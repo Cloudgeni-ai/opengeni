@@ -1,5 +1,22 @@
 import { describe, expect, test } from "bun:test";
-import { mcpMutationReceipt } from "../src/mcp/receipts";
+import {
+  mcpMutationReceipt,
+  sessionCreateMutationReceipt,
+  type SessionCreateReceiptResult,
+} from "../src/mcp/receipts";
+
+const sessionCreateResult = {
+  session: {
+    id: "00000000-0000-4000-8000-000000000004",
+    queueVersion: 1,
+    status: "queued",
+    sandboxGroupId: "00000000-0000-4000-8000-000000000004",
+    parentSessionId: null,
+  },
+  outcome: "created",
+  changed: true,
+  usageRecording: "recorded",
+} satisfies SessionCreateReceiptResult;
 
 describe("first-party MCP receipt builder", () => {
   test("defaults version, timestamp, and warnings without echoing mutation input", () => {
@@ -43,5 +60,85 @@ describe("first-party MCP receipt builder", () => {
         entity: { text: "must not enter the receipt" },
       } as Parameters<typeof mcpMutationReceipt>[0]),
     ).toThrow();
+  });
+
+  test("maps an applied session repair separately from a replay", () => {
+    expect(
+      sessionCreateMutationReceipt(
+        { ...sessionCreateResult, outcome: "repaired", changed: true },
+        true,
+      ),
+    ).toMatchObject({
+      outcome: "repaired",
+      changed: true,
+      idempotency: { status: "applied" },
+      facts: { sessionCreateOutcome: "repaired" },
+    });
+  });
+
+  test("makes a committed keyless usage failure explicitly non-retryable", () => {
+    expect(
+      sessionCreateMutationReceipt({ ...sessionCreateResult, usageRecording: "failed" }, false),
+    ).toMatchObject({
+      committed: true,
+      outcome: "partial_failure",
+      changed: true,
+      idempotency: { status: "not_requested" },
+      partialFailure: { stage: "usage_recording", retryable: false },
+      warnings: [expect.stringContaining("Do not retry this keyless request")],
+    });
+  });
+
+  test("preserves pure replay truth when keyed usage recording also fails", () => {
+    expect(
+      sessionCreateMutationReceipt({ ...sessionCreateResult, usageRecording: "failed" }, true),
+    ).toMatchObject({
+      committed: true,
+      outcome: "partial_failure",
+      changed: true,
+      idempotency: { status: "applied" },
+      partialFailure: { stage: "usage_recording", retryable: true },
+      warnings: [expect.stringContaining("same idempotency key")],
+      facts: { sessionCreateOutcome: "created" },
+    });
+
+    expect(
+      sessionCreateMutationReceipt(
+        {
+          ...sessionCreateResult,
+          outcome: "repaired",
+          changed: true,
+          usageRecording: "failed",
+        },
+        true,
+      ),
+    ).toMatchObject({
+      committed: true,
+      outcome: "partial_failure",
+      changed: true,
+      idempotency: { status: "applied" },
+      partialFailure: { stage: "usage_recording", retryable: true },
+      facts: { sessionCreateOutcome: "repaired" },
+    });
+
+    expect(
+      sessionCreateMutationReceipt(
+        {
+          ...sessionCreateResult,
+          outcome: "replayed",
+          changed: false,
+          usageRecording: "failed",
+        },
+        true,
+      ),
+    ).toMatchObject({
+      committed: true,
+      outcome: "partial_failure",
+      changed: false,
+      idempotency: { status: "replayed" },
+      partialFailure: { stage: "usage_recording", retryable: true },
+      warnings: [expect.stringContaining("same idempotency key")],
+      facts: { sessionCreateOutcome: "replayed" },
+    });
   });
 });

@@ -119,7 +119,7 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
-import { mcpMutationReceipt } from "./receipts";
+import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
 import {
   boundScheduledTaskDetailMcp,
   boundScheduledTaskMcpPage,
@@ -2003,37 +2003,13 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async (args) => {
-        const { session, replay } = await createSessionForRequestWithOutcome(
+        const result = await createSessionForRequestWithOutcome(
           deps,
           grant,
           grant.workspaceId,
           args,
         );
-        return json(
-          mcpMutationReceipt({
-            operation: "session_create",
-            committed: true,
-            outcome: replay ? "replayed" : "created",
-            changed: !replay,
-            resource: {
-              type: "session",
-              id: session.id,
-              version: session.queueVersion,
-              state: session.status,
-            },
-            idempotency: {
-              status: replay ? "replayed" : args.idempotencyKey ? "applied" : "not_requested",
-            },
-            facts: {
-              sandboxGroupId: session.sandboxGroupId,
-              parentSessionId: session.parentSessionId,
-            },
-            nextAction: {
-              tool: "session_get",
-              arguments: { sessionId: session.id },
-            },
-          }),
-        );
+        return json(sessionCreateMutationReceipt(result, Boolean(args.idempotencyKey)));
       },
     );
   }

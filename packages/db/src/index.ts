@@ -19579,6 +19579,8 @@ export type InitializeSessionStartResult = {
   turn: SessionTurn | null;
   temporalWorkflowId: string;
   workflowWakeRevision: number | null;
+  /** True when this call installed/repaired start state or committed a new wake revision. */
+  changed: boolean;
 };
 
 /**
@@ -19618,9 +19620,11 @@ export async function initializeSessionStartAtomically(
             turn: null,
             temporalWorkflowId,
             workflowWakeRevision: null,
+            changed: false,
           };
         }
 
+        let insertedGoal = false;
         let [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -19646,6 +19650,7 @@ export async function initializeSessionStartAtomically(
             })
             .returning();
           if (!goal) throw new Error("Failed to create initial session goal");
+          insertedGoal = true;
         }
 
         let [userEvent] = await tx
@@ -19812,26 +19817,33 @@ export async function initializeSessionStartAtomically(
         }
 
         const turnNeedsWake = turn.status === "queued" && runnable;
-        await tx
-          .update(schema.sessions)
-          .set({
-            temporalWorkflowId,
-            lastSequence: sequence,
-            ...(insertedTurn
-              ? {
-                  queueVersion: session.queueVersion + 1,
-                  queueTailPosition,
-                }
-              : {}),
-            ...(turn.status === "queued" ? { status: publicQueuedStatus } : {}),
-            updatedAt: new Date(),
-          })
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, session.id),
-            ),
-          );
+        const sessionNeedsRepair =
+          session.temporalWorkflowId !== temporalWorkflowId ||
+          session.lastSequence !== sequence ||
+          insertedTurn ||
+          (turn.status === "queued" && session.status !== publicQueuedStatus);
+        if (sessionNeedsRepair) {
+          await tx
+            .update(schema.sessions)
+            .set({
+              temporalWorkflowId,
+              lastSequence: sequence,
+              ...(insertedTurn
+                ? {
+                    queueVersion: session.queueVersion + 1,
+                    queueTailPosition,
+                  }
+                : {}),
+              ...(turn.status === "queued" ? { status: publicQueuedStatus } : {}),
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(schema.sessions.workspaceId, input.workspaceId),
+                eq(schema.sessions.id, session.id),
+              ),
+            );
+        }
         const workflowWakeRevision = turnNeedsWake
           ? await enqueueSessionWorkflowWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,
@@ -19841,11 +19853,18 @@ export async function initializeSessionStartAtomically(
               reason: "initial_session",
             })
           : null;
+        const changed =
+          insertedGoal ||
+          insertedEvents.length > 0 ||
+          insertedTurn ||
+          sessionNeedsRepair ||
+          workflowWakeRevision !== null;
         return {
           events: insertedEvents.map(mapEvent),
           turn: mapSessionTurn(turn),
           temporalWorkflowId,
           workflowWakeRevision,
+          changed,
         };
       }),
   );

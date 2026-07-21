@@ -7,6 +7,7 @@ import {
 } from "./event-preview";
 
 export {
+  MCP_MUTATION_RECEIPT_MAX_BYTES,
   MCP_MUTATION_RECEIPT_VERSION,
   McpMutationReceipt,
   McpMutationReceiptIdempotencyStatus,

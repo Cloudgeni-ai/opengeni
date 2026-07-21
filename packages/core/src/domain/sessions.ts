@@ -259,8 +259,17 @@ function validateSessionMcpCredentialUpdates(input: {
 
 export type CreateSessionOutcome = {
   session: Session;
-  /** True when an idempotency key resolved to a previously-created session. */
+  /** The committed create/start effect represented by this request. */
+  outcome: "created" | "repaired" | "replayed";
+  /** Backward-compatible replay flag for existing entity-oriented callers. */
   replay: boolean;
+  /** True when the request created/repaired start state or committed a new wake revision. */
+  changed: boolean;
+};
+
+export type CreateSessionRequestOutcome = CreateSessionOutcome & {
+  /** Billing telemetry is recorded after the committed session start. */
+  usageRecording: "recorded" | "failed";
 };
 
 export async function createAndStartSessionWithOutcome(input: {
@@ -338,12 +347,15 @@ export async function createAndStartSessionWithOutcome(input: {
       input.createIdempotencyKey,
     );
     if (existing) {
+      const finished = await finishStartSession(
+        existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+        existing,
+      );
       return {
-        session: await finishStartSession(
-          existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-          existing,
-        ),
-        replay: true,
+        session: finished.session,
+        outcome: finished.changed ? "repaired" : "replayed",
+        replay: !finished.changed,
+        changed: finished.changed,
       };
     }
     // No prior session: insert under the key, racing concurrent creates. The
@@ -373,15 +385,24 @@ export async function createAndStartSessionWithOutcome(input: {
       mcpServers: input.mcpServers ?? [],
     });
     if (!created) {
+      const finished = await finishStartSession(
+        keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+        keyed,
+      );
       return {
-        session: await finishStartSession(
-          keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-          keyed,
-        ),
-        replay: true,
+        session: finished.session,
+        outcome: finished.changed ? "repaired" : "replayed",
+        replay: !finished.changed,
+        changed: finished.changed,
       };
     }
-    return { session: await finishStartSession(input, keyed), replay: false };
+    const finished = await finishStartSession(input, keyed);
+    return {
+      session: finished.session,
+      outcome: "created",
+      replay: false,
+      changed: true,
+    };
   }
   const session = await createSession(input.db, {
     accountId: input.accountId,
@@ -402,7 +423,13 @@ export async function createAndStartSessionWithOutcome(input: {
     ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
     mcpServers: input.mcpServers ?? [],
   });
-  return { session: await finishStartSession(input, session), replay: false };
+  const finished = await finishStartSession(input, session);
+  return {
+    session: finished.session,
+    outcome: "created",
+    replay: false,
+    changed: true,
+  };
 }
 
 /** Backward-compatible entity-returning create path used by existing callers. */
@@ -440,7 +467,7 @@ async function finishStartSession(
     } | null;
   },
   session: Session,
-): Promise<Session> {
+): Promise<{ session: Session; changed: boolean }> {
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
   // machine. swapActiveSandbox does
@@ -507,7 +534,10 @@ async function finishStartSession(
       wakeRevision: started.workflowWakeRevision,
     });
   }
-  return await requireSession(input.db, session.workspaceId, session.id);
+  return {
+    session: await requireSession(input.db, session.workspaceId, session.id),
+    changed: started.changed,
+  };
 }
 
 export function workflowIdForSession(sessionId: string): string {
@@ -745,7 +775,7 @@ export async function createSessionForRequestWithOutcome(
   grant: AccessGrant,
   workspaceId: string,
   rawPayload: unknown,
-): Promise<CreateSessionOutcome> {
+): Promise<CreateSessionRequestOutcome> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
@@ -1093,7 +1123,7 @@ export async function createSessionForRequestWithOutcome(
     quantity: 1,
     model,
   });
-  const { session, replay } = await createAndStartSessionWithOutcome({
+  const createOutcome = await createAndStartSessionWithOutcome({
     db,
     bus,
     workflowClient,
@@ -1140,18 +1170,26 @@ export async function createSessionForRequestWithOutcome(
       ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
       : null,
   });
-  await recordWorkspaceUsage(deps, {
-    accountId: grant.accountId,
-    workspaceId,
-    subjectId: grant.subjectId,
-    eventType: "agent_run.created",
-    quantity: 1,
-    unit: "run",
-    sourceResourceType: "session",
-    sourceResourceId: session.id,
-    idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
-  });
-  return { session, replay };
+  let usageRecording: CreateSessionRequestOutcome["usageRecording"] = "recorded";
+  try {
+    await recordWorkspaceUsage(deps, {
+      accountId: grant.accountId,
+      workspaceId,
+      subjectId: grant.subjectId,
+      eventType: "agent_run.created",
+      quantity: 1,
+      unit: "run",
+      sourceResourceType: "session",
+      sourceResourceId: createOutcome.session.id,
+      idempotencyKey: `agent_run.created:${workspaceId}:${createOutcome.session.id}`,
+    });
+  } catch {
+    usageRecording = "failed";
+    console.warn(
+      `[sessions] usage recording failed after committed session create ${workspaceId}/${createOutcome.session.id}; returning committed outcome`,
+    );
+  }
+  return { ...createOutcome, usageRecording };
 }
 
 /**
