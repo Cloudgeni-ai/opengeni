@@ -24,6 +24,7 @@ import {
   type SessionAuthorizationOperation,
   type SessionAuthorizationSurface,
   type Session,
+  type ScheduledTask,
   UpdateScheduledTaskRequest,
   normalizeWorkspaceArtifactSlug,
   WORKSPACE_ARTIFACT_HTML_MAX_UTF8_BYTES,
@@ -143,7 +144,7 @@ import {
   acceptSessionUserMessageWithOutcome,
   controlAgentSessionWorkstream,
   controlHumanSessionWorkstream,
-  createSessionForRequest,
+  createSessionForRequestWithOutcome,
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
@@ -171,7 +172,7 @@ import {
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
-import { mcpMutationReceipt } from "./receipts";
+import { mcpMutationReceipt, sessionCreateMutationReceipt } from "./receipts";
 import {
   boundScheduledTaskDetailMcp,
   boundScheduledTaskMcpPage,
@@ -1519,6 +1520,7 @@ function registerGoalTools(
           event: { type: "goal.completed", evidence },
         },
       );
+      const changed = events.length > 0;
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
@@ -1572,6 +1574,7 @@ function registerGoalTools(
           },
         },
       );
+      const changed = events.length > 0;
       if (events.length > 0) {
         await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
@@ -2871,8 +2874,13 @@ function registerWorkspaceOrchestrationTools(
           if (callerSessionId !== null) {
             await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
           }
-          const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
-          return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
+          const result = await createSessionForRequestWithOutcome(
+            deps,
+            grant,
+            grant.workspaceId,
+            args,
+          );
+          return json(sessionCreateMutationReceipt(result, Boolean(args.idempotencyKey)));
         } catch (error) {
           if (error instanceof SessionSpawnDeniedError) {
             return {

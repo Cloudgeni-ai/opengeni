@@ -54,8 +54,8 @@ unbounded.
 | `receiptVersion` | Literal `mcp-mutation-receipt.v1`; use this discriminator before reading the rest of the shape. |
 | `operation` | The exact MCP mutation tool that produced the receipt. |
 | `committed` | Whether the mutation truth described by the receipt committed. A returned `partial_failure` is necessarily committed; validation, authorization, conflict, and fully compensated failures are MCP errors instead of `committed:false` receipts. |
-| `outcome` | One of `created`, `updated`, `deleted`, `unchanged`, `accepted`, `triggered`, `replayed`, or `partial_failure`. |
-| `changed` | Whether this invocation applied a new authoritative change. `unchanged` and `replayed` always carry `false`. |
+| `outcome` | One of `created`, `updated`, `deleted`, `unchanged`, `accepted`, `triggered`, `repaired`, `replayed`, or `partial_failure`. |
+| `changed` | Whether this invocation applied a new authoritative change. `repaired` always carries `true`; `unchanged` and `replayed` always carry `false`. |
 | `resource` | Primary server-generated identity: `type`, `id`, and, when authoritative for that resource, `version`, `etag`, and current `state`. |
 | `relatedResources` | At most eight additional generated resource identities needed to interpret the mutation. |
 | `timestamp` | Authoritative resource/update time when available, otherwise receipt creation time. It is an offset-aware ISO-8601 timestamp. |
@@ -67,8 +67,9 @@ unbounded.
 
 The schema is intentionally strict and intrinsically bounded: resource strings,
 warnings, scalar facts, related resources, and next-action arguments all have
-individual size/count limits. The adversarial contract-shaped maximum is tested
-against the 64 KiB model-facing envelope.
+individual UTF-8 byte/count limits. The complete pretty-printed JSON receipt is
+also validated against the canonical 64 KiB model-facing envelope, including
+JSON escape expansion.
 
 ### Replay, no-op, and partial-failure truth
 
@@ -76,6 +77,11 @@ against the 64 KiB model-facing envelope.
   `changed:false`, and `idempotency.status:"replayed"` only when the underlying
   idempotency store reports a replay. In particular, `session_create`, Send, and
   session control do not infer replay merely from a repeated-looking request.
+- **Repair is a change.** A keyed `session_create` that finds a session row but
+  installs missing initial events, turn, or runnable state, or commits a new
+  workflow-wake revision for queued work, is
+  `outcome:"repaired"`, `changed:true`, and `idempotency.status:"applied"`.
+  Only a fully initialized retry that issues no new wake is a pure replay.
 - **No-op is not replay.** An already-paused task, a deduplicated memory write,
   or another mutation that commits no new state can return `unchanged` with the
   applicable non-replay idempotency status.
@@ -85,6 +91,12 @@ against the 64 KiB model-facing envelope.
   a partial failure only when compensation failed and the database mutation
   remains committed. If compensation restores the prior persistence state, the
   operation throws an MCP error instead.
+- **Session usage-recording failure is returned, not thrown.** Session creation
+  and workflow wake have already committed at that point. A keyless receipt is
+  `partialFailure.retryable:false` and says not to retry; a keyed receipt is
+  retryable only with the same idempotency key. A failed usage-recording attempt
+  on a pure keyed retry retains `idempotency.status:"replayed"` and
+  `changed:false` while reporting `outcome:"partial_failure"`.
 - **Noncommit failures remain errors.** Authorization, input validation,
   missing resources, conflicts, and failures before commit preserve their
   existing MCP error behavior. They do not return a success-shaped receipt.

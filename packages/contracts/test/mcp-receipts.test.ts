@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MCP_MUTATION_RECEIPT_MAX_BYTES,
   MCP_MUTATION_RECEIPT_VERSION,
   McpMutationReceipt,
   type McpMutationReceiptType,
@@ -47,6 +48,28 @@ describe("MCP mutation receipt contract", () => {
     expect(replay.outcome).toBe("replayed");
   });
 
+  test("distinguishes an applied repair from a pure replay", () => {
+    expect(
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_create",
+        outcome: "repaired",
+        changed: true,
+        resource: { type: "session", id: "00000000-0000-4000-8000-000000000002" },
+        idempotency: { status: "applied" },
+      }),
+    ).toMatchObject({ outcome: "repaired", changed: true });
+
+    expect(() =>
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        outcome: "repaired",
+        changed: false,
+        idempotency: { status: "applied" },
+      }),
+    ).toThrow();
+  });
+
   test("requires truthful partial-commit failure facts", () => {
     expect(
       McpMutationReceipt.parse({
@@ -68,6 +91,22 @@ describe("MCP mutation receipt contract", () => {
         partialFailure: { stage: "schedule_sync", retryable: true },
       }),
     ).toThrow();
+
+    expect(
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        operation: "session_create",
+        outcome: "partial_failure",
+        changed: false,
+        idempotency: { status: "replayed" },
+        partialFailure: { stage: "usage_recording", retryable: true },
+        warnings: ["Retry only with the same idempotency key."],
+      }),
+    ).toMatchObject({
+      outcome: "partial_failure",
+      changed: false,
+      idempotency: { status: "replayed" },
+    });
   });
 
   test("rejects success-shaped receipts for noncommitted operations", () => {
@@ -101,6 +140,50 @@ describe("MCP mutation receipt contract", () => {
         warnings: ["x".repeat(513)],
       }),
     ).toThrow();
+  });
+
+  test("bounds strings and the full envelope by serialized UTF-8 bytes", () => {
+    expect(() =>
+      McpMutationReceipt.parse({
+        ...baseReceipt,
+        warnings: ["界".repeat(512)],
+      }),
+    ).toThrow();
+
+    const escapedMaximum = {
+      ...baseReceipt,
+      operation: "\0".repeat(128),
+      outcome: "partial_failure",
+      resource: {
+        type: "\0".repeat(128),
+        id: "\0".repeat(256),
+        version: "\0".repeat(128),
+        etag: "\0".repeat(512),
+        state: "\0".repeat(128),
+      },
+      relatedResources: Array.from({ length: 8 }, () => ({
+        type: "\0".repeat(128),
+        id: "\0".repeat(256),
+        version: "\0".repeat(128),
+        etag: "\0".repeat(512),
+        state: "\0".repeat(128),
+      })),
+      partialFailure: { stage: "\0".repeat(128), retryable: false },
+      warnings: Array.from({ length: 20 }, () => "\0".repeat(512)),
+      facts: Object.fromEntries(
+        Array.from({ length: 16 }, (_, index) => [`fact${index}`, "\0".repeat(512)]),
+      ),
+      nextAction: {
+        tool: "\0".repeat(128),
+        arguments: Object.fromEntries(
+          Array.from({ length: 8 }, (_, index) => [`arg${index}`, "\0".repeat(512)]),
+        ),
+      },
+    };
+    expect(Buffer.byteLength(JSON.stringify(escapedMaximum, null, 2), "utf8")).toBeGreaterThan(
+      MCP_MUTATION_RECEIPT_MAX_BYTES,
+    );
+    expect(() => McpMutationReceipt.parse(escapedMaximum)).toThrow();
   });
 
   test("rejects contradictory unchanged and replay outcomes", () => {

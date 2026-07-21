@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MCP_MUTATION_RECEIPT_MAX_BYTES } from "@opengeni/contracts";
 import { mcpMutationReceipt } from "../src/mcp/receipts";
 
 const ID = "11111111-1111-4111-8111-111111111111";
@@ -250,7 +251,7 @@ describe("MCP receipt response size", () => {
     }
   });
 
-  test("the maximum contract-shaped receipt remains below the canonical 64 KiB envelope", () => {
+  test("the maximum ASCII contract-shaped receipt remains below the canonical envelope", () => {
     const maximum = mcpMutationReceipt({
       operation: "x".repeat(128),
       committed: true,
@@ -284,7 +285,90 @@ describe("MCP receipt response size", () => {
         ),
       },
     });
-    expect(utf8Bytes(maximum)).toBeLessThanOrEqual(64 * 1024);
+    expect(utf8Bytes(maximum)).toBeLessThanOrEqual(MCP_MUTATION_RECEIPT_MAX_BYTES);
+  });
+
+  test("a valid multibyte maximum is bounded by UTF-8 bytes", () => {
+    const maximum = mcpMutationReceipt({
+      operation: exactUtf8String(128),
+      committed: true,
+      outcome: "partial_failure",
+      changed: true,
+      resource: {
+        type: exactUtf8String(128),
+        id: exactUtf8String(256),
+        version: exactUtf8String(128),
+        etag: exactUtf8String(512),
+        state: exactUtf8String(128),
+      },
+      relatedResources: Array.from({ length: 8 }, (_, index) => ({
+        type: exactUtf8String(128),
+        id: `${index}${exactUtf8String(255)}`,
+        version: exactUtf8String(128),
+        etag: exactUtf8String(512),
+        state: exactUtf8String(128),
+      })),
+      timestamp: TIMESTAMP,
+      idempotency: { status: "not_supported" },
+      partialFailure: { stage: exactUtf8String(128), retryable: true },
+      warnings: Array.from({ length: 20 }, () => exactUtf8String(512)),
+      facts: Object.fromEntries(
+        Array.from({ length: 16 }, (_, index) => [`fact${index}`, exactUtf8String(512)]),
+      ),
+      nextAction: {
+        tool: exactUtf8String(128),
+        arguments: Object.fromEntries(
+          Array.from({ length: 8 }, (_, index) => [`arg${index}`, exactUtf8String(512)]),
+        ),
+      },
+    });
+    expect(utf8Bytes(maximum)).toBeLessThanOrEqual(MCP_MUTATION_RECEIPT_MAX_BYTES);
+  });
+
+  test("rejects a code-unit maximum that exceeds its UTF-8 byte limit", () => {
+    expect(() =>
+      mcpMutationReceipt({
+        operation: "session_create",
+        committed: true,
+        outcome: "created",
+        changed: true,
+        resource: { type: "session", id: ID },
+        timestamp: TIMESTAMP,
+        idempotency: { status: "not_requested" },
+        warnings: ["界".repeat(512)],
+      }),
+    ).toThrow();
+  });
+
+  test("keeps repaired and committed partial-failure session receipts compact", () => {
+    const repaired = mcpMutationReceipt({
+      operation: "session_create",
+      committed: true,
+      outcome: "repaired",
+      changed: true,
+      resource: { type: "session", id: ID, version: 1, state: "queued" },
+      timestamp: TIMESTAMP,
+      idempotency: { status: "applied" },
+      facts: { sessionCreateOutcome: "repaired" },
+      nextAction: { tool: "session_get", arguments: { sessionId: ID } },
+    });
+    const partialFailure = mcpMutationReceipt({
+      operation: "session_create",
+      committed: true,
+      outcome: "partial_failure",
+      changed: true,
+      resource: { type: "session", id: ID, version: 1, state: "queued" },
+      timestamp: TIMESTAMP,
+      idempotency: { status: "not_requested" },
+      partialFailure: { stage: "usage_recording", retryable: false },
+      warnings: [
+        "The session committed, but usage recording failed. Do not retry this keyless request; inspect the returned session.",
+      ],
+      facts: { sessionCreateOutcome: "created" },
+      nextAction: { tool: "session_get", arguments: { sessionId: ID } },
+    });
+    expect(utf8Bytes(repaired)).toBeLessThanOrEqual(MCP_MUTATION_RECEIPT_MAX_BYTES);
+    expect(utf8Bytes(partialFailure)).toBeLessThanOrEqual(MCP_MUTATION_RECEIPT_MAX_BYTES);
   });
 });
 

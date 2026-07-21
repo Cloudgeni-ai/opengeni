@@ -574,7 +574,7 @@ export async function controlHumanSessionWorkstreamWithOutcome(
   },
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
-): Promise<SessionControlResponse> {
+): Promise<{ response: SessionControlResponse; replay: boolean }> {
   const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>

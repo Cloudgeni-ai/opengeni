@@ -163,6 +163,9 @@ describe("transactional session workflow wake outbox", () => {
     ]);
     expect(results.flatMap((result) => result.events)).toHaveLength(5);
     expect(results.map((result) => result.workflowWakeRevision).sort()).toEqual([1, 2]);
+    // Both concurrent callers own a committed wake revision, so neither may
+    // describe itself as a mutation-free replay.
+    expect(results.map((result) => result.changed).sort()).toEqual([true, true]);
 
     const events = await listSessionEvents(
       client.db,

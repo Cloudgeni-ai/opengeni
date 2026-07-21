@@ -9,6 +9,24 @@ import { z } from "zod";
  * fields into the result wastes context and can expose data twice.
  */
 export const MCP_MUTATION_RECEIPT_VERSION = "mcp-mutation-receipt.v1" as const;
+export const MCP_MUTATION_RECEIPT_MAX_BYTES = 64 * 1024;
+
+const utf8ByteLength = (value: string): number => new TextEncoder().encode(value).byteLength;
+
+function boundedUtf8String(maxBytes: number, minLength = 0) {
+  return z
+    .string()
+    .min(minLength)
+    .max(maxBytes)
+    .superRefine((value, context) => {
+      if (utf8ByteLength(value) > maxBytes) {
+        context.addIssue({
+          code: "custom",
+          message: `string must contain at most ${maxBytes} UTF-8 bytes`,
+        });
+      }
+    });
+}
 
 export const McpMutationReceiptOutcome = z.enum([
   "created",
@@ -17,6 +35,7 @@ export const McpMutationReceiptOutcome = z.enum([
   "unchanged",
   "accepted",
   "triggered",
+  "repaired",
   "replayed",
   "partial_failure",
 ]);
@@ -35,24 +54,24 @@ export type McpMutationReceiptIdempotencyStatus = z.infer<
 
 export const McpMutationResource = z
   .object({
-    type: z.string().min(1).max(128),
-    id: z.string().min(1).max(256),
-    version: z.union([z.number().int().nonnegative(), z.string().min(1).max(128)]).optional(),
-    etag: z.string().min(1).max(512).optional(),
-    state: z.string().min(1).max(128).optional(),
+    type: boundedUtf8String(128, 1),
+    id: boundedUtf8String(256, 1),
+    version: z.union([z.number().int().nonnegative(), boundedUtf8String(128, 1)]).optional(),
+    etag: boundedUtf8String(512, 1).optional(),
+    state: boundedUtf8String(128, 1).optional(),
   })
   .strict();
 export type McpMutationResource = z.infer<typeof McpMutationResource>;
 
 const McpMutationReceiptFact = z.union([
-  z.string().max(512),
+  boundedUtf8String(512),
   z.number().finite(),
   z.boolean(),
   z.null(),
 ]);
 
 const McpMutationReceiptFacts = z
-  .record(z.string().min(1).max(64), McpMutationReceiptFact)
+  .record(boundedUtf8String(64, 1), McpMutationReceiptFact)
   .superRefine((value, context) => {
     if (Object.keys(value).length > 16) {
       context.addIssue({
@@ -63,7 +82,7 @@ const McpMutationReceiptFacts = z
   });
 
 const McpMutationReceiptNextActionArguments = z
-  .record(z.string().min(1).max(64), McpMutationReceiptFact)
+  .record(boundedUtf8String(64, 1), McpMutationReceiptFact)
   .superRefine((value, context) => {
     if (Object.keys(value).length > 8) {
       context.addIssue({
@@ -76,7 +95,7 @@ const McpMutationReceiptNextActionArguments = z
 export const McpMutationReceipt = z
   .object({
     receiptVersion: z.literal(MCP_MUTATION_RECEIPT_VERSION),
-    operation: z.string().min(1).max(128),
+    operation: boundedUtf8String(128, 1),
     // v1 receipts describe committed truth only. Validation/auth/conflict and
     // fully compensated failures remain MCP errors rather than success-shaped
     // committed=false results.
@@ -93,15 +112,15 @@ export const McpMutationReceipt = z
       .strict(),
     partialFailure: z
       .object({
-        stage: z.string().min(1).max(128),
+        stage: boundedUtf8String(128, 1),
         retryable: z.boolean(),
       })
       .strict()
       .optional(),
-    warnings: z.array(z.string().min(1).max(512)).max(20),
+    warnings: z.array(boundedUtf8String(512, 1)).max(20),
     nextAction: z
       .object({
-        tool: z.string().min(1).max(128),
+        tool: boundedUtf8String(128, 1),
         arguments: McpMutationReceiptNextActionArguments,
       })
       .strict()
@@ -141,6 +160,22 @@ export const McpMutationReceipt = z
         message: "unchanged receipts cannot report changed=true",
       });
     }
+    if (receipt.outcome === "repaired") {
+      if (!receipt.changed) {
+        context.addIssue({
+          code: "custom",
+          path: ["changed"],
+          message: "a repair must report changed=true",
+        });
+      }
+      if (receipt.idempotency.status !== "applied") {
+        context.addIssue({
+          code: "custom",
+          path: ["idempotency", "status"],
+          message: "repaired outcomes require idempotency.status=applied",
+        });
+      }
+    }
     if (receipt.outcome === "replayed") {
       if (receipt.changed) {
         context.addIssue({
@@ -156,11 +191,22 @@ export const McpMutationReceipt = z
           message: "replayed outcomes require idempotency.status=replayed",
         });
       }
-    } else if (receipt.idempotency.status === "replayed") {
+    } else if (
+      receipt.idempotency.status === "replayed" &&
+      !(receipt.outcome === "partial_failure" && !receipt.changed)
+    ) {
       context.addIssue({
         code: "custom",
         path: ["outcome"],
-        message: "idempotency.status=replayed requires outcome=replayed",
+        message:
+          "idempotency.status=replayed requires a replayed outcome or unchanged partial failure",
+      });
+    }
+
+    if (utf8ByteLength(JSON.stringify(receipt, null, 2)) > MCP_MUTATION_RECEIPT_MAX_BYTES) {
+      context.addIssue({
+        code: "custom",
+        message: `receipt must contain at most ${MCP_MUTATION_RECEIPT_MAX_BYTES} UTF-8 bytes when serialized as pretty JSON`,
       });
     }
   });
