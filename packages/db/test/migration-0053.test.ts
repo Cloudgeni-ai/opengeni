@@ -222,7 +222,6 @@ describe("migration 0053 (Codex credential leases)", () => {
         sessionPinSource: null,
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: credentialA,
-        nearExhaustionPct: 90,
         now: selectionNow,
       });
       // sharded-rotation policy: rotation-enabled always behaves as sticky-sharded, so the
@@ -233,7 +232,6 @@ describe("migration 0053 (Codex credential leases)", () => {
         sessionId: "session-test",
         currentPolicyPin: null,
         accounts: rollbackAccounts,
-        nearExhaustionPct: 90,
         now: selectionNow,
       });
       expect(expectedHome.kind).toBe("home");
@@ -269,7 +267,6 @@ describe("migration 0053 (Codex credential leases)", () => {
             sessionPinSource: null,
             sessionPinnedCredentialId: null,
             sessionLastCredentialId: credentialA,
-            nearExhaustionPct: 90,
             now: selectionNow,
           }),
       );
@@ -308,7 +305,6 @@ describe("migration 0053 (Codex credential leases)", () => {
             sessionPinSource: null,
             sessionPinnedCredentialId: null,
             sessionLastCredentialId: null,
-            nearExhaustionPct: 90,
             now: selectionNow,
           }),
       );
@@ -346,7 +342,6 @@ describe("migration 0053 (Codex credential leases)", () => {
         sessionPinSource: null,
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: leased.credentialId,
-        nearExhaustionPct: 90,
         now: selectionNow,
       });
       // Rotation OFF is untouched by sharded-rotation policy: the selector returns the workspace
