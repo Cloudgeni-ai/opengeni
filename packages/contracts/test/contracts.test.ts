@@ -69,6 +69,24 @@ describe("contracts", () => {
       ],
     });
     expect(payload.mcpServers[0]?.headers).toEqual({ Authorization: "Bearer create-secret" });
+    const hostPayload = CreateSessionRequest.parse({
+      initialMessage: "inspect host repo",
+      tools: [{ kind: "mcp", id: "host_gitlab" }],
+      mcpServers: [
+        {
+          id: "host_gitlab",
+          url: "https://gitlab-tools.example/mcp",
+          connectionRef: {
+            connectionId: "cloud-connection:gitlab:42",
+            providerDomain: "gitlab.example",
+            kind: "oauth2",
+          },
+        },
+      ],
+    });
+    expect(hostPayload.mcpServers[0]?.connectionRef?.connectionId).toBe(
+      "cloud-connection:gitlab:42",
+    );
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "bad url",
@@ -104,6 +122,7 @@ describe("contracts", () => {
       url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 2,
+      connectionRef: null,
     });
     expect(() =>
       SessionMcpServerMetadata.parse({

@@ -2353,6 +2353,7 @@ export type CreateSessionMcpServerInput = {
   timeoutMs?: number | null;
   cacheToolsList?: boolean | null;
   requireApproval?: boolean | string[] | null;
+  connectionRef?: McpServerConnectionRef | null;
   headersEncrypted?: Record<string, string>;
 };
 
@@ -10688,6 +10689,7 @@ function mapSessionMcpServerMetadata(
     url: row.url,
     headerNames: Object.keys(row.headersEncrypted ?? {}).sort(),
     credentialVersion: Number(row.credentialVersion),
+    connectionRef: row.connectionRef ?? null,
   };
 }
 
@@ -10744,6 +10746,7 @@ async function insertSessionMcpServers(
         timeoutMs: server.timeoutMs ?? null,
         cacheToolsList: server.cacheToolsList ?? false,
         requireApproval: server.requireApproval ?? null,
+        connectionRef: server.connectionRef ?? null,
         headersEncrypted: server.headersEncrypted ?? {},
       })),
     )
@@ -10835,7 +10838,7 @@ export async function listSessionMcpServersForRun(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  encryptionKey: Uint8Array,
+  encryptionKey: Uint8Array | null,
 ): Promise<SessionMcpServerForRun[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -10851,10 +10854,13 @@ export async function listSessionMcpServersForRun(
     return rows.map((row) => {
       let headers: Record<string, string>;
       try {
+        if (!encryptionKey && Object.keys(row.headersEncrypted ?? {}).length > 0) {
+          throw new Error("missing encryption key");
+        }
         headers = Object.fromEntries(
           Object.entries(row.headersEncrypted ?? {}).map(([name, stored]) => [
             name,
-            decryptEnvironmentValue(encryptionKey, stored),
+            decryptEnvironmentValue(encryptionKey!, stored),
           ]),
         );
       } catch {

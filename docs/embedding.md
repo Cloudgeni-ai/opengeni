@@ -107,14 +107,17 @@ When bound on the worker through `ActivityDependencies.entitlements`, `admitRun`
 
 ### Connection Credentials
 
-Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`, consumers in `apps/worker/src/activities/environment.ts`.
+Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`,
+the worker consumers in `apps/worker/src/activities/`, and the API Toolspace
+consumer in `apps/api/src/mcp/toolspace.ts`.
 
-The port can bind either or both legs:
+The port can bind any combination of its three legs:
 
 ```ts
 type ConnectionCredentialsPort = {
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
+  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
 };
 ```
 
@@ -143,7 +146,30 @@ the same provider for every selected Git host and atomically replaces the token
 files. This renewal requires no model/MCP call and never mutates the manifest.
 `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
-check.
+check before values are applied.
+
+`mcpCredentials` is the request-time credential seam for connection-backed MCP
+servers. Bind the same port on `createOpenGeniWorker({ activityDependencies })`
+and `createApp(deps)`. The worker uses it for ordinary model-visible MCP calls;
+the API router uses it for Toolspace/Code Mode. When the leg is absent, both
+surfaces use OpenGeni's standalone encrypted connection store and refresh broker.
+When it is present, the host is the sole credential source: OpenGeni does not
+create or require a duplicate provider connection.
+
+Every request includes account/workspace/session scope, the exact durable turn
+and execution generation, the immutable `TurnInitiator`, the non-authoritative
+technical caller, the MCP server/tool, the opaque `connectionRef`, and whether a
+401 forced a refresh. The frozen initiator—not `sandbox:<runId>`, the session
+creator, or a synthetic worker subject—is the authorization principal. Results
+must echo account/workspace/session. OpenGeni verifies those echoes and validates
+the returned header snapshot before sending it upstream. Credential values never
+enter session events; `auth_needed` carries only reconnect metadata.
+
+The port is provider-neutral. A host can resolve its existing GitHub, GitLab,
+Azure DevOps, or other connection from the opaque reference, and can return a
+short-lived capability bearer for a host-owned MCP gateway. Normal MCP and
+Toolspace deliberately share this resolver, so Code Mode is additive rather than
+a second connection or authorization system.
 
 Unset legs fall back independently to standalone self-mint/decrypt. This port does **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with `signDelegatedAccessToken(settings.delegationSecret, ...)`.
 

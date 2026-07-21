@@ -3,6 +3,12 @@ import {
   type McpServerConnectionRef,
   type Settings,
 } from "@opengeni/config";
+import type {
+  ConnectionCredentialsPort,
+  McpCredentialsRequest,
+  TurnInitiator,
+  TurnInitiatorContext,
+} from "@opengeni/contracts";
 import { Buffer } from "node:buffer";
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
@@ -36,10 +42,166 @@ export type ResolveConnectionCredentialInput = {
   workspaceId: string;
   subjectId?: string;
   serverId: string;
+  toolName?: string;
+  /** @deprecated Use toolName. Retained for the API's pre-existing broker call shape. */
   toolId?: string;
   connectionRef: McpServerConnectionRef;
   forceRefresh?: boolean;
 };
+
+export type HostMcpCredentialResolverContext = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  attemptId: string | null;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  surface: McpCredentialsRequest["surface"];
+};
+
+export class HostMcpCredentialScopeError extends Error {
+  constructor(field: "accountId" | "workspaceId" | "sessionId") {
+    super(`host MCP credential ${field} scope mismatch`);
+    this.name = "HostMcpCredentialScopeError";
+  }
+}
+
+/**
+ * Adapts the public embedding credential port to the runtime's connection
+ * resolver contract. Scope echoes are checked before credential headers can
+ * reach a request; the returned object is a fresh copy so a host cannot mutate
+ * headers after resolution.
+ */
+export function buildHostConnectionTokenResolver(
+  resolve: NonNullable<ConnectionCredentialsPort["mcpCredentials"]>,
+  context: HostMcpCredentialResolverContext,
+): (input: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
+  return async (input) => {
+    if (input.workspaceId !== context.workspaceId) {
+      throw new HostMcpCredentialScopeError("workspaceId");
+    }
+    const toolName = input.toolName ?? input.toolId;
+    const request: McpCredentialsRequest = {
+      accountId: context.accountId,
+      workspaceId: context.workspaceId,
+      sessionId: context.sessionId,
+      turnId: context.turnId,
+      attemptId: context.attemptId,
+      executionGeneration: context.executionGeneration,
+      initiator: context.initiator,
+      initiatorContext: { ...context.initiatorContext },
+      surface: context.surface,
+      serverId: input.serverId,
+      connectionRef: {
+        providerDomain: input.connectionRef.providerDomain,
+        ...(input.connectionRef.connectionId
+          ? { connectionId: input.connectionRef.connectionId }
+          : {}),
+        ...(input.connectionRef.kind ? { kind: input.connectionRef.kind } : {}),
+        ...(input.connectionRef.scopes ? { scopes: [...input.connectionRef.scopes] } : {}),
+        ...(input.connectionRef.resource ? { resource: input.connectionRef.resource } : {}),
+        ...(input.connectionRef.subjectScope
+          ? { subjectScope: input.connectionRef.subjectScope }
+          : {}),
+      },
+      forceRefresh: input.forceRefresh === true,
+      ...(toolName ? { toolName } : {}),
+      ...(input.subjectId ? { callerSubjectId: input.subjectId } : {}),
+    };
+    const result = await resolve(request);
+    assertHostMcpCredentialScope(result, context);
+    if (result.status === "auth_needed") {
+      if (result.providerDomain !== input.connectionRef.providerDomain) {
+        throw new Error("host MCP credential provider domain mismatch");
+      }
+      const authorizationUrl = normalizedAuthorizationUrl(result.authorizationUrl);
+      return {
+        status: "auth_needed",
+        reason: result.reason,
+        providerDomain: result.providerDomain,
+        ...(result.connectionId ? { connectionId: result.connectionId } : {}),
+        ...(result.scopes ? { scopes: [...result.scopes] } : {}),
+        ...(result.resource ? { resource: result.resource } : {}),
+        ...(authorizationUrl ? { authorizationUrl } : {}),
+      };
+    }
+    if (result.connectionId.length === 0) {
+      throw new Error("host MCP credential returned an empty connectionId");
+    }
+    const expiresAt = parseHostCredentialExpiry(result.expiresAt);
+    return {
+      status: "ok",
+      headers: normalizedHostCredentialHeaders(result.headers),
+      connectionId: result.connectionId,
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
+    };
+  };
+}
+
+function assertHostMcpCredentialScope(
+  result: { accountId: string; workspaceId: string; sessionId: string },
+  context: HostMcpCredentialResolverContext,
+): void {
+  for (const field of ["accountId", "workspaceId", "sessionId"] as const) {
+    if (result[field] !== context[field]) {
+      throw new HostMcpCredentialScopeError(field);
+    }
+  }
+}
+
+function normalizedHostCredentialHeaders(headers: Record<string, string>): Record<string, string> {
+  const entries = Object.entries(headers);
+  if (entries.length === 0 || entries.length > 32) {
+    throw new Error("host MCP credential returned an invalid header count");
+  }
+  const normalized: Record<string, string> = {};
+  for (const [name, value] of entries) {
+    if (
+      name.length > 256 ||
+      !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(name) ||
+      value.length === 0 ||
+      value.length > 16_384 ||
+      /[\r\n\0]/.test(value)
+    ) {
+      throw new Error("host MCP credential returned an invalid header");
+    }
+    normalized[name] = value;
+  }
+  return normalized;
+}
+
+function normalizedAuthorizationUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("host MCP credential returned an invalid authorizationUrl");
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && isLoopbackHost(url.hostname))) {
+    throw new Error("host MCP credential returned an invalid authorizationUrl");
+  }
+  return url.toString();
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  if (hostname === "localhost" || hostname === "::1") return true;
+  if (isIP(hostname) !== 4) return false;
+  const [first] = hostname.split(".");
+  return first === "127";
+}
+
+function parseHostCredentialExpiry(value: string | null | undefined): Date | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) {
+    throw new Error("host MCP credential returned an invalid expiresAt");
+  }
+  return parsed;
+}
 
 export type ConnectionBrokerDeps = {
   loadCredential: typeof loadConnectionCredentialForBroker;

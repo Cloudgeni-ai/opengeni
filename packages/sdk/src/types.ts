@@ -264,7 +264,9 @@ export type SessionMcpServerInput = {
   allowedTools?: string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
+  requireApproval?: boolean | string[] | undefined;
   headers?: Record<string, string> | undefined;
+  connectionRef?: McpServerConnectionRef | undefined;
 };
 
 export type SessionMcpCredentialUpdateInput = {
@@ -278,6 +280,7 @@ export type SessionMcpServerMetadata = {
   url: string;
   headerNames: string[];
   credentialVersion: number;
+  connectionRef: McpServerConnectionRef | null;
 };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";

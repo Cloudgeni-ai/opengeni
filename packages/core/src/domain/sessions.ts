@@ -184,6 +184,7 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
     ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
     cacheToolsList: server.cacheToolsList ?? false,
     ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -195,6 +196,7 @@ function mcpServerConfigFromMetadata(
     ...(server.name ? { name: server.name } : {}),
     url: server.url,
     cacheToolsList: false,
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -228,7 +230,9 @@ function validateSessionMcpServersForCreate(
     return { runtimeServers: [], dbServers: [], metadata: [] };
   }
   requirePermission(grant, "mcp_servers:attach");
-  const encryptionKey = requireVariableSetEncryption(settings);
+  const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
+    ? requireVariableSetEncryption(settings)
+    : null;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const runtimeServers: Settings["mcpServers"] = [];
@@ -246,7 +250,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey, value),
+        encryptVariableSetValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -258,6 +262,7 @@ function validateSessionMcpServersForCreate(
       timeoutMs: server.timeoutMs ?? null,
       cacheToolsList: server.cacheToolsList ?? false,
       requireApproval: server.requireApproval ?? null,
+      connectionRef: server.connectionRef ?? null,
       headersEncrypted,
     });
     metadata.push({
@@ -266,6 +271,7 @@ function validateSessionMcpServersForCreate(
       url: server.url,
       headerNames: Object.keys(headersEncrypted).sort(),
       credentialVersion: 1,
+      connectionRef: server.connectionRef ?? null,
     });
   }
   return { runtimeServers, dbServers, metadata };
