@@ -259,11 +259,11 @@ describe("MachinesDashboard", () => {
 describe("MachineDockBar + SharedMachineDisclosure (dock parity)", () => {
   test("the dock bar surfaces the active machine + connection pill", async () => {
     const r = await renderComponent(
-      <MachineDockBar name="jorgen-desktop" kind="selfhosted" state="online" />,
+      <MachineDockBar name="dev-desktop" kind="selfhosted" state="online" />,
     );
     await flush();
     expect(r.container.querySelector("[data-machine-dock-bar]")).not.toBeNull();
-    expect(r.container.textContent).toContain("jorgen-desktop");
+    expect(r.container.textContent).toContain("dev-desktop");
     expect(r.container.querySelector('[data-connection-status="online"]')).not.toBeNull();
     await r.unmount();
   });
@@ -279,7 +279,7 @@ describe("MachineDockBar + SharedMachineDisclosure (dock parity)", () => {
 
 describe("EnrollmentConsent — loud whole-machine consent", () => {
   const display = {
-    machineName: "jorgen-desktop",
+    machineName: "dev-desktop",
     os: "linux",
     arch: "x86_64",
     canOfferDisplay: true,
