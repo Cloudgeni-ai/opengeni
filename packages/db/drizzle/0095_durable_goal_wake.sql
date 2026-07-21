@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-59: a goal-owned, monotonic continuation obligation. PostgreSQL is the
+-- A goal-owned, monotonic continuation obligation. PostgreSQL is the
 -- authority; Temporal receives only repairable workflow nudges.
 ALTER TABLE "session_goals"
   ADD COLUMN IF NOT EXISTS "continuation_wake_revision" bigint NOT NULL DEFAULT 0,

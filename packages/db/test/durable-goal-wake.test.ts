@@ -738,12 +738,12 @@ describe("durable active-goal wake", () => {
       const ctx = await runningGoalFixture();
       await settleIdle(ctx);
       const suffix = crypto.randomUUID().replaceAll("-", "");
-      const functionName = `ope59_fault_${suffix}`;
-      const triggerName = `ope59_fault_${suffix}`;
+      const functionName = `goal_wake_fault_${suffix}`;
+      const triggerName = `goal_wake_fault_${suffix}`;
       await shared.admin.unsafe(`
         create function ${functionName}() returns trigger language plpgsql as $$
         begin
-          raise exception 'ope59 injected ${fault.name} failure';
+          raise exception 'goal wake injected ${fault.name} failure';
         end $$;
         create trigger ${triggerName} ${fault.timing} on ${fault.table}
         for each row when (${fault.condition}) execute function ${functionName}();
@@ -836,7 +836,7 @@ describe("durable active-goal wake", () => {
       ) values (
         ${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.session.id},
         'agent_steer_instruction', 'action_required', ${ctx.session.id},
-        ${`ope59-steer:${operationId}`}, 'operator direction wins',
+        ${`goal-wake-steer:${operationId}`}, 'operator direction wins',
         ${shared.admin.json({
           type: "agent_steer_instruction",
           instruction: "operator direction wins",
@@ -873,8 +873,8 @@ describe("durable active-goal wake", () => {
   test("active-turn event writes and agent goal mutations complete without workspace/session lock inversion", async () => {
     const ctx = await runningGoalFixture();
     const suffix = crypto.randomUUID().replaceAll("-", "");
-    const functionName = `ope59_slow_event_${suffix}`;
-    const triggerName = `ope59_slow_event_${suffix}`;
+    const functionName = `goal_wake_slow_event_${suffix}`;
+    const triggerName = `goal_wake_slow_event_${suffix}`;
     await shared.admin.unsafe(`
       create function ${functionName}() returns trigger language plpgsql as $$
       begin
