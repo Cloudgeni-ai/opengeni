@@ -160,6 +160,7 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
+  gitHubTokenMintSelection,
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
   sandboxEnvironmentForRun,
@@ -6240,32 +6241,18 @@ async function assertGitHubResourcesRemainAuthorized(
   workspaceId: string,
   resources: import("@opengeni/contracts").ResourceRef[],
 ): Promise<void> {
-  const selected = resources.flatMap((resource) => {
-    if (resource.kind !== "repository") {
-      return [];
-    }
-    const installationId =
-      resource.githubInstallationId ??
-      (resource.provider === "github" ? resource.installationId : undefined);
-    const repositoryId =
-      resource.githubRepositoryId ??
-      (resource.provider === "github" ? resource.repositoryId : undefined);
-    if (typeof installationId !== "number" || typeof repositoryId !== "number") {
-      return [];
-    }
-    return [{ installationId, repositoryId }];
-  });
-  if (selected.length === 0) {
+  // Must check exactly what sandboxEnvironmentForRun would mint a token for,
+  // so the selection is derived from the same extraction as the mint path.
+  const selection = gitHubTokenMintSelection(resources);
+  if (!selection) {
     return;
   }
-  const installationId = selected[0]!.installationId;
   if (
-    selected.some((repository) => repository.installationId !== installationId) ||
     !(await areGitHubRepositoriesAllowedForWorkspace(
       db,
       workspaceId,
-      installationId,
-      selected.map((repository) => repository.repositoryId),
+      selection.installationId,
+      selection.repositoryIds,
     ))
   ) {
     throw new Error(

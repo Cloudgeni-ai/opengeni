@@ -399,6 +399,26 @@ function gitCredentialsRequestForSelection(
   };
 }
 
+/**
+ * The GitHub App installation + repository ids a run's git-credential mint
+ * would use for these resources, or null when no GitHub token would be minted.
+ * Derived from gitCredentialSelections so workspace-authorization rechecks
+ * cover exactly the ids that reach createGitHubAppInstallationToken —
+ * including legacy string-typed installationId/repositoryId refs, which the
+ * mint path coerces via positiveInteger.
+ */
+export function gitHubTokenMintSelection(
+  resources: ResourceRef[],
+): { installationId: number; repositoryIds: number[] } | null {
+  const selection = gitCredentialSelections(resources).find(
+    (candidate) => candidate.provider === "github",
+  );
+  if (!selection || selection.installationId <= 0 || selection.repositoryIds.length === 0) {
+    return null;
+  }
+  return { installationId: selection.installationId, repositoryIds: selection.repositoryIds };
+}
+
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
   const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
   for (const resource of resources) {

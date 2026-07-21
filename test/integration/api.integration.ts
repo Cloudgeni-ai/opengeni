@@ -4371,6 +4371,21 @@ describe("API component integration", () => {
     );
     expect(directCallback.status).toBe(200);
     expect(await directCallback.text()).toContain("GitHub App connected");
+
+    // The state cookie moved from path /v1/github to /v1. Until it expires, a
+    // stale pre-move cookie is sent ahead of the current one (more specific
+    // path first); the flow must accept the state when ANY same-name cookie
+    // carries it instead of reading only the first.
+    const shadowedCallback = await app.request(
+      `/v1/github/oauth/callback?code=test-code&installation_id=138826628&state=${encodeURIComponent(directState)}`,
+      {
+        headers: {
+          cookie: `opengeni_github_state=stale-legacy-path-state; opengeni_github_state=${directState}`,
+        },
+      },
+    );
+    expect(shadowedCallback.status).toBe(200);
+    expect(await shadowedCallback.text()).toContain("GitHub App connected");
   });
 
   test("links one existing GitHub installation to multiple workspaces with independent repository access", async () => {

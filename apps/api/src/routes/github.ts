@@ -18,7 +18,7 @@ import {
   verifySignedState,
 } from "@opengeni/github";
 import type { Context, Hono } from "hono";
-import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { deleteCookie, setCookie } from "hono/cookie";
 import { HTTPException } from "hono/http-exception";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
@@ -665,11 +665,31 @@ function setGitHubStateCookie(c: Context, deps: ApiRouteDeps, state: string): vo
 }
 
 function requireGitHubStateCookie(c: Context, state: string): void {
-  if (getCookie(c, githubStateCookie) !== state) {
+  // The state cookie moved from path /v1/github to /v1; until a stale
+  // pre-move cookie expires the browser sends BOTH (more specific path
+  // first), so a single-value read would only ever see the stale one.
+  // Accept the flow when any same-name cookie carries the expected state.
+  if (!allCookieValues(c, githubStateCookie).includes(state)) {
     throw new HTTPException(400, {
       message: "invalid or expired GitHub installation browser state",
     });
   }
+}
+
+function allCookieValues(c: Context, name: string): string[] {
+  const prefix = `${name}=`;
+  return (c.req.header("cookie") ?? "")
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(prefix))
+    .map((part) => {
+      const raw = part.slice(prefix.length);
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    });
 }
 
 function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
