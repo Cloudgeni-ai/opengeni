@@ -95,6 +95,7 @@ export function CapabilitiesRoute({
   // of leaving it on a stale snapshot that could re-enable what was just disabled.
   const [selected, setSelected] = useState<SheetSelection | null>(null);
   const sheetOpenerRef = useRef<HTMLElement | null>(null);
+  const capabilityFocusFallbackRef = useRef<HTMLDivElement | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -689,7 +690,13 @@ export function CapabilitiesRoute({
     // vertical scroll. This root IS that scroll viewport (min-h-0 so it can
     // shrink inside the flex parent, overflow-y-auto so the tall catalog grid
     // scrolls); the centered max-width column lives inside it.
-    <div className="min-h-0 flex-1 overflow-y-auto">
+    <div
+      ref={capabilityFocusFallbackRef}
+      role="region"
+      aria-label="Capabilities"
+      tabIndex={-1}
+      className="min-h-0 flex-1 overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-inset"
+    >
       <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
         <PageHeader
           icon={<PlugIcon className="size-4" />}
@@ -864,6 +871,7 @@ export function CapabilitiesRoute({
         logoSrc={selectedItem ? logoUrl(selectedItem) : null}
         open={selectedItem !== null}
         restoreFocusRef={sheetOpenerRef}
+        restoreFocusFallbackRef={capabilityFocusFallbackRef}
         onOpenChange={(open) => {
           if (!open) {
             setSelected(null);
@@ -924,7 +932,9 @@ function EnabledCard({
       <button
         type="button"
         onClick={onOpen}
-        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+        data-capability-focus-target
+        data-capability-id={item.id}
+        className="flex min-w-0 flex-1 items-center gap-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg"
       >
         <CapabilityLogo src={logoSrc} name={item.name} size="sm" />
         <div className="min-w-0">

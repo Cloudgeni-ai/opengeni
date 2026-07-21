@@ -31,6 +31,7 @@ import {
   GENERIC_API_KEY_FIELD,
   type ConnectionHealth,
 } from "@/lib/capabilities";
+import { focusCapabilitySuccessor } from "@/lib/capability-focus";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem } from "@/types";
 
@@ -64,6 +65,7 @@ export function CapabilityDetailSheet({
   open,
   onOpenChange,
   restoreFocusRef,
+  restoreFocusFallbackRef,
   busy,
   errorMessage,
   onAction,
@@ -74,12 +76,21 @@ export function CapabilityDetailSheet({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   restoreFocusRef?: RefObject<HTMLElement | null>;
+  restoreFocusFallbackRef?: RefObject<HTMLElement | null>;
   busy: boolean;
   errorMessage: string | null;
   onAction: (action: ConnectAction) => void;
 }) {
   const localRestoreFocusRef = useRef<HTMLElement | null>(null);
   const focusRef = restoreFocusRef ?? localRestoreFocusRef;
+  const focusTargetIdRef = useRef<string | null>(null);
+
+  // The selected item is cleared at the same time the controlled sheet closes.
+  // Retain its identity independently so the close autofocus hook can find the
+  // newly rendered Enabled control after a successful enable refresh.
+  useLayoutEffect(() => {
+    if (item) focusTargetIdRef.current = item.id;
+  }, [item]);
 
   // Capture before Radix's focus scope moves focus into the sheet. Routes pass
   // a synchronously captured opener for click/keyboard activation; this local
@@ -103,6 +114,24 @@ export function CapabilityDetailSheet({
           if (opener?.isConnected) {
             event.preventDefault();
             opener.focus();
+            return;
+          }
+
+          const restore = () =>
+            focusCapabilitySuccessor(
+              focusTargetIdRef.current,
+              restoreFocusFallbackRef?.current ?? null,
+            );
+          event.preventDefault();
+          // Refresh + close normally commit the Enabled control before Radix
+          // invokes this hook. One frame covers the rare slower commit without
+          // allowing Radix to restore focus to document.body in the meantime.
+          if (!restore()) {
+            if (typeof window.requestAnimationFrame === "function") {
+              window.requestAnimationFrame(restore);
+            } else {
+              window.setTimeout(restore, 0);
+            }
           }
         }}
       >
