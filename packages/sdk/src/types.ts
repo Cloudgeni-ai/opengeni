@@ -148,7 +148,11 @@ export type StreamUrlRotatedPayload = {
   transport: "vnc-ws";
   viewerId: string | null;
 };
-export type StreamOpenedPayload = { viewerId: string; shared: boolean; viewerCount: number };
+export type StreamOpenedPayload = {
+  viewerId: string;
+  shared: boolean;
+  viewerCount: number;
+};
 export type StreamClosedPayload = {
   viewerId: string;
   reason: "client-disconnect" | "reaped" | "revoked" | "box-rollover";
@@ -164,7 +168,10 @@ export type StreamRevokedPayload = {
 // `desktop:true` opts into the un-redacted pixel plane (the consent-gated noVNC
 // stream); a terminal/files-only warm attach omits it (defaults false) so it
 // warms the box + mints the pty-ws terminal cell WITHOUT tripping the consent 409.
-export type AttachViewerRequest = { viewerId?: string | undefined; desktop?: boolean | undefined };
+export type AttachViewerRequest = {
+  viewerId?: string | undefined;
+  desktop?: boolean | undefined;
+};
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
 // the POST /viewers handler folds in when the pixel plane is minted in-process.
@@ -202,7 +209,10 @@ export type AcknowledgeStreamRequest = {
   acknowledgeUnredacted?: boolean | undefined;
   acknowledgeShared?: boolean | undefined;
 };
-export type AcknowledgeStreamResponse = { acknowledged: boolean; acknowledgedShared: boolean };
+export type AcknowledgeStreamResponse = {
+  acknowledged: boolean;
+  acknowledgedShared: boolean;
+};
 
 // Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
 // Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
@@ -421,6 +431,8 @@ export type Session = {
         attentionDescendants: number;
         pausedDescendants: number;
         failedDescendants: number;
+        /** Counts are lower bounds rather than exact totals when true. */
+        truncated: boolean;
       }
     | undefined;
   createdAt: string;
@@ -432,6 +444,8 @@ export type SessionSummary = Session;
 /** Canonical session-list page; pinned rows are excluded from ordinary pages. */
 export type SessionListResponse = {
   pinned: Session[];
+  /** True when the server omitted older pins from its bounded pinned section. */
+  pinnedTruncated?: boolean;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -503,6 +517,8 @@ export type SessionTurn = {
 
 export const SESSION_EVENT_TYPES = [
   "session.created",
+  // Defensive bounded projection for malformed/legacy oversized envelopes.
+  "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
   "session.context.compaction.requested",
@@ -577,9 +593,9 @@ export const SESSION_EVENT_TYPES = [
   "session.title_set",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
-  // OPE-21 metadata-only per-turn credential selection audit.
+  // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
-  // OPE-21 durable zero-capacity wait lifecycle. These are system/runtime
+  // credential allocator durable zero-capacity wait lifecycle. These are system/runtime
   // events, never synthetic user messages.
   "codex.capacity.waiting",
   "codex.capacity.resumed",
@@ -633,6 +649,62 @@ export type SessionEvent = {
   turnAssociation?: "current" | "late_rejected" | "duplicate" | null | undefined;
   duplicateOfEventId?: string | null | undefined;
   duplicateReason?: string | null | undefined;
+};
+
+export type SessionEventSemanticClass =
+  | "control"
+  | "terminal"
+  | "failure"
+  | "checkpoint"
+  | "tool_receipt"
+  | "provider_account";
+export type SessionEventPayloadMode = "none" | "summary" | "full";
+export type SessionEventReadMode = "monitoring" | "forensic";
+export type SessionEventReadDirection = "after" | "before";
+
+type SessionEventListCommonOptions = {
+  after?: number;
+  before?: number;
+  limit?: number;
+  compact?: boolean;
+  mode?: SessionEventReadMode;
+  direction?: SessionEventReadDirection;
+  payloadMode?: SessionEventPayloadMode;
+};
+
+export type SessionEventListOptions = SessionEventListCommonOptions &
+  (
+    | {
+        latest?: never;
+        includeTypes?: SessionEventType[];
+        excludeTypes?: SessionEventType[];
+        includeClasses?: SessionEventSemanticClass[];
+        excludeClasses?: SessionEventSemanticClass[];
+      }
+    | {
+        /** Exclusive lookup for the newest event in exactly this semantic class. */
+        latest: SessionEventSemanticClass;
+        includeTypes?: never;
+        excludeTypes?: never;
+        includeClasses?: never;
+        excludeClasses?: never;
+      }
+  );
+
+export type SessionEventPage = {
+  events: SessionEvent[];
+  mode: SessionEventReadMode;
+  payloadMode: SessionEventPayloadMode;
+  direction: SessionEventReadDirection;
+  bytes: number;
+  maxBytes: number;
+  truncated: boolean;
+  hasMore: boolean;
+  truncatedBy: "count" | "bytes" | "http_bytes" | null;
+  coveredSequence: { first: number; last: number } | null;
+  nextAfter: number | null;
+  nextBefore: number | null;
+  forensicExact: boolean;
 };
 
 export type ToolAuthNeededPayload = {
@@ -771,8 +843,16 @@ export type FsListRequest = {
   maxEntries?: number;
   includeHidden?: boolean;
 };
-export type FsListResponse = { root: FsTreeNode; revision: number; truncated: boolean };
-export type FsReadRequest = { path: string; encoding?: FsEncoding; maxBytes?: number };
+export type FsListResponse = {
+  root: FsTreeNode;
+  revision: number;
+  truncated: boolean;
+};
+export type FsReadRequest = {
+  path: string;
+  encoding?: FsEncoding;
+  maxBytes?: number;
+};
 export type FsReadResponse = {
   path: string;
   encoding: FsEncoding;
@@ -789,7 +869,11 @@ export type FsWriteRequest = {
   overwrite?: boolean;
   createParents?: boolean;
 };
-export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
+export type FsWriteResponse = {
+  path: string;
+  sizeBytes: number;
+  revision: number;
+};
 export type FsDeleteRequest = { path: string; recursive?: boolean };
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
@@ -798,7 +882,11 @@ export type FsMoveRequest = {
   overwrite?: boolean;
   createParents?: boolean;
 };
-export type FsMoveResponse = { path: string; newPath: string; revision: number };
+export type FsMoveResponse = {
+  path: string;
+  newPath: string;
+  revision: number;
+};
 export type FsMkdirRequest = { path: string; recursive?: boolean };
 export type FsMkdirResponse = { path: string; revision: number };
 
@@ -860,6 +948,7 @@ export type GitFileDiff = {
 export type GitDiffRequest = {
   path?: string;
   staged?: boolean;
+  includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
   pathspec?: string[];
@@ -895,12 +984,17 @@ export type GitShowRequest = {
 export type GitShowResponse = {
   commit: GitCommit | null;
   files: GitFileDiff[];
-  blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null;
+  blob: {
+    content: string;
+    encoding: FsEncoding;
+    sizeBytes: number;
+    truncated: boolean;
+  } | null;
   revision: number;
 };
 
 // Workbench v2 turn-end capture (mirror of `@opengeni/contracts` WorkspaceCapture*
-// + the M2 read-API response shapes, dossier §10.3). Reuses FsTreeNode /
+// + the M2 read-API response shapes). Reuses FsTreeNode /
 // GitFileStatus / GitFileDiff / GitFileStatusCode / FsEncoding above.
 export type WorkspaceCaptureFile = {
   path: string;
@@ -1018,8 +1112,17 @@ export type TerminalExecResponse = {
   running: boolean;
   wallTimeSeconds: number;
 };
-export type PtyOpenRequest = { cols?: number; rows?: number; cwd?: string; shell?: string };
-export type PtyOpenResponse = { ptyId: string; streamVia: "sse-events"; supportsInput: boolean };
+export type PtyOpenRequest = {
+  cols?: number;
+  rows?: number;
+  cwd?: string;
+  shell?: string;
+};
+export type PtyOpenResponse = {
+  ptyId: string;
+  streamVia: "sse-events";
+  supportsInput: boolean;
+};
 export type PtyWriteRequest = { ptyId: string; data: string };
 export type PtyResizeRequest = { ptyId: string; cols: number; rows: number };
 export type PtyCloseRequest = { ptyId: string };
@@ -1150,7 +1253,7 @@ export const KNOWN_PERMISSIONS = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
-  // Sandbox-surfacing (mirror of @opengeni/contracts Permission). stream:view is
+  // sandbox workspace (mirror of @opengeni/contracts Permission). stream:view is
   // strictly broader than sessions:read (un-redacted pixels); stream:control is
   // the never-granted-v1 raw-input plane; stream:acknowledge is the secret-leak
   // consent gate.
@@ -1223,7 +1326,11 @@ export type CodexConnectionStatus = {
   lastError?: string | null;
   models?: ClientModel[];
   /** The account a session runs on when unpinned (label for the in-session indicator). */
-  activeAccount?: { id: string; label?: string | null; chatgptAccountId?: string | null } | null;
+  activeAccount?: {
+    id: string;
+    label?: string | null;
+    chatgptAccountId?: string | null;
+  } | null;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
 };
@@ -1329,7 +1436,12 @@ export type CodexConnectStart = {
 export type CodexConnectPoll =
   | { status: "pending" }
   | { status: "expired" }
-  | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
+  | {
+      status: "connected";
+      plan?: string | null;
+      accountId?: string;
+      isActive?: boolean;
+    };
 
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
 export type CodexUsage = {
@@ -1380,7 +1492,11 @@ export type ClientConfig = {
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt
   // the fs/git/terminal panels.
-  structuredServices: { fileSystem: boolean; git: boolean; terminalEvents: boolean };
+  structuredServices: {
+    fileSystem: boolean;
+    git: boolean;
+    terminalEvents: boolean;
+  };
 };
 
 export type AccountRole = "owner" | "admin" | "member";
@@ -1625,6 +1741,8 @@ export type ComposerDraft = {
 export type SessionQueueSnapshot = {
   version: number;
   effectiveControl: EffectiveSessionControl;
+  /** The latest interrupted attempt has not yet durably proved physical quiescence. */
+  stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
 };
 
@@ -1690,6 +1808,26 @@ export type WorkspaceControlEvent = {
   reason: string | null;
   actor: string;
   occurredAt: string;
+  truncation?: {
+    truncated: true;
+    surface:
+      | "durable_control"
+      | "database_guard"
+      | "http_projection"
+      | "nats_legacy_guard"
+      | "sse_legacy_guard";
+    deliveredBytes: number;
+    fields: Array<{
+      field: "reason" | "actor";
+      originalBytes: number;
+      deliveredBytes: number;
+      omittedBytes: number;
+    }>;
+    fullEvidence: {
+      available: false;
+      reason: "not_retained";
+    };
+  } | null;
 };
 
 export type SessionQueueMutationResponse = {
@@ -2439,7 +2577,11 @@ export type CapabilityCatalogItem = {
   enabled: boolean;
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
-  connectionRef: { connectionId: string; providerDomain: string; kind: string } | null;
+  connectionRef: {
+    connectionId: string;
+    providerDomain: string;
+    kind: string;
+  } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;

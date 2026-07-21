@@ -1,7 +1,7 @@
 //! Artifact verification — symmetric with the install scripts (one pinned key,
 //! one routine).
 //!
-//! Three independent gates, ALL fail-closed (dossier §23.2):
+//! Three independent gates, ALL fail-closed:
 //!   1. **minisign signature** against the pinned ed25519 public key — a tampered
 //!      or attacker-substituted artifact is rejected here, independent of the
 //!      network (the key is compiled into the binary, not trusted from TLS);

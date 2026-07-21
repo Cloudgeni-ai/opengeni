@@ -4,7 +4,7 @@ import { Collapsible } from "radix-ui";
 import { cn } from "../lib/cn";
 import { useForcedDefaultOpen } from "./disclosure-context";
 import { useEntranceAnimation } from "./entrance";
-import { applyPatchOps, isApplyPatch, screenshotDataUrl } from "./parsers";
+import { applyPatchOps, isApplyPatch, mediaPreviewFact, screenshotDataUrl } from "./parsers";
 import { rawTypeOf } from "./registry";
 import type { ActivityItem, TurnOutcome } from "./types";
 export type { TurnOutcome } from "./types";
@@ -181,7 +181,7 @@ function summarizeTurn(items: ActivityItem[], durationMs?: number): string {
       item.name === "computer_call" ||
       item.name === "computer_screenshot"
     ) {
-      if (screenshotDataUrl(item.output) !== null) {
+      if (screenshotDataUrl(item.output) !== null || mediaPreviewFact(item.output) !== null) {
         screenshots += 1;
       }
     }

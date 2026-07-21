@@ -14,8 +14,17 @@ export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
-export { useSessionEvents } from "./hooks/use-session-events";
+export {
+  SESSION_EVENT_BROWSER_MAX_BYTES,
+  SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
+  SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
+  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+  boundBrowserSessionEventWindow,
+  useSessionEvents,
+} from "./hooks/use-session-events";
 export type {
+  BrowserSessionEventWindow,
   SessionEventsConnectionState,
   UseSessionEventsOptions,
   UseSessionEventsResult,
@@ -123,15 +132,25 @@ export type {
   UseSandboxTerminalOptions,
   UseSandboxTerminalResult,
 } from "./hooks/use-sandbox-terminal";
-export { useSandboxFiles } from "./hooks/use-sandbox-files";
+export {
+  CapturedFileUnavailableError,
+  FileWriteConflictError,
+  useSandboxFiles,
+} from "./hooks/use-sandbox-files";
 export type {
+  CapturedFileUnavailableReason,
   FileTreeNode,
   FileTreeStatus,
+  SandboxWriteFileOptions,
   UseSandboxFilesOptions,
   UseSandboxFilesResult,
 } from "./hooks/use-sandbox-files";
 export { useSandboxGit } from "./hooks/use-sandbox-git";
-export type { UseSandboxGitOptions, UseSandboxGitResult } from "./hooks/use-sandbox-git";
+export type {
+  SandboxGitFileDiff,
+  UseSandboxGitOptions,
+  UseSandboxGitResult,
+} from "./hooks/use-sandbox-git";
 
 // Workbench v2 turn-end capture (the cold-paint data layer)
 export { useWorkspaceCapture } from "./hooks/use-workspace-capture";
@@ -275,6 +294,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { defaultChatComposerMessages } from "./components/composer";
+export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";

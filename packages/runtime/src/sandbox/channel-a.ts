@@ -1,5 +1,4 @@
-// packages/runtime/src/sandbox/channel-a.ts — the Channel-A structured services
-// (P4.4 / modules/08-channel-a.md §4), provider-agnostic, called API-DIRECT.
+// Provider-agnostic structured sandbox services, called API-direct.
 //
 // THE NON-PIXEL SURFACE: file tree + read/write (the Pierre tree), git
 // status/diff hunks (the Pierre diff), and a terminal exec + interactive PTY.
@@ -8,10 +7,9 @@
 // op, returns inline JSON, and drops the handle. There is NO ownership/singleton
 // here — the live handle is whatever the caller resumed; it is non-owned and
 // dropped when the call returns. The same module is importable by the worker's
-// agent-turn for the A1 fs.changed side-effect it produces in-process.
+// agent turn for the fs.changed side effect it produces in-process.
 //
-// SDK GROUNDING (the load-bearing reality — see the adversarial review in the
-// module spec). Built on `session.exec(args): Promise<SandboxExecResult>` which
+// Built on `session.exec(args): Promise<SandboxExecResult>`, which
 // returns RAW {stdout,stderr,exitCode} on the agents-core local/docker sessions
 // (and Modal/the extensions providers expose the equivalent). `execCommand`
 // returns a BANNER-DECORATED string (formatExecResponse) — NEVER used for
@@ -111,6 +109,15 @@ export class ChannelAValidationError extends Error {
     this.name = "ChannelAValidationError";
   }
 }
+/** A structurally valid Channel-A request could not be completed because the
+ * sandbox/provider control plane was temporarily unavailable. Callers may retry
+ * this class; it must never be presented as a bad user path. */
+export class ChannelAUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelAUnavailableError";
+  }
+}
 export class ChannelAConflictError extends Error {
   constructor(message: string) {
     super(message);
@@ -170,6 +177,11 @@ const REPOSITORY_DISCOVERY_TRUNCATED_SENTINEL = "__OPENGENI_REPOSITORY_DISCOVERY
 const REPOSITORY_DISCOVERY_STATUS_PREFIX = "__OPENGENI_REPOSITORY_DISCOVERY_STATUS__:";
 
 const NUL = String.fromCharCode(0); // \0 NUL — find/porcelain/numstat -z separator
+const FS_LIST_TRUNCATED_MARKER = "__OPENGENI_FS_LIST_TRUNCATED__";
+// Both the local and Modal SDK sessions retain at most 1 MiB per active output
+// stream. Leave ample framing/translation headroom and emit an explicit marker
+// instead of allowing the SDK to drop the tree's leading parent records.
+const FS_LIST_MAX_OUTPUT_BYTES = 768 * 1024;
 const US = String.fromCharCode(0x1f); // \x1f unit sep — git-log field separator
 const RS = String.fromCharCode(0x1e); // \x1e record sep — git-log record separator
 const SELFHOSTED_VIRTUAL_ROOT = "/workspace";
@@ -248,7 +260,7 @@ export class SandboxChannelAService {
       return {
         stdout: stripExecBanner(raw),
         stderr: "",
-        exitCode: null,
+        exitCode: parseExecBannerExitCode(raw),
         ...(sessionId !== null ? { sessionId } : {}),
         wallTimeSeconds: 0,
       };
@@ -259,34 +271,102 @@ export class SandboxChannelAService {
   // ════════════════════════════ FileSystem (A2) ═════════════════════════════
 
   async fsList(req: FsListRequest): Promise<FsListResponse> {
-    const root = normalizeRelPath(req.path);
-    // A single bounded `find` (NUL-delimited) builds the whole subtree in one
-    // round-trip. Prefer GNU find's -printf on the Ubuntu-based images, but fall
-    // back to a POSIX-ish find+stat loop for unix_local on macOS/BSD.
-    const findRoot = root === "" ? "." : shellQuote(root);
+    return await this.fsListInternal(req, []);
+  }
+
+  /**
+   * Worker-only fast path for a bounded whole-workspace index. Matching
+   * directory nodes are emitted but pruned by `find` before descent, so residue
+   * such as node_modules cannot consume the result budget. The public fs/list
+   * wire remains unchanged; interactive callers still expand every directory
+   * they explicitly request.
+   */
+  async fsListPruned(
+    req: FsListRequest,
+    pruneDirectoryNames: readonly string[],
+  ): Promise<FsListResponse> {
+    return await this.fsListInternal(req, pruneDirectoryNames);
+  }
+
+  private async fsListInternal(
+    req: FsListRequest,
+    pruneDirectoryNames: readonly string[],
+  ): Promise<FsListResponse> {
+    const root = assertSafeRelPathOrRoot(req.path);
+    const pruneNames = [...new Set(pruneDirectoryNames)].map(assertSafePruneDirectoryName);
+    // A single bounded command (NUL-delimited) builds the whole subtree in one
+    // round-trip. Prefer GNU find's -printf on the Ubuntu-based images; on
+    // macOS/BSD, use a depth-bounded Bash glob walker because their find has no
+    // -mindepth/-maxdepth/-printf contract.
+    const findRoot = ".";
     const depthArg = Math.max(1, req.depth);
-    const hidden = req.includeHidden ? "" : ` -not -path '*/.*'`;
-    const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -printf '%y\\t%s\\t%T@\\t%m\\t%p\\0' 2>/dev/null`;
-    let { stdout } = await this.run({
-      cmd: `bash -lc ${shellQuote(gnuFind)}`,
-      workdir: this.workspaceRoot || undefined,
+    const maxCommandEntries = req.maxEntries + 1;
+    const gnuPrint = `-printf '%y\\t%s\\t%T@\\t%m\\t%p\\0'`;
+    const gnuSelector = pruneNames.length
+      ? `\\( -type d \\( ${pruneNames.map((name) => `-name ${shellQuote(name)}`).join(" -o ")} \\) ${gnuPrint} -prune \\) -o ${gnuPrint}`
+      : gnuPrint;
+    const gnuVisibleSelector = req.includeHidden
+      ? gnuSelector
+      : `\\( -path '*/.*' -prune \\) -o \\( ${gnuSelector} \\)`;
+    const gnuFind = `find ${findRoot} -mindepth 1 -maxdepth ${depthArg} \\( ${gnuVisibleSelector} \\) 2>/dev/null`;
+    const portableHiddenGuard = req.includeHidden
+      ? ""
+      : `if [[ "$base" == .* ]]; then continue; fi;`;
+    const portablePruneCase = pruneNames.length
+      ? `case "$base" in ${pruneNames.map(shellQuote).join("|")}) pruned=1 ;; *) pruned=0 ;; esac;`
+      : "pruned=0;";
+    const portableWalk = [
+      "shopt -s nullglob dotglob; count=0; stop=0;",
+      'walk() { local dir="$1" level="$2" p base t size mtime mode pruned;',
+      'for p in "$dir"/*; do [ "$stop" -eq 1 ] && return; base=${p##*/};',
+      portableHiddenGuard,
+      `if [ -L "$p" ]; then t=l; size=0; elif [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); else t=o; size=0; fi;`,
+      `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
+      `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
+      `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
+      `count=$((count + 1)); if [ "$count" -ge ${maxCommandEntries} ]; then stop=1; return; fi;`,
+      portablePruneCase,
+      `if [ "$t" = d ] && [ "$pruned" -eq 0 ] && [ "$level" -lt ${depthArg} ]; then walk "$p" $((level + 1)); fi;`,
+      "done; }; walk . 1",
+    ].join(" ");
+    // Capability selection lives inside the confined command. Even a BSD/macOS
+    // box therefore pays exactly one provider round-trip, and an empty GNU
+    // listing cannot be mistaken for a failed capability probe.
+    const rawFindCommand = [
+      `if find --version >/dev/null 2>&1 && head -z -n 0 </dev/null >/dev/null 2>&1; then`,
+      `${gnuFind};`,
+      "else",
+      `${portableWalk};`,
+      "fi",
+    ].join(" ");
+    const boundedOutput = [
+      "LC_ALL=C; bytes=0; records=0; truncated=0;",
+      "while IFS= read -r -d '' record; do",
+      "record_bytes=${#record};",
+      `if [ "$records" -ge ${req.maxEntries} ] || [ $((bytes + record_bytes + 1)) -gt ${FS_LIST_MAX_OUTPUT_BYTES} ]; then truncated=1; break; fi;`,
+      "printf '%s\\0' \"$record\"; bytes=$((bytes + record_bytes + 1)); records=$((records + 1));",
+      "done;",
+      `if [ "$truncated" -eq 1 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
+    ].join(" ");
+    const findCommand = [
+      `{ ${rawFindCommand}; } | { ${boundedOutput}; };`,
+      "producer_status=${PIPESTATUS[0]};",
+      `if [ "$producer_status" -ne 0 ] && [ "$producer_status" -ne 141 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
+    ].join(" ");
+    const { stdout, exitCode } = await this.runInConfinedDirectory(root, {
+      cmd: internalBashCommand(findCommand),
+      yieldTimeMs: 10_000,
+      maxOutputTokens: Math.ceil(FS_LIST_MAX_OUTPUT_BYTES / 4) + 1_024,
     });
-    if (!stdout) {
-      const portableFind = [
-        `find ${findRoot} -mindepth 1 -maxdepth ${depthArg}${hidden} -print0 2>/dev/null | while IFS= read -r -d '' p; do`,
-        `if [ -d "$p" ]; then t=d; size=0; elif [ -f "$p" ]; then t=f; size=$(wc -c < "$p" | tr -d ' '); elif [ -L "$p" ]; then t=l; size=0; else t=o; size=0; fi;`,
-        `mtime=$(date -r "$p" +%s 2>/dev/null || stat -c %Y "$p" 2>/dev/null || echo 0);`,
-        `mode=$(stat -f %Lp "$p" 2>/dev/null || stat -c %a "$p" 2>/dev/null || echo 0);`,
-        `printf '%s\\t%s\\t%s\\t%s\\t%s\\0' "$t" "$size" "$mtime" "$mode" "$p";`,
-        `done`,
-      ].join(" ");
-      ({ stdout } = await this.run({
-        cmd: `bash -lc ${shellQuote(portableFind)}`,
-        workdir: this.workspaceRoot || undefined,
-      }));
+    if (exitCode !== 0) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file list.",
+      );
     }
 
     const entries = stdout.split(NUL).filter((s) => s.length > 0);
+    const transportTruncated = entries.at(-1) === FS_LIST_TRUNCATED_MARKER;
+    if (transportTruncated) entries.pop();
     const rootNode: FsTreeNode = {
       name: basename(root) || (root === "" ? "" : root),
       path: root,
@@ -301,7 +381,7 @@ export class SandboxChannelAService {
     const byPath = new Map<string, FsTreeNode>();
     byPath.set(root, rootNode);
     let count = 0;
-    let truncated = false;
+    let truncated = transportTruncated;
     for (const entry of entries) {
       if (count >= req.maxEntries) {
         truncated = true;
@@ -340,7 +420,8 @@ export class SandboxChannelAService {
   async fsRead(req: FsReadRequest): Promise<FsReadResponse> {
     const path = assertSafeRelPath(req.path);
     if (!this.session.readFile) {
-      // No native readFile: base64 the file through exec (binary-safe).
+      // No native readFile: open the file once, prove that exact descriptor is
+      // rooted beneath the workspace, then base64 it through exec.
       return await this.fsReadViaExec(path, req);
     }
     let raw: string | Uint8Array;
@@ -351,41 +432,152 @@ export class SandboxChannelAService {
         ...(this.runAs ? { runAs: this.runAs } : {}),
       });
     } catch (error) {
-      // The provider's native readFile applies a REMOTE workspace-escape guard:
-      // a SYMLINK whose target resolves outside /workspace (e.g.
-      // `.config/pulse/<id>-runtime -> /tmp/pulse-…`) is rejected with
-      // "Sandbox path failed remote validation: workspace escape: /tmp/…". That
-      // raw 404 surfaced to the user. The path is still legitimately INSIDE the
-      // workspace (the symlink node lives there); only its target escapes. Read it
-      // via exec instead — `base64 <path>` follows the link and is NOT subject to
-      // the provider's path validation — so a symlink-to-/tmp renders cleanly
-      // instead of erroring. A genuine not-found falls through to a clean 404.
+      // A provider guard is the final race-safe check after our preflight. Never
+      // bypass it through exec: that would turn an in-workspace symlink into an
+      // arbitrary read outside the workspace root.
       if (isWorkspaceEscapeError(error)) {
+        throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+      }
+      if (isDefinitePathNotFoundError(error)) {
+        throw new ChannelANotFoundError(`file not found: ${path}`);
+      }
+      // A native provider read can fail while exec on the same live box remains
+      // healthy. The descriptor path below is equally confined and binary-safe,
+      // so use it as a single recovery path. Unknown provider failures must never
+      // be downgraded into a false 404.
+      if (this.session.exec || this.session.execCommand) {
         return await this.fsReadViaExec(path, req);
       }
-      throw new ChannelANotFoundError(
-        `file not found: ${path} (${error instanceof Error ? error.message : String(error)})`,
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
       );
     }
     const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
     return this.shapeRead(path, bytes, req);
   }
 
-  /** Read a file by base64-ing it through exec. Binary-safe and — crucially —
-   *  NOT subject to the provider's native-readFile workspace-escape validation,
-   *  so it can render a symlink whose target lives outside /workspace (the link
-   *  node itself is in-workspace). `base64 <path>` follows the symlink. */
-  private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
+  private async assertConfinedExistingDirectory(path: string): Promise<void> {
+    const root = this.workspaceRoot || ".";
     const abs = this.joinRoot(path);
-    const { stdout, exitCode } = await this.run({
-      cmd: `base64 ${shellQuote(abs)} 2>/dev/null | head -c ${Math.ceil(req.maxBytes * 1.4)}`,
-    });
-    if (exitCode !== null && exitCode !== 0 && stdout === "") {
-      // The target may be a dangling symlink or a link to a directory; surface a
-      // clean, typed not-found rather than a raw provider validation error.
+    const rejectLink = path
+      ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
+      : ":";
+    const script = [
+      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      rejectLink,
+      `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `printf '__OPENGENI_FS_CONFINED_OK__'`,
+    ].join("; ");
+    const result = await this.run({ cmd: internalBashCommand(script) });
+    this.assertConfinementResult(result, path || ".", "directory");
+  }
+
+  private async assertConfinedMutationParent(
+    path: string,
+    options: { allowMissingParents: boolean; rejectFinalSymlink: boolean },
+  ): Promise<void> {
+    const root = this.workspaceRoot || ".";
+    const abs = this.joinRoot(path);
+    const rejectLink = options.rejectFinalSymlink
+      ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
+      : ":";
+    const locateParent = options.allowMissingParents
+      ? 'probe="$parent"; while [ ! -e "$probe" ] && [ ! -L "$probe" ]; do next=$(dirname -- "$probe"); [ "$next" != "$probe" ] || break; probe="$next"; done'
+      : 'probe="$parent"';
+    const requireParent = options.allowMissingParents
+      ? ":"
+      : 'test -d "$parent" || { printf "__OPENGENI_FS_NOT_FOUND__"; exit 66; }';
+    const script = [
+      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      rejectLink,
+      `parent=$(dirname -- ${shellQuote(abs)})`,
+      locateParent,
+      `target=$(realpath -e -- "$probe") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      requireParent,
+      `printf '__OPENGENI_FS_CONFINED_OK__'`,
+    ].join("; ");
+    const result = await this.run({ cmd: internalBashCommand(script) });
+    this.assertConfinementResult(result, path, "mutation");
+  }
+
+  private assertConfinementResult(
+    result: { stdout: string; exitCode: number | null; sessionId?: number },
+    path: string,
+    kind: "directory" | "mutation",
+  ): void {
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the operation.",
+      );
+    }
+    if (result.stdout.includes("__OPENGENI_FS_CONFINED_OK__")) return;
+    if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
+      throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+    }
+    if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
+      throw new ChannelAValidationError(`${kind} path must not be a symbolic link: ${path}`);
+    }
+    if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
+      throw new ChannelANotFoundError(`${kind} path not found: ${path}`);
+    }
+    throw new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
+    );
+  }
+
+  /** Binary-safe fallback for sessions without native reads. The file is opened
+   *  before checking `/proc/.../fd/3`, so a symlink swap cannot redirect the
+   *  subsequent read after confinement has been established. */
+  private async fsReadViaExec(path: string, req: FsReadRequest): Promise<FsReadResponse> {
+    const root = this.workspaceRoot || ".";
+    const abs = this.joinRoot(path);
+    const script = [
+      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `exec 3<${shellQuote(abs)} || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `target=$(readlink -f -- "/proc/$$/fd/3") || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `test -f "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `printf '__OPENGENI_FS_READ_OK__\\n'`,
+      `head -c ${req.maxBytes} <&3 | base64 | tr -d '\\n'`,
+    ].join("; ");
+    let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+    try {
+      result = await this.run({
+        cmd: internalBashCommand(script),
+        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
+      });
+    } catch (error) {
+      if (error instanceof ChannelAUnsupportedError) throw error;
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
+    const { stdout, exitCode, sessionId } = result;
+    if (sessionId !== undefined) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
+    if (stdout.includes("__OPENGENI_FS_ESCAPE__") || exitCode === 67) {
+      throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
+    }
+    if (stdout.includes("__OPENGENI_FS_NOT_FOUND__") || exitCode === 66) {
       throw new ChannelANotFoundError(`file not found: ${path}`);
     }
-    const bytes = Buffer.from(stdout.replace(/\n/g, ""), "base64");
+    const prefix = "__OPENGENI_FS_READ_OK__\n";
+    const successIndex = stdout.indexOf(prefix);
+    if (successIndex < 0 || (exitCode !== null && exitCode !== 0)) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
+    const bytes = Buffer.from(
+      stdout.slice(successIndex + prefix.length).replace(/\n/g, ""),
+      "base64",
+    );
     return this.shapeRead(path, bytes, req);
   }
 
@@ -413,8 +605,15 @@ export class SandboxChannelAService {
         ? Buffer.from(req.content, "base64")
         : Buffer.from(req.content, "utf8");
 
+    await this.assertConfinedMutationParent(path, {
+      allowMissingParents: req.createParents,
+      rejectFinalSymlink: true,
+    });
+
     if (!req.overwrite) {
-      const { exitCode } = await this.run({ cmd: `test -e ${shellQuote(abs)}` });
+      const { exitCode } = await this.run({
+        cmd: `test -e ${shellQuote(abs)} || test -L ${shellQuote(abs)}`,
+      });
       if (exitCode === 0) {
         throw new ChannelAConflictError(`path exists and overwrite is false: ${path}`);
       }
@@ -422,6 +621,10 @@ export class SandboxChannelAService {
     if (req.createParents) {
       const dir = dirnameAbs(abs);
       if (dir) await this.run({ cmd: `mkdir -p ${shellQuote(dir)}` });
+      await this.assertConfinedMutationParent(path, {
+        allowMissingParents: false,
+        rejectFinalSymlink: true,
+      });
     }
     // base64-decode heredoc — raw + binary capable, single round-trip, last-
     // writer-wins (the I4 default; no read-modify-write race because we write
@@ -473,6 +676,10 @@ export class SandboxChannelAService {
   async fsDelete(req: FsDeleteRequest): Promise<FsDeleteResponse> {
     const path = assertSafeRelPath(req.path);
     const abs = this.joinRoot(path);
+    await this.assertConfinedMutationParent(path, {
+      allowMissingParents: false,
+      rejectFinalSymlink: false,
+    });
     const flag = req.recursive ? "-rf" : "-f";
     const { exitCode, stderr } = await this.run({ cmd: `rm ${flag} ${shellQuote(abs)}` });
     if (exitCode !== null && exitCode !== 0) {
@@ -491,8 +698,19 @@ export class SandboxChannelAService {
     const abs = this.joinRoot(path);
     const newAbs = this.joinRoot(newPath);
 
+    await this.assertConfinedMutationParent(path, {
+      allowMissingParents: false,
+      rejectFinalSymlink: false,
+    });
+    await this.assertConfinedMutationParent(newPath, {
+      allowMissingParents: req.createParents,
+      rejectFinalSymlink: true,
+    });
+
     if (!req.overwrite) {
-      const { exitCode } = await this.run({ cmd: `test -e ${shellQuote(newAbs)}` });
+      const { exitCode } = await this.run({
+        cmd: `test -e ${shellQuote(newAbs)} || test -L ${shellQuote(newAbs)}`,
+      });
       if (exitCode === 0) {
         throw new ChannelAConflictError(`destination exists and overwrite is false: ${newPath}`);
       }
@@ -500,6 +718,10 @@ export class SandboxChannelAService {
     if (req.createParents) {
       const dir = dirnameAbs(newAbs);
       if (dir) await this.run({ cmd: `mkdir -p ${shellQuote(dir)}` });
+      await this.assertConfinedMutationParent(newPath, {
+        allowMissingParents: false,
+        rejectFinalSymlink: true,
+      });
     }
     // -f only when overwrite — otherwise a clobber would silently succeed past
     // the guard above on a race. A missing source surfaces a non-zero exit -> 400.
@@ -526,6 +748,10 @@ export class SandboxChannelAService {
   async fsMkdir(req: FsMkdirRequest): Promise<FsMkdirResponse> {
     const path = assertSafeRelPath(req.path);
     const abs = this.joinRoot(path);
+    await this.assertConfinedMutationParent(path, {
+      allowMissingParents: req.recursive,
+      rejectFinalSymlink: true,
+    });
     // A plain mkdir on an existing path returns non-zero -> 400, matching the
     // write-on-existing semantics; -p makes the create idempotent + builds parents.
     const flag = req.recursive ? "-p " : "";
@@ -533,6 +759,7 @@ export class SandboxChannelAService {
     if (exitCode !== null && exitCode !== 0) {
       throw new ChannelAValidationError(`failed to mkdir ${path}: ${stderr || `exit ${exitCode}`}`);
     }
+    await this.assertConfinedExistingDirectory(path);
     this.revision++;
     await this.emitFsChanged([{ path, kind: "created", isDir: true, sizeBytes: null }], "write");
     return { path, revision: this.revision };
@@ -541,10 +768,9 @@ export class SandboxChannelAService {
   // ════════════════════════════ Git (A2, read-only) ═════════════════════════
 
   async gitStatus(req: GitStatusRequest): Promise<GitStatusResponse> {
-    const repo = this.repoWorkdir(req.path);
-    const inside = await this.run({
+    const repo = assertSafeRelPathOrRoot(req.path);
+    const inside = await this.runInConfinedDirectory(repo, {
       cmd: "git rev-parse --is-inside-work-tree 2>/dev/null",
-      workdir: repo,
     });
     if (inside.stdout.trim() !== "true") {
       return {
@@ -558,15 +784,14 @@ export class SandboxChannelAService {
         revision: this.revision,
       };
     }
-    const { stdout } = await this.run({
+    const { stdout } = await this.runInConfinedDirectory(repo, {
       cmd: "git status --porcelain=v2 --branch -z",
-      workdir: repo,
     });
     return { ...parsePorcelainV2(stdout), revision: this.revision };
   }
 
   async gitDiff(req: GitDiffRequest): Promise<GitDiffResponse> {
-    const repo = this.repoWorkdir(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path);
     const ctx = req.contextLines;
     // Selector precedence: refs > staged > worktree.
     let range = "";
@@ -577,9 +802,8 @@ export class SandboxChannelAService {
 
     // Pass 1: numstat (stats + binary detection). -z gives NUL-separated fields;
     // a rename emits old\0new for that record's path fields.
-    const numstat = await this.run({
+    const numstat = await this.runInConfinedDirectory(repo, {
       cmd: `git -c core.quotePath=false diff --no-color -z --numstat ${range}${pathspec}`.trim(),
-      workdir: repo,
     });
     const stats = parseNumstatZ(numstat.stdout);
 
@@ -602,9 +826,8 @@ export class SandboxChannelAService {
         continue;
       }
       // Pass 2: the per-file unified patch -> hunks.
-      const patch = await this.run({
+      const patch = await this.runInConfinedDirectory(repo, {
         cmd: `git -c core.quotePath=false diff --no-color -U${ctx} ${range} -- ${shellQuote(target)}`.trim(),
-        workdir: repo,
       });
       const oversized = Buffer.byteLength(patch.stdout, "utf8") > req.maxBytesPerFile;
       const parsed = oversized
@@ -622,16 +845,100 @@ export class SandboxChannelAService {
         truncated: oversized,
       });
     }
+
+    if (req.includeUntracked) {
+      // Native `git diff` deliberately omits untracked files, but a workspace
+      // review cannot: an untracked-only turn is still a real change surface.
+      // Ask Git for the exact NUL-delimited set, then synthesize an added-file
+      // hunk from a bounded read. The explicit request flag keeps commit/staged
+      // consumers on native Git semantics.
+      const untracked = await this.runInConfinedDirectory(repo, {
+        cmd: `git -c core.quotePath=false ls-files --others --exclude-standard -z${pathspec}`,
+      });
+      for (const target of untracked.stdout.split(NUL).filter(Boolean)) {
+        const fileArg = target.startsWith("./") ? target : `./${target}`;
+        const read = await this.runInConfinedDirectory(repo, {
+          cmd: [
+            `file=${shellQuote(fileArg)}`,
+            'if [ -L "$file" ]; then printf "L\\n"; readlink -z -- "$file" | base64 | tr -d "\\n"; exit; fi',
+            'size=$(wc -c < "$file") || exit 66',
+            'line_count=$(wc -l < "$file") || exit 66',
+            'if [ "$size" -gt 0 ]; then last_byte=$(tail -c 1 "$file" | od -An -tu1 | tr -d " \\n"); if [ "$last_byte" != "10" ]; then line_count=$((line_count + 1)); fi; fi',
+            'printf "F\\t%s\\t%s\\n" "$size" "$line_count"',
+            `head -c ${req.maxBytesPerFile + 1} "$file" | base64 | tr -d "\\n"`,
+          ].join("; "),
+        });
+        if (read.exitCode !== null && read.exitCode !== 0) continue;
+
+        const lineBreak = read.stdout.indexOf("\n");
+        if (lineBreak < 0) continue;
+        const header = read.stdout.slice(0, lineBreak);
+        const encoded = read.stdout.slice(lineBreak + 1).replace(/\s/g, "");
+        let sampled = Buffer.from(encoded, "base64");
+        let sizeBytes: number;
+        let lineCount: number;
+        if (header === "L") {
+          // GNU readlink -z preserves every byte (including trailing newlines)
+          // and adds one NUL framing byte. The diff shows the link destination
+          // itself, matching Git's symlink-blob semantics, never target content.
+          if (sampled.at(-1) !== 0) continue;
+          sampled = sampled.subarray(0, -1);
+          sizeBytes = sampled.length;
+          lineCount = addedLines(sampled).length;
+        } else {
+          const [kind, sizeRaw, lineCountRaw] = header.split("\t");
+          if (kind !== "F") continue;
+          const parsedSize = safeInt(sizeRaw);
+          const parsedLineCount = safeInt(lineCountRaw);
+          if (
+            parsedSize === null ||
+            parsedSize < 0 ||
+            parsedLineCount === null ||
+            parsedLineCount < 0
+          ) {
+            continue;
+          }
+          sizeBytes = parsedSize;
+          lineCount = parsedLineCount;
+        }
+        const truncated = sizeBytes > req.maxBytesPerFile || sampled.length > req.maxBytesPerFile;
+        const bytes = truncated ? sampled.subarray(0, req.maxBytesPerFile) : sampled;
+        const isBinary = sniffBinary(bytes);
+        const hunkLines = !isBinary && !truncated ? addedLines(bytes) : [];
+        files.push({
+          path: target,
+          oldPath: null,
+          status: "untracked",
+          isBinary,
+          isImage: isImagePath(target),
+          additions: isBinary ? 0 : lineCount,
+          deletions: 0,
+          hunks:
+            hunkLines.length > 0
+              ? [
+                  {
+                    oldStart: 0,
+                    oldLines: 0,
+                    newStart: 1,
+                    newLines: hunkLines.length,
+                    header: `@@ -0,0 +1,${hunkLines.length} @@`,
+                    lines: hunkLines,
+                  },
+                ]
+              : [],
+          truncated,
+        });
+      }
+    }
     return { files, revision: this.revision };
   }
 
   async gitLog(req: GitLogRequest): Promise<GitLogResponse> {
-    const repo = this.repoWorkdir(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path);
     const fmt = `%H${US}%h${US}%P${US}%an${US}%ae${US}%at${US}%cn${US}%ce${US}%ct${US}%s${US}%b${RS}`;
     const pathspec = req.pathspec.length ? ` -- ${req.pathspec.map(shellQuote).join(" ")}` : "";
-    const { stdout, exitCode } = await this.run({
+    const { stdout, exitCode } = await this.runInConfinedDirectory(repo, {
       cmd: `git log --format=${shellQuote(fmt)} -n${req.maxCount + 1} --skip=${req.skip} ${shellQuote(req.ref)}${pathspec}`,
-      workdir: repo,
     });
     if (exitCode !== null && exitCode !== 0) {
       return { commits: [], hasMore: false };
@@ -659,12 +966,11 @@ export class SandboxChannelAService {
   }
 
   async gitShow(req: GitShowRequest): Promise<GitShowResponse> {
-    const repo = this.repoWorkdir(req.path);
+    const repo = assertSafeRelPathOrRoot(req.path);
     if (req.filePath) {
       // Raw blob mode: ref:filePath -> bytes.
-      const { stdout, exitCode } = await this.run({
+      const { stdout, exitCode } = await this.runInConfinedDirectory(repo, {
         cmd: `git cat-file blob ${shellQuote(`${req.ref}:${req.filePath}`)} 2>/dev/null | base64`,
-        workdir: repo,
       });
       if (exitCode !== null && exitCode !== 0 && stdout.trim() === "") {
         throw new ChannelANotFoundError(`blob not found: ${req.ref}:${req.filePath}`);
@@ -698,6 +1004,7 @@ export class SandboxChannelAService {
     const diff = await this.gitDiff({
       path: req.path,
       staged: false,
+      includeUntracked: false,
       fromRef: `${req.ref}^`,
       toRef: req.ref,
       pathspec: [],
@@ -769,7 +1076,7 @@ export class SandboxChannelAService {
         'exit "$status"',
       ].join("\n");
       const { stdout } = await this.run({
-        cmd: `bash -lc ${shellQuote(command)}`,
+        cmd: internalBashCommand(command),
         workdir: this.workspaceRoot || undefined,
         yieldTimeMs: 20_000,
         // At most 256 Unix paths (PATH_MAX each) plus the status trailer. This
@@ -950,8 +1257,81 @@ export class SandboxChannelAService {
     return rel === "" ? this.workspaceRoot : `${this.workspaceRoot}/${rel}`;
   }
 
+  /** Validate and enter an FS/Git directory in the same remote command that
+   * performs the operation. This preserves confinement without adding a full
+   * provider round-trip to every tree expansion or Git query. */
+  private async runInConfinedDirectory(
+    rel: string,
+    args: ChannelAExecArgs,
+  ): Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number | null;
+    sessionId?: number;
+    wallTimeSeconds: number;
+  }> {
+    const safe = assertSafeRelPathOrRoot(rel);
+    const root = this.workspaceRoot || ".";
+    const abs = this.joinRoot(safe);
+    const rejectLink = safe
+      ? `test ! -L ${shellQuote(abs)} || { printf '__OPENGENI_FS_SYMLINK__'; exit 68; }`
+      : ":";
+    const script = [
+      `root=$(realpath -e -- ${shellQuote(root)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      rejectLink,
+      `target=$(realpath -e -- ${shellQuote(abs)}) || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `case "$target" in "$root"|"$root"/*) ;; *) printf '__OPENGENI_FS_ESCAPE__'; exit 67 ;; esac`,
+      `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
+      `cd -P -- "$target"`,
+      `printf '__OPENGENI_FS_CONFINED_OK__\\n'`,
+      args.cmd,
+    ].join("; ");
+    const successPrefix = "__OPENGENI_FS_CONFINED_OK__\n";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+      try {
+        result = await this.run({
+          ...args,
+          cmd: internalBashCommand(script),
+          workdir: undefined,
+        });
+      } catch (error) {
+        if (error instanceof ChannelAUnsupportedError) throw error;
+        if (attempt === 0) continue;
+        throw new ChannelAUnavailableError(
+          "Workspace files are temporarily unavailable. Retry the operation.",
+        );
+      }
+      if (result.sessionId !== undefined) {
+        throw new ChannelAUnavailableError(
+          "Workspace files are temporarily unavailable. Retry after the current file operation finishes.",
+        );
+      }
+      const successIndex = result.stdout.indexOf(successPrefix);
+      if (successIndex >= 0) {
+        return { ...result, stdout: result.stdout.slice(successIndex + successPrefix.length) };
+      }
+      if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
+        throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
+      }
+      if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
+        throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
+      }
+      if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
+        throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);
+      }
+      // Every operation using this helper is read-only. A completed result with
+      // no trusted marker can be retried once, but is never downgraded into a
+      // user-input error.
+      if (attempt === 0) continue;
+    }
+    throw new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
+    );
+  }
+
   private repoWorkdir(rel: string): string | undefined {
-    const safe = normalizeRelPath(rel);
+    const safe = assertSafeRelPathOrRoot(rel);
     const joined = this.joinRoot(safe);
     return joined === "." ? this.workspaceRoot || undefined : joined;
   }
@@ -1024,34 +1404,49 @@ export function stripExecBanner(raw: string): string {
 // Detect the provider's native-readFile workspace-escape rejection — a symlink
 // whose target resolves outside the sandbox root. Modal phrases it "Sandbox path
 // failed remote validation: workspace escape: <target>"; we match loosely so a
-// wording tweak still classifies it. Used to fall the read back onto the exec
-// path (which follows the link and isn't path-validated) instead of 404-ing.
-export function isWorkspaceEscapeError(error: unknown): boolean {
+// wording tweak still classifies it. The caller must preserve the rejection;
+// it must never fall back to a path that follows the escaping link.
+function isWorkspaceEscapeError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error ?? "");
   const lower = msg.toLowerCase();
   return (
     lower.includes("workspace escape") ||
+    lower.includes("escapes the workspace") ||
+    lower.includes("outside workspace") ||
     (lower.includes("remote validation") && lower.includes("escape"))
+  );
+}
+
+/** Classify only provider errors that carry an explicit path-miss fact. Generic
+ * 404s and "not found" text are unsafe here because they can describe the box or
+ * session disappearing rather than the requested file. */
+function isDefinitePathNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; errno?: unknown; osNotFound?: unknown };
+  return (
+    candidate.osNotFound === true ||
+    candidate.code === "ENOENT" ||
+    candidate.errno === "ENOENT" ||
+    candidate.errno === -2
   );
 }
 
 // Detect the Modal "the exec-session you're writing to no longer exists" banner.
 // writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). We treat that
-// as a lost PTY (the box rolled over / was re-created since the open) so the
-// caller surfaces a clean reconnect instead of writing the raw failure into
-// xterm. Matched loosely (`session not found`) with the id when present so a
-// future wording tweak still classifies it; the command's own output cannot spoof
-// it because the SDK emits this as the whole writeStdin return, not user output.
+// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
+// hard cancellation-fence fact, so classify only the complete known banner (or
+// its bare provider fact) carrying the exact tracked numeric id. ID-less,
+// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
 export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out) return false;
-  const lower = out.toLowerCase();
-  if (!lower.includes("session not found")) return false;
-  // When the id is present require it to match ours; when absent, the generic
-  // "session not found" still classifies (it is never legitimate stdout here).
-  return (
-    lower.includes(`session not found: ${execSessionId}`) || !/session not found:\s*\d+/.test(lower)
-  );
+  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
+  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
+  // JavaScript's `$` also matches immediately before one final line terminator.
+  // Requiring the regex match to consume the entire string keeps even that
+  // otherwise-special case fail-closed.
+  if (!match || match[0] !== out) return false;
+  // String equality is intentional: parseInt would normalize malformed facts
+  // such as `01` and can round an out-of-range integer into another identity.
+  return match[1] === String(execSessionId);
 }
 
 // Recover the numeric exec-session id the SDK embeds in a formatExecResponse
@@ -1071,10 +1466,33 @@ export function parseExecBannerSessionId(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+/** Recover a completed execCommand fallback's exit status from its banner.
+ * Only the banner region is inspected, so command output cannot spoof success. */
+export function parseExecBannerExitCode(raw: string): number | null {
+  const outputIdx = raw.indexOf("\nOutput:\n");
+  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
+  const match = banner.match(/Process exited with code (-?\d+)/);
+  if (!match) return null;
+  const exitCode = Number.parseInt(match[1]!, 10);
+  return Number.isSafeInteger(exitCode) ? exitCode : null;
+}
+
 function sniffBinary(bytes: Buffer): boolean {
   const n = Math.min(bytes.byteLength, 8192);
   for (let i = 0; i < n; i++) if (bytes[i] === 0) return true;
   return false;
+}
+
+function addedLines(bytes: Buffer): GitDiffHunk["lines"] {
+  if (bytes.length === 0) return [];
+  const lines = bytes.toString("utf8").split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines.map((text, index) => ({
+    type: "add",
+    oldNo: null,
+    newNo: index + 1,
+    text,
+  }));
 }
 
 function normalizeRelPath(p: string): string {
@@ -1082,19 +1500,38 @@ function normalizeRelPath(p: string): string {
   return trimmed;
 }
 
+function assertSafeRelPathOrRoot(p: string): string {
+  const norm = normalizeRelPath(p);
+  if (p.startsWith("/")) throw new ChannelAValidationError(`absolute paths are not allowed: ${p}`);
+  if (norm.split("/").some((seg) => seg === "..")) {
+    throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
+  }
+  return norm;
+}
+
 // Reject path traversal / absolute paths (case 4); the box normalizes against
 // the workspace root, so a leading slash or `..` is a 400.
 export function assertSafeRelPath(p: string): string {
-  const norm = normalizeRelPath(p);
+  const norm = assertSafeRelPathOrRoot(p);
   if (norm === "") throw new ChannelAValidationError("path is required");
-  if (p.startsWith("/")) throw new ChannelAValidationError(`absolute paths are not allowed: ${p}`);
-  if (norm.split("/").some((seg) => seg === ".."))
-    throw new ChannelAValidationError(`path traversal is not allowed: ${p}`);
   return norm;
 }
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Run control-plane-generated Bash without user/provider startup files. The
+ * marker protocol is private control data; profile output must not corrupt it. */
+function internalBashCommand(script: string): string {
+  return `env -u BASH_ENV bash --noprofile --norc -c ${shellQuote(script)}`;
+}
+
+function assertSafePruneDirectoryName(name: string): string {
+  if (name.length > 255 || !/^[A-Za-z0-9._@+-]+$/.test(name) || name === "." || name === "..") {
+    throw new ChannelAValidationError(`invalid directory prune name: ${JSON.stringify(name)}`);
+  }
+  return name;
 }
 
 function basename(p: string): string {

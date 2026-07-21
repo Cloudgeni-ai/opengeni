@@ -243,7 +243,7 @@ message EnrollmentCredentials {
   string agent_id = 1;
   string workspace_id = 2;
   // The NATS CONNECT AUTH-TOKEN the agent presents (the signed `oge_` enrollment
-  // bearer). The server runs with AUTH CALLOUT (dossier §10.1 / M-AUTH): on connect
+  // bearer). The server runs with AUTH CALLOUT (M-AUTH): on connect
   // the agent passes this as the auth-token; nats-server issues an authorization
   // request to the control-plane's callout responder, which validates the bearer
   // and returns a SIGNED user JWT scoping the connection to pub/sub ONLY
@@ -253,7 +253,7 @@ message EnrollmentCredentials {
   string nats_credentials = 3;
   // The NATS server URL(s) to dial. For the control plane these are `wss://` URLs
   // (the relay-symmetric TLS ingress) so the agent rides the same TLS endpoint as
-  // the stream relay — no separate public TCP load balancer (dossier M-AUTH).
+  // the stream relay — no separate public TCP load balancer.
   repeated string nats_urls = 4;
   // The relay edge base URL for opening stream channels.
   string relay_url = 5;
@@ -263,7 +263,7 @@ message EnrollmentCredentials {
   bool consented_whole_machine = 7;
   // Whether the user consented to screen capture + synthetic input.
   bool consented_screen_control = 8;
-  // The agent's PRODUCER token for the relay edge (dossier §10.5 / the relay-dial
+  // The agent's PRODUCER token for the relay edge (the relay-dial
   // protocol). Presented as `StreamOpen.token` when the agent registers a
   // pty/desktop channel (role=AGENT). It is a control-plane-minted, workspace+agent
   // -scoped `ogr_` HMAC token the relay verifies on its own merits — DISTINCT from
@@ -716,7 +716,7 @@ message ResumeResponse {
 
 // =============================================================================
 // Self-update (the manifest the updater consumes — codegen'd so the TS
-// publisher and Rust consumer never drift; see §23.2 of the dossier)
+// publisher and Rust consumer never drift; see §23.2 of the design)
 // =============================================================================
 
 // The agent asks whether a newer build is available for its channel + target.

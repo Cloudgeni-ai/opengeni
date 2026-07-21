@@ -13,11 +13,13 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: Cache Bun dependencies
         uses: actions/cache@v6.1.0
@@ -30,6 +32,52 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Validate changeset release plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          plan="$RUNNER_TEMP/changeset-status.json"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git update-ref refs/heads/main refs/remotes/origin/main
+
+          # `changeset status` deliberately exits non-zero on the generated
+          # Version PR: its package files changed and the consumed changeset is
+          # gone. Prove that special branch by reproducing `changeset version`
+          # from the exact base tree and comparing complete Git trees instead
+          # of skipping release-plan validation.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "${GITHUB_HEAD_REF:-}" = "changeset-release/main" ]; then
+            expected="$RUNNER_TEMP/changeset-version-expected"
+            git worktree add --detach "$expected" refs/remotes/origin/main
+            trap 'git worktree remove --force "$expected"' EXIT
+
+            (
+              cd "$expected"
+              bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+              git add -A
+              git diff --cached --check
+            )
+
+            expected_tree="$(git -C "$expected" write-tree)"
+            actual_tree="$(git rev-parse 'HEAD^{tree}')"
+            if [ "$actual_tree" != "$expected_tree" ]; then
+              echo "::error::Version PR tree does not exactly reproduce 'changeset version' from origin/main"
+              git -C "$expected" diff --cached --stat
+              exit 1
+            fi
+            exit 0
+          fi
+
+          bunx changeset status --output "$plan"
+          changeset_count="$(jq -er '.changesets | length' "$plan")"
+          release_count="$(jq -er '.releases | length' "$plan")"
+          if [ "$changeset_count" -gt 0 ] && [ "$release_count" -eq 0 ]; then
+            echo "::error::pending changesets target only ignored/private packages and cannot produce a Version PR"
+            exit 1
+          fi
+
+      - name: Generated font manifest freshness
+        run: bun run check:generated-fonts
+
       - name: Typecheck
         run: bun run typecheck
 
@@ -41,10 +89,10 @@ jobs:
 
       - name: Test
         env:
-          # OPE-26's per-subject FORCE-RLS/OCC suite is a required security gate.
+          # The per-subject FORCE-RLS/OCC suite is a required security gate.
           # Never turn a missing Docker/PostgreSQL runner into green skipped tests.
           OPENGENI_REQUIRE_REAL_DB: "1"
-        run: bun test
+        run: bun run test:unit
 
       - name: React warning-free test gate
         run: bun run test:react:clean
@@ -52,13 +100,18 @@ jobs:
       - name: Install pinned Playwright Chromium runtime
         run: bunx playwright install --with-deps chromium
 
-      - name: OPE-26 session pin browser acceptance
+      - name: Queue surface browser acceptance
+        id: queue_surface_browser
+        run: bun scripts/run-browser-e2e.ts ./test/e2e/queue-surface.browser.e2e.ts
+
+      - name: Session pin browser acceptance
+        id: session_pin_browser
         env:
           # This browser gate must fail when its real PostgreSQL boundary is unavailable.
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts
 
-      - name: OPE-15 responsive knowledge surfaces browser acceptance
+      - name: Responsive knowledge surfaces browser acceptance
         env:
           # This gate traverses the public configured-principal API and must fail
           # rather than skip when its real PostgreSQL boundary is unavailable.
@@ -66,40 +119,54 @@ jobs:
         run: bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts
 
       - name: Workbench browser acceptance
+        id: workbench_browser
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
 
-      - name: Upload OPE-26 visual evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: ope26-session-pin-visual-evidence
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            /tmp/ope26-session-pin-desktop-light.png
-            /tmp/ope26-session-pin-desktop-dark.png
-            /tmp/ope26-session-pin-mobile-light.png
-            /tmp/ope26-session-pin-mobile-dark.png
+      - name: Real workspace capture acceptance
+        run: >-
+          bun test --max-concurrency=1 --timeout 420000
+          --test-name-pattern
+          'captures a real turn-end multi-repository workspace through the public API'
+          ./test/e2e/sandbox.e2e.ts
 
-      - name: Upload OPE-15 responsive knowledge-surface evidence
-        if: ${{ always() }}
+      - name: Upload session pin visual evidence
+        if: >-
+          ${{ always() &&
+          (steps.session_pin_browser.outcome == 'success' ||
+          steps.session_pin_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
-          name: ope15-responsive-knowledge-surface-evidence
+          name: sessionpin-session-pin-visual-evidence
           if-no-files-found: error
           retention-days: 14
           path: |
-            /tmp/ope15-320-light-memory.png
-            /tmp/ope15-320-dark-memory.png
-            /tmp/ope15-375-light-variable-sets.png
-            /tmp/ope15-375-dark-variable-sets.png
-            /tmp/ope15-768-light-documents.png
-            /tmp/ope15-768-dark-documents.png
-            /tmp/ope15-desktop-light-memory.png
-            /tmp/ope15-desktop-dark-memory.png
+            /tmp/sessionpin-session-pin-desktop-light.png
+            /tmp/sessionpin-session-pin-desktop-dark.png
+            /tmp/sessionpin-session-pin-mobile-light.png
+            /tmp/sessionpin-session-pin-mobile-dark.png
+
+      - name: Upload responsive knowledge-surface evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: responsive-knowledge-surface-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            /tmp/knowledge-surfaces-320-light-memory.png
+            /tmp/knowledge-surfaces-320-dark-memory.png
+            /tmp/knowledge-surfaces-375-light-variable-sets.png
+            /tmp/knowledge-surfaces-375-dark-variable-sets.png
+            /tmp/knowledge-surfaces-768-light-documents.png
+            /tmp/knowledge-surfaces-768-dark-documents.png
+            /tmp/knowledge-surfaces-desktop-light-memory.png
+            /tmp/knowledge-surfaces-desktop-dark-memory.png
 
       - name: Upload workbench visual evidence
-        if: ${{ always() }}
+        if: >-
+          ${{ always() &&
+          (steps.workbench_browser.outcome == 'success' ||
+          steps.workbench_browser.outcome == 'failure') }}
         uses: actions/upload-artifact@v7.0.1
         with:
           name: workbench-visual-evidence
@@ -111,11 +178,11 @@ jobs:
             /tmp/workbench-desktop-dark-changes.png
             /tmp/workbench-desktop-light-files.png
 
-      # OPE-22's escaped MCP timeout and stale-input-token regressions cross the
+      # The escaped MCP timeout and stale-input-token regressions cross the
       # activity/DB/event boundary. Keep both explicit incident gates so a future
       # suite split cannot silently drop either the exactly-once/active-goal proof
       # or the real-Postgres shrink proof.
-      - name: OPE-22 recovery integration regressions
+      - name: Recovery integration regressions
         run: |
           bun test --timeout 30000 \
             --test-name-pattern \
@@ -132,11 +199,17 @@ jobs:
       - name: Docs reference freshness guard
         run: bun scripts/check-docs-refs.ts
 
+      - name: Public repository hygiene guard
+        run: bun run check:public-hygiene
+
       - name: Build client packages (contracts + SDK + React)
         run: bun run build:packages
 
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
+
+      - name: Clean published consumer
+        run: bun run test:publish-consumer
 
       - name: Build React demo harness
         run: cd packages/react && bun run demo:build
@@ -154,7 +227,7 @@ jobs:
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       - name: Cache Bun dependencies
         uses: actions/cache@v6.1.0
@@ -187,7 +260,10 @@ jobs:
 
       - name: Validate Helm chart
         run: |
-          ! grep -R -nE '(:|tag:[[:space:]]*"?)latest($|")' docker-compose.yml deploy/helm/opengeni
+          if grep -R -nE '(:|tag:[[:space:]]*"?)latest($|")' docker-compose.yml deploy/helm/opengeni; then
+            echo "floating latest tag found in deployment manifests" >&2
+            exit 1
+          fi
           helm lint deploy/helm/opengeni
           helm template opengeni deploy/helm/opengeni \
             --namespace opengeni \

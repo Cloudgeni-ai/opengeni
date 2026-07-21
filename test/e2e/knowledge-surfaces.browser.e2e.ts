@@ -22,20 +22,20 @@ import {
 } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const ownerHeaders = { "x-opengeni-subject": "ope15-owner" };
-const secretSentinel = "OPE15-SECRET-MUST-NEVER-RENDER-7d9d5d";
-const longVariableName = `OPE15_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(5)}`.slice(0, 128);
+const ownerHeaders = { "x-opengeni-subject": "knowledge-surfaces-owner" };
+const secretSentinel = "KNOWLEDGE-SECRET-MUST-NEVER-RENDER-7d9d5d";
+const longVariableName = `KNOWLEDGE_${"RESPONSIVE_INSPECTABLE_VARIABLE_".repeat(5)}`.slice(0, 128);
 const longVariableSetName =
-  `OPE-15 responsive production variable set ${"with long context ".repeat(6)}`.slice(0, 120);
-const longBaseName = `OPE-15 long document base ${"inspectable-title-".repeat(7)}`;
+  `Responsive production variable set ${"with long context ".repeat(6)}`.slice(0, 120);
+const longBaseName = `Long document base ${"inspectable-title-".repeat(7)}`;
 const activeMemoryText =
-  "OPE-15 active memory: keep responsive knowledge surfaces compact, deeply inspectable, and keyboard operable. " +
+  "Active memory: keep responsive knowledge surfaces compact, deeply inspectable, and keyboard operable. " +
   "This intentionally long record proves ordinary prose wraps without hiding the durable fact. ".repeat(
     4,
   );
-const unbrokenMemoryText = `OPE-15 overflow sentinel ${"unbrokenresponsiveknowledge".repeat(18)}`;
+const unbrokenMemoryText = `Overflow sentinel ${"unbrokenresponsiveknowledge".repeat(18)}`;
 const proposedMemoryText =
-  "OPE-15 proposed memory awaiting a human decision with approve and reject controls.";
+  "Proposed memory awaiting a human decision with approve and reject controls.";
 
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
@@ -49,7 +49,7 @@ const workflowClient: SessionWorkflowClient = {
   startRigVerification: async () => undefined,
 };
 
-describe("OPE-15 responsive knowledge surfaces (real API + PostgreSQL)", () => {
+describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   let shared: SharedTestDatabase;
   let dbClient: ReturnType<typeof createDb>;
   let api: ReturnType<typeof Bun.serve>;
@@ -59,9 +59,9 @@ describe("OPE-15 responsive knowledge surfaces (real API + PostgreSQL)", () => {
   let webBaseUrl: string;
 
   beforeAll(async () => {
-    const acquired = await acquireSharedTestDatabase("ope15-knowledge-surfaces-browser");
+    const acquired = await acquireSharedTestDatabase("knowledge-surfaces-browser");
     if (!acquired) {
-      throw new Error("OPE-15 browser acceptance requires real PostgreSQL; no skip is allowed");
+      throw new Error("Knowledge-surface browser acceptance requires real PostgreSQL; no skip is allowed");
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);
@@ -206,7 +206,7 @@ describe("OPE-15 responsive knowledge surfaces (real API + PostgreSQL)", () => {
             if (surface === matrixCase.screenshotSurface) {
               await resetSurfaceCaptureViewport(page);
               await page.screenshot({
-                path: `/tmp/ope15-${matrixCase.label}-${theme}-${surface}.png`,
+                path: `/tmp/knowledge-surfaces-${matrixCase.label}-${theme}-${surface}.png`,
                 fullPage: true,
               });
             }
@@ -260,7 +260,7 @@ describe("OPE-15 responsive knowledge surfaces (real API + PostgreSQL)", () => {
         await route.fulfill({
           status: 503,
           contentType: "application/json",
-          body: JSON.stringify({ message: "OPE-15 intentional list failure" }),
+          body: JSON.stringify({ message: "Intentional knowledge-list failure" }),
         });
         return;
       }
@@ -447,7 +447,7 @@ async function seedKnowledgeSurfaces(
           variables: [{ name: fixture.longVariableName, value: fixture.secretSentinel }],
         }),
       });
-      for (const name of [fixture.longBaseName, "OPE-15 empty document base"]) {
+      for (const name of [fixture.longBaseName, "Empty document base"]) {
         await request(`/v1/workspaces/${targetWorkspaceId}/document-bases`, {
           method: "POST",
           body: JSON.stringify({ name }),

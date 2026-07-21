@@ -91,7 +91,7 @@ function DockParity() {
           Selfhosted machine
         </p>
         <MachineDockBar
-          name="jorgen-desktop"
+          name="dev-desktop"
           kind="selfhosted"
           state="online"
           sharedSessionCount={2}

@@ -29,7 +29,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("observability count helpers", () => {
   test("credit balances are readable cross-account through the SECURITY DEFINER function", async () => {

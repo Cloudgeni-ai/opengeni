@@ -36,6 +36,7 @@ import {
   buildRailForest,
   groupSessionsForRail,
   isRunningStatus,
+  mergeSessionForRail,
   recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
@@ -261,10 +262,38 @@ describe("rail session grouping", () => {
         attentionDescendants: 0,
         pausedDescendants: 3,
         failedDescendants: 0,
+        truncated: false,
       },
     });
     const forest = buildRailForest([manager], NOW);
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
+  });
+
+  test("selected-session detail preserves the list-only hierarchy summary", () => {
+    const listProjection = railSession({
+      id: "selected-manager",
+      status: "idle",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 4,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const selectedDetail = railSession({ id: "selected-manager", status: "running" });
+
+    const merged = mergeSessionForRail(listProjection, selectedDetail);
+    expect(merged.status).toBe("running");
+    expect(merged.treeStats).toEqual(listProjection.treeStats);
+
+    const refreshedStats = { ...listProjection.treeStats!, directChildren: 3 };
+    expect(
+      mergeSessionForRail(merged, { ...selectedDetail, treeStats: refreshedStats }).treeStats,
+    ).toEqual(refreshedStats);
   });
 
   test("visibleForestRows expands only where the set says so", () => {
@@ -1179,14 +1208,14 @@ describe("capability catalog helpers", () => {
     expect(
       capabilityErrorToast(
         new Error(
-          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
         ),
         "Capability update failed",
       ),
     ).toEqual({
       title: "Connection failed",
       description:
-        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
     });
   });
 

@@ -7,6 +7,7 @@ const testFiles =
     : [
         "./test/e2e/browser.e2e.ts",
         "./test/e2e/knowledge-surfaces.browser.e2e.ts",
+        "./test/e2e/queue-surface.browser.e2e.ts",
         "./test/e2e/session-pins.browser.e2e.ts",
         "./test/e2e/workbench.browser.e2e.ts",
       ];

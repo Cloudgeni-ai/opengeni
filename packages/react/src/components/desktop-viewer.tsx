@@ -621,7 +621,7 @@ function WarmingNotice({ onRetry }: { onRetry?: (() => void) | undefined }) {
         <button
           type="button"
           onClick={onRetry}
-          className="rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm text-og-fg-muted transition-colors hover:text-og-fg pointer-coarse:min-h-10"
+          className="rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm text-og-fg-muted transition-colors hover:text-og-fg pointer-coarse:min-h-11"
         >
           Taking too long? Retry
         </button>
@@ -644,7 +644,7 @@ function DefaultConsentGate({ shared, onAccept }: { shared: boolean; onAccept: (
       <button
         type="button"
         onClick={onAccept}
-        className="rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg pointer-coarse:min-h-10"
+        className="rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg pointer-coarse:min-h-11"
       >
         I understand — show the desktop
       </button>
@@ -664,7 +664,7 @@ function defaultNotice(title: string, body: string, onRetry?: () => void): React
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm transition-colors hover:border-og-accent pointer-coarse:min-h-10"
+          className="mt-3 rounded-og-sm border border-og-border px-3 py-1.5 text-og-sm transition-colors hover:border-og-accent pointer-coarse:min-h-11"
         >
           Reconnect
         </button>

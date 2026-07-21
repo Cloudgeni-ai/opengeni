@@ -6,7 +6,7 @@
 //! per-channel it keeps two [`ReplayRing`]s (one per direction, for resume) and the
 //! two peers' outbound queues; nothing persists past a channel's life.
 //!
-//! # The epoch fence (dossier §10.6/§18)
+//! # The epoch fence
 //!
 //! Each live channel tracks an `epoch_floor` — the highest lease/active epoch any
 //! VIEWER token has presented for the key. A swap-away bumps `lease_epoch` at the

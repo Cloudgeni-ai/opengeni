@@ -14,7 +14,10 @@ import {
 
 type Capture = { url: string; init?: RequestInit | undefined };
 
-function baseRecorder(statuses: number[] = [200]): { base: FetchLike; captures: Capture[] } {
+function baseRecorder(statuses: number[] = [200]): {
+  base: FetchLike;
+  captures: Capture[];
+} {
   const captures: Capture[] = [];
   let i = 0;
   const base: FetchLike = async (input, init) => {
@@ -24,10 +27,13 @@ function baseRecorder(statuses: number[] = [200]): { base: FetchLike; captures: 
     });
     const status = statuses[Math.min(i, statuses.length - 1)] ?? 200;
     i += 1;
-    return new Response("data: {}\n\n", {
-      status,
-      headers: { "content-type": "text/event-stream" },
-    });
+    return new Response(
+      'data: {"type":"response.completed","response":{"id":"r1","status":"completed","output":[]}}\n\n',
+      {
+        status,
+        headers: { "content-type": "text/event-stream" },
+      },
+    );
   };
   return { base, captures };
 }
@@ -41,7 +47,11 @@ function ctx(overrides: Partial<CodexRequestContext> = {}): CodexRequestContext 
   return {
     clientVersion: "1.2.3",
     getToken: async () => token,
-    refresh: async () => ({ accessToken: "AC2", chatgptAccountId: "acct_1", isFedramp: false }),
+    refresh: async () => ({
+      accessToken: "AC2",
+      chatgptAccountId: "acct_1",
+      isFedramp: false,
+    }),
     resolveModel: (s) => s,
     ...overrides,
   };
@@ -90,7 +100,10 @@ describe("codexSubscriptionFetch", () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
     await codexRequestStorage.run(ctx({ sessionId: "11111111-2222-4333-8444-555555555555" }), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: "{}" }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: "{}",
+      }),
     );
     const headers = new Headers(captures[0]?.init?.headers);
     expect(headers.get("session_id")).toBe("11111111-2222-4333-8444-555555555555");
@@ -100,7 +113,10 @@ describe("codexSubscriptionFetch", () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
     await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: "{}" }),
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: "{}",
+      }),
     );
     expect(new Headers(captures[0]?.init?.headers).get("session_id")).toBeNull();
   });
@@ -109,7 +125,10 @@ describe("codexSubscriptionFetch", () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
     await codexRequestStorage.run(ctx(), () =>
-      fetchImpl("https://chatgpt.com/backend-api/codex/responses", { method: "POST", body: "{}" }),
+      fetchImpl("https://chatgpt.com/backend-api/codex/responses", {
+        method: "POST",
+        body: "{}",
+      }),
     );
     expect(captures[0]?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
   });
@@ -122,10 +141,18 @@ describe("codexSubscriptionFetch", () => {
       ctx({
         refresh: async () => {
           refreshed += 1;
-          return { accessToken: "AC2", chatgptAccountId: "acct_1", isFedramp: false };
+          return {
+            accessToken: "AC2",
+            chatgptAccountId: "acct_1",
+            isFedramp: false,
+          };
         },
       }),
-      () => fetchImpl("https://chatgpt.com/backend-api/responses", { method: "POST", body: "{}" }),
+      () =>
+        fetchImpl("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: "{}",
+        }),
     );
     expect(refreshed).toBe(1);
     expect(captures.length).toBe(2);
@@ -140,7 +167,11 @@ describe("codexSubscriptionFetch", () => {
       ctx({
         refresh: async () => {
           refreshed += 1;
-          return { accessToken: "AC2", chatgptAccountId: "acct_1", isFedramp: false };
+          return {
+            accessToken: "AC2",
+            chatgptAccountId: "acct_1",
+            isFedramp: false,
+          };
         },
       }),
       () =>
@@ -162,7 +193,11 @@ describe("codexSubscriptionFetch", () => {
       ctx({
         refresh: async () => {
           refreshed += 1;
-          return { accessToken: "AC2", chatgptAccountId: "acct_1", isFedramp: false };
+          return {
+            accessToken: "AC2",
+            chatgptAccountId: "acct_1",
+            isFedramp: false,
+          };
         },
       }),
       () =>
@@ -177,7 +212,7 @@ describe("codexSubscriptionFetch", () => {
     expect(captures).toHaveLength(1);
   });
 
-  test("malformed non-streaming SSE is not replayed against another request", async () => {
+  test("malformed non-streaming SSE fails truthfully without a transport replay", async () => {
     let calls = 0;
     const response = await codexRequestStorage.run(ctx(), () =>
       codexSubscriptionFetch(async () => {
@@ -188,8 +223,93 @@ describe("codexSubscriptionFetch", () => {
         body: JSON.stringify({ stream: false }),
       }),
     );
-    expect(await response.json()).toEqual({});
+    expect(response.status).toBe(502);
+    expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+    expect(await response.json()).toEqual({
+      error: {
+        type: "invalid_sse_terminal",
+        code: "invalid_sse_terminal",
+        message: "The Codex response stream ended without a terminal response",
+      },
+    });
     expect(calls).toBe(1);
+  });
+
+  test("non-streaming response.failed becomes a normal SDK error response", async () => {
+    let calls = 0;
+    const failure = [
+      "event: response.failed",
+      'data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"context_length_exceeded","message":"input too large"}}}',
+      "",
+    ].join("\n");
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(failure, { status: 200, headers: { "x-request-id": "req_failed" } });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: false }),
+      }),
+    );
+    expect(response.status).toBe(400);
+    expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toEqual({
+      error: {
+        type: "context_length_exceeded",
+        code: "context_length_exceeded",
+        message: "input too large",
+        event_type: "response.failed",
+        response_id: "resp_failed",
+        response_status: "failed",
+      },
+    });
+    expect(calls).toBe(1);
+  });
+
+  test("non-streaming top-level error and response.error terminal forms do not become empty success", async () => {
+    for (const event of [
+      { type: "error", code: "server_error", message: "backend unavailable", param: null },
+      {
+        type: "response.error",
+        error: { code: "server_error", message: "backend unavailable" },
+      },
+    ]) {
+      const response = await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(
+          async () => new Response(`data: ${JSON.stringify(event)}\n\n`, { status: 200 }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: false }),
+        }),
+      );
+      expect(response.status).toBe(502);
+      expect((await response.json()) as { error?: { code?: string } }).toMatchObject({
+        error: { code: "server_error" },
+      });
+    }
+  });
+
+  test("non-streaming response.incomplete is a provider failure like Codex CLI", async () => {
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            'data: {"type":"response.incomplete","response":{"id":"resp_inc","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n',
+            { status: 200 },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ stream: false }),
+      }),
+    );
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "response_incomplete",
+        message: "The Codex response was incomplete (max_output_tokens)",
+      },
+    });
   });
 
   test("partial streaming body failure is surfaced without a transport replay", async () => {
@@ -242,10 +362,236 @@ describe("codexSubscriptionFetch", () => {
       }),
     );
     expect(res.headers.get("content-type")).toContain("application/json");
-    const json = (await res.json()) as { status: string; output: Array<{ type: string }> };
+    const json = (await res.json()) as {
+      status: string;
+      output: Array<{ type: string }>;
+    };
     expect(json.status).toBe("completed");
     expect(json.output).toHaveLength(1); // assembled from output_item.done, not the empty terminal output
     expect(json.output[0]?.type).toBe("message");
+  });
+
+  test("non-streaming caller accepts canonical CRLF SSE framing", async () => {
+    const fetchImpl = codexSubscriptionFetch(
+      async () => new Response(CODEX_SSE.replaceAll("\n", "\r\n"), { status: 200 }),
+    );
+    const res = await codexRequestStorage.run(ctx(), () =>
+      fetchImpl("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", input: [] }),
+      }),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ id: "r1", status: "completed" });
+  });
+
+  test("non-streaming caller: response.failed becomes a marked non-retried provider error", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(
+          [
+            'data: {"type":"response.created","response":{"id":"resp_failed"}}',
+            'data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"type":"server_error","code":"upstream_failed","message":"checkpoint backend failed"}}}',
+            "",
+          ].join("\n\n"),
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    expect(calls).toBe(1);
+    expect(response.status).toBe(502);
+    expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toEqual({
+      error: {
+        type: "server_error",
+        code: "upstream_failed",
+        message: "checkpoint backend failed",
+        event_type: "response.failed",
+        response_id: "resp_failed",
+        response_status: "failed",
+      },
+    });
+  });
+
+  test("non-streaming caller: response.error preserves its top-level diagnostic", async () => {
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            'data: {"type":"response.error","code":"service_unavailable","message":"stream worker unavailable","param":"input"}\n\n',
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: {
+        type: "service_unavailable",
+        code: "service_unavailable",
+        message: "stream worker unavailable",
+        param: "input",
+        event_type: "response.error",
+      },
+    });
+  });
+
+  test.each([
+    ["CRLF response.failed", "\r\n", "response.failed"],
+    ["bare-CR response.error", "\r", "response.error"],
+  ] as const)(
+    "non-streaming caller: parses %s terminal events",
+    async (_name, newline, eventType) => {
+      const event =
+        eventType === "response.failed"
+          ? {
+              type: eventType,
+              response: {
+                id: "resp_line_endings",
+                status: "failed",
+                error: {
+                  type: "server_error",
+                  code: "line_ending_failure",
+                  message: "provider failed",
+                },
+              },
+            }
+          : {
+              type: eventType,
+              code: "line_ending_failure",
+              message: "provider failed",
+            };
+      const body = [
+        'data: {"type":"response.created","response":{"id":"resp_line_endings"}}',
+        `data: ${JSON.stringify(event)}`,
+        "",
+      ].join(`${newline}${newline}`);
+      const response = await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(
+          async () =>
+            new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: false,
+            input: [],
+          }),
+        }),
+      );
+
+      expect(response.status).toBe(502);
+      expect(response.headers.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe("1");
+      expect(response.headers.get("x-should-retry")).toBe("false");
+      expect(await response.json()).toMatchObject({
+        error: {
+          code: "line_ending_failure",
+          message: "provider failed",
+        },
+      });
+    },
+  );
+
+  test("non-streaming caller: parses mixed line endings and multiline data", async () => {
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            [
+              ": keepalive\r\n",
+              'data: {"type":"response.created","response":{"id":"mixed"}}\r\n\r\n',
+              'data: {"type":"response.error",\n',
+              'data: "code":"mixed_failure","message":"mixed failed"}\r\r',
+            ].join(""),
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: "mixed_failure",
+        message: "mixed failed",
+      },
+    });
+  });
+
+  test("non-streaming caller: terminal diagnostics are projected and explicitly bounded", async () => {
+    const oversized = "x".repeat(100_000);
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(
+        async () =>
+          new Response(
+            `data: ${JSON.stringify({
+              type: "response.failed",
+              response: {
+                id: `resp_${oversized}`,
+                status: oversized,
+                error: {
+                  type: "server_error",
+                  code: "diagnostic_too_large",
+                  message: oversized,
+                  stack: oversized,
+                  nested: { opaque: oversized },
+                },
+              },
+            })}\n\n`,
+            { status: 200, headers: { "content-type": "text/event-stream" } },
+          ),
+      )("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({
+          model: "gpt-5.6-sol",
+          stream: false,
+          input: [],
+        }),
+      }),
+    );
+
+    const body = await response.text();
+    expect(Buffer.byteLength(body)).toBeLessThan(6 * 1024);
+    expect(JSON.parse(body)).toEqual({
+      error: {
+        type: "server_error",
+        code: "diagnostic_too_large",
+        message: expect.stringMatching(/… \[truncated\]$/),
+        event_type: "response.failed",
+        response_id: expect.stringMatching(/… \[truncated\]$/),
+        response_status: expect.stringMatching(/… \[truncated\]$/),
+        diagnostic_truncated: true,
+      },
+    });
+    expect(body).not.toContain("stack");
+    expect(body).not.toContain("nested");
   });
 
   test("streaming caller: stream is passed through with the terminal event's empty output repaired", async () => {
@@ -273,6 +619,235 @@ describe("codexSubscriptionFetch", () => {
     expect(text).toContain("response.output_item.done"); // intermediate events still pass through for incremental UI
   });
 
+  test.each([
+    [
+      "response.failed",
+      {
+        type: "response.failed",
+        response: {
+          id: "resp_stream_failed",
+          status: "failed",
+          error: {
+            type: "server_error",
+            code: "upstream_failed",
+            message: "provider secret failure detail",
+          },
+        },
+      },
+      502,
+      "upstream_failed",
+    ],
+    [
+      "nested response.error",
+      {
+        type: "response.error",
+        response: {
+          id: "resp_stream_error",
+          status: "failed",
+          error: {
+            type: "server_error",
+            code: "nested_stream_error",
+            message: "provider secret nested detail",
+          },
+        },
+      },
+      502,
+      "nested_stream_error",
+    ],
+    [
+      "top-level error",
+      {
+        type: "error",
+        code: "service_unavailable",
+        message: "provider secret top-level detail",
+      },
+      502,
+      "service_unavailable",
+    ],
+    [
+      "response.incomplete",
+      {
+        type: "response.incomplete",
+        response: {
+          id: "resp_stream_incomplete",
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+        },
+      },
+      502,
+      "response_incomplete",
+    ],
+    [
+      "non-retryable failed request",
+      {
+        type: "response.failed",
+        response: {
+          id: "resp_stream_context",
+          status: "failed",
+          error: {
+            code: "context_length_exceeded",
+            message: "provider echoed private input",
+          },
+        },
+      },
+      400,
+      "context_length_exceeded",
+    ],
+  ] as const)(
+    "streaming caller: %s becomes a bounded marked provider failure without replay",
+    async (_name, event, expectedStatus, expectedCode) => {
+      let calls = 0;
+      const response = await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+            status: 200,
+            headers: { "content-type": "text/event-stream", "x-request-id": "req-stream" },
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+        }),
+      );
+
+      let observed: unknown;
+      try {
+        await response.text();
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toBeInstanceOf(Error);
+      expect(observed).toMatchObject({
+        status: expectedStatus,
+        code: expectedCode,
+      });
+      expect(isCodexTransportError(observed)).toBe(true);
+      expect(String((observed as Error).message)).not.toContain("provider secret");
+      expect(JSON.stringify(observed)).not.toContain("provider secret");
+      expect(Buffer.byteLength(JSON.stringify(observed), "utf8")).toBeLessThan(4 * 1024);
+      expect(calls).toBe(1);
+    },
+  );
+
+  test("streaming caller: a missing terminal fails as invalid_sse_terminal", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response('data: {"type":"response.created","response":{"id":"r1"}}\n\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({ status: 502, code: "invalid_sse_terminal" });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test("streaming caller: a null accepted body fails as invalid_sse_terminal", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(ctx(), () =>
+      codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      })("https://chatgpt.com/backend-api/responses", {
+        method: "POST",
+        body: JSON.stringify({ model: "gpt-5.6-sol", stream: true, input: [] }),
+      }),
+    );
+
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(observed).toMatchObject({ status: 502, code: "invalid_sse_terminal" });
+    expect(isCodexTransportError(observed)).toBe(true);
+    expect(calls).toBe(1);
+  });
+
+  test.each([
+    ["CRLF", "\r\n"],
+    ["bare CR", "\r"],
+  ] as const)(
+    "streaming caller: repairs %s SSE across one-byte chunk boundaries",
+    async (_name, lineEnding) => {
+      const source = [
+        ": keepalive",
+        'data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"hi 🙂"}]}}',
+        "event: response.completed" +
+          lineEnding +
+          'data: {"type":"response.completed","response":{"id":"r_line","status":"completed","output":[]}}',
+        "",
+      ].join(`${lineEnding}${lineEnding}`);
+      const bytes = new TextEncoder().encode(source);
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          // Deliberately split CRLF pairs, blank-line delimiters, and the emoji's
+          // multibyte UTF-8 sequence across chunks.
+          for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+          controller.close();
+        },
+      });
+      const response = await codexRequestStorage.run(ctx(), () =>
+        codexSubscriptionFetch(
+          async () =>
+            new Response(body, {
+              status: 200,
+              headers: { "content-type": "text/event-stream" },
+            }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({
+            model: "gpt-5.6-sol",
+            stream: true,
+            input: [],
+          }),
+        }),
+      );
+
+      const repaired = await response.text();
+      const terminal = repaired
+        .replaceAll("\r\n", "\n")
+        .replaceAll("\r", "\n")
+        .split("\n\n")
+        .map((block) =>
+          block
+            .split(/\r\n|\r|\n/)
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .join("\n"),
+        )
+        .filter(Boolean)
+        .map(
+          (data) =>
+            JSON.parse(data) as {
+              type?: string;
+              response?: { output?: unknown[] };
+            },
+        )
+        .find((event) => event.type === "response.completed");
+      expect(terminal?.response?.output).toHaveLength(1);
+      expect(JSON.stringify(terminal?.response?.output)).toContain("hi 🙂");
+      expect(repaired).toContain(`${lineEnding}${lineEnding}`);
+    },
+  );
+
   test("passes through untouched when there is no codex context", async () => {
     const { base, captures } = baseRecorder();
     const fetchImpl = codexSubscriptionFetch(base);
@@ -288,10 +863,17 @@ describe("codexSubscriptionFetch", () => {
 
   test("P1-d: a 429 usage_limit_reached is re-emitted as JSON with x-should-retry:false (preserving the body)", async () => {
     const body = JSON.stringify({
-      error: { type: "usage_limit_reached", message: "limit hit", resets_in_seconds: 3600 },
+      error: {
+        type: "usage_limit_reached",
+        message: "limit hit",
+        resets_in_seconds: 3600,
+      },
     });
     const base: FetchLike = async () =>
-      new Response(body, { status: 429, headers: { "content-type": "application/json" } });
+      new Response(body, {
+        status: 429,
+        headers: { "content-type": "application/json" },
+      });
     const fetchImpl = codexSubscriptionFetch(base);
     const res = await codexRequestStorage.run(ctx(), () =>
       fetchImpl("https://chatgpt.com/backend-api/responses", {
@@ -336,7 +918,10 @@ describe("codexSubscriptionFetch", () => {
     const base: FetchLike = async () => {
       call += 1;
       return call === 1
-        ? new Response("unauth", { status: 401, headers: { "content-type": "text/plain" } })
+        ? new Response("unauth", {
+            status: 401,
+            headers: { "content-type": "text/plain" },
+          })
         : new Response(JSON.stringify({ error: { type: "usage_limit_reached" } }), {
             status: 429,
             headers: { "content-type": "application/json" },
@@ -371,7 +956,9 @@ describe("classifyCodexUsageLimitError", () => {
       type: "usage_limit_reached",
       error: { type: "usage_limit_reached", resets_in_seconds: 1800 },
     });
-    expect(classifyCodexUsageLimitError(err)).toEqual({ resetsInSeconds: 1800 });
+    expect(classifyCodexUsageLimitError(err)).toEqual({
+      resetsInSeconds: 1800,
+    });
   });
 
   test("detects via the error body type when the top-level type is absent", () => {
@@ -379,7 +966,9 @@ describe("classifyCodexUsageLimitError", () => {
       status: 429,
       error: { type: "usage_limit_reached" },
     });
-    expect(classifyCodexUsageLimitError(err)).toEqual({ resetsInSeconds: null });
+    expect(classifyCodexUsageLimitError(err)).toEqual({
+      resetsInSeconds: null,
+    });
   });
 
   test("walks the cause chain (SDK re-wrap)", () => {
@@ -388,7 +977,9 @@ describe("classifyCodexUsageLimitError", () => {
       error: { type: "usage_limit_reached", resets_in_seconds: 60 },
     });
     const outer = Object.assign(new Error("wrapped"), { cause: inner });
-    expect(classifyCodexUsageLimitError(outer)).toEqual({ resetsInSeconds: 60 });
+    expect(classifyCodexUsageLimitError(outer)).toEqual({
+      resetsInSeconds: 60,
+    });
   });
 
   test("returns null for a plain rate-limit (no usage cap)", () => {

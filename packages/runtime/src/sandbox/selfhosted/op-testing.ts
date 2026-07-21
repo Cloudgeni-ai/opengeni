@@ -110,6 +110,8 @@ export interface FakeOpScript {
    *  live emission; later attaches replay from retention unfiltered. Default
    *  false = the op is COMPLETE at start (pure collection). */
   live?: boolean;
+  /** Keep a live op RUNNING with no frames until OpCancel is received. */
+  holdUntilCancel?: boolean;
   /** Seqs whose LIVE emission is dropped (retention keeps them). */
   dropLiveSeqs?: ReadonlySet<number>;
   /** Seqs whose LIVE emission is duplicated (delivered twice back-to-back). */
@@ -155,6 +157,7 @@ export class FakeOpRunner implements ControlRpc {
   /** Op ids that answer LOST (evicted) on query/attach — bounded-retention
    *  collateral. */
   readonly lostOps = new Set<string>();
+  private readonly cancelledBeforeStart = new Set<string>();
 
   constructor(opts: {
     transport: InMemoryOpStreamTransport;
@@ -219,6 +222,8 @@ export class FakeOpRunner implements ControlRpc {
         );
       case "opQuery":
         return this.handleQuery(req.requestId, op.opQuery.opId);
+      case "opCancel":
+        return this.handleCancel(req.requestId, op.opCancel.opId);
       default: {
         if (this.fallback) {
           return this.fallback.request(subject, req, opts);
@@ -233,6 +238,9 @@ export class FakeOpRunner implements ControlRpc {
   }
 
   private handleStart(opId: string): ControlResponse {
+    if (this.cancelledBeforeStart.has(opId)) {
+      return startResponse(opId, cancelledStatus(opId), false);
+    }
     const existing = this.runs.get(opId);
     if (existing) {
       // IDEMPOTENT BY OP ID: a known op answers its current status and NEVER
@@ -294,7 +302,7 @@ export class FakeOpRunner implements ControlRpc {
     if (run.script.live && !run.liveEmitted) {
       // First attach on a live op: nothing retained yet worth replaying — the
       // child "runs now" and the (faulty) live flow begins.
-      this.emitLive(opId, run, subject);
+      if (!run.script.holdUntilCancel) this.emitLive(opId, run, subject);
       return statusOnly(requestId, this.statusOf(opId, run));
     }
     // A heal (or completed-op collection): replay from RETENTION — every frame
@@ -316,6 +324,26 @@ export class FakeOpRunner implements ControlRpc {
     const run = this.runs.get(opId);
     if (!run) {
       return statusOnly(requestId, lostStatus(opId));
+    }
+    return statusOnly(requestId, this.statusOf(opId, run));
+  }
+
+  private handleCancel(requestId: string, opId: string): ControlResponse {
+    const run = this.runs.get(opId);
+    if (!run) {
+      this.cancelledBeforeStart.add(opId);
+      return statusOnly(requestId, cancelledStatus(opId));
+    }
+    if (!run.liveEmitted && run.script.holdUntilCancel) {
+      run.exit.exitCode = -1;
+      run.exit.cancelled = true;
+      run.liveEmitted = true;
+      const subject = opFrameSubject(this.workspaceId, this.agentId, opId);
+      queueMicrotask(() => {
+        for (const frame of run.frames) {
+          this.transport.deliver(subject, OpFrame.encode(frame).finish());
+        }
+      });
     }
     return statusOnly(requestId, this.statusOf(opId, run));
   }
@@ -441,11 +469,11 @@ function errorResponse(requestId: string, code: ErrorCode, message: string): Con
   };
 }
 
-function startResponse(requestId: string, status: OpStatus): ControlResponse {
+function startResponse(requestId: string, status: OpStatus, accepted = true): ControlResponse {
   return {
     requestId,
     error: undefined,
-    result: { $case: "opStart", opStart: { accepted: true, status } },
+    result: { $case: "opStart", opStart: { accepted, status } },
   };
 }
 
@@ -464,5 +492,24 @@ function lostStatus(opId: string): OpStatus {
     nextSeq: "0",
     exit: undefined,
     lostReason: OpLostReason.OP_LOST_REASON_EVICTED,
+  };
+}
+
+function cancelledStatus(opId: string): OpStatus {
+  return {
+    opId,
+    state: OpState.OP_STATE_COMPLETE,
+    nextSeq: "1",
+    exit: {
+      exitCode: -1,
+      timedOut: false,
+      cancelled: true,
+      durationMs: "0",
+      digests: {},
+      totals: {},
+      failureCode: "",
+      failureDetail: {},
+    },
+    lostReason: OpLostReason.OP_LOST_REASON_UNSPECIFIED,
   };
 }
