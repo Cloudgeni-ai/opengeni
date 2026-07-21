@@ -1,5 +1,5 @@
 -- 0053_codex_credential_leases.sql
--- OPE-21: fair, atomic Codex subscription selection across worker replicas.
+-- tracking-21: fair, atomic Codex subscription selection across worker replicas.
 --
 -- Every field in this migration is workspace-local. In particular, the same
 -- external ChatGPT subscription connected in two workspaces is intentionally

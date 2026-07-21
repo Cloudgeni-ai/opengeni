@@ -389,9 +389,15 @@ describe("codex_subscription_credentials accessors", () => {
       expiresAt: null,
       lastRefreshAt: null,
     });
-    expect(await disconnectAllCodexAccounts(db, ws.workspaceId)).toBe(2);
+    expect(await disconnectAllCodexAccounts(db, ws.workspaceId)).toEqual({
+      removed: 2,
+      blockedCredentialIds: [],
+    });
     expect(await getCodexCredentialStatus(db, ws.workspaceId)).toBeNull();
-    expect(await disconnectAllCodexAccounts(db, ws.workspaceId)).toBe(0);
+    expect(await disconnectAllCodexAccounts(db, ws.workspaceId)).toEqual({
+      removed: 0,
+      blockedCredentialIds: [],
+    });
   });
 
   test("workspaceCodexSubscriptionActive reflects the ACTIVE account's status", async () => {

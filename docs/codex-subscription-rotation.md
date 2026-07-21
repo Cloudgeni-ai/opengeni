@@ -95,6 +95,76 @@ or quota history. An exact same-turn live lease or frozen approval/preemption
 checkpoint may continue on that healthy row; reconnect and token refresh never
 flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
+## Quota overview, allocator control, and reset-credit redemption
+
+Codex quota adds three deliberately separate product seams:
+
+- **Overview reads** fetch `/wham/usage` and the detailed reset-credit inventory
+  independently for each workspace credential, with at most four provider calls in
+  flight and a bounded whole-route deadline. Every result names its provider/cache
+  source, timestamp, staleness, error and
+  typed detail authority (`detailed`, `count_only`, `capped`, `unsupported`,
+  `unknown`, or `error`). `available_count` is cached as summary metadata;
+  detailed opaque ids are never cached as activation authority. Missing/capped
+  detail, unknown enums, expired/non-available rows, and summary disagreement are
+  view-only. Valid quota windows advance `usage_checked_at` independently from
+  valid reset-summary data advancing `reset_credits_checked_at`; a malformed or
+  timed-out reset inventory cannot erase fresh five-hour/weekly provider truth.
+- **Allocator control** writes only `allocator_enabled` plus its independent
+  `allocator_version`/actor/timestamp. Same desired state is idempotent even with
+  a stale expected version; a conflicting stale transition returns the current
+  version. One real change and one audit row share a transaction. Credential
+  token `version`, health, connection, cooldown, quota history, active leases,
+  and frozen turns remain independent; reconnect, refresh and redemption never
+  auto-enable the row.
+- **Reset redemption** has no SDK method, MCP/Toolspace tool, worker activity,
+  scheduled/background hook, or allocator/rotation call. Its REST mutation
+  requires managed product mode, an actual Better Auth cookie with no
+  `Authorization` header, workspace admin, the exact `user:<id>` who most
+  recently connected the credential through a direct cookie session, exact
+  same-origin `Origin`, `Sec-Fetch-Site: same-origin`, and a five-minute
+  session-bound HMAC confirmation. The deployment must configure
+  `publicBaseUrl`; the route never derives a trusted origin from request
+  `Host`/URL headers. Legacy/nonhuman-connected rows are view-only.
+
+The durable redemption attempt separates `processing` (fresh exact actionable
+detail still owed) from `provider_started` (the consume POST may have begun).
+The browser supplies one stable logical UUID; the server creates one upstream
+idempotency key. Immediately before every consume POST, including a recovery
+retry, a DB-time fence locks and revalidates the credential owner/health, exact
+browser claim, live claim lease, and unexpired confirmation, then atomically
+records `provider_started`. A crash before `provider_started` re-fetches detail. Any
+timeout/network/invalid response after `provider_started` preserves that state
+and retries with the same upstream key even if inventory has since changed;
+`alreadyRedeemed` resolves the ambiguity as success. Concurrent claims return
+in-progress. Unresolved `provider_started` work blocks credential disconnect and
+ownership-changing reconnect so its only durable provider key cannot be
+orphaned; a same-owner browser-session rotation can discover the attempt in the
+owner-scoped overview and explicitly adopt it. Browser `sessionStorage` retains
+only optional title/expiry convenience and is never recovery authority.
+
+Exact `reset`, `nothingToReset`, `noCredit`, or `alreadyRedeemed` outcomes are
+persisted and audited once. The redeem response returns that durable outcome
+with `overview: null` and never waits for provider usage/detail readback; the
+browser refreshes the independently bounded overview afterward. A completed
+outcome remains server-discoverable after tab/session loss or later credential
+health changes. `reset`/`alreadyRedeemed` permanently suppress another consume
+for that provider credit. `nothingToReset`/`noCredit` remain visible as history
+but do not suppress a later newly confirmed attempt when the provider again
+reports exact actionable detail; that later action receives a fresh logical and
+upstream idempotency key.
+Only `reset`/`alreadyRedeemed` clear provider-exhaustion cooldown, and no outcome
+changes allocator eligibility. The one-credit fence remains permanent only for
+those successful outcomes; `nothingToReset`/`noCredit` permit a later, newly
+confirmed logical attempt. Provider bodies, bearer tokens, opaque credit ids and
+upstream keys never enter logs/events/audit metadata.
+
+Migration `0065_codex_subscription_overview.sql` is a maintenance cutover, not a
+rolling API change. Every old API replica must be drained before applying it,
+because old binaries neither record the connecting human nor protect unresolved
+provider attempts from disconnect/ownership-changing reconnect. Start only the
+new revision after the migration; mixed old/new API writers are forbidden.
+
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it
 idempotently. The worker advances a conservative monotonic ownership deadline
@@ -262,7 +332,13 @@ correlate those alerts with `codex.credential.selected`,
   `packages/codex/test/fetch.test.ts`.
 - Real Postgres concurrency/RLS/failure injection:
   `packages/db/test/codex-credential-leases.test.ts` and
-  `packages/db/test/codex-capacity-waiters.test.ts`.
+  `packages/db/test/codex-capacity-waiters.test.ts`. Codex quota redemption-specific
+  FORCE-RLS/OCC/idempotency coverage lives in
+  `packages/db/test/codex-subscription-overview.test.ts` and
+  `apps/api/test/codex-redemption-routes.test.ts`.
+- Authenticated desktop/mobile/a11y/browser-session recovery evidence:
+  `test/e2e/codex-overview.e2e.ts`; the mutation-surface denylist is
+  `test/codex-quota-redemption-surface.test.ts`.
 - Real Temporal signal/timer/restart/continue-as-new coverage:
   `test/integration/temporal-workflow.integration.ts`.
 - Production release proof must additionally show concurrent live turns selecting

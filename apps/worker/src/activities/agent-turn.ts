@@ -1380,12 +1380,24 @@ async function refreshCappedCodexUsageRows(
   db: ActivityServices["db"],
   settings: Settings,
   workspaceId: string,
-  accounts: CodexAccountStatus[],
+  accounts: Array<
+    Pick<
+      CodexAccountStatus,
+      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+    >
+  >,
   capacitySignals: {
     signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"] | undefined;
     wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   },
-): Promise<CodexAccountStatus[]> {
+): Promise<
+  Array<
+    Pick<
+      CodexAccountStatus,
+      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+    >
+  >
+> {
   const nearPct = settings.codexRotationNearExhaustionPct;
   const stale = accounts.filter(
     (a) =>

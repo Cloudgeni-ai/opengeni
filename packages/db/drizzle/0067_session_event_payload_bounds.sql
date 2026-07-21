@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-64: session_events is the lossy human/audit projection, not a blob store.
+-- tracking-64: session_events is the lossy human/audit projection, not a blob store.
 -- Install the BEFORE trigger before the NOT VALID check so an older pod in the
 -- same rolling deployment is normalized instead of having an oversized write
 -- rejected. Historical oversized rows stay readable and can be defensively

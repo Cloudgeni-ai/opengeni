@@ -25,6 +25,15 @@ Before exposing OpenGeni beyond local development, choose the access mode intent
 
 No model provider credentials are automatically exposed inside agent sandboxes. Only expose host credentials to a managed sandbox through explicit preparation profiles or allowlists, and prefer short-lived credentials.
 
+Codex rate-limit reset credits are an irreversible owning-human browser
+capability, not agent capacity. The consume route is available only in managed
+mode and requires a direct Better Auth cookie session, the same `user:<id>` that
+most recently connected the credential, workspace admin, exact same-origin
+`Origin`/Fetch Metadata, and a session-bound HMAC confirmation. It rejects every
+`Authorization` header even when a valid cookie is also present. There is no SDK,
+MCP, Toolspace, worker, scheduled, background, allocator, or rotation consume
+path; provider bearer values remain server-only.
+
 ## Connected Machines
 
 A Connected Machine is a computer a user enrolls and runs sessions on directly — a first-class, co-equal compute target alongside the managed sandbox. Because a machine session runs on hardware OpenGeni does not own, its trust boundary differs from a managed sandbox in specific, deliberate ways.
