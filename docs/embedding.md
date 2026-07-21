@@ -40,6 +40,44 @@ HTTP routes use `requireAccessContext(c, deps)` and `requireAccessGrant(c, deps,
 
 There is no separate exported `IdentityResolver` type in this pass. A V1 host binds identity through `managedAuth`, delegation/API-key settings, and HTTP headers. A V2 host may resolve identity itself and pass an `AccessGrant` directly to core domain functions.
 
+### Immutable turn identity
+
+Canonical sources: `TurnInitiator` in `packages/contracts/src/index.ts`,
+`packages/db/src/turn-initiator.ts`, and the producer transitions in
+`packages/db/src/index.ts` / `packages/db/src/session-queue-commands.ts`.
+
+Every session response carries a frozen `createdBy` principal and every turn
+response carries its own frozen `initiator`. They are deliberately different
+facts: the creator is used only for creation attribution and idempotent repair
+of that create command's first turn. A later Send or Steer records the
+authenticated actor of that command. Queue move/edit/resubmit preserves the
+original turn authority. Recovery, approval, and retry update the existing turn
+and cannot replace it.
+
+`TurnInitiator.kind` is `subject | service`; `subjectId` remains opaque to
+OpenGeni. Hosts must not encode or infer the kind from a subject-id prefix,
+because the host owns that namespace. Agent-created work inherits the caller's
+frozen principal only through the HMAC-signed session/turn/attempt claims minted
+by the worker, and records a bounded `via` provenance chain. Scheduled,
+compaction, goal-continuation, and mixed service-only internal-update turns use
+named service principals. When ordinary machine notices coalesce with an Agent
+Steer, the Steer's inherited subject remains authoritative and the notices are
+context rather than a replacement principal. Pre-contract and rolling
+old-writer rows are explicitly
+`{ kind: "service", subjectId: "unattributed-legacy" }`; a host credential
+resolver must deny that sentinel rather than substitute the session creator,
+API-key owner, sandbox token, or current worker.
+
+The normal first-party orchestration MCP and Toolspace use deliberately
+different bearer scopes. The worker re-signs the normal first-party bearer for
+every request with the exact current turn, attempt, and execution generation;
+an agent-created child is accepted only while that attempt still owns the turn,
+and the ownership proof and child-session insert share one database
+transaction. The sandbox Toolspace bearer is renewable and session-bound so
+long-running work does not lose Code Mode after one hour, but Toolspace excludes
+the first-party OpenGeni orchestration server and cannot use that broader
+lifetime to call `session_create` or other first-party tools recursively.
+
 ### Tenancy / Bootstrap Workspace
 
 Canonical source: `bootstrapWorkspace` in `packages/db/src/index.ts`.

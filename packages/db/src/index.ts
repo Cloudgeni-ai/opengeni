@@ -58,6 +58,8 @@ import type {
   SystemUpdateClassification,
   SessionTurnSource,
   SessionTurnStatus,
+  TurnInitiator,
+  TurnInitiatorContext,
   SocialConnection,
   SocialConnectionStatus,
   SocialPost,
@@ -116,6 +118,15 @@ import {
   sql,
   type SQL,
 } from "drizzle-orm";
+import {
+  creatorColumns,
+  frozenInitiatorForCommandActor,
+  initiatorColumns,
+  initiatorFromStorage,
+  UNATTRIBUTED_LEGACY_INITIATOR,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
+export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -132,6 +143,7 @@ import {
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
 import {
+  assertAgentCommandAuthorityInTransaction,
   closeSessionTurnAttemptInTransaction,
   evaluateSessionControl,
   evaluateSessionControls,
@@ -143,6 +155,7 @@ import {
   registerSessionTurnAttemptClaim,
   serializeEffectiveSessionControl,
   type SessionDiscoveryControl,
+  type SessionCommandActor,
   SessionControlInvariantError,
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
@@ -2377,6 +2390,8 @@ export type EnqueueSessionTurnInput = {
   sandboxOs?: SandboxOs | null;
   metadata: Record<string, unknown>;
   lineage?: Record<string, unknown>;
+  initiator: TurnInitiator;
+  initiatorContext?: TurnInitiatorContext;
   /** Steer inserts before all waiting prompts; Send appends after them. */
   placement?: "head" | "tail";
 };
@@ -10869,6 +10884,37 @@ async function lockWorkspaceForSessionCreate(tx: Database, workspaceId: string):
   }
 }
 
+type AgentSessionCreationActor = Extract<SessionCommandActor, { type: "agent_attempt" }>;
+
+async function frozenSessionCreatorForInsert(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
+  },
+): Promise<FrozenTurnInitiator> {
+  if (!input.createdByActor) {
+    return {
+      initiator: input.createdBy ?? UNATTRIBUTED_LEGACY_INITIATOR,
+      context: input.createdByContext ?? {},
+    };
+  }
+  // A first-party worker bearer is minted per request with the exact current
+  // turn/attempt. Freeze the creator under the same ownership locks as the
+  // session insert so a superseded attempt cannot create a child attributed to
+  // its former initiating subject. Session-scoped Toolspace credentials remain
+  // deliberately renewable and are a separate, non-orchestration surface.
+  await assertAgentCommandAuthorityInTransaction(tx, {
+    workspaceId: input.workspaceId,
+    actor: input.createdByActor,
+    targetSessionId: input.createdByActor.sessionId,
+    action: "message",
+  });
+  return await frozenInitiatorForCommandActor(tx, input.workspaceId, input.createdByActor);
+}
+
 export async function createSession(
   db: Database,
   input: {
@@ -10878,6 +10924,14 @@ export async function createSession(
     resources: ResourceRef[];
     tools?: ToolRef[];
     metadata: Record<string, unknown>;
+    /**
+     * Frozen creator authority. Legacy/test-only callers may omit this and get
+     * an explicit unattributed service sentinel; production producers must pass
+     * an authenticated subject or named service.
+     */
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
     model: string;
     sandboxBackend: SandboxBackend;
     variableSetId?: string | null;
@@ -10908,6 +10962,7 @@ export async function createSession(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockWorkspaceForSessionCreate(tx as unknown as Database, input.workspaceId);
+        const frozenCreator = await frozenSessionCreatorForInsert(tx as unknown as Database, input);
         const [row] = await tx
           .insert(schema.sessions)
           .values({
@@ -10918,6 +10973,7 @@ export async function createSession(
             resources: input.resources,
             tools: input.tools ?? [],
             metadata: input.metadata,
+            ...creatorColumns(frozenCreator),
             model: input.model,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
@@ -10965,6 +11021,9 @@ export async function createSessionWithIdempotencyKey(
     resources: ResourceRef[];
     tools?: ToolRef[];
     metadata: Record<string, unknown>;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
     model: string;
     sandboxBackend: SandboxBackend;
     variableSetId?: string | null;
@@ -10993,6 +11052,7 @@ export async function createSessionWithIdempotencyKey(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockWorkspaceForSessionCreate(tx as unknown as Database, input.workspaceId);
+        const frozenCreator = await frozenSessionCreatorForInsert(tx as unknown as Database, input);
         const [inserted] = await tx
           .insert(schema.sessions)
           .values({
@@ -11003,6 +11063,7 @@ export async function createSessionWithIdempotencyKey(
             resources: input.resources,
             tools: input.tools ?? [],
             metadata: input.metadata,
+            ...creatorColumns(frozenCreator),
             model: input.model,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
@@ -19788,6 +19849,15 @@ export async function initializeSessionStartAtomically(
         });
         const session = locks.sessions[0];
         if (!locks.workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const creatorContext = session.createdByContext ?? {};
+        const creator: FrozenTurnInitiator = {
+          initiator: initiatorFromStorage(
+            session.createdByKind,
+            session.createdBySubjectId,
+            creatorContext,
+          ),
+          context: creatorContext,
+        };
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
@@ -19867,6 +19937,7 @@ export async function initializeSessionStartAtomically(
                 payload: sanitizeEventPayload({
                   ...input.createdEventPayload,
                   status: publicQueuedStatus,
+                  createdBy: creator.initiator,
                 }),
               },
               ...(goal
@@ -19894,7 +19965,10 @@ export async function initializeSessionStartAtomically(
                 sessionId: session.id,
                 sequence: ++sequence,
                 type: "user.message",
-                payload: sanitizeEventPayload(initialPayload),
+                payload: sanitizeEventPayload({
+                  ...initialPayload,
+                  initiator: creator.initiator,
+                }),
                 clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
               },
               {
@@ -19951,6 +20025,7 @@ export async function initializeSessionStartAtomically(
               sandboxOs: session.sandboxOs,
               metadata: {},
               lineage: {},
+              ...initiatorColumns(creator),
             })
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
@@ -19988,6 +20063,7 @@ export async function initializeSessionStartAtomically(
                 turnId: turn.id,
                 triggerEventId: userEvent.id,
                 source: turn.source,
+                initiator: creator.initiator,
               }),
             })
             .returning();
@@ -20091,6 +20167,10 @@ export async function enqueueSessionTurn(
             sandboxOs: input.sandboxOs ?? null,
             metadata: input.metadata,
             lineage: input.lineage ?? {},
+            ...initiatorColumns({
+              initiator: input.initiator,
+              context: input.initiatorContext ?? {},
+            }),
           })
           .returning();
         if (!row) {
@@ -20705,6 +20785,14 @@ export async function claimSessionWorkForAttempt(
             const turnId = crypto.randomUUID();
             const triggerEventId = crypto.randomUUID();
             const dispatchGeneration = 1;
+            const compactionInitiator: FrozenTurnInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "compaction",
+                label: "OpenGeni compaction",
+              },
+              context: {},
+            };
             const [{ position } = { position: 1 }] = await tx
               .select({
                 position: sql<number>`coalesce(max(${schema.sessionTurns.position}), 0) + 1`,
@@ -20766,6 +20854,7 @@ export async function claimSessionWorkForAttempt(
                     triggerEventId,
                   },
                 ),
+                ...initiatorColumns(compactionInitiator),
                 startedAt: now,
               })
               .returning();
@@ -20784,7 +20873,10 @@ export async function claimSessionWorkForAttempt(
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "session.context.compaction.requested",
-                payload: { trigger: "operator" },
+                payload: {
+                  trigger: "operator",
+                  initiator: compactionInitiator.initiator,
+                },
                 occurredAt: now,
               })
               .returning();
@@ -20867,9 +20959,117 @@ export async function claimSessionWorkForAttempt(
           const goalUpdate = delivered.updates.find(
             (update) => update.payload.type === "goal_continuation",
           );
+          const pureGoalUpdate =
+            delivered.updates.length > 0 &&
+            delivered.updates.every((update) => update.payload.type === "goal_continuation")
+              ? goalUpdate
+              : undefined;
+          const agentSteerUpdate = delivered.updates.find(
+            (update) => update.kind === "agent_steer_instruction",
+          );
+          // Goal policy/routing survives unrelated coalesced notices. Only an
+          // Agent Steer is a stronger causal command and therefore suppresses
+          // goal routing for this inference.
+          const routingGoalUpdate = agentSteerUpdate ? undefined : goalUpdate;
+          const internalUpdateInitiator = (provenanceError?: string): FrozenTurnInitiator => ({
+            initiator: {
+              kind: "service",
+              subjectId: "internal-update",
+              label: "OpenGeni internal update",
+            },
+            context: {
+              updateIds: delivered.updates.map((update) => update.id),
+              ...(provenanceError ? { provenanceError } : {}),
+            },
+          });
+          let internalInitiator: FrozenTurnInitiator;
+          // Agent Steer is the causal command for this inference. Ordinary
+          // machine notices may coalesce into the same batch as context, but
+          // their timing must not erase the steering subject's authority.
+          if (agentSteerUpdate) {
+            const lineage = agentSteerUpdate.lineage;
+            const callerSessionId = lineage.callerSessionId;
+            const callerTurnId = lineage.callerTurnId;
+            const callerAttemptId = lineage.callerAttemptId;
+            const callerExecutionGeneration = lineage.callerExecutionGeneration;
+            if (
+              typeof callerSessionId !== "string" ||
+              typeof callerTurnId !== "string" ||
+              typeof callerAttemptId !== "string" ||
+              typeof callerExecutionGeneration !== "number" ||
+              !Number.isSafeInteger(callerExecutionGeneration) ||
+              callerExecutionGeneration < 1
+            ) {
+              // Corrupt/hand-inserted historical rows must not wedge every
+              // recovery claim forever. Fail closed to a named service actor
+              // while retaining a bounded, non-secret diagnostic marker.
+              internalInitiator = internalUpdateInitiator("agent_steer_lineage_incomplete");
+            } else {
+              try {
+                internalInitiator = await frozenInitiatorForCommandActor(
+                  tx as unknown as Database,
+                  workspaceId,
+                  {
+                    type: "agent_attempt",
+                    sessionId: callerSessionId,
+                    turnId: callerTurnId,
+                    attemptId: callerAttemptId,
+                    executionGeneration: callerExecutionGeneration,
+                  },
+                );
+              } catch (error) {
+                if (
+                  error instanceof Error &&
+                  error.message.startsWith("Agent initiator turn not found:")
+                ) {
+                  internalInitiator = internalUpdateInitiator("agent_steer_source_turn_missing");
+                } else {
+                  throw error;
+                }
+              }
+            }
+          } else if (pureGoalUpdate) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "goal-continuation",
+                label: "OpenGeni goal continuation",
+              },
+              context: {
+                updateIds: delivered.updates.map((update) => update.id),
+                ...(typeof pureGoalUpdate.payload.goalId === "string"
+                  ? { goalId: pureGoalUpdate.payload.goalId }
+                  : {}),
+              },
+            };
+          } else if (
+            delivered.updates.length > 0 &&
+            delivered.updates.every((update) => update.kind === "scheduled_occurrence")
+          ) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "scheduler",
+                label: "OpenGeni scheduler",
+              },
+              context: {
+                updateIds: delivered.updates.map((update) => update.id),
+                scheduledRunIds: delivered.updates.map((update) => update.sourceId),
+              },
+            };
+          } else {
+            internalInitiator = internalUpdateInitiator();
+          }
+          if (delivered.event) {
+            delivered.event.payload = sanitizeEventPayload({
+              ...(delivered.event.payload as Record<string, unknown>),
+              initiator: internalInitiator.initiator,
+            });
+          }
           const goalPolicy =
-            goalUpdate?.payload.policy && typeof goalUpdate.payload.policy === "object"
-              ? (goalUpdate.payload.policy as Record<string, unknown>)
+            routingGoalUpdate?.payload.policy &&
+            typeof routingGoalUpdate.payload.policy === "object"
+              ? (routingGoalUpdate.payload.policy as Record<string, unknown>)
               : null;
           const [latestStarted] = await tx
             .select({
@@ -20919,7 +21119,7 @@ export async function claimSessionWorkForAttempt(
               status: "running",
               executionGeneration: 1,
               activeAttemptId: input.attemptId,
-              source: goalUpdate ? "goal" : "system",
+              source: routingGoalUpdate ? "goal" : "system",
               position: Number(position),
               prompt: "Process the delivered internal session updates.",
               resources: [],
@@ -20931,10 +21131,11 @@ export async function claimSessionWorkForAttempt(
               metadata: metadataWithTurnDispatchAttempt(
                 {
                   internalUpdateCount: delivered.count,
-                  ...(goalUpdate ? { goalId: goalUpdate.payload.goalId } : {}),
+                  ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                 },
                 { id: input.dispatchId, generation: 1, triggerEventId },
               ),
+              ...initiatorColumns(internalInitiator),
               startedAt: now,
             })
             .returning();
@@ -25410,6 +25611,12 @@ function mapSession(
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
     metadata: row.metadata,
+    createdBy: initiatorFromStorage(
+      row.createdByKind,
+      row.createdBySubjectId,
+      row.createdByContext ?? {},
+    ),
+    createdByContext: row.createdByContext ?? {},
     model: row.model,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: row.sandboxOs as SandboxOs,
@@ -25512,6 +25719,12 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     executionGeneration: row.executionGeneration,
     activeAttemptId: row.activeAttemptId,
     lineage: row.lineage,
+    initiator: initiatorFromStorage(
+      row.initiatorKind,
+      row.initiatorSubjectId,
+      row.initiatorContext ?? {},
+    ),
+    initiatorContext: row.initiatorContext ?? {},
     cancelledBy: row.cancelledBy,
     cancelReason: row.cancelReason,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,

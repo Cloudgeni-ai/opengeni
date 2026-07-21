@@ -569,6 +569,14 @@ export const sessions = pgTable(
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // Frozen creator fact. This is used for creation attribution and for the
+    // idempotent first-turn repair only; later turns capture their own actor.
+    createdByKind: text("created_by_kind").notNull().default("service"),
+    createdBySubjectId: text("created_by_subject_id").notNull().default("unattributed-legacy"),
+    createdByContext: jsonb("created_by_context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({ backfill: true }),
     model: text("model").notNull(),
     sandboxBackend: text("sandbox_backend").notNull(),
     // The OS this session's box runs. Defaults to 'linux' (today's only OS, so
@@ -1151,6 +1159,14 @@ export const sessionTurns = pgTable(
     // the SQL constraint is therefore DEFERRABLE INITIALLY DEFERRED.
     activeAttemptId: uuid("active_attempt_id"),
     lineage: jsonb("lineage").$type<Record<string, unknown>>().notNull().default({}),
+    // Required immutable authority captured when the turn is accepted. These
+    // columns are deliberately outside mutable metadata/lineage.
+    initiatorKind: text("initiator_kind").notNull().default("service"),
+    initiatorSubjectId: text("initiator_subject_id").notNull().default("unattributed-legacy"),
+    initiatorContext: jsonb("initiator_context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({ backfill: true }),
     cancelledBy: text("cancelled_by"),
     cancelReason: text("cancel_reason"),
     // Atomic per-turn toolspace call budget counter (migration 0043). Incremented

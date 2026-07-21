@@ -16,6 +16,8 @@ import {
   type SessionMcpServerMetadata,
   type SessionTurn,
   type ToolRef,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   createSession,
@@ -44,7 +46,9 @@ import {
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
+  AgentCommandAuthorityError,
   SessionControlConflictError,
+  type SessionCommandActor,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -83,6 +87,53 @@ type ValidatedSessionMcpServers = {
   dbServers: CreateSessionMcpServerInput[];
   metadata: SessionMcpServerMetadata[];
 };
+
+type FrozenCreationInitiator = {
+  initiator?: TurnInitiator;
+  context?: TurnInitiatorContext;
+  actor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+};
+
+function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator {
+  const callerSessionId = grant.metadata?.["sessionId"];
+  const callerTurnId = grant.metadata?.["turnId"];
+  const callerAttemptId = grant.metadata?.["attemptId"];
+  const callerExecutionGeneration = grant.metadata?.["executionGeneration"];
+  const hasCallerTurnClaim =
+    callerTurnId !== undefined ||
+    callerAttemptId !== undefined ||
+    callerExecutionGeneration !== undefined;
+  if (hasCallerTurnClaim) {
+    if (
+      typeof callerSessionId !== "string" ||
+      typeof callerTurnId !== "string" ||
+      typeof callerAttemptId !== "string" ||
+      typeof callerExecutionGeneration !== "number" ||
+      !Number.isSafeInteger(callerExecutionGeneration) ||
+      callerExecutionGeneration < 1
+    ) {
+      throw new HTTPException(403, { message: "caller attempt claims are incomplete" });
+    }
+    const actor = {
+      type: "agent_attempt",
+      sessionId: callerSessionId,
+      turnId: callerTurnId,
+      attemptId: callerAttemptId,
+      executionGeneration: callerExecutionGeneration,
+    } as const;
+    // The DB create transaction validates this exact attempt and derives the
+    // inherited subject under the same locks as the child-session insert.
+    return { actor };
+  }
+  return {
+    initiator: {
+      kind: "subject",
+      subjectId: grant.subjectId,
+      ...(grant.subjectLabel ? { label: grant.subjectLabel } : {}),
+    },
+    context: {},
+  };
+}
 
 function normalizedSessionMcpCredentialHeaders(
   headers: Record<string, string> | undefined,
@@ -271,6 +322,9 @@ export async function createAndStartSession(input: {
   reasoningEffort: Settings["openaiReasoningEffort"];
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
+  createdBy?: TurnInitiator;
+  createdByContext?: TurnInitiatorContext;
+  createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
   // Names/ids only; the session.created payload never carries variable values.
   variableSet?: { id: string; name: string } | null;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
@@ -350,6 +404,9 @@ export async function createAndStartSession(input: {
       resources: input.resources,
       tools: input.tools,
       metadata: sessionMetadata,
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+      createdByActor: input.createdByActor ?? null,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
       variableSetId: input.variableSet?.id ?? null,
@@ -378,6 +435,9 @@ export async function createAndStartSession(input: {
     resources: input.resources,
     tools: input.tools,
     metadata: sessionMetadata,
+    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+    ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+    createdByActor: input.createdByActor ?? null,
     model: input.model,
     sandboxBackend: input.sandboxBackend,
     variableSetId: input.variableSet?.id ?? null,
@@ -616,6 +676,7 @@ export async function postUserMessageTurn(input: {
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
+  actorLabel?: string;
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
@@ -636,6 +697,7 @@ export async function postUserMessageTurn(input: {
           workspaceId,
           sessionId,
           subjectId: input.actor ?? accountId,
+          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
           actor: { type: "human", subjectId: input.actor ?? accountId },
           operationKey,
           delivery: input.delivery ?? "send",
@@ -1074,53 +1136,65 @@ export async function createSessionForRequest(
     quantity: 1,
     model,
   });
-  const session = await createAndStartSession({
-    db,
-    bus,
-    workflowClient,
-    accountId: grant.accountId,
-    workspaceId,
-    initialMessage: payload.initialMessage,
-    resources,
-    tools,
-    ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-    model,
-    reasoningEffort,
-    // A shared spawn inherits the box's backend; a caller-supplied
-    // sandboxBackend on a shared spawn is ignored (it is the same box). A
-    // machine-targeted top-level create labels the home "selfhosted"
-    // (machineHomeBackend), overriding the caller/deployment default so the row
-    // matches where the session actually runs.
-    sandboxBackend:
-      inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
-    // Mirror the backend relabel on the OS axis: only a machine-targeted
-    // top-level create carries a derived OS; everything else is omitted and the
-    // "linux" default holds (shared spawns keep the parent-box behavior).
-    ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
-    sandboxGroupId,
-    metadata: payload.metadata,
-    variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
-    // Frozen rig binding (M3): both null for a rig-less session (today's path).
-    rigId: frozenRigId,
-    rigVersionId: frozenRigVersionId,
-    goal: payload.goal ?? null,
-    // Per-session persona instructions (already trimmed/validated by the
-    // contracts schema). Persisted on the row; composed system-level at turn
-    // time. Not surfaced as an event.
-    instructions: payload.instructions ?? null,
-    firstPartyMcpPermissions,
-    mcpServers: sessionMcpServers.dbServers,
-    sessionMcpServers: sessionMcpServers.metadata,
-    parentSessionId,
-    createIdempotencyKey: payload.idempotencyKey ?? null,
-    // Create-time machine targeting (A-2a): when a target sandbox is named, the
-    // active-sandbox pointer is seeded race-free inside createAndStartSession
-    // (after the row exists, before the first turn dispatches). Validation
-    // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
-    seedTargetSandbox: payload.targetSandboxId
-      ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
-      : null,
-  });
+  const creationInitiator = creationInitiatorForGrant(grant);
+  let session: Session;
+  try {
+    session = await createAndStartSession({
+      db,
+      bus,
+      workflowClient,
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: payload.initialMessage,
+      resources,
+      tools,
+      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      model,
+      reasoningEffort,
+      // A shared spawn inherits the box's backend; a caller-supplied
+      // sandboxBackend on a shared spawn is ignored (it is the same box). A
+      // machine-targeted top-level create labels the home "selfhosted"
+      // (machineHomeBackend), overriding the caller/deployment default so the row
+      // matches where the session actually runs.
+      sandboxBackend:
+        inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+      // Mirror the backend relabel on the OS axis: only a machine-targeted
+      // top-level create carries a derived OS; everything else is omitted and the
+      // "linux" default holds (shared spawns keep the parent-box behavior).
+      ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
+      sandboxGroupId,
+      metadata: payload.metadata,
+      ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
+      ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
+      createdByActor: creationInitiator.actor ?? null,
+      variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
+      // Frozen rig binding (M3): both null for a rig-less session (today's path).
+      rigId: frozenRigId,
+      rigVersionId: frozenRigVersionId,
+      goal: payload.goal ?? null,
+      // Per-session persona instructions (already trimmed/validated by the
+      // contracts schema). Persisted on the row; composed system-level at turn
+      // time. Not surfaced as an event.
+      instructions: payload.instructions ?? null,
+      firstPartyMcpPermissions,
+      mcpServers: sessionMcpServers.dbServers,
+      sessionMcpServers: sessionMcpServers.metadata,
+      parentSessionId,
+      createIdempotencyKey: payload.idempotencyKey ?? null,
+      // Create-time machine targeting (A-2a): when a target sandbox is named, the
+      // active-sandbox pointer is seeded race-free inside createAndStartSession
+      // (after the row exists, before the first turn dispatches). Validation
+      // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
+      seedTargetSandbox: payload.targetSandboxId
+        ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
+        : null,
+    });
+  } catch (error) {
+    if (error instanceof AgentCommandAuthorityError) {
+      throw new HTTPException(403, { message: error.message });
+    }
+    throw error;
+  }
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -1219,6 +1293,7 @@ export async function acceptSessionUserMessage(
     delivery: input.delivery ?? "send",
     origin: input.origin ?? "human",
     actor: grant.subjectId,
+    ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
     ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
     ...(input.expectedDraftRevision !== undefined
       ? { expectedDraftRevision: input.expectedDraftRevision }

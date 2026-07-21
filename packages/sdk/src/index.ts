@@ -264,6 +264,7 @@ export type {
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
+  TurnInitiator,
   ToolAuthNeededPayload,
   UpdateConnectionRequest,
   // Channel-A structured services (P4.4) — A1 payloads + A2 request/response.

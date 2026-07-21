@@ -1518,6 +1518,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       resources: [],
       tools: [],
       metadata: { title },
+      createdBy: { kind: "subject", subjectId: "user:demo" },
+      createdByContext: {},
       model: "gpt-5.2",
       sandboxBackend: "modal",
       sandboxOs: "linux",
@@ -1794,7 +1796,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-session-control-v1",
+  apiContractRevision: "2026-07-turn-initiator-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -1846,6 +1848,8 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:demo" },
+    initiatorContext: {},
     startedAt: null,
     finishedAt: null,
     createdAt: now,

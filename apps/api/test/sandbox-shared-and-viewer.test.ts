@@ -11,10 +11,12 @@ import {
 import { MemoryEventBus } from "@opengeni/testing";
 import {
   acquireLease,
+  claimSessionWorkForAttempt,
   commitWarmingToWarm,
   createDb,
   createSession,
   getSession,
+  listSessionTurns,
   reapStaleLeaseHolders,
   readLease,
   type Database,
@@ -185,6 +187,91 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.parentSessionId).toBe(a.id);
     // Distinct sessions, same group (one box, two conversations).
     expect(b.id).not.toBe(a.id);
+  }, 60_000);
+
+  test("an exact worker-signed caller inherits the frozen initiating subject", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    const [parentTurn] = await listSessionTurns(db, workspaceId, parent.id);
+    if (!parentTurn) throw new Error("Parent turn was not created");
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: parent.id,
+      workflowId: `session-${parent.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    const childGrant: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      subjectLabel: "OpenGeni worker",
+      permissions: ["sessions:create", "sessions:read"],
+      metadata: {
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        attemptId,
+        executionGeneration: 1,
+      },
+    };
+    const child = await createSessionForRequest(deps(bus), childGrant, workspaceId, {
+      initialMessage: "worker",
+    });
+    expect(child.createdBy).toEqual(parentTurn.initiator);
+    expect(child.createdBy.kind).toBe("subject");
+    expect(child.createdByContext.via).toEqual([
+      {
+        kind: "agent",
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        attemptId,
+        executionGeneration: 1,
+      },
+    ]);
+    const [childTurn] = await listSessionTurns(db, workspaceId, child.id);
+    expect(childTurn?.initiator).toEqual(parentTurn.initiator);
+  }, 60_000);
+
+  test("an agent session create rejects a caller attempt that no longer owns the turn", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    const [parentTurn] = await listSessionTurns(db, workspaceId, parent.id);
+    if (!parentTurn) throw new Error("Parent turn was not created");
+    const staleGrant: AccessGrant = {
+      accountId,
+      workspaceId,
+      subjectId: "worker:first-party-mcp",
+      subjectLabel: "OpenGeni worker",
+      permissions: ["sessions:create", "sessions:read"],
+      metadata: {
+        sessionId: parent.id,
+        turnId: parentTurn.id,
+        attemptId: crypto.randomUUID(),
+        executionGeneration: 1,
+      },
+    };
+    await expect(
+      createSessionForRequest(deps(bus), staleGrant, workspaceId, {
+        initialMessage: "must not be created",
+      }),
+    ).rejects.toMatchObject({ status: 403 });
   }, 60_000);
 
   test("explicit 'new' from inside a session opts OUT of sharing", async () => {

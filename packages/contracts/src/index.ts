@@ -2092,6 +2092,27 @@ export const CompactSessionContextResult = z.object({
 });
 export type CompactSessionContextResult = z.infer<typeof CompactSessionContextResult>;
 
+/**
+ * The principal whose authority accepted a session or turn. `subjectId` is an
+ * opaque host/standalone identity and therefore must never encode `kind` by
+ * convention: embedding hosts own their subject namespace.
+ */
+export const TurnInitiator = z.object({
+  kind: z.enum(["subject", "service"]),
+  subjectId: z.string().min(1),
+  /** Immutable display snapshot; never an authorization input. */
+  label: z.string().min(1).optional(),
+});
+export type TurnInitiator = z.infer<typeof TurnInitiator>;
+
+/**
+ * Immutable, non-secret provenance captured with an initiator. This is audit
+ * context (for example an agent caller hop or scheduled occurrence ids), not a
+ * second identity or authorization surface.
+ */
+export const TurnInitiatorContext = z.record(z.string(), z.unknown());
+export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
+
 export const SessionTurn = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -2114,6 +2135,8 @@ export const SessionTurn = z.object({
   executionGeneration: z.number().int().nonnegative(),
   activeAttemptId: z.string().uuid().nullable(),
   lineage: z.record(z.string(), z.unknown()),
+  initiator: TurnInitiator,
+  initiatorContext: TurnInitiatorContext,
   cancelledBy: z.string().nullable(),
   cancelReason: z.string().nullable(),
   startedAt: z.string().nullable(),
@@ -3477,6 +3500,9 @@ export const Session = z.object({
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
   metadata: z.record(z.string(), z.unknown()),
+  /** Frozen creator fact used only for creation attribution/idempotent repair. */
+  createdBy: TurnInitiator,
+  createdByContext: TurnInitiatorContext,
   model: z.string(),
   sandboxBackend: SandboxBackend,
   // The OS the session's box runs. Defaults to 'linux' (today's only OS).
@@ -5916,7 +5942,7 @@ export type ClientModel = z.infer<typeof ClientModel>;
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-initiator-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 export const ClientConfig = z.object({

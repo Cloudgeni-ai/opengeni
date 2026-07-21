@@ -17,6 +17,22 @@ rows. One execution attempt runs as one non-retryable Temporal `runAgentTurn`
 activity. Inside the activity the OpenAI Agents SDK loop makes as many model
 calls and tool calls as the work needs.
 
+Every accepted turn also carries one immutable `TurnInitiator`. Human/API
+Send and Steer capture the authenticated subject that accepted the command;
+schedules, goal continuation, compaction, and coalesced internal batches use
+explicit service principals. An Agent Steer remains the causal initiator when
+ordinary machine notices coalesce into its inference; those notices cannot
+erase the steering subject merely because they arrived in the same batch. The
+session creator is stored separately and is
+copied only when idempotently repairing that same create command's first turn.
+Queue move/edit/resubmit preserves the original initiator, while Steer creates a
+new turn with the steering actor. Agent-created work inherits the frozen
+initiator through the worker-signed calling-turn reference and appends bounded
+provenance. Approval, recovery, and retry reuse the existing row and therefore
+cannot change authority. Legacy rows use
+`{ kind: "service", subjectId: "unattributed-legacy" }`, which host credential
+ports must reject rather than infer from another identity.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing

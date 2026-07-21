@@ -86,6 +86,8 @@ function fakeTurn(overrides: Partial<SessionTurn>): SessionTurn {
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:test" },
+    initiatorContext: {},
     cancelledBy: null,
     cancelReason: null,
     startedAt: null,
@@ -225,7 +227,7 @@ describe("OpenGeniClient access + workspaces", () => {
   test("getClientConfig fetches the public bootstrap endpoint and returns the provider-grouped models", async () => {
     const config = {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-session-control-v1",
+      apiContractRevision: "2026-07-turn-initiator-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
       models: [

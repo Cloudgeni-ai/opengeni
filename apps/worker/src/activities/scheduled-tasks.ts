@@ -164,6 +164,15 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               scheduledTaskId: task.id,
               scheduledTaskRunId: run.id,
             },
+            createdBy: {
+              kind: "service",
+              subjectId: "scheduler",
+              label: "OpenGeni scheduler",
+            },
+            createdByContext: {
+              scheduledTaskId: task.id,
+              scheduledTaskRunId: run.id,
+            },
             model,
             sandboxBackend,
             variableSetId: task.variableSetId ?? null,
@@ -193,6 +202,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               type: "session.created",
               payload: {
                 status: session.status,
+                createdBy: session.createdBy,
                 scheduledTaskId: task.id,
                 scheduledTaskRunId: run.id,
                 // Names/ids only; never values.

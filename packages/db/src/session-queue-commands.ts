@@ -26,6 +26,12 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import * as schema from "./schema";
+import {
+  frozenInitiatorForCommandActor,
+  initiatorColumns,
+  initiatorFromStorage,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 
 export type QueueCommandConflictCode =
   | "QUEUE_VERSION_CHANGED"
@@ -405,8 +411,11 @@ export async function saveComposerDraftInTransaction(
     tools: input.tools,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
-    sourceTurnId: null,
-    sourceTurnVersion: null,
+    // A queue edit is still the same accepted work item. Preserve its frozen
+    // initiator through arbitrary draft saves; only a genuinely new compose or
+    // Steer captures the submitting actor.
+    sourceTurnId: current?.sourceTurnId ?? null,
+    sourceTurnVersion: current?.sourceTurnVersion ?? null,
     updatedAt: new Date(),
   };
   const [saved] = current
@@ -1077,6 +1086,7 @@ export async function submitHumanPromptInTransaction(
     workspaceId: string;
     sessionId: string;
     subjectId: string;
+    subjectLabel?: string;
     actor: SessionCommandActor;
     operationKey: string;
     delivery: "send" | "steer";
@@ -1247,6 +1257,43 @@ export async function submitHumanPromptInTransaction(
   }
 
   const now = new Date();
+  let frozenInitiator: FrozenTurnInitiator;
+  if (input.delivery === "send" && draft?.sourceTurnId) {
+    const [sourceTurn] = await db
+      .select({
+        sessionId: schema.sessionTurns.sessionId,
+        initiatorKind: schema.sessionTurns.initiatorKind,
+        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+        initiatorContext: schema.sessionTurns.initiatorContext,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, draft.sourceTurnId),
+        ),
+      )
+      .limit(1);
+    if (!sourceTurn) {
+      throw new SessionControlInvariantError("Edited prompt source turn is missing");
+    }
+    frozenInitiator = {
+      initiator: initiatorFromStorage(
+        sourceTurn.initiatorKind,
+        sourceTurn.initiatorSubjectId,
+        sourceTurn.initiatorContext ?? {},
+      ),
+      context: sourceTurn.initiatorContext ?? {},
+    };
+  } else {
+    frozenInitiator = await frozenInitiatorForCommandActor(
+      db,
+      input.workspaceId,
+      input.actor,
+      input.subjectLabel,
+    );
+  }
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -1267,6 +1314,7 @@ export async function submitHumanPromptInTransaction(
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         delivery: input.delivery,
+        initiator: frozenInitiator.initiator,
       }),
       occurredAt: now,
     },
@@ -1292,6 +1340,7 @@ export async function submitHumanPromptInTransaction(
       sandboxBackend: session.sandboxBackend,
       metadata: {},
       lineage: { actor: input.actor.type },
+      ...initiatorColumns(frozenInitiator),
     })
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
@@ -1302,7 +1351,12 @@ export async function submitHumanPromptInTransaction(
     sequence: ++sequence,
     type: "turn.queued",
     turnId,
-    payload: { turnId, triggerEventId: acceptedEventId, source: input.source },
+    payload: {
+      turnId,
+      triggerEventId: acceptedEventId,
+      source: input.source,
+      initiator: frozenInitiator.initiator,
+    },
     occurredAt: now,
   });
 

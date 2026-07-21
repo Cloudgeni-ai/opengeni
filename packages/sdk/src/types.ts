@@ -364,6 +364,14 @@ export type OAuthStartResponse = {
   expiresAt: string;
 };
 
+/** The immutable principal whose authority accepted a session or turn. */
+export type TurnInitiator = {
+  kind: "subject" | "service";
+  subjectId: string;
+  /** Display-only snapshot; never an authorization input. */
+  label?: string | undefined;
+};
+
 export type IntegrationClientMetadata = {
   client_id: string;
   client_name: "OpenGeni";
@@ -387,6 +395,9 @@ export type Session = {
   resources: ResourceRef[];
   tools: ToolRef[];
   metadata: Record<string, unknown>;
+  /** Frozen creator fact; later turns carry their own independent initiator. */
+  createdBy: TurnInitiator;
+  createdByContext: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs;
@@ -507,6 +518,8 @@ export type SessionTurn = {
   executionGeneration: number;
   activeAttemptId: string | null;
   lineage: Record<string, unknown>;
+  initiator: TurnInitiator;
+  initiatorContext: Record<string, unknown>;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
@@ -1465,7 +1478,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-initiator-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 /**

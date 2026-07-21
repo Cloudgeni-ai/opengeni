@@ -165,7 +165,7 @@ describe("createOpenGeniClient", () => {
     expect(request!.init?.credentials).toBe("include");
     expect(new Headers(request!.init?.headers).get("x-opengeni-access-key")).toBe("secret-key");
     expect(new Headers(request!.init?.headers).get("x-opengeni-api-contract")).toBe(
-      "2026-07-session-control-v1",
+      "2026-07-turn-initiator-v1",
     );
   });
 

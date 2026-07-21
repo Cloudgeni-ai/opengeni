@@ -634,6 +634,7 @@ describe("credential allocator durable Codex capacity waits", () => {
       reasoningEffort: "xhigh",
       sandboxBackend: "modal",
       metadata: {},
+      initiator: { kind: "subject", subjectId: "user:test" },
     });
     const queuedResult = await reconcileCodexCapacityWait(
       dbB,
@@ -687,6 +688,7 @@ describe("credential allocator durable Codex capacity waits", () => {
       reasoningEffort: "xhigh",
       sandboxBackend: "modal",
       metadata: {},
+      initiator: { kind: "subject", subjectId: "user:test" },
     });
     const claimed = await claimTestTurn(
       dbA,
