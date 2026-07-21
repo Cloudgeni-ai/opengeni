@@ -1884,6 +1884,7 @@ describe("API component integration", () => {
       text: "search docs",
       tools: [{ kind: "mcp", id: "docs" }],
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
       { kind: "mcp", id: "docs" },
@@ -2025,6 +2026,7 @@ describe("API component integration", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
@@ -4150,12 +4152,12 @@ describe("API component integration", () => {
     ]);
 
     const clampedMax = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=1000000000`),
     );
     expect(clampedMax.status).toBe(200);
     expect((await clampedMax.json()) as SessionEvent[]).toHaveLength(2000);
     const clampedMin = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=0`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=0`),
     );
     expect(clampedMin.status).toBe(200);
     expect((await clampedMin.json()) as SessionEvent[]).toHaveLength(1);
