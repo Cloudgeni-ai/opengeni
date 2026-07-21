@@ -12,7 +12,7 @@
 // (never an app context), notifications flow through an optional `onNotify` prop
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
-// external embedder (cloudgeni #1577) uses — that is criterion F1.
+// external embedder (tracked issue) uses — that is criterion F1.
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
