@@ -61,7 +61,7 @@ the audited SHA. These values are a point-in-time observation, not a live SLO.
 
 Implemented on the focused branch after the audited baseline:
 
-- maintenance/drain-only migration `0095_hierarchical_role_aware_memory.sql` adds trusted session
+- maintenance/drain-only migration `0096_hierarchical_role_aware_memory.sql` adds trusted session
   creator provenance, typed scopes, bounded labels, relationships, reversible
   maintenance operations, and text-free deletion/private-export audit tables;
   all five memory tables are FORCE RLS;
@@ -354,7 +354,7 @@ Required database evidence uses a non-owner app role and at least:
 
 ## Migration and rollout
 
-The implementation uses maintenance/drain-only migration `0095` after the retained migrations.
+The implementation uses maintenance/drain-only migration `0096` after the retained migrations.
 Although its storage changes are additive, it is not safe for mixed worker
 versions: an old worker ignores typed applicability and can over-read role-,
 session-, or ephemeral-scoped rows written by a new worker during overlap.
@@ -363,11 +363,11 @@ The cutover sequence is therefore:
 
 1. stop new session/turn admission;
 2. drain and terminate every old worker and in-flight session execution;
-3. apply `0095` with no old application process reading memory;
+3. apply `0096` with no old application process reading memory;
 4. start only compatible API and worker versions;
 5. verify health and reopen admission.
 
-Within that fenced cutover, `0095`:
+Within that fenced cutover, `0096`:
 
 1. add nullable session creator provenance and typed memory columns with safe
    defaults;
@@ -441,4 +441,3 @@ delivery lanes; memory-design alone owns release/production acceptance.
 
 The research informs the small composable model above; it is not a mandate to import
 another framework's identity, graph, or background-reflection architecture.
-

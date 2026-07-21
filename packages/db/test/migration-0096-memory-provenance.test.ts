@@ -6,7 +6,7 @@ import { acquireBlankTestDatabase, type BlankTestDatabase } from "@opengeni/test
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migrationName = "0095_hierarchical_role_aware_memory.sql";
+const migrationName = "0096_hierarchical_role_aware_memory.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 async function applyFile(sql: postgres.Sql, file: string): Promise<void> {
@@ -32,7 +32,7 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("migration 0095 memory creator provenance (real PostgreSQL)", () => {
+describe("migration 0096 memory creator provenance (real PostgreSQL)", () => {
   test("retries cleanly and replaces the global creator FK with one workspace fence", async () => {
     if (!available || !blank) return;
     const admin = postgres(blank.databaseUrl, { max: 1 });
