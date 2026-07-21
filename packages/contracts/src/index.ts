@@ -595,12 +595,137 @@ export const Workspace = z.object({
 });
 export type Workspace = z.infer<typeof Workspace>;
 
+export const WorkspaceTranscriptionTarget = z
+  .object({
+    provider: z.string().trim().min(1).max(128),
+    model: z.string().trim().min(1).max(256).nullable(),
+    credentialMode: z.enum(["managed", "byok"]),
+    // A workspace-scoped connection reference, never credential material.
+    credentialConnectionId: z.string().uuid().nullable(),
+    region: z.string().trim().min(1).max(128).nullable(),
+  })
+  .strict()
+  .superRefine((target, context) => {
+    if (target.provider === "azure-speech" && target.credentialMode !== "byok") {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialMode"],
+        message: "Azure Speech is supported only through workspace BYOK",
+      });
+    }
+    if (target.credentialMode === "byok" && target.credentialConnectionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialConnectionId"],
+        message: "BYOK transcription targets require a workspace connection reference",
+      });
+    }
+    if (target.credentialMode === "managed" && target.credentialConnectionId !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialConnectionId"],
+        message: "managed transcription targets cannot name a BYOK connection",
+      });
+    }
+  });
+export type WorkspaceTranscriptionTarget = z.infer<typeof WorkspaceTranscriptionTarget>;
+
+/**
+ * Workspace-only policy for the distinct speech-to-text capability. It never
+ * authorizes a turn model/provider and contains connection references rather
+ * than secrets. `acceptanceId` changes whenever an admin accepts a new target
+ * set, so clients can bind a microphone session to one exact policy revision.
+ */
+export const WorkspaceTranscriptionPolicy = z
+  .object({
+    enabled: z.boolean(),
+    acceptanceId: z.string().uuid().nullable(),
+    primary: WorkspaceTranscriptionTarget.nullable(),
+    language: z.string().trim().min(1).max(64).nullable(),
+    retention: z
+      .object({
+        mode: z.enum(["none", "provider-policy"]),
+        maxDays: z.number().int().nonnegative().max(3650).nullable(),
+      })
+      .strict(),
+    privacy: z
+      .object({
+        allowProviderLogging: z.boolean(),
+        allowProviderTraining: z.boolean(),
+      })
+      .strict(),
+    fallback: z
+      .object({
+        mode: z.enum(["disabled", "explicit"]),
+        targets: z.array(WorkspaceTranscriptionTarget).max(8),
+      })
+      .strict(),
+    cost: z
+      .object({
+        currency: z.literal("USD"),
+        maxPerHour: z.number().finite().nonnegative().max(10_000).nullable(),
+        maxPerMonth: z.number().finite().nonnegative().max(1_000_000).nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    if (policy.enabled && policy.acceptanceId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["acceptanceId"],
+        message: "enabled transcription requires an accepted policy identity",
+      });
+    }
+    if (policy.enabled && policy.primary === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["primary"],
+        message: "enabled transcription requires a primary target",
+      });
+    }
+    if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "disabled fallback cannot retain accepted targets",
+      });
+    }
+    if (policy.fallback.mode === "explicit" && policy.fallback.targets.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "explicit fallback requires at least one accepted target",
+      });
+    }
+    const targetKeys = [policy.primary, ...policy.fallback.targets]
+      .filter((target): target is WorkspaceTranscriptionTarget => target !== null)
+      .map((target) =>
+        [
+          target.provider,
+          target.model ?? "",
+          target.credentialMode,
+          target.credentialConnectionId ?? "",
+          target.region ?? "",
+        ].join("\u0000"),
+      );
+    if (new Set(targetKeys).size !== targetKeys.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "transcription targets must be unique",
+      });
+    }
+  });
+export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
-// V1 agent surfaces (turn injection + first-party memory tools); default false.
+// (future) keys rather than stripping them. memoryEnabled and transcription are
+// both default-off capabilities.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceTranscriptionPolicy.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -611,12 +736,13 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
-// PATCH body for workspace settings: a partial patch that deep-merges into the
-// stored bag. memoryEnabled is the only typed key today; passthrough carries
-// forward-compatible unknown keys through validation.
+// PATCH body for workspace settings: a partial top-level patch that merges into
+// the stored bag. Nested transcription policy updates are therefore full
+// replacements; passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceTranscriptionPolicy.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;

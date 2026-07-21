@@ -14,6 +14,7 @@ import {
   UpdateKnowledgeMemoryRequest as ContractUpdateKnowledgeMemoryRequest,
   UpdateWorkspaceSettingsRequest as ContractUpdateWorkspaceSettingsRequest,
   Workspace as ContractWorkspace,
+  WorkspaceTranscriptionPolicy as ContractWorkspaceTranscriptionPolicy,
   WorkspaceMemorySearchRequest as ContractWorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse as ContractWorkspaceMemorySearchResponse,
   DESKTOP_STREAM_PORT,
@@ -110,6 +111,7 @@ import type {
   ViewerHolder,
   WorkspaceMember,
 } from "../src/types";
+import type { WorkspaceTranscriptionPolicy } from "../src/transcription";
 
 // The SDK ships hand-written wire types so it carries zero runtime
 // dependencies. This suite pins them to `@opengeni/contracts`: if the public
@@ -323,11 +325,16 @@ describe("SDK / contracts parity", () => {
     // Server -> client: contract-produced shapes are assignable to the SDK mirrors.
     const acceptMemory = (value: z.infer<typeof ContractKnowledgeMemory>): KnowledgeMemory => value;
     const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
+    const acceptTranscriptionPolicy = (
+      value: z.infer<typeof ContractWorkspaceTranscriptionPolicy>,
+    ): WorkspaceTranscriptionPolicy => value;
     const acceptSearchResponse = (
       value: z.infer<typeof ContractWorkspaceMemorySearchResponse>,
     ): WorkspaceMemorySearchResponse => value;
     expect(
-      [acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function"),
+      [acceptMemory, acceptWorkspace, acceptTranscriptionPolicy, acceptSearchResponse].every(
+        (fn) => typeof fn === "function",
+      ),
     ).toBe(true);
 
     // Client -> server: SDK-sent bodies parse under the contract schemas.
@@ -341,6 +348,23 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    const transcription: WorkspaceTranscriptionPolicy = {
+      enabled: true,
+      acceptanceId: "11111111-1111-4111-8111-111111111111",
+      primary: {
+        provider: "fixture-speech",
+        model: "fixture-v1",
+        credentialMode: "byok",
+        credentialConnectionId: "22222222-2222-4222-8222-222222222222",
+        region: "eu-test-1",
+      },
+      language: "en-US",
+      retention: { mode: "none", maxDays: null },
+      privacy: { allowProviderLogging: false, allowProviderTraining: false },
+      fallback: { mode: "disabled", targets: [] },
+      cost: { currency: "USD", maxPerHour: 1, maxPerMonth: 10 },
+    };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse({ transcription }).success).toBe(true);
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.

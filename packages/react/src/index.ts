@@ -37,6 +37,19 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export {
+  INITIAL_TRANSCRIPTION_CONTROL_STATE,
+  appendFinalTranscript,
+  transitionTranscriptionControl,
+  useTranscription,
+} from "./hooks/use-transcription";
+export type {
+  TranscriptionControlAction,
+  TranscriptionControlState,
+  TranscriptionControlTransition,
+  UseTranscriptionOptions,
+  UseTranscriptionResult,
+} from "./hooks/use-transcription";
 export { useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
@@ -294,6 +307,11 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
+export type {
+  ComposerTranscriptionControlProps,
+  ComposerTranscriptionMessages,
+} from "./components/composer-transcription-control";
 export { defaultChatComposerMessages } from "./components/composer";
 export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";

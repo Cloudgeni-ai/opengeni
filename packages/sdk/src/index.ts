@@ -53,6 +53,28 @@ export type {
 export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
 export {
+  DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
+  authorizeTranscriptionAdapter,
+  createTranscriptionSessionRequest,
+  resolveWorkspaceTranscriptionPolicy,
+} from "./transcription";
+export type {
+  TranscriptionAdapter,
+  TranscriptionAdapterDescriptor,
+  TranscriptionAuthorization,
+  TranscriptionCredentialMode,
+  TranscriptionErrorCode,
+  TranscriptionEvent,
+  TranscriptionEventListener,
+  TranscriptionLifecycleStatus,
+  TranscriptionPolicyBlockReason,
+  TranscriptionSession,
+  TranscriptionSessionRequest,
+  TranscriptionTargetSelection,
+  WorkspaceTranscriptionPolicy,
+  WorkspaceTranscriptionTarget,
+} from "./transcription";
+export {
   KNOWN_PERMISSIONS,
   KNOWN_USAGE_EVENT_TYPES,
   OPENGENI_API_CONTRACT_HEADER,

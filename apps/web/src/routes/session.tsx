@@ -752,6 +752,7 @@ function SessionChatPane(props: {
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <ConsoleComposer
+            workspaceId={props.session.workspaceId}
             composer={composer}
             attachments={attachments}
             effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
