@@ -18,7 +18,9 @@ import {
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
+  RequestHumanInputToolInput,
   type GitCredentialProvider,
+  type HumanInputResponse,
   type McpServerConnectionRef,
   type Permission,
   type ReasoningEffort,
@@ -55,6 +57,7 @@ import {
   setDefaultOpenAIKey,
   setOpenAIResponsesTransport,
   setTracingDisabled,
+  tool as agentTool,
   // Hosted web_search tool factory. Re-exported from @openai/agents-openai via
   // `export * from '@openai/agents-openai'` in @openai/agents' index (0.11.6);
   // it returns a { type: 'hosted_tool', providerData: { type: 'web_search' } }
@@ -347,11 +350,23 @@ export type AgentSegmentInput =
       approvalId: string;
       decision: "approve" | "reject";
       message?: string;
+    }
+  | {
+      kind: "human_input";
+      serializedRunState: string;
+      toolCallId: string;
     };
 
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
   sandboxSessionState?: SandboxSessionState;
+};
+
+export const HUMAN_INPUT_TOOL_NAME = "request_human_input";
+
+export type SerializedHumanInputInterruption = {
+  toolCallId: string;
+  input: ReturnType<typeof RequestHumanInputToolInput.parse>;
 };
 
 export type SandboxFileDownload = {
@@ -412,6 +427,7 @@ export type OpenGeniRuntime = {
     options?: RunAgentStreamOptions,
   ) => Promise<Awaited<ReturnType<typeof runAgentStream>>>;
   serializeApprovals: (interruptions: unknown[]) => unknown[];
+  serializeHumanInputRequests?: (interruptions: unknown[]) => SerializedHumanInputInterruption[];
 };
 
 export type ProductionRuntimeOverrides = {
@@ -447,6 +463,7 @@ export function createProductionAgentRuntime(
         sandboxClient: overrides.sandboxClient,
       }),
     serializeApprovals,
+    serializeHumanInputRequests,
   };
 }
 
@@ -1146,6 +1163,12 @@ export type GitCredentialTokenWriterSession = SandboxSessionLike;
 
 export type BuildAgentOptions = {
   model?: Model;
+  /** Settled response for the one internal human-input interruption resumed by this run. */
+  humanInputResponse?: {
+    requestId: string;
+    toolCallId: string;
+    response: HumanInputResponse;
+  };
   reasoningEffort?: ReasoningEffort;
   // Per-turn gating overrides for the multi-provider path. Each defaults to
   // today's settings-derived behaviour when omitted, so the legacy
@@ -1574,6 +1597,28 @@ export function buildOpenGeniAgent(
   // [...agent.tools, ...capability.tools()]), so hosted web_search coexists with
   // both rather than overriding them.
   const hostedTools = hostedWebSearch ? [webSearchTool()] : [];
+  const humanInputTool = agentTool({
+    name: HUMAN_INPUT_TOOL_NAME,
+    description:
+      "Pause this turn and request structured human input. Use for decisions or missing information that only a person can provide. Supports free text, single-select, multi-select, an optional Other value, multiple questions, explicit skip policy, and an optional expiry.",
+    parameters: RequestHumanInputToolInput,
+    needsApproval: true,
+    // A missing/mismatched durable response is a protocol integrity failure,
+    // not model-visible tool output the agent may reason past.
+    errorFunction: null,
+    execute: (_input, _context, details) => {
+      const settled = options.humanInputResponse;
+      if (!settled) {
+        throw new Error("Human-input tool resumed without a durable response");
+      }
+      const resumedCallId = details?.toolCall?.callId;
+      if (resumedCallId && resumedCallId !== settled.toolCallId) {
+        throw new Error("Human-input response does not belong to the resumed tool call");
+      }
+      return JSON.stringify({ requestId: settled.requestId, ...settled.response });
+    },
+  });
+  const agentTools = [...hostedTools, humanInputTool];
   const baseConfig = {
     name: "OpenGeni Agent",
     model: options.model ?? settings.openaiModel,
@@ -1636,7 +1681,7 @@ export function buildOpenGeniAgent(
     // `new Agent(baseConfig)` path (sandboxBackend === "none") and the
     // `new SandboxAgent({ ...baseConfig, ... })` path via the shared baseConfig
     // spread; the SDK concatenates these with MCP and sandbox capability tools.
-    ...(hostedTools.length ? { tools: hostedTools } : {}),
+    tools: agentTools,
     ...(options.mcpServers?.length ? { mcpServers: options.mcpServers } : {}),
     // Surface FAILED MCP tool calls as `{ isError: true }` tool output (see
     // mcpToolErrorFunction / mcpToolErrorOutput) instead of the SDK's default
@@ -3087,22 +3132,25 @@ export async function prepareRunInput(
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
     };
   }
-  // An approval can only be resumed against a real saved run state. If the
+  // An interrupted tool can only be resumed against a real saved run state. If the
   // latest blob is the cleared sentinel the awaiting turn was wiped (the API
   // refuses clear in requires_action, so this is a defensive guard) — fail with
   // an honest message instead of the cryptic SDK "missing schema version".
   if (isClearedRunStateBlob(input.serializedRunState)) {
     throw new Error(
-      "Cannot resume an approval: the session context was cleared, so the awaiting run state no longer exists.",
+      "Cannot resume an interrupted tool: the session context was cleared, so the awaiting run state no longer exists.",
     );
   }
   const state = await RunState.fromString(agent, input.serializedRunState);
   const interruptions = state.getInterruptions();
-  const target = interruptions.find((item: any) => approvalIdentifier(item) === input.approvalId);
+  const interruptionId = input.kind === "human_input" ? input.toolCallId : input.approvalId;
+  const target = interruptions.find((item: any) => approvalIdentifier(item) === interruptionId);
   if (!target) {
-    throw new Error(`Approval not found in saved run state: ${input.approvalId}`);
+    throw new Error(`Interrupted tool not found in saved run state: ${interruptionId}`);
   }
-  if (input.decision === "approve") {
+  if (input.kind === "human_input") {
+    state.approve(target as any);
+  } else if (input.decision === "approve") {
     state.approve(target as any);
   } else {
     state.reject(target as any, input.message ? { message: input.message } : undefined);
@@ -4608,17 +4656,41 @@ function outputTokenDetailsProp(
 }
 
 export function serializeApprovals(interruptions: unknown[]): unknown[] {
-  return interruptions.map((item: any) => {
-    if (typeof item?.toJSON === "function") {
-      return item.toJSON();
-    }
-    return {
-      id: approvalIdentifier(item),
-      name: item?.name ?? item?.rawItem?.name ?? "tool",
-      arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
-      raw: item,
-    };
-  });
+  return interruptions
+    .filter((item) => interruptionToolName(item) !== HUMAN_INPUT_TOOL_NAME)
+    .map((item: any) => {
+      if (typeof item?.toJSON === "function") {
+        return item.toJSON();
+      }
+      return {
+        id: approvalIdentifier(item),
+        name: item?.name ?? item?.rawItem?.name ?? "tool",
+        arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
+        raw: item,
+      };
+    });
+}
+
+export function serializeHumanInputRequests(
+  interruptions: unknown[],
+): SerializedHumanInputInterruption[] {
+  return interruptions
+    .filter((item) => interruptionToolName(item) === HUMAN_INPUT_TOOL_NAME)
+    .map((item: any) => {
+      const rawArguments = item?.arguments ?? item?.rawItem?.arguments;
+      let parsedArguments: unknown = rawArguments;
+      if (typeof rawArguments === "string") {
+        try {
+          parsedArguments = JSON.parse(rawArguments);
+        } catch {
+          throw new Error("Human-input interruption contains invalid JSON arguments");
+        }
+      }
+      return {
+        toolCallId: approvalIdentifier(item),
+        input: RequestHumanInputToolInput.parse(parsedArguments),
+      };
+    });
 }
 
 export function buildManifest(
@@ -6212,4 +6284,14 @@ function sortJson(value: unknown): unknown {
 
 function approvalIdentifier(item: any): string {
   return String(item?.rawItem?.callId ?? item?.rawItem?.id ?? item?.id ?? item?.name ?? "approval");
+}
+
+function interruptionToolName(item: unknown): string {
+  const candidate = item as {
+    toolName?: unknown;
+    name?: unknown;
+    rawItem?: { name?: unknown };
+  };
+  const name = candidate?.toolName ?? candidate?.name ?? candidate?.rawItem?.name;
+  return typeof name === "string" ? name : "";
 }

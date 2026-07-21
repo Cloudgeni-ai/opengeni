@@ -528,12 +528,74 @@ export type SessionTurn = {
   updatedAt: string;
 };
 
+export type HumanInputQuestionKind = "text" | "single_select" | "multi_select";
+
+export type HumanInputOption = {
+  id: string;
+  label: string;
+  description?: string | null | undefined;
+};
+
+export type HumanInputQuestion = {
+  id: string;
+  kind: HumanInputQuestionKind;
+  prompt: string;
+  label?: string | null | undefined;
+  helpText?: string | null | undefined;
+  options: HumanInputOption[];
+  required: boolean;
+  allowOther: boolean;
+  validation?:
+    | {
+        minLength?: number | null | undefined;
+        maxLength?: number | null | undefined;
+        minSelections?: number | null | undefined;
+        maxSelections?: number | null | undefined;
+      }
+    | null
+    | undefined;
+};
+
+export type HumanInputAnswer = {
+  questionId: string;
+  values: string[];
+  other?: string | null | undefined;
+};
+
+export type HumanInputResponse =
+  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | { outcome: "skipped" | "expired" | "cancelled" };
+
+export type SubmitHumanInputResponseRequest =
+  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | { outcome: "skipped" };
+
+export type SessionHumanInputRequest = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnGeneration: number;
+  creationAttemptId: string;
+  toolCallId: string;
+  status: "pending" | "answered" | "skipped" | "expired" | "cancelled";
+  questions: HumanInputQuestion[];
+  allowSkip: boolean;
+  response: HumanInputResponse | null;
+  respondedBy: string | null;
+  respondedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export const SESSION_EVENT_TYPES = [
   "session.created",
   // Defensive bounded projection for malformed/legacy oversized envelopes.
   "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
+  "session.humanInput.requested",
   "session.context.compaction.requested",
   "session.context.compacted",
   "session.context.compaction.skipped",
@@ -541,6 +603,7 @@ export const SESSION_EVENT_TYPES = [
   "user.message",
   "user.pause",
   "user.approvalDecision",
+  "user.humanInputResponse",
   "turn.queued",
   "turn.started",
   "turn.completed",
@@ -1478,7 +1541,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-initiator-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-human-input-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 /**
@@ -2824,8 +2887,20 @@ export type UserApprovalDecisionEventInput = {
   };
 };
 
+export type UserHumanInputResponseEventInput = {
+  type: "user.humanInputResponse";
+  clientEventId?: string | undefined;
+  payload: {
+    requestId: string;
+    response: SubmitHumanInputResponseRequest;
+  };
+};
+
 /** Control/user events a client may POST to a session's event log. */
-export type ClientSessionEventInput = UserMessageEventInput | UserApprovalDecisionEventInput;
+export type ClientSessionEventInput =
+  | UserMessageEventInput
+  | UserApprovalDecisionEventInput
+  | UserHumanInputResponseEventInput;
 
 // ── Bring-your-own-compute: Machines dashboard + per-machine metrics (M10) ────
 // Hand-written mirrors of the `@opengeni/contracts` MetricSample / MachineView /

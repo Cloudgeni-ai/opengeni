@@ -16,6 +16,9 @@ import type {
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  HumanInputAnswer,
+  HumanInputQuestion,
+  HumanInputResponse,
   KnowledgeMemory,
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
@@ -47,6 +50,7 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  SessionHumanInputRequest,
   LineageNode,
   SessionMcpServerMetadata,
   SessionStatus,
@@ -94,6 +98,8 @@ import {
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionSystemUpdatePayload,
+  HumanInputQuestion as HumanInputQuestionContract,
+  SubmitHumanInputResponseRequest,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
@@ -13209,6 +13215,526 @@ export async function getLatestRunState(
   });
 }
 
+export class HumanInputResponseValidationError extends Error {
+  readonly name = "HumanInputResponseValidationError";
+
+  constructor(
+    readonly code: "INVALID_RESPONSE" | "SKIP_NOT_ALLOWED",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function mapSessionHumanInputRequest(
+  row: typeof schema.sessionHumanInputRequests.$inferSelect,
+): SessionHumanInputRequest {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    turnGeneration: row.turnGeneration,
+    creationAttemptId: row.creationAttemptId,
+    toolCallId: row.toolCallId,
+    status: row.status as SessionHumanInputRequest["status"],
+    questions: row.questions,
+    allowSkip: row.allowSkip,
+    response: row.response ?? null,
+    respondedBy: row.respondedBy ?? null,
+    respondedAt: row.respondedAt?.toISOString() ?? null,
+    expiresAt: row.expiresAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export async function getSessionHumanInputRequest(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  requestId: string,
+): Promise<SessionHumanInputRequest | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionHumanInputRequests)
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+          eq(schema.sessionHumanInputRequests.id, requestId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionHumanInputRequest(row) : null;
+  });
+}
+
+export async function listSessionHumanInputRequests(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: { status?: SessionHumanInputRequest["status"]; limit?: number } = {},
+): Promise<SessionHumanInputRequest[]> {
+  const limit = Math.min(100, Math.max(1, Math.floor(options.limit ?? 50)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const predicates = [
+      eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+      eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+    ];
+    if (options.status) {
+      predicates.push(eq(schema.sessionHumanInputRequests.status, options.status));
+    }
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionHumanInputRequests)
+      .where(and(...predicates))
+      .orderBy(
+        desc(schema.sessionHumanInputRequests.createdAt),
+        desc(schema.sessionHumanInputRequests.id),
+      )
+      .limit(limit);
+    return rows.map(mapSessionHumanInputRequest);
+  });
+}
+
+function validateAnsweredHumanInput(
+  questions: HumanInputQuestion[],
+  answers: HumanInputAnswer[],
+): HumanInputAnswer[] {
+  const questionsById = new Map(questions.map((question) => [question.id, question]));
+  const answersById = new Map<string, HumanInputAnswer>();
+  for (const answer of answers) {
+    if (!questionsById.has(answer.questionId)) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Unknown human-input question: ${answer.questionId}`,
+      );
+    }
+    if (answersById.has(answer.questionId)) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Duplicate human-input answer: ${answer.questionId}`,
+      );
+    }
+    answersById.set(answer.questionId, answer);
+  }
+  for (const question of questions) {
+    const answer = answersById.get(question.id);
+    const values = answer?.values ?? [];
+    const other = answer?.other?.trim() ?? "";
+    const suppliedCount = values.length + (other ? 1 : 0);
+    if (question.required && suppliedCount === 0) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} requires an answer`,
+      );
+    }
+    if (!answer) continue;
+    if (new Set(values).size !== values.length) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} contains duplicate values`,
+      );
+    }
+    if (question.kind === "text") {
+      if (values.length > 1 || other) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Text question ${question.id} accepts one value`,
+        );
+      }
+      const value = values[0] ?? "";
+      const minLength = question.validation?.minLength;
+      const maxLength = question.validation?.maxLength;
+      if (minLength != null && value.length < minLength) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} is shorter than its minimum length`,
+        );
+      }
+      if (maxLength != null && value.length > maxLength) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} exceeds its maximum length`,
+        );
+      }
+      continue;
+    }
+    if (other && !question.allowOther) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} does not allow Other`,
+      );
+    }
+    const optionIds = new Set(question.options.map((option) => option.id));
+    if (values.some((value) => !optionIds.has(value))) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} contains an unknown option`,
+      );
+    }
+    if (question.kind === "single_select" && suppliedCount > 1) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Single-select question ${question.id} accepts one selection`,
+      );
+    }
+    if (question.kind === "multi_select") {
+      const minSelections = question.validation?.minSelections;
+      const maxSelections = question.validation?.maxSelections;
+      if (minSelections != null && suppliedCount < minSelections) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} has too few selections`,
+        );
+      }
+      if (maxSelections != null && suppliedCount > maxSelections) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} has too many selections`,
+        );
+      }
+    }
+  }
+  return answers;
+}
+
+export function validateHumanInputResponse(
+  request: Pick<SessionHumanInputRequest, "questions" | "allowSkip">,
+  rawResponse: unknown,
+): HumanInputResponse {
+  const response = SubmitHumanInputResponseRequest.parse(rawResponse);
+  if (response.outcome === "skipped") {
+    if (!request.allowSkip) {
+      throw new HumanInputResponseValidationError(
+        "SKIP_NOT_ALLOWED",
+        "This human-input request cannot be skipped",
+      );
+    }
+    return response;
+  }
+  return {
+    outcome: "answered",
+    answers: validateAnsweredHumanInput(request.questions, response.answers),
+  };
+}
+
+export type AcceptSessionHumanInputResponseResult =
+  | {
+      action: "accepted";
+      request: SessionHumanInputRequest;
+      event: SessionEvent;
+      events: SessionEvent[];
+      workflowWakeRevision: number;
+    }
+  | {
+      action: "conflict";
+      request: SessionHumanInputRequest;
+      events: SessionEvent[];
+      workflowWakeRevision: number | null;
+    }
+  | { action: "not_found" };
+
+/**
+ * One requires-action boundary may admit exactly one durable resume event.
+ * Human-input responses and ordinary approval decisions share this gate: a
+ * mixed parallel interruption batch must not accept one of each before the
+ * workflow claims the first and advances the turn's trigger/generation.
+ */
+async function hasAcceptedRequiresActionAdvance(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnGeneration: number;
+    triggerEventId: string;
+  },
+): Promise<boolean> {
+  const [trigger] = await tx
+    .select({ sequence: schema.sessionEvents.sequence })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.id, input.triggerEventId),
+      ),
+    )
+    .limit(1);
+  if (!trigger) throw new Error(`Turn trigger not found: ${input.triggerEventId}`);
+  const [accepted] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        eq(schema.sessionEvents.turnGeneration, input.turnGeneration),
+        inArray(schema.sessionEvents.type, ["user.approvalDecision", "user.humanInputResponse"]),
+        gt(schema.sessionEvents.sequence, trigger.sequence),
+      ),
+    )
+    .limit(1);
+  return accepted !== undefined;
+}
+
+/**
+ * First-writer-wins settlement for one pending structured input boundary.
+ * Session + logical turn + current freeze generation are locked with the row;
+ * the creation attempt is provenance and is intentionally not the resume owner.
+ */
+export async function acceptSessionHumanInputResponse(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+    response: unknown;
+    respondedBy: string;
+    clientEventId?: string | null;
+    expireOnly?: boolean;
+  },
+): Promise<AcceptSessionHumanInputResponseResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) return { action: "not_found" } as const;
+        const [request] = await tx
+          .select()
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.id, input.requestId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!request) return { action: "not_found" } as const;
+        if (input.clientEventId) {
+          const [existing] = await tx
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.clientEventId, input.clientEventId),
+              ),
+            )
+            .limit(1);
+          if (existing) {
+            if (
+              existing.type !== "user.humanInputResponse" ||
+              (existing.payload as { requestId?: unknown }).requestId !== request.id
+            ) {
+              throw new Error("clientEventId belongs to a different session operation");
+            }
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: "approval_decision",
+              },
+            );
+            return {
+              action: "accepted",
+              request: mapSessionHumanInputRequest(request),
+              event: mapEvent(existing),
+              events: [],
+              workflowWakeRevision,
+            } as const;
+          }
+        }
+        const [turnPreview] = session.activeTurnId
+          ? await tx
+              .select()
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.id, session.activeTurnId),
+                ),
+              )
+              .limit(1)
+          : [];
+        const turn = turnPreview
+          ? (
+              await lockSessionEventWriteRows(tx as unknown as Database, {
+                workspaceId: input.workspaceId,
+                workspaceLock: "already_locked",
+                turnIds: [turnPreview.id],
+              })
+            ).turns[0]
+          : undefined;
+        const boundaryOwnsRequest =
+          session.status === "requires_action" &&
+          turn?.status === "requires_action" &&
+          turn.id === request.turnId &&
+          turn.executionGeneration === request.turnGeneration;
+        if (request.status !== "pending" || !boundaryOwnsRequest) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        if (
+          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            triggerEventId: turn.triggerEventId,
+          })
+        ) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        const now = new Date();
+        const expired = request.expiresAt !== null && request.expiresAt.getTime() <= now.getTime();
+        if (input.expireOnly && !expired) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        const response: HumanInputResponse = expired
+          ? { outcome: "expired" }
+          : validateHumanInputResponse(mapSessionHumanInputRequest(request), input.response);
+        const [updated] = await tx
+          .update(schema.sessionHumanInputRequests)
+          .set({
+            status: response.outcome,
+            response,
+            respondedBy: expired ? "system:expired" : input.respondedBy,
+            respondedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.id, request.id),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+              eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            turnAssociation: "current",
+            sequence: session.lastSequence + 1,
+            type: "user.humanInputResponse",
+            payload: sanitizeEventPayload({ requestId: request.id, response }),
+            clientEventId: expired ? null : (input.clientEventId ?? null),
+            occurredAt: now,
+          })
+          .returning();
+        if (!event) throw new Error("Failed to append human-input response");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, session.id));
+        const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+            reason: "approval_decision",
+          },
+        );
+        const mappedEvent = mapEvent(event);
+        const result = {
+          request: mapSessionHumanInputRequest(updated),
+          events: [mappedEvent],
+          workflowWakeRevision,
+        };
+        return expired
+          ? ({ action: "conflict", ...result } as const)
+          : ({ action: "accepted", event: mappedEvent, ...result } as const);
+      }),
+  );
+}
+
+export async function expireSessionHumanInputRequest(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+  },
+): Promise<AcceptSessionHumanInputResponseResult> {
+  return await acceptSessionHumanInputResponse(db, {
+    ...input,
+    response: { outcome: "skipped" },
+    respondedBy: "system:expired",
+    expireOnly: true,
+  });
+}
+
+export async function getHumanInputResumeForEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  event: Pick<SessionEvent, "type" | "payload">,
+): Promise<{
+  requestId: string;
+  toolCallId: string;
+  response: HumanInputResponse;
+} | null> {
+  if (event.type !== "user.humanInputResponse") return null;
+  const requestId = (event.payload as { requestId?: unknown }).requestId;
+  if (typeof requestId !== "string") return null;
+  const request = await getSessionHumanInputRequest(db, workspaceId, sessionId, requestId);
+  return request?.response
+    ? {
+        requestId: request.id,
+        toolCallId: request.toolCallId,
+        response: request.response,
+      }
+    : null;
+}
+
 export type TurnAttemptFenceRejectReason =
   | "workspace_paused"
   | "session_paused"
@@ -21795,7 +22321,7 @@ export async function settleSessionAttemptInterruptions(
 export type SessionWorkPeek =
   | { kind: "runnable" }
   | { kind: "approval-pending"; triggerEventId: string }
-  | { kind: "approval-wait" }
+  | { kind: "approval-wait"; humanInputRequestId?: string; expiresAt?: string }
   | {
       kind: "capacity-wait";
       ref: {
@@ -21973,21 +22499,52 @@ export async function peekSessionWork(
         if (!currentTrigger) {
           throw new Error(`Turn ${turn.id} points to missing trigger ${turn.triggerEventId}`);
         }
-        const [approval] = await scopedDb
+        const [actionResponse] = await scopedDb
           .select({ id: schema.sessionEvents.id })
           .from(schema.sessionEvents)
           .where(
             and(
               eq(schema.sessionEvents.workspaceId, workspaceId),
               eq(schema.sessionEvents.sessionId, sessionId),
-              eq(schema.sessionEvents.type, "user.approvalDecision"),
+              inArray(schema.sessionEvents.type, [
+                "user.approvalDecision",
+                "user.humanInputResponse",
+              ]),
               gt(schema.sessionEvents.sequence, currentTrigger.sequence),
             ),
           )
           .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
           .limit(1);
-        return approval
-          ? { kind: "approval-pending", triggerEventId: approval.id }
+        if (actionResponse) {
+          return { kind: "approval-pending", triggerEventId: actionResponse.id };
+        }
+        const [expiringHumanInput] = await scopedDb
+          .select({
+            id: schema.sessionHumanInputRequests.id,
+            expiresAt: schema.sessionHumanInputRequests.expiresAt,
+          })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+              eq(schema.sessionHumanInputRequests.turnId, turn.id),
+              eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+              isNotNull(schema.sessionHumanInputRequests.expiresAt),
+            ),
+          )
+          .orderBy(
+            sql`${schema.sessionHumanInputRequests.expiresAt} asc nulls last`,
+            asc(schema.sessionHumanInputRequests.id),
+          )
+          .limit(1);
+        return expiringHumanInput?.expiresAt
+          ? {
+              kind: "approval-wait",
+              humanInputRequestId: expiringHumanInput.id,
+              expiresAt: expiringHumanInput.expiresAt.toISOString(),
+            }
           : { kind: "approval-wait" };
       }
       if (turn.status === "running") {
@@ -22462,7 +23019,7 @@ async function isNewerApprovalTrigger(
   return Boolean(
     current &&
     candidate &&
-    candidate.type === "user.approvalDecision" &&
+    ["user.approvalDecision", "user.humanInputResponse"].includes(candidate.type) &&
     candidate.sequence > current.sequence,
   );
 }
@@ -22498,6 +23055,25 @@ export type ApplySessionTurnSettlementInput = {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   events: AppendEventInput[];
+  /**
+   * A mid-turn SDK freeze installed atomically with requires_action. Human
+   * input requests are public protocol rows; ordinary approvals remain only in
+   * pendingApprovals. No request can become visible without the exact frozen
+   * RunState needed to resume it, and no frozen request can miss its status
+   * transition/events because all writes share this transaction.
+   */
+  runState?: {
+    serializedRunState: string;
+    pendingApprovals: unknown[];
+    frozenCodexCredentialId?: string | null;
+    humanInputRequests?: Array<{
+      id: string;
+      toolCallId: string;
+      questions: HumanInputQuestion[];
+      allowSkip: boolean;
+      expiresAt?: Date | null;
+    }>;
+  };
   recording?: SessionTurnRecordingSettlement;
   /**
    * Atomically consume an operator /compact request and record why it could
@@ -22636,6 +23212,96 @@ export async function applySessionTurnSettlement(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (input.runState) {
+        if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
+          throw new Error("A frozen run state requires a requires_action settlement");
+        }
+        const humanInputRequests = input.runState.humanInputRequests ?? [];
+        for (const request of humanInputRequests) {
+          const parsedQuestions = request.questions.map((question) =>
+            HumanInputQuestionContract.parse(question),
+          );
+          if (Buffer.byteLength(JSON.stringify(parsedQuestions)) > 49_152) {
+            throw new Error("Human-input request questions exceed the durable payload limit");
+          }
+          if (
+            Buffer.byteLength(request.toolCallId) < 1 ||
+            Buffer.byteLength(request.toolCallId) > 1024
+          ) {
+            throw new Error("Human-input tool call id exceeds the durable payload limit");
+          }
+        }
+        const [{ maxVersion } = { maxVersion: 0 }] = await tx
+          .select({
+            maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
+          })
+          .from(schema.agentRunStates)
+          .where(
+            and(
+              eq(schema.agentRunStates.workspaceId, workspaceId),
+              eq(schema.agentRunStates.sessionId, input.sessionId),
+            ),
+          );
+        await tx.insert(schema.agentRunStates).values({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          stateVersion: Number(maxVersion) + 1,
+          serializedRunState: input.runState.serializedRunState,
+          pendingApprovals: input.runState.pendingApprovals,
+          frozenCodexCredentialId: input.runState.frozenCodexCredentialId ?? null,
+        });
+        if (humanInputRequests.length > 0) {
+          for (const request of humanInputRequests) {
+            const [persistedRequest] = await tx
+              .insert(schema.sessionHumanInputRequests)
+              .values({
+                id: request.id,
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                turnGeneration: turn.executionGeneration,
+                creationAttemptId: input.attemptId,
+                toolCallId: request.toolCallId,
+                questions: request.questions,
+                allowSkip: request.allowSkip,
+                expiresAt: request.expiresAt ?? null,
+              })
+              .onConflictDoUpdate({
+                target: [
+                  schema.sessionHumanInputRequests.workspaceId,
+                  schema.sessionHumanInputRequests.sessionId,
+                  schema.sessionHumanInputRequests.turnId,
+                  schema.sessionHumanInputRequests.toolCallId,
+                ],
+                set: {
+                  // A different interruption may be answered first. The same
+                  // tool call then re-freezes under the turn's next execution
+                  // generation; preserve its stable request id/deadline and
+                  // advance only the ownership generation.
+                  turnGeneration: turn.executionGeneration,
+                  updatedAt: new Date(),
+                },
+                setWhere: sql`
+                  ${schema.sessionHumanInputRequests.status} = 'pending'
+                  and ${schema.sessionHumanInputRequests.allowSkip} = ${request.allowSkip}
+                  and ${schema.sessionHumanInputRequests.questions} = ${JSON.stringify(request.questions)}::jsonb
+                  and ${schema.sessionHumanInputRequests.expiresAt}
+                    is not distinct from ${request.expiresAt?.toISOString() ?? null}::timestamptz
+                `,
+              })
+              .returning({ id: schema.sessionHumanInputRequests.id });
+            if (!persistedRequest) {
+              throw new Error(
+                `Human-input request ${request.id} changed contract or settled before re-freeze`,
+              );
+            }
+          }
+        }
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -22784,9 +23450,38 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
+      const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
+        input.turnStatus,
+      )
+        ? await tx
+            .update(schema.sessionHumanInputRequests)
+            .set({
+              status: "cancelled",
+              response: { outcome: "cancelled" },
+              respondedBy: `system:turn_${input.turnStatus}`,
+              respondedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+                eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+                eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+                eq(schema.sessionHumanInputRequests.status, "pending"),
+              ),
+            )
+            .returning({ id: schema.sessionHumanInputRequests.id })
+        : [];
+      const terminalHumanInputEvents: AppendEventInput[] = terminalHumanInputRows.map(
+        (request) => ({
+          type: "user.humanInputResponse",
+          payload: { requestId: request.id, response: { outcome: "cancelled" } },
+        }),
+      );
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
+        ...terminalHumanInputEvents,
         ...input.events,
       ];
       const values = settlementEvents.map((event) => {
@@ -25054,31 +25749,15 @@ export async function acceptSessionApprovalDecision(
             sessionStatus: session.status as SessionStatus,
           } as const;
         }
-        const [trigger] = await tx
-          .select({ sequence: schema.sessionEvents.sequence })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, input.sessionId),
-              eq(schema.sessionEvents.id, turn.triggerEventId),
-            ),
-          )
-          .limit(1);
-        if (!trigger) throw new Error(`Turn trigger not found: ${turn.triggerEventId}`);
-        const [alreadyAccepted] = await tx
-          .select({ id: schema.sessionEvents.id })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, input.sessionId),
-              eq(schema.sessionEvents.type, "user.approvalDecision"),
-              gt(schema.sessionEvents.sequence, trigger.sequence),
-            ),
-          )
-          .limit(1);
-        if (alreadyAccepted) {
+        if (
+          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            triggerEventId: turn.triggerEventId,
+          })
+        ) {
           return {
             action: "conflict",
             sessionStatus: "requires_action",

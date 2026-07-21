@@ -2,6 +2,7 @@ import type { FileAsset, ResourceRef, SessionSystemUpdate } from "@opengeni/cont
 import {
   getActiveSessionHistoryItems,
   getLatestRunState,
+  getHumanInputResumeForEvent,
   getSandboxSessionEnvelope,
   getSessionEvent,
   listSessionSystemUpdatesForTurn,
@@ -225,6 +226,26 @@ export async function turnInput(
       // items: the reconcile watermark must NOT apply the cross-account strip
       // (HOLE E) — else a cross-account approval resume re-appends K
       // already-persisted items at fresh positions.
+      modelHistoryFromItems: false,
+    };
+  }
+  if (trigger.type === "user.humanInputResponse") {
+    const [state, resume] = await Promise.all([
+      getLatestRunState(db, trigger.workspaceId, trigger.sessionId),
+      getHumanInputResumeForEvent(db, trigger.workspaceId, trigger.sessionId, trigger),
+    ]);
+    if (!state) {
+      throw new Error("No saved run state is available for human-input response");
+    }
+    if (!resume) {
+      throw new Error("Human-input response does not resolve to a durable request");
+    }
+    return {
+      input: await runtime.prepareInput(agent, {
+        kind: "human_input",
+        serializedRunState: resumeRunStateForCodexAccount(state, current),
+        toolCallId: resume.toolCallId,
+      }),
       modelHistoryFromItems: false,
     };
   }

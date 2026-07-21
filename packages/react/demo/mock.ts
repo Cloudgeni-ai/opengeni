@@ -51,6 +51,7 @@ import type {
   SessionListResponse,
   SessionEvent,
   SessionGoal,
+  SessionHumanInputRequest,
   SessionLineageResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
@@ -59,6 +60,7 @@ import type {
   SessionTurn,
   SteerMessageResult,
   StreamSessionEventsOptions,
+  SubmitHumanInputResponseRequest,
   UploadFileInput,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
@@ -611,6 +613,27 @@ export class MockOpenGeniClient implements SessionClientLike {
     decision: { approvalId: string; decision: "approve" | "reject"; message?: string },
   ): Promise<SessionEvent> {
     return this.bus(sessionId).append("user.approvalDecision", decision);
+  }
+
+  async listHumanInputRequests(): Promise<SessionHumanInputRequest[]> {
+    return [];
+  }
+
+  async getHumanInputRequest(
+    _workspaceId: string,
+    _sessionId: string,
+    requestId: string,
+  ): Promise<SessionHumanInputRequest> {
+    throw new Error(`No demo human-input request ${requestId}`);
+  }
+
+  async submitHumanInputResponse(
+    _workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    response: SubmitHumanInputResponseRequest,
+  ): Promise<SessionEvent> {
+    return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
 
   // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
@@ -1796,7 +1819,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-turn-initiator-v1",
+  apiContractRevision: "2026-07-human-input-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [

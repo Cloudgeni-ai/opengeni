@@ -90,6 +90,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#acceptSessionHumanInputResponse": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#appendSessionEventsForTurnAttempt": {
     inserts: 1,
     contract: "turn_attempt_fence",
@@ -127,6 +131,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     contract: "canonical",
   },
   "packages/db/src/session-queue-commands.ts#submitHumanPromptInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/session-queue-commands.ts#supersedeSessionCurrentDirectionInTransaction": {
     inserts: 1,
     contract: "canonical",
   },

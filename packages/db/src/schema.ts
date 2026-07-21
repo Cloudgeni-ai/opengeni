@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
   boolean,
@@ -1248,6 +1249,13 @@ export const sessionTurnAttempts = pgTable(
       table.workspaceId,
       table.id,
     ),
+    ownershipIdentity: uniqueIndex("session_turn_attempts_human_input_owner_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.id,
+    ),
     liveTurn: uniqueIndex("session_turn_attempts_live_turn_uq")
       .on(table.workspaceId, table.turnId)
       .where(sql`${table.state} in ('claimed', 'running')`),
@@ -1910,6 +1918,88 @@ export const agentRunStates = pgTable("agent_run_states", {
   frozenCodexCredentialId: uuid("frozen_codex_credential_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+// Durable structured human-input requests. The creation attempt is immutable
+// provenance; legitimate resume attempts are newer owners of the SAME logical
+// turn. Settlement therefore fences on the active session/turn plus the
+// request's turn generation, never on creationAttemptId.
+export const sessionHumanInputRequests = pgTable(
+  "session_human_input_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    turnGeneration: integer("turn_generation").notNull(),
+    creationAttemptId: uuid("creation_attempt_id").notNull(),
+    toolCallId: text("tool_call_id").notNull(),
+    status: text("status").notNull().default("pending"),
+    questions: jsonb("questions").$type<HumanInputQuestion[]>().notNull(),
+    allowSkip: boolean("allow_skip").notNull().default(false),
+    response: jsonb("response").$type<HumanInputResponse>(),
+    respondedBy: text("responded_by"),
+    respondedAt: timestamp("responded_at", { withTimezone: true }),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    creationAttemptOwner: foreignKey({
+      name: "session_human_input_requests_creation_attempt_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.turnId,
+        table.creationAttemptId,
+      ],
+      foreignColumns: [
+        sessionTurnAttempts.accountId,
+        sessionTurnAttempts.workspaceId,
+        sessionTurnAttempts.sessionId,
+        sessionTurnAttempts.turnId,
+        sessionTurnAttempts.id,
+      ],
+    }).onDelete("cascade"),
+    toolCall: uniqueIndex("session_human_input_requests_tool_call_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.turnId,
+      table.toolCallId,
+    ),
+    pendingSession: index("session_human_input_requests_pending_session_idx")
+      .on(table.workspaceId, table.sessionId, table.createdAt, table.id)
+      .where(sql`${table.status} = 'pending'`),
+    pendingExpiry: index("session_human_input_requests_pending_expiry_idx")
+      .on(table.expiresAt, table.id)
+      .where(sql`${table.status} = 'pending' and ${table.expiresAt} is not null`),
+    status: check(
+      "session_human_input_requests_status_check",
+      sql`${table.status} in ('pending','answered','skipped','expired','cancelled')`,
+    ),
+    generation: check(
+      "session_human_input_requests_generation_check",
+      sql`${table.turnGeneration} > 0`,
+    ),
+    toolCallBytes: check(
+      "session_human_input_requests_tool_call_bytes_check",
+      sql`octet_length(${table.toolCallId}) between 1 and 1024`,
+    ),
+    questionsBytes: check(
+      "session_human_input_requests_questions_bytes_check",
+      sql`octet_length(${table.questions}::text) <= 49152`,
+    ),
+    responseBytes: check(
+      "session_human_input_requests_response_bytes_check",
+      sql`${table.response} is null or octet_length(${table.response}::text) <= 49152`,
+    ),
+    actorBytes: check(
+      "session_human_input_requests_actor_bytes_check",
+      sql`${table.respondedBy} is null or octet_length(${table.respondedBy}) <= 1024`,
+    ),
+  }),
+);
 
 // Conversation truth: ordered, verbatim SDK input items (issue #35). The
 // model-facing memory store — unredacted and replay-ready. session_events

@@ -3,11 +3,13 @@
 // honest (reason + retry history) and revivable from the same composer.
 import {
   creditExhaustedFromEvents,
+  HumanInputForm,
   MessageTimeline,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
   useGoal,
+  useHumanInputRequests,
   useSession,
   useSessionEvents,
   useSessionLineage,
@@ -83,6 +85,7 @@ export function SessionRoute({
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
+  const humanInput = useHumanInputRequests(sessionId, { events });
   const session = useMemo(
     () =>
       fetchedSession
@@ -360,6 +363,7 @@ export function SessionRoute({
       timeline={timeline}
       initialLoading={initialLoading}
       approvals={approvals}
+      humanInput={humanInput}
       failure={failure}
       creditExhausted={creditExhausted}
       goal={goal}
@@ -492,6 +496,7 @@ function SessionChatPane(props: {
   timeline: TimelineItem[];
   initialLoading: boolean;
   approvals: PendingApproval[];
+  humanInput: ReturnType<typeof useHumanInputRequests>;
   failure: ReturnType<typeof summarizeSessionFailure> | null;
   /** The last turn ended budget_exhausted — the workspace is out of credits. */
   creditExhausted: boolean;
@@ -738,6 +743,27 @@ function SessionChatPane(props: {
                 </Notice>
               );
             })}
+          </div>
+        </div>
+      ) : null}
+
+      {/* Structured questions are tool output, not approvals: answer/skip
+          resumes the exact frozen call. The authoritative hook reads pending
+          rows and uses this shared event feed only as a refresh trigger. */}
+      {props.humanInput.requests.length > 0 && props.session.status === "requires_action" ? (
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 sm:px-6">
+          <div className="grid max-h-[28rem] gap-3 overflow-y-auto pb-2">
+            {props.humanInput.requests.map((request) => (
+              <HumanInputForm
+                key={request.id}
+                request={request}
+                submitting={props.humanInput.respondingRequestId !== null}
+                error={props.humanInput.mutationError?.message}
+                onSubmit={(response) =>
+                  props.humanInput.respond(request.id, response).then(() => undefined)
+                }
+              />
+            ))}
           </div>
         </div>
       ) : null}

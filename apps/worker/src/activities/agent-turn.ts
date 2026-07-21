@@ -13,6 +13,8 @@ import {
   getSessionEvent,
   getSessionGoal,
   getLatestRunState,
+  getHumanInputResumeForEvent,
+  getSessionHumanInputRequest,
   isCodexBilledTurn,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
@@ -47,7 +49,6 @@ import {
   nextSessionHistoryPosition,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
-  saveRunState,
   upsertSandboxSessionEnvelope,
   setSessionLastInputTokensForTurnAttempt,
   sumUsageQuantity,
@@ -68,6 +69,7 @@ import {
   type SandboxRecord,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
+  type ApplySessionTurnSettlementInput,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
@@ -305,6 +307,28 @@ export function filterUnmaterializedSandboxFileDownloads(
 /** Fixed-length one-way tenant correlation for metrics/alerts; never a raw id. */
 export function codexWorkspaceMetricKey(workspaceId: string): string {
   return createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
+}
+
+/** Stable public request identity across partial resumes and activity retries. */
+export function stableHumanInputRequestId(
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  const hex = createHash("sha256")
+    .update("opengeni-human-input-v1\0")
+    .update(sessionId)
+    .update("\0")
+    .update(turnId)
+    .update("\0")
+    .update(toolCallId)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+  hex[12] = "5";
+  hex[16] = ["8", "9", "a", "b"][Number.parseInt(hex[16] ?? "0", 16) % 4] ?? "8";
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
 /**
@@ -1487,13 +1511,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
-    const saveRunStateFenced = async (state: Parameters<typeof saveRunState>[1]): Promise<void> => {
-      if (!(await saveRunState(db, state))) {
-        throw new TurnAttemptFencedError(
-          "turn execution generation was fenced while saving run state",
-        );
-      }
-    };
     const setLastInputTokensFenced = async (lastInputTokens: number): Promise<void> => {
       if (!turnId || executionGeneration <= 0) {
         throw new Error("Turn attempt was not initialized before token accounting");
@@ -1714,6 +1731,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: SessionStatus;
           activeTurnId: string | null;
           consumeRequestedCompactionFailure?: boolean;
+          runState?: ApplySessionTurnSettlementInput["runState"];
         }) => Promise<boolean>)
       | null = null;
     let turnStartedPublished = false;
@@ -2081,6 +2099,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (!trigger) {
         throw new Error(`Trigger event not found: ${triggerEventId}`);
       }
+      const humanInputResume = await getHumanInputResumeForEvent(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        trigger,
+      );
       triggerType = trigger.type;
       executionGeneration = turn.executionGeneration;
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
@@ -2249,6 +2273,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: inputSettlement.sessionStatus,
           activeTurnId: inputSettlement.activeTurnId,
           events: inputs,
+          ...(inputSettlement.runState ? { runState: inputSettlement.runState } : {}),
           ...(recordingMutation ? { recording: recordingMutation } : {}),
           ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
         });
@@ -3770,6 +3795,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {};
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
+        ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
           titleIsSet: Boolean(session.title?.trim()),
@@ -4715,23 +4741,59 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
           const approvals = runtime.serializeApprovals(stream.interruptions);
-          await saveRunStateFenced({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            expectedExecutionGeneration: executionGeneration,
-            expectedAttemptId: input.attemptId,
-            serializedRunState: stream.state.toString(),
-            pendingApprovals: approvals,
-            // Record the account freezing this state so a resume on a DIFFERENT
-            // codex account strips its account-bound reasoning before replay (HOLE C).
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
+          const humanInputInterruptions =
+            runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
+          const humanInputRequests = await Promise.all(
+            humanInputInterruptions.map(async (interruption) => {
+              const id = stableHumanInputRequestId(
+                input.sessionId,
+                activeTurnId,
+                interruption.toolCallId,
+              );
+              const existing = await getSessionHumanInputRequest(
+                db,
+                input.workspaceId,
+                input.sessionId,
+                id,
+              );
+              if (existing && existing.status !== "pending") {
+                throw new Error(`Settled human-input request ${id} reappeared as an interruption`);
+              }
+              const expiresAt = existing?.expiresAt
+                ? new Date(existing.expiresAt)
+                : interruption.input.expiresInSeconds
+                  ? new Date(Date.now() + interruption.input.expiresInSeconds * 1000)
+                  : null;
+              return {
+                id,
+                toolCallId: interruption.toolCallId,
+                questions: interruption.input.questions,
+                allowSkip: interruption.input.allowSkip,
+                expiresAt,
+                isNew: existing === null,
+              };
+            }),
+          );
+          const requestEvents = humanInputRequests
+            .filter((request) => request.isNew)
+            .map((request) => ({
+              type: "session.humanInput.requested" as const,
+              payload: {
+                request: {
+                  id: request.id,
+                  questions: request.questions,
+                  allowSkip: request.allowSkip,
+                  expiresAt: request.expiresAt?.toISOString() ?? null,
+                },
+              },
+            }));
           if (
             !(await settle!({
               events: [
-                { type: "session.requiresAction", payload: { approvals } },
+                ...requestEvents,
+                ...(approvals.length > 0
+                  ? [{ type: "session.requiresAction" as const, payload: { approvals } }]
+                  : []),
                 {
                   type: "session.status.changed",
                   payload: { status: "requires_action" },
@@ -4740,6 +4802,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnStatus: "requires_action",
               sessionStatus: "requires_action",
               activeTurnId,
+              runState: {
+                serializedRunState: stream.state.toString(),
+                pendingApprovals: approvals,
+                frozenCodexCredentialId: effectiveCodexCredentialId,
+                humanInputRequests: humanInputRequests.map(
+                  ({ isNew: _isNew, ...request }) => request,
+                ),
+              },
             }))
           ) {
             return claimedResult({ status: "cancelled" });
