@@ -3,6 +3,7 @@ export {
   approvalDecision,
   codexCapacityChanged,
   sessionControl,
+  sessionAttemptQuiesced,
   queueChanged,
   sessionWorkflow,
   userMessage,

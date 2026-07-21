@@ -8,6 +8,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  getSessionQueueSnapshot,
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   markSessionAttemptQuiesced,
@@ -255,6 +256,30 @@ describe("attempt-fenced Agent session commands", () => {
     expect(lateUpdates).toHaveLength(0);
   });
 
+  test("Agent Steer reports cancellation cleanup with no visible human queue", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await activeAgent(grant);
+
+    const steered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: target.session.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          instruction: "replace the active direction",
+        }),
+      ),
+    );
+
+    expect(steered.interruptionCount).toBe(1);
+    expect(
+      await getSessionQueueSnapshot(client.db, grant.workspaceId!, target.session.id),
+    ).toMatchObject({ items: [], stoppingPreviousAttempt: true });
+  });
+
   test("a committed Agent command replays after caller interruption while a new command is rejected", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
@@ -404,6 +429,27 @@ describe("attempt-fenced Agent session commands", () => {
         internalClaim.turn.id,
       ),
     ).toMatchObject([{ id: steered.updateId, kind: "agent_steer_instruction" }]);
+    const [oldQuiescedAt] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      const [attempt] = await db
+        .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
+        .from(schema.sessionTurnAttempts)
+        .where(eq(schema.sessionTurnAttempts.id, targetAttemptId));
+      await db
+        .update(schema.sessionTurnAttempts)
+        .set({ quiescedAt: null })
+        .where(eq(schema.sessionTurnAttempts.id, targetAttemptId));
+      return [attempt?.quiescedAt ?? null] as const;
+    });
+    expect(oldQuiescedAt).not.toBeNull();
+    expect(await getSessionQueueSnapshot(client.db, grant.workspaceId!, target.id)).toMatchObject({
+      stoppingPreviousAttempt: false,
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurnAttempts)
+        .set({ quiescedAt: oldQuiescedAt })
+        .where(eq(schema.sessionTurnAttempts.id, targetAttemptId));
+    });
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: target.id,
       turnId: internalClaim.turn.id,

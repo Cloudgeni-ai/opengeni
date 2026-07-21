@@ -127,7 +127,7 @@ export type UseWorkspaceCaptureResult = {
 /**
  * The cold-paint data source: fetch the latest turn-end workspace capture with a
  * SINGLE api round-trip on mount (no machine, no Channel-A — this is the <200ms
- * first paint, dossier §10.4/§12-A1). The manifest is served inline in the common
+ * first paint). The manifest is served inline in the common
  * case; a rare >2MB manifest comes back as a short-TTL signed URL we follow.
  *
  * Subscribes to the live event log: a `workspace.revision.captured` for a revision

@@ -158,6 +158,42 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     expect(spy.resumes).toBe(1);
   });
 
+  test("paused state overrides a custom active-state placeholder", async () => {
+    const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
+    const blocker = {
+      kind: "session" as const,
+      sessionId: "22222222-2222-4222-8222-222222222222",
+      displayName: "Paused here",
+      actor: null,
+      reason: null,
+      changedAt: null,
+      revision: 1,
+    };
+    const paused: EffectiveSessionControl = {
+      state: "paused",
+      controlVersion: 1,
+      controlEtag: "paused",
+      directState: "paused",
+      primaryBlocker: blocker,
+      additionalBlockerCount: 0,
+      blockers: [blocker],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    };
+    mounted = await renderComponent(
+      <ChatComposer
+        composer={composer(spy)}
+        effectiveControl={paused}
+        placeholder="Custom active placeholder"
+      />,
+    );
+
+    expect(mounted.container.querySelector("textarea")?.placeholder).toBe(
+      "Sending will resume this workstream…",
+    );
+  });
+
   test("the send button queues and explains the steer shortcut", async () => {
     const spy = { sends: [] as string[], pauses: 0, resumes: 0 };
     mounted = await renderComponent(<ChatComposer composer={composer(spy)} />);
@@ -176,7 +212,7 @@ describe("ChatComposer delivery and lifecycle controls", () => {
     const workspaceBlocker = {
       kind: "workspace" as const,
       displayName: "Cloudgeni",
-      actor: "Jorge",
+      actor: "Example User",
       reason: "Maintenance",
       changedAt: "2026-07-16T12:00:00.000Z",
       revision: 8,

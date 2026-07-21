@@ -1,6 +1,6 @@
 # CI install-smoke (Windows): prove install.ps1 PARSES + VERIFIES + INSTALLS the
 # freshly-built .exe against a locally-signed mock release. Used by agent-ci.yml on
-# windows-latest (dossier §23.3). Requires minisign on PATH.
+# windows-latest. Requires minisign on PATH.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 

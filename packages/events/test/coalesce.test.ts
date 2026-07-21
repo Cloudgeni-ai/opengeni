@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { SessionEvent } from "@opengeni/contracts";
-import { coalesceSessionEventDeltas } from "../src/index";
+import {
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  sessionEventJsonBytes,
+  type SessionEvent,
+} from "@opengeni/contracts";
+import {
+  SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES,
+  coalesceSessionEventDeltas,
+} from "../src/index";
 
 const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 const SESSION_ID = "22222222-2222-4222-8222-222222222222";
@@ -110,14 +117,35 @@ describe("coalesceSessionEventDeltas", () => {
         commandId: "cmd-2",
       }),
       // Legacy shapes still coalesce (text/output fallbacks).
-      event(5, "sandbox.command.output.delta", { name: "build", text: "legacy\n" }),
-      event(6, "sandbox.command.output.delta", { name: "build", output: "older\n" }),
+      event(5, "sandbox.command.output.delta", {
+        name: "build",
+        text: "legacy\n",
+      }),
+      event(6, "sandbox.command.output.delta", {
+        name: "build",
+        output: "older\n",
+      }),
     ]);
 
     expect(result.map((item) => item.payload)).toEqual([
-      { chunk: "one\ntwo\n", coalescedUntil: 2, stream: "stdout", commandId: "cmd-1" },
-      { chunk: "warn\n", coalescedUntil: 3, stream: "stderr", commandId: "cmd-1" },
-      { chunk: "next\n", coalescedUntil: 4, stream: "stdout", commandId: "cmd-2" },
+      {
+        chunk: "one\ntwo\n",
+        coalescedUntil: 2,
+        stream: "stdout",
+        commandId: "cmd-1",
+      },
+      {
+        chunk: "warn\n",
+        coalescedUntil: 3,
+        stream: "stderr",
+        commandId: "cmd-1",
+      },
+      {
+        chunk: "next\n",
+        coalescedUntil: 4,
+        stream: "stdout",
+        commandId: "cmd-2",
+      },
       { chunk: "legacy\nolder\n", coalescedUntil: 6, name: "build" },
     ]);
   });
@@ -125,12 +153,62 @@ describe("coalesceSessionEventDeltas", () => {
   test("extracts reasoning text from raw item content parts", () => {
     const result = coalesceSessionEventDeltas([
       event(1, "agent.reasoning.delta", {
-        item: { rawItem: { content: [{ text: "look " }, { text: "here" }, { other: true }] } },
+        item: {
+          rawItem: {
+            content: [{ text: "look " }, { text: "here" }, { other: true }],
+          },
+        },
       }),
       event(2, "agent.reasoning.delta", { text: " now" }),
     ]);
 
     expect(result).toHaveLength(1);
-    expect(result[0]?.payload).toEqual({ text: "look here now", coalescedUntil: 2 });
+    expect(result[0]?.payload).toEqual({
+      text: "look here now",
+      coalescedUntil: 2,
+    });
+  });
+
+  test("does not recreate an oversized payload when a long delta run is coalesced", () => {
+    const events = Array.from({ length: 2_000 }, (_, index) =>
+      event(index + 1, "agent.message.delta", {
+        text: `${index === 0 ? "HEAD-" : ""}${"x".repeat(2_000)}${index === 1_999 ? "-TAIL" : ""}`,
+      }),
+    );
+
+    const result = coalesceSessionEventDeltas(events);
+
+    expect(result.length).toBeGreaterThan(1);
+    for (const projected of result) {
+      expect(sessionEventJsonBytes(projected.payload)).toBeLessThanOrEqual(
+        SESSION_EVENT_PAYLOAD_MAX_BYTES,
+      );
+    }
+    expect(result.at(-1)?.payload).toMatchObject({ coalescedUntil: 2_000 });
+    expect(JSON.stringify(result[0]?.payload)).toContain("HEAD-");
+    expect(JSON.stringify(result.at(-1)?.payload)).toContain("-TAIL");
+    expect(result.map((projected) => Number((projected.payload as any).coalescedUntil))).toEqual(
+      [...result]
+        .map((projected) => Number((projected.payload as any).coalescedUntil))
+        .sort((left, right) => left - right),
+    );
+  });
+
+  test("does not absorb an oversized delta into an empty prefix run", () => {
+    const result = coalesceSessionEventDeltas([
+      event(1, "agent.message.delta", { text: "" }),
+      event(2, "agent.message.delta", {
+        text: "x".repeat(SESSION_EVENT_COALESCED_TEXT_TARGET_BYTES * 4),
+      }),
+      event(3, "agent.message.delta", { text: "tail" }),
+    ]);
+
+    expect(result).toHaveLength(3);
+    expect(result.map((projected) => (projected.payload as any).coalescedUntil)).toEqual([1, 2, 3]);
+    for (const projected of result) {
+      expect(sessionEventJsonBytes(projected.payload)).toBeLessThanOrEqual(
+        SESSION_EVENT_PAYLOAD_MAX_BYTES,
+      );
+    }
   });
 });

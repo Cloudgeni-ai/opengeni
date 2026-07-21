@@ -289,6 +289,7 @@ describe("rail session grouping", () => {
         attentionDescendants: 0,
         pausedDescendants: 3,
         failedDescendants: 0,
+        truncated: false,
       },
     });
     const forest = buildRailForest([manager], NOW);
@@ -307,6 +308,7 @@ describe("rail session grouping", () => {
         attentionDescendants: 0,
         pausedDescendants: 0,
         failedDescendants: 0,
+        truncated: false,
       },
     });
     const selectedDetail = railSession({ id: "selected-manager", status: "running" });
@@ -1296,14 +1298,14 @@ describe("capability catalog helpers", () => {
     expect(
       capabilityErrorToast(
         new Error(
-          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
         ),
         "Capability update failed",
       ),
     ).toEqual({
       title: "Connection failed",
       description:
-        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
     });
   });
 

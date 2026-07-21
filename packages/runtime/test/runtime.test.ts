@@ -66,6 +66,7 @@ import { MCP_MAX_TOOL_RESULT_BYTES, McpPayloadTooLargeError } from "../src/mcp-n
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
+  boundModelToolOutputItem,
   codexRequestStorage,
   type CodexRequestContext,
   type CodexTokenSnapshot,
@@ -279,7 +280,10 @@ describe("runtime event normalization", () => {
     );
 
     expect(events).toEqual([
-      { type: "agent.reasoning.delta", payload: { text: "Checking credentials" } },
+      {
+        type: "agent.reasoning.delta",
+        payload: { text: "Checking credentials" },
+      },
     ]);
   });
 
@@ -316,7 +320,7 @@ describe("runtime event normalization", () => {
     expect((event?.payload as { id?: string } | undefined)?.id).toBe("call-1");
   });
 
-  test("compacts a codex computer_screenshot Uint8Array output to a data-URL string in the event", () => {
+  test("compacts a codex computer_screenshot Uint8Array output to a non-retained media fact", () => {
     const pngBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const [event] = normalizeSdkEvent({
       type: "run_item_stream_event",
@@ -324,92 +328,149 @@ describe("runtime event normalization", () => {
         id: "item-shot",
         type: "tool_call_output_item",
         rawItem: { callId: "call-shot", type: "function_call_result" },
-        output: { type: "image", image: { data: pngBytes, mediaType: "image/png" } },
+        output: {
+          type: "image",
+          image: { data: pngBytes, mediaType: "image/png" },
+        },
       },
     } as any);
 
     expect(event?.type).toBe("agent.toolCall.output");
     const payload = event?.payload as { id: string; output: unknown };
     expect(payload.id).toBe("call-shot");
-    expect(payload.output).toBe(
-      `data:image/png;base64,${Buffer.from(pngBytes).toString("base64")}`,
-    );
+    expect(payload.output).toMatchObject({
+      type: "media_preview",
+      mediaType: "image/png",
+      inlineBytes: pngBytes.byteLength,
+      fullOutputAvailable: false,
+    });
     // No raw typed-array / object-of-numbers survives into the serialized event.
     expect(JSON.stringify(event)).not.toContain('"0":137');
+    expect(JSON.stringify(event)).not.toContain("base64");
   });
 
   describe("normalizeToolOutputForEvent", () => {
-    test("Uint8Array structured image → data-URL string", () => {
+    test("Uint8Array structured image → non-retained media fact", () => {
       const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
       expect(
         normalizeToolOutputForEvent({
           type: "image",
           image: { data: bytes, mediaType: "image/png" },
         }),
-      ).toBe(`data:image/png;base64,${Buffer.from(bytes).toString("base64")}`);
+      ).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 4,
+        fullOutputAvailable: false,
+      });
     });
 
-    test("object-of-numbers (JSON-round-tripped Uint8Array) → data-URL string", () => {
+    test("object-of-numbers (JSON-round-tripped Uint8Array) → media fact", () => {
       const bytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0]);
       const roundTripped = JSON.parse(
-        JSON.stringify({ type: "image", image: { data: bytes, mediaType: "image/jpeg" } }),
+        JSON.stringify({
+          type: "image",
+          image: { data: bytes, mediaType: "image/jpeg" },
+        }),
       );
-      expect(normalizeToolOutputForEvent(roundTripped)).toBe(
-        `data:image/jpeg;base64,${Buffer.from(bytes).toString("base64")}`,
-      );
+      expect(normalizeToolOutputForEvent(roundTripped)).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/jpeg",
+        inlineBytes: 4,
+      });
     });
 
     test("defaults media type to image/png when absent", () => {
       const bytes = new Uint8Array([1, 2, 3]);
-      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes } })).toBe(
-        `data:image/png;base64,${Buffer.from(bytes).toString("base64")}`,
-      );
+      expect(normalizeToolOutputForEvent({ type: "image", image: { data: bytes } })).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 3,
+      });
     });
 
-    test("base64 string / data-URL image data pass through as a data-URL", () => {
+    test("base64 string / data-URL image data become byte-counted media facts", () => {
       expect(
         normalizeToolOutputForEvent({
           type: "image",
           image: { data: "aGk=", mediaType: "image/webp" },
         }),
-      ).toBe("data:image/webp;base64,aGk=");
+      ).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/webp",
+        inlineBytes: 2,
+      });
       expect(
         normalizeToolOutputForEvent({
           type: "image",
           image: { data: "data:image/png;base64,aGk=" },
         }),
-      ).toBe("data:image/png;base64,aGk=");
+      ).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 2,
+      });
     });
 
-    test("already-normalized input_image content item → its data-URL", () => {
+    test("already-normalized input_image content item → media fact", () => {
       expect(
-        normalizeToolOutputForEvent({ type: "input_image", image: "data:image/png;base64,aGk=" }),
-      ).toBe("data:image/png;base64,aGk=");
+        normalizeToolOutputForEvent({
+          type: "input_image",
+          image: "data:image/png;base64,aGk=",
+        }),
+      ).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 2,
+      });
     });
 
-    test("a single-image array unwraps to the bare data-URL string", () => {
+    test("a single-image array unwraps to the media fact", () => {
       const bytes = new Uint8Array([0x47, 0x49, 0x46, 0x38]);
       expect(
         normalizeToolOutputForEvent([
           { type: "image", image: { data: bytes, mediaType: "image/gif" } },
         ]),
-      ).toBe(`data:image/gif;base64,${Buffer.from(bytes).toString("base64")}`);
+      ).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/gif",
+        inlineBytes: 4,
+      });
     });
 
     test("text outputs pass through unchanged", () => {
       expect(normalizeToolOutputForEvent("plain tool output")).toBe("plain tool output");
-      expect(normalizeToolOutputForEvent("data:image/png;base64,aGk=")).toBe(
-        "data:image/png;base64,aGk=",
-      );
     });
 
-    test("hosted computer_call data-URL string output is unchanged", () => {
+    test("hosted computer_call data-URL string output becomes a media fact", () => {
       const hosted = "data:image/png;base64,iVBORw0KGgo=";
-      expect(normalizeToolOutputForEvent(hosted)).toBe(hosted);
+      expect(normalizeToolOutputForEvent(hosted)).toMatchObject({
+        type: "media_preview",
+        mediaType: "image/png",
+        inlineBytes: 8,
+        fullOutputAvailable: false,
+      });
+    });
+
+    test("mixed outputs retain text/error facts while replacing only inline media", () => {
+      const mixed = normalizeToolOutputForEvent([
+        { type: "text", text: "visible explanation" },
+        { type: "input_image", image: "data:image/png;base64,aGk=" },
+        { isError: true, text: "capture degraded" },
+      ]);
+      expect(mixed).toEqual([
+        { type: "text", text: "visible explanation" },
+        expect.objectContaining({ type: "media_preview", inlineBytes: 2 }),
+        { isError: true, text: "capture degraded" },
+      ]);
+      expect(JSON.stringify(mixed)).not.toContain("base64");
     });
 
     test("MCP isError object output is unchanged", () => {
-      const mcp = { isError: true, content: [{ type: "text", text: "delivery failed" }] };
+      const mcp = {
+        isError: true,
+        content: [{ type: "text", text: "delivery failed" }],
+      };
       expect(normalizeToolOutputForEvent(mcp)).toEqual(mcp);
     });
   });
@@ -457,7 +518,10 @@ describe("runtime event normalization", () => {
         // The runtime stores the raw return as the tool output; it must be an
         // isError object (not the SDK's flat default string) so the timeline
         // projection settles the tool to "failed".
-        const produced = errorFunction!({ context: {}, error: new Error("boom") });
+        const produced = errorFunction!({
+          context: {},
+          error: new Error("boom"),
+        });
         expect((produced as { isError?: unknown }).isError).toBe(true);
       }
     });
@@ -474,7 +538,10 @@ describe("runtime event normalization", () => {
         },
       } as any);
       expect(event?.type).toBe("agent.toolCall.output");
-      const payload = event?.payload as { id: string; output: { isError?: unknown } };
+      const payload = event?.payload as {
+        id: string;
+        output: { isError?: unknown };
+      };
       expect(payload.id).toBe("call-err");
       expect(payload.output.isError).toBe(true);
     });
@@ -541,17 +608,26 @@ describe("runtime event normalization", () => {
 
     test("requireApproval: true → every tool of the server needs approval", async () => {
       const map = await mcpToolApprovalMap(true);
-      expect(map).toEqual({ docs__search_documents: true, docs__fetch_document: true });
+      expect(map).toEqual({
+        docs__search_documents: true,
+        docs__fetch_document: true,
+      });
     });
 
     test("requireApproval: string[] → only the listed unprefixed tool needs approval", async () => {
       const map = await mcpToolApprovalMap(["fetch_document"]);
-      expect(map).toEqual({ docs__search_documents: false, docs__fetch_document: true });
+      expect(map).toEqual({
+        docs__search_documents: false,
+        docs__fetch_document: true,
+      });
     });
 
     test("requireApproval absent → nothing needs approval (historical default)", async () => {
       const map = await mcpToolApprovalMap(undefined);
-      expect(map).toEqual({ docs__search_documents: false, docs__fetch_document: false });
+      expect(map).toEqual({
+        docs__search_documents: false,
+        docs__fetch_document: false,
+      });
     });
 
     test("requireApproval survives the sandbox clone() tool-resolution path", async () => {
@@ -629,7 +705,9 @@ describe("runtime event normalization", () => {
         { kind: "mcp", id: "my_" },
       ]);
       try {
-        const agent = buildOpenGeniAgent(settings, [], { mcpServers: prepared.mcpServers });
+        const agent = buildOpenGeniAgent(settings, [], {
+          mcpServers: prepared.mcpServers,
+        });
         expect(await approvalMapForAgent(agent)).toEqual({
           // outer ("my"): only search_documents is gated.
           my__search_documents: true,
@@ -826,7 +904,10 @@ describe("runtime event normalization", () => {
             type: "message",
             role: "user",
             content: "[TURN RESUMED AFTER WORKER RESTART] Continue.",
-            providerData: { opengeni_internal_resume: "worker_restart", keep_me: "yes" },
+            providerData: {
+              opengeni_internal_resume: "worker_restart",
+              keep_me: "yes",
+            },
           } as never,
           {
             type: "message",
@@ -865,7 +946,12 @@ describe("runtime event normalization", () => {
       callId: "call_orphan",
       output: { type: "text", text: "stale" },
     };
-    const validCall = { type: "function_call", callId: "call_ok", name: "tool", arguments: "{}" };
+    const validCall = {
+      type: "function_call",
+      callId: "call_ok",
+      name: "tool",
+      arguments: "{}",
+    };
     const validResult = {
       type: "function_call_result",
       callId: "call_ok",
@@ -891,7 +977,11 @@ describe("runtime event normalization", () => {
     expect(
       input.some((item) => item.type === "function_call_result" && item.callId === "call_orphan"),
     ).toBe(false);
-    expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
+    expect(input[input.length - 1]).toEqual({
+      type: "message",
+      role: "user",
+      content: "continue",
+    });
   });
 
   test("items-mode input never silently drops history outside durable compaction", async () => {
@@ -913,7 +1003,11 @@ describe("runtime event normalization", () => {
     expect(Array.isArray(input)).toBe(true);
     expect(input.some((item) => item.content === huge)).toBe(true);
     expect(input.some((item) => item.content === "recent turn")).toBe(true);
-    expect(input[input.length - 1]).toEqual({ type: "message", role: "user", content: "continue" });
+    expect(input[input.length - 1]).toEqual({
+      type: "message",
+      role: "user",
+      content: "continue",
+    });
   });
 
   test("builds agents without MCP servers by default", () => {
@@ -973,7 +1067,11 @@ describe("runtime event normalization", () => {
     expect(detached.instructions).not.toContain("A workspace environment named");
 
     const minimal = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
-      workspaceEnvironment: { name: "bare", description: "  ", variableNames: [] },
+      workspaceEnvironment: {
+        name: "bare",
+        description: "  ",
+        variableNames: [],
+      },
     });
     expect(minimal.instructions).toContain(
       'A workspace environment named "bare" is attached to this session',
@@ -1188,7 +1286,10 @@ describe("runtime event normalization", () => {
   // gates the sandbox token mint: toolspaceEnabled AND a toolspace token minted
   // for this turn (surfaced to the runtime as options.toolspaceTokenSeed, which
   // the worker passes only for a non-selfhosted, non-skipped turn).
-  const toolspaceOn = { sandboxBackend: "none", toolspaceEnabled: true } as const;
+  const toolspaceOn = {
+    sandboxBackend: "none",
+    toolspaceEnabled: true,
+  } as const;
 
   test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
@@ -1423,7 +1524,13 @@ describe("runtime event normalization", () => {
         state: { manifest: new Manifest({ root: "/workspace" }) },
         exec: async ({ cmd }: { cmd: string }) => {
           commands.push(cmd);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       [
@@ -1558,7 +1665,9 @@ describe("runtime event normalization", () => {
     ]);
 
     await client.create!();
-    await client.resume!({ manifest: new Manifest({ root: "/workspace" }) } as any);
+    await client.resume!({
+      manifest: new Manifest({ root: "/workspace" }),
+    } as any);
 
     expect(sessions).toHaveLength(2);
   });
@@ -1589,7 +1698,9 @@ describe("runtime event normalization", () => {
         githubRepositoryId: 456,
       },
     ]);
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({ type: "dir" });
+    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+      type: "dir",
+    });
     const serialized = JSON.stringify(manifest);
     expect(serialized).not.toContain("git_repo");
     expect(serialized).not.toContain("githubInstallationId");
@@ -1608,7 +1719,9 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({ type: "dir" });
+    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+      type: "dir",
+    });
     const serialized = JSON.stringify(manifest);
     expect(serialized).not.toContain("git_repo");
     expect(serialized).not.toContain("githubInstallationId");
@@ -1877,7 +1990,13 @@ describe("runtime event normalization", () => {
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       [
@@ -1927,7 +2046,13 @@ describe("runtime event normalization", () => {
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       [
@@ -1962,7 +2087,13 @@ describe("runtime event normalization", () => {
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       [
@@ -2001,7 +2132,13 @@ describe("runtime event normalization", () => {
       {
         exec: async (args: Record<string, unknown>) => {
           calls.push(args);
-          return { output: "", stdout: "", stderr: "", wallTimeSeconds: 0, exitCode: 0 };
+          return {
+            output: "",
+            stdout: "",
+            stderr: "",
+            wallTimeSeconds: 0,
+            exitCode: 0,
+          };
         },
       } as any,
       {
@@ -2120,14 +2257,24 @@ describe("runtime event normalization", () => {
     const current = new Manifest({
       root: "/workspace",
       entries: {
-        "repos/acme/one": { type: "git_repo", host: "github.com", repo: "acme/one", ref: "main" },
+        "repos/acme/one": {
+          type: "git_repo",
+          host: "github.com",
+          repo: "acme/one",
+          ref: "main",
+        },
       },
       environment: { GH_TOKEN: "old-token" },
     });
     const target = new Manifest({
       root: "/workspace",
       entries: {
-        "repos/acme/one": { type: "git_repo", host: "github.com", repo: "acme/one", ref: "main" },
+        "repos/acme/one": {
+          type: "git_repo",
+          host: "github.com",
+          repo: "acme/one",
+          ref: "main",
+        },
       },
       environment: { GH_TOKEN: "new-token", NEW_KEY: "added" },
     });
@@ -2167,7 +2314,12 @@ describe("runtime event normalization", () => {
       defaultManifest: new Manifest({
         root: "/workspace",
         entries: {
-          "repos/acme/one": { type: "git_repo", host: "github.com", repo: "acme/one", ref: "main" },
+          "repos/acme/one": {
+            type: "git_repo",
+            host: "github.com",
+            repo: "acme/one",
+            ref: "main",
+          },
         },
         environment: { HOME: "/workspace", NEW_KEY: "fresh" },
       }),
@@ -2402,7 +2554,9 @@ describe("runtime event normalization", () => {
       expect(JSON.stringify(result)).toContain("found document for network policy");
       expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
       await expect(
-        prepared.mcpServers[0]!.callTool("docs__fetch_document", { id: "doc-1" }),
+        prepared.mcpServers[0]!.callTool("docs__fetch_document", {
+          id: "doc-1",
+        }),
       ).rejects.toThrow("not allowed");
     } finally {
       await prepared.close();
@@ -2457,7 +2611,9 @@ describe("runtime event normalization", () => {
 
   test("sends the shared access key to first-party MCP servers", async () => {
     const accessKey = "local-mcp-access-key";
-    const mcp = startTestMcpServer({ requiredHeaders: { "x-opengeni-access-key": accessKey } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { "x-opengeni-access-key": accessKey },
+    });
     const prepared = await prepareAgentTools(
       testSettings({
         authRequired: true,
@@ -2597,7 +2753,9 @@ describe("runtime event normalization", () => {
   });
 
   test("sends configured credential headers to third-party MCP servers", async () => {
-    const mcp = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
     const prepared = await prepareAgentTools(
       testSettings({
         mcpServers: [
@@ -2627,7 +2785,9 @@ describe("runtime event normalization", () => {
 
   test("sends broker-resolved connectionRef headers to third-party MCP servers", async () => {
     const connectionId = "11111111-1111-4111-8111-111111111111";
-    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer broker-token" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer broker-token" },
+    });
     const resolved: ResolveConnectionCredentialInput[] = [];
     const prepared = await prepareAgentTools(
       testSettings({
@@ -2651,7 +2811,11 @@ describe("runtime event normalization", () => {
         workspaceId: "22222222-2222-4222-8222-222222222222",
         resolveCredential: async (input) => {
           resolved.push(input);
-          return { status: "ok", connectionId, headers: { authorization: "Bearer broker-token" } };
+          return {
+            status: "ok",
+            connectionId,
+            headers: { authorization: "Bearer broker-token" },
+          };
         },
       },
     );
@@ -2679,7 +2843,9 @@ describe("runtime event normalization", () => {
 
   test("retries brokered MCP requests once after 401 with a forced credential refresh", async () => {
     const connectionId = "33333333-3333-4333-8333-333333333333";
-    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer fresh-token" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer fresh-token" },
+    });
     const resolved: ResolveConnectionCredentialInput[] = [];
     const prepared = await prepareAgentTools(
       testSettings({
@@ -2877,7 +3043,11 @@ describe("runtime event normalization", () => {
               authorizationUrl: "https://api.example.com/oauth/start",
             };
           }
-          return { status: "ok", connectionId, headers: { authorization: "Bearer list-token" } };
+          return {
+            status: "ok",
+            connectionId,
+            headers: { authorization: "Bearer list-token" },
+          };
         },
         onAuthNeeded: (payload) => {
           authNeeded.push(payload);
@@ -2960,7 +3130,9 @@ describe("runtime event normalization", () => {
   });
 
   test("connecting without the required credential headers fails", async () => {
-    const mcp = startTestMcpServer({ requiredHeaders: { "x-api-key": "capability-credential" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { "x-api-key": "capability-credential" },
+    });
     try {
       await expect(
         prepareAgentTools(
@@ -2984,7 +3156,10 @@ describe("runtime event normalization", () => {
 
   test("codex_apps: injects the dynamic ChatGPT bearer + account-id from the codex ALS at connect", async () => {
     const mcp = startTestMcpServer({
-      requiredHeaders: { authorization: "Bearer tok-123", "chatgpt-account-id": "acct-9" },
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "chatgpt-account-id": "acct-9",
+      },
     });
     const prepared = await codexRequestStorage.run(makeCodexContext(), () =>
       prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(mcp.url)] }), [
@@ -3007,11 +3182,17 @@ describe("runtime event normalization", () => {
 
   test("codex_apps: emits X-OpenAI-Product-Sku only when configured", async () => {
     const withSku = startTestMcpServer({
-      requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" },
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "X-OpenAI-Product-Sku": "plus",
+      },
     });
     const preparedWith = await codexRequestStorage.run(makeCodexContext(), () =>
       prepareAgentTools(
-        testSettings({ codexProductSku: "plus", mcpServers: [CODEX_APPS_ENTRY(withSku.url)] }),
+        testSettings({
+          codexProductSku: "plus",
+          mcpServers: [CODEX_APPS_ENTRY(withSku.url)],
+        }),
         [{ kind: "mcp", id: "codex_apps" }],
       ),
     );
@@ -3025,7 +3206,10 @@ describe("runtime event normalization", () => {
     // With the SKU unset, a server that REQUIRES the header rejects the connect,
     // and the best-effort drop leaves codex_apps absent (no throw).
     const requiresSku = startTestMcpServer({
-      requiredHeaders: { authorization: "Bearer tok-123", "X-OpenAI-Product-Sku": "plus" },
+      requiredHeaders: {
+        authorization: "Bearer tok-123",
+        "X-OpenAI-Product-Sku": "plus",
+      },
     });
     const preparedWithout = await codexRequestStorage.run(makeCodexContext(), () =>
       prepareAgentTools(testSettings({ mcpServers: [CODEX_APPS_ENTRY(requiresSku.url)] }), [
@@ -3041,7 +3225,9 @@ describe("runtime event normalization", () => {
   });
 
   test("codex_apps: no ALS store => no auth => graceful best-effort drop (turn does not throw)", async () => {
-    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
     // No codexRequestStorage.run wrapper: the bearer cannot be resolved, the
     // server fails auth at connect, and because codex_apps is best-effort the
     // call resolves with codex_apps simply absent (contrast the strict
@@ -3059,7 +3245,9 @@ describe("runtime event normalization", () => {
   });
 
   test("codex_apps: getToken rejection (needs_relogin) => graceful best-effort drop", async () => {
-    const mcp = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
+    const mcp = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
     const prepared = await codexRequestStorage.run(
       makeCodexContext({ tokenError: new Error("needs_relogin") }),
       () =>
@@ -3081,7 +3269,9 @@ describe("runtime event normalization", () => {
     const required = startTestMcpServer({
       requiredHeaders: { "x-api-key": "capability-credential" },
     });
-    const apps = startTestMcpServer({ requiredHeaders: { authorization: "Bearer tok-123" } });
+    const apps = startTestMcpServer({
+      requiredHeaders: { authorization: "Bearer tok-123" },
+    });
     try {
       await expect(
         codexRequestStorage.run(makeCodexContext(), () =>
@@ -3168,8 +3358,18 @@ describe("runtime event normalization", () => {
       const prepared = await prepareAgentTools(
         testSettings({
           mcpServers: [
-            { id: "geni-notebook", name: "Geni Notebook", url: broken.url, cacheToolsList: false },
-            { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+            {
+              id: "geni-notebook",
+              name: "Geni Notebook",
+              url: broken.url,
+              cacheToolsList: false,
+            },
+            {
+              id: "docs",
+              name: "Document Search",
+              url: healthy.url,
+              cacheToolsList: false,
+            },
           ],
         }),
         [
@@ -3258,7 +3458,12 @@ describe("runtime event normalization", () => {
               },
               cacheToolsList: false,
             },
-            { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+            {
+              id: "docs",
+              name: "Document Search",
+              url: healthy.url,
+              cacheToolsList: false,
+            },
           ],
         }),
         [
@@ -3337,7 +3542,9 @@ describe("runtime event normalization", () => {
     // auth machinery is involved at all) must never fail an unrelated turn. This
     // guards against the fix silently narrowing to auth-only. The degrade has NO
     // tool.auth_needed to lean on, so the structured warn is the only visibility.
-    const brokenOptional = startTestMcpServer({ serverErrorForMethods: ["tools/list"] });
+    const brokenOptional = startTestMcpServer({
+      serverErrorForMethods: ["tools/list"],
+    });
     const healthy = startTestMcpServer();
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;
@@ -3354,7 +3561,12 @@ describe("runtime event normalization", () => {
               url: brokenOptional.url,
               cacheToolsList: false,
             },
-            { id: "docs", name: "Document Search", url: healthy.url, cacheToolsList: false },
+            {
+              id: "docs",
+              name: "Document Search",
+              url: healthy.url,
+              cacheToolsList: false,
+            },
           ],
         }),
         [
@@ -3397,12 +3609,19 @@ describe("runtime event normalization", () => {
     // accepted) but rejects `tools/list` with a 401, so the throw surfaces from
     // getAllMcpTools exactly like the best-effort case — only here it is NOT
     // contained, because the caller depends on this server.
-    const strict = startTestMcpServer({ unauthorizedForMethods: ["tools/list"] });
+    const strict = startTestMcpServer({
+      unauthorizedForMethods: ["tools/list"],
+    });
     try {
       const prepared = await prepareAgentTools(
         testSettings({
           mcpServers: [
-            { id: "docs-strict", name: "Document Search", url: strict.url, cacheToolsList: false },
+            {
+              id: "docs-strict",
+              name: "Document Search",
+              url: strict.url,
+              cacheToolsList: false,
+            },
           ],
         }),
         [{ kind: "mcp", id: "docs-strict" }],
@@ -3464,7 +3683,11 @@ describe("runtime event normalization", () => {
                 connectionId,
                 authorizationUrl: "https://api.integrations-example.com/oauth/start",
               }
-            : { status: "ok", connectionId, headers: { authorization: "Bearer list-token" } },
+            : {
+                status: "ok",
+                connectionId,
+                headers: { authorization: "Bearer list-token" },
+              },
         onAuthNeeded: (payload) => {
           authNeeded.push(payload);
         },
@@ -3474,7 +3697,9 @@ describe("runtime event normalization", () => {
       const cap = prepared.mcpServers.find((s) => s.name === "cap")!;
       const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
       await cap.listTools();
-      const result = await cap.callTool("cap__search_documents", { query: "x" });
+      const result = await cap.callTool("cap__search_documents", {
+        query: "x",
+      });
       expect(result).toMatchObject({ isError: true });
       expect(authNeeded).toContainEqual(
         expect.objectContaining({
@@ -3499,7 +3724,9 @@ describe("runtime event normalization", () => {
     // bearer expired mid-turn). callTool must return a tool-error RESULT the model
     // sees — with LOOP-SAFE copy (do-not-retry) and only the safe error surface
     // (class + status), never the raw response body — rather than throw.
-    const flaky = startTestMcpServer({ unauthorizedForMethods: ["tools/call"] });
+    const flaky = startTestMcpServer({
+      unauthorizedForMethods: ["tools/call"],
+    });
     const healthy = startTestMcpServer();
     const warnings: unknown[][] = [];
     const originalWarn = console.warn;
@@ -3510,8 +3737,18 @@ describe("runtime event normalization", () => {
       const prepared = await prepareAgentTools(
         testSettings({
           mcpServers: [
-            { id: "flaky", name: "Flaky", url: flaky.url, cacheToolsList: false },
-            { id: "docs", name: "Docs", url: healthy.url, cacheToolsList: false },
+            {
+              id: "flaky",
+              name: "Flaky",
+              url: flaky.url,
+              cacheToolsList: false,
+            },
+            {
+              id: "docs",
+              name: "Docs",
+              url: healthy.url,
+              cacheToolsList: false,
+            },
           ],
         }),
         [
@@ -3523,7 +3760,9 @@ describe("runtime event normalization", () => {
         const flakySrv = prepared.mcpServers.find((s) => s.name === "flaky")!;
         const docs = prepared.mcpServers.find((s) => s.name === "docs")!;
         await flakySrv.listTools(); // fine — only tools/call 401s
-        const result = await flakySrv.callTool("flaky__search_documents", { query: "x" });
+        const result = await flakySrv.callTool("flaky__search_documents", {
+          query: "x",
+        });
         expect(result).toMatchObject({ isError: true });
         const text = JSON.stringify(result);
         // Loop-safety: the copy must steer the model away from re-calling it.
@@ -3532,7 +3771,9 @@ describe("runtime event normalization", () => {
         expect(text).toContain("StreamableHTTPError");
         expect(text).not.toContain("unauthorized");
         // Sibling unaffected.
-        const ok = await docs.callTool("docs__search_documents", { query: "y" });
+        const ok = await docs.callTool("docs__search_documents", {
+          query: "y",
+        });
         expect(JSON.stringify(ok)).toContain("found document for y");
       } finally {
         await prepared.close();
@@ -3574,14 +3815,23 @@ describe("runtime event normalization", () => {
     try {
       const prepared = await prepareAgentTools(
         testSettings({
-          mcpServers: [{ id: "flaky", name: "Flaky", url: flaky.url, cacheToolsList: false }],
+          mcpServers: [
+            {
+              id: "flaky",
+              name: "Flaky",
+              url: flaky.url,
+              cacheToolsList: false,
+            },
+          ],
         }),
         [{ kind: "mcp", id: "flaky", optional: true }],
       );
       try {
         const flakySrv = prepared.mcpServers[0]!;
         await flakySrv.listTools(); // fine — only tools/call 500s
-        const result = await flakySrv.callTool("flaky__search_documents", { query: "x" });
+        const result = await flakySrv.callTool("flaky__search_documents", {
+          query: "x",
+        });
         expect(result).toMatchObject({ isError: true });
         expect(JSON.stringify(result)).toMatch(/do not retry/i);
       } finally {
@@ -3596,18 +3846,29 @@ describe("runtime event normalization", () => {
   test("REQUIRED server tool INVOCATION failure still throws (fail-loud)", async () => {
     // The fail-loud default is unchanged for a required server (no optional flag,
     // no connectionRef): its tool-call failure must propagate, not degrade.
-    const strict = startTestMcpServer({ serverErrorForMethods: ["tools/call"] });
+    const strict = startTestMcpServer({
+      serverErrorForMethods: ["tools/call"],
+    });
     try {
       const prepared = await prepareAgentTools(
         testSettings({
-          mcpServers: [{ id: "docs-strict", name: "Docs", url: strict.url, cacheToolsList: false }],
+          mcpServers: [
+            {
+              id: "docs-strict",
+              name: "Docs",
+              url: strict.url,
+              cacheToolsList: false,
+            },
+          ],
         }),
         [{ kind: "mcp", id: "docs-strict" }],
       );
       try {
         await prepared.mcpServers[0]!.listTools(); // fine — only tools/call 500s
         await expect(
-          prepared.mcpServers[0]!.callTool("docs-strict__search_documents", { query: "x" }),
+          prepared.mcpServers[0]!.callTool("docs-strict__search_documents", {
+            query: "x",
+          }),
         ).rejects.toThrow();
       } finally {
         await prepared.close();
@@ -3622,7 +3883,9 @@ describe("runtime event normalization", () => {
     // RE-LIST (getAllMcpTools called again mid-turn on the SAME PrefixedMcpServer
     // instances) is covered too — the guard is on the instance method, so every
     // re-list degrades a best-effort failure while the sibling's tools survive.
-    const flaky = startTestMcpServer({ unauthorizedForMethods: ["tools/list"] });
+    const flaky = startTestMcpServer({
+      unauthorizedForMethods: ["tools/list"],
+    });
     const healthy = startTestMcpServer();
     const originalWarn = console.warn;
     console.warn = () => {};
@@ -3630,8 +3893,18 @@ describe("runtime event normalization", () => {
       const prepared = await prepareAgentTools(
         testSettings({
           mcpServers: [
-            { id: "flaky", name: "Flaky", url: flaky.url, cacheToolsList: false },
-            { id: "docs", name: "Docs", url: healthy.url, cacheToolsList: false },
+            {
+              id: "flaky",
+              name: "Flaky",
+              url: flaky.url,
+              cacheToolsList: false,
+            },
+            {
+              id: "docs",
+              name: "Docs",
+              url: healthy.url,
+              cacheToolsList: false,
+            },
           ],
         }),
         [
@@ -3642,7 +3915,9 @@ describe("runtime event normalization", () => {
       try {
         // Two successive resolutions model two model steps' re-lists.
         for (let i = 0; i < 2; i++) {
-          const tools = await getAllMcpTools({ mcpServers: prepared.mcpServers });
+          const tools = await getAllMcpTools({
+            mcpServers: prepared.mcpServers,
+          });
           const names = tools.map((t) => t.name);
           expect(names).toContain("docs__search_documents");
           expect(names.some((n) => n.startsWith("flaky__"))).toBe(false);
@@ -3777,7 +4052,11 @@ describe("pack skills in the sandbox skill index", () => {
       { path: "references/runbook.md", content: "Runbook." },
     ],
   };
-  const emptyManifest = new Manifest({ root: "/workspace", entries: {}, environment: {} });
+  const emptyManifest = new Manifest({
+    root: "/workspace",
+    entries: {},
+    environment: {},
+  });
 
   test("without pack skills the source is the unchanged bundled local-dir source", () => {
     const source = lazySkillSourceWithPackSkills([]);
@@ -3789,7 +4068,10 @@ describe("pack skills in the sandbox skill index", () => {
 
   test("pack skills join the bundled skills in one lazy skill index", () => {
     const source = lazySkillSourceWithPackSkills([infraSkill]);
-    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    const sourceDir = source.source as {
+      type: string;
+      children: Record<string, any>;
+    };
     expect(sourceDir.type).toBe("dir");
     // Bundled skills stay lazily materializable from their local directories.
     expect(sourceDir.children.checkov.type).toBe("local_dir");
@@ -3822,10 +4104,18 @@ describe("pack skills in the sandbox skill index", () => {
     const source = lazySkillSourceWithPackSkills([
       {
         name: "checkov",
-        files: [{ path: "SKILL.md", content: "---\ndescription: Pack-provided checkov.\n---\n" }],
+        files: [
+          {
+            path: "SKILL.md",
+            content: "---\ndescription: Pack-provided checkov.\n---\n",
+          },
+        ],
       },
     ]);
-    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    const sourceDir = source.source as {
+      type: string;
+      children: Record<string, any>;
+    };
     expect(sourceDir.children.checkov.type).toBe("dir");
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
@@ -3927,7 +4217,11 @@ describe("provider item id stripping", () => {
       status: "completed",
       output: { type: "text", text: "ok" },
     } as any;
-    const userMessage = { type: "message", role: "user", content: "do the thing" } as any;
+    const userMessage = {
+      type: "message",
+      role: "user",
+      content: "do the thing",
+    } as any;
     const input = [reasoning, message, functionCall, functionOutput, userMessage];
     const result = stripProviderItemIdsFilter({
       modelData: { input, instructions: "be useful" },
@@ -4066,7 +4360,12 @@ describe("provider item id stripping", () => {
     const filter = callModelInputFilterForSettings(testSettings())!;
     const original = "x".repeat(2_000_000);
     const input = [
-      { type: "function_call", callId: "huge-1", name: "sessions_list", arguments: "{}" },
+      {
+        type: "function_call",
+        callId: "huge-1",
+        name: "sessions_list",
+        arguments: "{}",
+      },
       {
         type: "function_call_result",
         callId: "huge-1",
@@ -4082,6 +4381,53 @@ describe("provider item id stripping", () => {
     expect(text).toContain("tokens truncated");
     expect(Buffer.byteLength(text, "utf8")).toBeLessThan(50_000);
     expect(((input[1] as any).output as { text: string }).text).toBe(original);
+  });
+
+  test("final model-input filtering matches canonical structured persistence bounds", async () => {
+    const settings = testSettings({ modelToolOutputTruncationTokens: 100 });
+    const filter = callModelInputFilterForSettings(settings)!;
+    const output: Record<string, unknown> = {
+      type: "界😀".repeat(100_000),
+      name: "n".repeat(500_000),
+      id: "i".repeat(500_000),
+      detail: "d".repeat(500_000),
+      ...Object.fromEntries(
+        Array.from({ length: 2_000 }, (_, index) => [
+          `property-${String(index).padStart(4, "0")}`,
+          `value-${index}`,
+        ]),
+      ),
+    };
+    let cursor = output;
+    for (let depth = 0; depth < 14; depth += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    cursor.payload = "x".repeat(2_000_000);
+    const item = {
+      type: "function_call_result",
+      callId: "structured-parity-1",
+      output,
+    };
+    const input = [item] as any;
+
+    const result = await filter({
+      modelData: { input },
+      agent: {} as any,
+      context: undefined,
+    });
+    const expected = boundModelToolOutputItem(item, settings.modelToolOutputTruncationTokens);
+    expect(result.input[0]).toEqual(expected);
+    expect(JSON.stringify(result.input[0])).toContain("structured object properties");
+    expect(Buffer.byteLength(JSON.stringify(result.input[0]), "utf8")).toBeLessThan(100_000);
+
+    const replayed = await filter({
+      modelData: { input: result.input },
+      agent: {} as any,
+      context: undefined,
+    });
+    expect(replayed.input).toEqual(result.input);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {
@@ -4105,8 +4451,17 @@ describe("provider item id stripping", () => {
     signal = { revision: 1, totalTokens: 200 };
     const next = [
       ...userOnly,
-      { type: "function_call", callId: "c1", name: "sessions_list", arguments: "{}" },
-      { type: "function_call_result", callId: "c1", output: "x".repeat(48_000) },
+      {
+        type: "function_call",
+        callId: "c1",
+        name: "sessions_list",
+        arguments: "{}",
+      },
+      {
+        type: "function_call_result",
+        callId: "c1",
+        output: "界".repeat(11_000),
+      },
     ] as any;
     try {
       await filter({
@@ -4159,7 +4514,7 @@ describe("provider item id stripping", () => {
       {
         type: "message",
         role: "assistant",
-        content: [{ type: "output_text", text: "x".repeat(48_000) }],
+        content: [{ type: "output_text", text: "🙂".repeat(6_000) }],
       },
       { type: "message", role: "user", content: "continue again" },
     ] as any;
@@ -4192,6 +4547,39 @@ describe("provider item id stripping", () => {
           name: "large_schema",
           description: "d".repeat(24_000),
           parameters: { type: "object", properties: {} },
+        },
+      ],
+    } as any;
+    await expect(
+      filter({
+        modelData: {
+          input: [{ type: "message", role: "user", content: "small" }] as any,
+          instructions: "system",
+        },
+        agent,
+        context: undefined,
+      }),
+    ).rejects.toBeInstanceOf(CompactionNeededError);
+  });
+
+  test("first-call accounting does not discount a multilingual tool schema", async () => {
+    const filter = contextRobustnessFilterForSettings(
+      testSettings({
+        contextWindowTokens: 12_000,
+        contextAutoCompactThresholdTokens: 7_000,
+      }),
+      { throwOnCompactionNeeded: true },
+    );
+    const agent = {
+      tools: [
+        {
+          type: "function",
+          name: "multilingual_schema",
+          description: "界".repeat(8_000),
+          parameters: {
+            type: "object",
+            properties: { 城市: { type: "string", description: "🙂" } },
+          },
         },
       ],
     } as any;
@@ -4250,7 +4638,10 @@ describe("provider item id stripping", () => {
       include: ["reasoning.encrypted_content"],
     });
     const disabled = buildOpenGeniAgent(
-      testSettings({ sandboxBackend: "none", openaiReasoningEncryptedContent: false }),
+      testSettings({
+        sandboxBackend: "none",
+        openaiReasoningEncryptedContent: false,
+      }),
       [],
     );
     expect((disabled as any).modelSettings.providerData).toBeUndefined();

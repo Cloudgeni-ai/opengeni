@@ -102,7 +102,14 @@ A rig's `defaultVariableSetIds` reference workspace variable-sets by id (validat
 The first-party MCP server exposes rig tools, gated by the same permissions as the REST routes and **registered only for grants that hold them**:
 
 - `rig_list` (`rigs:use`) — workspace rigs and their active versions.
-- `rig_get` (`rigs:use`) — one rig, its versions, and recent changes.
+- `rig_get` (`rigs:use`) — one rig with one bounded active definition plus
+  compact-by-query historical version/change summaries. The complete
+  pretty-printed MCP result is capped at 64 KiB. Historical setup scripts,
+  check bodies, change payloads, and verification logs are not copied into
+  model context; totals, counts, byte facts, previews, and truncation facts make
+  the omission explicit. `versionLimit` and `changeLimit` independently bound
+  the two histories (default 20, maximum 100). The access-controlled REST
+  version/change detail routes above remain the exact retained-detail surface.
 - `rig_propose_change` (`rigs:use`) — propose an additive `setup_append` change (the exact command that already worked in this sandbox) and start verification. On a session-scoped call this attributes the change to `session:<sessionId>` rather than the caller's user subject.
 - `rig_verify` (`rigs:use`) — trigger verification: pass `changeId` to (re-)verify a proposed change, or omit it to re-verify the active version's checks.
 - `rig_promote` (`rigs:manage`) — promote a verified `definition_edit` change to a new active version. **Not registered for a default sandboxed-agent session**: the worker's default first-party delegated token carries `rigs:use` but not `rigs:manage`, so an agent can propose and get changes verified but cannot itself promote a `definition_edit`. An explicitly scoped owner session may carry `rigs:manage`. A `setup_append` change needs no promote tool at all: a green clean-replay run merges it automatically.

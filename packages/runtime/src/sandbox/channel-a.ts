@@ -1,5 +1,4 @@
-// packages/runtime/src/sandbox/channel-a.ts — the Channel-A structured services
-// (P4.4 / modules/08-channel-a.md §4), provider-agnostic, called API-DIRECT.
+// Provider-agnostic structured sandbox services, called API-direct.
 //
 // THE NON-PIXEL SURFACE: file tree + read/write (the Pierre tree), git
 // status/diff hunks (the Pierre diff), and a terminal exec + interactive PTY.
@@ -8,10 +7,9 @@
 // op, returns inline JSON, and drops the handle. There is NO ownership/singleton
 // here — the live handle is whatever the caller resumed; it is non-owned and
 // dropped when the call returns. The same module is importable by the worker's
-// agent-turn for the A1 fs.changed side-effect it produces in-process.
+// agent turn for the fs.changed side effect it produces in-process.
 //
-// SDK GROUNDING (the load-bearing reality — see the adversarial review in the
-// module spec). Built on `session.exec(args): Promise<SandboxExecResult>` which
+// Built on `session.exec(args): Promise<SandboxExecResult>`, which
 // returns RAW {stdout,stderr,exitCode} on the agents-core local/docker sessions
 // (and Modal/the extensions providers expose the equivalent). `execCommand`
 // returns a BANNER-DECORATED string (formatExecResponse) — NEVER used for
@@ -109,6 +107,15 @@ export class ChannelAValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ChannelAValidationError";
+  }
+}
+/** A structurally valid Channel-A request could not be completed because the
+ * sandbox/provider control plane was temporarily unavailable. Callers may retry
+ * this class; it must never be presented as a bad user path. */
+export class ChannelAUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ChannelAUnavailableError";
   }
 }
 export class ChannelAConflictError extends Error {
@@ -346,16 +353,15 @@ export class SandboxChannelAService {
       "producer_status=${PIPESTATUS[0]};",
       `if [ "$producer_status" -ne 0 ] && [ "$producer_status" -ne 141 ]; then printf '%s\\0' ${shellQuote(FS_LIST_TRUNCATED_MARKER)}; fi`,
     ].join(" ");
-    const { stdout, exitCode, sessionId } = await this.runInConfinedDirectory(root, {
-      cmd: `bash -lc ${shellQuote(findCommand)}`,
+    const { stdout, exitCode } = await this.runInConfinedDirectory(root, {
+      cmd: internalBashCommand(findCommand),
       yieldTimeMs: 10_000,
       maxOutputTokens: Math.ceil(FS_LIST_MAX_OUTPUT_BYTES / 4) + 1_024,
     });
-    if (sessionId !== undefined) {
-      throw new ChannelAValidationError("filesystem listing exceeded its 10 second deadline");
-    }
     if (exitCode !== 0) {
-      throw new ChannelAValidationError(`filesystem listing failed with exit code ${exitCode}`);
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file list.",
+      );
     }
 
     const entries = stdout.split(NUL).filter((s) => s.length > 0);
@@ -432,8 +438,18 @@ export class SandboxChannelAService {
       if (isWorkspaceEscapeError(error)) {
         throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
       }
-      throw new ChannelANotFoundError(
-        `file not found: ${path} (${error instanceof Error ? error.message : String(error)})`,
+      if (isDefinitePathNotFoundError(error)) {
+        throw new ChannelANotFoundError(`file not found: ${path}`);
+      }
+      // A native provider read can fail while exec on the same live box remains
+      // healthy. The descriptor path below is equally confined and binary-safe,
+      // so use it as a single recovery path. Unknown provider failures must never
+      // be downgraded into a false 404.
+      if (this.session.exec || this.session.execCommand) {
+        return await this.fsReadViaExec(path, req);
+      }
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
       );
     }
     const bytes = typeof raw === "string" ? Buffer.from(raw, "utf8") : Buffer.from(raw);
@@ -454,7 +470,7 @@ export class SandboxChannelAService {
       `test -d "$target" || { printf '__OPENGENI_FS_NOT_FOUND__'; exit 66; }`,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.run({ cmd: `bash -lc ${shellQuote(script)}` });
+    const result = await this.run({ cmd: internalBashCommand(script) });
     this.assertConfinementResult(result, path || ".", "directory");
   }
 
@@ -483,16 +499,21 @@ export class SandboxChannelAService {
       requireParent,
       `printf '__OPENGENI_FS_CONFINED_OK__'`,
     ].join("; ");
-    const result = await this.run({ cmd: `bash -lc ${shellQuote(script)}` });
+    const result = await this.run({ cmd: internalBashCommand(script) });
     this.assertConfinementResult(result, path, "mutation");
   }
 
   private assertConfinementResult(
-    result: { stdout: string; exitCode: number | null },
+    result: { stdout: string; exitCode: number | null; sessionId?: number },
     path: string,
     kind: "directory" | "mutation",
   ): void {
-    if (result.stdout === "__OPENGENI_FS_CONFINED_OK__") return;
+    if (result.sessionId !== undefined) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the operation.",
+      );
+    }
+    if (result.stdout.includes("__OPENGENI_FS_CONFINED_OK__")) return;
     if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
@@ -502,7 +523,9 @@ export class SandboxChannelAService {
     if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
       throw new ChannelANotFoundError(`${kind} path not found: ${path}`);
     }
-    throw new ChannelAValidationError(`unable to validate workspace ${kind} path: ${path}`);
+    throw new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
+    );
   }
 
   /** Binary-safe fallback for sessions without native reads. The file is opened
@@ -520,10 +543,24 @@ export class SandboxChannelAService {
       `printf '__OPENGENI_FS_READ_OK__\\n'`,
       `head -c ${req.maxBytes} <&3 | base64 | tr -d '\\n'`,
     ].join("; ");
-    const { stdout, exitCode } = await this.run({
-      cmd: `bash -lc ${shellQuote(script)}`,
-      maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
-    });
+    let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+    try {
+      result = await this.run({
+        cmd: internalBashCommand(script),
+        maxOutputTokens: Math.ceil((req.maxBytes * 4) / 3) + 1_024,
+      });
+    } catch (error) {
+      if (error instanceof ChannelAUnsupportedError) throw error;
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
+    const { stdout, exitCode, sessionId } = result;
+    if (sessionId !== undefined) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
+    }
     if (stdout.includes("__OPENGENI_FS_ESCAPE__") || exitCode === 67) {
       throw new ChannelAValidationError(`path resolves outside workspace: ${path}`);
     }
@@ -531,10 +568,16 @@ export class SandboxChannelAService {
       throw new ChannelANotFoundError(`file not found: ${path}`);
     }
     const prefix = "__OPENGENI_FS_READ_OK__\n";
-    if (!stdout.startsWith(prefix) || (exitCode !== null && exitCode !== 0)) {
-      throw new ChannelAValidationError(`failed to read workspace file: ${path}`);
+    const successIndex = stdout.indexOf(prefix);
+    if (successIndex < 0 || (exitCode !== null && exitCode !== 0)) {
+      throw new ChannelAUnavailableError(
+        "Workspace files are temporarily unavailable. Retry the file read.",
+      );
     }
-    const bytes = Buffer.from(stdout.slice(prefix.length).replace(/\n/g, ""), "base64");
+    const bytes = Buffer.from(
+      stdout.slice(successIndex + prefix.length).replace(/\n/g, ""),
+      "base64",
+    );
     return this.shapeRead(path, bytes, req);
   }
 
@@ -1033,7 +1076,7 @@ export class SandboxChannelAService {
         'exit "$status"',
       ].join("\n");
       const { stdout } = await this.run({
-        cmd: `bash -lc ${shellQuote(command)}`,
+        cmd: internalBashCommand(command),
         workdir: this.workspaceRoot || undefined,
         yieldTimeMs: 20_000,
         // At most 256 Unix paths (PATH_MAX each) plus the status trailer. This
@@ -1243,26 +1286,47 @@ export class SandboxChannelAService {
       `printf '__OPENGENI_FS_CONFINED_OK__\\n'`,
       args.cmd,
     ].join("; ");
-    const result = await this.run({
-      ...args,
-      cmd: `bash -lc ${shellQuote(script)}`,
-      workdir: undefined,
-    });
     const successPrefix = "__OPENGENI_FS_CONFINED_OK__\n";
-    if (result.stdout.startsWith(successPrefix)) {
-      return { ...result, stdout: result.stdout.slice(successPrefix.length) };
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let result: Awaited<ReturnType<SandboxChannelAService["run"]>>;
+      try {
+        result = await this.run({
+          ...args,
+          cmd: internalBashCommand(script),
+          workdir: undefined,
+        });
+      } catch (error) {
+        if (error instanceof ChannelAUnsupportedError) throw error;
+        if (attempt === 0) continue;
+        throw new ChannelAUnavailableError(
+          "Workspace files are temporarily unavailable. Retry the operation.",
+        );
+      }
+      if (result.sessionId !== undefined) {
+        throw new ChannelAUnavailableError(
+          "Workspace files are temporarily unavailable. Retry after the current file operation finishes.",
+        );
+      }
+      const successIndex = result.stdout.indexOf(successPrefix);
+      if (successIndex >= 0) {
+        return { ...result, stdout: result.stdout.slice(successIndex + successPrefix.length) };
+      }
+      if (result.stdout.includes("__OPENGENI_FS_ESCAPE__") || result.exitCode === 67) {
+        throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
+      }
+      if (result.stdout.includes("__OPENGENI_FS_SYMLINK__") || result.exitCode === 68) {
+        throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
+      }
+      if (result.stdout.includes("__OPENGENI_FS_NOT_FOUND__") || result.exitCode === 66) {
+        throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);
+      }
+      // Every operation using this helper is read-only. A completed result with
+      // no trusted marker can be retried once, but is never downgraded into a
+      // user-input error.
+      if (attempt === 0) continue;
     }
-    if (result.stdout === "__OPENGENI_FS_ESCAPE__" || result.exitCode === 67) {
-      throw new ChannelAValidationError(`path resolves outside workspace: ${safe || "."}`);
-    }
-    if (result.stdout === "__OPENGENI_FS_SYMLINK__" || result.exitCode === 68) {
-      throw new ChannelAValidationError(`directory path must not be a symbolic link: ${safe}`);
-    }
-    if (result.stdout === "__OPENGENI_FS_NOT_FOUND__" || result.exitCode === 66) {
-      throw new ChannelANotFoundError(`directory path not found: ${safe || "."}`);
-    }
-    throw new ChannelAValidationError(
-      `unable to validate workspace directory path: ${safe || "."}`,
+    throw new ChannelAUnavailableError(
+      "Workspace files are temporarily unavailable. Retry the operation.",
     );
   }
 
@@ -1353,23 +1417,36 @@ function isWorkspaceEscapeError(error: unknown): boolean {
   );
 }
 
+/** Classify only provider errors that carry an explicit path-miss fact. Generic
+ * 404s and "not found" text are unsafe here because they can describe the box or
+ * session disappearing rather than the requested file. */
+function isDefinitePathNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const candidate = error as { code?: unknown; errno?: unknown; osNotFound?: unknown };
+  return (
+    candidate.osNotFound === true ||
+    candidate.code === "ENOENT" ||
+    candidate.errno === "ENOENT" ||
+    candidate.errno === -2
+  );
+}
+
 // Detect the Modal "the exec-session you're writing to no longer exists" banner.
 // writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). We treat that
-// as a lost PTY (the box rolled over / was re-created since the open) so the
-// caller surfaces a clean reconnect instead of writing the raw failure into
-// xterm. Matched loosely (`session not found`) with the id when present so a
-// future wording tweak still classifies it; the command's own output cannot spoof
-// it because the SDK emits this as the whole writeStdin return, not user output.
+// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
+// hard cancellation-fence fact, so classify only the complete known banner (or
+// its bare provider fact) carrying the exact tracked numeric id. ID-less,
+// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
 export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out) return false;
-  const lower = out.toLowerCase();
-  if (!lower.includes("session not found")) return false;
-  // When the id is present require it to match ours; when absent, the generic
-  // "session not found" still classifies (it is never legitimate stdout here).
-  return (
-    lower.includes(`session not found: ${execSessionId}`) || !/session not found:\s*\d+/.test(lower)
-  );
+  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
+  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
+  // JavaScript's `$` also matches immediately before one final line terminator.
+  // Requiring the regex match to consume the entire string keeps even that
+  // otherwise-special case fail-closed.
+  if (!match || match[0] !== out) return false;
+  // String equality is intentional: parseInt would normalize malformed facts
+  // such as `01` and can round an out-of-range integer into another identity.
+  return match[1] === String(execSessionId);
 }
 
 // Recover the numeric exec-session id the SDK embeds in a formatExecResponse
@@ -1442,6 +1519,12 @@ export function assertSafeRelPath(p: string): string {
 
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Run control-plane-generated Bash without user/provider startup files. The
+ * marker protocol is private control data; profile output must not corrupt it. */
+function internalBashCommand(script: string): string {
+  return `env -u BASH_ENV bash --noprofile --norc -c ${shellQuote(script)}`;
 }
 
 function assertSafePruneDirectoryName(name: string): string {

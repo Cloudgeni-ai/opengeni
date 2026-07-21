@@ -11,6 +11,8 @@ import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
   SandboxChannelAService,
+  ChannelANotFoundError,
+  ChannelAUnavailableError,
   MockAgentResponder,
   SelfhostedSession,
   parsePorcelainV2,
@@ -116,6 +118,61 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
     const read = await svc.fsRead({ path: "raw.dat", encoding: "utf8", maxBytes: 1024 });
     expect(read.isBinary).toBe(true);
     expect(read.encoding).toBe("base64"); // forced to base64 despite the utf8 request
+  });
+
+  test("a transient native read failure recovers through the confined descriptor path", async () => {
+    const commands: string[] = [];
+    const svc = new SandboxChannelAService({
+      session: {
+        readFile: async () => {
+          throw new Error("provider read endpoint temporarily unavailable");
+        },
+        exec: async (args) => {
+          commands.push(args.cmd);
+          return {
+            stdout: `__OPENGENI_FS_READ_OK__\n${Buffer.from("recovered\n").toString("base64")}`,
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+
+    const read = await svc.fsRead({ path: "file.txt", encoding: "utf8", maxBytes: 1_024 });
+    expect(read.content).toBe("recovered\n");
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.startsWith("env -u BASH_ENV bash --noprofile --norc -c ")).toBe(true);
+  });
+
+  test("a repeated native and confined read failure is unavailable, never a false 404", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        readFile: async () => {
+          throw new Error("provider read endpoint temporarily unavailable");
+        },
+        exec: async () => {
+          throw new Error("provider exec endpoint temporarily unavailable");
+        },
+      },
+    });
+
+    await expect(
+      svc.fsRead({ path: "file.txt", encoding: "utf8", maxBytes: 1_024 }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+  });
+
+  test("a structured native ENOENT remains a definite file miss", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        readFile: async () => {
+          throw Object.assign(new Error("missing"), { code: "ENOENT" });
+        },
+      },
+    });
+
+    await expect(
+      svc.fsRead({ path: "missing.txt", encoding: "utf8", maxBytes: 1_024 }),
+    ).rejects.toBeInstanceOf(ChannelANotFoundError);
   });
 
   test("fsList returns a coherent tree of a known directory", async () => {
@@ -368,7 +425,83 @@ describe("P4.4 SandboxChannelAService — FileSystem (real local box)", () => {
       svc.fsListPruned({ path: "", depth: 8, maxEntries: 10, includeHidden: true }, [
         "node_modules",
       ]),
-    ).rejects.toThrow(/exceeded its 10 second deadline/);
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+  });
+
+  test("fsList retries one completed transient probe and uses a profile-free control shell", async () => {
+    const commands: string[] = [];
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async (args) => {
+          commands.push(args.cmd);
+          if (commands.length === 1) {
+            return { stdout: "provider temporarily unavailable", stderr: "", exitCode: 1 };
+          }
+          return { stdout: "__OPENGENI_FS_CONFINED_OK__\n", stderr: "", exitCode: 0 };
+        },
+      },
+    });
+
+    const list = await svc.fsList({ path: "", depth: 1, maxEntries: 10, includeHidden: true });
+    expect(list.root.children).toEqual([]);
+    expect(commands).toHaveLength(2);
+    for (const command of commands) {
+      expect(command.startsWith("env -u BASH_ENV bash --noprofile --norc -c ")).toBe(true);
+      expect(command).not.toContain("bash -lc");
+    }
+  });
+
+  test("fsList accepts a trusted success record after provider prelude output", async () => {
+    let calls = 0;
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => {
+          calls += 1;
+          return {
+            stdout: "provider prelude\n__OPENGENI_FS_CONFINED_OK__\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        },
+      },
+    });
+
+    const list = await svc.fsList({ path: ".", depth: 1, maxEntries: 10, includeHidden: true });
+    expect(list.root.children).toEqual([]);
+    expect(calls).toBe(1);
+  });
+
+  test("fsList classifies repeated unmarked provider results as unavailable, never bad input", async () => {
+    let calls = 0;
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => {
+          calls += 1;
+          return { stdout: "", stderr: "provider unavailable", exitCode: 1 };
+        },
+      },
+    });
+
+    await expect(
+      svc.fsList({ path: ".", depth: 1, maxEntries: 10, includeHidden: true }),
+    ).rejects.toBeInstanceOf(ChannelAUnavailableError);
+    expect(calls).toBe(2);
+  });
+
+  test("deterministic confinement sentinels remain typed through surrounding provider output", async () => {
+    const svc = new SandboxChannelAService({
+      session: {
+        exec: async () => ({
+          stdout: "provider prelude\n__OPENGENI_FS_NOT_FOUND__\n",
+          stderr: "",
+          exitCode: 66,
+        }),
+      },
+    });
+
+    await expect(
+      svc.fsList({ path: "missing", depth: 1, maxEntries: 10, includeHidden: true }),
+    ).rejects.toBeInstanceOf(ChannelANotFoundError);
   });
 
   test("write with overwrite:false on an existing path throws conflict", async () => {
@@ -1451,10 +1584,24 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
   test("isExecSessionLostBanner classifies the lost-PTY writeStdin banner", () => {
     // The Modal writeStdin non-throwing banner when the exec-session is gone.
     expect(isExecSessionLostBanner("write_stdin failed: session not found: 1", 1)).toBe(true);
-    // A generic 'session not found' (no id) still classifies — never legit output.
-    expect(isExecSessionLostBanner("session not found", 1)).toBe(true);
-    // A different id present means it's not OUR session's loss banner.
+    expect(isExecSessionLostBanner("session not found: 1", 1)).toBe(true);
+    // The hard fence requires the exact tracked numeric id and known complete
+    // banner. Generic, malformed, mismatched, and ambiguous text fails closed.
+    expect(isExecSessionLostBanner("session not found", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: nope", 1)).toBe(false);
     expect(isExecSessionLostBanner("write_stdin failed: session not found: 9", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 10", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1 or 2", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1x", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 01", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed:  session not found: 1", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found:\n1", 1)).toBe(false);
+    expect(isExecSessionLostBanner(" write_stdin failed: session not found: 1", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1 ", 1)).toBe(false);
+    expect(isExecSessionLostBanner("write_stdin failed: session not found: 1\n", 1)).toBe(false);
+    expect(
+      isExecSessionLostBanner("write_stdin failed: session not found: 9007199254740993", 1),
+    ).toBe(false);
     // Real PTY output is never misclassified.
     expect(isExecSessionLostBanner("root@box:~# echo hi\nhi\n", 1)).toBe(false);
     expect(isExecSessionLostBanner("", 1)).toBe(false);

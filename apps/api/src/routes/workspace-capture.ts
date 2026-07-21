@@ -1,4 +1,4 @@
-// Workbench v2 — capture READ serving (dossier §10.3).
+// Workbench v2 — capture READ serving.
 //
 // The two GET capture routes in `sessions.ts` are thin: grant-first (files:read),
 // load the row (DB, RLS-scoped), then delegate the response SHAPING to the two
@@ -46,7 +46,7 @@ function signedUrl(signed: { url: string; expiresAt: Date }): { url: string; exp
 // manifest key, the blob is gone (GC'd), or the bytes fail to parse/validate — a
 // malformed capture is treated as "no capture available" (the list route degrades
 // to {available:false}, the file route to 404). Capture reads must NEVER be worse
-// than the status-quo live/wake fallback (dossier §10.10), so a poison row can
+// than the status-quo live/wake fallback, so a poison row can
 // never 500 the workbench; it degrades and logs.
 async function loadManifest(
   row: WorkspaceCaptureRow,

@@ -326,6 +326,42 @@ describe("catalog import persistence", () => {
     ).toBe(true);
   }, 180_000);
 
+  test("listEnabledMcpCapabilityServers excludes stale registry entries", async () => {
+    if (!available) return;
+    const ws = await freshWorkspace();
+    const batch = await createImportBatch(db, {
+      source: "integrations.sh",
+      snapshotDate: new Date("2026-07-03T23:41:44.132Z"),
+      snapshotRef: "stale-runtime-fence",
+      attributionNote: "MIT attribution",
+    });
+    const capabilityId = "mcp:integrations-sh:stale-runtime-fence";
+    await upsertRegistryCapabilityCatalogItem(
+      db,
+      registryRow({
+        id: capabilityId,
+        importBatchId: batch.id,
+        providerDomain: "stale-runtime.example",
+        mcpUrl: "https://stale-runtime.example/mcp",
+        name: "Stale Runtime Fence",
+        tier: "community",
+        provenance: "discovered",
+      }),
+    );
+    await enableCapabilityInstallation(db, {
+      accountId: ws.accountId,
+      workspaceId: ws.workspaceId,
+      capabilityId,
+      kind: "mcp",
+      metadata: { mcpConnectivity: { status: "ok" } },
+    });
+    expect(await listEnabledMcpCapabilityServers(db, ws.workspaceId)).toHaveLength(1);
+
+    await markStaleRegistryCatalogItems(db, [], batch.id);
+
+    expect(await listEnabledMcpCapabilityServers(db, ws.workspaceId)).toEqual([]);
+  }, 180_000);
+
   test("markStaleRegistryCatalogItems marks multiple removed registry rows in one call", async () => {
     if (!available) return;
     const batch1 = await createImportBatch(db, {
@@ -473,7 +509,7 @@ function registryRow(overrides: {
   tier: "verified" | "community";
   provenance: string;
   logoAssetPath?: string | null;
-  authKind?: "oauth2" | "api_key" | "none" | "unknown";
+  authKind?: "none" | "oauth2" | "api_key" | "unknown";
   metadata?: Record<string, unknown>;
 }) {
   return {
@@ -488,6 +524,6 @@ function registryRow(overrides: {
     tier: overrides.tier,
     provenance: overrides.provenance,
     logoAssetPath: overrides.logoAssetPath ?? null,
-    metadata: overrides.metadata ?? { mcpProbe: { status: "real", reason: "db_test" } },
+    metadata: overrides.metadata ?? {},
   };
 }

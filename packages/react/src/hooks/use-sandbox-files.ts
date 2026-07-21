@@ -88,11 +88,10 @@ export type UseSandboxFilesOptions = ClientOverride & {
    *  (with no `fs.changed` event) never re-lists. Passing liveness re-lists when
    *  the box first becomes warm, so the tree populates as soon as the box is up. */
   liveness?: string | undefined;
-  /** The latest turn-end workspace capture (from `useWorkspaceCapture`). When the
-   *  box is NOT warm, the tree paints INSTANTLY from this capture's tree index (the
-   *  <200ms cold first paint) instead of blocking on a Channel-A list. A warm box
-   *  always wins (live path unchanged). On the cold→warm transition the live list
-   *  is merged in place — no remount, no flash (dossier §10.4 / §12-A1/D1). */
+  /** The latest turn-end workspace capture (from `useWorkspaceCapture`). The tree
+   *  paints immediately from this durable index, then a warm box reconciles live
+   *  in place. If that live read fails, the capture remains a truthful read-only
+   *  fallback instead of turning into an empty error surface. */
   capture?: WorkspaceCaptureManifest | null | undefined;
   /** Called when an OPTIMISTIC mutation is reverted because its background
    *  Channel-A op failed (e.g. a 409 rename collision). The host wires this to a
@@ -408,6 +407,7 @@ export function useSandboxFiles(
   const [stateIdentity, setStateIdentity] = useState(identityKey);
   // Which source the tree currently reflects — "capture" (cold paint) or "live".
   const [source, setSource] = useState<"live" | "capture" | null>(null);
+  const sourceRef = useRef<"live" | "capture" | null>(null);
   const statusRef = useRef<Map<string, FileTreeStatus>>(new Map());
   // Async reads, event cursors, and debounced work are scoped to the hook's
   // workspace/session/root identity. These refs are reset/fenced at that boundary.
@@ -437,7 +437,7 @@ export function useSandboxFiles(
   // Overlay the git-status tint onto the tree. IDENTITY-PRESERVING: a node whose
   // tint and children are unchanged is returned by reference (not rebuilt), so a
   // re-tint or a cold→warm reconcile does NOT remount unchanged rows — the
-  // no-flicker constraint (dossier §3 #6 / §12-D1). An empty overlay is still
+  // no-flicker constraint. An empty overlay is still
   // meaningful: it strips stale tints after the repository becomes clean.
   const applyStatus = useCallback((nodes: FileTreeNode[]): FileTreeNode[] => {
     const overlay = statusRef.current;
@@ -509,6 +509,7 @@ export function useSandboxFiles(
         applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)),
       );
       // Live data is now serving — flip the source off the capture snapshot.
+      sourceRef.current = "live";
       setSource("live");
     } catch (cause) {
       if (refreshGenerationRef.current !== generation) return;
@@ -523,7 +524,7 @@ export function useSandboxFiles(
   // zero Channel-A calls. The tree index is workspace-relative (`treeIndex`); the
   // tint overlay comes from the capture's changed `files`. Uses the SAME merge as
   // the live reconcile so a re-seed (a newer capture arriving cold) patches deltas
-  // in place instead of remounting the tree (§12-D1). Never runs while warm.
+  // in place instead of remounting the tree (§12-D1).
   const seedFromCapture = useCallback(
     (manifest: WorkspaceCaptureManifest) => {
       const overlay = new Map<string, FileTreeStatus>();
@@ -540,6 +541,7 @@ export function useSandboxFiles(
       setTree((prev) =>
         applyStatus(prev.length === 0 ? children : mergeRootChildren(prev, children)),
       );
+      sourceRef.current = "capture";
       setSource("capture");
       setError(null);
     },
@@ -552,7 +554,7 @@ export function useSandboxFiles(
       // Capture browsing is a durable server-side read surface. Never turn a
       // folder click into a Channel-A list while cold; truncated residue already
       // renders a truthful "contents on machine" row.
-      if (!isLive && capture) return;
+      if (source === "capture" && capture) return;
       const identityGeneration = identityGenerationRef.current;
       const identitySignal = identityAbortRef.current.signal;
       // Mark this node as expanding so the FileBrowser can render a spinner while
@@ -587,7 +589,7 @@ export function useSandboxFiles(
         }
       }
     },
-    [client, workspaceId, sessionId, capture, isLive, applyStatus],
+    [client, workspaceId, sessionId, capture, source, applyStatus],
   );
 
   const readFile = useCallback(
@@ -598,7 +600,7 @@ export function useSandboxFiles(
         ? AbortSignal.any([identitySignal, requestOptions.signal])
         : identitySignal;
       const captured = capture?.files.find((file) => file.path === path && !file.deleted);
-      if (!isLive && capture) {
+      if (source === "capture" && capture) {
         if (!captured) {
           throw new CapturedFileUnavailableError(path, "not-captured");
         }
@@ -682,7 +684,7 @@ export function useSandboxFiles(
       }
       return await client.fsRead(workspaceId, sessionId, { path }, { signal });
     },
-    [client, workspaceId, sessionId, capture, isLive],
+    [client, workspaceId, sessionId, capture, source],
   );
 
   // TARGETED reconcile of a single directory — re-list ONE parent at depth 1 and
@@ -900,11 +902,10 @@ export function useSandboxFiles(
     [client, workspaceId, sessionId, runOptimistic],
   );
 
-  // Initial paint + reset on identity change. Source selection (dossier §10.4):
-  //   • warm/draining box → the LIVE list (unchanged behavior).
-  //   • cold/offline box WITH a capture → paint instantly from the capture index
-  //     (no Channel-A; the box warms in the background and the warm effect below
-  //     reconciles live in place).
+  // Initial paint + reset on identity change. Source selection:
+  //   • any box WITH a capture → paint instantly from the durable capture index;
+  //     a warm/draining box then reconciles live in place.
+  //   • if that live reconciliation fails, keep the capture visible and read-only.
   //   • cold box with NO capture → best-effort live list (status quo — never worse).
   // Key the seed on the capture's REVISION (a primitive), not the manifest object
   // — a consumer passing a fresh object each render (or a new revision) must not
@@ -939,6 +940,7 @@ export function useSandboxFiles(
       setTree([]);
       setStateIdentity(identityKey);
       setExpandingPaths(new Set());
+      sourceRef.current = null;
       setSource(null);
       setLoading(false);
       setError(null);
@@ -946,11 +948,11 @@ export function useSandboxFiles(
     if (!enabled) {
       return;
     }
-    if (isLive) {
-      void refresh();
-    } else if (captureRevision !== null && captureRef.current) {
-      seedFromCapture(captureRef.current);
-    } else {
+    const currentCapture = captureRevision !== null ? captureRef.current : null;
+    if (currentCapture && (identityChanged || !isLive || sourceRef.current !== "live")) {
+      seedFromCapture(currentCapture);
+    }
+    if (isLive || !currentCapture) {
       void refresh();
     }
     return () => {
@@ -1069,23 +1071,6 @@ export function useSandboxFiles(
     },
     [],
   );
-
-  // Re-list when the box first becomes warm. The FileSystem capability is
-  // advertised on a cold box too, so the mount-time `refresh()` can run before
-  // the box is up (empty/errored result); without an `fs.changed` event the tree
-  // would stay empty forever. A cold->warm transition re-lists once the box is
-  // actually serving — the real fix for the "No files" the deployed app showed.
-  const wasLiveRef = useRef(false);
-  const liveness = options.liveness;
-  useEffect(() => {
-    const live = liveness === "warm" || liveness === "draining";
-    if (enabled && live && !wasLiveRef.current) {
-      wasLiveRef.current = true;
-      void refresh();
-    } else if (!live) {
-      wasLiveRef.current = false;
-    }
-  }, [enabled, liveness, refresh]);
 
   const identityMatches = enabled && stateIdentity === identityKey;
   return {

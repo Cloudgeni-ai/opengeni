@@ -36,7 +36,7 @@ export type UseTurnQueueResult = {
   /** Human/API prompts exactly in server execution order. Never client-sorted. */
   queue: SessionTurn[];
   effectiveControl: EffectiveSessionControl | null;
-  /** Saved queue work is waiting only for its predecessor to reach quiescence. */
+  /** The latest interrupted attempt has not yet durably proved physical quiescence. */
   stoppingPreviousAttempt: boolean;
   loading: boolean;
   error: Error | null;

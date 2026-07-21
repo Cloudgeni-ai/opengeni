@@ -12,7 +12,7 @@
 // (never an app context), notifications flow through an optional `onNotify` prop
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
-// external embedder (cloudgeni #1577) uses — that is criterion F1.
+// external embedder uses — that is criterion F1.
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
@@ -123,7 +123,7 @@ function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
 }
 
 export type WorkspaceMachine = {
-  /** The derived live/waking/offline chip model (dossier §3 #10). */
+  /** The derived live/waking/offline chip model. */
   chip: MachineChip;
   /** The machine these surfaces are bound to (the Modal group box or a
    *  self-hosted machine), or null while the fleet is still resolving. */
@@ -240,7 +240,7 @@ export function useSandboxWorkspaceTabs(
   // The FS is writable only when it's live AND not read-only. A self-hosted box
   // that's offline (or any read-only advertisement) or a capture-served cold tree
   // must not offer create/rename/delete/edit affordances — you cannot mutate a
-  // machine you can't reach (dossier §12-A2/C3). Tree-structure ops need a warm
+  // machine you can't reach (C3). Tree-structure ops need a warm
   // writable box; content editing on a cold CLOUD box is the wake-on-edit path in
   // the editor, not tree mutation.
   const fsReadOnly = capabilities?.FileSystem.readOnly ?? false;
@@ -285,7 +285,8 @@ export function useSandboxWorkspaceTabs(
 
   // The cold-paint data source: the latest turn-end capture, fetched with a single
   // api round-trip on mount (no machine). Feeds the Files tree + the Changes/Git
-  // diff when the box is not warm; a warm box always wins (live path unchanged).
+  // diff immediately; a warm box reconciles live without discarding the capture
+  // when that provider read is temporarily unavailable.
   const captureState = useWorkspaceCapture(sessionId, { events });
   const captureAvailable = captureState.available;
   const liveWorkspaceExpected = liveness === "warm" || liveness === "draining";
@@ -510,7 +511,9 @@ export function useSandboxWorkspaceTabs(
           git={git}
           stagedGit={stagedGit}
           fileSystemAvailable={fileSystemOn || captureAvailable}
-          editable={filesEditable}
+          editable={
+            filesEditable && files.source === "live" && files.error === null && !files.loading
+          }
           workspaceResting={
             !liveWorkspaceExpected &&
             liveness !== undefined &&
@@ -784,7 +787,7 @@ function chipDotClass(state: MachineChip["state"]): string {
  * with a popover carrying the machine identity, connection state, the "shown as
  * of <time>" staleness note, the shared-session disclosure, and a retry when the
  * fleet failed to resolve (the old per-surface machine bar + Sandbox info tab,
- * folded into one header affordance — dossier §10.6 recommendation).
+ * folded into one header affordance — recommendation).
  */
 function MachineStateChip({
   chip,
@@ -918,13 +921,44 @@ function ChangesTabBody({
 
   if (diff.length > 0) {
     return (
-      <WorkbenchChanges
-        diff={diff}
-        source={git.source}
-        capturedAt={git.capturedAt}
-        captureRevision={captureRevision}
-        {...(onOpenFile ? { onOpenFile } : {})}
-      />
+      <div className="flex h-full min-h-0 flex-col">
+        {git.error ? (
+          <div
+            role="status"
+            aria-live="polite"
+            data-opengeni-changes-degraded
+            className="flex shrink-0 items-center gap-2 border-b border-og-status-running/30 bg-og-status-running/10 px-2 py-1.5 text-og-xs text-og-fg-muted"
+          >
+            <TriangleAlertIcon className="size-3.5 shrink-0 text-og-status-running" aria-hidden />
+            <span className="min-w-0 flex-1">
+              {git.source === "capture"
+                ? "Live changes are temporarily unavailable. Showing the latest captured revision."
+                : "Live refresh failed. Showing the last loaded changes."}
+            </span>
+            <button
+              type="button"
+              onClick={() => void git.refresh()}
+              disabled={git.loading}
+              className="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-og-sm border border-og-border bg-og-surface-1 px-2 font-medium text-og-fg transition-colors hover:border-og-border-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-og-accent disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11"
+            >
+              <RefreshCwIcon
+                className={cn("size-3", git.loading && "animate-spin motion-reduce:animate-none")}
+                aria-hidden
+              />
+              Retry
+            </button>
+          </div>
+        ) : null}
+        <div className="min-h-0 flex-1">
+          <WorkbenchChanges
+            diff={diff}
+            source={git.source}
+            capturedAt={git.capturedAt}
+            captureRevision={captureRevision}
+            {...(onOpenFile ? { onOpenFile } : {})}
+          />
+        </div>
+      </div>
     );
   }
 

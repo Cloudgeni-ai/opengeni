@@ -272,7 +272,7 @@ export async function createAndStartSession(input: {
   resources: ResourceRef[];
   tools: ToolRef[];
   // Public admission always supplies provenance; optional keeps internal
-  // callers that predate OPE-16 source-compatible during the rolling deploy.
+  // callers that predate tool-policy provenance source-compatible during the rolling deploy.
   toolPolicy?: SessionToolPolicy;
   clientEventId?: string;
   model: string;
@@ -898,7 +898,7 @@ export async function createSessionForRequest(
   ) {
     firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
   }
-  // OPE-16 policy admission. The raw payload is retained so omitted `tools`
+  // Tool-policy admission. The raw payload is retained so omitted `tools`
   // differs from explicit `tools: []`. Child policy is based only on the
   // worker-signed parent claim; caller-supplied parent metadata is ignored.
   const toolsProvided = hasOwnProperty(rawPayload, "tools");
@@ -943,7 +943,7 @@ export async function createSessionForRequest(
     toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
   }
   // First-party OpenGeni remains eagerly attached to every session. Its
-  // individual tools are permission-gated by the existing OPE-72 contract.
+  // individual tools remain permission-gated by the existing access contract.
   const tools = withFirstPartyTools(selectedTools, runtimeSettings);
   // Shared-sandbox placement (addendum 05 §D.2/§D.3, decision I10/OD-S1).
   //
