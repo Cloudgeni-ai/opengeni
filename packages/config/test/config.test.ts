@@ -299,7 +299,7 @@ describe("sandbox preparation profiles", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      // The whole point of I8/OD-8: desktop on + no secret is NOT a boot-fail.
+      // The whole point of stream-token availability contract: desktop on + no secret is NOT a boot-fail.
       // getSettings() returns settings (does not throw), emits a loud warning,
       // and streamTokenDegraded() flags the runtime degrade to transport:null.
       const settings = withEnv(

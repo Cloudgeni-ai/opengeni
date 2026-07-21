@@ -231,11 +231,24 @@ class SnapshotTimeoutError extends Error {
 export async function waitForWarmSnapshot(
   snapshot: Promise<unknown>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  if (signal?.aborted) return false;
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let cancelListener: (() => void) | undefined;
   try {
     await Promise.race([
       snapshot,
+      ...(signal
+        ? [
+            new Promise<never>((_resolve, reject) => {
+              cancelListener = () =>
+                reject(signal.reason ?? new Error("workspace snapshot wait cancelled"));
+              signal.addEventListener("abort", cancelListener, { once: true });
+              if (signal.aborted) cancelListener();
+            }),
+          ]
+        : []),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new SnapshotTimeoutError(timeoutMs)), timeoutMs);
         if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
@@ -245,6 +258,7 @@ export async function waitForWarmSnapshot(
     ]);
     return true;
   } catch (error) {
+    if (signal?.aborted) return false;
     if (error instanceof SnapshotTimeoutError) {
       console.error("mid-session workspace snapshot wait timed out (turn unaffected)", error);
       return false;
@@ -254,6 +268,7 @@ export async function waitForWarmSnapshot(
     if (timeout) {
       clearTimeout(timeout);
     }
+    if (cancelListener) signal?.removeEventListener("abort", cancelListener);
   }
 }
 
@@ -389,9 +404,17 @@ function preserveWorkspaceArchivesOnResumeState(
  */
 export async function maybePersistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
-  ids: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    sandboxGroupId: string;
+  },
   session: unknown,
   leaseEpoch: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const { db, settings } = services;
   const intervalMs = settings.sandboxSnapshotIntervalMs;
@@ -404,12 +427,18 @@ export async function maybePersistWarmWorkspaceSnapshot(
   if (typeof persistable.persistWorkspace !== "function") {
     return false;
   }
+  if (signal?.aborted) {
+    return false;
+  }
   try {
     // Cheap throttle pre-check before the (potentially slow) capture;
     // persistWarmSnapshot re-checks atomically under the row lock, so this is
     // purely a cost optimization, not the correctness guard.
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     if (!lease || lease.leaseEpoch !== leaseEpoch || lease.liveness !== "warm") {
+      return false;
+    }
+    if (signal?.aborted) {
       return false;
     }
     const sessionState =
@@ -437,8 +466,18 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // guard this timeout exists to provide.
     const capture = persistable.persistWorkspace();
     capture.catch(() => undefined);
+    let cancelListener: (() => void) | undefined;
     const bytes = await Promise.race([
       capture,
+      ...(signal
+        ? [
+            new Promise<undefined>((resolve) => {
+              cancelListener = () => resolve(undefined);
+              signal.addEventListener("abort", cancelListener, { once: true });
+              if (signal.aborted) cancelListener();
+            }),
+          ]
+        : []),
       new Promise<undefined>((resolve) => {
         timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
         if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
@@ -449,13 +488,20 @@ export async function maybePersistWarmWorkspaceSnapshot(
       if (timeout) {
         clearTimeout(timeout);
       }
+      if (cancelListener) signal?.removeEventListener("abort", cancelListener);
     });
     if (!bytes || bytes.length === 0) {
+      return false;
+    }
+    if (signal?.aborted) {
       return false;
     }
     const { wrote, priorArchiveForGc } = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      turnId: ids.turnId,
+      attemptId: ids.attemptId,
       sandboxGroupId: ids.sandboxGroupId,
       expectedEpoch: leaseEpoch,
       workspaceArchive: Buffer.from(bytes).toString("base64"),

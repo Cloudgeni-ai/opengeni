@@ -1,32 +1,44 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  addSessionSystemUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   getActiveSessionHistoryItems,
   getSession,
+  getSessionQueueSnapshot,
   getSessionTurn,
   initializeSessionStartAtomically,
   isSessionCompactionRequested,
+  listOutstandingSessionSystemUpdates,
   listSessionEvents,
+  listSessionSystemUpdatesForTurn,
+  peekSessionWork,
   requestSessionCompaction,
+  submitHumanPromptInTransaction,
   withWorkspaceRls,
+  withWorkspaceSubjectRls,
 } from "@opengeni/db";
 import * as schema from "@opengeni/db/schema";
 import type { EventBus } from "@opengeni/events";
 import {
+  CompactionNeededError,
+  CompactionProviderResponseError,
+  createProductionAgentRuntime,
   EmptyCompactionSummaryError,
   SUMMARY_PREFIX,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
 import {
   acquireSharedTestDatabase,
+  ScriptedModel,
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
 import { createActivityTestHarness } from "../src/activities";
-import { maybeCompactContext } from "../src/activities/context-compaction";
+import { isContextWindowExceeded, maybeCompactContext } from "../src/activities/context-compaction";
 
 async function claimCompactionForAttempt(
   db: Parameters<typeof claimSessionWorkForAttempt>[0],
@@ -651,6 +663,309 @@ describe("standalone context compaction execution", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "turn.recovery.requested" }));
   });
 
+  test("same-turn empty-summary recovery settles once and waits for actionable durable input", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "Same-turn compaction convergence test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "Same-turn compaction convergence test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const originalItems = [
+      {
+        type: "message",
+        role: "user",
+        content: "preserve the active transcript exactly",
+      },
+      {
+        type: "message",
+        role: "assistant",
+        status: "completed",
+        content: [{ type: "output_text", text: "durable work already completed" }],
+      },
+    ];
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values(
+        originalItems.map((item, position) => ({
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position,
+          item,
+        })),
+      );
+    });
+    const historyBefore = JSON.stringify(
+      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+        (row) => row.item,
+      ),
+    );
+
+    const ordinary = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "Child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    if (!ordinary.added) throw new Error("ordinary update was not inserted");
+    const goal = await createSessionGoal(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      text: "Finish without a compaction loop",
+      createdBy: "api",
+    });
+    const goalContinuation = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "goal_continuation",
+      classification: "info",
+      sourceId: goal.id,
+      dedupeKey: `goal-continuation:${goal.id}:${goal.version}:1`,
+      summary: "Continue the goal",
+      payload: {
+        type: "goal_continuation",
+        goalId: goal.id,
+        goalVersion: goal.version,
+        autoContinuation: 1,
+        prompt: "Continue the goal",
+      },
+    });
+    if (!goalContinuation.added) throw new Error("goal update was not inserted");
+
+    const scriptedModel = new ScriptedModel([
+      {
+        error: new CompactionNeededError({
+          signalTokens: 250_000,
+          thresholdTokens: 225_000,
+          signalSource: "provider",
+        }),
+      },
+    ]);
+    let summaryCalls = 0;
+    const summarizerClient = {
+      chat: {
+        completions: {
+          create: async () => {
+            summaryCalls += 1;
+            return {
+              id: "chatcmpl-empty-recovery",
+              usage: {
+                prompt_tokens: 321,
+                completion_tokens: 0,
+                total_tokens: 321,
+              },
+              choices: [{ message: { content: "" }, finish_reason: "stop" }],
+            };
+          },
+        },
+      },
+    } as unknown as NonNullable<ReturnType<OpenGeniRuntime["resolveTurnModel"]>>["client"];
+    const productionRuntime = createProductionAgentRuntime({
+      model: scriptedModel,
+    });
+    const runtime: OpenGeniRuntime = {
+      ...productionRuntime,
+      configure: () => undefined,
+      resolveTurnModel: () => ({
+        provider: {
+          id: "test-chat",
+          label: "Test chat",
+          kind: "api-key",
+          api: "chat",
+          builtin: false,
+        },
+        client: summarizerClient,
+        model: scriptedModel,
+        configured: {
+          id: "scripted-model",
+          label: "Scripted model",
+          providerId: "test-chat",
+          providerLabel: "Test chat",
+          api: "chat",
+          contextWindowTokens: 250_000,
+          effectiveContextWindowTokens: 250_000,
+          autoCompactTokenLimit: 225_000,
+          reasoningEffort: false,
+          hostedWebSearch: false,
+        },
+      }),
+    };
+    const bus = {
+      publish: async () => undefined,
+      subscribe: async function* () {},
+      close: async () => undefined,
+    } as unknown as EventBus;
+    const activities = createActivityTestHarness({
+      settings: testSettings({
+        databaseUrl: shared.appUrl,
+        openaiModel: "scripted-model",
+        sandboxBackend: "none",
+      }),
+      db: client.db,
+      bus,
+      runtime,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const result = await activities.runAgentTurn({
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      trigger: { kind: "next" },
+    });
+
+    expect(result).toMatchObject({
+      status: "idle",
+      attemptId,
+      deferredUntilWake: true,
+    });
+    if (result.status === "unclaimed") throw new Error("system update turn was not claimed");
+    expect(scriptedModel.calls).toBe(1);
+    expect(summaryCalls).toBe(1);
+    expect(await getSessionTurn(client.db, grant.workspaceId!, result.turnId)).toMatchObject({
+      source: "goal",
+      metadata: { internalUpdateCount: 2 },
+      status: "failed",
+    });
+    expect((await getSession(client.db, grant.workspaceId!, session.id))?.status).toBe("idle");
+    expect(
+      JSON.stringify(
+        (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).map(
+          (row) => row.item,
+        ),
+      ),
+    ).toBe(historyBefore);
+    expect(
+      await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
+    ).toMatchObject([{ id: ordinary.update.id, state: "deferred", deliveredTurnId: null }]);
+    const storedUpdates = await withWorkspaceRls(
+      client.db,
+      grant.workspaceId!,
+      async (db) =>
+        await db
+          .select({
+            id: schema.sessionSystemUpdates.id,
+            state: schema.sessionSystemUpdates.state,
+          })
+          .from(schema.sessionSystemUpdates),
+    );
+    const storedGoalContinuation = storedUpdates.find(
+      (update) => update.id === goalContinuation.update.id,
+    );
+    expect(storedGoalContinuation?.state).toBe("failed");
+    expect(
+      (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
+    ).toEqual([]);
+    expect(await peekSessionWork(client.db, grant.workspaceId!, session.id)).toEqual({
+      kind: "idle",
+    });
+
+    const newUpdate = await addSessionSystemUpdate(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      kind: "child_terminal_result",
+      classification: "success",
+      sourceId: crypto.randomUUID(),
+      dedupeKey: `child-${crypto.randomUUID()}`,
+      summary: "A genuinely new child completed",
+      payload: {
+        type: "child_terminal_result",
+        childSessionId: crypto.randomUUID(),
+        status: "idle",
+      },
+    });
+    if (!newUpdate.added) throw new Error("new update was not inserted");
+    const heldClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(heldClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+    expect(
+      (await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id)).map(
+        (update) => update.id,
+      ),
+    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+
+    await withWorkspaceSubjectRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      async (db) =>
+        await db.transaction(
+          async (tx) =>
+            await submitHumanPromptInTransaction(tx as typeof db, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId!,
+              sessionId: session.id,
+              subjectId: grant.subjectId,
+              actor: { type: "human", subjectId: grant.subjectId },
+              operationKey: crypto.randomUUID(),
+              delivery: "send",
+              text: "Retry after the compaction failure with new human input",
+              resources: [],
+              tools: [],
+              reasoningEffortFallback: "low",
+              source: "user",
+            }),
+        ),
+    );
+    const retryClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(retryClaim).toMatchObject({
+      action: "claimed",
+      turn: { source: "user" },
+    });
+    if (retryClaim.action !== "claimed") throw new Error("human input did not wake the session");
+    expect(
+      (
+        await listSessionSystemUpdatesForTurn(
+          client.db,
+          grant.workspaceId!,
+          session.id,
+          retryClaim.turn.id,
+        )
+      ).map((update) => update.id),
+    ).toEqual(expect.arrayContaining([ordinary.update.id, newUpdate.update.id]));
+  });
+
   test("consumes an operator request without replacing history when its summary is not smaller", async () => {
     const suffix = crypto.randomUUID();
     const access = await bootstrapWorkspace(client.db, {
@@ -1065,5 +1380,24 @@ describe("standalone context compaction execution", () => {
         (row) => row.item,
       ),
     ).toEqual([originalItem]);
+  });
+
+  test("recognizes a provider overflow through the content-free compaction wrapper", () => {
+    const providerOverflow = Object.assign(new Error("maximum context length exceeded"), {
+      code: "context_length_exceeded",
+    });
+    const wrapped = new CompactionProviderResponseError(
+      { stage: "stream", responseFailed: true },
+      providerOverflow,
+    );
+    expect(isContextWindowExceeded(wrapped)).toBe(true);
+    expect(
+      isContextWindowExceeded(
+        new CompactionProviderResponseError(
+          { stage: "stream", responseFailed: true },
+          new Error("provider authentication failed"),
+        ),
+      ),
+    ).toBe(false);
   });
 });

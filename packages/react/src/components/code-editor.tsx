@@ -3,8 +3,6 @@ import {
   type ComponentType,
   type CSSProperties,
   type ReactNode,
-  lazy,
-  Suspense,
   useCallback,
   useEffect,
   useMemo,
@@ -92,13 +90,6 @@ export function languageForPath(path: string): keyof typeof LANGUAGE_LOADERS | n
   }
 }
 
-const LazyCodeMirror = lazy(async () => {
-  const mod = (await import("@uiw/react-codemirror")) as unknown as {
-    default: ReactCodeMirrorComponent;
-  };
-  return { default: mod.default };
-});
-
 export type CodeEditorProps = {
   /** Workspace-relative path — drives language inference (and the save target upstream). */
   path: string;
@@ -106,6 +97,10 @@ export type CodeEditorProps = {
   initialContents: string;
   /** Persist the current buffer. Resolves when the write lands; rejects to surface an error. */
   onSave: (contents: string) => Promise<unknown>;
+  /** Explicitly overwrite after a visible expected-content conflict. */
+  onOverwrite?: ((contents: string) => Promise<unknown>) | undefined;
+  /** Re-read the selected file after a visible save conflict. */
+  onReload?: (() => void) | undefined;
   /** Fired once when the buffer FIRST diverges from its baseline (the first real
    *  keystroke) — the wake-on-edit intent. The host warms the box on this so the
    *  eventual save lands fast; merely opening the file for reading never fires it. */
@@ -136,6 +131,8 @@ export function CodeEditor({
   path,
   initialContents,
   onSave,
+  onOverwrite,
+  onReload,
   onEditIntent,
   readOnly = false,
   themeType = "dark",
@@ -156,6 +153,8 @@ export function CodeEditor({
   const [savedTick, setSavedTick] = useState(false);
 
   const dirty = value !== baseline;
+  const saveConflict =
+    saveError !== null && (saveError as Error & { code?: unknown }).code === "file_write_conflict";
 
   // Reload the buffer when the file identity changes. Guard on initialContents
   // too so an external refresh of the SAME path (e.g. fs.changed re-read) reseeds
@@ -201,7 +200,16 @@ export function CodeEditor({
           keymap: { of: (binds: unknown[]) => unknown };
           Prec: { highest: (ext: unknown) => unknown };
         };
-        const languageExtension = langKey ? await LANGUAGE_LOADERS[langKey]?.() : null;
+        // Language peers are optional. A missing grammar must degrade to a plain
+        // CodeMirror document, not throw the entire editor down to textarea.
+        let languageExtension: unknown | null = null;
+        if (langKey) {
+          try {
+            languageExtension = (await LANGUAGE_LOADERS[langKey]?.()) ?? null;
+          } catch {
+            languageExtension = null;
+          }
+        }
         if (cancelled) return;
         // A high-precedence Cmd/Ctrl-S keymap that calls back into the latest
         // save handler (kept fresh via a ref) and swallows the browser's
@@ -222,8 +230,9 @@ export function CodeEditor({
         setBundle({
           Editor: cmMod.default,
           saveKeymapExtension,
-          languageExtension: languageExtension ?? null,
+          languageExtension,
         });
+        setFailed(false);
       } catch {
         if (!cancelled) setFailed(true);
       }
@@ -256,6 +265,25 @@ export function CodeEditor({
     }
   }, [readOnly, value, baseline, onSave, path]);
 
+  const overwrite = useCallback(async () => {
+    if (readOnly || !onOverwrite) return;
+    const snapshot = value;
+    if (snapshot === baseline) return;
+    setSaving(true);
+    setSaveError(null);
+    setSavedTick(false);
+    try {
+      await onOverwrite(snapshot);
+      setBaseline(snapshot);
+      lastSeed.current = { path, contents: snapshot };
+      setSavedTick(true);
+    } catch (cause) {
+      setSaveError(cause instanceof Error ? cause : new Error(String(cause)));
+    } finally {
+      setSaving(false);
+    }
+  }, [readOnly, onOverwrite, value, baseline, path]);
+
   saveRef.current = () => {
     void save();
   };
@@ -276,13 +304,7 @@ export function CodeEditor({
     return exts;
   }, [bundle]);
 
-  if (failed) {
-    return (
-      <div className={cn("flex h-full min-h-0 flex-col", className)}>
-        {fallback ?? <PlainTextarea value={value} readOnly={readOnly} onChange={noteEdit} />}
-      </div>
-    );
-  }
+  const Editor = bundle?.Editor;
 
   return (
     <div
@@ -291,7 +313,7 @@ export function CodeEditor({
       style={editorVars}
     >
       {/* Save bar: dirty indicator + status + the explicit Save button. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1">
+      <div className="flex min-h-9 shrink-0 items-center gap-2 border-b border-og-border bg-og-surface-1 px-2 py-1">
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full transition-colors",
@@ -304,7 +326,7 @@ export function CodeEditor({
           {dirty && !readOnly ? " •" : ""}
         </span>
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {saveError && (
+          {saveError && !saveConflict && (
             <span
               className="max-w-[220px] truncate text-og-xs text-og-status-failed"
               title={saveError.message}
@@ -315,13 +337,13 @@ export function CodeEditor({
           {!saveError && savedTick && <span className="text-og-xs text-og-status-idle">Saved</span>}
           {readOnly ? (
             <span className="text-og-xs uppercase tracking-wide text-og-fg-subtle">Read-only</span>
-          ) : (
+          ) : !saveConflict ? (
             <button
               type="button"
               onClick={() => void save()}
               disabled={saving || !dirty}
               className={cn(
-                "flex items-center gap-1 rounded-og-sm border border-og-border px-1.5 py-0.5 text-og-xs pointer-coarse:min-h-10",
+                "flex items-center gap-1 rounded-og-sm border border-og-border px-1.5 py-0.5 text-og-xs pointer-coarse:min-h-11",
                 saving || !dirty
                   ? "cursor-default text-og-fg-subtle opacity-60"
                   : "text-og-fg hover:bg-og-accent-soft",
@@ -335,14 +357,59 @@ export function CodeEditor({
               )}
               Save
             </button>
-          )}
+          ) : null}
         </div>
       </div>
 
+      {saveConflict ? (
+        <div
+          className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-og-status-failed/25 bg-og-status-failed/8 px-2 py-2"
+          role="alert"
+        >
+          <div className="min-w-[12rem] flex-1 text-og-xs text-og-fg-muted">
+            <span className="font-medium text-og-status-failed">File changed on machine.</span>{" "}
+            Reloading discards your edits; overwriting replaces the live version.
+          </div>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {onReload ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setSaveError(null);
+                  onReload();
+                }}
+                className="min-h-8 rounded-og-sm border border-og-border bg-og-surface-1 px-2 text-og-xs font-medium text-og-fg hover:bg-og-surface-2 pointer-coarse:min-h-11"
+              >
+                Reload live
+              </button>
+            ) : null}
+            {onOverwrite ? (
+              <button
+                type="button"
+                onClick={() => void overwrite()}
+                disabled={saving}
+                className="min-h-8 rounded-og-sm border border-og-status-failed/40 px-2 text-og-xs font-medium text-og-status-failed hover:bg-og-status-failed/10 disabled:opacity-50 pointer-coarse:min-h-11"
+              >
+                Overwrite
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {/* The editor surface. */}
       <div className="min-h-0 flex-1 overflow-auto">
-        <Suspense fallback={loading ?? <EditorSkeleton />}>
-          <LazyCodeMirror
+        {failed ? (
+          (fallback ?? (
+            <PlainTextarea
+              value={value}
+              readOnly={readOnly}
+              onChange={noteEdit}
+              onSave={() => void save()}
+            />
+          ))
+        ) : Editor ? (
+          <Editor
             value={value}
             theme={themeType === "light" ? "light" : "dark"}
             editable={!readOnly}
@@ -353,7 +420,9 @@ export function CodeEditor({
             className="og-cm-editor min-h-full text-og-sm"
             onChange={readOnly ? undefined : noteEdit}
           />
-        </Suspense>
+        ) : (
+          (loading ?? <EditorSkeleton />)
+        )}
       </div>
     </div>
   );
@@ -369,10 +438,12 @@ function PlainTextarea({
   value,
   readOnly,
   onChange,
+  onSave,
 }: {
   value: string;
   readOnly: boolean;
   onChange: (value: string) => void;
+  onSave: () => void;
 }) {
   return (
     <textarea
@@ -380,6 +451,13 @@ function PlainTextarea({
       readOnly={readOnly}
       spellCheck={false}
       onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(event) => {
+        if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+          event.preventDefault();
+          onSave();
+        }
+      }}
+      aria-label="Plain text file editor"
       className="h-full w-full resize-none bg-transparent p-2 font-og-mono text-og-sm text-og-fg outline-none"
     />
   );

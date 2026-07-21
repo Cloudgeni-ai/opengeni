@@ -109,7 +109,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("Finding 1b — countConsecutiveReactiveRotations", () => {
   test("no events → 0 (a fresh session is never mid-loop)", async () => {

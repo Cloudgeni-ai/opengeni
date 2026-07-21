@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { continuationHoldMs } from "../src/workflows/session";
+import { continuationHoldMs, deferredResultMayContinue } from "../src/workflows/session";
 
 // P3 all-capped infinite-loop bugfix (fix #6). session.ts must treat a rotation
 // all-capped idle (`idleUntilReset`) as a MANDATORY hold: a 0/elapsed continueDelayMs
@@ -48,5 +48,18 @@ describe("continuationHoldMs — the all-capped idle is a real wait", () => {
       continuationHoldMs({ status: "failed", continueDelayMs: 99, idleUntilReset: true }, FLOOR),
     ).toBe(0);
     expect(continuationHoldMs({ status: "requires_action" }, FLOOR)).toBe(0);
+  });
+});
+
+describe("deferredResultMayContinue — failed recovery converges until a real wake", () => {
+  test("four unchanged deferred results cannot continue against unchanged durable state", () => {
+    const entryWakeups = 17;
+    for (let failure = 0; failure < 4; failure += 1) {
+      expect(deferredResultMayContinue(entryWakeups, entryWakeups)).toBe(false);
+    }
+  });
+
+  test("a newly committed non-control wake allows one later retry", () => {
+    expect(deferredResultMayContinue(17, 18)).toBe(true);
   });
 });

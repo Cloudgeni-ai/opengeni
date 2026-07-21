@@ -39,6 +39,9 @@ import type {
   Session,
   SessionListResponse,
   SessionEvent,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
   SessionGoalCreatedBy,
@@ -76,6 +79,14 @@ import type {
   RigCheck,
 } from "@opengeni/contracts";
 import {
+  boundWorkspaceControlEvent,
+  workspaceControlUtf8Bytes,
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES,
+  SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES,
+  SESSION_EVENT_ENVELOPE_MAX_BYTES,
+  SESSION_EVENT_TYPE_MAX_BYTES,
+  resolveSessionEventTypeFilters,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
@@ -99,6 +110,7 @@ import {
   isNull,
   lt,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -109,6 +121,10 @@ import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
 import {
+  runIdempotentPersistenceTransaction,
+  type IdempotentPersistenceTransactionOptions,
+} from "./persistence-errors";
+import {
   closePendingSessionToolCallsInTransaction,
   historyCallId,
   historyItemType,
@@ -118,11 +134,17 @@ import {
   closeSessionTurnAttemptInTransaction,
   evaluateSessionControl,
   evaluateSessionControls,
+  evaluateSessionDiscoveryControls,
+  lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
+  SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS,
   registerSessionTurnAttemptClaim,
   serializeEffectiveSessionControl,
+  type SessionDiscoveryControl,
+  SessionControlInvariantError,
   type SessionTurnAttemptOutcome,
+  type WorkspaceControlRow,
 } from "./session-control";
 import * as schema from "./schema";
 import {
@@ -156,6 +178,7 @@ export {
   sanitizeEventString,
   sanitizeModelPayload,
 } from "./event-payload-sanitizer";
+export * from "./persistence-errors";
 export { sanitizeMemoryText } from "./memory-domain";
 // Re-exported so external consumers can `import { migrate } from "@opengeni/db"`.
 // The `@opengeni/db/migrate` subpath stays available too (internal callers + the
@@ -304,7 +327,7 @@ export type CreateDbOptions = {
    * it as a per-session startup parameter (the supported, query-param-free way;
    * URL `?search_path=` is IGNORED by postgres-js). Keep `public` LAST so the
    * `vector` type and `gen_random_uuid()` (which live in `public` on the
-   * pgvector image) still resolve — the SPIKE-1 live footgun.
+   * pgvector image) still resolve — the schema-isolation contract live footgun.
    */
   searchPath?: string;
   /** RLS posture; defaults to `"force"` (today's standalone). */
@@ -473,6 +496,28 @@ export async function withWorkspaceRls<T>(
   fn: (db: Database) => Promise<T>,
 ): Promise<T> {
   return await withRlsContext(db, await rlsContextForWorkspace(db, workspaceId), fn);
+}
+
+async function retryWorkspacePersistence<T>(
+  db: Database,
+  workspaceId: string,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withWorkspaceRls(db, workspaceId, fn);
+  });
+}
+
+async function retryRlsPersistence<T>(
+  db: Database,
+  context: RlsContext,
+  options: IdempotentPersistenceTransactionOptions,
+  fn: (db: Database) => Promise<T>,
+): Promise<T> {
+  return await runIdempotentPersistenceTransaction(options, async () => {
+    return await withRlsContext(db, context, fn);
+  });
 }
 
 /**
@@ -843,7 +888,10 @@ export async function ensureManagedAccessForUser(
     if (!workspaceControl) {
       await tx
         .insert(schema.workspaceInferenceControls)
-        .values({ workspaceId: defaultWorkspace.id, accountId: defaultWorkspace.accountId })
+        .values({
+          workspaceId: defaultWorkspace.id,
+          accountId: defaultWorkspace.accountId,
+        })
         .onConflictDoNothing();
     }
     // The remainder lists every membership in the account, so restore account-
@@ -1133,7 +1181,7 @@ export async function updateWorkspaceSettings(
   // The DB trigger takes the mandatory inference-control UPDATE lock after the
   // workspace row is locked. Keeping that one workspace -> control order makes
   // new and old binaries serialize identically and avoids mixed-version lock
-  // inversion with an old settings writer that does not know about OPE-53.
+  // inversion with an old settings writer that does not know about this policy.
   return await withWorkspaceRls(
     db,
     workspaceId,
@@ -1660,7 +1708,9 @@ export async function applyCreditLedgerEntry(
           metadata: input.metadata ?? {},
           occurredAt: input.occurredAt ?? new Date(),
         })
-        .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey });
+        .onConflictDoNothing({
+          target: schema.creditLedgerEntries.idempotencyKey,
+        });
       return await getBillingBalance(scopedDb, input.accountId);
     },
   );
@@ -1681,7 +1731,10 @@ export async function applyCreditDebitUpToBalance(
   },
 ): Promise<{ balance: BillingBalance; debitedMicros: number }> {
   if (input.requestedAmountMicros <= 0) {
-    return { balance: await getBillingBalance(db, input.accountId), debitedMicros: 0 };
+    return {
+      balance: await getBillingBalance(db, input.accountId),
+      debitedMicros: 0,
+    };
   }
   return await withRlsContext(
     db,
@@ -1712,11 +1765,16 @@ export async function applyCreditDebitUpToBalance(
             },
             occurredAt: input.occurredAt ?? new Date(),
           })
-          .onConflictDoNothing({ target: schema.creditLedgerEntries.idempotencyKey })
+          .onConflictDoNothing({
+            target: schema.creditLedgerEntries.idempotencyKey,
+          })
           .returning({ id: schema.creditLedgerEntries.id });
         debitedMicros = inserted.length === 1 ? candidateDebitMicros : 0;
       }
-      return { balance: await getBillingBalance(scopedDb, input.accountId), debitedMicros };
+      return {
+        balance: await getBillingBalance(scopedDb, input.accountId),
+        debitedMicros,
+      };
     },
   );
 }
@@ -2286,7 +2344,10 @@ export async function createFileUpload(
             status: "pending",
             expiresAt: input.expiresAt,
           })
-          .returning({ id: schema.fileUploads.id, expiresAt: schema.fileUploads.expiresAt });
+          .returning({
+            id: schema.fileUploads.id,
+            expiresAt: schema.fileUploads.expiresAt,
+          });
         if (!uploadRow) {
           throw new Error("Failed to create file upload");
         }
@@ -2330,7 +2391,12 @@ export async function getFileUpload(
   db: Database,
   workspaceId: string,
   uploadId: string,
-): Promise<{ id: string; status: FileUploadStatus; expiresAt: Date; file: FileAsset } | null> {
+): Promise<{
+  id: string;
+  status: FileUploadStatus;
+  expiresAt: Date;
+  file: FileAsset;
+} | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({
@@ -2486,7 +2552,10 @@ export async function claimFileUploadCleanup(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const [upload] = await tx
-          .select({ status: schema.fileUploads.status, fileId: schema.fileUploads.fileId })
+          .select({
+            status: schema.fileUploads.status,
+            fileId: schema.fileUploads.fileId,
+          })
           .from(schema.fileUploads)
           .where(
             and(
@@ -2508,13 +2577,19 @@ export async function claimFileUploadCleanup(
           .for("update")
           .limit(1);
         if (!file) {
-          return { outcome: "unavailable", status: upload.status as FileUploadStatus };
+          return {
+            outcome: "unavailable",
+            status: upload.status as FileUploadStatus,
+          };
         }
         if (upload.status === "completed" && file.status === "ready") {
           return { outcome: "completed", file: mapFile(file) };
         }
         if (upload.status !== "pending") {
-          return { outcome: "unavailable", status: upload.status as FileUploadStatus };
+          return {
+            outcome: "unavailable",
+            status: upload.status as FileUploadStatus,
+          };
         }
         const now = new Date();
         await tx
@@ -2604,7 +2679,10 @@ export async function completeFileUploadCleanup(
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         const [upload] = await tx
-          .select({ status: schema.fileUploads.status, fileId: schema.fileUploads.fileId })
+          .select({
+            status: schema.fileUploads.status,
+            fileId: schema.fileUploads.fileId,
+          })
           .from(schema.fileUploads)
           .where(
             and(
@@ -2659,7 +2737,10 @@ export async function completeExpiredFileUploadCleanup(
     fileId: string;
   },
 ): Promise<boolean> {
-  return await completeFileUploadCleanup(db, { ...input, terminalStatus: "expired" });
+  return await completeFileUploadCleanup(db, {
+    ...input,
+    terminalStatus: "expired",
+  });
 }
 
 export async function enablePackInstallation(
@@ -3330,6 +3411,7 @@ export async function listEnabledMcpCapabilityServers(
             eq(schema.capabilityInstallations.workspaceId, workspaceId),
             eq(schema.capabilityInstallations.kind, "mcp"),
             eq(schema.capabilityInstallations.status, "active"),
+            eq(schema.capabilityCatalogItems.stale, false),
           ),
         )
         .orderBy(asc(schema.capabilityCatalogItems.name)),
@@ -3941,7 +4023,9 @@ export async function consumeIntegrationOAuthStateNonce(
           expiresAt: input.expiresAt,
           usedAt: input.now,
         })
-        .onConflictDoNothing({ target: schema.integrationOauthStateNonces.nonce })
+        .onConflictDoNothing({
+          target: schema.integrationOauthStateNonces.nonce,
+        })
         .returning({ nonce: schema.integrationOauthStateNonces.nonce });
       return inserted.length > 0;
     },
@@ -4188,7 +4272,9 @@ export async function updateKnowledgeMemory(
         nextTextHash,
         memoryId,
       );
-      throw new Error(visibleTextHashConflictMessage(duplicate), { cause: error });
+      throw new Error(visibleTextHashConflictMessage(duplicate), {
+        cause: error,
+      });
     }
     if (!row) {
       throw new Error(`Knowledge memory not found: ${memoryId}`);
@@ -4909,7 +4995,11 @@ export async function correctWorkspaceMemory(
     if (!archived) {
       throw new Error(`Memory "${input.id}" not found in this workspace.`);
     }
-    return { action: "archived", memory: mapKnowledgeMemory(archived), replacement: null };
+    return {
+      action: "archived",
+      memory: mapKnowledgeMemory(archived),
+      replacement: null,
+    };
   });
 }
 
@@ -4999,7 +5089,10 @@ export async function searchWorkspaceMemories(
         const keywordScore =
           Number.isFinite(rankValue) && rankValue > 0 ? rankValue / (rankValue + 1) : 0;
         const prev = scored.get(row.id);
-        scored.set(row.id, { vectorScore: prev?.vectorScore ?? null, keywordScore });
+        scored.set(row.id, {
+          vectorScore: prev?.vectorScore ?? null,
+          keywordScore,
+        });
       }
     }
 
@@ -5019,7 +5112,13 @@ export async function searchWorkspaceMemories(
             : mode === "keyword"
               ? keyword
               : Math.min(1, 0.65 * vector + 0.35 * keyword + (matchType === "hybrid" ? 0.1 : 0));
-        return { id, score: Number(score.toFixed(6)), matchType, vectorScore, keywordScore };
+        return {
+          id,
+          score: Number(score.toFixed(6)),
+          matchType,
+          vectorScore,
+          keywordScore,
+        };
       })
       .sort(
         (left, right) =>
@@ -6628,7 +6727,10 @@ export async function createRigVersionForChangePromotion(
       .update(schema.rigs)
       .set({ updatedAt: new Date() })
       .where(and(eq(schema.rigs.workspaceId, workspaceId), eq(schema.rigs.id, rigId)));
-    return { version: mapRigVersion(versionRow), change: mapRigChange(changeRow) };
+    return {
+      version: mapRigVersion(versionRow),
+      change: mapRigChange(changeRow),
+    };
   });
 }
 
@@ -6646,6 +6748,81 @@ export async function listRigVersions(
       )
       .orderBy(desc(schema.rigVersions.version));
     return rows.map(mapRigVersion);
+  });
+}
+
+export type RigVersionMonitoringSummary = {
+  id: string;
+  rigId: string;
+  version: number;
+  active: boolean;
+  image: string | null;
+  imageOriginalChars: number | null;
+  setupScriptBytes: number;
+  checkCount: number;
+  credentialHookCount: number;
+  defaultVariableSetCount: number;
+  changelog: string | null;
+  changelogOriginalChars: number | null;
+  createdBy: string | null;
+  createdAt: string;
+};
+
+/** Compact-by-query historical rig versions for the model-facing MCP surface. */
+export async function listRigVersionMonitoringSummaries(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  limit = 20,
+): Promise<{ versions: RigVersionMonitoringSummary[]; hasMore: boolean; total: number }> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.rigVersions.id,
+        rigId: schema.rigVersions.rigId,
+        version: schema.rigVersions.version,
+        active: schema.rigVersions.active,
+        image: sql<string | null>`left(${schema.rigVersions.image}, 512)`,
+        imageOriginalChars: sql<number | null>`char_length(${schema.rigVersions.image})::int`,
+        setupScriptBytes: sql<number>`octet_length(coalesce(${schema.rigVersions.setupScript}, ''))::int`,
+        checkCount: sql<number>`jsonb_array_length(${schema.rigVersions.checks})::int`,
+        credentialHookCount: sql<number>`jsonb_array_length(${schema.rigVersions.credentialHooks})::int`,
+        defaultVariableSetCount: sql<number>`jsonb_array_length(${schema.rigVersions.defaultVariableSetIds})::int`,
+        changelog: sql<string | null>`left(${schema.rigVersions.changelog}, 600)`,
+        changelogOriginalChars: sql<
+          number | null
+        >`char_length(${schema.rigVersions.changelog})::int`,
+        createdBy: sql<string | null>`left(${schema.rigVersions.createdBy}, 200)`,
+        createdAt: schema.rigVersions.createdAt,
+      })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
+      )
+      .orderBy(desc(schema.rigVersions.version), desc(schema.rigVersions.id))
+      .limit(boundedLimit + 1);
+    const [{ total } = { total: 0 }] = await scopedDb
+      .select({ total: sql<number>`count(*)::int` })
+      .from(schema.rigVersions)
+      .where(
+        and(eq(schema.rigVersions.workspaceId, workspaceId), eq(schema.rigVersions.rigId, rigId)),
+      );
+    return {
+      versions: rows.slice(0, boundedLimit).map((row) => ({
+        ...row,
+        setupScriptBytes: Number(row.setupScriptBytes),
+        checkCount: Number(row.checkCount),
+        credentialHookCount: Number(row.credentialHookCount),
+        defaultVariableSetCount: Number(row.defaultVariableSetCount),
+        imageOriginalChars: row.imageOriginalChars === null ? null : Number(row.imageOriginalChars),
+        changelogOriginalChars:
+          row.changelogOriginalChars === null ? null : Number(row.changelogOriginalChars),
+        createdAt: row.createdAt.toISOString(),
+      })),
+      hasMore: rows.length > boundedLimit,
+      total: Number(total),
+    };
   });
 }
 
@@ -6823,6 +7000,96 @@ export async function listRigChanges(
       .orderBy(desc(schema.rigChanges.createdAt))
       .limit(limit);
     return rows.map(mapRigChange);
+  });
+}
+
+export type RigChangeMonitoringSummary = {
+  id: string;
+  rigId: string;
+  baseVersionId: string | null;
+  kind: RigChangeKind;
+  status: RigChangeStatus;
+  proposedBy: string | null;
+  resultVersionId: string | null;
+  commandPreview: string | null;
+  commandOriginalChars: number | null;
+  payloadBytes: number;
+  verificationBytes: number;
+  verificationLogBytes: number;
+  verificationStartedAt: string | null;
+  verificationFinishedAt: string | null;
+  verificationPassed: boolean | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Compact-by-query recent rig changes for the model-facing MCP surface. */
+export async function listRigChangeMonitoringSummaries(
+  db: Database,
+  workspaceId: string,
+  rigId: string,
+  limit = 20,
+): Promise<{ changes: RigChangeMonitoringSummary[]; hasMore: boolean; total: number }> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select({
+        id: schema.rigChanges.id,
+        rigId: schema.rigChanges.rigId,
+        baseVersionId: schema.rigChanges.baseVersionId,
+        kind: schema.rigChanges.kind,
+        status: schema.rigChanges.status,
+        proposedBy: sql<string | null>`left(${schema.rigChanges.proposedBy}, 200)`,
+        resultVersionId: schema.rigChanges.resultVersionId,
+        commandPreview: sql<string | null>`left(${schema.rigChanges.payload}->>'command', 600)`,
+        commandOriginalChars: sql<
+          number | null
+        >`char_length(${schema.rigChanges.payload}->>'command')::int`,
+        payloadBytes: sql<number>`octet_length(${schema.rigChanges.payload}::text)::int`,
+        verificationBytes: sql<number>`octet_length(coalesce(${schema.rigChanges.verification}::text, 'null'))::int`,
+        verificationLogBytes: sql<number>`octet_length(coalesce(${schema.rigChanges.verification}->>'log', ''))::int`,
+        verificationStartedAt: sql<
+          string | null
+        >`left(${schema.rigChanges.verification}->>'startedAt', 64)`,
+        verificationFinishedAt: sql<
+          string | null
+        >`left(${schema.rigChanges.verification}->>'finishedAt', 64)`,
+        verificationPassed: sql<boolean | null>`case
+          when ${schema.rigChanges.verification}->>'passed' = 'true' then true
+          when ${schema.rigChanges.verification}->>'passed' = 'false' then false
+          else null
+        end`,
+        createdAt: schema.rigChanges.createdAt,
+        updatedAt: schema.rigChanges.updatedAt,
+      })
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.rigId, rigId)),
+      )
+      .orderBy(desc(schema.rigChanges.createdAt), desc(schema.rigChanges.id))
+      .limit(boundedLimit + 1);
+    const [{ total } = { total: 0 }] = await scopedDb
+      .select({ total: sql<number>`count(*)::int` })
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.rigId, rigId)),
+      );
+    return {
+      changes: rows.slice(0, boundedLimit).map((row) => ({
+        ...row,
+        kind: row.kind as RigChangeKind,
+        status: row.status as RigChangeStatus,
+        commandOriginalChars:
+          row.commandOriginalChars === null ? null : Number(row.commandOriginalChars),
+        payloadBytes: Number(row.payloadBytes),
+        verificationBytes: Number(row.verificationBytes),
+        verificationLogBytes: Number(row.verificationLogBytes),
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+      })),
+      hasMore: rows.length > boundedLimit,
+      total: Number(total),
+    };
   });
 }
 
@@ -7110,7 +7377,11 @@ export type WorkspaceEnvironmentForRun = VariableSetForRun;
 // `getCodexCredentialStatus` returns metadata only (never the secret column).
 // ---------------------------------------------------------------------------
 
-export type CodexCredentialTokens = { accessToken: string; refreshToken: string; idToken: string };
+export type CodexCredentialTokens = {
+  accessToken: string;
+  refreshToken: string;
+  idToken: string;
+};
 
 export type CodexCredentialForRun = {
   id: string; // row id — for compare-and-set writes (P1-c)
@@ -7485,7 +7756,9 @@ async function getCodexCredentialStatusScoped(
     lastError: schema.codexSubscriptionCredentials.lastError,
   } as const;
   const [settingsRow] = await scopedDb
-    .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+    .select({
+      activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+    })
     .from(schema.codexRotationSettings)
     .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
     .limit(1);
@@ -7724,8 +7997,8 @@ export type CodexLeaseAccountStatus = CodexAccountStatus & {
 /**
  * Opaque accepted-turn policy scope resolved while the durable turn is locked.
  *
- * OPE-21 deliberately does not know the shape of named pools. A downstream
- * allocator policy (OPE-32) owns its private scope type and supplies a pure
+ * This API deliberately does not know the shape of named pools. A downstream
+ * allocator policy owns its private scope type and supplies a pure
  * metadata resolver. The resolved value is handed to the selector in the same
  * workspace rotation-row transaction as lease acquisition, so future pool
  * membership filtering cannot race the accepted turn's frozen policy.
@@ -7965,7 +8238,7 @@ export async function acquireCodexCredentialLease<
     /**
      * Optional downstream parser for private accepted-turn policy metadata.
      * It is pure, runs under the turn/rotation transaction, and must not query
-     * pool membership itself. OPE-21 stores or interprets no pool identifiers.
+     * pool membership itself. This module stores or interprets no pool identifiers.
      */
     resolvePolicyScope?: CodexCredentialLeasePolicyScopeResolver<TPolicyScope>;
     /**
@@ -8023,7 +8296,10 @@ export async function acquireCodexCredentialLease<
       // inside exactly the same RLS-scoped workspace/account. A downstream
       // accepted-turn policy is parsed from this locked metadata while the
       // rotation transaction is held.
-      const turns = await tx.execute(sql<{ id: string; metadata: Record<string, unknown> | null }>`
+      const turns = await tx.execute(sql<{
+        id: string;
+        metadata: Record<string, unknown> | null;
+      }>`
         select id, metadata from session_turns
         where account_id = ${input.accountId}
           and workspace_id = ${input.workspaceId}
@@ -8071,7 +8347,11 @@ export async function acquireCodexCredentialLease<
       }
       const existingRows = leaseRotationEnabled
         ? await tx.execute(
-            sql<{ credential_id: string; holder_id: string; generation: number }>`
+            sql<{
+              credential_id: string;
+              holder_id: string;
+              generation: number;
+            }>`
               select credential_id, holder_id, generation from codex_credential_leases
               where workspace_id = ${input.workspaceId}
                 and turn_id = ${input.turnId}
@@ -8192,7 +8472,11 @@ export async function acquireCodexCredentialLease<
 
       const reused = existingCredentialId === selected.credentialId;
       const leaseRows = await tx.execute(
-        sql<{ holder_id: string; generation: number; leased_until: Date | string }>`
+        sql<{
+          holder_id: string;
+          generation: number;
+          leased_until: Date | string;
+        }>`
         insert into codex_credential_leases
           (account_id, workspace_id, credential_id, turn_id, holder_id, generation, leased_until)
         values
@@ -8250,7 +8534,7 @@ export async function acquireCodexCredentialLease<
 }
 
 // ---------------------------------------------------------------------------
-// OPE-21 durable zero-capacity wait / wake state machine.
+// Durable zero-capacity wait / wake state machine.
 // ---------------------------------------------------------------------------
 
 export type CodexCapacityWaitStatus = "waiting" | "resumed" | "superseded";
@@ -8297,7 +8581,11 @@ export type CodexCapacityMutationResult<T> = {
 };
 
 export type CodexCapacityAvailabilityDecision =
-  | { kind: "available"; credentialId: string; diagnostic?: Record<string, unknown> }
+  | {
+      kind: "available";
+      credentialId: string;
+      diagnostic?: Record<string, unknown>;
+    }
   | {
       kind: "unavailable";
       earliestResetAt: Date | null;
@@ -8318,7 +8606,11 @@ export type CodexCapacitySelectionContext<
 
 export type ArmCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export type ReconcileCodexCapacityWaitResult =
   | { action: "waiting"; waiter: CodexCapacityWait; events: SessionEvent[] }
@@ -8329,7 +8621,11 @@ export type ReconcileCodexCapacityWaitResult =
       events: SessionEvent[];
     }
   | { action: "superseded"; waiter: CodexCapacityWait; events: SessionEvent[] }
-  | { action: "stale"; waiter: CodexCapacityWait | null; events: SessionEvent[] };
+  | {
+      action: "stale";
+      waiter: CodexCapacityWait | null;
+      events: SessionEvent[];
+    };
 
 export const CODEX_CAPACITY_REFRESH_MIN_MS = 60_000;
 export const CODEX_CAPACITY_REFRESH_MAX_MS = 15 * 60_000;
@@ -8432,11 +8728,13 @@ function nextCodexCapacityCheckAt(
 
 /**
  * Atomically settle one all-unavailable turn and arm exactly one durable wait.
- * Lock order is allocator rotation row -> session -> goal -> blocked turn ->
- * live lease (when a reactive failure owns one) -> waiter. The failed turn,
- * idle/capacity-paused session, durable events, lease release, and waiter
- * generation commit together; a crash cannot leave only half of the boundary
- * visible.
+ * Lock order is allocator rotation row -> workspace control -> actual workspace
+ * -> session -> exact turn -> exact attempt -> goal -> live lease (when a
+ * reactive failure owns one) -> waiter. The control share lock and effective
+ * control recheck prevent a capacity boundary from closing an attempt after a
+ * committed Pause. The failed turn, idle/capacity-paused session, durable
+ * events, lease release, and waiter generation commit together; a crash cannot
+ * leave only half of the boundary visible.
  */
 export async function armCodexCapacityWait(
   db: Database,
@@ -8471,18 +8769,21 @@ export async function armCodexCapacityWait(
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: locks.control ?? undefined,
+            })
+          : null;
         const [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -8491,18 +8792,6 @@ export async function armCodexCapacityWait(
               eq(schema.sessionGoals.workspaceId, input.workspaceId),
               eq(schema.sessionGoals.id, input.goalId),
               eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [turn] = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
             ),
           )
           .for("update")
@@ -8530,6 +8819,20 @@ export async function armCodexCapacityWait(
           .for("update")
           .limit(1);
 
+        const exactRowsMatch =
+          session?.accountId === input.accountId &&
+          turn?.accountId === input.accountId &&
+          turn?.sessionId === input.sessionId &&
+          attempt?.accountId === input.accountId &&
+          attempt?.sessionId === input.sessionId &&
+          attempt?.turnId === input.turnId;
+        if (!exactRowsMatch) {
+          return {
+            action: "stale",
+            waiter: existing ? mapCodexCapacityWaiter(existing) : null,
+            events: [],
+          } as const;
+        }
         if (
           existing?.status === "waiting" &&
           existing.blockedTurnId === input.turnId &&
@@ -8551,9 +8854,9 @@ export async function armCodexCapacityWait(
             Number(lease.generation) === input.leaseFence.generation &&
             currentRedispatches === (input.expectedRedispatches ?? currentRedispatches));
         if (
-          !session ||
           !goal ||
-          !turn ||
+          effectiveControl?.state !== "active" ||
+          effectiveControl.settlement !== null ||
           session.activeTurnId !== input.turnId ||
           session.status !== "running" ||
           goal.status !== "active" ||
@@ -8763,8 +9066,8 @@ export async function getCodexCapacityWaitForSession(
 }
 
 /**
- * Same-transaction capacity-mutation/outbox seam for OPE-24 eligibility and
- * OPE-32 membership/default changes. The allocator rotation row is always the
+ * Same-transaction capacity-mutation/outbox seam for account eligibility and
+ * policy-scope membership/default changes. The allocator rotation row is always the
  * first lock. Mutations report whether capacity truth changed; only then are
  * matching waiter wake revisions advanced and returned for best-effort signal.
  */
@@ -8928,7 +9231,10 @@ async function supersedeCodexCapacityWaitInTransaction(
         eq(schema.sessions.id, input.session.id),
       ),
     );
-  return { waiter: mapCodexCapacityWaiter(updated), events: inserted.map(mapEvent) };
+  return {
+    waiter: mapCodexCapacityWaiter(updated),
+    events: inserted.map(mapEvent),
+  };
 }
 
 /**
@@ -8974,6 +9280,10 @@ export async function reconcileCodexCapacityWait<
         if (!rotation || rotation.accountId !== input.accountId) {
           return { action: "stale", waiter: null, events: [] } as const;
         }
+        const prefix = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+        });
         const [waiterRead] = await tx
           .select()
           .from(schema.codexCapacityWaiters)
@@ -8992,18 +9302,20 @@ export async function reconcileCodexCapacityWait<
             events: [],
           } as const;
         }
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx, {
+          workspaceId: input.workspaceId,
+          controlLock: "already_locked",
+          workspaceLock: "already_locked",
+          sessionIds: [input.sessionId],
+          turnIds: [waiterRead.blockedTurnId],
+        });
+        const session = locks.sessions[0];
+        const blockedTurn = locks.turns[0];
+        const effectiveControl = session
+          ? await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+              workspaceControl: prefix.control ?? undefined,
+            })
+          : null;
         const [goal] = await tx
           .select()
           .from(schema.sessionGoals)
@@ -9012,18 +9324,6 @@ export async function reconcileCodexCapacityWait<
               eq(schema.sessionGoals.workspaceId, input.workspaceId),
               eq(schema.sessionGoals.id, waiterRead.goalId),
               eq(schema.sessionGoals.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [blockedTurn] = await tx
-          .select()
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, waiterRead.blockedTurnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
             ),
           )
           .for("update")
@@ -9039,6 +9339,13 @@ export async function reconcileCodexCapacityWait<
           !goal ||
           !blockedTurn ||
           !waiter ||
+          session.accountId !== input.accountId ||
+          blockedTurn.accountId !== input.accountId ||
+          blockedTurn.sessionId !== input.sessionId ||
+          waiter.accountId !== input.accountId ||
+          waiter.workspaceId !== input.workspaceId ||
+          waiter.sessionId !== input.sessionId ||
+          waiter.blockedTurnId !== blockedTurn.id ||
           waiter.generation !== input.generation ||
           waiter.status !== "waiting"
         ) {
@@ -9073,7 +9380,9 @@ export async function reconcileCodexCapacityWait<
           .limit(1);
         const currentPolicyHash = codexCapacityPolicyHashFromTurnMetadata(blockedTurn.metadata);
         let supersedeReason: string | null = null;
-        if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
+        if (effectiveControl?.state !== "active" || effectiveControl.settlement !== null) {
+          supersedeReason = "control_changed";
+        } else if (goal.status !== "active" || goal.version !== waiter.goalVersion) {
           supersedeReason = "goal_changed";
         } else if (currentPolicyHash !== waiter.policyHash) {
           supersedeReason = "credential_policy_changed";
@@ -9461,7 +9770,9 @@ export async function listCodexAccountStatuses(
 ): Promise<CodexAccountStatus[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .select({
+        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      })
       .from(schema.codexRotationSettings)
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .limit(1);
@@ -9690,7 +10001,9 @@ export async function ensureCodexRotationSettings(
         workspaceId,
         leaseRotationEnabled: false,
       })
-      .onConflictDoNothing({ target: [schema.codexRotationSettings.workspaceId] });
+      .onConflictDoNothing({
+        target: [schema.codexRotationSettings.workspaceId],
+      });
   });
 }
 
@@ -9796,7 +10109,10 @@ export async function setCodexCredentialExhaustedWithWakeTargets(
 ): Promise<CodexCapacityMutationResult<boolean>> {
   return await withCodexCapacityMutation(
     db,
-    { workspaceId, reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed" },
+    {
+      workspaceId,
+      reason: until === null ? "codex_cooldown_cleared" : "codex_cooldown_changed",
+    },
     async (tx) => {
       const updated = await tx
         .update(schema.codexSubscriptionCredentials)
@@ -9927,7 +10243,10 @@ export type CodexRotationStrategy = (typeof CODEX_ROTATION_STRATEGIES)[number];
 export async function updateCodexRotationSettings(
   db: Database,
   workspaceId: string,
-  patch: { rotationEnabled?: boolean; rotationStrategy?: CodexRotationStrategy },
+  patch: {
+    rotationEnabled?: boolean;
+    rotationStrategy?: CodexRotationStrategy;
+  },
 ): Promise<CodexRotationSettings | null> {
   if (
     patch.rotationStrategy !== undefined &&
@@ -10129,12 +10448,17 @@ export async function disconnectCodexAccount(
       .returning({ id: schema.codexSubscriptionCredentials.id });
     // The FK SET NULL already cleared the pointer if we deleted the active row.
     const [settingsRow] = await scopedDb
-      .select({ activeCredentialId: schema.codexRotationSettings.activeCredentialId })
+      .select({
+        activeCredentialId: schema.codexRotationSettings.activeCredentialId,
+      })
       .from(schema.codexRotationSettings)
       .where(eq(schema.codexRotationSettings.workspaceId, workspaceId))
       .limit(1);
     if (removedRows.length === 0) {
-      return { removed: false, newActiveCredentialId: settingsRow?.activeCredentialId ?? null };
+      return {
+        removed: false,
+        newActiveCredentialId: settingsRow?.activeCredentialId ?? null,
+      };
     }
     let newActive = settingsRow?.activeCredentialId ?? null;
     if (newActive === null) {
@@ -11254,68 +11578,129 @@ type SessionTreeStatsRow = {
   attentionDescendants: number | string;
   pausedDescendants: number | string;
   failedDescendants: number | string;
+  truncated: boolean;
 };
 
+const SESSION_TREE_STATS_MAX_DESCENDANTS = 1_000;
+const SESSION_TREE_STATS_MAX_DEPTH = 32;
+const SESSION_TREE_STATS_MAX_ROOTS = 600;
+const SESSION_LIST_MAX_PINNED = 100;
+
 /**
- * Return complete descendant aggregates for the bounded set of rows being
- * painted in the session rail. Parent links are immutable, so one recursive
- * read inside the list transaction gives the client stable, authoritative
- * expand affordances without loading the workspace's entire session table.
+ * Return bounded descendant aggregates for the bounded set of rows being
+ * painted in the session rail. Each selected root receives an independent
+ * fixed node/depth budget. `truncated=true` makes every count an explicit lower
+ * bound when a deep, wide, overlapping, or cyclic graph reaches that budget.
  */
-async function sessionTreeStatsForSessions(
+export async function sessionTreeStatsForSessions(
   db: Database,
   workspaceId: string,
   rootIds: string[],
 ): Promise<Map<string, SessionTreeStats>> {
-  if (rootIds.length === 0) return new Map();
+  const uniqueRootIds = [...new Set(rootIds)];
+  if (uniqueRootIds.length === 0) return new Map();
+  if (uniqueRootIds.length > SESSION_TREE_STATS_MAX_ROOTS) {
+    throw new RangeError(
+      `Session tree stats projection exceeds ${SESSION_TREE_STATS_MAX_ROOTS} roots`,
+    );
+  }
   const rows = await rawRows<SessionTreeStatsRow>(
     db,
     sql`
-      with recursive descendants(root_id, id, status, depth, path) as (
-        select
-          root.id,
-          root.id,
-          root.status,
-          0,
-          array[root.id]
-        from ${schema.sessions} root
-        where root.workspace_id = ${workspaceId}
-          and ${inArray(sql`root.id`, rootIds)}
-
-        union all
-
-        select
-          descendants.root_id,
-          child.id,
-          child.status,
-          descendants.depth + 1,
-          descendants.path || child.id
-        from ${schema.sessions} child
-        join descendants on child.parent_session_id = descendants.id
-        where child.workspace_id = ${workspaceId}
-          and not child.id = any(descendants.path)
-      )
       select
-        root_id as "rootId",
-        count(*) filter (where depth = 1)::int as "directChildren",
-        count(*) filter (where depth > 0)::int as "totalDescendants",
-        count(*) filter (
-          where depth > 0 and status in ('running', 'recovering')
-        )::int as "runningDescendants",
-        count(*) filter (
-          where depth > 0 and status in ('queued', 'waiting_capacity')
-        )::int as "queuedDescendants",
-        count(*) filter (
-          where depth > 0 and status = 'requires_action'
-        )::int as "attentionDescendants",
-        count(*) filter (
-          where depth > 0 and status = 'paused'
-        )::int as "pausedDescendants",
-        count(*) filter (
-          where depth > 0 and status = 'failed'
-        )::int as "failedDescendants"
-      from descendants
-      group by root_id
+        root.id as "rootId",
+        stats."directChildren",
+        stats."totalDescendants",
+        stats."runningDescendants",
+        stats."queuedDescendants",
+        stats."attentionDescendants",
+        stats."pausedDescendants",
+        stats."failedDescendants",
+        stats.truncated
+      from ${schema.sessions} root
+      cross join lateral (
+        with recursive descendants(id, status, depth, path) as (
+          select root.id, root.status, 0, array[root.id]::uuid[]
+
+          union all
+
+          select
+            child.id,
+            child.status,
+            descendants.depth + 1,
+            descendants.path || child.id
+          from descendants
+          join ${schema.sessions} child on child.parent_session_id = descendants.id
+          where child.workspace_id = ${workspaceId}
+            and descendants.depth < ${SESSION_TREE_STATS_MAX_DEPTH}
+            -- Parent links are expected to form a tree, but legacy/manual rows
+            -- can be cyclic. The path is depth-bounded above, so cycle defense
+            -- cannot grow independently of this query's fixed work budget.
+            and not child.id = any(descendants.path)
+        ), bounded as materialized (
+          -- PostgreSQL evaluates the recursive producer only as far as this
+          -- unsorted LIMIT is consumed. One extra descendant is lookahead.
+          select id, status, depth, path
+          from descendants
+          limit ${SESSION_TREE_STATS_MAX_DESCENDANTS + 2}
+        ), numbered as (
+          select id, status, depth, path, row_number() over () as ordinal
+          from bounded
+        )
+        select
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth = 1
+          )::int as "directChildren",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1} and depth > 0
+          )::int as "totalDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status in ('running', 'recovering')
+          )::int as "runningDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status in ('queued', 'waiting_capacity')
+          )::int as "queuedDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'requires_action'
+          )::int as "attentionDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'paused'
+          )::int as "pausedDescendants",
+          count(*) filter (
+            where ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth > 0 and status = 'failed'
+          )::int as "failedDescendants",
+          coalesce(bool_or(
+            ordinal > ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+            or (
+              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and depth = ${SESSION_TREE_STATS_MAX_DEPTH}
+              and exists (
+                select 1
+                from ${schema.sessions} deeper
+                where deeper.workspace_id = ${workspaceId}
+                  and deeper.parent_session_id = numbered.id
+              )
+            )
+            or (
+              ordinal <= ${SESSION_TREE_STATS_MAX_DESCENDANTS + 1}
+              and exists (
+                select 1
+                from ${schema.sessions} cycle_edge
+                where cycle_edge.workspace_id = ${workspaceId}
+                  and cycle_edge.parent_session_id = numbered.id
+                  and cycle_edge.id = any(numbered.path)
+              )
+            )
+          ), false) as truncated
+        from numbered
+      ) stats
+      where root.workspace_id = ${workspaceId}
+        and ${inArray(sql`root.id`, uniqueRootIds)}
     `,
   );
   return new Map(
@@ -11329,6 +11714,7 @@ async function sessionTreeStatsForSessions(
         attentionDescendants: Number(row.attentionDescendants),
         pausedDescendants: Number(row.pausedDescendants),
         failedDescendants: Number(row.failedDescendants),
+        truncated: row.truncated,
       },
     ]),
   );
@@ -11449,7 +11835,10 @@ export async function listSessionsForSubject(
   workspaceId: string,
   options: ListSessionsForSubjectOptions,
 ): Promise<SessionListResponse> {
-  const limit = Math.max(1, options.limit ?? 50);
+  const requestedLimit = options.limit ?? 50;
+  const limit = Number.isFinite(requestedLimit)
+    ? Math.min(500, Math.max(1, Math.floor(requestedLimit)))
+    : 50;
   let membershipCheckSerializationFailure = false;
   const listInTransaction = async (): Promise<SessionListResponse> => {
     membershipCheckSerializationFailure = false;
@@ -11589,7 +11978,7 @@ export async function listSessionsForSubject(
             });
           }
         }
-        const pinnedRows = await tx
+        const pinnedLookaheadRows = await tx
           .select({ session: schema.sessions, pin: schema.sessionPins })
           .from(schema.sessionPins)
           .innerJoin(schema.sessions, eq(schema.sessions.id, schema.sessionPins.sessionId))
@@ -11601,7 +11990,10 @@ export async function listSessionsForSubject(
               ...filters,
             ),
           )
-          .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id));
+          .orderBy(desc(schema.sessionPins.pinnedAt), desc(schema.sessions.id))
+          .limit(SESSION_LIST_MAX_PINNED + 1);
+        const pinnedTruncated = pinnedLookaheadRows.length > SESSION_LIST_MAX_PINNED;
+        const pinnedRows = pinnedLookaheadRows.slice(0, SESSION_LIST_MAX_PINNED);
         const ordinaryRows =
           pageIds.length === 0
             ? []
@@ -11655,11 +12047,13 @@ export async function listSessionsForSubject(
               attentionDescendants: 0,
               pausedDescendants: 0,
               failedDescendants: 0,
+              truncated: false,
             },
           };
         };
         return {
           pinned: pinnedRows.map(mapListSession),
+          pinnedTruncated,
           sessions: pageRows.map(mapListSession),
           nextCursor,
         };
@@ -11896,20 +12290,88 @@ export async function listSessions(
   });
 }
 
-export type SessionDiscoveryCursor = { createdAt: Date; id: string };
+export type SessionDiscoveryOrderBy = "createdAt" | "updatedAt";
+export type SessionDiscoveryCursor = {
+  orderBy: SessionDiscoveryOrderBy;
+  /** Decimal database activity revision; zero is the legacy/created-order bucket. */
+  sortRevision: string;
+  /** Exact PostgreSQL timestamp text (including microseconds), not a JS Date. */
+  sortAt: string;
+  id: string;
+  /** Created-order timestamp ceiling; retained as diagnostic context for updated order. */
+  snapshotAt: string;
+  /** First-page revision fence: later activity belongs to the next incremental scan. */
+  snapshotRevision: string;
+  /** Incremental revision scope is cursor-bound and cannot change on continuation. */
+  updatedAfter: string | null;
+};
+export const SESSION_DISCOVERY_GOAL_MAX_CHARS = 600;
+export const SESSION_DISCOVERY_MESSAGE_MAX_CHARS = 600;
 export type SessionDiscoverySummary = {
   id: string;
   title: string | null;
+  titleOriginalChars: number | null;
   parentSessionId: string | null;
   status: SessionStatus;
-  effectiveControl: Session["effectiveControl"];
-  goal: { status: SessionGoalStatus; text: string } | null;
+  effectiveControl: SessionDiscoveryControl;
+  goal: { status: SessionGoalStatus; text: string; textOriginalChars: number } | null;
   queuedPromptCount: number;
   treeStats: NonNullable<Session["treeStats"]>;
-  latestMessage: { type: SessionEventType; preview: string | null } | null;
+  latestMessage: {
+    type: SessionEventType;
+    preview: string | null;
+    previewOriginalChars: number | null;
+  } | null;
   createdAt: string;
   updatedAt: string;
+  /** Internal exact revision key; omitted from the MCP row projection. */
+  sortRevision: string;
+  /** Internal exact keyset timestamp; omitted from the MCP row projection. */
+  sortAt: string;
 };
+
+const SESSION_ACTIVITY_REVISION_PATTERN = /^(?:0|[1-9]\d*)$/;
+const SESSION_ACTIVITY_REVISION_MAX = 9_223_372_036_854_775_807n;
+
+function normalizeSessionActivityRevision(value: string, label: string): string {
+  if (!SESSION_ACTIVITY_REVISION_PATTERN.test(value)) {
+    throw new Error(`sessions_list ${label} must be a decimal activity revision`);
+  }
+  const revision = BigInt(value);
+  if (revision > SESSION_ACTIVITY_REVISION_MAX) {
+    throw new Error(`sessions_list ${label} exceeds the database activity revision range`);
+  }
+  return revision.toString();
+}
+
+async function lockWorkspaceSessionActivityRevision(
+  db: Database,
+  workspaceId: string,
+): Promise<string> {
+  // The caller already holds workspace_inference_controls FOR SHARE. This
+  // insert makes an untouched workspace's zero fence durable and waits for an
+  // in-flight first allocation instead of observing a missing counter as zero.
+  await db.execute(sql`
+    insert into ${schema.workspaceSessionActivityRevisions} (
+      workspace_id, account_id, revision
+    )
+    select ${schema.workspaces.id}, ${schema.workspaces.accountId}, 0
+    from ${schema.workspaces}
+    where ${schema.workspaces.id} = ${workspaceId}
+    on conflict (workspace_id) do nothing
+  `);
+  const rows = await db.execute<{ revision: string }>(sql`
+    select revision::text as revision
+    from ${schema.workspaceSessionActivityRevisions}
+    where workspace_id = ${workspaceId}
+    for share
+  `);
+  const revision = rows[0]?.revision;
+  if (revision === undefined) {
+    throw new Error("sessions_list workspace activity revision is unavailable");
+  }
+  return normalizeSessionActivityRevision(revision, "snapshot revision");
+}
 
 /**
  * Compact-by-construction discovery projection for the first-party
@@ -11923,36 +12385,145 @@ export async function listSessionDiscoverySummaries(
     limit: number;
     cursor?: SessionDiscoveryCursor;
     includeLastMessage?: boolean;
+    orderBy?: SessionDiscoveryOrderBy;
+    updatedAfter?: string;
   },
 ): Promise<{
   sessions: SessionDiscoverySummary[];
   hasMore: boolean;
   nextCursor: SessionDiscoveryCursor | null;
   total: number;
+  orderBy: SessionDiscoveryOrderBy;
+  snapshotAt: string;
+  snapshotRevision: string;
+  updatedThrough: string | null;
+  updatedAfter: string | null;
 }> {
   const limit = Math.max(1, Math.min(100, Math.floor(options.limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const cursorPredicate = options.cursor
-      ? or(
-          lt(schema.sessions.createdAt, options.cursor.createdAt),
-          and(
-            eq(schema.sessions.createdAt, options.cursor.createdAt),
-            lt(schema.sessions.id, options.cursor.id),
-          ),
+    const orderBy = options.orderBy ?? options.cursor?.orderBy ?? "createdAt";
+    const requestedUpdatedAfter = options.updatedAfter ?? options.cursor?.updatedAfter ?? null;
+    const updatedAfter =
+      requestedUpdatedAfter === null
+        ? null
+        : normalizeSessionActivityRevision(requestedUpdatedAfter, "updatedAfter");
+    if (options.cursor?.orderBy !== undefined && options.cursor.orderBy !== orderBy) {
+      throw new Error("sessions_list cursor order does not match the request");
+    }
+    if (options.cursor && options.cursor.updatedAfter !== updatedAfter) {
+      throw new Error("sessions_list cursor incremental filter does not match the request");
+    }
+    if (updatedAfter !== null && orderBy !== "updatedAt") {
+      throw new Error("sessions_list updatedAfter requires orderBy=updatedAt");
+    }
+    const snapshotAt =
+      options.cursor?.snapshotAt ??
+      (
+        await rawRows<{ value: string }>(
+          scopedDb,
+          sql`select to_char(statement_timestamp() at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as value`,
         )
+      )[0]!.value;
+    const needsUpdatedSnapshot =
+      orderBy === "updatedAt" && options.cursor?.snapshotRevision === undefined;
+    if (needsUpdatedSnapshot) {
+      // Canonical semantic writers lock workspace control, then UUID-sorted
+      // sessions, then allocate this counter. Taking the same workspace lock
+      // before the first-page counter fence preserves that order. Page queries
+      // are plain MVCC reads and never wait on session row locks, so a writer
+      // blocked at the counter cannot deadlock the reader. Holding FOR SHARE
+      // until transaction end ensures every later committed activity receives a
+      // greater revision. Continuations reuse the established fence and need no
+      // new control/counter lock.
+      await lockWorkspaceInferenceControl(scopedDb, workspaceId, "share");
+    }
+    const snapshotRevision =
+      orderBy === "updatedAt"
+        ? options.cursor?.snapshotRevision !== undefined
+          ? normalizeSessionActivityRevision(
+              options.cursor.snapshotRevision,
+              "cursor snapshot revision",
+            )
+          : await lockWorkspaceSessionActivityRevision(scopedDb, workspaceId)
+        : "0";
+    const cursorSortRevision = options.cursor
+      ? normalizeSessionActivityRevision(options.cursor.sortRevision, "cursor sort revision")
+      : null;
+    if (
+      orderBy === "createdAt" &&
+      options.cursor &&
+      (cursorSortRevision !== "0" || options.cursor.snapshotRevision !== "0")
+    ) {
+      throw new Error("sessions_list created-order cursor cannot carry activity revisions");
+    }
+    const cursorPredicate = options.cursor
+      ? orderBy === "updatedAt"
+        ? or(
+            sql`${schema.sessions.activityRevision} < ${cursorSortRevision!}::text::bigint`,
+            and(
+              sql`${schema.sessions.activityRevision} = ${cursorSortRevision!}::text::bigint`,
+              or(
+                sql`${schema.sessions.updatedAt} < ${options.cursor.sortAt}::text::timestamptz`,
+                and(
+                  sql`${schema.sessions.updatedAt} = ${options.cursor.sortAt}::text::timestamptz`,
+                  lt(schema.sessions.id, options.cursor.id),
+                ),
+              ),
+            ),
+          )
+        : or(
+            // Cast through text deliberately. postgres.js otherwise infers a
+            // timestamptz parameter and serializes this exact cursor string via
+            // JS Date, which discards PostgreSQL's sub-millisecond precision.
+            sql`${schema.sessions.createdAt} < ${options.cursor.sortAt}::text::timestamptz`,
+            and(
+              sql`${schema.sessions.createdAt} = ${options.cursor.sortAt}::text::timestamptz`,
+              lt(schema.sessions.id, options.cursor.id),
+            ),
+          )
       : undefined;
+    const snapshotFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    snapshotFilters.push(
+      orderBy === "updatedAt"
+        ? sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`
+        : sql`${schema.sessions.createdAt} <= ${snapshotAt}::text::timestamptz`,
+    );
+    if (updatedAfter !== null) {
+      snapshotFilters.push(
+        sql`${schema.sessions.activityRevision} > ${updatedAfter}::text::bigint`,
+      );
+    }
     const rows = await scopedDb
       .select({
         id: schema.sessions.id,
-        title: schema.sessions.title,
+        title: sql<
+          string | null
+        >`left(${schema.sessions.title}, ${SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS})`,
+        titleOriginalChars: sql<number | null>`char_length(${schema.sessions.title})::integer`,
         parentSessionId: schema.sessions.parentSessionId,
         status: schema.sessions.status,
         createdAt: schema.sessions.createdAt,
         updatedAt: schema.sessions.updatedAt,
+        sortRevision:
+          orderBy === "updatedAt"
+            ? sql<string>`${schema.sessions.activityRevision}::text`
+            : sql<string>`'0'`,
+        sortAt:
+          orderBy === "updatedAt"
+            ? sql<string>`to_char(${schema.sessions.updatedAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+            : sql<string>`to_char(${schema.sessions.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
       })
       .from(schema.sessions)
-      .where(and(eq(schema.sessions.workspaceId, workspaceId), cursorPredicate))
-      .orderBy(desc(schema.sessions.createdAt), desc(schema.sessions.id))
+      .where(and(...snapshotFilters, cursorPredicate))
+      .orderBy(
+        ...(orderBy === "updatedAt"
+          ? [
+              desc(schema.sessions.activityRevision),
+              desc(schema.sessions.updatedAt),
+              desc(schema.sessions.id),
+            ]
+          : [desc(schema.sessions.createdAt), desc(schema.sessions.id)]),
+      )
       .limit(limit + 1);
     const hasMore = rows.length > limit;
     const page = rows.slice(0, limit);
@@ -11960,18 +12531,29 @@ export async function listSessionDiscoverySummaries(
     const [{ total } = { total: 0 }] = await scopedDb
       .select({ total: sql<number>`count(*)::int` })
       .from(schema.sessions)
-      .where(eq(schema.sessions.workspaceId, workspaceId));
+      .where(and(...snapshotFilters));
     if (ids.length === 0) {
-      return { sessions: [], hasMore: false, nextCursor: null, total: Number(total) };
+      return {
+        sessions: [],
+        hasMore: false,
+        nextCursor: null,
+        total: Number(total),
+        orderBy,
+        snapshotAt,
+        snapshotRevision,
+        updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
+        updatedAfter,
+      };
     }
 
-    const controls = await sessionControlProjections(scopedDb, workspaceId, ids);
+    const controls = await evaluateSessionDiscoveryControls(scopedDb, workspaceId, ids);
     const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, ids);
     const goals = await scopedDb
       .select({
         sessionId: schema.sessionGoals.sessionId,
         status: schema.sessionGoals.status,
-        text: schema.sessionGoals.text,
+        text: sql<string>`left(${schema.sessionGoals.text}, ${SESSION_DISCOVERY_GOAL_MAX_CHARS})`,
+        textOriginalChars: sql<number>`char_length(${schema.sessionGoals.text})::integer`,
       })
       .from(schema.sessionGoals)
       .where(
@@ -12011,7 +12593,12 @@ export async function listSessionDiscoverySummaries(
               ${schema.sessionEvents.payload}->>'text',
               ${schema.sessionEvents.payload}->>'message',
               ${schema.sessionEvents.payload}->>'content'
-            ), 1200)`,
+            ), ${SESSION_DISCOVERY_MESSAGE_MAX_CHARS})`,
+            previewOriginalChars: sql<number | null>`char_length(coalesce(
+              ${schema.sessionEvents.payload}->>'text',
+              ${schema.sessionEvents.payload}->>'message',
+              ${schema.sessionEvents.payload}->>'content'
+            ))::integer`,
           })
           .from(schema.sessionEvents)
           .where(
@@ -12032,10 +12619,17 @@ export async function listSessionDiscoverySummaries(
       return {
         id: row.id,
         title: row.title,
+        titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
         parentSessionId: row.parentSessionId,
         status: row.status as SessionStatus,
         effectiveControl: control,
-        goal: goal ? { status: goal.status as SessionGoalStatus, text: goal.text } : null,
+        goal: goal
+          ? {
+              status: goal.status as SessionGoalStatus,
+              text: goal.text,
+              textOriginalChars: Number(goal.textOriginalChars),
+            }
+          : null,
         queuedPromptCount: queueBySession.get(row.id) ?? 0,
         treeStats: treeStats.get(row.id) ?? {
           directChildren: 0,
@@ -12045,20 +12639,44 @@ export async function listSessionDiscoverySummaries(
           attentionDescendants: 0,
           pausedDescendants: 0,
           failedDescendants: 0,
+          truncated: false,
         },
         latestMessage: latest
-          ? { type: latest.type as SessionEventType, preview: latest.preview }
+          ? {
+              type: latest.type as SessionEventType,
+              preview: latest.preview,
+              previewOriginalChars:
+                latest.previewOriginalChars === null ? null : Number(latest.previewOriginalChars),
+            }
           : null,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
+        sortRevision: row.sortRevision,
+        sortAt: row.sortAt,
       };
     });
     const last = page.at(-1);
     return {
       sessions,
       hasMore,
-      nextCursor: hasMore && last ? { createdAt: last.createdAt, id: last.id } : null,
+      nextCursor:
+        hasMore && last
+          ? {
+              orderBy,
+              sortRevision: last.sortRevision,
+              sortAt: last.sortAt,
+              id: last.id,
+              snapshotAt,
+              snapshotRevision,
+              updatedAfter,
+            }
+          : null,
       total: Number(total),
+      orderBy,
+      snapshotAt,
+      snapshotRevision,
+      updatedThrough: orderBy === "updatedAt" ? snapshotRevision : null,
+      updatedAfter,
     };
   });
 }
@@ -12235,9 +12853,302 @@ export type ListSessionEventsOptions = {
   after?: number;
   before?: number;
   limit?: number;
+  direction?: SessionEventReadDirection;
+  includeTypes?: readonly SessionEventType[];
+  excludeTypes?: readonly SessionEventType[];
+  includeClasses?: readonly SessionEventSemanticClass[];
+  excludeClasses?: readonly SessionEventSemanticClass[];
+  defaultExcludeTypes?: readonly SessionEventType[];
+  payloadMode?: SessionEventPayloadMode;
+};
+
+export type ListSessionEventPageOptions = ListSessionEventsOptions & {
+  /** Exact UTF-8 JSON-array envelope budget for rows materialized by the app. */
+  maxBytes?: number;
+  /** Internal SQL fetch size. Batches never escape the surrounding RLS transaction. */
+  batchSize?: number;
+};
+
+export type SessionEventPage = {
+  events: SessionEvent[];
+  hasMore: boolean;
+  bytes: number;
+  direction: SessionEventReadDirection;
+  coveredSequence: { first: number; last: number } | null;
+  nextAfter: number | null;
+  nextBefore: number | null;
+  truncatedBy: "count" | "bytes" | null;
 };
 
 const POSTGRES_INT_MAX = 2_147_483_647;
+export const SESSION_EVENT_DB_PAGE_MAX_BYTES = 1024 * 1024;
+const SESSION_EVENT_DB_BATCH_SIZE = 64;
+
+type SessionEventProjectionRow = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  sequence: number;
+  type: string;
+  payload: unknown;
+  occurredAt: Date;
+  clientEventId: string | null;
+  turnId: string | null;
+  turnGeneration: number | null;
+  turnAttemptId: string | null;
+  turnAssociation: string | null;
+  duplicateOfEventId: string | null;
+  duplicateReason: string | null;
+};
+
+/**
+ * Read one direction-aware session-event page without transferring legacy raw
+ * payloads or malformed free-form envelope strings out of PostgreSQL.
+ *
+ * Migration 0067 deliberately leaves historical rows untouched. This query
+ * invokes its immutable payload projector in SQL and mirrors the rolling
+ * envelope guard in SQL, then accumulates small batches under one RLS
+ * transaction. `bytes` is the exact UTF-8 size of `JSON.stringify(events)`;
+ * `hasMore` is true whenever count or byte selection stopped before the durable
+ * range ended. A nonempty durable range can therefore never become an empty,
+ * non-advancing HTTP page.
+ */
+export async function listSessionEventPage(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: ListSessionEventPageOptions = {},
+): Promise<SessionEventPage> {
+  const after = normalizeEventSequence(options.after, 0);
+  const requestedLimit = Math.max(1, normalizeEventLimit(options.limit, 500));
+  const hasBefore = options.before !== undefined && Number.isFinite(options.before);
+  const before = hasBefore ? Math.floor(options.before as number) : undefined;
+  const direction = options.direction ?? (hasBefore ? "before" : "after");
+  const payloadMode = options.payloadMode ?? "full";
+  const typeFilters = resolveSessionEventTypeFilters({
+    includeTypes: options.includeTypes,
+    excludeTypes: options.excludeTypes,
+    includeClasses: options.includeClasses,
+    excludeClasses: options.excludeClasses,
+    defaultExcludeTypes: options.defaultExcludeTypes,
+  });
+  const maxBytes = Math.max(
+    SESSION_EVENT_ENVELOPE_MAX_BYTES + 2,
+    normalizeEventLimit(options.maxBytes, SESSION_EVENT_DB_PAGE_MAX_BYTES),
+  );
+  const batchSize = Math.max(
+    1,
+    Math.min(256, normalizeEventLimit(options.batchSize, SESSION_EVENT_DB_BATCH_SIZE)),
+  );
+
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const events: SessionEvent[] = [];
+    let bytes = 2; // []
+    let cursor = direction === "before" ? before : after;
+    let hasMore = false;
+    let truncatedBy: SessionEventPage["truncatedBy"] = null;
+
+    for (;;) {
+      const remainingWithLookahead = Math.max(1, requestedLimit - events.length + 1);
+      const queryLimit = Math.min(batchSize, remainingWithLookahead);
+      const filters: SQL[] = [
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        gt(schema.sessionEvents.sequence, after),
+      ];
+      if (typeFilters.includeTypes.length > 0) {
+        filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
+      }
+      if (typeFilters.excludeTypes.length > 0) {
+        filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+      }
+      if (direction === "before") {
+        if (cursor !== undefined && cursor <= POSTGRES_INT_MAX) {
+          filters.push(lt(schema.sessionEvents.sequence, cursor));
+        }
+      } else if (cursor !== undefined) {
+        filters.push(gt(schema.sessionEvents.sequence, cursor));
+      }
+      if (direction === "after" && before !== undefined && before <= POSTGRES_INT_MAX) {
+        filters.push(lt(schema.sessionEvents.sequence, before));
+      }
+
+      const rows = await scopedDb
+        .select(sessionEventProjectionSelect(payloadMode))
+        .from(schema.sessionEvents)
+        .where(and(...filters))
+        .orderBy(
+          direction === "before"
+            ? desc(schema.sessionEvents.sequence)
+            : asc(schema.sessionEvents.sequence),
+        )
+        .limit(queryLimit);
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        if (events.length >= requestedLimit) {
+          hasMore = true;
+          truncatedBy = "count";
+          break;
+        }
+        const event = mapProjectedEvent(row);
+        const eventBytes = utf8JsonBytes(event);
+        const separatorBytes = events.length === 0 ? 0 : 1;
+        if (bytes + separatorBytes + eventBytes > maxBytes) {
+          if (events.length === 0) {
+            throw new RangeError(
+              `A projected session event cannot fit in the database page envelope (${eventBytes + 2} > ${maxBytes} bytes)`,
+            );
+          }
+          hasMore = true;
+          truncatedBy = "bytes";
+          break;
+        }
+        events.push(event);
+        bytes += separatorBytes + eventBytes;
+        cursor = event.sequence;
+      }
+      if (hasMore) break;
+      if (rows.length < queryLimit) break;
+    }
+
+    if (direction === "before") events.reverse();
+    const first = events[0]?.sequence ?? null;
+    const last = events.at(-1)?.sequence ?? null;
+    return {
+      events,
+      hasMore,
+      bytes,
+      direction,
+      coveredSequence: first === null || last === null ? null : { first, last },
+      nextAfter: direction === "after" ? (last ?? after) : null,
+      nextBefore: direction === "before" ? (first ?? before ?? null) : null,
+      truncatedBy,
+    };
+  });
+}
+
+function sessionEventProjectionSelect(payloadMode: SessionEventPayloadMode = "full") {
+  const typeInvalid = sql`(
+    octet_length(${schema.sessionEvents.type}) > ${SESSION_EVENT_TYPE_MAX_BYTES}
+    or position(E'\\n' in ${schema.sessionEvents.type}) > 0
+    or position(E'\\r' in ${schema.sessionEvents.type}) > 0
+  )`;
+  const clientEventIdInvalid = sql`(
+    ${schema.sessionEvents.clientEventId} is not null
+    and octet_length(${schema.sessionEvents.clientEventId})
+      > ${SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES}
+  )`;
+  const turnAssociationInvalid = sql`(
+    ${schema.sessionEvents.turnAssociation} is not null
+    and ${schema.sessionEvents.turnAssociation} not in (
+      'current', 'late_rejected', 'duplicate'
+    )
+  )`;
+  const duplicateReasonInvalid = sql`(
+    ${schema.sessionEvents.duplicateReason} is not null
+    and octet_length(${schema.sessionEvents.duplicateReason})
+      > ${SESSION_EVENT_DUPLICATE_REASON_MAX_BYTES}
+  )`;
+  const envelopeInvalid = sql`(
+    ${typeInvalid} or ${clientEventIdInvalid}
+    or ${turnAssociationInvalid} or ${duplicateReasonInvalid}
+  )`;
+  const projectedType = sql<string>`case
+    when ${typeInvalid} then 'session.event.envelope_omitted'
+    else ${schema.sessionEvents.type}
+  end`;
+  const projectedClientEventId = sql<string | null>`case
+    when ${clientEventIdInvalid} then left(${schema.sessionEvents.clientEventId}, 256)
+    else ${schema.sessionEvents.clientEventId}
+  end`;
+  const projectedTurnAssociation = sql<string | null>`case
+    when ${turnAssociationInvalid} then null
+    else ${schema.sessionEvents.turnAssociation}
+  end`;
+  const projectedDuplicateReason = sql<string | null>`case
+    when ${duplicateReasonInvalid} then left(${schema.sessionEvents.duplicateReason}, 1024)
+    else ${schema.sessionEvents.duplicateReason}
+  end`;
+  const projectedEnvelopeFields = sql`(
+    '[]'::jsonb
+    || case when ${typeInvalid} then jsonb_build_array(jsonb_build_object(
+      'field', 'type',
+      'originalBytes', octet_length(${schema.sessionEvents.type}),
+      'deliveredBytes', octet_length(${projectedType})
+    )) else '[]'::jsonb end
+    || case when ${clientEventIdInvalid} then jsonb_build_array(jsonb_build_object(
+      'field', 'clientEventId',
+      'originalBytes', octet_length(${schema.sessionEvents.clientEventId}),
+      'deliveredBytes', octet_length(${projectedClientEventId})
+    )) else '[]'::jsonb end
+    || case when ${turnAssociationInvalid} then jsonb_build_array(jsonb_build_object(
+      'field', 'turnAssociation',
+      'originalBytes', octet_length(${schema.sessionEvents.turnAssociation}),
+      'deliveredBytes', 0
+    )) else '[]'::jsonb end
+    || case when ${duplicateReasonInvalid} then jsonb_build_array(jsonb_build_object(
+      'field', 'duplicateReason',
+      'originalBytes', octet_length(${schema.sessionEvents.duplicateReason}),
+      'deliveredBytes', octet_length(${projectedDuplicateReason})
+    )) else '[]'::jsonb end
+  )`;
+  const projectedPayload = sql<unknown>`case
+    when ${envelopeInvalid} then jsonb_build_object(
+      'preview', '[legacy event envelope normalized at bounded database read boundary]',
+      'originalEventBytes', octet_length(row_to_json(${schema.sessionEvents})::text),
+      'originalType', left(${schema.sessionEvents.type}, 64),
+      'envelopeProjection', jsonb_build_object(
+        'truncated', true,
+        'surface', 'database_read_projection',
+        'fields', ${projectedEnvelopeFields}
+      ),
+      'fullEvidence', jsonb_build_object('available', false, 'reason', 'not_retained')
+    )
+    else opengeni_private.project_session_event_payload(${schema.sessionEvents.payload})
+  end`;
+  const projectedPayloadBytes = sql<number>`octet_length((${projectedPayload})::text)`;
+  const selectedPayload =
+    payloadMode === "none"
+      ? sql<unknown>`jsonb_build_object(
+          '_monitoring', jsonb_build_object(
+            'payloadMode', 'none',
+            'payloadOmitted', true,
+            'projectedPayloadBytes', ${projectedPayloadBytes}
+          )
+        )`
+      : payloadMode === "summary"
+        ? sql<unknown>`case
+            when ${projectedPayloadBytes} <= 4096 then ${projectedPayload}
+            else jsonb_build_object(
+              '_monitoring', jsonb_build_object(
+                'payloadMode', 'summary',
+                'payloadTruncated', true,
+                'projectedPayloadBytes', ${projectedPayloadBytes},
+                'fullForensicPayload', 'request payloadMode=full explicitly'
+              ),
+              'preview', left((${projectedPayload})::text, 2048)
+            )
+          end`
+        : projectedPayload;
+
+  return {
+    id: schema.sessionEvents.id,
+    workspaceId: schema.sessionEvents.workspaceId,
+    sessionId: schema.sessionEvents.sessionId,
+    sequence: schema.sessionEvents.sequence,
+    type: projectedType,
+    payload: selectedPayload,
+    occurredAt: schema.sessionEvents.occurredAt,
+    clientEventId: projectedClientEventId,
+    turnId: schema.sessionEvents.turnId,
+    turnGeneration: schema.sessionEvents.turnGeneration,
+    turnAttemptId: schema.sessionEvents.turnAttemptId,
+    turnAssociation: projectedTurnAssociation,
+    duplicateOfEventId: schema.sessionEvents.duplicateOfEventId,
+    duplicateReason: projectedDuplicateReason,
+  };
+}
 
 export async function listSessionEvents(
   db: Database,
@@ -12272,6 +13183,14 @@ export async function listSessionEvents(
   const limit = normalizeEventLimit(options.limit, 500);
   const hasBefore = options.before !== undefined && Number.isFinite(options.before);
   const before = hasBefore ? Math.floor(options.before as number) : undefined;
+  const direction = options.direction ?? (hasBefore ? "before" : "after");
+  const typeFilters = resolveSessionEventTypeFilters({
+    includeTypes: options.includeTypes,
+    excludeTypes: options.excludeTypes,
+    includeClasses: options.includeClasses,
+    excludeClasses: options.excludeClasses,
+    defaultExcludeTypes: options.defaultExcludeTypes,
+  });
 
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const filters: SQL[] = [
@@ -12279,16 +13198,26 @@ export async function listSessionEvents(
       eq(schema.sessionEvents.sessionId, sessionId),
       gt(schema.sessionEvents.sequence, after),
     ];
+    if (typeFilters.includeTypes.length > 0) {
+      filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
+    }
+    if (typeFilters.excludeTypes.length > 0) {
+      filters.push(notInArray(schema.sessionEvents.type, typeFilters.excludeTypes));
+    }
     if (before !== undefined && before <= POSTGRES_INT_MAX) {
       filters.push(lt(schema.sessionEvents.sequence, before));
     }
     const rows = await scopedDb
-      .select()
+      .select(sessionEventProjectionSelect(options.payloadMode ?? "full"))
       .from(schema.sessionEvents)
       .where(and(...filters))
-      .orderBy(hasBefore ? desc(schema.sessionEvents.sequence) : asc(schema.sessionEvents.sequence))
+      .orderBy(
+        direction === "before"
+          ? desc(schema.sessionEvents.sequence)
+          : asc(schema.sessionEvents.sequence),
+      )
       .limit(limit);
-    return (hasBefore ? rows.reverse() : rows).map(mapEvent);
+    return (direction === "before" ? rows.reverse() : rows).map(mapProjectedEvent);
   });
 }
 
@@ -12314,7 +13243,9 @@ export async function reserveToolspaceCallForTurn(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .update(schema.sessionTurns)
-      .set({ toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1` })
+      .set({
+        toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1`,
+      })
       .where(
         and(
           eq(schema.sessionTurns.workspaceId, workspaceId),
@@ -12366,20 +13297,32 @@ function mapWorkspaceControlEvent(
   row: typeof schema.workspaceControlEvents.$inferSelect,
 ): WorkspaceControlEvent {
   const revision = Number(row.revision);
-  return {
-    id: row.id,
-    workspaceId: row.workspaceId,
-    sequence: revision,
-    revision,
-    type: "workspace.control.changed",
-    scope: row.scope as WorkspaceControlEvent["scope"],
-    rootSessionId: row.rootSessionId,
-    action: row.action as WorkspaceControlEvent["action"],
-    automatic: row.automatic,
-    reason: row.reason,
-    actor: row.actor,
-    occurredAt: row.occurredAt.toISOString(),
-  };
+  return boundWorkspaceControlEvent(
+    {
+      id: row.id,
+      workspaceId: row.workspaceId,
+      sequence: revision,
+      revision,
+      type: "workspace.control.changed",
+      scope: row.scope as WorkspaceControlEvent["scope"],
+      rootSessionId: row.rootSessionId,
+      action: row.action as WorkspaceControlEvent["action"],
+      automatic: row.automatic,
+      reason: row.reason,
+      actor: row.actor,
+      occurredAt: row.occurredAt.toISOString(),
+    },
+    {
+      surface: "durable_control",
+      // Untouched bounded rows from before migration 0068 intentionally retain
+      // null metadata. Their delivered bytes are the exact original facts.
+      reasonOriginalBytes:
+        row.reason === null
+          ? null
+          : (row.reasonOriginalBytes ?? workspaceControlUtf8Bytes(row.reason)),
+      actorOriginalBytes: row.actorOriginalBytes ?? workspaceControlUtf8Bytes(row.actor),
+    },
+  );
 }
 
 export async function listWorkspaceControlEvents(
@@ -12508,6 +13451,7 @@ type TurnAttemptFenceResult =
       workspace: typeof schema.workspaces.$inferSelect;
       session: typeof schema.sessions.$inferSelect;
       turn: typeof schema.sessionTurns.$inferSelect;
+      attempt: typeof schema.sessionTurnAttempts.$inferSelect;
     }
   | {
       allowed: false;
@@ -12515,10 +13459,12 @@ type TurnAttemptFenceResult =
       workspace: typeof schema.workspaces.$inferSelect | null;
       session: typeof schema.sessions.$inferSelect | null;
       turn: typeof schema.sessionTurns.$inferSelect | null;
+      attempt: typeof schema.sessionTurnAttempts.$inferSelect | null;
     };
 
 /**
- * Lock order for every activity write fence: workspace -> session -> turn.
+ * Lock order for every activity write fence: workspace control -> actual
+ * workspace -> session -> exact turn -> exact attempt.
  *
  * Activity writes only need a shared workspace admission lock: concurrent
  * sessions may write independently, while an exclusive workspace Pause/Resume
@@ -12537,39 +13483,24 @@ async function lockTurnAttemptWriteFenceTx(
     attemptId: string;
   },
 ): Promise<TurnAttemptFenceResult> {
-  const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
-    lock: "share",
+  const locks = await lockSessionEventWriteRows(tx, {
+    workspaceId: input.workspaceId,
+    controlLock: "share",
+    sessionIds: [input.sessionId],
+    turnIds: [input.turnId],
+    attemptIds: [input.attemptId],
   });
-  const [workspace] = await tx
-    .select()
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, input.workspaceId))
-    .limit(1);
-  const [session] = await tx
-    .select()
-    .from(schema.sessions)
-    .where(
-      and(
-        eq(schema.sessions.workspaceId, input.workspaceId),
-        eq(schema.sessions.id, input.sessionId),
-      ),
-    )
-    .for("update")
-    .limit(1);
-  const [turn] = await tx
-    .select()
-    .from(schema.sessionTurns)
-    .where(
-      and(
-        eq(schema.sessionTurns.workspaceId, input.workspaceId),
-        eq(schema.sessionTurns.sessionId, input.sessionId),
-        eq(schema.sessionTurns.id, input.turnId),
-      ),
-    )
-    .for("update")
-    .limit(1);
-  const base = { workspace: workspace ?? null, session: session ?? null, turn: turn ?? null };
-  if (!workspace || !session || !turn) return { allowed: false, reason: "not_found", ...base };
+  const workspace = locks.workspace;
+  const session = locks.sessions.find((row) => row.id === input.sessionId) ?? null;
+  const turn = locks.turns.find((row) => row.id === input.turnId) ?? null;
+  const attempt = locks.attempts.find((row) => row.id === input.attemptId) ?? null;
+  const base = { workspace, session, turn, attempt };
+  if (!workspace || !session || !turn || !attempt) {
+    return { allowed: false, reason: "not_found", ...base };
+  }
+  const effectiveControl = await evaluateSessionControl(tx, input.workspaceId, input.sessionId, {
+    workspaceControl: locks.control ?? undefined,
+  });
   if (effectiveControl.state === "paused") {
     return {
       allowed: false,
@@ -12587,6 +13518,17 @@ async function lockTurnAttemptWriteFenceTx(
     return { allowed: false, reason: "generation_changed", ...base };
   }
   if (turn.activeAttemptId !== input.attemptId) {
+    return { allowed: false, reason: "attempt_changed", ...base };
+  }
+  if (
+    turn.accountId !== session.accountId ||
+    turn.sessionId !== input.sessionId ||
+    attempt.accountId !== session.accountId ||
+    attempt.sessionId !== input.sessionId ||
+    attempt.turnId !== input.turnId ||
+    attempt.executionGeneration !== input.executionGeneration ||
+    !["claimed", "running"].includes(attempt.state)
+  ) {
     return { allowed: false, reason: "attempt_changed", ...base };
   }
   const [interruption] = await tx
@@ -12607,7 +13549,7 @@ async function lockTurnAttemptWriteFenceTx(
   if (!["running", "requires_action"].includes(turn.status)) {
     return { allowed: false, reason: "turn_terminal", ...base };
   }
-  return { allowed: true, workspace, session, turn };
+  return { allowed: true, workspace, session, turn, attempt };
 }
 
 /**
@@ -12748,7 +13690,7 @@ export async function recordPendingSessionToolCallResult(
   input: Omit<PendingSessionToolCallInput, "callType" | "callItem"> & {
     resultItem: Record<string, unknown>;
   },
-): Promise<{ accepted: boolean; recorded: boolean; allResultsRecorded: boolean }> {
+): Promise<{ accepted: boolean; recorded: boolean }> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -12762,7 +13704,7 @@ export async function recordPendingSessionToolCallResult(
           attemptId: input.attemptId,
         });
         if (!fence.allowed) {
-          return { accepted: false, recorded: false, allResultsRecorded: false };
+          return { accepted: false, recorded: false };
         }
         const [pending] = await tx
           .select()
@@ -12776,7 +13718,7 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .limit(1);
-        if (!pending) return { accepted: true, recorded: false, allResultsRecorded: false };
+        if (!pending) return { accepted: true, recorded: false };
         const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[pending.callType];
         if (
           !resultType ||
@@ -12798,21 +13740,9 @@ export async function recordPendingSessionToolCallResult(
             ),
           )
           .returning({ id: schema.sessionPendingToolCalls.id });
-        const [{ unresolved } = { unresolved: 0 }] = await tx
-          .select({ unresolved: sql<number>`count(*)::int` })
-          .from(schema.sessionPendingToolCalls)
-          .where(
-            and(
-              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
-              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
-              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
-              sql`${schema.sessionPendingToolCalls.resultItem} is null`,
-            ),
-          );
         return {
           accepted: true,
           recorded: recorded.length === 1,
-          allResultsRecorded: Number(unresolved) === 0,
         };
       }),
   );
@@ -12825,7 +13755,9 @@ export async function recordPendingSessionToolCallResult(
  */
 export async function clearDurablePendingSessionToolCalls(
   db: Database,
-  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem">,
+  input: Omit<PendingSessionToolCallInput, "callId" | "callType" | "callItem"> & {
+    callIds: string[];
+  },
 ): Promise<{ accepted: boolean; cleared: number }> {
   return await withRlsContext(
     db,
@@ -12840,6 +13772,7 @@ export async function clearDurablePendingSessionToolCalls(
           attemptId: input.attemptId,
         });
         if (!fence.allowed) return { accepted: false, cleared: 0 };
+        if (input.callIds.length === 0) return { accepted: true, cleared: 0 };
         const pending = await tx
           .select()
           .from(schema.sessionPendingToolCalls)
@@ -12848,30 +13781,40 @@ export async function clearDurablePendingSessionToolCalls(
               eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
               eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
               eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+              inArray(schema.sessionPendingToolCalls.callId, input.callIds),
               sql`${schema.sessionPendingToolCalls.resultItem} is not null`,
             ),
           )
           .for("update");
         if (pending.length === 0) return { accepted: true, cleared: 0 };
         const history = await tx
-          .select({ item: schema.sessionHistoryItems.item })
+          .select({
+            position: schema.sessionHistoryItems.position,
+            item: schema.sessionHistoryItems.item,
+          })
           .from(schema.sessionHistoryItems)
           .where(
             and(
               eq(schema.sessionHistoryItems.workspaceId, input.workspaceId),
               eq(schema.sessionHistoryItems.sessionId, input.sessionId),
               eq(schema.sessionHistoryItems.turnId, input.turnId),
-              eq(schema.sessionHistoryItems.active, true),
             ),
           );
         const durableIds = pending
           .filter((call) => {
             const resultType = TOOL_RESULT_TYPE_BY_CALL_TYPE[call.callType];
+            if (!resultType) return false;
+            const durableCall = history.find(
+              ({ item }) =>
+                historyItemType(item) === call.callType && historyCallId(item) === call.callId,
+            );
             return Boolean(
-              resultType &&
+              durableCall &&
               history.some(
-                ({ item }) =>
-                  historyItemType(item) === resultType && historyCallId(item) === call.callId,
+                ({ item, position }) =>
+                  position > durableCall.position &&
+                  historyItemType(item) === resultType &&
+                  historyCallId(item) === call.callId,
               ),
             );
           })
@@ -13196,7 +14139,9 @@ export async function applyContextCompaction(
             lastInputTokens: Math.max(0, Math.floor(input.replacementInputTokens)),
             ...(input.clearRequestedCompaction ? { compactRequested: false } : {}),
             ...(insertedEvents.length > 0
-              ? { lastSequence: fence.session.lastSequence + insertedEvents.length }
+              ? {
+                  lastSequence: fence.session.lastSequence + insertedEvents.length,
+                }
               : {}),
             updatedAt: new Date(),
           })
@@ -13240,7 +14185,10 @@ export async function recordSkippedContextCompaction(
   },
 ): Promise<
   | { recorded: true; events: SessionEvent[] }
-  | { recorded: false; reason: TurnAttemptFenceRejectReason | "request_not_pending" }
+  | {
+      recorded: false;
+      reason: TurnAttemptFenceRejectReason | "request_not_pending";
+    }
 > {
   return await withRlsContext(
     db,
@@ -13256,7 +14204,10 @@ export async function recordSkippedContextCompaction(
         });
         if (!fence.allowed) return { recorded: false as const, reason: fence.reason };
         if (!fence.session.compactRequested) {
-          return { recorded: false as const, reason: "request_not_pending" as const };
+          return {
+            recorded: false as const,
+            reason: "request_not_pending" as const,
+          };
         }
         const inserted = await tx
           .insert(schema.sessionEvents)
@@ -13636,7 +14587,7 @@ export async function getSandboxSessionEnvelope(
 
 // ============================================================================
 // Session recordings — the durable index for the "agent films itself proving
-// the fix" loop (P4.3). One row per recording; insert at start, update at
+// the fix" loop. One row per recording; insert at start, update at
 // finalize (available with the storage_key) or failure. Read-side feeds the
 // list route + the signed-URL replay route (storage_key is the source of truth).
 // ============================================================================
@@ -13744,7 +14695,9 @@ export async function updateRecording(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
-      const set: Partial<typeof schema.sessionRecordings.$inferInsert> = { state: input.state };
+      const set: Partial<typeof schema.sessionRecordings.$inferInsert> = {
+        state: input.state,
+      };
       if (input.storageKey !== undefined) set.storageKey = input.storageKey;
       if (input.sizeBytes !== undefined) set.sizeBytes = input.sizeBytes;
       if (input.durationSeconds !== undefined) set.durationSeconds = input.durationSeconds;
@@ -14326,7 +15279,11 @@ async function recomputeAndStampLease(
   leaseTtlMs: number,
   setLiveness: SandboxLeaseLiveness | null,
 ): Promise<LeaseRow> {
-  const counts = await tx.execute<{ total: number; turns: number; viewers: number }>(sql`
+  const counts = await tx.execute<{
+    total: number;
+    turns: number;
+    viewers: number;
+  }>(sql`
     select count(*)::int as total,
            count(*) filter (where kind = 'turn')::int   as turns,
            count(*) filter (where kind = 'viewer')::int as viewers
@@ -14811,7 +15768,11 @@ export async function releaseLeaseHolder(
         where lease_id = ${row.id} and kind = ${input.kind} and holder_id = ${input.holderId}
       `);
 
-        const counts = await tx.execute<{ total: number; turns: number; viewers: number }>(sql`
+        const counts = await tx.execute<{
+          total: number;
+          turns: number;
+          viewers: number;
+        }>(sql`
         select count(*)::int as total,
                count(*) filter (where kind = 'turn')::int   as turns,
                count(*) filter (where kind = 'viewer')::int as viewers
@@ -15202,7 +16163,10 @@ export async function countSandboxLeasesByLiveness(
     warm: 0,
     draining: 0,
   };
-  const rows = await rawRows<{ liveness: SandboxLeaseLiveness; count: number | string }>(
+  const rows = await rawRows<{
+    liveness: SandboxLeaseLiveness;
+    count: number | string;
+  }>(
     db,
     sql`
     select liveness, count
@@ -15223,7 +16187,10 @@ export type CreditBalanceByAccount = {
 };
 
 export async function listCreditBalancesByAccount(db: Database): Promise<CreditBalanceByAccount[]> {
-  const rows = await rawRows<{ account_id: string; balance_micros: number | string }>(
+  const rows = await rawRows<{
+    account_id: string;
+    balance_micros: number | string;
+  }>(
     db,
     sql`
     select account_id, balance_micros
@@ -15395,7 +16362,11 @@ export async function persistDrainSnapshot(
      *  Pass null to CAS-check without writing (for backends with no persistWorkspace). */
     workspaceArchive: string | null;
   },
-): Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }> {
+): Promise<{
+  wrote: boolean;
+  priorArchive: string | null;
+  priorArchivePrev: string | null;
+}> {
   // withRlsContext already runs `fn` inside ONE transaction with the RLS GUCs set,
   // so the SELECT...FOR UPDATE + UPDATE below are atomic (one snapshot, one lock)
   // WITHOUT an extra nested savepoint — nesting a second transaction here under
@@ -15527,6 +16498,9 @@ export async function persistWarmSnapshot(
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     /** base64 of the provider snapshot-ref / tar archive from persistWorkspace(). */
@@ -15551,6 +16525,56 @@ export async function persistWarmSnapshot(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) => {
+      // Serialize with control acceptance before touching resume state. Either
+      // this exact attempt snapshot commits first, or Pause/Steer commits its
+      // interruption first and the late snapshot becomes a no-op. An in-process
+      // AbortSignal cannot close this database race.
+      await lockWorkspaceInferenceControl(scopedDb, input.workspaceId, "share");
+      const [attempt] = await scopedDb
+        .select({
+          accountId: schema.sessionTurnAttempts.accountId,
+          state: schema.sessionTurnAttempts.state,
+          outcome: schema.sessionTurnAttempts.outcome,
+        })
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+            eq(schema.sessionTurnAttempts.sessionId, input.sessionId),
+            eq(schema.sessionTurnAttempts.turnId, input.turnId),
+            eq(schema.sessionTurnAttempts.id, input.attemptId),
+          ),
+        )
+        .limit(1);
+      const [interruption] = attempt
+        ? await scopedDb
+            .select({ id: schema.sessionAttemptInterruptions.id })
+            .from(schema.sessionAttemptInterruptions)
+            .where(
+              and(
+                eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+                eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+              ),
+            )
+            .limit(1)
+        : [];
+      const attemptMayPersistWorkspace =
+        attempt !== undefined &&
+        (attempt.state === "claimed" || attempt.state === "running"
+          ? attempt.outcome === null
+          : attempt.state === "closed" &&
+            (attempt.outcome === "completed" ||
+              attempt.outcome === "failed" ||
+              attempt.outcome === "requires_action"));
+      if (
+        !attempt ||
+        attempt.accountId !== input.accountId ||
+        interruption ||
+        !attemptMayPersistWorkspace
+      ) {
+        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+      }
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
         prior_archive_prev: string | null;
@@ -15566,7 +16590,12 @@ export async function persistWarmSnapshot(
         for update
       `);
       if (guard.length === 0) {
-        return { wrote: false, throttled: false, superseded: false, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: false,
+          priorArchiveForGc: null,
+        };
       }
       const priorArchive = guard[0]!.prior_archive ?? null;
       const priorArchivePrev = guard[0]!.prior_archive_prev ?? null;
@@ -15578,14 +16607,24 @@ export async function persistWarmSnapshot(
       // fresher turn-end one). No-op — do NOT overwrite and do NOT advance the
       // throttle clock. This is what makes the bounded snapshot wait safe.
       if (Number.isFinite(priorAtMs) && capturedAtMs <= priorAtMs) {
-        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: true,
+          priorArchiveForGc: null,
+        };
       }
       if (
         input.minIntervalMs > 0 &&
         Number.isFinite(priorAtMs) &&
         capturedAtMs - priorAtMs < input.minIntervalMs
       ) {
-        return { wrote: false, throttled: true, superseded: false, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: true,
+          superseded: false,
+          priorArchiveForGc: null,
+        };
       }
       await foldWorkspaceArchiveOntoLease(scopedDb, {
         workspaceId: input.workspaceId,
@@ -15706,13 +16745,11 @@ export async function markSandboxFileResourcesMaterialized(
   );
 }
 
-// ═══════════════ Workbench v2 turn-end workspace capture (dossier §10.2) ═══════
+// ═══════════════ Workbench v2 turn-end workspace capture ═══════
 // The durable index for turn-end workspace captures. `insertWorkspaceCapture`
-// mirrors persistWarmSnapshot's epoch-CAS discipline: the write is fenced on the
-// live lease's epoch so a capture whose lease was superseded (a newer turn
-// re-armed the box under a fresh epoch) writes ZERO rows. `revision` is assigned
-// monotonically per session inside the same statement (max+1), unique on
-// (session_id, revision).
+// mirrors persistWarmSnapshot's epoch-CAS discipline and also requires the exact
+// closed, uninterrupted turn attempt. A cancelled attempt or superseded lease
+// writes ZERO rows. `revision` is explicit and unique on (session_id, revision).
 
 export type WorkspaceCaptureRow = {
   id: string;
@@ -15751,7 +16788,7 @@ function mapWorkspaceCaptureRow(row: {
   blob_keys: unknown;
   size_bytes: number | string | null;
   stats: unknown;
-  captured_at: string;
+  captured_at: string | Date;
 }): WorkspaceCaptureRow {
   return {
     id: row.id,
@@ -15765,7 +16802,13 @@ function mapWorkspaceCaptureRow(row: {
     blobKeys: Array.isArray(row.blob_keys) ? (row.blob_keys as string[]) : [],
     sizeBytes: row.size_bytes === null ? null : Number(row.size_bytes),
     stats: (row.stats && typeof row.stats === "object" ? row.stats : {}) as Record<string, unknown>,
-    capturedAt: row.captured_at,
+    // postgres-js decodes `timestamptz` as a Date. Keep the public DB contract
+    // canonical and driver-independent: capture manifests embed ISO strings and
+    // the API compares this identity before it serves any blob.
+    capturedAt:
+      row.captured_at instanceof Date
+        ? row.captured_at.toISOString()
+        : new Date(row.captured_at).toISOString(),
   };
 }
 
@@ -15773,7 +16816,8 @@ type CommitWorkspaceCaptureRevisionInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  turnId: string | null;
+  turnId: string;
+  attemptId: string;
   sandboxGroupId: string;
   expectedEpoch: number;
   revision: number;
@@ -15787,10 +16831,10 @@ type CommitWorkspaceCaptureRevisionInput = {
 };
 
 /**
- * Commit the epoch-fenced capture index and its session-scoped announcement as
- * one durable transition. The announcement is metadata about an already
- * captured revision, not output from the active turn attempt, so it deliberately
- * carries no attempt/generation fence or current-turn association.
+ * Commit the attempt/control/epoch-fenced capture index and its session-scoped
+ * announcement as one durable transition. The announcement is metadata rather
+ * than model output, so it has no current-turn association, but it still carries
+ * the exact attempt/generation that produced the filesystem state.
  */
 async function commitWorkspaceCaptureRevision(
   db: Database,
@@ -15801,27 +16845,50 @@ async function commitWorkspaceCaptureRevision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        // Match the canonical lifecycle lock order. The capture event has FKs to
-        // workspace/session/turn, so taking these locks later could deadlock a
-        // concurrent turn settlement that already owns them in this order.
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const turn = locks.turns.find((row) => row.id === input.turnId);
+        const attempt = locks.attempts.find((row) => row.id === input.attemptId);
+        const [interruption] = attempt
+          ? await tx
+              .select({ id: schema.sessionAttemptInterruptions.id })
+              .from(schema.sessionAttemptInterruptions)
+              .where(
+                and(
+                  eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+                  eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+                  eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+                ),
+              )
+              .limit(1)
+          : [];
+        if (
+          !turn ||
+          !attempt ||
+          turn.sessionId !== input.sessionId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          turn.accountId !== input.accountId ||
+          attempt.accountId !== input.accountId ||
+          attempt.executionGeneration !== turn.executionGeneration ||
+          attempt.state !== "closed" ||
+          (attempt.outcome !== "completed" &&
+            attempt.outcome !== "failed" &&
+            attempt.outcome !== "requires_action") ||
+          interruption ||
+          (turn.status !== "completed" &&
+            turn.status !== "failed" &&
+            turn.status !== "requires_action")
+        ) {
+          return null;
+        }
 
         const capturedAt = input.capturedAt ?? new Date();
         const rows = await tx.execute<{ revision: number | string }>(sql`
@@ -15880,8 +16947,8 @@ async function commitWorkspaceCaptureRevision(
             payload: sanitizeEventPayload(payload),
             clientEventId: `opengeni:workspace-capture:${revision}`,
             turnId: input.turnId,
-            turnGeneration: null,
-            turnAttemptId: null,
+            turnGeneration: attempt.executionGeneration,
+            turnAttemptId: attempt.id,
             turnAssociation: null,
             duplicateOfEventId: null,
             duplicateReason: null,
@@ -15911,9 +16978,10 @@ async function commitWorkspaceCaptureRevision(
  * — can embed the same number). Writes ONLY when a warm lease with the expected
  * epoch still exists for the sandbox group (the same supersession guard
  * persistWarmSnapshot uses, expressed as an EXISTS on sandbox_leases). Returns
- * the assigned revision, or null when the fence rejected the write (superseded /
- * released lease). Captures for one session are serialized (one turn at a time),
- * so the explicit revision never races the unique (session_id, revision) index.
+ * the assigned revision, or null when the fence rejected the write (interrupted
+ * attempt, cancelled/superseded turn, or released/superseded lease). Captures for
+ * one session are serialized (one turn at a time), so the explicit revision never
+ * races the unique (session_id, revision) index.
  */
 export async function insertWorkspaceCapture(
   db: Database,
@@ -15921,7 +16989,8 @@ export async function insertWorkspaceCapture(
     accountId: string;
     workspaceId: string;
     sessionId: string;
-    turnId: string | null;
+    turnId: string;
+    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     revision: number;
@@ -15954,7 +17023,8 @@ export async function insertFailedWorkspaceCapture(
     accountId: string;
     workspaceId: string;
     sessionId: string;
-    turnId: string | null;
+    turnId: string;
+    attemptId: string;
     sandboxGroupId: string;
     expectedEpoch: number;
     revision: number;
@@ -16052,7 +17122,11 @@ export function computeWorkspaceCaptureGcPlan(
     if (r.treeIndexKey) deletePerRevisionKeys.push(r.treeIndexKey);
     for (const k of r.blobKeys) if (!survivingBlobKeys.has(k)) deleteBlobKeys.add(k);
   }
-  return { evictedRowIds, deleteBlobKeys: [...deleteBlobKeys], deletePerRevisionKeys };
+  return {
+    evictedRowIds,
+    deleteBlobKeys: [...deleteBlobKeys],
+    deletePerRevisionKeys,
+  };
 }
 
 export async function planWorkspaceCaptureGc(
@@ -16201,7 +17275,7 @@ export async function recordLeaseTerminalDataPlaneUrl(
 // ============================================================================
 // Bring-your-own-compute (M2): first-class swappable sandboxes + enrollment +
 // per-machine metrics + the per-session epoch-fenced active-sandbox pointer
-// (migration 0024 / dossier §10.3 + §10.7 + §23). All workspace-scoped behind
+// (migration 0024). All workspace-scoped behind
 // the same RLS the lease DAOs use.
 // ============================================================================
 
@@ -16403,7 +17477,11 @@ export async function revokeEnrollment(
     async (scopedDb) => {
       const rows = await scopedDb
         .update(schema.enrollments)
-        .set({ status: "revoked", revokedAt: new Date(), updatedAt: new Date() })
+        .set({
+          status: "revoked",
+          revokedAt: new Date(),
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
@@ -16513,7 +17591,11 @@ export async function clearEnrollmentWentOffline(
     async (scopedDb) => {
       const rows = await scopedDb
         .update(schema.enrollments)
-        .set({ wentOfflineAt: null, wentOfflineReason: null, updatedAt: new Date() })
+        .set({
+          wentOfflineAt: null,
+          wentOfflineReason: null,
+          updatedAt: new Date(),
+        })
         .where(
           and(
             eq(schema.enrollments.workspaceId, input.workspaceId),
@@ -16633,7 +17715,7 @@ export async function setEnrollmentOpStreamState(
 // single-use row per in-flight enrollment. The agent starts a flow (gets a
 // device_code + user_code), the user approves it (LOUD consent capture +
 // createEnrollment + createSandbox), and the agent polls the device_code for the
-// resulting EnrollmentCredentials. Dossier §10.2 + §18.
+// resulting EnrollmentCredentials.
 
 export type DeviceEnrollmentStatus = (typeof schema.deviceEnrollmentStatusValues)[number];
 
@@ -16750,7 +17832,10 @@ export async function getDeviceEnrollmentRequestByDeviceCode(
   db: Database,
   deviceCode: string,
 ): Promise<DeviceEnrollmentRequestRecord | null> {
-  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+  const resolved = await db.execute<{
+    account_id: string;
+    workspace_id: string;
+  }>(sql`
     select account_id, workspace_id from opengeni_private.resolve_device_enrollment_request(${deviceCode})
   `);
   const ctx = resolved[0];
@@ -16807,7 +17892,10 @@ export async function getPendingDeviceEnrollmentRequestByUserCodeGlobal(
   db: Database,
   userCode: string,
 ): Promise<DeviceEnrollmentRequestRecord | null> {
-  const resolved = await db.execute<{ account_id: string; workspace_id: string }>(sql`
+  const resolved = await db.execute<{
+    account_id: string;
+    workspace_id: string;
+  }>(sql`
     select account_id, workspace_id from opengeni_private.resolve_pending_device_enrollment_by_user_code(${userCode})
   `);
   const ctx = resolved[0];
@@ -17431,7 +18519,7 @@ export async function insertMachineMetricsSeries(
 }
 
 // The target spacing between series rows: the agent heartbeats ~every 5s, but we
-// downsample the long-term history to ~1/min (dossier §10.7). A new series row is
+// downsample the long-term history to ~1/min. A new series row is
 // appended only when >= this much time has elapsed since the last one.
 export const MACHINE_METRICS_SERIES_INTERVAL_MS = 60_000;
 
@@ -17857,7 +18945,12 @@ export async function accrueWarmSeconds(
     debitCredits?: boolean;
   },
 ): Promise<AccrueWarmSecondsResult> {
-  const none: AccrueWarmSecondsResult = { accrued: false, seconds: 0, tick: 0, costMicros: 0 };
+  const none: AccrueWarmSecondsResult = {
+    accrued: false,
+    seconds: 0,
+    tick: 0,
+    costMicros: 0,
+  };
   const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -18206,26 +19299,21 @@ export async function clearSessionGoal(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<{ cleared: boolean; goal: SessionGoal | null; event: SessionEvent | null }> {
+): Promise<{
+  cleared: boolean;
+  goal: SessionGoal | null;
+  event: SessionEvent | null;
+}> {
   return await withWorkspaceRls(
     db,
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          sessionIds: [sessionId],
+        });
+        const session = locks.sessions[0];
         if (!session) {
           throw new Error(`Session not found: ${sessionId}`);
         }
@@ -18270,7 +19358,11 @@ export async function clearSessionGoal(
         if (!event) {
           throw new Error("Failed to append goal.cleared event");
         }
-        return { cleared: true, goal: mapSessionGoal(existing), event: mapEvent(event) };
+        return {
+          cleared: true,
+          goal: mapSessionGoal(existing),
+          event: mapEvent(event),
+        };
       }),
   );
 }
@@ -18456,7 +19548,11 @@ export async function setSessionGoalStatus(
     rationale?: string;
     pausedReason?: string;
   },
-): Promise<{ goal: SessionGoal; changed: boolean; workflowWakeRevision: number | null }> {
+): Promise<{
+  goal: SessionGoal;
+  changed: boolean;
+  workflowWakeRevision: number | null;
+}> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const effectiveControl = await evaluateSessionControl(scopedDb, workspaceId, sessionId, {
       lock: "share",
@@ -18490,7 +19586,11 @@ export async function setSessionGoalStatus(
       throw new Error(`Session goal not found: ${sessionId}`);
     }
     if (existing.status === input.status) {
-      return { goal: mapSessionGoal(existing), changed: false, workflowWakeRevision: null };
+      return {
+        goal: mapSessionGoal(existing),
+        changed: false,
+        workflowWakeRevision: null,
+      };
     }
     if (existing.status === "completed") {
       throw new Error("session goal is completed; set a new goal to continue");
@@ -18580,7 +19680,58 @@ export type GoalContinuationDecision =
       reason: "no_progress" | "max_auto_continuations" | "limits";
       goal: SessionGoal;
     }
-  | { decision: "continue"; goal: SessionGoal; autoContinuation: number; cap: number | null };
+  | {
+      decision: "continue";
+      goal: SessionGoal;
+      autoContinuation: number;
+      cap: number | null;
+    };
+
+async function turnHasFailureCodeTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  turnId: string,
+  code: string,
+): Promise<boolean> {
+  const [failure] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, workspaceId),
+        eq(schema.sessionEvents.sessionId, sessionId),
+        eq(schema.sessionEvents.turnId, turnId),
+        eq(schema.sessionEvents.type, "turn.failed"),
+        sql`${schema.sessionEvents.payload} ->> 'code' = ${code}`,
+      ),
+    )
+    .limit(1);
+  return Boolean(failure);
+}
+
+async function latestFinishedTurnHasFailureCodeTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+  code: string,
+): Promise<boolean> {
+  const [latestFinished] = await tx
+    .select({ id: schema.sessionTurns.id })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, workspaceId),
+        eq(schema.sessionTurns.sessionId, sessionId),
+        sql`${schema.sessionTurns.finishedAt} is not null`,
+      ),
+    )
+    .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
+    .limit(1);
+  return latestFinished
+    ? await turnHasFailureCodeTx(tx, workspaceId, sessionId, latestFinished.id, code)
+    : false;
+}
 
 /**
  * Core continuation decision, taken in one transaction with the goal row
@@ -18647,7 +19798,10 @@ export async function evaluateGoalContinuation(
           return { decision: "none" } as const;
         }
         const [pendingTurn] = await tx
-          .select({ id: schema.sessionTurns.id, status: schema.sessionTurns.status })
+          .select({
+            id: schema.sessionTurns.id,
+            status: schema.sessionTurns.status,
+          })
           .from(schema.sessionTurns)
           .where(
             and(
@@ -18677,29 +19831,21 @@ export async function evaluateGoalContinuation(
           )
           .orderBy(desc(schema.sessionTurns.position), desc(schema.sessionTurns.createdAt))
           .limit(1);
-        const [contextCompactionFailure] = latestFinished
-          ? await tx
-              .select({
-                id: schema.sessionEvents.id,
-              })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, input.workspaceId),
-                  eq(schema.sessionEvents.sessionId, input.sessionId),
-                  eq(schema.sessionEvents.turnId, latestFinished.id),
-                  eq(schema.sessionEvents.type, "turn.failed"),
-                  sql`${schema.sessionEvents.payload} ->> 'code' = 'context_compaction_failed'`,
-                ),
-              )
-              .limit(1)
-          : [];
+        const contextCompactionFailure = latestFinished
+          ? await turnHasFailureCodeTx(
+              tx as unknown as Database,
+              input.workspaceId,
+              input.sessionId,
+              latestFinished.id,
+              "context_compaction_failed",
+            )
+          : false;
         // A provider could not produce a durable checkpoint for the latest
         // inference. Re-running the unchanged active history autonomously only
         // repeats the same failure. Keep the active goal intact but inert until
-        // a human prompt, a new internal update, or an explicit /compact attempt
-        // creates newer finished-turn truth. Queued human work already won in
-        // the branch above; this never creates queue work or consumes counters.
+        // a human/API prompt, agent Steer instruction, or explicit Compact
+        // attempt creates newer truth. Ordinary internal updates stay pending;
+        // this never creates queue work or consumes counters.
         if (contextCompactionFailure) {
           return { decision: "none" } as const;
         }
@@ -18833,7 +19979,11 @@ export async function evaluateGoalContinuation(
             })
             .where(eq(schema.sessionGoals.id, row.id))
             .returning();
-          return { decision: "paused", reason: "limits", goal: mapSessionGoal(paused!) } as const;
+          return {
+            decision: "paused",
+            reason: "limits",
+            goal: mapSessionGoal(paused!),
+          } as const;
         }
         // Freeze the counter on a rotation failover (invariant: a rotation walk never
         // consumes continuation budget); a normal continuation increments as before.
@@ -18918,30 +20068,19 @@ export async function initializeSessionStartAtomically(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!locks.workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
 
         const temporalWorkflowId = session.temporalWorkflowId ?? `session-${session.id}`;
         if (session.status === "cancelled") {
@@ -19104,6 +20243,11 @@ export async function initializeSessionStartAtomically(
           if (!turn) throw new Error("Failed to create initial session turn");
           insertedTurn = true;
         }
+        await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          workspaceLock: "already_locked",
+          turnIds: [turn.id],
+        });
 
         const [queuedEvent] = await tx
           .select({ id: schema.sessionEvents.id })
@@ -19312,6 +20456,7 @@ export async function claimSessionWorkForAttempt(
           lastSequence: number;
           triggerEventId: string | null;
           updates: Array<typeof schema.sessionSystemUpdates.$inferSelect>;
+          event: typeof schema.sessionEvents.$inferInsert | null;
         }> => {
           const [agentSteer] = await tx
             .select()
@@ -19363,7 +20508,13 @@ export async function claimSessionWorkForAttempt(
             .for("update");
           const updates = agentSteer ? [agentSteer, ...ordinary] : ordinary;
           if (updates.length === 0) {
-            return { count: 0, lastSequence: nextSequence - 1, triggerEventId: null, updates: [] };
+            return {
+              count: 0,
+              lastSequence: nextSequence - 1,
+              triggerEventId: null,
+              updates: [],
+              event: null,
+            };
           }
           const deliverable: typeof updates = [];
           let deliveredBytes = 0;
@@ -19419,11 +20570,21 @@ export async function claimSessionWorkForAttempt(
             deliveredBytes += updateBytes;
           }
           if (deliverable.length === 0) {
-            return { count: 0, lastSequence: nextSequence - 1, triggerEventId: null, updates: [] };
+            return {
+              count: 0,
+              lastSequence: nextSequence - 1,
+              triggerEventId: null,
+              updates: [],
+              event: null,
+            };
           }
           await tx
             .update(schema.sessionSystemUpdates)
-            .set({ state: "delivered", deliveredTurnId: turnId, deliveredAt: occurredAt })
+            .set({
+              state: "delivered",
+              deliveredTurnId: turnId,
+              deliveredAt: occurredAt,
+            })
             .where(
               and(
                 eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
@@ -19435,7 +20596,7 @@ export async function claimSessionWorkForAttempt(
               ),
             );
           const eventId = triggerEventId ?? crypto.randomUUID();
-          await tx.insert(schema.sessionEvents).values({
+          const event: typeof schema.sessionEvents.$inferInsert = {
             id: eventId,
             accountId,
             workspaceId,
@@ -19452,12 +20613,13 @@ export async function claimSessionWorkForAttempt(
               classifications: [...new Set(deliverable.map((update) => update.classification))],
             }),
             occurredAt,
-          });
+          };
           return {
             count: deliverable.length,
             lastSequence: nextSequence,
             triggerEventId: eventId,
             updates: deliverable,
+            event,
           };
         };
 
@@ -19470,23 +20632,51 @@ export async function claimSessionWorkForAttempt(
           workspaceId,
           "share",
         );
+        const prefix = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          controlLock: "already_locked",
+          sessionIds: [sessionId],
+        });
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           workspaceId,
           sessionId,
-          { lock: "share" },
+          { workspaceControl },
         );
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
         if (effectiveControl.state !== "active") {
           return { action: "unclaimed", reason: "gate-closed" };
+        }
+        // Quiescence is a session-wide admission fence, not a property of one
+        // queue row. The user may delete/reorder the original Steer replacement
+        // while its predecessor is still stopping, and recovery/internal-update
+        // claimers must remain blocked just the same. The session lock serializes
+        // this read with markSessionAttemptQuiesced's receipt transaction.
+        const [unquiescedInterruption] = await tx
+          .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
+          .from(schema.sessionAttemptInterruptions)
+          .innerJoin(
+            schema.sessionTurnAttempts,
+            and(
+              eq(
+                schema.sessionTurnAttempts.workspaceId,
+                schema.sessionAttemptInterruptions.workspaceId,
+              ),
+              eq(schema.sessionTurnAttempts.id, schema.sessionAttemptInterruptions.attemptId),
+            ),
+          )
+          .where(
+            and(
+              eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+              eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+              isNull(schema.sessionTurnAttempts.quiescedAt),
+            ),
+          )
+          .orderBy(desc(schema.sessionAttemptInterruptions.requestedAt))
+          .limit(1);
+        if (unquiescedInterruption) {
+          return { action: "unclaimed", reason: "control-pending" };
         }
         const registerAttempt = async (turn: typeof schema.sessionTurns.$inferSelect) =>
           await registerSessionTurnAttemptClaim(tx as unknown as Database, {
@@ -19502,7 +20692,7 @@ export async function claimSessionWorkForAttempt(
             verifiedControlRevision: Number(workspaceControl.revision),
           });
         if (session.activeTurnId !== null) {
-          const [activeTurn] = await tx
+          const [activeTurnPreview] = await tx
             .select()
             .from(schema.sessionTurns)
             .where(
@@ -19512,19 +20702,36 @@ export async function claimSessionWorkForAttempt(
                 eq(schema.sessionTurns.id, session.activeTurnId),
               ),
             )
-            .for("update")
             .limit(1);
+          const activeLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
+            workspaceId,
+            workspaceLock: "already_locked",
+            turnIds: [session.activeTurnId],
+            attemptIds: activeTurnPreview?.activeAttemptId
+              ? [activeTurnPreview.activeAttemptId]
+              : [],
+          });
+          const activeTurn = activeLocks.turns[0];
+          if (
+            !activeTurn ||
+            activeTurn.sessionId !== sessionId ||
+            activeTurn.accountId !== session.accountId ||
+            (activeTurn.activeAttemptId !== null &&
+              !activeLocks.attempts.some(
+                (attempt) =>
+                  attempt.id === activeTurn.activeAttemptId &&
+                  attempt.sessionId === sessionId &&
+                  attempt.turnId === activeTurn.id &&
+                  attempt.accountId === session.accountId,
+              ))
+          ) {
+            throw new Error(
+              `Session ${sessionId} points to invalid active turn ownership ${session.activeTurnId}`,
+            );
+          }
           const parsedDispatch = readTurnDispatchMetadata(activeTurn?.metadata);
           if (parsedDispatch.kind === "malformed") {
             throw new Error(`Malformed turn dispatch metadata: ${parsedDispatch.reason}`);
-          }
-          if (
-            activeTurn?.status === "running" &&
-            activeTurn.activeAttemptId === input.attemptId &&
-            parsedDispatch.attempt?.id === input.dispatchId
-          ) {
-            await registerAttempt(activeTurn);
-            return { action: "claimed", turn: mapSessionTurn(activeTurn) };
           }
           const [pendingInterruption] = activeTurn?.activeAttemptId
             ? await tx
@@ -19546,6 +20753,14 @@ export async function claimSessionWorkForAttempt(
             : [];
           if (pendingInterruption) {
             return { action: "unclaimed", reason: "control-pending" };
+          }
+          if (
+            activeTurn?.status === "running" &&
+            activeTurn.activeAttemptId === input.attemptId &&
+            parsedDispatch.attempt?.id === input.dispatchId
+          ) {
+            await registerAttempt(activeTurn);
+            return { action: "claimed", turn: mapSessionTurn(activeTurn) };
           }
           if (activeTurn?.status === "requires_action") {
             if (input.trigger.kind !== "approval") {
@@ -19664,8 +20879,11 @@ export async function claimSessionWorkForAttempt(
         // until settlement closes that owner; otherwise the live-session
         // uniqueness fence would surface as an opaque database error and, more
         // importantly, two attempts could contend for the same session state.
-        const [detachedLiveAttempt] = await tx
-          .select({ id: schema.sessionTurnAttempts.id })
+        const [detachedLiveAttemptPreview] = await tx
+          .select({
+            id: schema.sessionTurnAttempts.id,
+            turnId: schema.sessionTurnAttempts.turnId,
+          })
           .from(schema.sessionTurnAttempts)
           .where(
             and(
@@ -19674,9 +20892,31 @@ export async function claimSessionWorkForAttempt(
               inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
             ),
           )
-          .for("update")
           .limit(1);
-        if (detachedLiveAttempt) {
+        const detachedLocks = detachedLiveAttemptPreview
+          ? await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              workspaceLock: "already_locked",
+              turnIds: [detachedLiveAttemptPreview.turnId],
+              attemptIds: [detachedLiveAttemptPreview.id],
+            })
+          : null;
+        const detachedLiveAttempt = detachedLocks?.attempts[0];
+        const detachedTurn = detachedLocks?.turns[0];
+        if (detachedLiveAttemptPreview) {
+          if (
+            !detachedLiveAttempt ||
+            !detachedTurn ||
+            detachedLiveAttempt.accountId !== session.accountId ||
+            detachedLiveAttempt.sessionId !== sessionId ||
+            detachedLiveAttempt.turnId !== detachedTurn.id ||
+            detachedTurn.accountId !== session.accountId ||
+            detachedTurn.sessionId !== sessionId
+          ) {
+            throw new Error(
+              `Detached live attempt ${detachedLiveAttemptPreview.id} lost ownership`,
+            );
+          }
           return { action: "unclaimed", reason: "control-pending" };
         }
 
@@ -19713,9 +20953,32 @@ export async function claimSessionWorkForAttempt(
               where workspace_id = ${workspaceId} and session_id = ${sessionId}
                 and status = 'queued' and source in ('user', 'api')
               order by position asc, created_at asc, id asc
-              for update skip locked limit 1`,
+              limit 1`,
             );
-        const queuedTurn = rows[0];
+        const queuedTurnPreview = rows[0];
+        const queuedLocks = queuedTurnPreview
+          ? await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              workspaceLock: "already_locked",
+              turnIds: [queuedTurnPreview.id],
+            })
+          : null;
+        const queuedTurnRow = queuedLocks?.turns[0];
+        if (
+          queuedTurnRow &&
+          (queuedTurnRow.sessionId !== sessionId || queuedTurnRow.accountId !== session.accountId)
+        ) {
+          throw new Error(
+            `Queued turn ${queuedTurnRow.id} does not belong to session ${sessionId}`,
+          );
+        }
+        const queuedTurn = queuedTurnRow
+          ? {
+              id: queuedTurnRow.id,
+              trigger_event_id: queuedTurnRow.triggerEventId,
+              metadata: queuedTurnRow.metadata,
+            }
+          : undefined;
         const id = queuedTurn?.id;
         if (!id) {
           // Manual compaction is a first-class maintenance execution, never
@@ -19794,6 +21057,7 @@ export async function claimSessionWorkForAttempt(
               })
               .returning();
             if (!compactionTurn) throw new Error("Failed to create context compaction execution");
+            await registerAttempt(compactionTurn);
             const [requestedEvent] = await tx
               .insert(schema.sessionEvents)
               .values({
@@ -19828,8 +21092,22 @@ export async function claimSessionWorkForAttempt(
                   eq(schema.sessions.id, sessionId),
                 ),
               );
-            await registerAttempt(compactionTurn);
             return { action: "claimed", turn: mapSessionTurn(compactionTurn) };
+          }
+
+          if (
+            !pendingAgentSteer &&
+            (await latestFinishedTurnHasFailureCodeTx(
+              tx as unknown as Database,
+              workspaceId,
+              sessionId,
+              "context_compaction_failed",
+            ))
+          ) {
+            // Ordinary machine updates must not turn one failed compaction into
+            // an autonomous retry loop. They remain pending and will attach to
+            // the next human/API, Steer, or explicitly requested Compact run.
+            return { action: "unclaimed", reason: "no-work" };
           }
 
           const pendingUpdates = await tx
@@ -19903,7 +21181,9 @@ export async function claimSessionWorkForAttempt(
               ? goalPolicy.model
               : (latestStarted?.model ?? session.model);
           const reasoningEffort = reasoningEffortForMetadata(
-            { reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort },
+            {
+              reasoningEffort: goalPolicy?.reasoningEffort ?? latestStarted?.reasoningEffort,
+            },
             reasoningEffortForMetadata(session.metadata, "medium"),
           );
           const tools = Array.isArray(goalPolicy?.tools)
@@ -19946,6 +21226,9 @@ export async function claimSessionWorkForAttempt(
             })
             .returning();
           if (!internalTurn) throw new Error("Failed to create internal update inference");
+          await registerAttempt(internalTurn);
+          if (!delivered.event) throw new Error("Delivered update batch has no durable event");
+          await tx.insert(schema.sessionEvents).values(delivered.event);
           if (goalUpdate && typeof goalUpdate.payload.goalId === "string") {
             await tx
               .update(schema.sessionGoals)
@@ -19970,8 +21253,29 @@ export async function claimSessionWorkForAttempt(
             .where(
               and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
             );
-          await registerAttempt(internalTurn);
           return { action: "claimed", turn: mapSessionTurn(internalTurn) };
+        }
+        const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
+        if (predecessorAttemptId) {
+          const [predecessor] = await tx
+            .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
+            .from(schema.sessionTurnAttempts)
+            .where(
+              and(
+                eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+                eq(schema.sessionTurnAttempts.sessionId, sessionId),
+                eq(schema.sessionTurnAttempts.id, predecessorAttemptId),
+              ),
+            )
+            .limit(1);
+          if (!predecessor) {
+            throw new SessionControlInvariantError(
+              `Queued Steer ${id} points to missing predecessor attempt ${predecessorAttemptId}`,
+            );
+          }
+          if (!predecessor.quiescedAt) {
+            return { action: "unclaimed", reason: "control-pending" };
+          }
         }
         // The database guard makes this function the only supported
         // queued-to-running transition. Raw or stale claimers cannot bypass the
@@ -20009,6 +21313,7 @@ export async function claimSessionWorkForAttempt(
         if (!row) {
           throw new Error(`Session turn not found: ${id}`);
         }
+        await registerAttempt(row);
         const [{ historyPosition } = { historyPosition: 0 }] = await tx
           .select({
             historyPosition: sql<number>`coalesce(max(${schema.sessionHistoryItems.position}), -1) + 1`,
@@ -20026,7 +21331,11 @@ export async function claimSessionWorkForAttempt(
           sessionId,
           turnId: row.id,
           position: Number(historyPosition),
-          item: sanitizeModelPayload({ type: "message", role: "user", content: row.prompt }),
+          item: sanitizeModelPayload({
+            type: "message",
+            role: "user",
+            content: row.prompt,
+          }),
           producerCodexCredentialId: null,
         });
         const delivered = await deliverPendingUpdates(
@@ -20036,6 +21345,9 @@ export async function claimSessionWorkForAttempt(
           session.lastSequence + 1,
           now,
         );
+        if (delivered.event) {
+          await tx.insert(schema.sessionEvents).values(delivered.event);
+        }
         await tx
           .update(schema.sessions)
           .set({
@@ -20048,7 +21360,6 @@ export async function claimSessionWorkForAttempt(
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
-        await registerAttempt(row);
         return { action: "claimed", turn: mapSessionTurn(row) };
       }),
   );
@@ -20061,6 +21372,223 @@ export type SessionAttemptInterruptionSettlement = {
   turnId: string | null;
   outcome: SessionTurnAttemptOutcome | null;
 };
+
+/**
+ * Acknowledge that the exact cancelled attempt reached its final quiescence
+ * boundary: after this transaction it has no inference, user-visible output,
+ * or workspace-persistence authority. Fenced/idempotent cleanup and telemetry
+ * may still finish. This may race the workflow's logical settlement transaction
+ * in either order; both use the canonical control -> workspace -> session ->
+ * exact turn -> exact attempt lock order and require the durable interruption.
+ * Temporal activity cancellation/terminalization is transport state only. The
+ * workflow admits a replacement from this durable receipt, never from the
+ * activity promise.
+ */
+export async function markSessionAttemptQuiesced(
+  db: Database,
+  input: {
+    accountId?: string;
+    workspaceId: string;
+    sessionId: string;
+    attemptId: string;
+    temporalWorkflowId: string;
+    /** When supplied, both values bind an activity-owned recovery proof to the
+     * exact persisted Temporal dispatch. Legacy v1 replay callers omit them. */
+    temporalWorkflowRunId?: string;
+    temporalActivityId?: string;
+    /** The dying activity also reaches this boundary for non-control ownership
+     * fences. It may no-op when no Pause/Steer interruption exists; replacement
+     * admission remains strict because only a durable interruption needs this
+     * receipt. */
+    allowUninterrupted?: boolean;
+  },
+): Promise<SessionEvent[]> {
+  const persistence = {
+    stage: "session_attempts.mark_quiesced",
+    eventTypes: ["session.queue.changed"],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, input.workspaceId, persistence, async (scopedDb) => {
+    const prefix = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      controlLock: "share",
+      sessionIds: [],
+    });
+    // The attempt's turn identity is immutable. Read it only to discover the
+    // exact suffix, then lock and revalidate every ownership edge below.
+    const [attemptPreview] = await scopedDb
+      .select({ turnId: schema.sessionTurnAttempts.turnId })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+        ),
+      )
+      .limit(1);
+    const locks = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      sessionIds: [input.sessionId],
+      turnIds: attemptPreview ? [attemptPreview.turnId] : [],
+      attemptIds: attemptPreview ? [input.attemptId] : [],
+    });
+    const session = locks.sessions[0];
+    const turn = locks.turns[0];
+    const attempt = locks.attempts[0];
+    // Revalidate immutable ownership only. Control settlement may already have
+    // advanced the session/turn workflow identity or turn generation while the
+    // exact predecessor attempt is still acknowledging physical quiescence.
+    if (
+      !session ||
+      !turn ||
+      !attempt ||
+      turn.accountId !== session.accountId ||
+      turn.sessionId !== session.id ||
+      attempt.accountId !== session.accountId ||
+      (input.accountId !== undefined && attempt.accountId !== input.accountId) ||
+      attempt.sessionId !== session.id ||
+      attempt.turnId !== turn.id ||
+      attempt.temporalWorkflowId !== input.temporalWorkflowId ||
+      (input.temporalWorkflowRunId !== undefined &&
+        attempt.temporalWorkflowRunId !== input.temporalWorkflowRunId) ||
+      (input.temporalActivityId !== undefined &&
+        attempt.temporalActivityId !== input.temporalActivityId) ||
+      (input.temporalWorkflowRunId === undefined) !== (input.temporalActivityId === undefined)
+    ) {
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its session ownership`,
+      );
+    }
+    const [interruption] = attempt
+      ? await scopedDb
+          .select({
+            id: schema.sessionAttemptInterruptions.id,
+            state: schema.sessionAttemptInterruptions.state,
+          })
+          .from(schema.sessionAttemptInterruptions)
+          .where(
+            and(
+              eq(schema.sessionAttemptInterruptions.workspaceId, input.workspaceId),
+              eq(schema.sessionAttemptInterruptions.sessionId, input.sessionId),
+              eq(schema.sessionAttemptInterruptions.attemptId, input.attemptId),
+            ),
+          )
+          .orderBy(asc(schema.sessionAttemptInterruptions.requestedAt))
+          .limit(1)
+      : [];
+    if (!interruption) {
+      if (input.allowUninterrupted) return [];
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence without its interruption`,
+      );
+    }
+    const liveQuiescence =
+      (attempt.state === "claimed" || attempt.state === "running") &&
+      (interruption.state === "pending" ||
+        interruption.state === "delivered" ||
+        interruption.state === "acknowledged");
+    const settledQuiescence =
+      attempt.state === "closed" &&
+      (interruption.state === "settled" || interruption.state === "rejected_stale");
+    if (!liveQuiescence && !settledQuiescence) {
+      throw new SessionControlInvariantError(
+        `Attempt ${input.attemptId} cannot acknowledge quiescence from ${attempt.state}/${interruption.state}`,
+      );
+    }
+
+    const clientEventId = `opengeni:attempt-quiesced:${input.attemptId}`;
+    if (attempt.quiescedAt) {
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.sessionEvents)
+        .where(
+          and(
+            eq(schema.sessionEvents.workspaceId, input.workspaceId),
+            eq(schema.sessionEvents.sessionId, input.sessionId),
+            eq(schema.sessionEvents.clientEventId, clientEventId),
+          ),
+        )
+        .limit(1);
+      if (!existing) {
+        // Migration 0065 seeds quiesced_at for interrupted attempts that were
+        // already closed before queue-event receipts existed. A replaying
+        // workflow may still execute this idempotent fallback after rollout;
+        // there is nothing new to publish and admission is already safely open.
+        return [];
+      }
+      return [mapEvent(existing)];
+    }
+
+    const now = new Date();
+    const queueVersion = session.queueVersion + 1;
+    const [marked] = await scopedDb
+      .update(schema.sessionTurnAttempts)
+      .set({
+        quiescedAt: now,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, input.workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+          isNull(schema.sessionTurnAttempts.quiescedAt),
+        ),
+      )
+      .returning({ id: schema.sessionTurnAttempts.id });
+    if (!marked) {
+      throw new SessionControlInvariantError(`Attempt ${input.attemptId} quiescence CAS lost`);
+    }
+    const [event] = await scopedDb
+      .insert(schema.sessionEvents)
+      .values({
+        accountId: session.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sequence: session.lastSequence + 1,
+        type: "session.queue.changed",
+        payload: sanitizeEventPayload({
+          operation: "attempt_quiesced",
+          attemptId: input.attemptId,
+          queueVersion,
+        }),
+        clientEventId,
+        turnId: attempt.turnId,
+        turnGeneration: attempt.executionGeneration,
+        turnAttemptId: attempt.id,
+        turnAssociation: null,
+        occurredAt: now,
+      })
+      .returning();
+    if (!event) throw new Error("Attempt-quiesced queue event was not inserted");
+    await scopedDb
+      .update(schema.sessions)
+      .set({ queueVersion, lastSequence: event.sequence, updatedAt: now })
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, input.sessionId),
+        ),
+      );
+    const effectiveControl = await evaluateSessionControl(
+      scopedDb,
+      input.workspaceId,
+      input.sessionId,
+      { workspaceControl: prefix.control ?? undefined },
+    );
+    if (effectiveControl.state === "active") {
+      await enqueueSessionWorkflowWakeInTransaction(scopedDb, {
+        accountId: session.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        temporalWorkflowId: input.temporalWorkflowId,
+        reason: "attempt_quiesced",
+      });
+    }
+    return [mapEvent(event)];
+  });
+}
 
 /**
  * Settle every durable interruption cause for one exact first-class attempt.
@@ -20076,21 +21604,66 @@ export async function settleSessionAttemptInterruptions(
 ): Promise<SessionAttemptInterruptionSettlement> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
     scopedDb.transaction(async (tx) => {
-      await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "share");
+      const prefix = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [sessionId],
+      });
+      const session = prefix.sessions[0];
+      if (!session) throw new Error(`Session not found: ${sessionId}`);
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         sessionId,
-        { lock: "share" },
+        { workspaceControl: prefix.control ?? undefined },
       );
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-        .for("update")
+      const interruptionPreview = await tx
+        .select({ id: schema.sessionAttemptInterruptions.id })
+        .from(schema.sessionAttemptInterruptions)
+        .where(
+          and(
+            eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+            eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+            eq(schema.sessionAttemptInterruptions.attemptId, attemptId),
+            inArray(schema.sessionAttemptInterruptions.state, [
+              "pending",
+              "delivered",
+              "acknowledged",
+            ]),
+          ),
+        )
         .limit(1);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-
+      if (interruptionPreview.length === 0) {
+        return {
+          action: "stale",
+          events: [],
+          attemptId,
+          turnId: null,
+          outcome: null,
+        };
+      }
+      const [attemptPreview] = await tx
+        .select()
+        .from(schema.sessionTurnAttempts)
+        .where(
+          and(
+            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+            eq(schema.sessionTurnAttempts.id, attemptId),
+          ),
+        )
+        .limit(1);
+      if (!attemptPreview) {
+        throw new Error(`Interruption points to missing attempt: ${attemptId}`);
+      }
+      const exact = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        workspaceLock: "already_locked",
+        turnIds: [attemptPreview.turnId],
+        attemptIds: [attemptId],
+      });
+      const attempt = exact.attempts[0];
+      const turn = exact.turns[0];
+      if (!attempt) throw new Error(`Interruption points to missing attempt: ${attemptId}`);
       const interruptions = await tx
         .select()
         .from(schema.sessionAttemptInterruptions)
@@ -20120,21 +21693,6 @@ export async function settleSessionAttemptInterruptions(
           outcome: null,
         };
       }
-
-      const [attempt] = await tx
-        .select()
-        .from(schema.sessionTurnAttempts)
-        .where(
-          and(
-            eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
-            eq(schema.sessionTurnAttempts.id, attemptId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!attempt) {
-        throw new Error(`Interruption points to missing attempt: ${attemptId}`);
-      }
       const now = new Date();
       if (attempt.state === "closed") {
         await tx
@@ -20155,22 +21713,13 @@ export async function settleSessionAttemptInterruptions(
         };
       }
 
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, sessionId),
-            eq(schema.sessionTurns.id, attempt.turnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
       if (
         !turn ||
         attempt.accountId !== session.accountId ||
         attempt.sessionId !== sessionId ||
+        attempt.turnId !== turn.id ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== sessionId ||
         attempt.executionGeneration !== turn.executionGeneration ||
         turn.activeAttemptId !== attemptId
       ) {
@@ -20343,7 +21892,55 @@ export type SessionWorkPeek =
       };
     }
   | { kind: "interruption-pending"; attemptId: string }
+  | { kind: "cancellation-wait"; attemptId: string }
   | { kind: "idle" };
+
+async function latestSessionAttemptInterruption(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<{
+  attemptId: string;
+  quiescedAt: Date | null;
+  interruptionState: string;
+} | null> {
+  const [latestAttempt] = await db
+    .select({
+      attemptId: schema.sessionTurnAttempts.id,
+      quiescedAt: schema.sessionTurnAttempts.quiescedAt,
+    })
+    .from(schema.sessionTurnAttempts)
+    .where(
+      and(
+        eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+        eq(schema.sessionTurnAttempts.sessionId, sessionId),
+      ),
+    )
+    .orderBy(desc(schema.sessionTurnAttempts.startedAt), desc(schema.sessionTurnAttempts.id))
+    .limit(1);
+  if (!latestAttempt) return null;
+  const [interruption] = await db
+    .select({ state: schema.sessionAttemptInterruptions.state })
+    .from(schema.sessionAttemptInterruptions)
+    .where(
+      and(
+        eq(schema.sessionAttemptInterruptions.workspaceId, workspaceId),
+        eq(schema.sessionAttemptInterruptions.sessionId, sessionId),
+        eq(schema.sessionAttemptInterruptions.attemptId, latestAttempt.attemptId),
+      ),
+    )
+    .orderBy(
+      desc(schema.sessionAttemptInterruptions.requestedAt),
+      desc(schema.sessionAttemptInterruptions.id),
+    )
+    .limit(1);
+  return interruption
+    ? {
+        ...latestAttempt,
+        interruptionState: interruption.state,
+      }
+    : null;
+}
 
 /** Read durable session state without reserving a turn-worker slot or mutating it. */
 export async function peekSessionWork(
@@ -20381,9 +21978,25 @@ export async function peekSessionWork(
       )
       .limit(1);
     if (interruption) {
-      return { kind: "interruption-pending", attemptId: interruption.attemptId };
+      return {
+        kind: "interruption-pending",
+        attemptId: interruption.attemptId,
+      };
     }
     if (effectiveControl.state !== "active") return { kind: "idle" };
+
+    const latestInterruption = await latestSessionAttemptInterruption(
+      scopedDb,
+      workspaceId,
+      sessionId,
+    );
+    if (
+      latestInterruption &&
+      latestInterruption.quiescedAt === null &&
+      ["settled", "rejected_stale"].includes(latestInterruption.interruptionState)
+    ) {
+      return { kind: "cancellation-wait", attemptId: latestInterruption.attemptId };
+    }
 
     const [capacityWait] = await scopedDb
       .select()
@@ -20495,8 +22108,109 @@ export async function peekSessionWork(
         ),
       )
       .limit(1);
-    return pendingUpdate ? { kind: "runnable" } : { kind: "idle" };
+    if (!pendingUpdate) return { kind: "idle" };
+    if (
+      !(await latestFinishedTurnHasFailureCodeTx(
+        scopedDb,
+        workspaceId,
+        sessionId,
+        "context_compaction_failed",
+      ))
+    ) {
+      return { kind: "runnable" };
+    }
+    const [pendingAgentSteer] = await scopedDb
+      .select({ id: schema.sessionSystemUpdates.id })
+      .from(schema.sessionSystemUpdates)
+      .where(
+        and(
+          eq(schema.sessionSystemUpdates.workspaceId, workspaceId),
+          eq(schema.sessionSystemUpdates.sessionId, sessionId),
+          eq(schema.sessionSystemUpdates.state, "pending"),
+          eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+        ),
+      )
+      .limit(1);
+    return pendingAgentSteer ? { kind: "runnable" } : { kind: "idle" };
   });
+}
+
+/**
+ * Child lifecycle transactions discover immutable parentage only after taking
+ * the control/workspace prefix. They must then lock child and parent together,
+ * UUID ordered, before exact turn/attempt rows or an outbox FK insert. This is
+ * a staged use of the one canonical event-write helper, not a second lock order.
+ */
+async function lockChildLifecycleOutboxWriteRowsTx(
+  tx: Database,
+  workspaceId: string,
+  input: { sessionId: string; turnId?: string; attemptId?: string },
+) {
+  const prefix = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "share",
+    sessionIds: [],
+  });
+  const [preview] = await tx
+    .select({ id: schema.sessions.id, parentSessionId: schema.sessions.parentSessionId })
+    .from(schema.sessions)
+    .where(
+      and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, input.sessionId)),
+    )
+    .limit(1);
+  if (!preview) throw new Error(`Session not found: ${input.sessionId}`);
+
+  const sessionLocks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    sessionIds: [input.sessionId, ...(preview.parentSessionId ? [preview.parentSessionId] : [])],
+  });
+  const session = sessionLocks.sessions.find((row) => row.id === input.sessionId);
+  if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+  if (session.parentSessionId !== preview.parentSessionId) {
+    throw new SessionControlInvariantError(
+      `Session ${input.sessionId} parent changed while establishing lifecycle locks`,
+    );
+  }
+  if (
+    session.parentSessionId &&
+    !sessionLocks.sessions.some((row) => row.id === session.parentSessionId)
+  ) {
+    throw new SessionControlInvariantError(
+      `Parent session ${session.parentSessionId} was not locked with child ${input.sessionId}`,
+    );
+  }
+
+  let turnId = input.turnId ?? null;
+  if (!turnId && input.attemptId) {
+    const [attemptPreview] = await tx
+      .select({ turnId: schema.sessionTurnAttempts.turnId })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.id, input.attemptId),
+        ),
+      )
+      .limit(1);
+    turnId = attemptPreview?.turnId ?? null;
+  }
+  const exactLocks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "already_locked",
+    workspaceLock: "already_locked",
+    turnIds: turnId ? [turnId] : [],
+    attemptIds: turnId && input.attemptId ? [input.attemptId] : [],
+  });
+  return {
+    control: prefix.control,
+    workspace: prefix.workspace,
+    sessions: sessionLocks.sessions,
+    turns: exactLocks.turns,
+    attempts: exactLocks.attempts,
+    session,
+  };
 }
 
 /**
@@ -20510,31 +22224,38 @@ export async function settleSessionIdleWithParentOutbox(
   workspaceId: string,
   sessionId: string,
 ): Promise<
-  | { action: "settled"; changed: boolean; episodeKey: string; events: SessionEvent[] }
+  | {
+      action: "settled";
+      changed: boolean;
+      episodeKey: string;
+      events: SessionEvent[];
+    }
   | { action: "stale"; episodeKey: null; events: [] }
 > {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const persistence = {
+    stage: "session_lifecycle_outbox.settle_idle",
+    eventTypes: ["child_terminal_result", "session.status.changed"],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(
+        tx as unknown as Database,
+        workspaceId,
+        { sessionId },
+      );
+      const session = locks.session;
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
-        .for("update")
-        .limit(1);
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      if (!workspace || effectiveControl.state !== "active" || session.activeTurnId !== null) {
+      if (
+        !locks.workspace ||
+        effectiveControl.state !== "active" ||
+        session.activeTurnId !== null
+      ) {
         return { action: "stale", episodeKey: null, events: [] } as const;
       }
       const [queued] = await tx
@@ -20582,7 +22303,12 @@ export async function settleSessionIdleWithParentOutbox(
         if (event) events.push(mapEvent(event));
         await tx
           .update(schema.sessions)
-          .set({ status: "idle", activeTurnId: null, lastSequence: sequence, updatedAt: now })
+          .set({
+            status: "idle",
+            activeTurnId: null,
+            lastSequence: sequence,
+            updatedAt: now,
+          })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
@@ -20612,8 +22338,15 @@ export async function settleSessionIdleWithParentOutbox(
           classification: "success",
           sourceId: session.id,
           summary: "Child session reached a terminal idle boundary.",
-          payload: { type: "child_terminal_result", childSessionId: session.id, status: "idle" },
-          lineage: { childSessionId: session.id, parentSessionId: session.parentSessionId },
+          payload: {
+            type: "child_terminal_result",
+            childSessionId: session.id,
+            status: "idle",
+          },
+          lineage: {
+            childSessionId: session.id,
+            parentSessionId: session.parentSessionId,
+          },
         })
         .onConflictDoNothing({
           target: [
@@ -20696,7 +22429,10 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
     hasGeneration &&
     (typeof rawGeneration !== "number" || !Number.isSafeInteger(rawGeneration) || rawGeneration < 0)
   ) {
-    return { kind: "malformed", reason: "dispatchGeneration is not a safe non-negative integer" };
+    return {
+      kind: "malformed",
+      reason: "dispatchGeneration is not a safe non-negative integer",
+    };
   }
   const generation = hasGeneration ? (rawGeneration as number) : null;
 
@@ -20721,10 +22457,16 @@ function readTurnDispatchMetadata(metadata: unknown): TurnDispatchMetadata {
     typeof attempt.triggerEventId !== "string" ||
     attempt.triggerEventId.length === 0
   ) {
-    return { kind: "malformed", reason: "dispatchAttempt has an invalid shape" };
+    return {
+      kind: "malformed",
+      reason: "dispatchAttempt has an invalid shape",
+    };
   }
   if (generation === null || generation !== attempt.generation) {
-    return { kind: "malformed", reason: "dispatchGeneration does not match dispatchAttempt" };
+    return {
+      kind: "malformed",
+      reason: "dispatchGeneration does not match dispatchAttempt",
+    };
   }
   return {
     kind: "valid",
@@ -20858,7 +22600,11 @@ export type ApplySessionTurnSettlementInput = {
 };
 
 export type ApplySessionTurnSettlementResult =
-  | { action: "settled"; events: SessionEvent[]; recordingMutationApplied: boolean }
+  | {
+      action: "settled";
+      events: SessionEvent[];
+      recordingMutationApplied: boolean;
+    }
   | {
       action: "stale";
       events: [];
@@ -20891,46 +22637,49 @@ export async function applySessionTurnSettlement(
   input: ApplySessionTurnSettlementInput,
 ): Promise<ApplySessionTurnSettlementResult> {
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const eventTypes = [
+    ...input.events.map((event) => event.type),
+    ...(input.recording?.action === "available"
+      ? ["recording.available"]
+      : input.recording?.action === "failed"
+        ? ["recording.failed"]
+        : []),
+    ...(input.compactionRequestFailure ? ["session.context.compaction.skipped"] : []),
+    ...(input.turnStatus === "failed" ? ["child_terminal_result"] : []),
+  ];
+  const persistence = {
+    stage: "session_lifecycle_outbox.settle_turn",
+    eventTypes,
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks =
+        input.turnStatus === "failed"
+          ? await lockChildLifecycleOutboxWriteRowsTx(tx as unknown as Database, workspaceId, {
+              sessionId: input.sessionId,
+              turnId: input.turnId,
+              attemptId: input.attemptId,
+            })
+          : await lockSessionEventWriteRows(tx as unknown as Database, {
+              workspaceId,
+              controlLock: "share",
+              sessionIds: [input.sessionId],
+              turnIds: [input.turnId],
+              attemptIds: [input.attemptId],
+            });
+      const session = locks.sessions.find((row) => row.id === input.sessionId);
+      const turn = locks.turns.find((row) => row.id === input.turnId);
+      const attempt = locks.attempts.find((row) => row.id === input.attemptId);
+      if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.id, input.turnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       const [pendingInterruption] = turn
         ? await tx
@@ -20952,7 +22701,14 @@ export async function applySessionTurnSettlement(
         : [];
       if (
         !turn ||
-        !workspace ||
+        !attempt ||
+        !locks.workspace ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== input.sessionId ||
+        attempt.accountId !== session.accountId ||
+        attempt.sessionId !== input.sessionId ||
+        attempt.turnId !== input.turnId ||
+        attempt.executionGeneration !== turn.executionGeneration ||
         effectiveControl.state !== "active" ||
         pendingInterruption !== undefined ||
         session.activeTurnId !== input.turnId ||
@@ -21282,54 +23038,35 @@ export async function settleCodexCredentialLeaseLoss(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [turn] = await tx
-          .select({
-            sessionId: schema.sessionTurns.sessionId,
-            status: schema.sessionTurns.status,
-            metadata: schema.sessionTurns.metadata,
-            activeAttemptId: schema.sessionTurns.activeAttemptId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.accountId, input.accountId),
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
         const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
         if (
-          !workspace ||
+          !locks.workspace ||
           !session ||
           !turn ||
+          !attempt ||
+          session.accountId !== input.accountId ||
+          turn.accountId !== input.accountId ||
+          turn.sessionId !== input.sessionId ||
+          attempt.accountId !== input.accountId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          attempt.executionGeneration !== turn.executionGeneration ||
           effectiveControl.state !== "active" ||
           session.activeTurnId !== input.turnId ||
           !["running", "requires_action"].includes(turn.status) ||
@@ -21546,62 +23283,47 @@ export async function settleCodexCredentialFailover(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+          turnIds: [input.turnId],
+          attemptIds: [input.attemptId],
+        });
+        const session = locks.sessions[0];
+        const turn = locks.turns[0];
+        const attempt = locks.attempts[0];
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [workspace] = await tx
-          .select()
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.accountId, input.accountId),
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        const [turn] = await tx
-          .select({
-            sessionId: schema.sessionTurns.sessionId,
-            status: schema.sessionTurns.status,
-            metadata: schema.sessionTurns.metadata,
-            activeAttemptId: schema.sessionTurns.activeAttemptId,
-            executionGeneration: schema.sessionTurns.executionGeneration,
-          })
-          .from(schema.sessionTurns)
-          .where(
-            and(
-              eq(schema.sessionTurns.accountId, input.accountId),
-              eq(schema.sessionTurns.workspaceId, input.workspaceId),
-              eq(schema.sessionTurns.id, input.turnId),
-              eq(schema.sessionTurns.sessionId, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
         const currentFailovers = Number(turn?.metadata?.codexCredentialFailovers ?? 0);
         const currentRedispatches = Number(turn?.metadata?.workerDeathRedispatches ?? 0);
         if (
-          !workspace ||
+          !locks.workspace ||
           !session ||
           !turn ||
+          !attempt ||
+          session.accountId !== input.accountId ||
+          turn.accountId !== input.accountId ||
+          turn.sessionId !== input.sessionId ||
+          attempt.accountId !== input.accountId ||
+          attempt.sessionId !== input.sessionId ||
+          attempt.turnId !== input.turnId ||
+          attempt.executionGeneration !== turn.executionGeneration ||
           effectiveControl.state !== "active" ||
           session.activeTurnId !== input.turnId ||
           !["running", "requires_action"].includes(turn.status) ||
           turn.activeAttemptId !== input.attemptId ||
           currentRedispatches !== input.expectedRedispatches
         ) {
-          return { action: "stale", failoverCount: currentFailovers, events: [] } as const;
+          return {
+            action: "stale",
+            failoverCount: currentFailovers,
+            events: [],
+          } as const;
         }
 
         const leaseRows = await tx.execute(
@@ -21618,12 +23340,20 @@ export async function settleCodexCredentialFailover(
           lease &&
           (lease.holder_id !== input.holderId || Number(lease.generation) !== input.generation)
         ) {
-          return { action: "stale", failoverCount: currentFailovers, events: [] } as const;
+          return {
+            action: "stale",
+            failoverCount: currentFailovers,
+            events: [],
+          } as const;
         }
 
         const failoverCount = currentFailovers + 1;
         if (failoverCount > input.maxFailovers) {
-          return { action: "limit_exceeded", failoverCount, events: [] } as const;
+          return {
+            action: "limit_exceeded",
+            failoverCount,
+            events: [],
+          } as const;
         }
         const now = new Date();
         await closeSessionTurnAttemptInTransaction(tx as unknown as Database, {
@@ -21693,7 +23423,10 @@ export async function settleCodexCredentialFailover(
           .set({
             status: "recovering",
             activeAttemptId: null,
-            metadata: { ...turn.metadata, codexCredentialFailovers: failoverCount },
+            metadata: {
+              ...turn.metadata,
+              codexCredentialFailovers: failoverCount,
+            },
             finishedAt: null,
             updatedAt: now,
           })
@@ -21762,49 +23495,36 @@ export async function requestSessionTurnRecovery(
   const fromStatuses = input.fromStatuses ?? ["running", "requires_action"];
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        controlLock: "share",
+        sessionIds: [input.sessionId],
+        turnIds: [input.turnId],
+        attemptIds: [input.attemptId],
+      });
+      const session = locks.sessions[0];
+      const turn = locks.turns[0];
+      const attempt = locks.attempts[0];
+      if (!session) {
+        throw new Error(`Session not found: ${input.sessionId}`);
+      }
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
-
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.id, input.turnId),
-          ),
-        )
-        .for("update")
-        .limit(1);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       if (
-        !workspace ||
+        !locks.workspace ||
         !turn ||
+        !attempt ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== input.sessionId ||
+        attempt.accountId !== session.accountId ||
+        attempt.sessionId !== input.sessionId ||
+        attempt.turnId !== input.turnId ||
+        attempt.executionGeneration !== turn.executionGeneration ||
         effectiveControl.state !== "active" ||
         session.activeTurnId !== input.turnId ||
         !fromStatuses.includes(turnStatus as SessionTurnStatus) ||
@@ -21942,8 +23662,18 @@ export type RecoverSessionDispatchInput = {
 
 export type RecoverSessionDispatchResult =
   | { action: "unclaimed"; events: [] }
-  | { action: "recovering"; turnId: string; redispatches: number; events: SessionEvent[] }
-  | { action: "exceeded"; turnId: string; redispatches: number; events: SessionEvent[] }
+  | {
+      action: "recovering";
+      turnId: string;
+      redispatches: number;
+      events: SessionEvent[];
+    }
+  | {
+      action: "exceeded";
+      turnId: string;
+      redispatches: number;
+      events: SessionEvent[];
+    }
   | {
       action: "stale";
       events: [];
@@ -21961,47 +23691,32 @@ export async function recoverSessionDispatch(
   workspaceId: string,
   input: RecoverSessionDispatchInput,
 ): Promise<RecoverSessionDispatchResult> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  const persistence = {
+    stage: "session_lifecycle_outbox.recover_dispatch",
+    eventTypes: [
+      "child_terminal_result",
+      "session.status.changed",
+      "turn.failed",
+      "turn.recovery.requested",
+    ],
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
     return await scopedDb.transaction(async (tx) => {
+      const locks = await lockChildLifecycleOutboxWriteRowsTx(
+        tx as unknown as Database,
+        workspaceId,
+        { sessionId: input.sessionId, attemptId: input.attemptId },
+      );
+      const session = locks.session;
       const effectiveControl = await evaluateSessionControl(
         tx as unknown as Database,
         workspaceId,
         input.sessionId,
-        { lock: "share" },
+        { workspaceControl: locks.control ?? undefined },
       );
-      const [workspace] = await tx
-        .select()
-        .from(schema.workspaces)
-        .where(eq(schema.workspaces.id, workspaceId))
-        .for("update")
-        .limit(1);
-      const [session] = await tx
-        .select()
-        .from(schema.sessions)
-        .where(
-          and(
-            eq(schema.sessions.workspaceId, workspaceId),
-            eq(schema.sessions.id, input.sessionId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!session) {
-        throw new Error(`Session not found: ${input.sessionId}`);
-      }
-      const [turn] = await tx
-        .select()
-        .from(schema.sessionTurns)
-        .where(
-          and(
-            eq(schema.sessionTurns.workspaceId, workspaceId),
-            eq(schema.sessionTurns.sessionId, input.sessionId),
-            eq(schema.sessionTurns.activeAttemptId, input.attemptId),
-          ),
-        )
-        .for("update")
-        .limit(1);
-      if (!turn) {
+      const attempt = locks.attempts.find((row) => row.id === input.attemptId);
+      if (!attempt) {
         return input.timeoutType === "SCHEDULE_TO_START"
           ? { action: "unclaimed", events: [] }
           : {
@@ -22011,10 +23726,18 @@ export async function recoverSessionDispatch(
               activeTurnId: session.activeTurnId,
             };
       }
+      const turn = locks.turns.find((row) => row.id === attempt.turnId);
       const turnStatus = (turn?.status as SessionTurnStatus | undefined) ?? null;
       const parsedMetadata = readTurnDispatchMetadata(turn?.metadata);
       if (
-        !workspace ||
+        !locks.workspace ||
+        !turn ||
+        turn.accountId !== session.accountId ||
+        turn.sessionId !== input.sessionId ||
+        attempt.accountId !== session.accountId ||
+        attempt.sessionId !== input.sessionId ||
+        attempt.turnId !== turn.id ||
+        attempt.executionGeneration !== turn.executionGeneration ||
         parsedMetadata.kind === "malformed" ||
         parsedMetadata.attempt === null ||
         effectiveControl.state !== "active" ||
@@ -22371,12 +24094,36 @@ export async function getSessionQueueSnapshot(
         ),
       )
       .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
+    const latestInterruption = await latestSessionAttemptInterruption(
+      scopedDb,
+      workspaceId,
+      sessionId,
+    );
     return {
       version: session.queueVersion,
       effectiveControl: serializeEffectiveSessionControl(effectiveControl),
+      stoppingPreviousAttempt:
+        latestInterruption !== null && latestInterruption.quiescedAt === null,
       items: rows.map(mapSessionTurn),
     };
   });
+}
+
+function queuedSteerReplacementAttemptId(metadata: Record<string, unknown>): string | null {
+  if (metadata.delivery !== "steer") return null;
+  const attemptId = metadata.replacedAttemptId;
+  const interruptionCount = metadata.interruptionCount;
+  if (attemptId === null && interruptionCount === 0) return null;
+  if (
+    typeof attemptId === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(attemptId) &&
+    typeof interruptionCount === "number" &&
+    Number.isSafeInteger(interruptionCount) &&
+    interruptionCount > 0
+  ) {
+    return attemptId;
+  }
+  throw new SessionControlInvariantError("Queued Steer has malformed predecessor metadata");
 }
 
 async function enqueueFailedChildOutboxForTurnTx(
@@ -22772,59 +24519,71 @@ export async function getOrCreateSessionSystemUpdateOutbox(
   db: Database,
   input: Omit<SessionSystemUpdateOutboxDelivery, "id" | "status">,
 ): Promise<SessionSystemUpdateOutboxDelivery> {
-  return await withRlsContext(
-    db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .insert(schema.sessionSystemUpdateOutbox)
-        .values({
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sourceSessionId: input.sourceSessionId,
-          targetSessionId: input.targetSessionId,
-          dedupeKey: input.dedupeKey,
+  const persistence = {
+    stage: "session_lifecycle_outbox.get_or_create",
+    eventTypes: ["child_terminal_result"],
+    maxAttempts: 3,
+  };
+  const context = { accountId: input.accountId, workspaceId: input.workspaceId };
+  return await retryRlsPersistence(db, context, persistence, async (scopedDb) => {
+    const locks = await lockSessionEventWriteRows(scopedDb, {
+      workspaceId: input.workspaceId,
+      sessionIds: [input.sourceSessionId, input.targetSessionId],
+    });
+    const expectedSessionIds = new Set([input.sourceSessionId, input.targetSessionId]);
+    if (locks.sessions.length !== expectedSessionIds.size) {
+      throw new SessionControlInvariantError(
+        "System-update outbox source and target sessions must exist in the same workspace",
+      );
+    }
+    const [row] = await scopedDb
+      .insert(schema.sessionSystemUpdateOutbox)
+      .values({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sourceSessionId: input.sourceSessionId,
+        targetSessionId: input.targetSessionId,
+        dedupeKey: input.dedupeKey,
+        kind: input.kind,
+        classification: input.classification,
+        sourceId: input.sourceId,
+        summary: input.summary,
+        payload: input.payload,
+        lineage: input.lineage,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.sessionSystemUpdateOutbox.workspaceId,
+          schema.sessionSystemUpdateOutbox.dedupeKey,
+        ],
+        set: {
           kind: input.kind,
           classification: input.classification,
           sourceId: input.sourceId,
           summary: input.summary,
           payload: input.payload,
           lineage: input.lineage,
-        })
-        .onConflictDoUpdate({
-          target: [
-            schema.sessionSystemUpdateOutbox.workspaceId,
-            schema.sessionSystemUpdateOutbox.dedupeKey,
-          ],
-          set: {
-            kind: input.kind,
-            classification: input.classification,
-            sourceId: input.sourceId,
-            summary: input.summary,
-            payload: input.payload,
-            lineage: input.lineage,
-            updatedAt: new Date(),
-          },
-        })
-        .returning();
-      if (!row) throw new Error("Failed to persist system-update outbox row");
-      return {
-        id: row.id,
-        status: row.status as "pending" | "delivered",
-        accountId: row.accountId,
-        workspaceId: row.workspaceId,
-        sourceSessionId: row.sourceSessionId,
-        targetSessionId: row.targetSessionId,
-        dedupeKey: row.dedupeKey,
-        kind: "child_terminal_result",
-        classification: row.classification as SystemUpdateClassification,
-        sourceId: row.sourceId,
-        summary: row.summary,
-        payload: parseChildTerminalResultPayload(row.payload),
-        lineage: row.lineage,
-      };
-    },
-  );
+          updatedAt: new Date(),
+        },
+      })
+      .returning();
+    if (!row) throw new Error("Failed to persist system-update outbox row");
+    return {
+      id: row.id,
+      status: row.status as "pending" | "delivered",
+      accountId: row.accountId,
+      workspaceId: row.workspaceId,
+      sourceSessionId: row.sourceSessionId,
+      targetSessionId: row.targetSessionId,
+      dedupeKey: row.dedupeKey,
+      kind: "child_terminal_result",
+      classification: row.classification as SystemUpdateClassification,
+      sourceId: row.sourceId,
+      summary: row.summary,
+      payload: parseChildTerminalResultPayload(row.payload),
+      lineage: row.lineage,
+    };
+  });
 }
 
 export async function markSessionSystemUpdateOutboxFailed(
@@ -22857,7 +24616,12 @@ export async function markSessionSystemUpdateOutboxDeliveredInTransaction(
 ): Promise<void> {
   const [row] = await tx
     .update(schema.sessionSystemUpdateOutbox)
-    .set({ status: "delivered", deliveredAt: new Date(), lastError: null, updatedAt: new Date() })
+    .set({
+      status: "delivered",
+      deliveredAt: new Date(),
+      lastError: null,
+      updatedAt: new Date(),
+    })
     .where(
       and(
         eq(schema.sessionSystemUpdateOutbox.workspaceId, input.workspaceId),
@@ -22993,30 +24757,19 @@ export async function addSessionSystemUpdateWithSourceMutation(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
           input.sessionId,
-          { lock: "share" },
+          { workspaceControl: locks.control ?? undefined },
         );
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
-        // The session row is the sequence and wake owner. Taking an unrelated
-        // exclusive lock on its workspace here creates an inverse lock edge
-        // with an active turn that already owns the session and is inserting a
-        // workspace-scoped event (the FK check then waits on the workspace).
-        // The session FK already proves workspace existence, so serialize only
-        // on the actual mutable owner.
-        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (session.status === "cancelled") {
           await mutateSource(tx as unknown as Database, null);
           return { added: false, reason: "session_cancelled" } as const;
@@ -23201,6 +24954,26 @@ function mapSessionSystemUpdate(
   };
 }
 
+const SESSION_EVENT_RAW_DELTA_TYPE_SET: ReadonlySet<string> = new Set(
+  SESSION_EVENT_RAW_DELTA_TYPES,
+);
+
+/** Raw streaming fragments advance the durable sequence, not monitoring activity. */
+function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }>): boolean {
+  return inputs.some((input) => !SESSION_EVENT_RAW_DELTA_TYPE_SET.has(input.type));
+}
+
+function sessionMutationAdvancesActivity(update: {
+  resources?: ResourceRef[];
+  tools?: ToolRef[];
+  model?: string;
+  metadata?: Record<string, unknown>;
+  status?: SessionStatus;
+  activeTurnId?: string | null;
+}): boolean {
+  return Object.values(update).some((value) => value !== undefined);
+}
+
 export async function appendSessionEvents(
   db: Database,
   workspaceId: string,
@@ -23210,63 +24983,61 @@ export async function appendSessionEvents(
   if (inputs.length === 0) {
     return [];
   }
-  return await withWorkspaceRls(
-    db,
-    workspaceId,
-    async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        // Generic API/system event appends participate in the same lock order
-        // as durable queue controls. Without this workspace lock an append can
-        // hold the session row and then request a workspace FK key-share while
-        // a concurrent stop/steer holds workspace FOR UPDATE and waits on the
-        // session — a real PostgreSQL deadlock whose caller may treat the live
-        // fanout as best-effort and accidentally hide a lost terminal event.
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, workspaceId))
-          .for("update")
-          .limit(1);
-        const [row] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
-        if (!row) {
-          throw new Error(`Session not found: ${sessionId}`);
-        }
-        let sequence = row.lastSequence;
-        const values = inputs.map((input) => ({
-          accountId: row.accountId,
-          workspaceId: row.workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId: input.turnId ?? null,
-          turnGeneration: input.turnGeneration ?? null,
-          turnAttemptId: input.turnAttemptId ?? null,
-          turnAssociation: input.turnAssociation ?? (input.turnId ? "current" : null),
-          duplicateOfEventId: input.duplicateOfEventId ?? null,
-          duplicateReason: input.duplicateReason ?? null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? new Date(),
-        }));
-        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
-          .update(schema.sessions)
-          .set({ lastSequence: sequence, updatedAt: new Date() })
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          );
-        return inserted.map(mapEvent);
-      }),
-  );
+  const persistence = {
+    stage: "session_events.append_generic",
+    eventTypes: inputs.map((input) => input.type),
+    maxAttempts: 3,
+  };
+  return await retryWorkspacePersistence(db, workspaceId, persistence, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const turnIds = inputs
+        .map((input) => input.turnId)
+        .filter((id): id is string => typeof id === "string");
+      const attemptIds = inputs
+        .map((input) => input.turnAttemptId)
+        .filter((id): id is string => typeof id === "string");
+      const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        workspaceId,
+        sessionIds: [sessionId],
+        turnIds,
+        attemptIds,
+      });
+      const row = locks.sessions[0];
+      if (!row) {
+        throw new Error(`Session not found: ${sessionId}`);
+      }
+      let sequence = row.lastSequence;
+      const values = inputs.map((input) => ({
+        accountId: row.accountId,
+        workspaceId: row.workspaceId,
+        sessionId,
+        sequence: ++sequence,
+        type: input.type,
+        payload: sanitizeEventPayload(input.payload ?? {}),
+        clientEventId: input.clientEventId ?? null,
+        turnId: input.turnId ?? null,
+        turnGeneration: input.turnGeneration ?? null,
+        turnAttemptId: input.turnAttemptId ?? null,
+        turnAssociation: input.turnAssociation ?? (input.turnId ? "current" : null),
+        duplicateOfEventId: input.duplicateOfEventId ?? null,
+        duplicateReason: input.duplicateReason ?? null,
+        producerId: input.producerId ?? null,
+        producerSeq: input.producerSeq ?? null,
+        occurredAt: input.occurredAt ?? new Date(),
+      }));
+      const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+      await tx
+        .update(schema.sessions)
+        .set({
+          lastSequence: sequence,
+          ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: new Date() } : {}),
+        })
+        .where(
+          and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+        );
+      return inserted.map(mapEvent);
+    });
+  });
 }
 
 export type AcceptSessionApprovalDecisionResult =
@@ -23298,23 +25069,11 @@ export async function acceptSessionApprovalDecision(
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await tx
-          .select({ id: schema.workspaces.id })
-          .from(schema.workspaces)
-          .where(eq(schema.workspaces.id, input.workspaceId))
-          .for("update")
-          .limit(1);
-        const [session] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.id, input.sessionId),
-            ),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
         if (!session) throw new Error(`Session not found: ${input.sessionId}`);
         if (input.clientEventId) {
           const [existing] = await tx
@@ -23350,7 +25109,7 @@ export async function acceptSessionApprovalDecision(
             } as const;
           }
         }
-        const [turn] = session.activeTurnId
+        const [turnPreview] = session.activeTurnId
           ? await tx
               .select()
               .from(schema.sessionTurns)
@@ -23361,9 +25120,20 @@ export async function acceptSessionApprovalDecision(
                   eq(schema.sessionTurns.id, session.activeTurnId),
                 ),
               )
-              .for("update")
               .limit(1)
           : [];
+        const turn = turnPreview
+          ? (
+              await lockSessionEventWriteRows(tx as unknown as Database, {
+                workspaceId: input.workspaceId,
+                workspaceLock: "already_locked",
+                turnIds: [turnPreview.id],
+              })
+            ).turns[0]
+          : undefined;
+        if (turnPreview && !turn) {
+          throw new Error(`Active turn disappeared: ${turnPreview.id}`);
+        }
         if (session.status !== "requires_action" || turn?.status !== "requires_action") {
           return {
             action: "conflict",
@@ -23395,7 +25165,10 @@ export async function acceptSessionApprovalDecision(
           )
           .limit(1);
         if (alreadyAccepted) {
-          return { action: "conflict", sessionStatus: "requires_action" } as const;
+          return {
+            action: "conflict",
+            sessionStatus: "requires_action",
+          } as const;
         }
         const [event] = await tx
           .insert(schema.sessionEvents)
@@ -23415,7 +25188,10 @@ export async function acceptSessionApprovalDecision(
         if (!event) throw new Error("Failed to append approval decision");
         await tx
           .update(schema.sessions)
-          .set({ lastSequence: session.lastSequence + 1, updatedAt: new Date() })
+          .set({
+            lastSequence: session.lastSequence + 1,
+            updatedAt: new Date(),
+          })
           .where(eq(schema.sessions.id, session.id));
         const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
           tx as unknown as Database,
@@ -23454,130 +25230,143 @@ export async function appendSessionEventsForTurnAttempt(
   inputs: AppendEventInput[],
 ): Promise<{ events: SessionEvent[]; accepted: boolean }> {
   if (inputs.length === 0) return { events: [], accepted: true };
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    return await scopedDb.transaction(async (tx) => {
-      const fence = await lockTurnAttemptWriteFenceTx(tx, {
-        workspaceId,
-        sessionId,
-        turnId,
-        executionGeneration,
-        attemptId,
-      });
-      const session = fence.session;
-      if (!session) throw new Error(`Session not found: ${sessionId}`);
-      let sequence = session.lastSequence;
-      const now = new Date();
-      const usageSourceKey = (input: AppendEventInput): string | null => {
-        if (
-          input.type !== "agent.model.usage" ||
-          !input.payload ||
-          typeof input.payload !== "object"
-        ) {
-          return null;
-        }
-        const value = (input.payload as Record<string, unknown>).sourceKey;
-        return typeof value === "string" && value.length > 0 ? value : null;
-      };
-      const incomingUsageKeys = [
-        ...new Set(inputs.map(usageSourceKey).filter((value): value is string => value !== null)),
-      ];
-      const existingUsageRows =
-        fence.allowed && incomingUsageKeys.length > 0
-          ? await tx
-              .select({ id: schema.sessionEvents.id, payload: schema.sessionEvents.payload })
-              .from(schema.sessionEvents)
-              .where(
-                and(
-                  eq(schema.sessionEvents.workspaceId, workspaceId),
-                  eq(schema.sessionEvents.sessionId, sessionId),
-                  eq(schema.sessionEvents.turnId, turnId),
-                  eq(schema.sessionEvents.type, "agent.model.usage"),
-                  eq(schema.sessionEvents.turnAssociation, "current"),
-                  inArray(
-                    sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
-                    incomingUsageKeys,
+  const eventTypes = [...new Set(inputs.map((input) => input.type))].sort();
+  return await runIdempotentPersistenceTransaction(
+    {
+      stage: "session_events.append_for_turn_attempt",
+      eventTypes,
+      maxAttempts: 3,
+    },
+    async () =>
+      await withWorkspaceRls(db, workspaceId, async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx, {
+          workspaceId,
+          sessionId,
+          turnId,
+          executionGeneration,
+          attemptId,
+        });
+        const session = fence.session;
+        if (!session) throw new Error(`Session not found: ${sessionId}`);
+        let sequence = session.lastSequence;
+        const now = new Date();
+        const usageSourceKey = (input: AppendEventInput): string | null => {
+          if (
+            input.type !== "agent.model.usage" ||
+            !input.payload ||
+            typeof input.payload !== "object"
+          ) {
+            return null;
+          }
+          const value = (input.payload as Record<string, unknown>).sourceKey;
+          return typeof value === "string" && value.length > 0 ? value : null;
+        };
+        const incomingUsageKeys = [
+          ...new Set(inputs.map(usageSourceKey).filter((value): value is string => value !== null)),
+        ];
+        const existingUsageRows =
+          fence.allowed && incomingUsageKeys.length > 0
+            ? await tx
+                .select({
+                  id: schema.sessionEvents.id,
+                  payload: schema.sessionEvents.payload,
+                })
+                .from(schema.sessionEvents)
+                .where(
+                  and(
+                    eq(schema.sessionEvents.workspaceId, workspaceId),
+                    eq(schema.sessionEvents.sessionId, sessionId),
+                    eq(schema.sessionEvents.turnId, turnId),
+                    eq(schema.sessionEvents.type, "agent.model.usage"),
+                    eq(schema.sessionEvents.turnAssociation, "current"),
+                    inArray(
+                      sql<string>`${schema.sessionEvents.payload} ->> 'sourceKey'`,
+                      incomingUsageKeys,
+                    ),
                   ),
-                ),
-              )
-          : [];
-      const canonicalUsageIds = new Map<string, string>();
-      for (const row of existingUsageRows) {
-        const value =
-          row.payload && typeof row.payload === "object"
-            ? (row.payload as Record<string, unknown>).sourceKey
-            : null;
-        if (typeof value === "string" && value.length > 0) {
-          canonicalUsageIds.set(value, row.id);
+                )
+            : [];
+        const canonicalUsageIds = new Map<string, string>();
+        for (const row of existingUsageRows) {
+          const value =
+            row.payload && typeof row.payload === "object"
+              ? (row.payload as Record<string, unknown>).sourceKey
+              : null;
+          if (typeof value === "string" && value.length > 0) {
+            canonicalUsageIds.set(value, row.id);
+          }
         }
-      }
-      const values = inputs.map((input) => {
-        const id = crypto.randomUUID();
-        if (!fence.allowed) {
+        const values = inputs.map((input) => {
+          const id = crypto.randomUUID();
+          if (!fence.allowed) {
+            return {
+              id,
+              accountId: session.accountId,
+              workspaceId,
+              sessionId,
+              sequence: ++sequence,
+              type: "turn.event.rejected_late",
+              payload: sanitizeEventPayload({
+                rejectedType: input.type,
+                rejectedPayload: input.payload ?? {},
+                reason: fence.reason,
+                expectedExecutionGeneration: executionGeneration,
+                rejectedAttemptId: attemptId,
+                currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
+                currentAttemptId: fence.turn?.activeAttemptId ?? null,
+                currentTurnStatus: fence.turn?.status ?? null,
+                currentActiveTurnId: session.activeTurnId,
+              }),
+              clientEventId: input.clientEventId ?? null,
+              turnId,
+              turnGeneration: executionGeneration,
+              turnAttemptId: attemptId,
+              turnAssociation: "late_rejected" as const,
+              duplicateOfEventId: null,
+              duplicateReason: null,
+              producerId: input.producerId ?? null,
+              producerSeq: input.producerSeq ?? null,
+              occurredAt: input.occurredAt ?? now,
+            };
+          }
+          const sourceKey = usageSourceKey(input);
+          const duplicateOfEventId = sourceKey ? (canonicalUsageIds.get(sourceKey) ?? null) : null;
+          if (sourceKey && !duplicateOfEventId) {
+            canonicalUsageIds.set(sourceKey, id);
+          }
           return {
             id,
             accountId: session.accountId,
             workspaceId,
             sessionId,
             sequence: ++sequence,
-            type: "turn.event.rejected_late",
-            payload: sanitizeEventPayload({
-              rejectedType: input.type,
-              rejectedPayload: input.payload ?? {},
-              reason: fence.reason,
-              expectedExecutionGeneration: executionGeneration,
-              rejectedAttemptId: attemptId,
-              currentExecutionGeneration: fence.turn?.executionGeneration ?? null,
-              currentAttemptId: fence.turn?.activeAttemptId ?? null,
-              currentTurnStatus: fence.turn?.status ?? null,
-              currentActiveTurnId: session.activeTurnId,
-            }),
+            type: input.type,
+            payload: sanitizeEventPayload(input.payload ?? {}),
             clientEventId: input.clientEventId ?? null,
             turnId,
             turnGeneration: executionGeneration,
             turnAttemptId: attemptId,
-            turnAssociation: "late_rejected" as const,
-            duplicateOfEventId: null,
-            duplicateReason: null,
+            turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
+            duplicateOfEventId,
+            duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
             producerId: input.producerId ?? null,
             producerSeq: input.producerSeq ?? null,
             occurredAt: input.occurredAt ?? now,
           };
-        }
-        const sourceKey = usageSourceKey(input);
-        const duplicateOfEventId = sourceKey ? (canonicalUsageIds.get(sourceKey) ?? null) : null;
-        if (sourceKey && !duplicateOfEventId) {
-          canonicalUsageIds.set(sourceKey, id);
-        }
-        return {
-          id,
-          accountId: session.accountId,
-          workspaceId,
-          sessionId,
-          sequence: ++sequence,
-          type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
-          clientEventId: input.clientEventId ?? null,
-          turnId,
-          turnGeneration: executionGeneration,
-          turnAttemptId: attemptId,
-          turnAssociation: duplicateOfEventId ? ("duplicate" as const) : ("current" as const),
-          duplicateOfEventId,
-          duplicateReason: duplicateOfEventId ? "duplicate_provider_response_usage" : null,
-          producerId: input.producerId ?? null,
-          producerSeq: input.producerSeq ?? null,
-          occurredAt: input.occurredAt ?? now,
-        };
-      });
-      const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-      await tx
-        .update(schema.sessions)
-        .set({ lastSequence: sequence, updatedAt: now })
-        .where(
-          and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-        );
-      return { events: inserted.map(mapEvent), accepted: fence.allowed };
-    });
-  });
+        });
+        const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        await tx
+          .update(schema.sessions)
+          .set({
+            lastSequence: sequence,
+            ...(sessionEventTypesAdvanceActivity(values) ? { updatedAt: now } : {}),
+          })
+          .where(
+            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+          );
+        return { events: inserted.map(mapEvent), accepted: fence.allowed };
+      }),
+  );
 }
 
 export async function appendSessionEventToSandboxGroup(
@@ -23591,8 +25380,11 @@ export async function appendSessionEventToSandboxGroup(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const rows = await tx
-          .select()
+        await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+        });
+        const sessionIds = await tx
+          .select({ id: schema.sessions.id })
           .from(schema.sessions)
           .where(
             and(
@@ -23600,8 +25392,17 @@ export async function appendSessionEventToSandboxGroup(
               eq(schema.sessions.sandboxGroupId, sandboxGroupId),
             ),
           )
-          .orderBy(asc(schema.sessions.createdAt))
-          .for("update");
+          .orderBy(asc(schema.sessions.id));
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          workspaceLock: "already_locked",
+          sessionIds: sessionIds.map((row) => row.id),
+          turnIds: input.turnId ? [input.turnId] : [],
+          attemptIds: input.turnAttemptId ? [input.turnAttemptId] : [],
+        });
+        const rows = locks.sessions
+          .filter((row) => row.sandboxGroupId === sandboxGroupId)
+          .sort((left, right) => left.createdAt.getTime() - right.createdAt.getTime());
         if (rows.length === 0) {
           return [];
         }
@@ -23621,18 +25422,23 @@ export async function appendSessionEventToSandboxGroup(
           occurredAt,
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
-        await tx
+        const lockedSessionIds = rows.map((row) => row.id);
+        const updated = await tx
           .update(schema.sessions)
           .set({
             lastSequence: sql`${schema.sessions.lastSequence} + 1`,
-            updatedAt: new Date(),
+            ...(sessionEventTypesAdvanceActivity([input]) ? { updatedAt: new Date() } : {}),
           })
           .where(
             and(
               eq(schema.sessions.workspaceId, workspaceId),
-              eq(schema.sessions.sandboxGroupId, sandboxGroupId),
+              inArray(schema.sessions.id, lockedSessionIds),
             ),
-          );
+          )
+          .returning({ id: schema.sessions.id });
+        if (updated.length !== lockedSessionIds.length) {
+          throw new Error("Sandbox-group event sequence update did not match locked sessions");
+        }
         return inserted.map(mapEvent);
       }),
   );
@@ -23660,14 +25466,19 @@ export async function appendSessionEventsAndUpdateSession(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const [row] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const turnIds = inputs
+          .map((input) => input.turnId)
+          .filter((id): id is string => typeof id === "string");
+        const attemptIds = inputs
+          .map((input) => input.turnAttemptId)
+          .filter((id): id is string => typeof id === "string");
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          sessionIds: [sessionId],
+          turnIds,
+          attemptIds,
+        });
+        const row = locks.sessions[0];
         if (!row) {
           throw new Error(`Session not found: ${sessionId}`);
         }
@@ -23688,6 +25499,8 @@ export async function appendSessionEventsAndUpdateSession(
           occurredAt: input.occurredAt ?? now,
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
+        const advancesActivity =
+          sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
         await tx
           .update(schema.sessions)
           .set({
@@ -23698,7 +25511,7 @@ export async function appendSessionEventsAndUpdateSession(
             ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
             ...(update.status !== undefined ? { status: update.status } : {}),
             ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
-            updatedAt: now,
+            ...(advancesActivity ? { updatedAt: now } : {}),
           })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
@@ -23741,19 +25554,22 @@ export async function appendSessionEventsWithLockedSessionUpdate(
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "share");
-        const [sessionRow] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
-          )
-          .for("update")
-          .limit(1);
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          controlLock: "share",
+          sessionIds: [sessionId],
+        });
+        const sessionRow = locks.sessions[0];
         if (!sessionRow) {
           throw new Error(`Session not found: ${sessionId}`);
         }
-        const mappedSession = await mapSessionWithControl(tx as unknown as Database, sessionRow);
+        const mappedSession = await mapSessionWithControl(
+          tx as unknown as Database,
+          sessionRow,
+          [],
+          undefined,
+          locks.control ?? undefined,
+        );
         const built = await build(mappedSession, {
           updateSessionMcpServerCredentials: async (updates) =>
             await updateSessionMcpServerCredentialsInTransaction(tx, {
@@ -23779,6 +25595,16 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         if (built.events.length === 0) {
           return [];
         }
+        await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId,
+          workspaceLock: "already_locked",
+          turnIds: built.events
+            .map((input) => input.turnId)
+            .filter((id): id is string => typeof id === "string"),
+          attemptIds: built.events
+            .map((input) => input.turnAttemptId)
+            .filter((id): id is string => typeof id === "string"),
+        });
         let sequence = sessionRow.lastSequence;
         const now = new Date();
         const values = built.events.map((input) => ({
@@ -23797,6 +25623,8 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         }));
         const inserted = await tx.insert(schema.sessionEvents).values(values).returning();
         const update = built.update ?? {};
+        const advancesActivity =
+          sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
         await tx
           .update(schema.sessions)
           .set({
@@ -23807,7 +25635,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
             ...(update.status !== undefined ? { status: update.status } : {}),
             ...(update.activeTurnId !== undefined ? { activeTurnId: update.activeTurnId } : {}),
-            updatedAt: now,
+            ...(advancesActivity ? { updatedAt: now } : {}),
           })
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
@@ -23825,8 +25653,11 @@ async function sessionControlProjections(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
+  workspaceControl?: WorkspaceControlRow,
 ): Promise<Map<string, Session["effectiveControl"]>> {
-  const controls = await evaluateSessionControls(db, workspaceId, sessionIds, { lock: "share" });
+  const controls = await evaluateSessionControls(db, workspaceId, sessionIds, {
+    ...(workspaceControl ? { workspaceControl } : { lock: "share" as const }),
+  });
   return new Map(
     [...controls].map(([sessionId, control]) => [
       sessionId,
@@ -23840,8 +25671,9 @@ async function mapSessionWithControl(
   row: typeof schema.sessions.$inferSelect,
   mcpServers: SessionMcpServerMetadata[] = [],
   pin: Pick<Session, "pinned" | "pinnedAt" | "pinVersion"> = mapSessionPin(null),
+  workspaceControl?: WorkspaceControlRow,
 ): Promise<DbSession> {
-  const controls = await sessionControlProjections(db, row.workspaceId, [row.id]);
+  const controls = await sessionControlProjections(db, row.workspaceId, [row.id], workspaceControl);
   const control = controls.get(row.id);
   if (!control) throw new Error(`Effective control missing for session ${row.id}`);
   return mapSession(row, control, mcpServers, pin);
@@ -23923,6 +25755,32 @@ function mapEvent(row: typeof schema.sessionEvents.$inferSelect): SessionEvent {
     duplicateOfEventId: row.duplicateOfEventId,
     duplicateReason: row.duplicateReason,
   };
+}
+
+function mapProjectedEvent(row: SessionEventProjectionRow): SessionEvent {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    sequence: row.sequence,
+    type: row.type as SessionEventType,
+    payload: row.payload,
+    occurredAt:
+      row.occurredAt instanceof Date
+        ? row.occurredAt.toISOString()
+        : new Date(row.occurredAt).toISOString(),
+    clientEventId: row.clientEventId,
+    turnId: row.turnId,
+    turnGeneration: row.turnGeneration,
+    turnAttemptId: row.turnAttemptId,
+    turnAssociation: row.turnAssociation as SessionEvent["turnAssociation"],
+    duplicateOfEventId: row.duplicateOfEventId,
+    duplicateReason: row.duplicateReason,
+  };
+}
+
+function utf8JsonBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
 function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTurn {

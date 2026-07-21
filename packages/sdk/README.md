@@ -75,12 +75,39 @@ contiguous `sequence` number:
 - Ends gracefully when the provided `AbortSignal` aborts; throws on
   non-retryable failures (e.g. 401/403/404).
 
-Use `client.listEvents(workspaceId, sessionId, { before, after, limit })` for
-durable replay pages. `before` is an exclusive sequence cursor that returns the
-newest matching page, still ordered ascending in the response. Pass
-`compact: true` for history windows that do not need individual delta fragments;
-delta runs may be coalesced and expose `payload.coalescedUntil` as the true last
-sequence for stream resume cursors.
+Use `client.listEventPage(...)` when monitoring another session. A call without
+a cursor is safe by default: it returns a newest-first-selected (but
+ascending-in-response) semantic tail, uses bounded `summary` payloads, and omits
+raw message/reasoning/command/PTY deltas. The page returns exact
+`coveredSequence`, `nextBefore`/`nextAfter`, byte, truncation, and projection
+metadata. Filters can select canonical event types or the `control`, `terminal`,
+`failure`, `checkpoint`, `tool_receipt`, and `provider_account` semantic classes;
+`latest` is an exclusive typed lookup that returns the newest event in exactly
+the requested class. It cannot be combined with any type or class include/exclude
+filter, so an unrelated newer event cannot displace the requested result and an
+exclusion cannot remove it.
+
+```ts
+const terminal = await client.listEventPage(workspaceId, sessionId, {
+  latest: "terminal",
+  payloadMode: "summary",
+});
+
+const older = await client.listEventPage(workspaceId, sessionId, {
+  before: terminal.nextBefore ?? undefined,
+  includeClasses: ["failure", "checkpoint"],
+  payloadMode: "none",
+});
+```
+
+Use explicit `mode: "forensic", payloadMode: "full"` with `after`/`before` for
+exact retained audit replay. “Full” means the exact durable audit projection;
+it cannot restore source bytes that the audit boundary never retained. REST/SDK
+pages remain count- and byte-bounded, so continue with the returned cursor. The
+convenience `client.listEvents(...)` returns only the page's event array. Pass
+`compact: true` for forensic history windows that do not need individual delta
+fragments; delta runs may be coalesced and expose `payload.coalescedUntil` as
+the true last sequence for stream resume cursors.
 
 ```ts
 const controller = new AbortController();

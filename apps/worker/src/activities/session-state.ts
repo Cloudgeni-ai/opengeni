@@ -6,6 +6,7 @@ import {
   countQueuedTurns,
   getSessionEvent,
   getSessionTurnForAttempt,
+  markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
@@ -18,6 +19,7 @@ import type {
   FailSessionAttemptInput,
   SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
+  PersistSessionAttemptQuiescenceInput,
   RecoverDispatchInput,
   RecoverDispatchResult,
 } from "./types";
@@ -32,6 +34,7 @@ export type SessionStateActivityOverrides = Partial<{
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
+  markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
   deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
   notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
@@ -60,6 +63,8 @@ export function createSessionStateActivities(
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
+  const markSessionAttemptQuiescedFn =
+    overrides.markSessionAttemptQuiesced ?? markSessionAttemptQuiesced;
   const publishDurableSessionEventsFn =
     overrides.publishDurableSessionEvents ?? publishDurableSessionEvents;
   const deliverFailedChildTurnToParentFn =
@@ -117,6 +122,19 @@ export function createSessionStateActivities(
     input: SettleSessionInterruptionsInput,
   ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
+    if (input.phase === "attempt_quiesced") {
+      // Replay compatibility only: v1 histories scheduled this idempotent
+      // fallback after WAIT_CANCELLATION_COMPLETED. Receipt-gated v2 workflows
+      // never call it; runAgentTurn writes immediately after its hard fence.
+      const events = await markSessionAttemptQuiescedFn(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        temporalWorkflowId: input.workflowId,
+      });
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+      return { action: "stale" };
+    }
     const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,
@@ -128,6 +146,38 @@ export function createSessionStateActivities(
     }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     return { action: applied.action };
+  }
+
+  /** Persist an exact activity-owned physical-quiescence proof through the
+   * workflow control-activity retry policy. The DB transaction remains the
+   * sole receipt/wake authority; duplicate signals and activity retries reuse
+   * its attempt-scoped idempotency key. */
+  async function persistSessionAttemptQuiescence(
+    input: PersistSessionAttemptQuiescenceInput,
+  ): Promise<void> {
+    const { db, bus, observability } = await services();
+    const events = await markSessionAttemptQuiescedFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: input.workflowRunId,
+      temporalActivityId: input.activityId,
+      allowUninterrupted: true,
+    });
+    try {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+    } catch (error) {
+      // The receipt and exact workflow wake already committed atomically in
+      // Postgres. NATS is best-effort live fanout and must not keep this
+      // control activity retrying or delay receipt-gated admission.
+      observability.error("session-attempt quiescence event fanout failed", {
+        "opengeni.session_id": input.sessionId,
+        "opengeni.attempt_id": input.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -207,6 +257,7 @@ export function createSessionStateActivities(
   return {
     failSessionAttempt,
     settleSessionInterruptions,
+    persistSessionAttemptQuiescence,
     recoverDispatch,
     peekSessionWork,
     markSessionIdle,

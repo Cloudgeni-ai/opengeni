@@ -13,6 +13,7 @@ import { PierreDiff } from "../src/components/pierre-diff";
 import { FileBrowser } from "../src/components/file-browser";
 import { SandboxFiles } from "../src/components/sandbox-files";
 import type { UseSandboxFilesResult } from "../src/hooks/use-sandbox-files";
+import { CapturedFileUnavailableError } from "../src/hooks/use-sandbox-files";
 import type { UseSandboxGitResult } from "../src/hooks/use-sandbox-git";
 
 registerDom();
@@ -53,18 +54,21 @@ function filesResult(overrides: Partial<UseSandboxFilesResult> = {}): UseSandbox
   };
 }
 
-function gitResult(): UseSandboxGitResult {
+function gitResult(overrides: Partial<UseSandboxGitResult> = {}): UseSandboxGitResult {
   return {
     diff: [],
     branch: "main",
     isRepo: true,
     ahead: 0,
     behind: 0,
+    repoCount: 1,
+    repoRoots: [""],
     refresh: async () => {},
     source: "capture",
     capturedAt: "2026-07-16T12:00:00.000Z",
     loading: false,
     error: null,
+    ...overrides,
   };
 }
 
@@ -105,6 +109,27 @@ describe("FileBrowser", () => {
     await r.unmount();
   });
 
+  test("keeps captured files visible with an accessible retry state and no mutations", async () => {
+    const r = await renderComponent(
+      <FileBrowser
+        result={filesResult({
+          source: "capture",
+          capturedAt: "2026-07-19T10:44:52.383Z",
+          error: new Error("OpenGeni API 503: Workspace files are temporarily unavailable"),
+        })}
+      />,
+    );
+    await flush();
+
+    const degraded = r.container.querySelector("[data-opengeni-files-degraded]");
+    expect(degraded?.getAttribute("role")).toBe("status");
+    expect(degraded?.textContent).toContain("Showing the latest captured revision");
+    expect(r.container.textContent).toContain("README.md");
+    expect(r.container.querySelector('button[aria-label="New file"]')).toBeNull();
+    expect(r.container.querySelector('button[aria-label="Delete"]')).toBeNull();
+    await r.unmount();
+  });
+
   test("an empty tree shows the empty state (no crash)", async () => {
     const r = await renderComponent(
       <FileBrowser result={filesResult({ tree: [] })} emptyState="nothing here" />,
@@ -113,9 +138,141 @@ describe("FileBrowser", () => {
     expect(r.container.textContent).toContain("nothing here");
     await r.unmount();
   });
+
+  test("delete uses a non-blocking accessible confirmation and can be cancelled", async () => {
+    const deleted: string[] = [];
+    const r = await renderComponent(
+      <FileBrowser
+        result={filesResult({
+          deleteEntry: async (path) => {
+            deleted.push(path);
+          },
+        })}
+      />,
+    );
+    await flush();
+
+    const openDelete = async () => {
+      const file = fileButton(r.container, "README.md");
+      const more = file.querySelector<HTMLElement>('[aria-label="More actions"]');
+      expect(more).not.toBeNull();
+      await actRun(() => more!.click());
+      const action = Array.from(r.container.querySelectorAll("button")).find(
+        (button) => button.textContent?.trim() === "Delete",
+      );
+      expect(action).toBeDefined();
+      await actRun(() => action!.click());
+      await flush();
+    };
+
+    await openDelete();
+    expect(document.body.textContent).toContain("Delete file?");
+    expect(document.body.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("README.md will be permanently removed.");
+    const cancel = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Cancel",
+    );
+    await actRun(() => cancel!.click());
+    await flush();
+    expect(deleted).toEqual([]);
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+
+    await openDelete();
+    const confirm = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Delete permanently",
+    );
+    await actRun(() => confirm!.click());
+    await flush();
+    expect(deleted).toEqual(["README.md"]);
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    await r.unmount();
+  });
 });
 
 describe("SandboxFiles guarded-file routing", () => {
+  test("capture-only untouched files expose an explicit live-open action", async () => {
+    let wakeCalls = 0;
+    const files = filesResult({
+      source: "capture",
+      readFile: async (path) => {
+        throw new CapturedFileUnavailableError(path, "not-captured");
+      },
+    });
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={gitResult()}
+        liveWorkspaceReady={false}
+        onWakeWorkspace={() => {
+          wakeCalls += 1;
+        }}
+      />,
+    );
+    await flush();
+    await actRun(() => fileButton(r.container, "README.md").click());
+    await flush();
+    expect(r.container.textContent).toContain("On machine");
+    expect(r.container.textContent).toContain("Open live file");
+    const openLive = Array.from(r.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Open live file"),
+    );
+    expect(openLive).toBeDefined();
+    await actRun(() => openLive!.click());
+    expect(wakeCalls).toBe(1);
+    expect(r.container.textContent).toContain("Waking workspace");
+    await r.unmount();
+  });
+
+  test("an already-warm capture fallback retries the live list instead of issuing a no-op wake", async () => {
+    let refreshCalls = 0;
+    let wakeCalls = 0;
+    const files = filesResult({
+      source: "capture",
+      error: new Error("OpenGeni API 503: Workspace files are temporarily unavailable"),
+      readFile: async (path) => {
+        throw new CapturedFileUnavailableError(path, "not-captured");
+      },
+      refresh: async () => {
+        refreshCalls += 1;
+      },
+    });
+    const r = await renderComponent(
+      <SandboxFiles
+        files={files}
+        git={gitResult()}
+        liveWorkspaceReady
+        onWakeWorkspace={() => {
+          wakeCalls += 1;
+        }}
+      />,
+    );
+    await flush();
+    await actRun(() => fileButton(r.container, "README.md").click());
+    await flush();
+
+    const retry = Array.from(r.container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Retry live file"),
+    );
+    expect(retry).toBeDefined();
+    await actRun(() => retry!.click());
+    expect(refreshCalls).toBe(1);
+    expect(wakeCalls).toBe(0);
+    await r.unmount();
+  });
+
+  test("the header describes a multi-repo workspace without inventing one branch", async () => {
+    const r = await renderComponent(
+      <SandboxFiles
+        files={filesResult()}
+        git={gitResult({ branch: null, repoCount: 2, repoRoots: ["api", "web"] })}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("2 repositories");
+    expect(r.container.textContent).not.toContain("(detached)");
+    await r.unmount();
+  });
+
   test("manual navigation consumes a pending cold request and wins after warm-up", async () => {
     const files = filesResult();
     const git = gitResult();
@@ -211,6 +368,10 @@ describe("PierreDiff (the one renderer)", () => {
     await flush();
     expect(r.container.textContent).toContain("src/app.ts");
     expect(r.container.textContent).toContain("const b = 3;");
+    expect(
+      r.container.querySelector<HTMLElement>('[role="region"][aria-label="Diff for src/app.ts"]')
+        ?.tabIndex,
+    ).toBe(0);
     await r.unmount();
   });
 

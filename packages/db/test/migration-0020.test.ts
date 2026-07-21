@@ -39,7 +39,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await blank?.release();
-});
+}, 180_000);
 
 describe("migration 0020 (session_recordings)", () => {
   test("applies the full chain, has the table + list index + RLS + CHECKs, and the lifecycle update is in-place", async () => {

@@ -128,7 +128,7 @@ async function prepareDatabaseThrough0064(sql: postgres.Sql): Promise<void> {
   await sql.unsafe(
     `create table if not exists schema_migrations (name text primary key, applied_at timestamptz not null default now())`,
   );
-  for (const file of (await sortedMigrationFiles()).filter((candidate) => candidate < "0065_")) {
+  for (const file of (await sortedMigrationFiles()).filter((candidate) => candidate < "0095_")) {
     await applyAndRecordMigration(sql, file);
   }
 }
@@ -547,7 +547,7 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
     const rootId = ids[0]!;
     const deepId = ids[4]!;
 
-    // Migration 0065 deliberately permits already-persisted trees deeper than
+    // Migration 0095 deliberately permits already-persisted trees deeper than
     // their effective limit. Seed that pre-migration state while disabling
     // only the new INSERT trigger, then restore enforcement before exercising
     // any creation API.
@@ -779,10 +779,10 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
     try {
       await prepareDatabaseThrough0064(sql);
       const [{ id: accountId } = { id: "" }] = await sql<{ id: string }[]>`
-        insert into managed_accounts (name) values ('0065 backfill') returning id`;
+        insert into managed_accounts (name) values ('0095 backfill') returning id`;
       const [{ id: workspaceId } = { id: "" }] = await sql<{ id: string }[]>`
         insert into workspaces (account_id, name, settings)
-        values (${accountId}, '0065 backfill', '{"maxNestedAgentDepth":2}') returning id`;
+        values (${accountId}, '0095 backfill', '{"maxNestedAgentDepth":2}') returning id`;
       await sql`
         insert into workspace_inference_controls (workspace_id, account_id)
         values (${workspaceId}, ${accountId}) on conflict do nothing`;
@@ -822,11 +822,11 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
         });
       }
       const phasedFiles = (await sortedMigrationFiles()).filter(
-        (file) => file >= "0065_" && file <= "0072_zzzz",
+        (file) => file >= "0095_" && file <= "0102_zzzz",
       );
       const applied = await sql<{ name: string }[]>`
         select name from schema_migrations
-        where name >= '0065_' and name <= '0072_zzzz' order by name`;
+        where name >= '0095_' and name <= '0102_zzzz' order by name`;
       expect(applied.map((row) => row.name)).toEqual(phasedFiles);
       const [contract] = await sql<Array<{ validatedConstraints: number; validIndex: boolean }>>`
         select
@@ -880,8 +880,8 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
 
       await sql`select set_config('opengeni.max_nested_agent_depth', '3', false)`;
       await sql`select set_config('opengeni.nested_agent_depth_policy_source', 'default', false)`;
-      await applyAndRecordMigration(sql, "0065_nested_agent_depth_expand.sql");
-      await applyAndRecordMigration(sql, "0066_nested_agent_depth_boundary.sql");
+      await applyAndRecordMigration(sql, "0095_nested_agent_depth_expand.sql");
+      await applyAndRecordMigration(sql, "0096_nested_agent_depth_boundary.sql");
 
       await blocker`begin`;
       await blocker`select id from sessions where id = ${legacyRootId} for update`;
@@ -892,7 +892,7 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
       const [failedAttempt] = await sql<{ recorded: boolean }[]>`
         select exists(
           select 1 from schema_migrations
-          where name = '0067_nested_agent_depth_backfill.sql'
+          where name = '0097_nested_agent_depth_backfill.sql'
         ) as recorded`;
       expect(failedAttempt?.recorded).toBe(false);
 
@@ -913,7 +913,7 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
           effective_max_nested_agent_depth as "effectiveMax",
           nested_agent_depth_policy_source as "policySource",
           (select count(*)::int from schema_migrations
-            where name >= '0065_' and name <= '0072_zzzz') as "phasedMigrations"
+            where name >= '0095_' and name <= '0102_zzzz') as "phasedMigrations"
         from sessions where id = ${legacyRootId}`;
       expect(recovered).toEqual({
         rootSessionId: legacyRootId,
@@ -940,7 +940,7 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
       await sql`select set_config('opengeni.max_nested_agent_depth', '3', false)`;
       await sql`select set_config('opengeni.nested_agent_depth_policy_source', 'default', false)`;
       for (const file of (await sortedMigrationFiles()).filter(
-        (candidate) => candidate >= "0065_" && candidate < "0072_",
+        (candidate) => candidate >= "0095_" && candidate < "0102_",
       )) {
         await applyAndRecordMigration(sql, file);
       }
@@ -995,12 +995,12 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
 
       await sql`
         delete from schema_migrations
-        where name = '0072_nested_agent_depth_index.sql'`;
+        where name = '0102_nested_agent_depth_index.sql'`;
       await migrate(blank.databaseUrl, undefined, { maxNestedAgentDepth: 3 });
       const [validRetry] = await sql<{ oid: number; migrationRecords: number }[]>`
         select 'sessions_workspace_root_depth_idx'::regclass::oid::int as oid,
                (select count(*)::int from schema_migrations
-                where name = '0072_nested_agent_depth_index.sql') as "migrationRecords"`;
+                where name = '0102_nested_agent_depth_index.sql') as "migrationRecords"`;
       expect(validRetry).toEqual({ oid: repairedOid, migrationRecords: 1 });
     } finally {
       await sql.end().catch(() => undefined);
@@ -1052,8 +1052,8 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
 
       await sql`select set_config('opengeni.max_nested_agent_depth', '3', false)`;
       await sql`select set_config('opengeni.nested_agent_depth_policy_source', 'default', false)`;
-      await applyAndRecordMigration(sql, "0065_nested_agent_depth_expand.sql");
-      await applyAndRecordMigration(sql, "0066_nested_agent_depth_boundary.sql");
+      await applyAndRecordMigration(sql, "0095_nested_agent_depth_expand.sql");
+      await applyAndRecordMigration(sql, "0096_nested_agent_depth_boundary.sql");
       await grantAppRoleForDepthPolicy(sql);
       await sql.unsafe(`
         CREATE FUNCTION slow_nested_agent_backfill() RETURNS trigger
@@ -1122,7 +1122,7 @@ describe("nested agent depth policy (real PostgreSQL + FORCE RLS)", () => {
           )::int as incomplete,
           max(nested_agent_depth) filter (where id = ${oldChildId})::int as "childDepth",
           (select count(*)::int from schema_migrations
-            where name >= '0065_' and name <= '0072_zzzz') as migrations
+            where name >= '0095_' and name <= '0102_zzzz') as migrations
         from sessions where workspace_id = ${workspaceId}`;
       expect(finalState).toEqual({ total: 2_502, incomplete: 0, childDepth: 1, migrations: 8 });
       const [index] = await observer<{ valid: boolean }[]>`

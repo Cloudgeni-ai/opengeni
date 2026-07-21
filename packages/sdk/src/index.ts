@@ -2,15 +2,15 @@ export { OpenGeniClient } from "./client";
 export type {
   FetchLike,
   OpenGeniClientOptions,
+  OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
+  WorkspaceControlEventPage,
 } from "./client";
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
   OpenGeniStreamError,
-  SessionSpawnDeniedError,
-  createOpenGeniApiError,
   isRetryableStreamError,
 } from "./errors";
 export {
@@ -246,6 +246,12 @@ export type {
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
   SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
   SessionSpawnDenial,
   SessionEventType,
   SessionGoal,

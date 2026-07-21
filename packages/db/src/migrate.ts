@@ -227,18 +227,18 @@ async function persistDeploymentDepthPolicy(
  * byte-for-byte historical behavior — the migration test suite calls
  * `migrate(DB_URL)` and is unaffected.
  *
- * EMBEDDED (Step I, §7.8 runtime/SDK half): pass a `schema` (or set
+ * EMBEDDED SCHEMA MODE: pass a `schema` (or set
  * `OPENGENI_DB_SCHEMA`). The migrate session then `CREATE SCHEMA IF NOT EXISTS`
  * for both `<schema>` and `opengeni_private`, and sets
  * `search_path = "<schema>", "opengeni_private", "public"`, so EVERY unqualified
  * DDL statement lands in the dedicated schema with NO per-statement SQL rewrite
- * (the SPIKE-1 F1 result). Two things make this work and stay idempotent:
+ * (the schema-isolation contract). Two things make this work and stay idempotent:
  *   1. The policy-existence guards in the migration SQL use `current_schema()`
  *      (not a hardcoded `'public'`) — so a re-run finds the policy it already
  *      created in `<schema>` and DROP/CREATEs idempotently instead of failing
  *      with "policy already exists". (This guard substitution is the migrate-
  *      time enabler for the runtime search_path approach; without it the SDK
- *      entry point silently fails on re-run — the Fork-6 hazard.)
+ *      entry point silently fails on re-run — a migration replay hazard.)
  *   2. `public` stays LAST on the path so `gen_random_uuid()` (pgcrypto) and the
  *      `vector` type — both installed into `public` by 0000 — still resolve. The
  *      `opengeni_private.*` helpers are always called with an absolute prefix.

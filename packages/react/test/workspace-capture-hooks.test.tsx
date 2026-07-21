@@ -8,6 +8,7 @@
    + warming, §12-C), and the machine-chip derivation.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type {
   FsTreeNode,
   GetWorkspaceCaptureResponse,
@@ -20,7 +21,11 @@ import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
 import { fakeEvent } from "./sandbox-fixtures";
 import { useWorkspaceCapture } from "../src/hooks/use-workspace-capture";
-import { useSandboxFiles } from "../src/hooks/use-sandbox-files";
+import {
+  CapturedFileUnavailableError,
+  FileWriteConflictError,
+  useSandboxFiles,
+} from "../src/hooks/use-sandbox-files";
 import { useSandboxGit } from "../src/hooks/use-sandbox-git";
 import { useWorkspaceEdit } from "../src/hooks/use-workspace-edit";
 import { deriveMachineChip } from "../src/hooks/use-machine-chip";
@@ -198,9 +203,11 @@ describe("useWorkspaceCapture", () => {
     const originalFetch = globalThis.fetch;
     let fetched: string | null = null;
     let fetchSignal: AbortSignal | null = null;
+    let fetchInit: RequestInit | undefined;
     globalThis.fetch = (async (url: string, init?: RequestInit) => {
       fetched = String(url);
       fetchSignal = init?.signal ?? null;
+      fetchInit = init;
       return { ok: true, status: 200, json: async () => manifest } as unknown as Response;
     }) as typeof fetch;
     try {
@@ -227,8 +234,105 @@ describe("useWorkspaceCapture", () => {
       await flush();
       expect(fetched as string | null).toBe("https://blob.example/manifest.json");
       expect(fetchSignal).not.toBeNull();
+      expect(fetchInit?.credentials).toBe("omit");
+      expect(fetchInit?.cache).toBe("no-store");
+      expect(fetchInit?.referrerPolicy).toBe("no-referrer");
       expect(hook.result.current.revision).toBe(5);
       expect(hook.result.current.capture?.files[0]?.path).toBe("src/app.py");
+      await hook.unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("refreshes an expired signed manifest URL once without leaking credentials", async () => {
+    const manifest = fakeManifest({ revision: 5 });
+    const originalFetch = globalThis.fetch;
+    const fetched: string[] = [];
+    globalThis.fetch = (async (url: string) => {
+      fetched.push(String(url));
+      if (fetched.length === 1) {
+        return { ok: false, status: 403, json: async () => ({}) } as unknown as Response;
+      }
+      return { ok: true, status: 200, json: async () => manifest } as unknown as Response;
+    }) as typeof fetch;
+    let captureCalls = 0;
+    try {
+      const client = fakeClient({
+        getWorkspaceCapture: async (): Promise<GetWorkspaceCaptureResponse> => {
+          captureCalls += 1;
+          return {
+            available: true,
+            revision: 5,
+            capturedAt: manifest.capturedAt,
+            turnId: manifest.turnId,
+            leaseEpoch: manifest.leaseEpoch,
+            sizeBytes: 3_000_000,
+            stats: manifest.stats,
+            manifest: null,
+            manifestUrl: {
+              url: `https://blob.example/manifest-${captureCalls}.json?signature=secret`,
+              expiresAt: "2026-07-08T12:05:00.000Z",
+            },
+          };
+        },
+      });
+      const hook = await renderHook(
+        () => useWorkspaceCapture(SESSION_ID, { ...ctx, client }),
+        undefined,
+      );
+      await flush();
+      expect(captureCalls).toBe(2);
+      expect(fetched).toEqual([
+        "https://blob.example/manifest-1.json?signature=secret",
+        "https://blob.example/manifest-2.json?signature=secret",
+      ]);
+      expect(hook.result.current.available).toBe(true);
+      expect(hook.result.current.revision).toBe(5);
+      expect(hook.result.current.error).toBeNull();
+      await hook.unmount();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("a signed manifest with mismatched revision identity fails closed", async () => {
+    const expected = fakeManifest({ revision: 5 });
+    const wrong = fakeManifest({ revision: 6 });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => wrong,
+      }) as unknown as Response) as unknown as typeof fetch;
+    try {
+      const client = fakeClient({
+        getWorkspaceCapture: async (): Promise<GetWorkspaceCaptureResponse> => ({
+          available: true,
+          revision: 5,
+          capturedAt: expected.capturedAt,
+          turnId: expected.turnId,
+          leaseEpoch: expected.leaseEpoch,
+          sizeBytes: 3_000_000,
+          stats: expected.stats,
+          manifest: null,
+          manifestUrl: {
+            url: "https://blob.example/mis-keyed.json",
+            expiresAt: "2026-07-08T12:05:00.000Z",
+          },
+        }),
+      });
+      const hook = await renderHook(
+        () => useWorkspaceCapture(SESSION_ID, { ...ctx, client }),
+        undefined,
+      );
+      await flush();
+      expect(hook.result.current.available).toBe(false);
+      expect(hook.result.current.capture).toBeNull();
+      expect(hook.result.current.error?.message).toBe(
+        "Workspace capture manifest identity did not match its response.",
+      );
       await hook.unmount();
     } finally {
       globalThis.fetch = originalFetch;
@@ -427,6 +531,33 @@ describe("useWorkspaceCapture", () => {
     expect(hook.result.current.revision).toBe(1);
     await hook.unmount();
   });
+
+  test("a session switch aborts the obsolete capture request", async () => {
+    let firstSignal: AbortSignal | undefined;
+    const firstRequest = new Promise<GetWorkspaceCaptureResponse>(() => {});
+    const client = fakeClient({
+      getWorkspaceCapture: async (_workspaceId, sessionId, options) => {
+        if (sessionId === SESSION_ID) {
+          firstSignal = options?.signal;
+          return await firstRequest;
+        }
+        return captureAvailable(fakeManifest({ revision: 2 }));
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string }) => useWorkspaceCapture(props.sessionId, { ...ctx, client }),
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(firstSignal?.aborted).toBe(false);
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+    await flush();
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(hook.result.current.revision).toBe(2);
+    await hook.unmount();
+  });
 });
 
 // ── use-sandbox-files: source selection + no-flicker reconcile ─────────────────
@@ -469,7 +600,217 @@ describe("useSandboxFiles — capture source", () => {
     await hook.unmount();
   });
 
-  test("warm uses the LIVE path (capture ignored, existing behavior)", async () => {
+  test("cold preview reads and verifies a turn-touched file from capture without waking the box", async () => {
+    const content = "captured hello\n";
+    const hash = createHash("sha256").update(content).digest("hex");
+    let fsReadCalls = 0;
+    let captureFileCalls = 0;
+    const capture = fakeManifest({
+      files: [
+        {
+          ...fakeManifest().files[0]!,
+          path: "src/app.py",
+          hash,
+          sizeBytes: Buffer.byteLength(content),
+        },
+      ],
+    });
+    const client = fakeClient({
+      fsRead: async () => {
+        fsReadCalls += 1;
+        throw new Error("cold captured preview must not call live fs.read");
+      },
+      getWorkspaceCaptureFile: async (_workspaceId, _sessionId, path, revision) => {
+        captureFileCalls += 1;
+        return {
+          path,
+          revision: revision!,
+          status: "modified",
+          hash,
+          baseHash: null,
+          sizeBytes: Buffer.byteLength(content),
+          isBinary: false,
+          tooLarge: false,
+          encoding: "utf8",
+          content,
+          contentUrl: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { ...ctx, client, capture, liveness: "cold" }),
+      undefined,
+    );
+    await flush();
+
+    const read = await hook.result.current.readFile("src/app.py");
+    expect(read.content).toBe(content);
+    expect(read.revision).toBe(capture.revision);
+    expect(captureFileCalls).toBe(1);
+    expect(fsReadCalls).toBe(0);
+    await hook.unmount();
+  });
+
+  test("an untouched cold file requires explicit live intent and never calls fs.read", async () => {
+    let fsReadCalls = 0;
+    const capture = fakeManifest();
+    const client = fakeClient({
+      fsRead: async () => {
+        fsReadCalls += 1;
+        throw new Error("passive capture browsing must not read the live box");
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { ...ctx, client, capture, liveness: "cold" }),
+      undefined,
+    );
+    await flush();
+
+    try {
+      await hook.result.current.readFile("README.md");
+      throw new Error("expected untouched capture file to require the live workspace");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CapturedFileUnavailableError);
+      expect((error as CapturedFileUnavailableError).reason).toBe("not-captured");
+    }
+    expect(fsReadCalls).toBe(0);
+    await hook.unmount();
+  });
+
+  test("expanding a cold capture directory never issues fs.list", async () => {
+    let fsListCalls = 0;
+    const client = fakeClient({
+      fsList: async () => {
+        fsListCalls += 1;
+        throw new Error("capture residue must not list the live box");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxFiles(SESSION_ID, {
+          ...ctx,
+          client,
+          capture: fakeManifest(),
+          liveness: "cold",
+        }),
+      undefined,
+    );
+    await flush();
+    expect(hook.result.current.tree.find((node) => node.path === "src")?.children).toEqual([]);
+    await hook.result.current.expand("src");
+    expect(fsListCalls).toBe(0);
+    await hook.unmount();
+  });
+
+  test("an expired captured-file URL is refreshed once and the downloaded bytes are verified", async () => {
+    const originalFetch = globalThis.fetch;
+    const content = "signed capture\n";
+    const hash = createHash("sha256").update(content).digest("hex");
+    let apiCalls = 0;
+    let downloadCalls = 0;
+    const capture = fakeManifest({
+      files: [
+        {
+          ...fakeManifest().files[0]!,
+          path: "src/app.py",
+          hash,
+          sizeBytes: Buffer.byteLength(content),
+        },
+      ],
+    });
+    Object.defineProperty(globalThis, "fetch", {
+      configurable: true,
+      writable: true,
+      value: async () => {
+        downloadCalls += 1;
+        return downloadCalls === 1
+          ? new Response("expired", { status: 403 })
+          : new Response(content, { status: 200 });
+      },
+    });
+    try {
+      const client = fakeClient({
+        getWorkspaceCaptureFile: async (_workspaceId, _sessionId, path, revision) => {
+          apiCalls += 1;
+          return {
+            path,
+            revision: revision!,
+            status: "modified",
+            hash,
+            baseHash: null,
+            sizeBytes: Buffer.byteLength(content),
+            isBinary: false,
+            tooLarge: false,
+            encoding: null,
+            content: null,
+            contentUrl: {
+              url: `https://capture.invalid/file-${apiCalls}`,
+              expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            },
+          };
+        },
+      });
+      const hook = await renderHook(
+        () => useSandboxFiles(SESSION_ID, { ...ctx, client, capture, liveness: "cold" }),
+        undefined,
+      );
+      await flush();
+
+      expect((await hook.result.current.readFile("src/app.py")).content).toBe(content);
+      expect(apiCalls).toBe(2);
+      expect(downloadCalls).toBe(2);
+      await hook.unmount();
+    } finally {
+      Object.defineProperty(globalThis, "fetch", {
+        configurable: true,
+        writable: true,
+        value: originalFetch,
+      });
+    }
+  });
+
+  test("corrupt captured bytes fail closed instead of rendering storage drift", async () => {
+    const expected = "captured hello\n";
+    const corrupt = "captured jello\n";
+    const hash = createHash("sha256").update(expected).digest("hex");
+    const capture = fakeManifest({
+      files: [
+        {
+          ...fakeManifest().files[0]!,
+          path: "src/app.py",
+          hash,
+          sizeBytes: Buffer.byteLength(corrupt),
+        },
+      ],
+    });
+    const client = fakeClient({
+      getWorkspaceCaptureFile: async (_workspaceId, _sessionId, path, revision) => ({
+        path,
+        revision: revision!,
+        status: "modified",
+        hash,
+        baseHash: null,
+        sizeBytes: Buffer.byteLength(corrupt),
+        isBinary: false,
+        tooLarge: false,
+        encoding: "utf8",
+        content: corrupt,
+        contentUrl: null,
+      }),
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { ...ctx, client, capture, liveness: "cold" }),
+      undefined,
+    );
+    await flush();
+
+    await expect(hook.result.current.readFile("src/app.py")).rejects.toThrow(
+      "failed its integrity check",
+    );
+    await hook.unmount();
+  });
+
+  test("warm reconciles the capture to the live path when the provider succeeds", async () => {
     let fsListCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
@@ -497,13 +838,173 @@ describe("useSandboxFiles — capture source", () => {
       undefined,
     );
     await flush();
-    expect(fsListCalls).toBeGreaterThan(0);
+    expect(fsListCalls).toBe(1);
     expect(hook.result.current.source).toBe("live");
     expect(hook.result.current.tree.map((n) => n.name)).toEqual(["live.ts"]);
     await hook.unmount();
   });
 
+  test("warm live-list failure preserves the capture and reads captured content server-side", async () => {
+    const content = "captured during provider failure\n";
+    const hash = createHash("sha256").update(content).digest("hex");
+    const capture = fakeManifest({
+      files: [
+        {
+          ...fakeManifest().files[0]!,
+          hash,
+          sizeBytes: Buffer.byteLength(content),
+        },
+      ],
+    });
+    let fsReadCalls = 0;
+    let captureFileCalls = 0;
+    let failLiveList = true;
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      fsList: async () => {
+        if (failLiveList) {
+          throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+        }
+        return {
+          root: treeDir("", "", [treeFile("app.py", "src/app.py", 13)]),
+          revision: 4,
+          truncated: false,
+        };
+      },
+      fsRead: async (_workspaceId, _sessionId, request) => {
+        fsReadCalls += 1;
+        return {
+          path: request.path,
+          encoding: "utf8",
+          content: "live content\n",
+          sizeBytes: 13,
+          truncated: false,
+          isBinary: false,
+          revision: 4,
+        };
+      },
+      getWorkspaceCaptureFile: async (_workspaceId, _sessionId, path, revision) => {
+        captureFileCalls += 1;
+        return {
+          path,
+          revision: revision!,
+          status: "modified",
+          hash,
+          baseHash: null,
+          sizeBytes: Buffer.byteLength(content),
+          isBinary: false,
+          tooLarge: false,
+          encoding: "utf8",
+          content,
+          contentUrl: null,
+        };
+      },
+    });
+    const hook = await renderHook(
+      () => useSandboxFiles(SESSION_ID, { ...ctx, client, capture, liveness: "warm" }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.tree.map((node) => node.name)).toEqual(["src", "README.md"]);
+    expect(hook.result.current.error?.message).toContain("503");
+    const read = await hook.result.current.readFile("src/app.py");
+    expect(read.content).toBe(content);
+    expect(captureFileCalls).toBe(1);
+    expect(fsReadCalls).toBe(0);
+
+    failLiveList = false;
+    await actRun(() => hook.result.current.refresh());
+    await flush();
+    expect(hook.result.current.source).toBe("live");
+    expect(hook.result.current.error).toBeNull();
+    const liveRead = await hook.result.current.readFile("src/app.py");
+    expect(liveRead.content).toBe("live content\n");
+    expect(fsReadCalls).toBe(1);
+    await hook.unmount();
+  });
+
+  test("editor save detects live divergence and requires an explicit overwrite", async () => {
+    let writes = 0;
+    let mutationErrors = 0;
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      fsList: async () => ({
+        root: treeDir("", "", [treeFile("app.py", "app.py", 16)]),
+        revision: 0,
+        truncated: false,
+      }),
+      fsRead: async () => ({
+        path: "app.py",
+        encoding: "utf8",
+        content: "changed by agent\n",
+        sizeBytes: 17,
+        truncated: false,
+        isBinary: false,
+        revision: 1,
+      }),
+      fsWrite: async (_workspaceId, _sessionId, request) => {
+        writes += 1;
+        return { path: request.path, sizeBytes: request.content.length, revision: 2 };
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxFiles(SESSION_ID, {
+          ...ctx,
+          client,
+          liveness: "warm",
+          onMutationError: () => {
+            mutationErrors += 1;
+          },
+        }),
+      undefined,
+    );
+    await flush();
+
+    let conflict: unknown;
+    await actRun(async () => {
+      try {
+        await hook.result.current.writeFile("app.py", "my edit\n", {
+          expectedContent: "original\n",
+        });
+      } catch (error) {
+        conflict = error;
+      }
+    });
+    expect(conflict).toBeInstanceOf(FileWriteConflictError);
+    expect((conflict as FileWriteConflictError).liveContent).toBe("changed by agent\n");
+    expect(writes).toBe(0);
+    expect(mutationErrors).toBe(0);
+    expect(hook.result.current.error).toBeNull();
+
+    await actRun(() => hook.result.current.writeFile("app.py", "my edit\n", { force: true }));
+    expect(writes).toBe(1);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("FLAGSHIP: cold→warm reconcile keeps node identity — no remount, deltas patched", async () => {
+    let fsListCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
         isRepo: false,
@@ -517,15 +1018,18 @@ describe("useSandboxFiles — capture source", () => {
       }),
       // The live list returns the SAME two entries the capture had (unchanged),
       // plus a new file — the delta that must be patched in.
-      fsList: async () => ({
-        root: treeDir("", "", [
-          treeDir("src", "src"),
-          treeFile("README.md", "README.md", 10),
-          treeFile("new.ts", "new.ts", 3),
-        ]),
-        revision: 1,
-        truncated: false,
-      }),
+      fsList: async () => {
+        fsListCalls += 1;
+        return {
+          root: treeDir("", "", [
+            treeDir("src", "src"),
+            treeFile("README.md", "README.md", 10),
+            treeFile("new.ts", "new.ts", 3),
+          ]),
+          revision: 1,
+          truncated: false,
+        };
+      },
     });
     const hook = await renderHook(
       (props: { liveness: string }) =>
@@ -549,6 +1053,7 @@ describe("useSandboxFiles — capture source", () => {
     // Box warms → live reconcile.
     await hook.rerender({ liveness: "warm" });
     await flush();
+    expect(fsListCalls).toBe(1);
 
     const warmTree = hook.result.current.tree;
     // The tree was NEVER emptied and NOW serves live.
@@ -659,6 +1164,7 @@ describe("useSandboxFiles — capture source", () => {
   });
 
   test("a late filesystem response from the previous session cannot replace the new tree", async () => {
+    let firstSignal: AbortSignal | undefined;
     let resolveFirst!: (value: { root: FsTreeNode; revision: number; truncated: boolean }) => void;
     const firstList = new Promise<{
       root: FsTreeNode;
@@ -678,8 +1184,11 @@ describe("useSandboxFiles — capture source", () => {
         files: [],
         revision: 0,
       }),
-      fsList: async (_workspaceId, sessionId) => {
-        if (sessionId === SESSION_ID) return await firstList;
+      fsList: async (_workspaceId, sessionId, _request, options) => {
+        if (sessionId === SESSION_ID) {
+          firstSignal = options?.signal;
+          return await firstList;
+        }
         return {
           root: treeDir("", "", [treeFile("second.ts", "second.ts", 1)]),
           revision: 0,
@@ -696,6 +1205,7 @@ describe("useSandboxFiles — capture source", () => {
 
     await hook.rerender({ sessionId: SECOND_SESSION_ID });
     await flush();
+    expect(firstSignal?.aborted).toBe(true);
     expect(hook.result.current.tree.map((node) => node.path)).toEqual(["second.ts"]);
 
     resolveFirst({
@@ -707,6 +1217,55 @@ describe("useSandboxFiles — capture source", () => {
 
     expect(hook.result.current.tree.map((node) => node.path)).toEqual(["second.ts"]);
     expect(hook.result.current.source).toBe("live");
+    await hook.unmount();
+  });
+
+  test("a session switch renders zero frames of the previous filesystem tree", async () => {
+    const pendingSecond = new Promise<{
+      root: FsTreeNode;
+      revision: number;
+      truncated: boolean;
+    }>(() => {});
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: false,
+        head: null,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      fsList: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID
+          ? {
+              root: treeDir("", "", [treeFile("first.ts", "first.ts", 1)]),
+              revision: 0,
+              truncated: false,
+            }
+          : await pendingSecond,
+    });
+    const observed: Array<{ sessionId: string; paths: string[] }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const state = useSandboxFiles(props.sessionId, { ...ctx, client, liveness: "warm" });
+        observed.push({ sessionId: props.sessionId, paths: state.tree.map((node) => node.path) });
+        return state;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(hook.result.current.tree.map((node) => node.path)).toEqual(["first.ts"]);
+
+    observed.length = 0;
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+
+    expect(
+      observed
+        .filter(({ sessionId }) => sessionId === SECOND_SESSION_ID)
+        .flatMap(({ paths }) => paths),
+    ).not.toContain("first.ts");
     await hook.unmount();
   });
 
@@ -836,6 +1395,125 @@ describe("useSandboxGit — capture source", () => {
     await hook.unmount();
   });
 
+  test("cold multi-repo capture aggregates every repo with workspace-qualified paths", async () => {
+    let gitStatusCalls = 0;
+    let gitDiffCalls = 0;
+    const client = fakeClient({
+      gitStatus: async () => {
+        gitStatusCalls += 1;
+        throw new Error("cold capture must not call live Git status");
+      },
+      gitDiff: async () => {
+        gitDiffCalls += 1;
+        throw new Error("cold capture must not call live Git diff");
+      },
+    });
+    const capture = fakeManifest({
+      repos: [
+        fakeRepo({
+          root: "api",
+          head: "api-main",
+          ahead: 1,
+          diff: [fakeDiff({ path: "src/server.ts" })],
+        }),
+        fakeRepo({
+          root: "web",
+          head: "web-main",
+          behind: 2,
+          diff: [fakeDiff({ path: "src/app.tsx", oldPath: "src/old-app.tsx" })],
+        }),
+      ],
+      stats: { ...fakeManifest().stats, repoCount: 2, fileCount: 2 },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture,
+          liveness: "cold",
+          repoPaths: ["api", "web"],
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.repoCount).toBe(2);
+    expect(hook.result.current.repoRoots).toEqual(["api", "web"]);
+    expect(hook.result.current.branch).toBeNull();
+    expect(hook.result.current.ahead).toBe(1);
+    expect(hook.result.current.behind).toBe(2);
+    expect(hook.result.current.diff.map((file) => [file.path, file.repoRoot])).toEqual([
+      ["api/src/server.ts", "api"],
+      ["web/src/app.tsx", "web"],
+    ]);
+    expect(hook.result.current.diff[1]?.oldPath).toBe("web/src/old-app.tsx");
+    expect(gitStatusCalls).toBe(0);
+    expect(gitDiffCalls).toBe(0);
+    await hook.unmount();
+  });
+
+  test("multi-repo cold→warm reconciliation preserves unchanged qualified file identity", async () => {
+    const capture = fakeManifest({
+      repos: [
+        fakeRepo({ root: "api", diff: [fakeDiff({ path: "src/server.ts" })] }),
+        fakeRepo({ root: "web", diff: [fakeDiff({ path: "src/app.tsx" })] }),
+      ],
+      stats: { ...fakeManifest().stats, repoCount: 2, fileCount: 2 },
+    });
+    const client = fakeClient({
+      gitStatus: async (_workspaceId, _sessionId, request) => ({
+        isRepo: true,
+        head: `${request?.path ?? "root"}-main`,
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 1,
+      }),
+      gitDiff: async (_workspaceId, _sessionId, request) => ({
+        files: [fakeDiff({ path: request?.path === "api" ? "src/server.ts" : "src/app.tsx" })],
+        revision: 1,
+      }),
+    });
+    const hook = await renderHook(
+      (props: { liveness: string }) =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture,
+          liveness: props.liveness,
+          // Reversed input proves root ordering is canonical, not caller-identity driven.
+          repoPaths: ["web", "api"],
+        }),
+      { liveness: "cold" },
+    );
+    await flush();
+    const coldApi = hook.result.current.diff.find((file) => file.path === "api/src/server.ts");
+    const coldWeb = hook.result.current.diff.find((file) => file.path === "web/src/app.tsx");
+    expect(coldApi).toBeDefined();
+    expect(coldWeb).toBeDefined();
+
+    await hook.rerender({ liveness: "warm" });
+    await flush();
+    expect(hook.result.current.source).toBe("live");
+    expect(
+      Object.is(
+        hook.result.current.diff.find((file) => file.path === "api/src/server.ts"),
+        coldApi,
+      ),
+    ).toBe(true);
+    expect(
+      Object.is(
+        hook.result.current.diff.find((file) => file.path === "web/src/app.tsx"),
+        coldWeb,
+      ),
+    ).toBe(true);
+    await hook.unmount();
+  });
+
   test("cold→warm swaps to the live diff, preserving unchanged file-section identity", async () => {
     const client = fakeClient({
       gitStatus: async () => ({
@@ -877,7 +1555,7 @@ describe("useSandboxGit — capture source", () => {
     await hook.unmount();
   });
 
-  test("warm uses the live diff directly (capture ignored)", async () => {
+  test("warm reconciles the capture to the live diff", async () => {
     let gitDiffCalls = 0;
     const client = fakeClient({
       gitStatus: async () => ({
@@ -904,6 +1582,30 @@ describe("useSandboxGit — capture source", () => {
     expect(gitDiffCalls).toBeGreaterThan(0);
     expect(hook.result.current.source).toBe("live");
     expect(hook.result.current.diff.map((d) => d.path)).toEqual(["live-only.py"]);
+    await hook.unmount();
+  });
+
+  test("warm live-Git failure preserves the captured review diff", async () => {
+    const client = fakeClient({
+      gitStatus: async () => {
+        throw new Error("OpenGeni API 503: Workspace files are temporarily unavailable");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useSandboxGit(SESSION_ID, {
+          ...ctx,
+          client,
+          capture: fakeManifest(),
+          liveness: "warm",
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(hook.result.current.source).toBe("capture");
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["app.py"]);
+    expect(hook.result.current.error?.message).toContain("503");
     await hook.unmount();
   });
 
@@ -1003,6 +1705,7 @@ describe("useSandboxGit — capture source", () => {
   });
 
   test("a late git response from the previous session cannot replace the new diff", async () => {
+    let firstSignal: AbortSignal | undefined;
     let resolveFirst!: (value: { files: GitFileDiff[]; revision: number }) => void;
     const firstDiff = new Promise<{ files: GitFileDiff[]; revision: number }>((resolve) => {
       resolveFirst = resolve;
@@ -1018,8 +1721,11 @@ describe("useSandboxGit — capture source", () => {
         files: [],
         revision: 0,
       }),
-      gitDiff: async (_workspaceId, sessionId) => {
-        if (sessionId === SESSION_ID) return await firstDiff;
+      gitDiff: async (_workspaceId, sessionId, _request, options) => {
+        if (sessionId === SESSION_ID) {
+          firstSignal = options?.signal;
+          return await firstDiff;
+        }
         return { files: [fakeDiff({ path: "second.ts" })], revision: 0 };
       },
     });
@@ -1032,6 +1738,7 @@ describe("useSandboxGit — capture source", () => {
 
     await hook.rerender({ sessionId: SECOND_SESSION_ID });
     await flush();
+    expect(firstSignal?.aborted).toBe(true);
     expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second.ts"]);
 
     resolveFirst({ files: [fakeDiff({ path: "first-late.ts" })], revision: 0 });
@@ -1039,6 +1746,47 @@ describe("useSandboxGit — capture source", () => {
 
     expect(hook.result.current.diff.map((file) => file.path)).toEqual(["second.ts"]);
     expect(hook.result.current.source).toBe("live");
+    await hook.unmount();
+  });
+
+  test("a session switch renders zero frames of the previous git diff", async () => {
+    const pendingSecond = new Promise<{ files: GitFileDiff[]; revision: number }>(() => {});
+    const client = fakeClient({
+      gitStatus: async () => ({
+        isRepo: true,
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        files: [],
+        revision: 0,
+      }),
+      gitDiff: async (_workspaceId, sessionId) =>
+        sessionId === SESSION_ID
+          ? { files: [fakeDiff({ path: "first.ts" })], revision: 0 }
+          : await pendingSecond,
+    });
+    const observed: Array<{ sessionId: string; paths: string[] }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const state = useSandboxGit(props.sessionId, { ...ctx, client, liveness: "warm" });
+        observed.push({ sessionId: props.sessionId, paths: state.diff.map((file) => file.path) });
+        return state;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    expect(hook.result.current.diff.map((file) => file.path)).toEqual(["first.ts"]);
+
+    observed.length = 0;
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+
+    expect(
+      observed
+        .filter(({ sessionId }) => sessionId === SECOND_SESSION_ID)
+        .flatMap(({ paths }) => paths),
+    ).not.toContain("first.ts");
     await hook.unmount();
   });
 });
@@ -1195,6 +1943,135 @@ describe("useWorkspaceEdit", () => {
     await hook.rerender({ warming: true });
     await flush();
     expect(hook.result.current.state).toBe("warming");
+    await hook.unmount();
+  });
+
+  test("a session switch aborts an obsolete conflict-check read", async () => {
+    let firstSignal: AbortSignal | undefined;
+    const client = fakeClient({
+      fsRead: async (_workspaceId, sessionId, request, options) => {
+        if (sessionId === SESSION_ID) {
+          firstSignal = options?.signal;
+          return await new Promise<never>(() => {});
+        }
+        return {
+          path: request.path,
+          encoding: "utf8" as const,
+          content: "second\n",
+          sizeBytes: 7,
+          truncated: false,
+          isBinary: false,
+          revision: 0,
+        };
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string; liveness: string }) =>
+        useWorkspaceEdit(props.sessionId, {
+          ...ctx,
+          client,
+          path: "a.txt",
+          baseContent: "first\n",
+          liveness: props.liveness,
+        }),
+      { sessionId: SESSION_ID, liveness: "cold" },
+    );
+    await flush();
+    await actRun(() => hook.result.current.edit("edited\n"));
+    await hook.rerender({ sessionId: SESSION_ID, liveness: "warm" });
+    await flush();
+    expect(firstSignal?.aborted).toBe(false);
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID, liveness: "cold" });
+    await flush();
+
+    expect(firstSignal?.aborted).toBe(true);
+    expect(hook.result.current.state).toBe("viewing-cold");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a completed write from the previous session cannot settle the new editor", async () => {
+    let resolveWrite!: () => void;
+    const firstWrite = new Promise<void>((resolve) => {
+      resolveWrite = resolve;
+    });
+    const client = fakeClient({
+      fsRead: async (_workspaceId, _sessionId, request) => ({
+        path: request.path,
+        encoding: "utf8" as const,
+        content: "base\n",
+        sizeBytes: 5,
+        truncated: false,
+        isBinary: false,
+        revision: 0,
+      }),
+      fsWrite: async (_workspaceId, sessionId, request) => {
+        if (sessionId === SESSION_ID) await firstWrite;
+        return { path: request.path, sizeBytes: request.content.length, revision: 1 };
+      },
+    });
+    const hook = await renderHook(
+      (props: { sessionId: string; liveness: string }) =>
+        useWorkspaceEdit(props.sessionId, {
+          ...ctx,
+          client,
+          path: "a.txt",
+          baseContent: "base\n",
+          liveness: props.liveness,
+        }),
+      { sessionId: SESSION_ID, liveness: "cold" },
+    );
+    await flush();
+    await actRun(() => hook.result.current.edit("edited\n"));
+    await hook.rerender({ sessionId: SESSION_ID, liveness: "warm" });
+    await flush();
+    expect(hook.result.current.state).toBe("flushing");
+
+    await hook.rerender({ sessionId: SECOND_SESSION_ID, liveness: "cold" });
+    await flush();
+    resolveWrite();
+    await flush();
+
+    expect(hook.result.current.state).toBe("viewing-cold");
+    expect(hook.result.current.buffer).toBeNull();
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch renders zero frames of the previous edit buffer", async () => {
+    const client = fakeClient({});
+    const observed: Array<{
+      sessionId: string;
+      state: string;
+      buffer: string | null;
+    }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const state = useWorkspaceEdit(props.sessionId, {
+          ...ctx,
+          client,
+          path: "a.txt",
+          baseContent: "base\n",
+          liveness: "cold",
+        });
+        observed.push({ sessionId: props.sessionId, state: state.state, buffer: state.buffer });
+        return state;
+      },
+      { sessionId: SESSION_ID },
+    );
+    await flush();
+    await actRun(() => hook.result.current.edit("first-session-edit\n"));
+    await flush();
+
+    observed.length = 0;
+    await hook.rerender({ sessionId: SECOND_SESSION_ID });
+
+    expect(observed.filter(({ sessionId }) => sessionId === SECOND_SESSION_ID)).not.toContainEqual(
+      expect.objectContaining({ buffer: "first-session-edit\n" }),
+    );
+    expect(hook.result.current.state).toBe("viewing-cold");
+    expect(hook.result.current.buffer).toBeNull();
     await hook.unmount();
   });
 });

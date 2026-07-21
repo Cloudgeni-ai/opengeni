@@ -1,4 +1,4 @@
-// M1 B-suite integration (dossier §12 B1–B7, §14). Drives REAL agent bash turns
+// Workspace-capture integration suite. Drives REAL agent bash turns
 // on the docker sandbox backend through the running dev stack (API :8001 +
 // worker + docker box) via the public SDK seed harness, then inspects the
 // persisted capture: the DB rows (postgres, superuser bypasses RLS) and the
@@ -67,12 +67,13 @@ type CaptureRow = {
   account_id: string;
   workspace_id: string;
   session_id: string;
+  turn_id: string | null;
 };
 
 async function captureRows(sessionId: string): Promise<CaptureRow[]> {
   const rows = await db.execute<CaptureRow>(dbSql`
     select id, revision::int as revision, state, manifest_key, tree_index_key, blob_keys,
-           size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id
+           size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id, turn_id
     from workspace_captures where session_id = ${sessionId} order by revision`);
   return rows as unknown as CaptureRow[];
 }
@@ -125,6 +126,9 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       const appDiff = rootRepo!.diff.find((d) => d.path === "app.py");
       expect(appDiff).toBeTruthy();
       expect(appDiff!.additions).toBeGreaterThanOrEqual(1);
+      const utilsDiff = rootRepo!.diff.find((d) => d.path === "utils.py");
+      expect(utilsDiff?.status).toBe("untracked");
+      expect(utilsDiff?.hunks[0]?.lines[0]?.text).toBe("fresh file");
       // Both the modified and the untracked file are captured as after-images.
       const appFile = manifest.files.find((f) => f.path === "app.py");
       const utilsFile = manifest.files.find((f) => f.path === "utils.py");
@@ -192,6 +196,7 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       for (const root of ["api", "web"]) {
         const repo = manifest.repos.find((r) => r.root === root)!;
         expect(repo.diff.some((d) => d.path === "app.py")).toBe(true);
+        expect(repo.diff.some((d) => d.path === "utils.py" && d.status === "untracked")).toBe(true);
         expect(manifest.files.some((f) => f.path === `${root}/app.py`)).toBe(true);
         expect(manifest.files.some((f) => f.path === `${root}/utils.py`)).toBe(true);
       }
@@ -341,6 +346,14 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       await Bun.sleep(1500);
       const [seed] = await captureRows(session.id);
       const { account_id, workspace_id, session_id } = seed!;
+      expect(seed!.turn_id).not.toBeNull();
+      const attemptRows = await db.execute<{ id: string }>(dbSql`
+        select id from session_turn_attempts
+        where workspace_id = ${workspace_id} and turn_id = ${seed!.turn_id}
+        order by started_at desc
+        limit 1`);
+      const attemptId = (attemptRows as unknown as Array<{ id: string }>)[0]?.id;
+      expect(attemptId).toBeTruthy();
 
       // The live lease epoch for this session's sandbox group.
       const grpRows = await db.execute<{ sandbox_group_id: string }>(dbSql`
@@ -356,7 +369,8 @@ describe("workspace capture — B-suite (real docker turns)", () => {
         accountId: account_id,
         workspaceId: workspace_id,
         sessionId: session_id,
-        turnId: null,
+        turnId: seed!.turn_id!,
+        attemptId: attemptId!,
         sandboxGroupId,
         revision: degradedRevision,
         manifestKey: "m",

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 
 /**
- * The wake-on-edit state machine (dossier §3 #5 / §10.4 / §12-C). M3 OWNS this
- * logic; M5 renders it. States are explicit and exhaustive:
+ * The wake-on-edit state machine. This hook owns the logic and the UI renders
+ * its result. States are explicit and exhaustive:
  *
  *   viewing-cold      — cold snapshot open, no local edits (editable, cloud).
  *   buffering         — local edits buffered; the box is not warm and no warm is
@@ -80,11 +80,11 @@ function isLive(liveness: string | undefined): boolean {
  * Cold-editing without a spinner: the editor opens instantly from the capture,
  * the first keystroke buffers locally AND signals the host to warm the box, and on
  * warm the buffer flushes IF the live file still matches the captured base — else a
- * non-blocking conflict is surfaced and nothing is overwritten (dossier §12-C2).
+ * non-blocking conflict is surfaced and nothing is overwritten.
  *
  * The base guard compares the live content at flush time against `baseContent`
  * (the exact bytes the editor loaded). This is equivalent to the sha256 compare
- * the dossier describes — M1 leaves `baseHash` null, so the loaded content IS the
+ * the design specifies — M1 leaves `baseHash` null, so the loaded content IS the
  * authoritative base — and avoids async Web Crypto in the render path.
  */
 export function useWorkspaceEdit(
@@ -96,31 +96,48 @@ export function useWorkspaceEdit(
   const baseContent = options.baseContent ?? null;
   const live = isLive(options.liveness);
   const offline = options.offline === true;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${path ?? ""}`;
 
   const [buffer, setBuffer] = useState<string | null>(null);
   const [wantsWarm, setWantsWarm] = useState(false);
   const [flush, setFlush] = useState<"idle" | "flushing" | "flushed" | "conflict">("idle");
   const [conflict, setConflict] = useState<WorkspaceEditConflict | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const [stateIdentity, setStateIdentity] = useState(identityKey);
 
   const onWarmRequested = options.onWarmRequested;
   const bufferRef = useRef<string | null>(null);
   bufferRef.current = buffer;
   // Guards a single in-flight flush against re-entry (liveness can re-render).
   const flushingRef = useRef(false);
+  const identityGenerationRef = useRef(0);
+  const flushAttemptRef = useRef(0);
+  const readAbortRef = useRef<AbortController | null>(null);
 
   // Reset the machine when the edited file (or session) changes.
   useEffect(() => {
+    identityGenerationRef.current += 1;
+    flushAttemptRef.current += 1;
+    readAbortRef.current?.abort();
+    readAbortRef.current = null;
+    setStateIdentity(identityKey);
     setBuffer(null);
     setWantsWarm(false);
     setFlush("idle");
     setConflict(null);
     setError(null);
     flushingRef.current = false;
-  }, [sessionId, path]);
+    return () => {
+      identityGenerationRef.current += 1;
+      flushAttemptRef.current += 1;
+      readAbortRef.current?.abort();
+      readAbortRef.current = null;
+    };
+  }, [identityKey]);
 
   const edit = useCallback(
     (content: string) => {
+      if (stateIdentity !== identityKey) return;
       if (offline) return; // read-only — no buffering, no wake.
       setBuffer((prev) => (prev === content ? prev : content));
       // Any new edit invalidates a prior flushed/conflict resolution.
@@ -134,15 +151,18 @@ export function useWorkspaceEdit(
         });
       }
     },
-    [offline, live, onWarmRequested],
+    [offline, live, onWarmRequested, stateIdentity, identityKey],
   );
 
   const doFlush = useCallback(
     async (force: boolean) => {
+      if (stateIdentity !== identityKey) return;
       if (!sessionId || !path) return;
       const content = bufferRef.current;
       if (content === null) return;
       if (flushingRef.current) return;
+      const identityGeneration = identityGenerationRef.current;
+      const flushAttempt = (flushAttemptRef.current += 1);
       flushingRef.current = true;
       setFlush("flushing");
       setError(null);
@@ -151,7 +171,17 @@ export function useWorkspaceEdit(
           // Base guard: re-read the live file and compare to the captured base. A
           // divergence means the box changed under us — surface a conflict, write
           // NOTHING (C2).
-          const liveRead = await client.fsRead(workspaceId, sessionId, { path });
+          const readAbort = new AbortController();
+          readAbortRef.current?.abort();
+          readAbortRef.current = readAbort;
+          const liveRead = await client.fsRead(
+            workspaceId,
+            sessionId,
+            { path },
+            { signal: readAbort.signal },
+          );
+          if (readAbortRef.current === readAbort) readAbortRef.current = null;
+          if (identityGenerationRef.current !== identityGeneration) return;
           const liveContent = liveRead.content;
           if (baseContent !== null && liveContent !== baseContent) {
             setConflict({ path, base: baseContent, live: liveContent });
@@ -160,18 +190,23 @@ export function useWorkspaceEdit(
           }
         }
         await client.fsWrite(workspaceId, sessionId, { path, content, overwrite: true });
+        if (identityGenerationRef.current !== identityGeneration) return;
         setConflict(null);
         setFlush("flushed");
         setWantsWarm(false);
       } catch (cause) {
+        if (identityGenerationRef.current !== identityGeneration) return;
         setError(cause instanceof Error ? cause : new Error(String(cause)));
         // Leave the buffer intact so the user can retry; fall back to buffering.
         setFlush("idle");
       } finally {
-        flushingRef.current = false;
+        if (flushAttemptRef.current === flushAttempt) {
+          flushingRef.current = false;
+          readAbortRef.current = null;
+        }
       }
     },
-    [client, workspaceId, sessionId, path, baseContent],
+    [client, workspaceId, sessionId, path, baseContent, stateIdentity, identityKey],
   );
 
   // Auto-flush once the box is warm and a buffer is pending (the wake completed).
@@ -217,15 +252,16 @@ export function useWorkspaceEdit(
     state = "buffering";
   }
 
+  const identityMatches = stateIdentity === identityKey;
   return {
-    state,
+    state: identityMatches ? state : offline ? "readonly-offline" : "viewing-cold",
     readOnly: offline,
-    buffer,
-    wantsWarm,
+    buffer: identityMatches ? buffer : null,
+    wantsWarm: identityMatches && wantsWarm,
     edit,
-    conflict,
+    conflict: identityMatches ? conflict : null,
     overwrite,
     discard,
-    error,
+    error: identityMatches ? error : null,
   };
 }

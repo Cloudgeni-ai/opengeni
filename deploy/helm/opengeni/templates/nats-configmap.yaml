@@ -8,7 +8,7 @@ metadata:
     app.kubernetes.io/component: nats
 data:
   # The nats-server config for the bring-your-own-compute tenancy boundary
-  # (M-AUTH; dossier §10.1 NATS Accounts + §17 isolation smoke). This mirrors the
+  # (M-AUTH; NATS Accounts + §17 isolation smoke). This mirrors the
   # version-controlled single source of truth at deploy/nats/auth-callout.conf.
   #
   # The secret VALUES (the callout issuer public key + the control/auth passwords)

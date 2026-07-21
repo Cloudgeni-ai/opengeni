@@ -1,4 +1,4 @@
-//! Engine-era op-stream scenarios (`.agent/ENGINE-SCENARIOS.md` E1–E10 + E12).
+//! Engine-era op-stream scenarios (the engine scenario contract E1–E10 + E12).
 //!
 //! The harness plays the SERVER: `OpStart`/`OpCancel`/`OpQuery`/`OpAttach` on
 //! the rpc subject, frame collection off the per-op subject (subscribed
@@ -759,7 +759,7 @@ impl Harness {
         )
     }
 
-    // ---- E7: reconnect transparency (#5) — the headline -------------------
+    // ---- E7: reconnect transparency ----------------------------------------
 
     /// E7 — a nats restart mid-op must NOT kill the child (op ⊥ connection);
     /// after reconnect, OpAttach resumes from the ack floor and the final
