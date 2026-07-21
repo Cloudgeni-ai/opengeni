@@ -196,8 +196,6 @@ export type SessionEventFeedOptions = {
    */
   events?: SessionEvent[] | undefined;
   enabled?: boolean | undefined;
-  /** Refresh authoritative non-event state after the live stream is open. */
-  beforeLive?: (() => void | Promise<void>) | undefined;
 };
 
 /**
@@ -212,6 +210,7 @@ export function useSessionEventTrigger(
   match: (event: SessionEvent) => boolean,
   onEvent: (event: SessionEvent) => void,
   options: SessionEventFeedOptions = {},
+  reconcileBeforeLive?: (() => void | Promise<void>) | undefined,
 ): void {
   const enabled = options.enabled ?? true;
   const events = options.events;
@@ -220,8 +219,8 @@ export function useSessionEventTrigger(
   matchRef.current = match;
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
-  const beforeLiveRef = useRef(options.beforeLive);
-  beforeLiveRef.current = options.beforeLive;
+  const reconcileBeforeLiveRef = useRef(reconcileBeforeLive);
+  reconcileBeforeLiveRef.current = reconcileBeforeLive;
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
 
@@ -264,7 +263,7 @@ export function useSessionEventTrigger(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: session.lastSequence,
           signal: controller.signal,
-          beforeLive: async () => await beforeLiveRef.current?.(),
+          beforeLive: async () => await reconcileBeforeLiveRef.current?.(),
         });
         for await (const event of stream) {
           if (matchRef.current(event)) {

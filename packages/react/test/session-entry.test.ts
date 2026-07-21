@@ -49,6 +49,8 @@ describe("session-only entry", () => {
     }
 
     expect(visited.has(join(packageRoot, "src/timeline/index.ts"))).toBe(false);
+    expect(visited.has(join(packageRoot, "src/provider.tsx"))).toBe(false);
+    expect(visited.has(join(packageRoot, "src/session-context.ts"))).toBe(true);
     expect([...visited].some((file) => file.includes("/src/components/"))).toBe(false);
     expect([...visited].some((file) => file.includes("/src/commands/"))).toBe(false);
     expect([...thirdParty].sort()).toEqual(["@opengeni/sdk", "react"]);
@@ -87,6 +89,8 @@ describe("session-only entry", () => {
     const reactSources = [...transformed].filter((id) => id.includes("/packages/react/src/"));
     expect(reactSources.some((id) => id.endsWith("/src/session.ts"))).toBe(true);
     expect(reactSources.some((id) => id.endsWith("/src/timeline/index.ts"))).toBe(false);
+    expect(reactSources.some((id) => id.endsWith("/src/provider.tsx"))).toBe(false);
+    expect(reactSources.some((id) => id.endsWith("/src/session-context.ts"))).toBe(true);
     expect(reactSources.some((id) => id.includes("/src/components/"))).toBe(false);
     expect(reactSources.some((id) => id.includes("/src/commands/"))).toBe(false);
     expect(reactSources.length).toBeLessThanOrEqual(14);

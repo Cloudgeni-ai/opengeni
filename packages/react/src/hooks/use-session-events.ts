@@ -1,6 +1,6 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
 import type { TimelineItem } from "../timeline/types";
 import type { EmbeddedSessionClientLike } from "../client";

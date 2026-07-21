@@ -7,7 +7,7 @@ import type {
   SessionTurn,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
   useSessionEventTrigger,
@@ -94,23 +94,27 @@ export function useTurnQueue(
     return true;
   }, []);
 
-  const load = useCallback(async (): Promise<void> => {
-    if (!sessionId) return;
-    const ticket = ++readGeneration.current;
-    try {
-      const fetched = await client.getQueue(workspaceId, sessionId);
-      if (ticket === readGeneration.current) {
-        acceptSnapshot(fetched);
-        setError(null);
-        setLoading(false);
+  const load = useCallback(
+    async (rejectOnFailure = false): Promise<void> => {
+      if (!sessionId) return;
+      const ticket = ++readGeneration.current;
+      try {
+        const fetched = await client.getQueue(workspaceId, sessionId);
+        if (ticket === readGeneration.current) {
+          acceptSnapshot(fetched);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (cause) {
+        if (ticket === readGeneration.current) {
+          setError(asError(cause));
+          setLoading(false);
+        }
+        if (rejectOnFailure) throw cause;
       }
-    } catch (cause) {
-      if (ticket === readGeneration.current) {
-        setError(asError(cause));
-        setLoading(false);
-      }
-    }
-  }, [client, workspaceId, sessionId, acceptSnapshot]);
+    },
+    [client, workspaceId, sessionId, acceptSnapshot],
+  );
 
   useEffect(() => {
     const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
@@ -151,11 +155,18 @@ export function useTurnQueue(
   }, [enabled, load, registerSessionReconciler, sessionId]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isTurnQueueEvent, scheduleRefresh, {
-    enabled,
-    beforeLive: load,
-    ...(options.events !== undefined ? { events: options.events } : {}),
-  });
+  useSessionEventTrigger(
+    client,
+    workspaceId,
+    sessionId,
+    isTurnQueueEvent,
+    scheduleRefresh,
+    {
+      enabled,
+      ...(options.events !== undefined ? { events: options.events } : {}),
+    },
+    async () => await load(true),
+  );
 
   const mutate = useCallback(
     async (

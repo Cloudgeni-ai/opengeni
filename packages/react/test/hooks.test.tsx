@@ -223,6 +223,53 @@ describe("useTurnQueue", () => {
     await hook.unmount();
   });
 
+  test("a failed queue handoff rejects live, surfaces the error, then recovers", async () => {
+    let reads = 0;
+    let handoffRejections = 0;
+    let releaseRetry = (): void => undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 2) throw new TypeError("queue handoff unavailable");
+        return queueSnapshot([fakeTurn({ id: reads === 1 ? "stale" : "recovered" })]);
+      },
+      getSession: async () => ({ lastSequence: 41 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          try {
+            await options?.beforeLive?.();
+          } catch {
+            handoffRejections += 1;
+            await retryGate;
+            await options?.beforeLive?.();
+          }
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(handoffRejections).toBe(1);
+    expect(hook.result.current.queue[0]?.id).toBe("stale");
+    expect(hook.result.current.error?.message).toContain("queue handoff unavailable");
+
+    releaseRetry();
+    await flush();
+    expect(reads).toBe(3);
+    expect(hook.result.current.queue[0]?.id).toBe("recovered");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("move, Edit, Steer, and Delete bind the displayed versions and accept server order", async () => {
     const first = fakeTurn({ id: "11111111-aaaa-4aaa-8aaa-111111111111", version: 2 });
     const second = fakeTurn({ id: "22222222-bbbb-4bbb-8bbb-222222222222", version: 4 });
@@ -807,6 +854,65 @@ describe("useComposer durable draft and control binding", () => {
     expect(reads).toBe(2);
     expect(hook.result.current.draft?.revision).toBe(2);
     expect(hook.result.current.value).toBe("authoritative handoff state");
+    await hook.unmount();
+  });
+
+  test("a failed draft handoff rejects live, surfaces the error, then recovers", async () => {
+    const draft = (revision: number, text: string): ComposerDraft => ({
+      revision,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let reads = 0;
+    let handoffRejections = 0;
+    let releaseRetry = (): void => undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) throw new TypeError("draft handoff unavailable");
+        return reads === 1 ? draft(1, "stale") : draft(2, "recovered");
+      },
+      getSession: async () => ({ lastSequence: 42 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          try {
+            await options?.beforeLive?.();
+          } catch {
+            handoffRejections += 1;
+            await retryGate;
+            await options?.beforeLive?.();
+          }
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(handoffRejections).toBe(1);
+    expect(hook.result.current.value).toBe("stale");
+    expect(hook.result.current.error?.message).toContain("draft handoff unavailable");
+
+    releaseRetry();
+    await flush();
+    expect(reads).toBe(3);
+    expect(hook.result.current.value).toBe("recovered");
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
 

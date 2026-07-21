@@ -5,7 +5,7 @@
 // rendering their own product UI.
 
 export type { EmbeddedSessionClientLike as SessionClientLike } from "./client";
-export type { EmbeddedSessionClientOverride as ClientOverride } from "./provider";
+export type { EmbeddedSessionClientOverride as ClientOverride } from "./session-context";
 
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {

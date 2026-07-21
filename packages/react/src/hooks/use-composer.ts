@@ -8,7 +8,7 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
@@ -82,6 +82,7 @@ export function useComposer(
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
   const pendingClientEventId = useRef<string | null>(null);
   const draftRef = useRef<ComposerDraft | null>(null);
+  const draftLoadErrorRef = useRef<Error | null>(null);
   const localEditRevision = useRef(0);
   const targetGeneration = useRef(0);
   const lastSavedSignature = useRef<string | null>(null);
@@ -105,6 +106,7 @@ export function useComposer(
       pendingClientEventId.current = null;
       localEditRevision.current = 0;
       draftRef.current = null;
+      draftLoadErrorRef.current = null;
       lastSavedSignature.current = null;
       setValue("");
       setError(null);
@@ -130,7 +132,7 @@ export function useComposer(
   );
 
   const loadDraft = useCallback(
-    async (replaceLocal: boolean): Promise<void> => {
+    async (replaceLocal: boolean, rejectOnFailure = false): Promise<void> => {
       if (!sessionId) return;
       const generation = targetGeneration.current;
       const localAtStart = localEditRevision.current;
@@ -141,6 +143,11 @@ export function useComposer(
         draftRef.current = fetched;
         setDraft(fetched);
         setDraftConflict(null);
+        const recoveredError = draftLoadErrorRef.current;
+        draftLoadErrorRef.current = null;
+        if (recoveredError) {
+          setError((current) => (current === recoveredError ? null : current));
+        }
         if (replaceLocal || localAtStart === localEditRevision.current) {
           lastSavedSignature.current = draftSignature(draftPayload(fetched));
           setValue(fetched.text);
@@ -148,7 +155,12 @@ export function useComposer(
           onDraftApplied?.(fetched);
         }
       } catch (cause) {
-        if (generation === targetGeneration.current) setError(asError(cause));
+        if (generation === targetGeneration.current) {
+          const failure = asError(cause);
+          draftLoadErrorRef.current = failure;
+          setError(failure);
+        }
+        if (rejectOnFailure) throw cause;
       } finally {
         if (generation === targetGeneration.current) setDraftLoading(false);
       }
@@ -175,9 +187,9 @@ export function useComposer(
     () => void loadDraft(false),
     {
       enabled: Boolean(sessionId),
-      beforeLive: async () => await loadDraft(false),
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
+    async () => await loadDraft(false, true),
   );
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {

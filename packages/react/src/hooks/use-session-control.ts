@@ -1,6 +1,6 @@
 import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback } from "react";
-import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 
 export type UseSessionControlOptions = EmbeddedSessionClientOverride;
