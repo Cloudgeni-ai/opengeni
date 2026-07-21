@@ -212,6 +212,7 @@
       "name": "@opengeni/contracts",
       "version": "0.10.0",
       "dependencies": {
+        "@noble/hashes": "^1.8.0",
         "zod": "^4.2.1",
       },
       "devDependencies": {
@@ -355,6 +356,7 @@
         "@happy-dom/global-registrator": "^20.10.2",
         "@novnc/novnc": "^1.7.0",
         "@opengeni/agent-proto": "workspace:*",
+        "@opengeni/contracts": "workspace:*",
         "@pierre/diffs": "^1.2.11",
         "@tailwindcss/vite": "^4.2.4",
         "@types/react": "^19.2.14",

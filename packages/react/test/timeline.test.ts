@@ -9,6 +9,7 @@ import {
   sessionStatusFromEvents,
   toolDisplayName,
   type AgentMessageItem,
+  type FleetDecisionItem,
   type MemoryItem,
   type SandboxItem,
   type TimelineGroup,
@@ -80,6 +81,56 @@ function reset(): void {
   sequence = 0;
 }
 
+function fleetDecisionPayload(): Record<string, unknown> {
+  return {
+    schemaVersion: 1,
+    mode: "shadow",
+    actual: { outcome: "selected", candidateKey: "c00", reason: "active" },
+    comparison: "match",
+    replay: {
+      schemaVersion: 1,
+      policyVersion: "adaptive-shadow-v1",
+      mode: "shadow",
+      input: { candidates: [{ key: "c00" }, { key: "c01" }] },
+      truncatedCandidateCount: 0,
+      policyFingerprint: "must-not-reach-the-view",
+      inputFingerprint: "must-not-reach-the-view",
+      decisionFingerprint: "must-not-reach-the-view",
+      decision: {
+        outcome: "selected",
+        selectedCandidateKey: "c00",
+        reason: "affinity_best",
+        admission: {
+          outcome: "admit",
+          reason: "pacing_disabled",
+          borrowedIdleCapacity: false,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 0,
+        confidence: "unknown",
+        scores: [
+          {
+            candidateKey: "c00",
+            eligible: true,
+            rejectionReason: null,
+            total: -2_400,
+            confidence: "unknown",
+          },
+          {
+            candidateKey: "c01",
+            eligible: true,
+            rejectionReason: null,
+            total: 1_600,
+            confidence: "unknown",
+          },
+        ],
+      },
+    },
+    accountEmail: "secret-owner@example.test",
+    credentialId: "credential-secret",
+  };
+}
+
 type ActivityGroup = Extract<TimelineGroup, { kind: "activity" }>;
 type TurnGroup = Extract<TimelineGroup, { kind: "turn" }>;
 
@@ -106,6 +157,136 @@ function flattenActivityIds(group: TurnGroup | undefined): string[] {
 }
 
 describe("buildTimeline", () => {
+  test("projects a bounded identity-free fleet shadow decision", () => {
+    reset();
+    const items = buildTimeline([event("codex.fleet.decision", fleetDecisionPayload())]);
+
+    expect(items).toHaveLength(1);
+    const decision = items[0] as FleetDecisionItem;
+    expect(decision).toMatchObject({
+      kind: "fleet-decision",
+      turnId: "turn-1",
+      policyVersion: "adaptive-shadow-v1",
+      actualOutcome: "selected",
+      actualCandidateKey: "c00",
+      shadowOutcome: "selected",
+      shadowCandidateKey: "c00",
+      comparison: "match",
+      candidateCount: 2,
+      truncatedCandidateCount: 0,
+      scoreRowsTruncatedCount: 0,
+    });
+    expect(decision.scores).toEqual([
+      {
+        candidateKey: "c00",
+        eligible: true,
+        rejectionReason: null,
+        total: -2_400,
+        confidence: "unknown",
+      },
+      {
+        candidateKey: "c01",
+        eligible: true,
+        rejectionReason: null,
+        total: 1_600,
+        confidence: "unknown",
+      },
+    ]);
+    const projected = JSON.stringify(decision);
+    expect(projected).not.toContain("secret-owner@example.test");
+    expect(projected).not.toContain("credential-secret");
+    expect(projected).not.toContain("Fingerprint");
+    expect(projected).not.toContain("must-not-reach-the-view");
+  });
+
+  test("accepts manager priority as a paced standard-work admission reason", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    payload.comparison = "different_outcome";
+    const replay = payload.replay as { decision: Record<string, unknown> };
+    replay.decision = {
+      ...replay.decision,
+      outcome: "paced",
+      selectedCandidateKey: null,
+      reason: "admission_paced",
+      admission: {
+        outcome: "pace",
+        reason: "manager_priority",
+        borrowedIdleCapacity: false,
+      },
+      borrowedOverlayCapacity: false,
+      strandedEligibleCount: 0,
+      scores: [],
+    };
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item).toMatchObject({
+      kind: "fleet-decision",
+      shadowOutcome: "paced",
+      shadowReason: "admission_paced",
+      admissionOutcome: "pace",
+      admissionReason: "manager_priority",
+    });
+  });
+
+  test("caps score rows at 32 without reading an extra secret-shaped row", () => {
+    reset();
+    const payload = fleetDecisionPayload();
+    const replay = payload.replay as Record<string, unknown>;
+    const input = replay.input as Record<string, unknown>;
+    const decision = replay.decision as Record<string, unknown>;
+    input.candidates = Array.from({ length: 32 }, (_, index) => ({
+      key: `c${index.toString(36).padStart(2, "0")}`,
+    }));
+    decision.scores = [
+      ...Array.from({ length: 32 }, (_, index) => ({
+        candidateKey: `c${index.toString(36).padStart(2, "0")}`,
+        eligible: true,
+        rejectionReason: null,
+        total: index,
+        confidence: "unknown",
+      })),
+      {
+        candidateKey: "credential-secret@example.test",
+        eligible: true,
+        rejectionReason: null,
+        total: 33,
+        confidence: "unknown",
+      },
+    ];
+
+    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+    expect(item?.kind).toBe("fleet-decision");
+    if (item?.kind !== "fleet-decision") throw new Error("expected fleet decision");
+    expect(item.scores).toHaveLength(32);
+    expect(item.scoreRowsTruncatedCount).toBe(1);
+    expect(JSON.stringify(item)).not.toContain("credential-secret@example.test");
+  });
+
+  test("drops malformed or identity-shaped fleet events instead of rendering payload strings", () => {
+    reset();
+    const invalidAlias = fleetDecisionPayload();
+    (invalidAlias.actual as Record<string, unknown>).candidateKey =
+      "credential-secret@example.test";
+
+    const invalidEnum = fleetDecisionPayload();
+    (invalidEnum.replay as { decision: Record<string, unknown> }).decision.reason =
+      "operator supplied this arbitrary message";
+
+    const invalidNumber = fleetDecisionPayload();
+    const invalidScores = (invalidNumber.replay as { decision: { scores: unknown[] } }).decision
+      .scores;
+    (invalidScores[0] as Record<string, unknown>).total = Number.POSITIVE_INFINITY;
+
+    const inconsistentReason = fleetDecisionPayload();
+    (inconsistentReason.actual as Record<string, unknown>).reason = "all_capped";
+
+    expect(buildTimeline([event("codex.fleet.decision", invalidAlias)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", invalidEnum)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", invalidNumber)])).toEqual([]);
+    expect(buildTimeline([event("codex.fleet.decision", inconsistentReason)])).toEqual([]);
+  });
+
   test("projects childCompletion user messages as worker-completion items", () => {
     reset();
     const items = buildTimeline([

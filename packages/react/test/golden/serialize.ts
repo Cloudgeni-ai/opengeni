@@ -116,6 +116,31 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         memoryId: item.memoryId,
         replacementMemoryId: item.replacementMemoryId ?? null,
       };
+    case "fleet-decision":
+      return {
+        kind: item.kind,
+        id: item.id,
+        turnId: item.turnId,
+        occurredAt: item.occurredAt,
+        policyVersion: item.policyVersion,
+        actualOutcome: item.actualOutcome,
+        actualCandidateKey: item.actualCandidateKey,
+        actualReason: item.actualReason,
+        shadowOutcome: item.shadowOutcome,
+        shadowCandidateKey: item.shadowCandidateKey,
+        shadowReason: item.shadowReason,
+        comparison: item.comparison,
+        confidence: item.confidence,
+        admissionOutcome: item.admissionOutcome,
+        admissionReason: item.admissionReason,
+        borrowedIdleCapacity: item.borrowedIdleCapacity,
+        borrowedOverlayCapacity: item.borrowedOverlayCapacity,
+        strandedEligibleCount: item.strandedEligibleCount,
+        candidateCount: item.candidateCount,
+        truncatedCandidateCount: item.truncatedCandidateCount,
+        scoreRowsTruncatedCount: item.scoreRowsTruncatedCount,
+        scores: stableValue(item.scores),
+      };
     case "notice":
       return {
         kind: item.kind,

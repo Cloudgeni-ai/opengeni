@@ -3,6 +3,7 @@ import {
   BotIcon,
   BrainCircuitIcon,
   BrainIcon,
+  GaugeIcon,
   SquareTerminalIcon,
 } from "lucide-react";
 import { cn } from "../lib/cn";
@@ -12,7 +13,14 @@ import { useEntranceAnimation } from "./entrance";
 import type { ToolRegistry } from "./registry";
 import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./projection";
-import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
+import type {
+  ActivityItem,
+  FleetDecisionItem,
+  MemoryItem,
+  ReasoningItem,
+  SandboxItem,
+  WorkerItem,
+} from "./types";
 
 /* ----------------------------------------------------------------------------
    Activity rail
@@ -112,6 +120,8 @@ function renderActivity(
       return <SandboxRow item={item} />;
     case "memory":
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
+    case "fleet-decision":
+      return <FleetDecisionRow item={item} />;
     default:
       return assertNever(item);
   }
@@ -235,6 +245,217 @@ function MemoryRow({
       ) : null}
     </ActivityDisclosure>
   );
+}
+
+const FLEET_ACTUAL_REASON_LABEL: Record<FleetDecisionItem["actualReason"], string> = {
+  lease_reused: "Reused the fenced lease",
+  pin: "Kept the session pin",
+  rotation: "Rotated for capacity",
+  active: "Used the active subscription",
+  all_capped: "All observed subscriptions were capped",
+  none: "No production candidate was selected",
+};
+
+const FLEET_SHADOW_REASON_LABEL: Record<FleetDecisionItem["shadowReason"], string> = {
+  fenced_in_flight: "Kept the fenced in-flight assignment",
+  fenced_candidate_missing: "The fenced assignment was missing from the snapshot",
+  admission_paced: "Admission would have been paced",
+  no_eligible_candidate: "No candidate passed the policy checks",
+  overlay_isolated_empty: "Explicit isolation left no eligible candidate",
+  best_score: "Selected the lowest-pressure candidate",
+  affinity_best: "Session affinity was already best",
+  hysteresis_hold: "Hysteresis avoided a low-value switch",
+};
+
+const FLEET_COMPARISON_LABEL: Record<FleetDecisionItem["comparison"], string> = {
+  match: "Production and shadow matched",
+  different_candidate: "Shadow preferred another candidate",
+  different_outcome: "Production and shadow outcomes differed",
+  not_comparable_truncated: "Comparison limited by bounded candidate data",
+};
+
+const FLEET_ADMISSION_REASON_LABEL: Record<FleetDecisionItem["admissionReason"], string> = {
+  fenced_in_flight: "In-flight assignment was fenced",
+  pacing_disabled: "Admission pacing was disabled",
+  capacity_unknown: "Capacity was unknown, so work remained admissible",
+  capacity_available: "Observed capacity was available",
+  work_conserving_borrow: "Idle capacity was borrowed for standard work",
+  manager_priority: "Standard work was paced for queued manager demand",
+  standard_starvation_bound: "The standard-work starvation bound was reached",
+  capacity_saturated: "Observed dynamic capacity was saturated",
+  emergency_fuse: "The emergency fuse blocked new work",
+};
+
+const FLEET_REJECTION_LABEL: Record<
+  Exclude<FleetDecisionItem["scores"][number]["rejectionReason"], null>,
+  string
+> = {
+  allocator_disabled: "Allocator disabled",
+  unavailable: "Unavailable",
+  cooling: "Cooling down",
+  quota_ceiling: "Quota ceiling reached",
+  overlay_isolation: "Outside explicit isolation",
+};
+
+const FLEET_CONFIDENCE_LABEL: Record<FleetDecisionItem["confidence"], string> = {
+  unknown: "Unknown confidence",
+  low: "Low confidence",
+  medium: "Medium confidence",
+  high: "High confidence",
+};
+
+function FleetDecisionRow({ item }: { item: FleetDecisionItem }) {
+  const scoreRowsHidden = item.scoreRowsTruncatedCount > 0;
+  return (
+    <ActivityDisclosure
+      icon={<GaugeIcon className="size-3.5" />}
+      iconTone="muted"
+      title="Fleet policy shadow"
+      preview={FLEET_COMPARISON_LABEL[item.comparison]}
+      chip={{
+        tone: "muted",
+        text:
+          item.comparison === "match"
+            ? "matched"
+            : item.comparison === "not_comparable_truncated"
+              ? "limited"
+              : "different",
+      }}
+    >
+      <section aria-label="Fleet policy shadow details" className="flex min-w-0 flex-col gap-3">
+        <BodyNote tone="muted">
+          Shadow observation only — it did not change the subscription serving this turn.
+        </BodyNote>
+        <dl className="grid min-w-0 grid-cols-1 gap-x-5 gap-y-3 sm:grid-cols-2">
+          <FleetDetail
+            term="Production"
+            value={fleetOutcomeLabel(item.actualOutcome, item.actualCandidateKey)}
+            note={FLEET_ACTUAL_REASON_LABEL[item.actualReason]}
+          />
+          <FleetDetail
+            term="Shadow policy"
+            value={fleetOutcomeLabel(item.shadowOutcome, item.shadowCandidateKey)}
+            note={FLEET_SHADOW_REASON_LABEL[item.shadowReason]}
+          />
+          <FleetDetail term="Comparison" value={FLEET_COMPARISON_LABEL[item.comparison]} />
+          <FleetDetail term="Decision confidence" value={FLEET_CONFIDENCE_LABEL[item.confidence]} />
+          <FleetDetail
+            term="Admission"
+            value={
+              item.admissionOutcome === "admit" ? "Would admit new work" : "Would pace new work"
+            }
+            note={FLEET_ADMISSION_REASON_LABEL[item.admissionReason]}
+          />
+          <FleetDetail
+            term="Observed candidates"
+            value={`${item.candidateCount} in the bounded replay`}
+          />
+          <FleetDetail
+            term="Idle-capacity borrowing"
+            value={item.borrowedIdleCapacity ? "Borrowed for standard work" : "Not borrowed"}
+          />
+          <FleetDetail
+            term="Named-policy borrowing"
+            value={
+              item.borrowedOverlayCapacity ? "Borrowed outside the preferred group" : "Not borrowed"
+            }
+          />
+          <FleetDetail
+            term="Stranded capacity"
+            value={
+              item.strandedEligibleCount === 0
+                ? "None"
+                : `${item.strandedEligibleCount} eligible ${item.strandedEligibleCount === 1 ? "candidate" : "candidates"}`
+            }
+            note={
+              item.strandedEligibleCount > 0
+                ? "Capacity excluded by explicit isolation; existing fenced turns are unchanged."
+                : undefined
+            }
+          />
+        </dl>
+
+        {item.scores.length > 0 ? (
+          <div className="min-w-0">
+            <h4 className="text-og-sm font-medium text-og-fg">Bounded candidate scores</h4>
+            <p className="mt-0.5 text-og-xs leading-5 text-og-fg-subtle">
+              Lower scores rank first. Candidate aliases are temporary and local to this event.
+            </p>
+            <ul className="mt-2 flex min-w-0 flex-col gap-1.5" aria-label="Candidate scores">
+              {item.scores.map((score) => (
+                <li
+                  key={score.candidateKey}
+                  className="flex min-w-0 flex-col gap-1 rounded-og-sm bg-og-surface-1 px-2.5 py-2 text-og-sm sm:flex-row sm:items-center sm:gap-3"
+                >
+                  <span className="font-og-mono text-og-fg">{score.candidateKey}</span>
+                  <span className="min-w-0 text-og-fg-muted sm:flex-1">
+                    {score.eligible
+                      ? "Eligible"
+                      : score.rejectionReason
+                        ? FLEET_REJECTION_LABEL[score.rejectionReason]
+                        : "Unavailable"}
+                  </span>
+                  <span className="font-og-mono text-og-fg-subtle">
+                    score {formatFleetScore(score.total)} ·{" "}
+                    {FLEET_CONFIDENCE_LABEL[score.confidence]}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {item.truncatedCandidateCount > 0 ? (
+          <BodyNote tone="muted">
+            {item.truncatedCandidateCount} additional{" "}
+            {item.truncatedCandidateCount === 1 ? "candidate was" : "candidates were"} excluded from
+            this bounded replay record.
+          </BodyNote>
+        ) : null}
+        {scoreRowsHidden ? (
+          <BodyNote tone="muted">
+            {item.scoreRowsTruncatedCount} additional{" "}
+            {item.scoreRowsTruncatedCount === 1 ? "score row was" : "score rows were"} hidden by
+            this view’s safety limit.
+          </BodyNote>
+        ) : null}
+      </section>
+    </ActivityDisclosure>
+  );
+}
+
+function FleetDetail({
+  term,
+  value,
+  note,
+}: {
+  term: string;
+  value: string;
+  note?: string | undefined;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="text-og-xs font-medium uppercase tracking-wide text-og-fg-subtle">{term}</dt>
+      <dd className="mt-0.5 break-words text-og-sm text-og-fg-muted">
+        <span className="text-og-fg">{value}</span>
+        {note ? <span className="mt-0.5 block leading-5">{note}</span> : null}
+      </dd>
+    </div>
+  );
+}
+
+function fleetOutcomeLabel(
+  outcome: FleetDecisionItem["actualOutcome"] | FleetDecisionItem["shadowOutcome"],
+  candidateKey: string | null,
+): string {
+  if (outcome === "selected" && candidateKey) return `Selected ${candidateKey}`;
+  if (outcome === "waiting") return "Waiting for capacity";
+  if (outcome === "paced") return "Paced before placement";
+  return "No candidate selected";
+}
+
+function formatFleetScore(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
 }
 
 /**

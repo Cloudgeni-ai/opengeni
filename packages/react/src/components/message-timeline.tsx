@@ -568,8 +568,8 @@ function clusterIsSettled(group: Extract<TimelineGroup, { kind: "activity" }>): 
     if (item.kind === "reasoning") {
       return !item.streaming;
     }
-    // A memory write is a discrete, already-settled event — it has no running state.
-    if (item.kind === "memory") {
+    // Memory writes and fleet observations are discrete, already-settled events.
+    if (item.kind === "memory" || item.kind === "fleet-decision") {
       return true;
     }
     return item.status !== "running";

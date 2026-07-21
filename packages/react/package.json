@@ -81,6 +81,7 @@
     "@happy-dom/global-registrator": "^20.10.2",
     "@novnc/novnc": "^1.7.0",
     "@opengeni/agent-proto": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
     "@pierre/diffs": "^1.2.11",
     "@tailwindcss/vite": "^4.2.4",
     "@types/react": "^19.2.14",

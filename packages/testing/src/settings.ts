@@ -96,6 +96,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexSubscriptionEnabled: false,
     codexToolSearchEnabled: false,
     codexCredentialLeasingEnabled: false,
+    codexFleetPolicyShadowEnabled: false,
     codexProductSku: undefined,
     codexRotationNearExhaustionPct: 90,
     openaiReasoningEffort: "high",

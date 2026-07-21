@@ -138,6 +138,11 @@ import {
   type CodexRotationStrategy,
   type RotationDecision,
 } from "./codex-rotation";
+import {
+  codexFleetShadowDecisionMetricLabelsV1,
+  codexFleetShadowErrorMetricLabelsV1,
+  publishCodexFleetShadowDecisionV1,
+} from "./codex-fleet-shadow";
 import type { CodexAccountStatus } from "@opengeni/db";
 import { buildCodexTokenResolver } from "./codex-auth";
 import {
@@ -2545,6 +2550,80 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           leased.generation !== null &&
           codexLeaseConfirmedUntilMs !== null;
         if (codexLeaseHeld) startCodexLeaseHeartbeat();
+
+        const actualOutcome = effectiveCodexCredentialId
+          ? "selected"
+          : rotationDecision.kind === "allCapped"
+            ? "waiting"
+            : "none";
+        const actualReason = effectiveCodexCredentialId
+          ? leased.reused
+            ? "lease_reused"
+            : sessionPin === effectiveCodexCredentialId
+              ? "pin"
+              : rotationDecision.kind === "active" && rotationDecision.moved
+                ? "rotation"
+                : "active"
+          : rotationDecision.kind === "allCapped"
+            ? "all_capped"
+            : "none";
+        const fencedInFlight =
+          leased.reused ||
+          (continuationCodexCredentialId !== null &&
+            continuationCodexCredentialId === effectiveCodexCredentialId);
+        const shadowResult = await publishCodexFleetShadowDecisionV1({
+          enabled: settings.codexFleetPolicyShadowEnabled,
+          decision: {
+            accounts: leased.accounts,
+            actualCredentialId: effectiveCodexCredentialId,
+            actualOutcome,
+            actualReason,
+            affinityCredentialId: fencedInFlight
+              ? effectiveCodexCredentialId
+              : (sessionPin ?? sessionCodex?.lastCredentialId ?? null),
+            fencedInFlight,
+            nearExhaustionPct: settings.codexRotationNearExhaustionPct,
+            now: new Date(),
+            aliasSeed: randomUUID(),
+          },
+          publish,
+        });
+        if (shadowResult.outcome === "published") {
+          const shadowPayload = shadowResult.payload;
+          observability.incrementCounter({
+            name: "opengeni_codex_fleet_shadow_decisions_total",
+            help: "Shadow decisions by bounded actual/shadow outcome and comparison.",
+            labels: codexFleetShadowDecisionMetricLabelsV1(shadowPayload),
+          });
+          observability.info("Codex adaptive fleet shadow decision", {
+            workspaceId: input.workspaceId,
+            policyVersion: shadowPayload.replay.policyVersion,
+            inputFingerprint: shadowPayload.replay.inputFingerprint,
+            decisionFingerprint: shadowPayload.replay.decisionFingerprint,
+            actualOutcome: shadowPayload.actual.outcome,
+            shadowOutcome: shadowPayload.replay.decision.outcome,
+            comparison: shadowPayload.comparison,
+            candidateCount: shadowPayload.replay.input.candidates.length,
+            truncatedCandidateCount: shadowPayload.replay.truncatedCandidateCount,
+            payloadBytes: shadowResult.payloadBytes,
+          });
+        } else if (shadowResult.outcome === "failed") {
+          // Shadow observability is explicitly non-authoritative. A malformed
+          // snapshot or event-write fault must never change the authoritative lease,
+          // capacity wait, failover, or the account serving this fenced turn.
+          observability.incrementCounter({
+            name: "opengeni_codex_fleet_shadow_errors_total",
+            help: "Shadow decision build/publication failures.",
+            labels: codexFleetShadowErrorMetricLabelsV1(shadowResult),
+          });
+          observability.warn("Codex adaptive fleet shadow decision failed open", {
+            workspaceId: input.workspaceId,
+            stage: shadowResult.stage,
+            reason: shadowResult.reason,
+            errorName: shadowResult.errorName,
+            payloadBytes: shadowResult.payloadBytes,
+          });
+        }
 
         const eligibleCount = leased.accounts.filter((account) =>
           isCodexCredentialEligible(account, settings.codexRotationNearExhaustionPct, new Date()),
