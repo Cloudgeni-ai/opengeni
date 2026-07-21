@@ -339,8 +339,12 @@ export {
   initialWorkspaceTab,
   WORKBENCH_TAB_CHANGES,
   WORKBENCH_TAB_FILES,
+  WORKBENCH_TAB_TERMINAL,
+  WORKBENCH_TAB_DESKTOP,
+  WORKBENCH_SURFACES,
 } from "./components/sandbox-workspace";
 export type {
+  SandboxWorkspaceSurface,
   SandboxWorkspaceProps,
   UseSandboxWorkspaceTabsOptions,
   UseSandboxWorkspaceTabsResult,
