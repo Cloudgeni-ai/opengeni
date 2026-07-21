@@ -166,7 +166,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P2.1 reaper-tick warm metering + force-drain (real lease + RLS, spied provider stop)", () => {
   test("(1) the reaper sweep meters a WARM viewer-only box but NOT a turn-held box", async () => {

@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type { Document, ScheduledTask } from "@opengeni/contracts";
+import type { Document, GitHubAppApiPort, ScheduledTask } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
@@ -80,6 +80,12 @@ export type AppDependencies = {
   observability?: Observability;
   readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
   githubStateSecret?: string;
+  /**
+   * Optional host-provided GitHub App API seam. Embedded hosts can authorize
+   * users, inspect installations, and list repositories with their own GitHub
+   * App credentials; standalone deployments fall back to @opengeni/github.
+   */
+  githubAppApi?: GitHubAppApiPort;
   managedAuth?: ManagedAuth | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.

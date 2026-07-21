@@ -1,4 +1,4 @@
-//! Atomic self-replace + rollback — the platform-honest headline (dossier §23.2).
+//! Atomic self-replace + rollback — the platform-honest headline.
 //!
 //! The replace is a same-filesystem rename dance so the worst power-loss outcome
 //! is "old binary still in place" — NEVER a half-written live binary:

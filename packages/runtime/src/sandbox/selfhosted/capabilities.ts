@@ -1,4 +1,4 @@
-// Selfhosted capability negotiation (M3, dossier §10.2 item 4).
+// Selfhosted capability negotiation (M3, item 4).
 //
 // `negotiateSelfhostedCapabilities` resolves the selfhosted-specific cells from
 //   (a) the M2 enrollment row (consent / display / status / lastSeenAt), and

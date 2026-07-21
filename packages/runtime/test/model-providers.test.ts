@@ -1,11 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents";
+import { createRequire } from "node:module";
+import { dirname, join } from "node:path";
 import {
   configuredProviders,
   resolveModelProvider,
   type ResolvedModelProvider,
 } from "@opengeni/config";
-import { CODEX_MODEL_ID_PREFIX, CODEX_PROVIDER_BASE_URL, CODEX_PROVIDER_ID } from "@opengeni/codex";
+import {
+  CODEX_MODEL_ID_PREFIX,
+  CODEX_PROVIDER_BASE_URL,
+  CODEX_PROVIDER_ID,
+  CODEX_TRANSPORT_ERROR_HEADER,
+  MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+  MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
+  boundModelToolOutputItem,
+  codexRequestStorage,
+  codexSubscriptionFetch,
+  type CodexRequestContext,
+} from "@opengeni/codex";
 import { testSettings } from "@opengeni/testing";
 import OpenAI from "openai";
 import {
@@ -22,6 +35,35 @@ import {
 // (settingsWithCodexCredential → withCodexProvider) injects into runSettings for
 // a workspace with an ACTIVE Codex subscription. Mirrors capabilities.ts.
 const CODEX_TURN_MODEL = `${CODEX_MODEL_ID_PREFIX}gpt-5.6-sol`;
+
+type PinnedResponsesModule = {
+  getInputItems: (input: unknown[]) => unknown[];
+};
+
+async function pinnedResponsesModule(): Promise<PinnedResponsesModule> {
+  const request = createRequire(import.meta.url);
+  const agentsRequest = createRequire(request.resolve("@openai/agents"));
+  const modulePath = join(
+    dirname(agentsRequest.resolve("@openai/agents-openai")),
+    "openaiResponsesModel.mjs",
+  );
+  return (await import(modulePath)) as PinnedResponsesModule;
+}
+
+function codexTestContext(): CodexRequestContext {
+  const token = {
+    accessToken: "test-token",
+    chatgptAccountId: "test-account",
+    isFedramp: false,
+  };
+  return {
+    clientVersion: "largeoutput-test",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+  };
+}
+
 function codexProviderJson(): string {
   return JSON.stringify([
     {
@@ -34,6 +76,306 @@ function codexProviderJson(): string {
     },
   ]);
 }
+
+describe("pinned Responses large-output boundary", () => {
+  test("serializes a 10,000-part mixed bounded result entirely inside the pinned wire union", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const raw = {
+      type: "function_call_result",
+      callId: "call_mixed_10000",
+      status: "completed",
+      output: Array.from({ length: 10_000 }, (_, index): Record<string, unknown> => {
+        if (index % 3 === 0) return { type: "input_text", text: `text-${index}` };
+        if (index % 3 === 1) {
+          return { type: "input_image", image: `data:image/png;base64,a${index}` };
+        }
+        return {
+          type: "input_file",
+          file: { id: `file_${index}` },
+          filename: `${index}.txt`,
+        };
+      }),
+    };
+
+    const bounded = boundModelToolOutputItem(raw);
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
+    const [wire] = getInputItems([bounded]) as Array<Record<string, unknown>>;
+    expect(wire).toMatchObject({
+      type: "function_call_output",
+      call_id: "call_mixed_10000",
+      status: "completed",
+    });
+    const output = wire.output as Array<Record<string, unknown>>;
+    expect(output.length).toBeGreaterThan(1);
+    expect(output.length).toBeLessThanOrEqual(256);
+    for (const part of output) {
+      expect(["input_text", "input_image", "input_file"]).toContain(part.type);
+      if (part.type === "input_text") expect(typeof part.text).toBe("string");
+      if (part.type === "input_image") {
+        expect(typeof (part.image_url ?? part.file_id)).toBe("string");
+      }
+      if (part.type === "input_file") {
+        expect(typeof (part.file_data ?? part.file_url ?? part.file_id)).toBe("string");
+      }
+    }
+    expect(output.at(-1)).toEqual({
+      type: "input_text",
+      text: expect.stringMatching(/^\[OpenGeni omitted \d+ structured array items\]$/),
+    });
+  });
+
+  test("serializes oversized file omission as pinned input_text, never a fake file_url", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const bounded = boundModelToolOutputItem({
+      type: "function_call_result",
+      callId: "call_oversized_file",
+      output: [
+        {
+          type: "input_file",
+          file: `data:application/pdf;base64,${"a".repeat(
+            MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
+          )}`,
+          filename: "oversized.pdf",
+        },
+      ],
+    });
+    const [wire] = getInputItems([bounded]) as Array<Record<string, unknown>>;
+    expect(wire.output).toEqual([
+      {
+        type: "input_text",
+        text: expect.stringMatching(/^\[OpenGeni omitted file payload: \d+ bytes exceeded/),
+      },
+    ]);
+    expect(JSON.stringify(wire.output)).not.toContain("file_url");
+  });
+
+  test("serializes exhausted image IDs as omission image_url values, never fake file_id values", async () => {
+    const { getInputItems } = await pinnedResponsesModule();
+    const prefix = "data:application/octet-stream;base64,";
+    const bounded = boundModelToolOutputItem({
+      type: "function_call_result",
+      callId: "call_exhausted_image_ids",
+      output: [
+        {
+          type: "input_file",
+          fileData: `${prefix}${"a".repeat(
+            MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES - Buffer.byteLength(prefix, "utf8"),
+          )}`,
+          filename: "allowance.bin",
+        },
+        { type: "input_image", fileId: "file_123" },
+        { type: "input_image", image: { id: "file_456" } },
+      ],
+    });
+
+    const [wire] = getInputItems([bounded]) as Array<Record<string, unknown>>;
+    const output = wire.output as Array<Record<string, unknown>>;
+    expect(output.slice(1)).toEqual([
+      {
+        type: "input_image",
+        image_url: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+      },
+      {
+        type: "input_image",
+        image_url: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+      },
+    ]);
+    expect(output.slice(1).some((part) => "file_id" in part)).toBe(false);
+    expect(JSON.stringify(output.slice(1))).not.toContain("file_123");
+    expect(JSON.stringify(output.slice(1))).not.toContain("file_456");
+    expect(boundModelToolOutputItem(bounded)).toEqual(bounded);
+  });
+});
+
+describe("pinned Responses streamed terminal failures", () => {
+  const terminalCases = [
+    {
+      name: "response.failed",
+      event: {
+        type: "response.failed",
+        response: {
+          id: "resp_failed",
+          status: "failed",
+          error: {
+            type: "server_error",
+            code: "server_error",
+            message: "SECRET response.failed provider detail",
+          },
+        },
+      },
+      expected: {
+        status: 502,
+        code: "server_error",
+        type: "server_error",
+        eventType: "response.failed",
+        responseId: "resp_failed",
+        responseStatus: "failed",
+      },
+    },
+    {
+      name: "nested response.error",
+      event: {
+        type: "response.error",
+        response: {
+          id: "resp_error",
+          status: "failed",
+          error: {
+            code: "invalid_prompt",
+            message: "SECRET nested response.error provider detail",
+          },
+        },
+      },
+      expected: {
+        status: 400,
+        code: "invalid_prompt",
+        type: "invalid_prompt",
+        eventType: "response.error",
+        responseId: "resp_error",
+        responseStatus: "failed",
+      },
+    },
+    {
+      name: "top-level error",
+      event: {
+        type: "error",
+        code: "rate_limit_exceeded",
+        message: "SECRET top-level error provider detail",
+      },
+      expected: {
+        status: 429,
+        code: "rate_limit_exceeded",
+        type: "rate_limit_exceeded",
+        eventType: "error",
+      },
+    },
+    {
+      name: "response.incomplete",
+      event: {
+        type: "response.incomplete",
+        response: {
+          id: "resp_incomplete",
+          status: "incomplete",
+          incomplete_details: { reason: "SECRET provider incomplete reason" },
+        },
+      },
+      expected: {
+        status: 502,
+        code: "response_incomplete",
+        type: "response_incomplete",
+        eventType: "response.incomplete",
+        responseId: "resp_incomplete",
+        responseStatus: "incomplete",
+      },
+    },
+    {
+      name: "missing terminal",
+      event: { type: "response.created", response: { id: "resp_missing" } },
+      expected: {
+        status: 502,
+        code: "invalid_sse_terminal",
+        type: "invalid_sse_terminal",
+      },
+    },
+  ] as const;
+
+  for (const terminalCase of terminalCases) {
+    test(`real OpenAIResponsesModel rejects ${terminalCase.name} without response_done or replay`, async () => {
+      let calls = 0;
+      const client = new OpenAI({
+        apiKey: "test-key",
+        baseURL: CODEX_PROVIDER_BASE_URL,
+        maxRetries: 2,
+        fetch: codexSubscriptionFetch(async () => {
+          calls += 1;
+          return new Response(`data: ${JSON.stringify(terminalCase.event)}\n\n`, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }),
+      });
+      const model = new OpenAIResponsesModel(client, "gpt-5.6-sol");
+      const events: Array<{ type?: unknown }> = [];
+      let observed: unknown;
+
+      await codexRequestStorage.run(codexTestContext(), async () => {
+        try {
+          for await (const event of model.getStreamedResponse({
+            input: "bounded terminal test",
+            modelSettings: {},
+            tools: [],
+            handoffs: [],
+            outputType: "text",
+            tracing: false,
+          } as never)) {
+            events.push(event);
+          }
+        } catch (error) {
+          observed = error;
+        }
+      });
+
+      expect(calls).toBe(1);
+      expect(events.some((event) => event.type === "response_done")).toBe(false);
+      expect(observed).toMatchObject(terminalCase.expected);
+      expect((observed as { headers?: Headers }).headers?.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe(
+        "1",
+      );
+      const serialized = JSON.stringify({
+        message: (observed as Error).message,
+        error: (observed as { error?: unknown }).error,
+      });
+      expect(Buffer.byteLength(serialized, "utf8")).toBeLessThan(2_000);
+      expect(serialized).not.toContain("SECRET");
+    });
+  }
+
+  test("real OpenAIResponsesModel rejects a null accepted stream without response_done or replay", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: CODEX_PROVIDER_BASE_URL,
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    const model = new OpenAIResponsesModel(client, "gpt-5.6-sol");
+    const events: Array<{ type?: unknown }> = [];
+    let observed: unknown;
+
+    await codexRequestStorage.run(codexTestContext(), async () => {
+      try {
+        for await (const event of model.getStreamedResponse({
+          input: "null terminal test",
+          modelSettings: {},
+          tools: [],
+          handoffs: [],
+          outputType: "text",
+          tracing: false,
+        } as never)) {
+          events.push(event);
+        }
+      } catch (error) {
+        observed = error;
+      }
+    });
+
+    expect(calls).toBe(1);
+    expect(events.some((event) => event.type === "response_done")).toBe(false);
+    expect(observed).toMatchObject({
+      status: 502,
+      code: "invalid_sse_terminal",
+      type: "invalid_sse_terminal",
+    });
+    expect((observed as { headers?: Headers }).headers?.get(CODEX_TRANSPORT_ERROR_HEADER)).toBe(
+      "1",
+    );
+  });
+});
 
 // A host exposing the built-in OpenAI provider plus Fireworks (the `chat` wire
 // API) serving GLM 5.2, mirroring the canonical example in

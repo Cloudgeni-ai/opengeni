@@ -263,15 +263,17 @@ function establishedSandbox(client: unknown, session: unknown): EstablishedSandb
 function localSession() {
   return {
     exec: async (args: Record<string, unknown>) => {
-      const process = Bun.spawn(["bash", "-lc", String(args.cmd)], {
-        cwd: String(args.workdir ?? "/workspace"),
+      const child = Bun.spawn(["bash", "-lc", String(args.cmd)], {
+        // The unit harness has no sandbox-mounted /workspace; execution semantics
+        // are independent of that provider-owned working directory.
+        cwd: process.cwd(),
         stdout: "pipe",
         stderr: "pipe",
       });
       const [exitCode, stdout, stderr] = await Promise.all([
-        process.exited,
-        new Response(process.stdout).text(),
-        new Response(process.stderr).text(),
+        child.exited,
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
       ]);
       return { exitCode, output: [stdout, stderr].filter(Boolean).join("\n") };
     },

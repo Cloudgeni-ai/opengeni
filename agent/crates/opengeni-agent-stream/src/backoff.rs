@@ -1,7 +1,7 @@
 //! Full-jitter exponential backoff for stream-channel reconnects.
 //!
 //! A relay blip must re-register the channel WITHOUT triggering a reconnect storm
-//! (the named #1 outage cause, dossier §10.6/§19). [`ChannelBackoff`] is the
+//! (the named #1 outage cause). [`ChannelBackoff`] is the
 //! stream-plane peer of the agent supervisor's backoff: the same "full jitter"
 //! strategy (each delay a uniform draw in `[0, min(cap, base·2ⁿ)]`), so a fleet of
 //! channels re-registering after a relay pod death spreads across the window.

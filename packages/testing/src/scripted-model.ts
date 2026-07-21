@@ -101,6 +101,41 @@ export function functionCall(
   } as AgentOutputItem;
 }
 
+export type LatestExecCommandState =
+  | { status: "running"; sessionId: number; occurrence: number; index: number }
+  | { status: "exited"; index: number }
+  | null;
+
+/**
+ * Recover the latest provider exec banner from a serialized model request.
+ * Conversation history retains older running banners after a later write_stdin
+ * observes completion, so comparing the final banner positions is mandatory:
+ * blindly matching any session id restarts polling a process that already
+ * exited. The occurrence count gives scripted models a deterministic unique
+ * tool-call suffix while the same session remains live across several polls.
+ */
+export function latestExecCommandState(body: string): LatestExecCommandState {
+  const matches = [...body.matchAll(/Process running with session ID (\d+)/gu)];
+  const latestRunning = matches.at(-1);
+  const latestRunningIndex = latestRunning?.index ?? -1;
+  const latestExitIndex = body.lastIndexOf("Process exited with code ");
+  const latestLostIndex = body.toLowerCase().lastIndexOf("session not found");
+  if (latestRunning && latestRunningIndex > Math.max(latestExitIndex, latestLostIndex)) {
+    const sessionId = Number.parseInt(latestRunning[1]!, 10);
+    if (Number.isSafeInteger(sessionId)) {
+      return {
+        status: "running",
+        sessionId,
+        occurrence: matches.length,
+        index: latestRunningIndex,
+      };
+    }
+  }
+  const terminalIndex = Math.max(latestExitIndex, latestLostIndex);
+  if (terminalIndex >= 0) return { status: "exited", index: terminalIndex };
+  return null;
+}
+
 function responseForStep(step: ScriptedModelStep, callNumber: number): ModelResponse {
   const text = step.outputText ?? step.chunks?.join("") ?? "";
   return {

@@ -151,7 +151,7 @@ describe("sanitizeMcpJsonBody", () => {
       id: 7,
       result: {
         content: [{ type: "text", text: "Action completed." }],
-        structuredContent: { email: "jorgen.sandhaug@gmail.com", name: "Jørgen" },
+        structuredContent: { email: "user@example.com", name: "Example User" },
       },
     });
     const out = JSON.parse(sanitizeMcpJsonBody(call)).result;
@@ -160,8 +160,8 @@ describe("sanitizeMcpJsonBody", () => {
     expect(out.content[0]).toEqual({ type: "text", text: "Action completed." });
     expect(out.content[1].type).toBe("text");
     expect(JSON.parse(out.content[1].text)).toEqual({
-      email: "jorgen.sandhaug@gmail.com",
-      name: "Jørgen",
+      email: "user@example.com",
+      name: "Example User",
     });
   });
 

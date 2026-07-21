@@ -35,13 +35,23 @@ async function hangWithoutHeartbeating(): Promise<{ status: string }> {
   throw new Error("unreachable simulated dead worker completion");
 }
 
-// Generous bound for the server to detect a missed-heartbeat activity
-// (2-minute heartbeat window + server detection slack) plus the rest of the
-// test. This timeout does not change runtime behavior; it only prevents a slow
-// CI host from killing the real heartbeat proof just before recovery settles.
-const workerDeathTestTimeoutMs = 240_000;
+// The end-to-end ownership chain has two independently bounded phases: the
+// server may spend the full two-minute heartbeat window detecting the dead turn
+// worker, then the control-plane recovery activity has its own two-minute
+// start-to-close contract. Leave scheduling and worker-drain slack after both
+// phases so a loaded CI host cannot cancel a valid recovery at the boundary.
+// This finite test ceiling does not change either runtime timeout.
+const workerDeathTestTimeoutMs = 360_000;
 
 const temporalWorkflowTestTimeoutMs = 30_000;
+
+// Goal-continuation cases run real workflow timers and activities after the two
+// long heartbeat-recovery proofs. On a loaded shared runner, task polling and
+// worker drain can legitimately exceed the general 30s test ceiling even though
+// the workflow's delay and settlement assertions still pass. Keep a finite,
+// narrowly scoped ceiling so a timed-out test cannot strand its worker and
+// cascade into the following cases; this does not change any runtime timeout.
+const goalContinuationTestTimeoutMs = 60_000;
 
 // continueAsNew tests legitimately span a continueAsNew chain (the handle only
 // resolves on the FINAL run) plus a possible 5s idle-wait window before the
@@ -625,7 +635,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "Steer during an active run supersedes the active attempt and continues queued work",
+    "Steer waits for the activity quiescence receipt then admits one replacement",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -636,7 +646,10 @@ describe("Temporal workflow integration", () => {
       const queuedTurns = [first];
       const runs: WorkflowTestTurn[] = [];
       const controls: unknown[] = [];
+      let cancellationWaitAttemptId: string | null = null;
+      let cancellationWaitPeeks = 0;
       let allowFirstRunToFinish = false;
+      let wakeWorkflow: (() => Promise<void>) | null = null;
       const admission = createTurnAdmission(queuedTurns, async (_input, turn) => {
         runs.push(turn);
         if (runs.length === 1) {
@@ -644,16 +657,32 @@ describe("Temporal workflow integration", () => {
             if (allowFirstRunToFinish) break;
             await Bun.sleep(10);
           }
+          // Model the exact activity-owned boundary: the hard tool fence has
+          // completed, its receipt transaction cleared cancellation-wait, and
+          // the same transaction's outbox now wakes this workflow.
+          cancellationWaitAttemptId = null;
+          await wakeWorkflow?.();
         }
         return { status: "idle" };
       });
+      const peekAdmission = admission.activities.peekSessionWork;
       const worker = await testWorker(nativeConnection, taskQueue, {
         ...admission.activities,
+        peekSessionWork: async () => {
+          if (cancellationWaitAttemptId) {
+            cancellationWaitPeeks += 1;
+            return {
+              kind: "cancellation-wait" as const,
+              attemptId: cancellationWaitAttemptId,
+            };
+          }
+          return await peekAdmission();
+        },
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
-        settleSessionInterruptions: async (input: unknown) => {
+        settleSessionInterruptions: async (input: { attemptId: string }) => {
           controls.push(input);
-          allowFirstRunToFinish = true;
+          cancellationWaitAttemptId = input.attemptId;
           return { action: "continue" as const };
         },
       });
@@ -665,17 +694,168 @@ describe("Temporal workflow integration", () => {
           workflowId,
           args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
         });
+        wakeWorkflow = async () => await handle.signal("queueChanged");
         await waitFor(() => runs.length === 1);
         queuedTurns.push(second);
         await handle.signal("userMessage", second.triggerEventId);
         await handle.signal("sessionControl", "control-event");
+        await waitFor(() => cancellationWaitPeeks > 0);
+        expect(runs).toHaveLength(1);
+        allowFirstRunToFinish = true;
         await waitFor(() => runs.length === 2);
         expect(controls).toEqual([
           { ...scope, sessionId, attemptId: expect.any(String), workflowId },
         ]);
         expect(runs[1]).toEqual(second);
+        await handle.result();
+        expect(runs).toHaveLength(2);
       } finally {
         allowFirstRunToFinish = true;
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "Temporal activity failure never manufactures quiescence or pins workflow completion",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const first = queuedTurn("event-1");
+      const second = queuedTurn("event-2");
+      const queuedTurns = [first];
+      const controls: unknown[] = [];
+      let runs = 0;
+      let cancellationWaitAttemptId: string | null = null;
+      let terminateFirst = false;
+      const admission = createTurnAdmission(queuedTurns, async () => {
+        runs += 1;
+        if (runs === 1) {
+          await waitFor(() => terminateFirst);
+          throw new Error("physical cancellation was not confirmed");
+        }
+        return { status: "idle" };
+      });
+      const peekAdmission = admission.activities.peekSessionWork;
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        ...admission.activities,
+        peekSessionWork: async () =>
+          cancellationWaitAttemptId
+            ? ({
+                kind: "cancellation-wait" as const,
+                attemptId: cancellationWaitAttemptId,
+              } as const)
+            : await peekAdmission(),
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async (input: { attemptId: string }) => {
+          controls.push(input);
+          cancellationWaitAttemptId = input.attemptId;
+          terminateFirst = true;
+          return { action: "continue" as const };
+        },
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.start("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          args: [{ ...scope, sessionId, initialEventId: first.triggerEventId }],
+        });
+        await waitFor(() => runs === 1);
+        queuedTurns.push(second);
+        await handle.signal("userMessage", second.triggerEventId);
+        await handle.signal("sessionControl", "control-event");
+        await handle.result();
+
+        expect(runs).toBe(1);
+        expect(controls).toEqual([
+          { ...scope, sessionId, attemptId: expect.any(String), workflowId },
+        ]);
+      } finally {
+        terminateFirst = true;
+        worker.shutdown();
+        await run;
+      }
+    },
+    temporalWorkflowTestTimeoutMs,
+  );
+
+  test(
+    "an exact quiescence proof survives signalWithStart and DB activity retry exhaustion",
+    async () => {
+      const taskQueue = `workflow-test-${crypto.randomUUID()}`;
+      const scope = workflowScope();
+      const sessionId = crypto.randomUUID();
+      const workflowId = `wf-${crypto.randomUUID()}`;
+      const replacement = queuedTurn("replacement-event");
+      const proof = {
+        ...scope,
+        sessionId,
+        attemptId: crypto.randomUUID(),
+        workflowId,
+        workflowRunId: crypto.randomUUID(),
+        activityId: "old-activity-42",
+      };
+      let waitingForReceipt = true;
+      let receiptAttempts = 0;
+      let replacementRuns = 0;
+      const persistedProofs: Array<typeof proof> = [];
+      const worker = await testWorker(nativeConnection, taskQueue, {
+        peekSessionWork: async () => {
+          if (waitingForReceipt) {
+            return { kind: "cancellation-wait", attemptId: proof.attemptId } as const;
+          }
+          return replacementRuns === 0
+            ? ({ kind: "runnable" } as const)
+            : ({ kind: "idle" } as const);
+        },
+        persistSessionAttemptQuiescence: async (input: typeof proof) => {
+          persistedProofs.push(input);
+          receiptAttempts += 1;
+          // Fail multiple real Temporal activity attempts. The workflow's
+          // unbounded control-activity retry must retain the signal-owned proof
+          // and may not peek/admit replacement work until this succeeds.
+          if (receiptAttempts < 3) throw new Error("receipt database unavailable");
+          waitingForReceipt = false;
+        },
+        runAgentTurn: async (input: { attemptId: string }) => {
+          replacementRuns += 1;
+          return {
+            status: "idle" as const,
+            turnId: replacement.id,
+            attemptId: input.attemptId,
+          };
+        },
+        markSessionIdle: async () => undefined,
+        failSessionAttempt: async () => undefined,
+        settleSessionInterruptions: async () => ({ action: "continue" as const }),
+      });
+      const run = worker.run();
+      try {
+        const client = new Client({ connection });
+        const handle = await client.workflow.signalWithStart("sessionWorkflow", {
+          taskQueue,
+          workflowId,
+          workflowIdReusePolicy: "ALLOW_DUPLICATE",
+          args: [{ ...scope, sessionId }],
+          signal: "sessionAttemptQuiesced",
+          signalArgs: [proof],
+        });
+        // A duplicate transport signal in the same run is coalesced; the
+        // control activity's own retries still execute until the DB succeeds.
+        await handle.signal("sessionAttemptQuiesced", proof);
+        await handle.result();
+
+        expect(receiptAttempts).toBe(3);
+        expect(persistedProofs).toEqual([proof, proof, proof]);
+        expect(replacementRuns).toBe(1);
+      } finally {
         worker.shutdown();
         await run;
       }
@@ -788,7 +968,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
@@ -838,7 +1018,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(
@@ -895,7 +1075,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    goalContinuationTestTimeoutMs,
   );
 
   test(

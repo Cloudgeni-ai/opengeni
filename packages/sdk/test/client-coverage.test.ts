@@ -631,12 +631,14 @@ describe("OpenGeniClient github", () => {
     await client.getGitHubApp(WORKSPACE_ID);
     await client.listGitHubRepositories(WORKSPACE_ID);
     await client.syncGitHubRepositories(WORKSPACE_ID);
+    await client.unlinkGitHubInstallation(WORKSPACE_ID, 123);
     await client.createGitHubAppManifest(WORKSPACE_ID, { organization: "acme" });
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
       [
         `GET /v1/workspaces/${WORKSPACE_ID}/github/app`,
         `GET /v1/workspaces/${WORKSPACE_ID}/github/repositories`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/repositories/sync`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/github/installations/123`,
         `POST /v1/workspaces/${WORKSPACE_ID}/github/app-manifest`,
       ],
     );

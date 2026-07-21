@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Cross-stack round-trip driver (the M0 acceptance, dossier V11).
+# Cross-stack protobuf round-trip driver.
 #
 # Sequences the two halves so BOTH fixtures exist for the bidirectional check:
 #

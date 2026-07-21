@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { buildAgentCapabilities, buildOpenGeniAgent } from "../src/index";
+import {
+  buildAgentCapabilities,
+  buildOpenGeniAgent,
+  type TurnToolCancellationFence,
+} from "../src/index";
 
 function capabilityTypes(settings: Parameters<typeof buildAgentCapabilities>[0]): string[] {
   return buildAgentCapabilities(settings, []).map(
@@ -17,6 +21,36 @@ describe("portable local compaction capability boundary", () => {
       expect(types).toContain("shell");
       expect(types).toContain("skills");
     }
+  });
+});
+
+describe("turn sandbox-tool cancellation boundary", () => {
+  test("buildOpenGeniAgent installs and exposes one shared physical tool fence", async () => {
+    const abort = new AbortController();
+    let fence: TurnToolCancellationFence | null = null;
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "local", webSearchEnabled: false }),
+      [],
+      {
+        turnCancellationSignal: abort.signal,
+        onToolCancellationFence: (value) => {
+          fence = value;
+        },
+      },
+    );
+    const capabilities = (agent as unknown as { capabilities: Array<Record<string, unknown>> })
+      .capabilities;
+
+    expect(fence).not.toBeNull();
+    expect(capabilities.map((capability) => capability.type)).toEqual([
+      "filesystem",
+      "shell",
+      "skills",
+    ]);
+    expect(capabilities.every((capability) => Object.hasOwn(capability, "tools"))).toBe(true);
+
+    abort.abort(new Error("steered"));
+    await fence!.waitForQuiescence();
   });
 });
 

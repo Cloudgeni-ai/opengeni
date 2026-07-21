@@ -114,7 +114,7 @@ export const SANDBOX_REQUIRED_ENV: Record<SandboxBackend, SandboxEnvBackendSpec>
   selfhosted: { required: [], optional: [] },
 };
 
-// Sandbox-surfacing runtime env (the desktop/Channel-A giga-PR). These are
+// sandbox workspace runtime env (the desktop/Channel-A feature rollout). These are
 // recognized by the runtime-artifacts generator so a surfacing-enabled
 // deployment (e.g. preview) carries them into the opengeni-runtime secret, but
 // they are all passthroughs (emitted only when set) — none are required, so
@@ -2122,7 +2122,7 @@ function runtimeEnvValues(
     entries.push(valueEnv(key, env[key]));
   }
 
-  // Sandbox-surfacing passthroughs (the desktop/Channel-A giga-PR). These are
+  // sandbox workspace passthroughs (the desktop/Channel-A feature rollout). These are
   // recognized runtime env vars so a surfacing-enabled deployment carries them
   // into runtime.env, but they are valueEnv passthroughs (emitted only when set,
   // never forced into missingEnvVars): OPENGENI_STREAM_TOKEN_SECRET gracefully

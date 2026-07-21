@@ -37,7 +37,7 @@ The agent reaches a user's machine via one trusted line and keeps itself current
   **verifies it two ways** — a minisign signature against a public key **pinned in
   the script body** + a sha256 — then installs to a per-user path and prints the
   enroll+run command. It installs **no service by default** (foreground `run` is
-  the default run model, dossier §23.0) and contains **no secrets**. Read it before
+  the default run model) and contains **no secrets**. Read it before
   piping. `OPENGENI_INSTALL_BASE_URL` overrides the asset base (e.g. a local mock
   dir or the direct GitHub-Releases URL). [`install/uninstall.sh`](install/uninstall.sh)
   removes it (`--purge` also deletes credentials + deactivates the enrollment).

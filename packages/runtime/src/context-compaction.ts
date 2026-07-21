@@ -8,7 +8,11 @@
  * from the active model-facing history; the database audit rows remain.
  */
 
-import { TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE } from "./history-sanitizer";
+import {
+  TOOL_CALL_RESULT_TYPE_BY_CALL_TYPE,
+  sanitizeHistoryItemsForModel,
+} from "./history-sanitizer";
+import { boundModelToolOutputItem } from "@opengeni/codex";
 import { createHash } from "node:crypto";
 
 export type CompactionItem = Record<string, unknown>;
@@ -102,9 +106,24 @@ export function isEphemeralInternalContext(item: unknown): boolean {
 }
 
 /**
- * Rough token estimate for an item: char/4 over its serialized text. Used for
- * the pre-first-call signal and the retained user-message budget.
+ * Conservative tokenizer-independent text estimate used for every local input
+ * budget. Preserve the stable ASCII `chars / 4` heuristic, but never discount
+ * Unicode as UTF-16 length/4: each non-ASCII code unit costs at least one token
+ * (CJK ≈ 1/code point; an astral emoji's surrogate pair ≈ 2). This intentionally
+ * errs toward compaction rather than letting multilingual current input exceed
+ * a provider context window before an authoritative usage anchor exists.
  */
+export function estimateTextTokens(text: string): number {
+  let asciiCodeUnits = 0;
+  let nonAsciiCodeUnits = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) <= 0x7f) asciiCodeUnits += 1;
+    else nonAsciiCodeUnits += 1;
+  }
+  return nonAsciiCodeUnits + Math.ceil(asciiCodeUnits / 4);
+}
+
+/** Serialized-item estimate for pre-call accounting and retained user budgets. */
 export function estimateItemTokens(item: CompactionItem): number {
   let text: string;
   try {
@@ -112,7 +131,7 @@ export function estimateItemTokens(item: CompactionItem): number {
   } catch {
     text = String(item);
   }
-  return Math.ceil(text.length / 4);
+  return estimateTextTokens(text);
 }
 
 export function estimateTokens(items: readonly CompactionItem[]): number {
@@ -130,7 +149,7 @@ export function estimateSerializedValueTokens(value: unknown): number {
   } catch {
     serialized = String(value);
   }
-  return Math.ceil(Buffer.byteLength(serialized ?? "", "utf8") / 4);
+  return estimateTextTokens(serialized ?? "");
 }
 
 export type CompleteModelInputFootprint = {
@@ -282,15 +301,35 @@ export function decideCompaction(input: {
   // is available in the per-call guard.
   const signalTokens = Math.max(recorded, activeHistoryEstimate);
   if (input.items.length === 0) {
-    return { shouldCompact: false, reason: "no_history", signalTokens, thresholdTokens };
+    return {
+      shouldCompact: false,
+      reason: "no_history",
+      signalTokens,
+      thresholdTokens,
+    };
   }
   if (input.force) {
-    return { shouldCompact: true, reason: "force", signalTokens, thresholdTokens };
+    return {
+      shouldCompact: true,
+      reason: "force",
+      signalTokens,
+      thresholdTokens,
+    };
   }
   if (signalTokens >= thresholdTokens) {
-    return { shouldCompact: true, reason: "above_threshold", signalTokens, thresholdTokens };
+    return {
+      shouldCompact: true,
+      reason: "above_threshold",
+      signalTokens,
+      thresholdTokens,
+    };
   }
-  return { shouldCompact: false, reason: "below_threshold", signalTokens, thresholdTokens };
+  return {
+    shouldCompact: false,
+    reason: "below_threshold",
+    signalTokens,
+    thresholdTokens,
+  };
 }
 
 export class CompactionNeededError extends Error {
@@ -396,6 +435,98 @@ export function buildCompactionPromptInput(items: readonly CompactionItem[]): Co
   ];
 }
 
+export type PreparedCompactionPromptInput = {
+  input: CompactionItem[];
+  estimatedInputTokens: number;
+  rewrittenToolOutputs: number;
+  droppedHistoryItems: number;
+};
+
+/**
+ * Fit the explicit checkpoint request without mutating canonical history.
+ *
+ * Codex first replaces oversized tool outputs in its temporary remote-
+ * compaction input. OpenGeni does the same oldest-first, preserving the most
+ * recent tool detail for the plaintext summary. If that is still insufficient,
+ * whole oldest user-delimited work units are removed and the remaining suffix
+ * is protocol-sanitized so no call/result/reasoning fragment is orphaned.
+ * The raw active history is still the source for the eventual replacement and
+ * remains unchanged if the provider call fails.
+ */
+export function prepareCompactionPromptInput(
+  items: readonly CompactionItem[],
+  maxInputTokens: number,
+): PreparedCompactionPromptInput {
+  const budget = Math.max(0, Math.floor(maxInputTokens));
+  let history = items.slice();
+  let estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
+  let rewrittenToolOutputs = 0;
+
+  for (let index = 0; index < history.length && estimatedInputTokens > budget; index += 1) {
+    const current = history[index]!;
+    const replacement = minimalToolResultForCompaction(current);
+    if (replacement === current) continue;
+    const before = estimateItemTokens(current);
+    const after = estimateItemTokens(replacement);
+    if (after >= before) continue;
+    history[index] = replacement;
+    estimatedInputTokens -= before - after;
+    rewrittenToolOutputs += 1;
+  }
+
+  const beforeDropLength = history.length;
+  if (estimatedInputTokens > budget && history.length > 0) {
+    const prefixTokens = new Array<number>(history.length + 1).fill(0);
+    for (let index = 0; index < history.length; index += 1) {
+      prefixTokens[index + 1] = prefixTokens[index]! + estimateItemTokens(history[index]!);
+    }
+    const cuts = oldestLogicalUnitCuts(history);
+    const cut =
+      cuts.find((candidate) => estimatedInputTokens - prefixTokens[candidate]! <= budget) ??
+      history.length;
+    history = sanitizeHistoryItemsForModel(history.slice(cut));
+    estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
+    // The synthesized checkpoint instruction is the irreducible floor. The
+    // real model budgets are far above it, but keep the helper total for tests
+    // and malformed configuration instead of constructing invalid fragments.
+    if (estimatedInputTokens > budget) {
+      history = [];
+      estimatedInputTokens = estimateTokens(buildCompactionPromptInput(history));
+    }
+  }
+
+  return {
+    input: buildCompactionPromptInput(history),
+    estimatedInputTokens,
+    rewrittenToolOutputs,
+    droppedHistoryItems: beforeDropLength - history.length,
+  };
+}
+
+function minimalToolResultForCompaction(item: CompactionItem): CompactionItem {
+  const type = itemType(item);
+  if (!type || !RESULT_TYPES.has(type)) return item;
+  if (type === "tool_search_output" && Array.isArray(item.tools) && item.tools.length > 0) {
+    return { ...item, tools: [] };
+  }
+  return boundModelToolOutputItem(item, 0);
+}
+
+function oldestLogicalUnitCuts(items: readonly CompactionItem[]): number[] {
+  const userMessageIndexes: number[] = [];
+  for (let index = 0; index < items.length; index += 1) {
+    if (isUserMessage(items[index])) userMessageIndexes.push(index);
+  }
+  const cuts: number[] = [];
+  if (userMessageIndexes.length === 0) {
+    return [items.length];
+  }
+  if (userMessageIndexes[0]! > 0) cuts.push(userMessageIndexes[0]!);
+  for (const index of userMessageIndexes.slice(1)) cuts.push(index);
+  cuts.push(items.length);
+  return cuts;
+}
+
 /**
  * Build the active history after compaction:
  * the newest real user messages that fit one cumulative 20k-token budget
@@ -412,7 +543,7 @@ export function buildCompactionReplacementHistory(
     if (!isUserMessage(item) || isCompactionSummary(item)) {
       continue;
     }
-    const textTokens = estimatedTextTokens(messageText(item));
+    const textTokens = estimateTextTokens(messageText(item));
     retainedReversed.push(compactMessageToTokenBudget(item, remaining));
     if (textTokens > remaining) {
       remaining = 0;
@@ -476,7 +607,7 @@ export function buildSummaryItem(summaryBody: string): CompactionItem {
 function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): CompactionItem {
   const text = messageText(item);
   const next = { ...item };
-  if (estimatedTextTokens(text) > maxTokens) {
+  if (estimateTextTokens(text) > maxTokens) {
     next.content = truncateMiddleByEstimatedTokens(text, maxTokens);
     return next;
   }
@@ -484,22 +615,91 @@ function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): C
   return next;
 }
 
-function estimatedTextTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {
-  const maxChars = Math.max(0, maxTokens * 4);
-  if (text.length <= maxChars) {
+  const budget = Math.max(0, Math.floor(maxTokens));
+  if (estimateTextTokens(text) <= budget) {
     return text;
   }
-  if (maxChars <= USER_MESSAGE_TRUNCATION_MARKER.length) {
-    return USER_MESSAGE_TRUNCATION_MARKER.slice(0, maxChars);
+  if (estimateTextTokens(USER_MESSAGE_TRUNCATION_MARKER) > budget) {
+    return tokenBoundedPrefix(USER_MESSAGE_TRUNCATION_MARKER, budget);
   }
-  const keepChars = maxChars - USER_MESSAGE_TRUNCATION_MARKER.length;
-  const headChars = Math.ceil(keepChars / 2);
-  const tailChars = Math.floor(keepChars / 2);
-  return `${text.slice(0, headChars)}${USER_MESSAGE_TRUNCATION_MARKER}${text.slice(text.length - tailChars)}`;
+
+  let low = 0;
+  let high = text.length;
+  let best = USER_MESSAGE_TRUNCATION_MARKER;
+  while (low <= high) {
+    const keepCodeUnits = Math.floor((low + high) / 2);
+    const candidate = middleTruncationCandidate(text, keepCodeUnits);
+    if (estimateTextTokens(candidate) <= budget) {
+      best = candidate;
+      low = keepCodeUnits + 1;
+    } else {
+      high = keepCodeUnits - 1;
+    }
+  }
+  return best;
+}
+
+function middleTruncationCandidate(text: string, keepCodeUnits: number): string {
+  const headTarget = Math.ceil(keepCodeUnits / 2);
+  const tailTarget = Math.floor(keepCodeUnits / 2);
+  const headEnd = validPrefixBoundary(text, headTarget);
+  const tailStart = validSuffixBoundary(text, text.length - tailTarget);
+  return `${text.slice(0, headEnd)}${USER_MESSAGE_TRUNCATION_MARKER}${text.slice(tailStart)}`;
+}
+
+function tokenBoundedPrefix(text: string, maxTokens: number): string {
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const target = Math.floor((low + high) / 2);
+    const end = validPrefixBoundary(text, target);
+    const candidate = text.slice(0, end);
+    if (estimateTextTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = target + 1;
+    } else {
+      high = target - 1;
+    }
+  }
+  return best;
+}
+
+/** Largest boundary at or below target that does not split a surrogate pair. */
+function validPrefixBoundary(text: string, target: number): number {
+  let boundary = Math.max(0, Math.min(text.length, target));
+  if (
+    boundary > 0 &&
+    boundary < text.length &&
+    isHighSurrogate(text.charCodeAt(boundary - 1)) &&
+    isLowSurrogate(text.charCodeAt(boundary))
+  ) {
+    boundary -= 1;
+  }
+  return boundary;
+}
+
+/** Smallest boundary at or above target that does not split a surrogate pair. */
+function validSuffixBoundary(text: string, target: number): number {
+  let boundary = Math.max(0, Math.min(text.length, target));
+  if (
+    boundary > 0 &&
+    boundary < text.length &&
+    isHighSurrogate(text.charCodeAt(boundary - 1)) &&
+    isLowSurrogate(text.charCodeAt(boundary))
+  ) {
+    boundary += 1;
+  }
+  return boundary;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function contentWithoutImages(item: CompactionItem): unknown {

@@ -15,6 +15,8 @@ import {
   CAPABILITY_DESCRIPTORS,
   isClearedRunStateBlob,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
+  sessionEventMediaPreview,
+  sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
   type GitCredentialProvider,
   type McpServerConnectionRef,
@@ -22,6 +24,7 @@ import {
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
+  type SessionEventMediaPreview,
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -140,10 +143,19 @@ import {
   setSelfhostedApplyDiff,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+  wrapCapabilityToolsForTurnCancellation,
+  type TurnSandboxCommandArgs,
+  type TurnSandboxCommandSession,
+  type TurnToolCancellationFence,
+} from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 
 export type { RuntimeMetricsHooks } from "./metrics";
+export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -207,6 +219,7 @@ export {
   findCompactionNeededError,
   isCompactionSummary,
   latestCompactionReplacementFingerprint,
+  prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
   estimateItemTokens,
@@ -225,7 +238,11 @@ export {
   isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
-export type { CompactionDecision, CompactionItem } from "./context-compaction";
+export type {
+  CompactionDecision,
+  CompactionItem,
+  PreparedCompactionPromptInput,
+} from "./context-compaction";
 export { modelCallUsageTelemetry } from "./usage-telemetry";
 export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
@@ -902,12 +919,15 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
   let code: string | null = null;
   let type: string | null = null;
   let requestId: string | null = null;
+  let eventType: string | null = null;
   const seen = new Set<object>();
   for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
     if (seen.has(current)) break;
     seen.add(current);
     const record = current as Record<string, unknown>;
-    if (!errorName && current instanceof Error) errorName = current.name;
+    if (!errorName && current instanceof Error) {
+      errorName = boundCompactionDiagnosticField(current.name);
+    }
     if (
       httpStatus === null &&
       typeof record.status === "number" &&
@@ -916,28 +936,63 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
       httpStatus = record.status;
     }
     if (responseStatus === null && typeof record.status === "string") {
-      responseStatus = record.status;
+      responseStatus = boundCompactionDiagnosticField(record.status);
     }
-    if (responseId === null && typeof record.id === "string") responseId = record.id;
-    if (code === null && typeof record.code === "string") code = record.code;
-    if (type === null && typeof record.type === "string") type = record.type;
+    const directResponseStatus = record.response_status ?? record.responseStatus;
+    if (responseStatus === null && typeof directResponseStatus === "string") {
+      responseStatus = boundCompactionDiagnosticField(directResponseStatus);
+    }
+    const directResponseId = record.response_id ?? record.responseId ?? record.id;
+    if (responseId === null && typeof directResponseId === "string") {
+      responseId = boundCompactionDiagnosticField(directResponseId);
+    }
+    if (code === null && typeof record.code === "string") {
+      code = boundCompactionDiagnosticField(record.code);
+    }
+    if (type === null && typeof record.type === "string") {
+      type = boundCompactionDiagnosticField(record.type);
+    }
+    const directEventType = record.event_type ?? record.eventType;
+    if (eventType === null && typeof directEventType === "string") {
+      eventType = boundCompactionDiagnosticField(directEventType);
+    }
     if (requestId === null) {
       const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
-      if (typeof directRequestId === "string") requestId = directRequestId;
+      if (typeof directRequestId === "string") {
+        requestId = boundCompactionDiagnosticField(directRequestId);
+      }
       const headers = record.headers;
       if (!requestId && headers && typeof headers === "object") {
         const get = (headers as { get?: unknown }).get;
         if (typeof get === "function") {
           const headerId = get.call(headers, "x-request-id");
-          if (typeof headerId === "string") requestId = headerId;
+          if (typeof headerId === "string") {
+            requestId = boundCompactionDiagnosticField(headerId);
+          }
         }
       }
     }
     const nestedError = record.error;
     if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
       const nested = nestedError as Record<string, unknown>;
-      if (code === null && typeof nested.code === "string") code = nested.code;
-      if (type === null && typeof nested.type === "string") type = nested.type;
+      if (code === null && typeof nested.code === "string") {
+        code = boundCompactionDiagnosticField(nested.code);
+      }
+      if (type === null && typeof nested.type === "string") {
+        type = boundCompactionDiagnosticField(nested.type);
+      }
+      const nestedResponseStatus = nested.response_status ?? nested.responseStatus;
+      if (responseStatus === null && typeof nestedResponseStatus === "string") {
+        responseStatus = boundCompactionDiagnosticField(nestedResponseStatus);
+      }
+      const nestedResponseId = nested.response_id ?? nested.responseId ?? nested.id;
+      if (responseId === null && typeof nestedResponseId === "string") {
+        responseId = boundCompactionDiagnosticField(nestedResponseId);
+      }
+      const nestedEventType = nested.event_type ?? nested.eventType;
+      if (eventType === null && typeof nestedEventType === "string") {
+        eventType = boundCompactionDiagnosticField(nestedEventType);
+      }
     }
     current = record.cause;
   }
@@ -949,7 +1004,24 @@ export function compactionProviderFailureDiagnostics(error: unknown): Record<str
     code,
     type,
     requestId,
+    ...(eventType ? { eventType } : {}),
   };
+}
+
+const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
+const COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER = "…[truncated]";
+
+function boundCompactionDiagnosticField(value: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES) return value;
+  const markerBytes = Buffer.byteLength(COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER, "utf8");
+  let end = COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES - markerBytes;
+  while (end > 0 && isUtf8ContinuationByte(bytes[end]!)) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER}`;
+}
+
+function isUtf8ContinuationByte(value: number): boolean {
+  return (value & 0xc0) === 0x80;
 }
 
 /** Bounded, content-free diagnostics for a semantically empty checkpoint. */
@@ -1205,6 +1277,18 @@ export type BuildAgentOptions = {
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  /**
+   * Internal per-attempt cancellation boundary. The worker supplies Temporal's
+   * signal so an in-flight shell process is interrupted immediately instead of
+   * holding Steer/Pause behind its requested yield or natural exit.
+   */
+  turnCancellationSignal?: AbortSignal;
+  /**
+   * Receives the physical sandbox-tool fence at agent construction time. A
+   * cancelled/fenced worker attempt must await it before publishing its durable
+   * attempt-quiesced receipt.
+   */
+  onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
 export type PackSkillFile = {
@@ -1591,6 +1675,12 @@ export function buildOpenGeniAgent(
         ? { computerToolMode: options.computerToolMode }
         : {}),
       ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
+      ...(options.turnCancellationSignal
+        ? { turnCancellationSignal: options.turnCancellationSignal }
+        : {}),
+      ...(options.onToolCancellationFence
+        ? { onToolCancellationFence: options.onToolCancellationFence }
+        : {}),
     }),
   });
   if (options.genesisTitleHint) {
@@ -1889,8 +1979,15 @@ export function buildAgentCapabilities(
     // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
     computerToolMode?: ComputerToolMode;
     onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+    turnCancellationSignal?: AbortSignal;
+    onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
+  const toolCancellation =
+    options.turnCancellationSignal || options.onToolCancellationFence
+      ? createTurnToolCancellationController(options.turnCancellationSignal)
+      : null;
+  if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
   // bound model instance (supportsApplyPatchTransport / structured tool output).
   // When the caller declares the backend does NOT support that structured/hosted
@@ -1909,7 +2006,7 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
-    shell({ configureTools: withExecOpCorrelation }),
+    shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
   ];
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
@@ -1962,6 +2059,14 @@ export function buildAgentCapabilities(
       neutralizeStructuredToolTransport(computerCapability);
     }
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
+  }
+  if (toolCancellation) {
+    for (const capability of caps) {
+      wrapCapabilityToolsForTurnCancellation(
+        capability as unknown as { tools(): Tool<unknown>[] },
+        toolCancellation,
+      );
+    }
   }
   return caps;
 }
@@ -3048,6 +3153,13 @@ export type RunAgentStreamOptions = {
     // after establish, so runAgentStream must not run it eagerly here.
     deferredSetup?: boolean;
   };
+  /**
+   * The attempt's authoritative physical sandbox-operation fence. Platform
+   * lifecycle commands use its command runner too, so Steer/Pause can interrupt
+   * repository clone, rig setup, file materialization, and credential seeding
+   * before the attempt-quiesced receipt opens queue admission.
+   */
+  turnToolCancellationFence?: TurnToolCancellationFence;
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
   // directive: a callModelInputFilter mutates only `modelData.input` for each
@@ -3340,6 +3452,13 @@ export async function runAgentStream(
           ? { fileDownloadsMaterialized: true }
           : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        ...(overrides.turnToolCancellationFence
+          ? {
+              commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
+                overrides.turnToolCancellationFence,
+              ),
+            }
+          : {}),
       });
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
@@ -3350,6 +3469,13 @@ export async function runAgentStream(
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
             ...(runAs ? { runAs } : {}),
+            ...(overrides.turnToolCancellationFence
+              ? {
+                  commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
+                    overrides.turnToolCancellationFence,
+                  ),
+                }
+              : {}),
           })
         : (ownedClient as SandboxClient);
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
@@ -3892,6 +4018,7 @@ export async function runOwnedSandboxSetup(
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
   const { settings, environment } = opts;
@@ -3937,6 +4064,7 @@ export async function runOwnedSandboxSetup(
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+    ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -3956,6 +4084,7 @@ export async function runOwnedSandboxSetup(
       const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
         ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
         ...(runAs ? { runAs } : {}),
+        ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
       });
       if (opts.preparedInput) {
         appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
@@ -3989,7 +4118,7 @@ function mergePathGrants(
 export function withSandboxFileDownloads(
   client: SandboxClient,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
 ): SandboxClient {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -4055,7 +4184,7 @@ export function withSandboxFileDownloads(
 export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
 ): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -4093,27 +4222,24 @@ export async function materializeSandboxFileDownloads(
     }
     let result: unknown;
     try {
-      result = session.exec
-        ? await session.exec({
-            cmd: sandboxFileDownloadCommand(download, targetPath),
-            workdir: "/workspace",
-            ...(context.runAs ? { runAs: context.runAs } : {}),
-            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-            maxOutputTokens: 20_000,
-          })
-        : await session.execCommand!({
-            cmd: sandboxFileDownloadCommand(download, targetPath),
-            workdir: "/workspace",
-            ...(context.runAs ? { runAs: context.runAs } : {}),
-            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-            maxOutputTokens: 20_000,
-          });
+      result = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: sandboxFileDownloadCommand(download, targetPath),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 20_000,
+        },
+        context.commandRunner,
+      );
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.completed",
         payload: { name: "file-resource-download", ...payload },
       });
     } catch (error) {
+      if (error instanceof TurnSandboxCommandCancelledError) throw error;
       const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
       failures.push(failure);
       await context.onRuntimeEvent?.({
@@ -4190,86 +4316,87 @@ function ensureManifest(
   });
 }
 
-/** Coerce the various binary shapes a tool-output image `data` field can take into
- *  a Uint8Array. Handles a live `Uint8Array`, a plain number[] , and the
- *  object-of-numbers (`{"0":137,"1":80,…}`) that a `Uint8Array` degrades into after
- *  a JSON round-trip — the exact 10x-bloat shape this normalizer exists to kill. */
-function toImageBytes(data: unknown): Uint8Array | null {
-  if (data instanceof Uint8Array) {
-    return data;
-  }
-  if (Array.isArray(data)) {
-    return data.every((n) => typeof n === "number") ? Uint8Array.from(data as number[]) : null;
-  }
-  if (data && typeof data === "object") {
-    const values = Object.values(data as Record<string, unknown>);
-    if (values.length > 0 && values.every((n) => typeof n === "number")) {
-      return Uint8Array.from(values as number[]);
-    }
-  }
-  return null;
+function base64DecodedByteLength(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
 }
 
-/** Compact a structured image tool output — the SDK's `{type:'image', image:{data,mediaType}}`
- *  shape (produced by the codex-path `computer_screenshot` function tool) OR the already-
- *  normalized protocol `{type:'input_image', image:'data:…'}` item — into a `data:<mt>;base64,…`
- *  string. Returns null when `value` is not an image output. */
-function structuredImageToDataUrl(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+/** Determine image byte length without allocating another binary/base64 copy. */
+function imageDataByteLength(data: unknown): number | null {
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (Array.isArray(data)) {
+    return data.every((value) => typeof value === "number") ? data.length : null;
   }
-  const v = value as { type?: unknown; image?: unknown };
-  if (v.type === "input_image") {
-    // Protocol item: `image` is already a `data:…` (or plain URL) string.
-    return typeof v.image === "string" && v.image.length > 0 ? v.image : null;
+  if (!data || typeof data !== "object") return null;
+  const record = data as Record<string, unknown>;
+  if (record.type === "Buffer" && Array.isArray(record.data)) {
+    return record.data.every((value) => typeof value === "number") ? record.data.length : null;
   }
-  if (v.type !== "image" || !v.image || typeof v.image !== "object") {
-    return null;
+  const keys = Object.keys(record);
+  return keys.length > 0 &&
+    keys.every((key) => /^\d+$/.test(key) && typeof record[key] === "number")
+    ? keys.length
+    : null;
+}
+
+/**
+ * Convert one image-shaped tool result into a content-free audit fact. This is
+ * intentionally different from model history: the model keeps its structured
+ * image item, while `session_events` never becomes an implicit image blob store.
+ */
+function toolOutputMediaPreview(value: unknown): SessionEventMediaPreview | null {
+  if (typeof value === "string") {
+    return sessionEventMediaPreviewFromDataUrl(value);
   }
-  const image = v.image as {
-    data?: unknown;
-    mediaType?: unknown;
-    url?: unknown;
-  };
-  if (typeof image.url === "string" && image.url.length > 0) {
-    return image.url;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.type === "input_image") {
+    const source = record.image ?? record.image_url ?? record.imageUrl;
+    const url =
+      typeof source === "string"
+        ? source
+        : source && typeof source === "object"
+          ? (source as Record<string, unknown>).url
+          : null;
+    if (typeof url !== "string" || url.length === 0) return null;
+    return sessionEventMediaPreviewFromDataUrl(url) ?? sessionEventMediaPreview("image/*", null);
   }
+  if (record.type !== "image" || !record.image || typeof record.image !== "object") return null;
+  const image = record.image as Record<string, unknown>;
   const mediaType =
     typeof image.mediaType === "string" && image.mediaType.length > 0
       ? image.mediaType
       : "image/png";
-  if (typeof image.data === "string") {
-    return image.data.startsWith("data:") ? image.data : `data:${mediaType};base64,${image.data}`;
+  if (typeof image.url === "string" && image.url.length > 0) {
+    return (
+      sessionEventMediaPreviewFromDataUrl(image.url) ?? sessionEventMediaPreview(mediaType, null)
+    );
   }
-  const bytes = toImageBytes(image.data);
-  return bytes ? `data:${mediaType};base64,${Buffer.from(bytes).toString("base64")}` : null;
+  if (typeof image.data === "string") {
+    return (
+      sessionEventMediaPreviewFromDataUrl(image.data) ??
+      sessionEventMediaPreview(mediaType, base64DecodedByteLength(image.data))
+    );
+  }
+  const byteLength = imageDataByteLength(image.data);
+  return byteLength === null ? null : sessionEventMediaPreview(mediaType, byteLength);
 }
 
 /**
- * Compact a tool-call output for the `agent.toolCall.output` SESSION EVENT so it
- * never carries a raw binary payload. The codex-path `computer_screenshot` function
- * tool returns a structured `{type:'image', image:{data: Uint8Array, mediaType}}`;
- * captured verbatim its `Uint8Array` JSON-serializes as an object-of-numbers (~12.7MB
- * per screenshot in session_events — ~10x the base64 form). This mirrors the desktop
- * screenshot to the SAME compact `data:<mediaType>;base64,…` STRING the HOSTED
- * `computer_call` event already carries (agents-core sets its output to that data-URL),
- * so both computer-use transports emit one representation. The full data-URL is kept
- * (not truncated) because the web timeline RENDERS the screenshot from this event
- * payload — packages/react/src/timeline/tool-renderers.tsx ComputerCallRenderer
- * (`out.startsWith("data:image")` → <ScreenshotFigure src={out}/>) and ViewImageRenderer.
- * Non-image outputs (text strings, MCP `{isError,content}` objects, hosted computer_call
- * data-URL strings) pass through unchanged.
+ * Normalize a tool-call output for the lossy `agent.toolCall.output` audit event.
+ * Inline image bytes/data URLs become a compact `media_preview` with exact byte
+ * length where knowable and `fullOutputAvailable:false`. The model-facing output
+ * is not changed here, and mixed arrays retain their non-image text/error facts.
  */
 export function normalizeToolOutputForEvent(output: unknown): unknown {
-  const single = structuredImageToDataUrl(output);
+  const single = toolOutputMediaPreview(output);
   if (single !== null) {
     return single;
   }
   if (Array.isArray(output)) {
-    const normalized = output.map((el) => structuredImageToDataUrl(el) ?? el);
-    // A lone image content item unwraps to the bare data-URL string the timeline
-    // image renderers expect; a mixed/multi array keeps its (now-compact) shape.
-    if (normalized.length === 1 && typeof normalized[0] === "string") {
+    const normalized = output.map((el) => toolOutputMediaPreview(el) ?? el);
+    if (normalized.length === 1 && normalized[0]?.type === "media_preview") {
       return normalized[0];
     }
     return normalized;
@@ -4326,8 +4453,8 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       type: "agent.toolCall.output",
       payload: {
         id: item.rawItem?.callId ?? item.id ?? null,
-        // Compact any structured/binary image output to a data-URL string so a
-        // screenshot never bloats session_events ~10x as an object-of-numbers.
+        // Inline media becomes a content-free audit fact. Model history keeps
+        // the provider's real structured image output on its separate path.
         output: normalizeToolOutputForEvent(item.output),
       },
     });
@@ -4753,6 +4880,11 @@ function shellQuote(value: string): string {
 
 export type SandboxLifecycleHookPhase = "beforeAgentStart";
 
+export type SandboxLifecycleCommandRunner = (
+  session: TurnSandboxCommandSession,
+  args: TurnSandboxCommandArgs,
+) => Promise<unknown>;
+
 export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -4768,7 +4900,21 @@ export type SandboxLifecycleHookContext = {
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
+  commandRunner?: SandboxLifecycleCommandRunner;
 };
+
+async function runSandboxLifecycleCommand(
+  session: SandboxSessionLike,
+  args: TurnSandboxCommandArgs,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<unknown> {
+  if (commandRunner) {
+    return await commandRunner(session as TurnSandboxCommandSession, args);
+  }
+  if (session.exec) return await session.exec(args);
+  if (session.execCommand) return await session.execCommand(args);
+  throw new Error("Sandbox session does not support command execution");
+}
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
 // script exactly once per box. `versionId` keys the idempotence marker
@@ -5279,7 +5425,7 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
 export async function refreshGitProviderTokenFiles(
   session: GitCredentialTokenWriterSession,
   seeds: GitTokenSeeds,
-  options: { runAs?: string } = {},
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
 ): Promise<void> {
   const command = gitProviderTokenRefreshCommand(seeds);
   if (!command) {
@@ -5292,13 +5438,10 @@ export async function refreshGitProviderTokenFiles(
     yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
     maxOutputTokens: 4_000,
   };
-  if (session.exec) {
-    assertSandboxCommandSucceeded(await session.exec(args), "Git credential refresh");
-  } else if (session.execCommand) {
-    assertSandboxCommandSucceeded(await session.execCommand(args), "Git credential refresh");
-  } else {
-    throw new Error("Sandbox session does not support command execution");
-  }
+  assertSandboxCommandSucceeded(
+    await runSandboxLifecycleCommand(session, args, options.commandRunner),
+    "Git credential refresh",
+  );
 }
 
 export function repositoryCloneCommand(
@@ -5436,27 +5579,18 @@ export async function runToolspaceTokenSeedHook(
     return;
   }
   const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
-  if (session.exec) {
-    const result = await session.exec({
+  const result = await runSandboxLifecycleCommand(
+    session,
+    {
       cmd: command,
       workdir: "/workspace",
       ...(context.runAs ? { runAs: context.runAs } : {}),
       yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
       maxOutputTokens: 4_000,
-    });
-    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
-  } else if (session.execCommand) {
-    const result = await session.execCommand({
-      cmd: command,
-      workdir: "/workspace",
-      ...(context.runAs ? { runAs: context.runAs } : {}),
-      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-      maxOutputTokens: 4_000,
-    });
-    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
-  } else {
-    throw new Error("Sandbox session does not support command execution");
-  }
+    },
+    context.commandRunner,
+  );
+  assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
@@ -5581,13 +5715,7 @@ export async function runRigSetupHook(
   };
   let result: unknown;
   try {
-    if (session.exec) {
-      result = await session.exec(execArgs);
-    } else if (session.execCommand) {
-      result = await session.execCommand(execArgs);
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+    result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
@@ -5671,27 +5799,18 @@ export async function runRepositoryCloneHook(
     const command = seedPrefix
       ? `${seedPrefix}\n${repositoryCloneCommand(resources)}`
       : repositoryCloneCommand(resources);
-    if (session.exec) {
-      const result = await session.exec({
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
         cmd: command,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Repository clone hook");
-    } else if (session.execCommand) {
-      const result = await session.execCommand({
-        cmd: command,
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Repository clone hook");
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, "Repository clone hook");
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
       payload,
@@ -5817,27 +5936,18 @@ export async function runAzureCliLoginHook(
     payload,
   });
   try {
-    if (session.exec) {
-      const result = await session.exec({
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
         cmd: azureCliLoginCommand(),
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Azure CLI login hook");
-    } else if (session.execCommand) {
-      const result = await session.execCommand({
-        cmd: azureCliLoginCommand(),
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Azure CLI login hook");
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, "Azure CLI login hook");
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.completed",
       payload,

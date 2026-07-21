@@ -8,7 +8,7 @@ import {
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
-import { listGitHubInstallationIdsForWorkspace, requireFile, type Database } from "@opengeni/db";
+import { areGitHubRepositoriesAllowedForWorkspace, requireFile, type Database } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
 
 export function validateToolRefs(tools: ToolRef[], settings: Settings): ToolRef[] {
@@ -154,7 +154,23 @@ export function mergeResourceRefs(
 }
 
 export function validateGitHubRepositorySelectionShape(resources: ResourceRef[]): number | null {
-  const selected = resources.flatMap((resource) => {
+  const selected = gitHubRepositorySelections(resources);
+  if (selected.length === 0) {
+    return null;
+  }
+  const installationId = selected[0]!.installationId;
+  if (selected.some((item) => item.installationId !== installationId)) {
+    throw new HTTPException(422, {
+      message: "GitHub App repository resources must belong to one installation",
+    });
+  }
+  return installationId;
+}
+
+function gitHubRepositorySelections(
+  resources: ResourceRef[],
+): Array<{ installationId: number; repositoryId: number }> {
+  return resources.flatMap((resource) => {
     if (resource.kind !== "repository") {
       return [];
     }
@@ -180,16 +196,6 @@ export function validateGitHubRepositorySelectionShape(resources: ResourceRef[])
     }
     return [{ installationId, repositoryId }];
   });
-  if (selected.length === 0) {
-    return null;
-  }
-  const installationId = selected[0]!.installationId;
-  if (selected.some((item) => item.installationId !== installationId)) {
-    throw new HTTPException(422, {
-      message: "GitHub App repository resources must belong to one installation",
-    });
-  }
-  return installationId;
 }
 
 export async function validateGitHubRepositorySelection(
@@ -201,13 +207,20 @@ export async function validateGitHubRepositorySelection(
   if (installationId === null) {
     return;
   }
-  const linkedInstallationIds = new Set(
-    await listGitHubInstallationIdsForWorkspace(db, workspaceId),
+  const repositoryIds = gitHubRepositorySelections(resources).map(
+    (selection) => selection.repositoryId,
   );
-  if (!linkedInstallationIds.has(installationId)) {
+  if (
+    !(await areGitHubRepositoriesAllowedForWorkspace(
+      db,
+      workspaceId,
+      installationId,
+      repositoryIds,
+    ))
+  ) {
     throw new HTTPException(422, {
       message:
-        "GitHub App repository resources must belong to a GitHub App installation linked to this workspace",
+        "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
     });
   }
 }

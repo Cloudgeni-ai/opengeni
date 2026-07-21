@@ -14,9 +14,10 @@
    Tailwind bridge for the canonical @opengeni/react token palette.
    --------------------------------------------------------------------------- */
 @theme {
-  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Inter Variable", "Noto Sans JP Variable", "Noto Sans Arabic Variable",
+    ui-sans-serif, system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular,
-    Menlo, monospace;
+    "Noto Sans JP Variable", "Noto Sans Arabic Variable", Menlo, monospace;
 
   --text-2xs: 0.6875rem;
   --text-2xs--line-height: 1rem;

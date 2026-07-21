@@ -16,10 +16,12 @@ RUN set -eux; \
         git \
         jq \
         openssh-client \
+        procps \
         fuse3 \
         rclone \
         ripgrep \
         unzip \
+        util-linux \
         wget \
     "; \
     for attempt in 1 2 3; do \

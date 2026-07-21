@@ -29,8 +29,10 @@ const exec = promisify(execFile);
 const REPO_ROOT = join(import.meta.dir, "..", "..", "..");
 const DOCKERFILE = "docker/desktop.Dockerfile";
 const IMAGE = "ogtest-desktop";
-const CTR = "ogtest-desktop-p41";
-const HOST_PORT = 56081;
+// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
+// the container name binds the listener contract across worktrees.
+const HOST_PORT = 61445;
+const CTR = `ogtest-desktop-p41-${HOST_PORT}`;
 
 async function dockerAvailable(): Promise<boolean> {
   try {
@@ -106,12 +108,12 @@ beforeAll(async () => {
     return;
   }
   // best-effort clean slate
-  await exec("docker", ["rm", "-f", CTR]).catch(() => undefined);
+  await exec("docker", ["rm", "-f", "-v", CTR]).catch(() => undefined);
 }, 30_000);
 
 afterAll(async () => {
   if (!docker) return;
-  await exec("docker", ["rm", "-f", CTR]).catch(() => undefined);
+  await exec("docker", ["rm", "-f", "-v", CTR]).catch(() => undefined);
   // Remove the image we built (leave it if the build never produced it).
   if (built) {
     await exec("docker", ["image", "rm", "-f", IMAGE]).catch(() => undefined);

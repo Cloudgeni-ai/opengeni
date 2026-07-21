@@ -64,6 +64,7 @@ import type {
   AuthSession,
   ClientConfig,
   CreateWorkspaceRequest,
+  GitHubAppInfo,
   GitHubRepository,
   ResourceRef,
   Session,
@@ -108,7 +109,7 @@ export type AppContextValue = {
   selectedRepoRefs: Record<number, string>;
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
-  githubStatus: { configured: boolean; missing: string[]; installUrl: string | null } | null;
+  githubStatus: GitHubAppInfo | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -157,6 +158,7 @@ export type AppContextValue = {
   ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
+  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
@@ -232,11 +234,7 @@ export function RootRouteComponent() {
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
-  const [githubStatus, setGithubStatus] = useState<{
-    configured: boolean;
-    missing: string[];
-    installUrl: string | null;
-  } | null>(null);
+  const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -657,11 +655,7 @@ export function RootRouteComponent() {
         if (signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubStatus({
-          configured: status.configured,
-          missing: status.missing,
-          installUrl: status.installUrl,
-        });
+        setGithubStatus(status);
         setGithubAppOpen(!status.configured);
         if (status.configured) {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
@@ -681,7 +675,7 @@ export function RootRouteComponent() {
         if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubStatus({ configured: false, missing: [], installUrl: null });
+        setGithubStatus(null);
         setGithubRepos([]);
         toast.error("GitHub status unavailable", { description: String(error) });
       } finally {
@@ -784,6 +778,37 @@ export function RootRouteComponent() {
         description: error instanceof Error ? error.message : String(error),
       });
       setGithubAppBusy(false);
+    }
+  }
+
+  async function disconnectGitHubInstallation(
+    workspaceId: string,
+    installationId: number,
+  ): Promise<void> {
+    try {
+      await client.unlinkGitHubInstallation(workspaceId, installationId);
+      const removedRepositoryIds = new Set(
+        githubRepos
+          .filter((repository) => repository.installationId === installationId)
+          .map((repository) => repository.id),
+      );
+      setSelectedRepoIds(
+        (current) =>
+          new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
+      );
+      setSelectedRepoRefs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([repositoryId]) => !removedRepositoryIds.has(Number(repositoryId)),
+          ),
+        ),
+      );
+      await refreshGitHub(workspaceId, undefined, { sync: true });
+      toast.success("GitHub installation unlinked from this workspace");
+    } catch (error) {
+      toast.error("Failed to unlink GitHub installation", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -908,6 +933,7 @@ export function RootRouteComponent() {
   const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
   const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
   const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
+  const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
   const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
   const contextStartSession = useLatestCallback(startSession);
 
@@ -971,6 +997,7 @@ export function RootRouteComponent() {
           refreshGitHub,
           refreshWorkspaceMcpServers,
           startGitHubAppManifestFlow: contextStartGitHubAppManifestFlow,
+          disconnectGitHubInstallation: contextDisconnectGitHubInstallation,
           toggleGitHubRepository: contextToggleGitHubRepository,
           startSession: contextStartSession,
           resetSessionView,
@@ -993,6 +1020,7 @@ export function RootRouteComponent() {
     contextRenameWorkspace,
     contextSetWorkspaceInferenceControl,
     contextSetWorkspaceDefaultRig,
+    contextDisconnectGitHubInstallation,
     contextStartGitHubAppManifestFlow,
     contextStartSession,
     contextToggleGitHubRepository,

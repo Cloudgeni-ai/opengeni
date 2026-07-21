@@ -23,8 +23,8 @@ import {
 import postgres from "postgres";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const ownerHeaders = { "x-opengeni-subject": "ope26-owner" };
-const otherMemberHeaders = { "x-opengeni-subject": "ope26-other-member" };
+const ownerHeaders = { "x-opengeni-subject": "sessionpin-owner" };
+const otherMemberHeaders = { "x-opengeni-subject": "sessionpin-other-member" };
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
@@ -106,9 +106,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   }, 180_000);
 
   afterAll(async () => {
-    await browser?.close().catch(() => undefined);
-    await web?.stop().catch(() => undefined);
-    api?.stop(true);
+    await Promise.allSettled([browser?.close(), web?.stop()]);
+    // Closing the browser stops new polling first; then drain requests that
+    // already entered the API before closing its database pool. Force-stopping
+    // the listener and immediately ending the pool races those handlers and
+    // turns clean teardown into CONNECTION_ENDED noise (or an unhandled error).
+    await api?.stop(false);
     await dbClient?.close().catch(() => undefined);
     await shared?.release();
   }, 60_000);
@@ -254,11 +257,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await setTheme(pageB, theme);
       await expectNoPageOverflow(pageB);
       await expectNoAxeViolations(pageB, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
+        "[data-sessionpin-session-header]",
+        "[data-sessionpin-session-list]",
       ]);
       await pageB.screenshot({
-        path: `/tmp/ope26-session-pin-desktop-${theme}.png`,
+        path: `/tmp/sessionpin-session-pin-desktop-${theme}.png`,
         fullPage: true,
       });
     }
@@ -645,11 +648,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await expectContainedInViewport(navigation, 320);
       await expectNoPageOverflow(page);
       await expectNoAxeViolations(page, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
+        "[data-sessionpin-session-header]",
+        "[data-sessionpin-session-list]",
       ]);
       await page.screenshot({
-        path: `/tmp/ope26-session-pin-mobile-${theme}.png`,
+        path: `/tmp/sessionpin-session-pin-mobile-${theme}.png`,
         fullPage: true,
       });
 
@@ -675,12 +678,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
-    const raceSecret = "ope26-browser-race-secret";
-    const raceSubject = "configured:ope26-browser-race";
+    const raceSecret = "sessionpin-browser-race-secret";
+    const raceSubject = "configured:sessionpin-browser-race";
     const barrierClass = 81326028;
     const removalLock = 1;
-    const triggerFunction = "ope26_browser_removal_first_barrier";
-    const triggerName = "ope26_browser_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_browser_removal_first_barrier";
+    const triggerName = "sessionpin_browser_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     try {
       await page.goto(webBaseUrl);
@@ -792,12 +795,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
-    const raceSecret = "ope26-browser-pin-race-secret";
-    const raceSubject = "configured:ope26-browser-pin-race";
+    const raceSecret = "sessionpin-browser-pin-race-secret";
+    const raceSubject = "configured:sessionpin-browser-pin-race";
     const barrierClass = 81326031;
     const removalLock = 1;
-    const triggerFunction = "ope26_browser_pin_removal_first_barrier";
-    const triggerName = "ope26_browser_pin_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_browser_pin_removal_first_barrier";
+    const triggerName = "sessionpin_browser_pin_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     try {
       await page.goto(webBaseUrl);
@@ -1138,7 +1141,11 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
     results.violations.map((violation) => ({
       id: violation.id,
       impact: violation.impact,
-      nodes: violation.nodes.map((node) => node.target),
+      nodes: violation.nodes.map((node) => ({
+        target: node.target,
+        failureSummary: node.failureSummary,
+        checks: node.any.map((check) => ({ message: check.message, data: check.data })),
+      })),
     })),
   ).toEqual([]);
 }
