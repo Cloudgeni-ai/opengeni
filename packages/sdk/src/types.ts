@@ -559,6 +559,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.toolCall.output",
   "agent.model.usage",
   "tool.auth_needed",
+  "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
   "rig.setup.completed",

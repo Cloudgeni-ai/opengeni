@@ -52,6 +52,7 @@ import {
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
   ChannelAValidationError,
+  withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
@@ -296,7 +297,7 @@ export async function withChannelA<T>(
       : established.session;
 
     const service = new SandboxChannelAService({
-      session: routedSession as ChannelASession,
+      session: withRunCredentialsSession(routedSession as object, session.id) as ChannelASession,
       leaseEpoch: leaseSnapshot.leaseEpoch,
       emit,
     });

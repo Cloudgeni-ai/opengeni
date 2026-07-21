@@ -12467,6 +12467,64 @@ export type SessionLineage = {
   truncated: boolean;
 };
 
+/**
+ * Resolve a session tree to its root without materializing the full lineage.
+ * Every recursive hop stays workspace-scoped and invalid/cyclic/deep chains
+ * fail closed instead of returning an ambiguous credential authority.
+ */
+export async function getSessionRootId(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      id: string;
+      parentSessionId: string | null;
+      depth: number;
+      cycle: boolean;
+    }>(sql`
+      with recursive lineage(id, parent_session_id, depth, path, cycle) as (
+        select
+          ${schema.sessions.id},
+          ${schema.sessions.parentSessionId},
+          0,
+          array[${schema.sessions.id}],
+          false
+        from ${schema.sessions}
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.id} = ${sessionId}
+        union all
+        select
+          parent.id,
+          parent.parent_session_id,
+          lineage.depth + 1,
+          lineage.path || parent.id,
+          parent.id = any(lineage.path)
+        from ${schema.sessions} parent
+        join lineage on lineage.parent_session_id = parent.id
+        where parent.workspace_id = ${workspaceId}
+          and not lineage.cycle
+          and lineage.depth < 64
+      )
+      select
+        id,
+        parent_session_id as "parentSessionId",
+        depth,
+        cycle
+      from lineage
+      order by depth desc
+      limit 1
+    `);
+    const root = rows[0];
+    if (!root) return null;
+    if (root.cycle || root.parentSessionId !== null || Number(root.depth) >= 64) {
+      throw new Error(`session lineage for ${sessionId} has no valid workspace root`);
+    }
+    return root.id;
+  });
+}
+
 type LineageIdRow = {
   id: string;
   parentSessionId: string | null;

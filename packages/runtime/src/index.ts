@@ -141,6 +141,9 @@ import {
   desktopCapableBackend,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
+  withRunCredentialsClient,
+  withRunCredentialsSession,
+  type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
 import {
@@ -3123,6 +3126,11 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
+  // Host-owned run material is seeded off-manifest before setup and every
+  // agent-created process sources the active immutable generation. The worker
+  // owns resolution/renewal/fencing; runtime owns sandbox transport.
+  runCredentialSessionId?: string;
+  onRunCredentialSessionReady?: RunCredentialSessionReady;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -3422,6 +3430,9 @@ export async function runAgentStream(
     typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
+  if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
+    throw new Error("runCredentialSessionId is required when run credential setup is enabled");
+  }
 
   // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
   // live, externally-owned box. We thread the live `session` straight into
@@ -3440,11 +3451,18 @@ export async function runAgentStream(
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
+    const agentSession = overrides.runCredentialSessionId
+      ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
+      : (session as SandboxSessionLike);
+    const credentialSetupSession = overrides.runCredentialSessionId
+      ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
+      : setupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
     // lazy provisioner. Eager path: runs here, before the run starts (unchanged).
     if (!overrides.ownedSandbox.deferredSetup) {
-      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, setupSession, {
+      await overrides.onRunCredentialSessionReady?.(session as SandboxSessionLike);
+      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, credentialSetupSession, {
         settings,
         environment,
         preparedInput: prepared,
@@ -3504,9 +3522,21 @@ export async function runAgentStream(
       ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
-    // Keep the decoration as a safety net for any session the SDK does create/resume
-    // through the client during this run (it is inert for the provided session).
-    const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
+    // Keep both credential seeding and lifecycle decoration as a safety net for
+    // any session the SDK does create/resume during this run. They are inert for
+    // the provided session, which remains the normal ownership-inverted path.
+    const credentialResourceClient = overrides.runCredentialSessionId
+      ? withRunCredentialsClient(
+          resourceClient,
+          overrides.runCredentialSessionId,
+          overrides.onRunCredentialSessionReady,
+        )
+      : resourceClient;
+    const decoratedClient = withSandboxLifecycleHooks(
+      credentialResourceClient,
+      ownedHooks,
+      ownedHookContext,
+    );
     const ownedFilter = composeCallModelInputFilters(
       [
         callModelInputFilterForSettings(settings),
@@ -3537,7 +3567,7 @@ export async function runAgentStream(
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
-      session,
+      session: agentSession,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
     return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
@@ -3562,14 +3592,22 @@ export async function runAgentStream(
           ...(runAs ? { runAs } : {}),
         })
       : refreshedClient;
+  const credentialClient =
+    resourceClient && overrides.runCredentialSessionId
+      ? withRunCredentialsClient(
+          resourceClient,
+          overrides.runCredentialSessionId,
+          overrides.onRunCredentialSessionReady,
+        )
+      : resourceClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeeds = gitTokenSeedsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = resourceClient
+  const client = credentialClient
     ? withSandboxLifecycleHooks(
-        resourceClient,
+        credentialClient,
         [
           // M3: same rig-setup-first ordering + credential-hook union as the owned
           // path (this legacy create/resume decoration path is byte-for-byte today

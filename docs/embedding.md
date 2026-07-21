@@ -11,8 +11,8 @@ The contract is simple: **all ports unset means standalone**. The defaults in `a
 **V2: call core directly.** Import from `@opengeni/core` and call domain helpers without HTTP. The main session surface is:
 
 ```ts
-createSessionForRequest(deps, grant, workspaceId, rawPayload)
-acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input)
+createSessionForRequest(deps, grant, workspaceId, rawPayload);
+acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
 ```
 
 Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
@@ -21,8 +21,8 @@ Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` pl
 
 A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + variable set block) always substituted in.
 
-- **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for *every* session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
-- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-*session* refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
+- **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
+- **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
 
 Prefer `instructions` over stuffing persona text into `initialMessage`: `initialMessage` renders as visible timeline content, has weaker instruction authority, and is readable by anyone with the session. Reach for workspace `agentInstructions` when the persona is the same for the whole tenant; reach for session `instructions` when it varies per session. Omitting `instructions` is byte-identical to today's composition. It is trimmed, non-empty, and capped at 32768 characters.
 
@@ -111,13 +111,18 @@ Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.
 the worker consumers in `apps/worker/src/activities/`, and the API Toolspace
 consumer in `apps/api/src/mcp/toolspace.ts`.
 
-The port can bind any combination of its three legs:
+The port can bind any combination of its four legs:
 
 ```ts
 type ConnectionCredentialsPort = {
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
-  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
+  runCredentials?(
+    input: RunCredentialsRequest,
+  ): Promise<RunCredentialsResolution>;
+  mcpCredentials?(
+    input: McpCredentialsRequest,
+  ): Promise<McpCredentialResolution>;
 };
 ```
 
@@ -148,6 +153,83 @@ files. This renewal requires no model/MCP call and never mutates the manifest.
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
 check before values are applied.
 
+`runCredentials` is the session-aware seam for credentials that programs inside
+the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,
+or equivalent host-owned material. It is independent of `variableSetId`; the
+request includes a variable-set id/name only as informational context. An
+embedding host should resolve the OpenGeni session through its own durable
+session binding instead of creating a marker variable set or copying host
+connection rows into OpenGeni.
+
+Every request carries account/workspace/session, parent and root session,
+the shared `sandboxGroupId`,
+turn/attempt/execution generation, frozen initiator and provenance, effective
+sandbox backend and OS, and whether the call is initial provision or renewal.
+The host decides which of its connections apply—including whether to deliver
+anything to a connected machine—and returns provider-neutral environment
+values, relative credential files, and environment names that point at those
+files. One response may contain credentials for multiple providers and multiple
+accounts; OpenGeni does not infer or constrain provider combinations.
+`not_applicable` is the explicit per-attempt opt-out for a target OS/backend or
+host policy; it carries no material and must remain stable for the frozen
+attempt. On a compatible command surface OpenGeni still removes any prior
+session credential root before agent or Channel-A commands run, so a worker
+crash cannot leave an old pointer readable merely because the next attempt opts
+out.
+
+Run material is never added to the sandbox manifest or `/workspace`. The worker
+validates scope echoes, paths, sizes, expiry, and reconnect metadata, then the
+runtime writes an immutable generation under a session-specific `/tmp` root and
+atomically replaces a small pointer file. Every new agent command and
+session-scoped Channel-A terminal process sources that generation. Renewal is
+single-flight and proactive; a stopped attempt rejects late host responses,
+drains any physical write, and removes only its own generations before admitting
+a successor or capturing the workspace. A successor's already-active generation
+cannot be erased by stale cleanup; its initial provision also prunes orphaned
+generations left by a worker crash after the prior attempt was fenced. Renewal
+retains the active and immediately prior immutable generation, which gives an
+already-running process one rotation of overlap while bounding disk growth;
+processes do not receive live environment mutation and should restart or perform
+their own provider refresh if they outlive rotating credentials.
+
+Credential selection and renewal are pinned to the effective sandbox backend
+and unproxied session established at turn start. If a user swaps the active route
+mid-turn, OpenGeni does not copy that turn's host material onto the new target;
+the next admitted turn resolves and seeds credentials for that target. This is a
+deliberate authority boundary, especially when the new target is a connected
+machine. A chat-only lazy turn still resolves the host port so reconnect state
+and model context are deterministic even if no sandbox is ultimately created;
+hosts should therefore keep resolution bounded, idempotent, and inexpensive.
+
+`sandboxGroupId` is also a security fact, not bookkeeping. Sessions in one group
+share an OS user and filesystem; separate session directory names prevent
+accidental activation collisions but are not an isolation boundary. A host must
+therefore select credentials that are valid for the whole shared-box trust
+domain (commonly the intersection or root-session policy), decline delivery, or
+place differently trusted sessions in separate sandbox groups. OpenGeni never
+claims that `/tmp` path separation protects one same-user process from another.
+
+Environment values are automatically registered with event-output redaction.
+When a credential file embeds atomic secrets (for example a bearer inside a
+kubeconfig), the host must also return those values through `redactions`; this
+lets OpenGeni redact chunked command output without understanding provider file
+formats. `auth_needed` can coexist with usable material and becomes both bounded
+model context and a structured `credential.auth_needed` reconnect card.
+
+The box-global websocket `ttyd` server remains credential-free because one box
+may be shared by several sessions. Session-scoped terminal exec and PTY calls do
+receive the active generation. A future websocket terminal implementation must
+first isolate its server/process by session; pointing the current group-global
+server at one session's credential root would be a cross-session leak.
+
+Materialization uses a POSIX `bash` command surface. Base64 decoding is probed
+across GNU, macOS, and OpenSSL variants, and every file's decoded byte count is
+verified before activation. Pointer updates prefer
+`flock(1)` and fall back to an atomic, stale-reaped directory lock so macOS does
+not require an extra package. A host targeting a non-POSIX command surface (for
+example native Windows without a compatible shell/toolset) must return
+`not_applicable` for that attempt.
+
 `mcpCredentials` is the request-time credential seam for connection-backed MCP
 servers. Bind the same port on `createOpenGeniWorker({ activityDependencies })`
 and `createApp(deps)`. The worker uses it for ordinary model-visible MCP calls;
@@ -171,7 +253,12 @@ short-lived capability bearer for a host-owned MCP gateway. Normal MCP and
 Toolspace deliberately share this resolver, so Code Mode is additive rather than
 a second connection or authorization system.
 
-Unset legs fall back independently to standalone self-mint/decrypt. This port does **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with `signDelegatedAccessToken(settings.delegationSecret, ...)`.
+Unset legs fall back independently to standalone self-mint/decrypt. `runCredentials`
+has no standalone fallback because ordinary standalone sandbox credentials
+continue to come from variable sets and existing lifecycle hooks. This port does
+**not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in
+`packages/runtime/src/index.ts` self-mints the `ogd_` bearer with
+`signDelegatedAccessToken(settings.delegationSecret, ...)`.
 
 ### Persistence
 
@@ -244,6 +331,6 @@ pointless coupling (host ownership of engine internals), so it is a contract:
 **API-side admission is local by design.** The API validates structure,
 permissions, and workspace scoping; host-specific admission (may this tenant
 run another turn?) is enforced where the work actually starts — the worker's
-entitlements port. A request can therefore be *accepted* by the API and still
-be *declined* at run admission; hosts that want earlier rejection should gate
+entitlements port. A request can therefore be _accepted_ by the API and still
+be _declined_ at run admission; hosts that want earlier rejection should gate
 at their own perimeter, which they control.
