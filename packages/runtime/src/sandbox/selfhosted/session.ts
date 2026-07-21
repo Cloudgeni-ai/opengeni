@@ -64,7 +64,7 @@ const encoder = new TextEncoder();
  * provided-session root-delta guard (`validateProvidedSessionManifestUpdate`).
  *
  * On a bring-your-own machine this path DOES NOT EXIST: the machine's real root
- * is the agent's `workspace_root` (reported in Hello, e.g. "/home/jorge/repo").
+ * is the agent's `workspace_root` (reported in Hello, e.g. "/home/user/repo").
  * The Rust agent's `resolve_cwd` maps an EMPTY cwd / a RELATIVE path onto its
  * `workspace_root`, but takes an ABSOLUTE path AS-IS. So a virtual-root-anchored
  * path the SDK hands us ("/workspace" or "/workspace/sub", e.g. an exec workdir
