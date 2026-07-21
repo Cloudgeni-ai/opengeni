@@ -29,8 +29,10 @@ import { migrate } from "../src/migrate";
 // active selection, and RLS isolation — under a NON-superuser role so FORCE RLS is
 // genuinely enforced (a superuser bypasses RLS). Throwaway pg17.
 
-const CONTAINER = "ogcodex-pg-creds";
-const PORT = 55482;
+// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
+// the container name binds the listener contract across worktrees.
+const PORT = 61444;
+const CONTAINER = `ogcodex-pg-creds-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
@@ -50,7 +52,7 @@ function docker(args: string[]): string {
 }
 function removeContainer(): void {
   try {
-    docker(["rm", "-f", CONTAINER]);
+    docker(["rm", "-f", "-v", CONTAINER]);
   } catch {
     /* gone */
   }

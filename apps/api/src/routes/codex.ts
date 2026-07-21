@@ -732,7 +732,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
       activeAccountId,
       settings: {
         rotationEnabled: rotation?.rotationEnabled ?? false,
-        // OPE-36: rotation-enabled always behaves as sticky-sharded; report the
+        // sharded-rotation policy: rotation-enabled always behaves as sticky-sharded; report the
         // effective truth, never the stored legacy residue.
         rotationStrategy: "sharded",
         activeCredentialId: activeAccountId,
@@ -762,7 +762,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json({ activated: true, accountId });
   });
 
-  // Update rotation settings. admin access. OPE-36: the strategy picker is GONE —
+  // Update rotation settings. admin access. sharded-rotation policy: the strategy picker is GONE —
   // rotation-enabled always behaves as sticky-sharded (worker-side
   // effectiveRotationStrategy normalization). `rotationStrategy` in the body is
   // ACCEPTED-BUT-IGNORED so no existing SDK/UI caller breaks (deprecation), and
@@ -804,7 +804,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     await signalCodexCapacityTargets(deps, mutation.wakeTargets);
     return c.json({
       rotationEnabled: updated.rotationEnabled,
-      // OPE-36: sharded is the only behavior; the stored column is residue.
+      // sharded-rotation policy: sharded is the only behavior; the stored column is residue.
       rotationStrategy: "sharded",
       activeCredentialId: updated.activeCredentialId,
     });
@@ -829,7 +829,7 @@ export function registerCodexRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(codexAccountJson(row));
   });
 
-  // OPE-24: independent OCC for new-turn allocator eligibility. Same-state is
+  // Codex quota: independent OCC for new-turn allocator eligibility. Same-state is
   // idempotent even with a stale expected version; conflicting stale state is
   // an explicit 409 carrying the current version.
   app.patch("/v1/workspaces/:workspaceId/codex/accounts/:accountId/allocator", async (c) => {

@@ -1,4 +1,4 @@
--- OPE-50: replace the blind periodic scan of "enrollable" sessions with a
+-- tracking-50: replace the blind periodic scan of "enrollable" sessions with a
 -- transactional, revisioned, coalescing delivery ledger. Postgres is the
 -- durable work source; a Temporal signal is an idempotent nudge.
 

@@ -1,7 +1,7 @@
 //! Opt-in virtual desktop (Xvfb) for headless Linux boxes.
 //!
 //! A headless Linux machine has no `$DISPLAY`, so [`resolve_desktop`] reports
-//! `display_unavailable` (dossier §3: Xvfb is off by default but trivially easy to
+//! `display_unavailable` because Xvfb is off by default but trivially easy to
 //! enable). When the user runs the agent with `--virtual-desktop`, [`VirtualXvfb`]
 //! spawns an `Xvfb` server on a free display number and sets `$DISPLAY` so the
 //! Linux X11 backend ([`crate::linux::LinuxDesktop`]) then captures + drives it

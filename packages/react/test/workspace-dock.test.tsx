@@ -248,9 +248,13 @@ describe("WorkspaceDock", () => {
       expect(rendered.container.querySelector("[data-separator-state]")).toBeNull();
       // The dock content is presented as a modal overlay, not a side column.
       const overlay = rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]');
+      const primary = rendered.container.querySelector("[data-workspace-primary]");
       expect(overlay).not.toBeNull();
+      expect(overlay?.hasAttribute("data-workspace-surface")).toBe(true);
       expect(overlay?.textContent ?? "").toContain("Run content");
       expect(overlay?.querySelector('[aria-label="Open navigation"]')).not.toBeNull();
+      expect(primary?.getAttribute("inert")).not.toBeNull();
+      expect(primary?.getAttribute("aria-hidden")).toBe("true");
 
       // The overlay's own close control drives the same collapsed contract.
       await click(rendered.container.querySelector('[aria-label="Close workspace"]'));
@@ -261,6 +265,8 @@ describe("WorkspaceDock", () => {
       expect(
         rendered.container.querySelector('[role="dialog"][aria-label="Workspace"][hidden]'),
       ).not.toBeNull();
+      expect(primary?.getAttribute("inert")).toBeNull();
+      expect(primary?.getAttribute("aria-hidden")).toBeNull();
 
       const hostOpen = rendered.container.querySelector<HTMLElement>(
         '[aria-label="Host open workspace"]',
@@ -271,6 +277,8 @@ describe("WorkspaceDock", () => {
       expect(
         rendered.container.querySelector('[role="dialog"][aria-label="Workspace"]:not([hidden])'),
       ).not.toBeNull();
+      expect(primary?.getAttribute("inert")).not.toBeNull();
+      expect(primary?.getAttribute("aria-hidden")).toBe("true");
       expect(document.activeElement?.getAttribute("role")).toBe("tab");
 
       await click(rendered.container.querySelector('[aria-label="Close workspace"]'));

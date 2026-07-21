@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
-  test("classifies the OPE-24 owning-human cutover as maintenance-only", async () => {
+  test("classifies the Codex quota owning-human cutover as maintenance-only", async () => {
     const contract = await buildSchemaContract();
     expect(
       contract.migrations.find(

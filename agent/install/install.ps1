@@ -13,7 +13,7 @@
   contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
 
-  Run model (dossier §23.0): the default is a FOREGROUND `opengeni-agent run`. An
+  Run model: the default is a FOREGROUND `opengeni-agent run`. An
   always-on Windows Service is an explicit opt-in (`opengeni-agent service
   install`), never installed by this script. This script is rename-running-exe
   aware: a re-install over a running agent renames the live .exe aside before

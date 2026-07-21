@@ -5,10 +5,13 @@
 // parity, and the durable-before-wire-ack ordering.
 
 import { describe, expect, test } from "bun:test";
+import type { Tool } from "@openai/agents";
+import { shell } from "@openai/agents/sandbox";
 import type { SelfhostedOpObservation } from "../src/sandbox/selfhosted/op-observer";
 import { FakeOpRunner, InMemoryOpStreamTransport } from "../src/sandbox/selfhosted/op-testing";
 import { SelfhostedSession } from "../src/sandbox/selfhosted/session";
 import type { OpStreamJournal } from "../src/sandbox/selfhosted/op-stream";
+import { createTurnToolCancellationController } from "../src/sandbox/turn-tool-cancellation";
 
 const WORKSPACE = "ws-1";
 const AGENT = "agent-1";
@@ -60,6 +63,78 @@ describe("op-stream exec (fake runner)", () => {
     const ok = observations.find((o) => o.outcome === "ok");
     expect(ok?.op).toBe("exec");
     expect(ok?.replyBytes).toBe("hello world".length + "warn\n".length);
+  });
+
+  test("OpCancel physically settles a running connected-machine exec", async () => {
+    const { runner, session } = buildRig();
+    runner.script("call_cancel:0", { frames: [], live: true, holdUntilCancel: true });
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const executing = runWithToolCallCorrelation("call_cancel", () =>
+      session.exec({ cmd: "sleep 60" }),
+    );
+    while (!runner.runs.has("call_cancel:0")) await Bun.sleep(1);
+
+    const cancelledAt = performance.now();
+    await session.cancelExecCommand("call_cancel:0");
+    const result = await executing;
+
+    expect(performance.now() - cancelledAt).toBeLessThan(2_000);
+    expect(result.exitCode).toBe(-1);
+    expect(runner.runs.get("call_cancel:0")?.exit.cancelled).toBe(true);
+  });
+
+  test("the SDK shell capability and turn fence cancel a connected-machine process end to end", async () => {
+    const { runner, session } = buildRig();
+    runner.script("call_shell_cancel:0", { frames: [], live: true, holdUntilCancel: true });
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const capability = shell({
+      configureTools: (tools) => controller.wrapTools(tools, session),
+    });
+    const exec = capability
+      .clone()
+      .bind(session)
+      .tools()
+      .find(
+        (tool): tool is Extract<Tool<unknown>, { type: "function" }> =>
+          tool.type === "function" && tool.name === "exec_command",
+      );
+    expect(exec).toBeDefined();
+    const invocation = exec!.invoke({} as never, JSON.stringify({ cmd: "sleep 60" }), {
+      toolCall: {
+        type: "function_call",
+        callId: "call_shell_cancel",
+        name: "exec_command",
+        arguments: "{}",
+      },
+    });
+    while (!runner.runs.has("call_shell_cancel:0")) await Bun.sleep(1);
+
+    const cancelledAt = performance.now();
+    abort.abort(new Error("steered"));
+    await controller.waitForQuiescence();
+    await invocation;
+
+    expect(performance.now() - cancelledAt).toBeLessThan(2_000);
+    expect(runner.runs.get("call_shell_cancel:0")?.exit.cancelled).toBe(true);
+  });
+
+  test("OpCancel racing before OpStart tombstones the command with zero execution", async () => {
+    const { runner, session } = buildRig();
+    runner.script("call_cancel_early:0", {
+      frames: [{ channel: "stdout", bytes: "must-not-run" }],
+    });
+    await session.cancelExecCommand("call_cancel_early:0");
+    const { runWithToolCallCorrelation } = await import("../src/sandbox/op-correlation");
+    const error = await runWithToolCallCorrelation("call_cancel_early", () =>
+      session.exec({ cmd: "printf must-not-run" }).then(
+        () => null,
+        (reason: unknown) => reason,
+      ),
+    );
+
+    expect(String((error as Error).message)).toContain("cancelled before");
+    expect(runner.runs.has("call_cancel_early:0")).toBe(false);
   });
 
   test("mid-op acks are credit-only; the final ack lands only via finalizeOpStreamOps, journal-first", async () => {

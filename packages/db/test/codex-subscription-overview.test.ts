@@ -48,8 +48,8 @@ const settings = testSettings({
 type Workspace = { accountId: string; workspaceId: string };
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
-  const adminUrl = process.env.OPENGENI_OPE24_POSTGRES_ADMIN_URL;
-  const appUrl = process.env.OPENGENI_OPE24_POSTGRES_APP_URL;
+  const adminUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_APP_URL;
   if (!adminUrl || !appUrl) return await acquireSharedTestDatabase("codex-subscription-overview");
   await migrate(adminUrl);
   const nativeAdmin = postgres(adminUrl, { max: 8 });
@@ -69,10 +69,10 @@ async function acquireDatabase(): Promise<SharedTestDatabase | null> {
 
 async function freshWorkspace(name: string): Promise<Workspace> {
   const [account] = await admin<{ id: string }[]>`
-    insert into managed_accounts (name) values (${`ope24-${name}`}) returning id`;
+    insert into managed_accounts (name) values (${`codex-quota-${name}`}) returning id`;
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
-    values (${account!.id}, ${`ope24-${name}`}) returning id`;
+    values (${account!.id}, ${`codex-quota-${name}`}) returning id`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -121,7 +121,7 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
         id, account_id, workspace_id, initial_message, model,
         sandbox_backend, sandbox_group_id, status, temporal_workflow_id
       ) values (
-        ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'OPE-24 capacity wake',
+        ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'Codex quota capacity wake',
         'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'idle', ${workflowId}
       )`;
     await tx`
@@ -131,7 +131,7 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
         reasoning_effort, sandbox_backend, resources, tools, metadata
       ) values (
         ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
-        ${workflowId}, 'failed', 1, 'OPE-24 capacity wake', 'codex/gpt-5.6-sol',
+        ${workflowId}, 'failed', 1, 'Codex quota capacity wake', 'codex/gpt-5.6-sol',
         'xhigh', 'modal', '[]'::jsonb, '[]'::jsonb, '{}'::jsonb
       )`;
     await tx`
@@ -152,7 +152,7 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
       ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${goalId}, ${turnId},
       ${workflowId}, 1, now() + interval '5 minutes', 'bounded_refresh', 1, 1
     ) returning id, wake_revision`;
-  if (!waiter) throw new Error("failed to seed OPE-24 capacity waiter");
+  if (!waiter) throw new Error("failed to seed Codex quota capacity waiter");
   return {
     id: waiter.id,
     sessionId,
@@ -165,8 +165,8 @@ beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
     available = false;
-    if (process.env.OPENGENI_REQUIRE_OPE24_POSTGRES === "1") {
-      throw new Error("OPE-24 requires real PostgreSQL; no harness was available");
+    if (process.env.OPENGENI_REQUIRE_CODEX_QUOTA_POSTGRES === "1") {
+      throw new Error("Codex quota requires real PostgreSQL; no harness was available");
     }
     console.warn("[codex-subscription-overview] postgres unavailable, skipping");
     return;
@@ -184,7 +184,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("OPE-24 Codex overview and irreversible reset state", () => {
+describe("Codex quota Codex overview and irreversible reset state", () => {
   test("0065 is FORCE-RLS, secret-free on metadata reads, and keeps caches/ownership independent", async () => {
     if (!available) return;
     const [role] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`

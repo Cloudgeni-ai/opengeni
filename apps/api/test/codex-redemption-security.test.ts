@@ -5,7 +5,7 @@ import {
   verifyCodexRedemptionConfirmation,
 } from "../src/codex-redemption-security";
 
-const secret = "ope24-test-hmac-secret";
+const secret = "codex-quota-test-hmac-secret";
 
 describe("Codex reset-credit browser confirmation", () => {
   test("binds one five-minute confirmation to session, human, workspace, credential, credit and attempt", async () => {

@@ -1,4 +1,4 @@
-//! Real machine-metrics sampling for the heartbeat payload (dossier §10.7, M10).
+//! Real machine-metrics sampling for the heartbeat payload (M10).
 //!
 //! The heartbeat ([`AgentEvent`](opengeni_agent_proto::v1::AgentEvent)) carries a
 //! [`MetricsSample`] so the control plane can upsert the machine's last sample

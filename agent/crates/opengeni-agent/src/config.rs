@@ -3,7 +3,7 @@
 //! After a successful device-flow enrollment the agent persists its scoped
 //! credentials (NATS Account creds + URLs, the relay URL, the pinned update
 //! public key, and the consent grants) to a per-user config directory with
-//! `0600` permissions (dossier §2/§23.1). On `run` the agent loads them back; if
+//! `0600` permissions. On `run` the agent loads them back; if
 //! none exist it enrolls first ("enroll-if-needed").
 //!
 //! The on-disk shape is a small JSON document, deliberately decoupled from the
@@ -105,7 +105,7 @@ pub struct StoredCredentials {
     pub workspace_id: String,
     /// The NATS CONNECT AUTH-TOKEN (the signed `oge_` enrollment bearer). The agent
     /// presents this as the connect token; the server's auth-callout responder
-    /// validates it and mints a workspace-scoped user JWT (dossier §10.1 / M-AUTH).
+    /// validates it and mints a workspace-scoped user JWT (M-AUTH).
     /// There is NO operator creds-file — the bearer IS the credential. NEVER logged.
     ///
     /// (Deserialized from the legacy `nats_credentials` key too, so a credentials
@@ -118,8 +118,8 @@ pub struct StoredCredentials {
     /// The relay edge base URL for stream channels (M8).
     pub relay_url: String,
     /// The agent's enrollment-scoped relay PRODUCER token, presented on a
-    /// `StreamOpen` when the agent registers a pty/desktop channel (dossier §10.5,
-    /// the relay-dial protocol). Distinct from the viewer's control-plane-minted
+    /// `StreamOpen` when the agent registers a pty/desktop channel under the
+    /// relay-dial protocol. Distinct from the viewer's control-plane-minted
     /// `ogs_` token — the relay validates each side and pairs by channel key. The
     /// control plane fills this at enrollment; empty until then (a channel open then
     /// presents an empty token the relay rejects, surfacing the gap rather than
@@ -256,7 +256,7 @@ pub fn save_credentials(creds: &StoredCredentials) -> Result<PathBuf, ConfigErro
 }
 
 /// Tightens a file to owner-only read/write (`0600`) on unix; a no-op elsewhere
-/// (Windows ACL tightening is handled by the install path, dossier §23.1).
+/// (Windows ACL tightening is handled by the install path).
 #[cfg(unix)]
 fn restrict_permissions(path: &Path) -> Result<(), ConfigError> {
     use std::os::unix::fs::PermissionsExt;

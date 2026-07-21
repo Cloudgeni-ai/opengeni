@@ -28,19 +28,19 @@ const OTHER_USER_ID = `other-${RUN_ID}`;
 const OWNER_COOKIE = `better-auth.session_token=${OWNER_USER_ID}`;
 const ROTATED_OWNER_COOKIE = `better-auth.session_token=${OWNER_USER_ID}-rotated`;
 const OTHER_COOKIE = `better-auth.session_token=${OTHER_USER_ID}`;
-const DELEGATION_SECRET = "ope24-api-delegation-secret";
+const DELEGATION_SECRET = "codex-quota-api-delegation-secret";
 const settings = testSettings({
   productAccessMode: "managed",
   publicBaseUrl: PUBLIC_ORIGIN,
-  betterAuthSecret: "ope24-better-auth-secret-at-least-32-bytes",
+  betterAuthSecret: "codex-quota-better-auth-secret-at-least-32-bytes",
   delegationSecret: DELEGATION_SECRET,
   environmentsEncryptionKey: Buffer.alloc(32, 42).toString("base64"),
   codexSubscriptionEnabled: true,
 });
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
-  const adminUrl = process.env.OPENGENI_OPE24_POSTGRES_ADMIN_URL;
-  const appUrl = process.env.OPENGENI_OPE24_POSTGRES_APP_URL;
+  const adminUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_APP_URL;
   if (!adminUrl || !appUrl) return await acquireSharedTestDatabase("codex-redemption-routes");
   await migrate(adminUrl);
   const nativeAdmin = postgres(adminUrl, { max: 8 });
@@ -233,8 +233,8 @@ beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
     available = false;
-    if (process.env.OPENGENI_REQUIRE_OPE24_POSTGRES === "1") {
-      throw new Error("OPE-24 API security tests require real PostgreSQL");
+    if (process.env.OPENGENI_REQUIRE_CODEX_QUOTA_POSTGRES === "1") {
+      throw new Error("Codex quota API security tests require real PostgreSQL");
     }
     console.warn("[codex-redemption-routes] postgres unavailable, skipping");
     return;
@@ -248,14 +248,14 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("OPE-24 managed-cookie-only reset redemption API", () => {
+describe("Codex quota managed-cookie-only reset redemption API", () => {
   test("an actual Better Auth sign-in cookie can prepare its owning credential", async () => {
     if (!available) return;
     const actualSettings = testSettings({
       databaseUrl: shared!.adminUrl,
       productAccessMode: "managed",
       publicBaseUrl: PUBLIC_ORIGIN,
-      betterAuthSecret: "ope24-real-better-auth-secret-32-bytes",
+      betterAuthSecret: "codex-quota-real-better-auth-secret-32-bytes",
       environmentsEncryptionKey: settings.environmentsEncryptionKey,
       codexSubscriptionEnabled: true,
     });
@@ -266,12 +266,12 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       workflowClient: {} as never,
       codexFetch: provider.fetch.bind(provider) as typeof fetch,
     });
-    const email = `ope24-real-${crypto.randomUUID()}@example.com`;
+    const email = `codex-quota-real-${crypto.randomUUID()}@example.com`;
     const password = "password1234";
     const signup = await actual.request("/v1/auth/sign-up/email", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: "Real OPE-24 Owner", email, password }),
+      body: JSON.stringify({ name: "Real Codex quota Owner", email, password }),
     });
     expect(signup.status).toBeGreaterThanOrEqual(200);
     expect(signup.status).toBeLessThan(300);
@@ -527,10 +527,10 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
     expect(otherPrepared.response.status).toBe(403);
 
     const [foreignAccount] = await admin<{ id: string }[]>`
-      insert into managed_accounts (name) values (${`ope24-foreign-${RUN_ID}`}) returning id`;
+      insert into managed_accounts (name) values (${`codex-quota-foreign-${RUN_ID}`}) returning id`;
     const [foreignWorkspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
-      values (${foreignAccount!.id}, ${`ope24-foreign-${RUN_ID}`}) returning id`;
+      values (${foreignAccount!.id}, ${`codex-quota-foreign-${RUN_ID}`}) returning id`;
     const foreignCredential = await upsertCodexSubscriptionCredential(client.db, {
       accountId: foreignAccount!.id,
       workspaceId: foreignWorkspace!.id,
@@ -564,7 +564,7 @@ describe("OPE-24 managed-cookie-only reset redemption API", () => {
       method: "POST",
       headers: { cookie: OWNER_COOKIE, "content-type": "application/json" },
       body: JSON.stringify({
-        name: "OPE-24 product key",
+        name: "Codex quota product key",
         permissions: ["workspace:admin"],
       }),
     });

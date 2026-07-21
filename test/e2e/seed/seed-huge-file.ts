@@ -1,4 +1,4 @@
-// seed-huge-file — STUB (dossier §16). Will trip the pathological per-file guard
+// seed-huge-file — STUB. Will trip the pathological per-file guard
 // so the Changes tab shows the "too large — open live" affordance (acceptance
 // B4) rather than a silently-truncated diff. Wired once M1 lands the guard
 // thresholds so this seed can assert against the real limit.

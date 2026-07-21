@@ -194,7 +194,7 @@ export function MachineCard({
               onAttach?.(machine);
             }}
             className={cn(
-              "rounded-og-sm border border-og-border px-2.5 py-1 text-og-xs font-medium text-og-fg-muted transition-colors pointer-coarse:min-h-10",
+              "rounded-og-sm border border-og-border px-2.5 py-1 text-og-xs font-medium text-og-fg-muted transition-colors pointer-coarse:min-h-11",
               "hover:border-og-border-strong hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50",
             )}
           >

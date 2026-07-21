@@ -1,4 +1,4 @@
-// Mocked-NATS integration (dossier §16): a `MockAgentResponder` standing in for
+// Mocked-NATS integration: a `MockAgentResponder` standing in for
 // a real enrolled agent over NATS drives an exec + an fs write→read round-trip
 // through a `SelfhostedSession` built by the registry-shaped `SelfhostedSandboxClient`
 // — end-to-end, no live broker (the real NATS transport is M4). It exercises the

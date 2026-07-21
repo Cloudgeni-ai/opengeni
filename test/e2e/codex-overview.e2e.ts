@@ -28,12 +28,12 @@ import { createApp } from "../../apps/api/src/app";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const RUN_ID = crypto.randomUUID();
-const OWNER_USER_ID = `ope24-browser-owner-${RUN_ID}`;
-const OWNER_COOKIE_VALUE = `ope24-browser-cookie-${RUN_ID}`;
-const ROTATED_OWNER_COOKIE_VALUE = `ope24-browser-cookie-rotated-${RUN_ID}`;
-const FINAL_OWNER_COOKIE_VALUE = `ope24-browser-cookie-final-${RUN_ID}`;
+const OWNER_USER_ID = `codex-quota-browser-owner-${RUN_ID}`;
+const OWNER_COOKIE_VALUE = `codex-quota-browser-cookie-${RUN_ID}`;
+const ROTATED_OWNER_COOKIE_VALUE = `codex-quota-browser-cookie-rotated-${RUN_ID}`;
+const FINAL_OWNER_COOKIE_VALUE = `codex-quota-browser-cookie-final-${RUN_ID}`;
 const OWNER_COOKIE = `better-auth.session_token=${OWNER_COOKIE_VALUE}`;
-const EVIDENCE_DIR = process.env.OPENGENI_OPE24_EVIDENCE_DIR ?? "/tmp/ope24-evidence";
+const EVIDENCE_DIR = process.env.OPENGENI_CODEX_QUOTA_EVIDENCE_DIR ?? "/tmp/codex-quota-evidence";
 
 let shared: SharedTestDatabase | null = null;
 let client: DbClient;
@@ -220,8 +220,8 @@ async function expectNoWcagAxeViolations(page: Page, include: string): Promise<v
 }
 
 async function acquireDatabase(): Promise<SharedTestDatabase | null> {
-  const adminUrl = process.env.OPENGENI_OPE24_POSTGRES_ADMIN_URL;
-  const appUrl = process.env.OPENGENI_OPE24_POSTGRES_APP_URL;
+  const adminUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_ADMIN_URL;
+  const appUrl = process.env.OPENGENI_CODEX_QUOTA_POSTGRES_APP_URL;
   if (!adminUrl || !appUrl) return await acquireSharedTestDatabase("codex-overview-e2e");
   await migrate(adminUrl);
   return {
@@ -238,7 +238,7 @@ async function acquireDatabase(): Promise<SharedTestDatabase | null> {
 beforeAll(async () => {
   shared = await acquireDatabase();
   if (!shared) {
-    throw new Error("OPE-24 browser E2E requires real PostgreSQL; no skip is permitted");
+    throw new Error("Codex quota browser E2E requires real PostgreSQL; no skip is permitted");
   }
   client = createDb(shared.appUrl, { max: 16 });
   browser = await chromium.launch(
@@ -251,20 +251,20 @@ beforeAll(async () => {
   const settings = testSettings({
     productAccessMode: "managed",
     publicBaseUrl: publicOrigin,
-    betterAuthSecret: "ope24-browser-better-auth-secret-32-bytes",
+    betterAuthSecret: "codex-quota-browser-better-auth-secret-32-bytes",
     environmentsEncryptionKey: Buffer.alloc(32, 91).toString("base64"),
     codexSubscriptionEnabled: true,
   });
   const ownerSession = (suffix: string) => ({
     session: {
-      id: `ope24-browser-session-${suffix}-${RUN_ID}`,
+      id: `codex-quota-browser-session-${suffix}-${RUN_ID}`,
       userId: OWNER_USER_ID,
       expiresAt: new Date(Date.now() + 60_000),
     },
     user: {
       id: OWNER_USER_ID,
-      name: "OPE-24 Owner",
-      email: `ope24-owner-${RUN_ID}@example.com`,
+      name: "Codex quota Owner",
+      email: `codex-quota-owner-${RUN_ID}@example.com`,
     },
   });
   const sessionForHeaders = (headers: Headers) => {
@@ -303,7 +303,7 @@ beforeAll(async () => {
   });
   const buildExit = await build.exited;
   if (buildExit !== 0) {
-    throw new Error(`OPE-24 web build failed: ${await new Response(build.stderr).text()}`);
+    throw new Error(`Codex quota web build failed: ${await new Response(build.stderr).text()}`);
   }
   const webDist = `${repoRoot}/apps/web/dist`;
   edge = Bun.serve({
@@ -395,7 +395,7 @@ afterAll(async () => {
   await shared?.release();
 });
 
-describe("OPE-24 real browser/API/Postgres reset overview", () => {
+describe("Codex quota real browser/API/Postgres reset overview", () => {
   test("renders truthful states, keyboard-safe redemption retry, allocator independence, themes and 375px", async () => {
     if (!available) return;
     provider.consumeBodies = [];
@@ -468,13 +468,13 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
     expect(aria).toContain('button "Redeem Full reset"');
     await expectNoWcagAxeViolations(page, 'section[aria-labelledby="codex-subscriptions-heading"]');
     await page.screenshot({
-      path: `${EVIDENCE_DIR}/ope24-desktop-dark.png`,
+      path: `${EVIDENCE_DIR}/codex-quota-desktop-dark.png`,
       fullPage: true,
     });
 
     await page.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
     await page.screenshot({
-      path: `${EVIDENCE_DIR}/ope24-desktop-light.png`,
+      path: `${EVIDENCE_DIR}/codex-quota-desktop-light.png`,
       fullPage: true,
     });
     await page.evaluate(() => document.documentElement.removeAttribute("data-og-theme"));
@@ -521,12 +521,12 @@ describe("OPE-24 real browser/API/Postgres reset overview", () => {
     );
     await mobile.evaluate(() => document.documentElement.setAttribute("data-og-theme", "light"));
     await mobile.screenshot({
-      path: `${EVIDENCE_DIR}/ope24-mobile-light.png`,
+      path: `${EVIDENCE_DIR}/codex-quota-mobile-light.png`,
       fullPage: true,
     });
     await mobile.evaluate(() => document.documentElement.removeAttribute("data-og-theme"));
     await mobile.screenshot({
-      path: `${EVIDENCE_DIR}/ope24-mobile-dark.png`,
+      path: `${EVIDENCE_DIR}/codex-quota-mobile-dark.png`,
       fullPage: true,
     });
     await mobileDetailed.getByRole("button", { name: "Redeem Full reset" }).tap();

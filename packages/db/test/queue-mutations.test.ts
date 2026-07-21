@@ -10,8 +10,11 @@ import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
   evaluateSessionControl,
+  getSessionQueueSnapshot,
+  markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
+  peekSessionWork,
   QueueCommandConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
@@ -361,9 +364,39 @@ describe("canonical queue commands", () => {
       triggerEventId: target.triggerEventId,
       prompt: target.prompt,
       version: target.version + 1,
+      metadata: {
+        delivery: "steer",
+        replacedTurnId: runningTurn.id,
+        replacedAttemptId: attemptId,
+        interruptionCount: 1,
+      },
     });
     expect(steered.interruptionCount).toBe(1);
     expect(steered.eventIds.length).toBeGreaterThan(0);
+    const validSteerMetadata = steered.items[0]!.metadata;
+    const setTargetMetadata = async (metadata: Record<string, unknown>) => {
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+        await db
+          .update(schema.sessionTurns)
+          .set({ metadata })
+          .where(eq(schema.sessionTurns.id, target.id));
+      });
+    };
+    await setTargetMetadata({
+      ...validSteerMetadata,
+      replacedAttemptId: crypto.randomUUID(),
+    });
+    expect(
+      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({ stoppingPreviousAttempt: true });
+    await setTargetMetadata({
+      ...validSteerMetadata,
+      interruptionCount: 0,
+    });
+    expect(
+      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({ stoppingPreviousAttempt: true });
+    await setTargetMetadata(validSteerMetadata);
     const [superseded, interruption, session] = await withWorkspaceRls(
       client.db,
       value.grant.workspaceId!,
@@ -428,6 +461,103 @@ describe("canonical queue commands", () => {
       "turn.superseded",
       "session.status.changed",
     ]);
+    expect(await peekSessionWork(client.db, value.grant.workspaceId!, value.session.id)).toEqual({
+      kind: "cancellation-wait",
+      attemptId,
+    });
+    const claimBeforeQuiescence = await claimSessionWorkForAttempt(
+      client.db,
+      value.grant.workspaceId!,
+      {
+        sessionId: value.session.id,
+        workflowId: `session-${value.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      },
+    );
+    expect(claimBeforeQuiescence).toEqual({ action: "unclaimed", reason: "control-pending" });
+    // The physical fence belongs to the session, not the replacement row. A
+    // delete/reorder race must not let the next ordinary prompt start while the
+    // predecessor activity is still stopping.
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ status: "withdrawn_for_edit" })
+        .where(eq(schema.sessionTurns.id, target.id));
+    });
+    expect(
+      await getSessionQueueSnapshot(client.db, value.grant.workspaceId!, value.session.id),
+    ).toMatchObject({ stoppingPreviousAttempt: true });
+    const claimAfterReplacementRemoval = await claimSessionWorkForAttempt(
+      client.db,
+      value.grant.workspaceId!,
+      {
+        sessionId: value.session.id,
+        workflowId: `session-${value.session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId: crypto.randomUUID(),
+        dispatchId: crypto.randomUUID(),
+        trigger: { kind: "next" },
+      },
+    );
+    expect(claimAfterReplacementRemoval).toEqual({
+      action: "unclaimed",
+      reason: "control-pending",
+    });
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ status: "queued" })
+        .where(eq(schema.sessionTurns.id, target.id));
+    });
+    const wakeBeforeQuiescence = await withWorkspaceRls(
+      client.db,
+      value.grant.workspaceId!,
+      async (db) => {
+        const [row] = await db
+          .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, value.session.id));
+        return row?.wakeRevision ?? 0;
+      },
+    );
+    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.session.id,
+      attemptId,
+      temporalWorkflowId: `session-${value.session.id}`,
+    });
+    const wakeAfterQuiescence = await withWorkspaceRls(
+      client.db,
+      value.grant.workspaceId!,
+      async (db) => {
+        const [row] = await db
+          .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, value.session.id));
+        return row?.wakeRevision ?? 0;
+      },
+    );
+    expect(wakeAfterQuiescence).toBe(wakeBeforeQuiescence + 1);
+    expect(
+      await markSessionAttemptQuiesced(client.db, {
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        attemptId,
+        temporalWorkflowId: `session-${value.session.id}`,
+      }),
+    ).toEqual(quiescenceEvents);
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+        const [row] = await db
+          .select({ wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision })
+          .from(schema.sessionWorkflowWakeOutbox)
+          .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, value.session.id));
+        return row?.wakeRevision ?? 0;
+      }),
+    ).toBe(wakeAfterQuiescence);
     const nextAttemptId = crypto.randomUUID();
     const claimAfterSettlement = await claimSessionWorkForAttempt(
       client.db,
