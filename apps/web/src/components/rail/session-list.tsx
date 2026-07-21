@@ -54,6 +54,7 @@ import {
   SESSION_GROUP_ORDER,
   buildRailForest,
   groupSessionsForRail,
+  mergeSessionForRail,
   nodeIsActive,
   recencyGroupFor,
   relativeTimeLabel,
@@ -102,8 +103,13 @@ export function SessionList() {
     enabled: hierarchyMode,
   });
   const { sessions, nextCursor, loading, error, refresh } = rootPage;
-  const { pinned: globalPinned, refresh: refreshGlobalPins } = globalPinPage;
+  const {
+    pinned: globalPinned,
+    pinnedTruncated: globalPinsTruncated,
+    refresh: refreshGlobalPins,
+  } = globalPinPage;
   const pinned = hierarchyMode ? globalPinned : rootPage.pinned;
+  const pinnedTruncated = hierarchyMode ? globalPinsTruncated : rootPage.pinnedTruncated;
   // The hierarchy and its global pinned shortcuts come from separate queries.
   // Every invalidation must refresh both or a pin changed in another tab/device
   // can disappear from the shortcut section until the next polling interval.
@@ -177,9 +183,13 @@ export function SessionList() {
       ...lineageSessions,
       ...pinned,
     ]) {
-      source.set(session.id, session);
+      const current = source.get(session.id);
+      source.set(session.id, current ? mergeSessionForRail(current, session) : session);
     }
-    for (const [id, override] of pinOverrides) source.set(id, override.session);
+    for (const [id, override] of pinOverrides) {
+      const current = source.get(id);
+      source.set(id, current ? mergeSessionForRail(current, override.session) : override.session);
+    }
     return [...source.values()];
   }, [
     activeLineage.lineage?.ancestors,
@@ -308,6 +318,7 @@ export function SessionList() {
               attentionDescendants: Math.max(0, stats.attentionDescendants - removed.attention),
               pausedDescendants: Math.max(0, stats.pausedDescendants - removed.paused),
               failedDescendants: Math.max(0, stats.failedDescendants - removed.failed),
+              truncated: stats.truncated,
             },
           }
         : node.session;
@@ -793,7 +804,7 @@ export function SessionList() {
         ref={listRef}
         role="region"
         aria-label={hierarchyMode ? "Workstreams" : "Session search results"}
-        data-ope26-session-list
+        data-sessionpin-session-list
         onKeyDown={onKeyDown}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
       >
@@ -829,22 +840,29 @@ export function SessionList() {
         ) : (
           <>
             {pinnedNodes.length > 0 ? (
-              <SessionGroup
-                label="Pinned"
-                nodes={pinnedNodes}
-                flat={flat}
-                activeSessionId={activeSessionId}
-                focusIndex={focusIndex}
-                onFocusSession={setFocusedSessionId}
-                expanded={expanded}
-                onToggleExpand={toggleExpand}
-                onRevealActivePath={revealActivePath}
-                childPages={childPages}
-                onLoadMoreChildren={loadChildPage}
-                onSelect={rail.openSession}
-                onRename={context.updateSessionTitle}
-                onPin={onPin}
-              />
+              <>
+                <SessionGroup
+                  label="Pinned"
+                  nodes={pinnedNodes}
+                  flat={flat}
+                  activeSessionId={activeSessionId}
+                  focusIndex={focusIndex}
+                  onFocusSession={setFocusedSessionId}
+                  expanded={expanded}
+                  onToggleExpand={toggleExpand}
+                  onRevealActivePath={revealActivePath}
+                  childPages={childPages}
+                  onLoadMoreChildren={loadChildPage}
+                  onSelect={rail.openSession}
+                  onRename={context.updateSessionTitle}
+                  onPin={onPin}
+                />
+                {pinnedTruncated ? (
+                  <p className="px-2 pb-2 text-[11px] text-fg-subtle" role="status">
+                    Showing the 100 most recently pinned sessions. Older pins are omitted.
+                  </p>
+                ) : null}
+              </>
             ) : null}
             {forest.running.length > 0 ? (
               <SessionGroup
@@ -1186,7 +1204,7 @@ function SessionRow(props: {
     props.depth > 0 ? { paddingLeft: visualTreeDepth(props.depth) * 12 } : undefined;
 
   const rowClassName = cn(
-    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm transition-colors pointer-coarse:h-11 pointer-coarse:py-0",
+    "group relative flex h-8 w-full items-center gap-1.5 rounded-md py-1 pl-2.5 pr-1.5 text-left text-sm pointer-coarse:h-11 pointer-coarse:py-0",
     rail.isMobile && "h-12 py-1.5 pointer-coarse:h-12",
     "hover:bg-surface-2",
     props.active ? "bg-surface-3 font-medium text-fg" : "text-fg-muted",
@@ -1305,7 +1323,7 @@ function SessionRow(props: {
                 and steps aside on hover/focus so the rename overflow can slot in.
                 On coarse pointers there is no hover, so the time stays visible. */}
             {!rail.isMobile ? (
-              <span className="shrink-0 text-2xs tabular-nums text-fg transition-opacity group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:group-hover:opacity-100">
+              <span className="shrink-0 text-2xs tabular-nums text-fg group-hover:invisible group-focus-within:invisible pointer-coarse:group-hover:visible">
                 {relativeTime}
               </span>
             ) : null}
@@ -1338,11 +1356,12 @@ function sessionDescendantLabel(session: Session): string | null {
   const stats = session.treeStats;
   if (!stats || stats.totalDescendants === 0) return null;
   const live = stats.runningDescendants + stats.queuedDescendants;
+  const total = `${stats.totalDescendants}${stats.truncated ? "+" : ""}`;
   if (stats.attentionDescendants > 0) {
-    return `${stats.attentionDescendants} need you · ${stats.totalDescendants} total`;
+    return `${stats.attentionDescendants} need you · ${total} total`;
   }
-  if (live > 0) return `${live} active · ${stats.totalDescendants} total`;
-  return `${stats.totalDescendants} session${stats.totalDescendants === 1 ? "" : "s"}`;
+  if (live > 0) return `${live} active · ${total} total`;
+  return `${total} session${stats.totalDescendants === 1 && !stats.truncated ? "" : "s"}`;
 }
 
 /** The active-session accent bar shared by the row's display and edit modes. */

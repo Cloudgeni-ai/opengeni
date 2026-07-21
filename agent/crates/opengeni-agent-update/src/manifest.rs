@@ -2,7 +2,7 @@
 //!
 //! OpenGeni owns release truth via a tiny signed JSON manifest per channel
 //! (`$BASE/agent/{stable,beta}/manifest.json` + `.minisig`), NOT the raw GitHub
-//! API (dossier §23.2). The manifest is itself minisign-signed, so a compromised
+//! API. The manifest is itself minisign-signed, so a compromised
 //! CDN can neither redirect to an attacker artifact nor roll the fleet backward.
 //! The wire shape mirrors the codegen'd [`UpdateManifest`] proto so the TS
 //! publisher and this Rust consumer never drift.
@@ -117,7 +117,7 @@ pub fn artifact_for_target<'m>(
         .ok_or_else(|| UpdateError::NoArtifactForTarget(target.to_string()))
 }
 
-/// Deterministic staged-rollout cohorting (dossier §23.2): an agent is IN the
+/// Deterministic staged-rollout cohorting: an agent is IN the
 /// rollout when `blake3(agent_id + cohort_salt) % 100 < rollout_percent`. The same
 /// agent always lands in the same cohort for a given salt, so a `5 → 25 → 50 → 100`
 /// promotion is monotonic per agent (no agent flaps in and out). `rollout_percent

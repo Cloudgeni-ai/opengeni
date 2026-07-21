@@ -4,13 +4,13 @@
 //! module holds the macOS specifics — OS reporting, the POSIX shell command, and
 //! the structured desktop backend ([`MacosDesktop`]). It is
 //! `cfg(target_os = "macos")`-gated so it compiles only on macOS, but the
-//! cross-platform CI matrix (dossier §23.3) builds + tests it there.
+//! cross-platform CI matrix builds + tests it there.
 //!
 //! # Desktop (experimental; stable release disabled)
 //!
 //! macOS computer-use is **CGEvent** (synthetic input) + **ScreenCaptureKit**
 //! (capture), both **TCC-gated** (Screen Recording + Accessibility grants that
-//! cannot be auto-clicked on an ephemeral CI runner — dossier §23.4/§24.3). The
+//! cannot be auto-clicked on an ephemeral CI runner). The
 //! source contains a ScreenCaptureKit/CGEvent implementation behind the
 //! `macos-desktop` feature and confines Apple FFI to a dedicated leaf crate. Stable
 //! release artifacts deliberately leave that feature off and use the honest stub:

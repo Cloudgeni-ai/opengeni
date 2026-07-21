@@ -415,7 +415,7 @@ export type RunOnResult = {
 
 /**
  * Run a ONE-OFF op against a SPECIFIC target WITHOUT changing the active pointer
- * (the dossier `run_on`). Only selfhosted targets are routable as a one-off here
+ * (the design `run_on`). Only selfhosted targets are routable as a one-off here
  * (a Modal target is the session's group box, reached via the normal Channel-A /
  * turn path — `run_on` is for reaching a NON-active enrolled machine without
  * swapping). The op is fenced under the target's enrollment, addressed to its
@@ -496,7 +496,7 @@ export type ProvisionResult =
  *     cannot click the loud whole-machine consent itself).
  *   - modal → create a first-class named modal `sandboxes` record (a swap target).
  *     NOTE: the Modal BOX is materialized lazily when first swapped-to (Modal
- *     lifecycle is owned by the lease — unchanged per dossier §21).
+ * lifecycle is owned by the lease — unchanged per).
  */
 export async function provisionSandbox(
   services: FleetServices,

@@ -6,7 +6,7 @@ import type { AppDependencies } from "../src/app";
 import { testSettings } from "@opengeni/testing";
 import type { Settings } from "@opengeni/config";
 
-// The get.<domain> install-serving routes (dossier §23.1). These only read
+// The get.<domain> install-serving routes. These only read
 // settings + the committed agent/install/* files; db / bus / workflowClient are
 // never touched, so we stub them and force managedAuth null (no Better Auth). No
 // docker/postgres needed — safe to run in isolation.

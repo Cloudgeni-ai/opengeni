@@ -9,7 +9,7 @@
 //! convert to/from the proto [`EnrollmentCredentials`](opengeni_agent_proto::v1::EnrollmentCredentials)
 //! at their edges so the rest of the agent only ever sees proto types.
 //!
-//! ## Flow (dossier §10.1 / §23.1)
+//! ## Flow
 //!
 //! 1. The agent loads its durable ed25519 install keypair from disk, generating
 //!    it only once when absent; the FULL public key (base64) is the `publicKey`
@@ -679,7 +679,7 @@ mod wire {
         pub nats_urls: Vec<String>,
         #[serde(default)]
         pub relay_url: String,
-        /// The agent's relay PRODUCER token (the `ogr_` token; M8b/dossier §10.5),
+        /// The agent's relay PRODUCER token (the `ogr_` token; M8b),
         /// presented on a `StreamOpen` when the agent registers a pty/desktop relay
         /// channel. Empty when the relay-token plane is unconfigured for the
         /// deployment (the agent then presents an empty token the relay rejects).

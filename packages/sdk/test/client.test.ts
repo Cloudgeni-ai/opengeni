@@ -51,6 +51,57 @@ function makeClient(responder: (request: RecordedRequest) => Response): {
 }
 
 describe("OpenGeniClient", () => {
+  test("identity-scoped workspace reads forward AbortSignal cancellation", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        receivedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          receivedSignal?.addEventListener(
+            "abort",
+            () => reject(receivedSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const request = client.getWorkspaceCapture(WORKSPACE_ID, SESSION_ID, {
+      signal: abort.signal,
+    });
+    abort.abort();
+
+    expect(receivedSignal).toBe(abort.signal);
+    await expect(request).rejects.toHaveProperty("name", "AbortError");
+  });
+
+  test("machine polling forwards AbortSignal cancellation", async () => {
+    let receivedSignal: AbortSignal | undefined;
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (_input, init) => {
+        receivedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>((_resolve, reject) => {
+          receivedSignal?.addEventListener(
+            "abort",
+            () => reject(receivedSignal?.reason ?? new DOMException("Aborted", "AbortError")),
+            { once: true },
+          );
+        });
+      },
+    });
+    const abort = new AbortController();
+    const request = client.listMachines(WORKSPACE_ID, {
+      sessionId: SESSION_ID,
+      signal: abort.signal,
+    });
+    abort.abort();
+
+    expect(receivedSignal).toBe(abort.signal);
+    await expect(request).rejects.toHaveProperty("name", "AbortError");
+  });
+
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
     const session = { id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" };
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
@@ -102,6 +153,85 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/enrollments/${enrollmentId}/revoke`,
     );
     expect(requests[0]!.body).toBeNull();
+  });
+
+  test("listEventPage round-trips monitoring filters and exact page headers", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const body = JSON.stringify([event]);
+    const { client, requests } = makeClient(
+      () =>
+        new Response(body, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-OpenGeni-Event-Mode": "forensic",
+            "X-OpenGeni-Event-Direction": "after",
+            "X-OpenGeni-Payload-Mode": "full",
+            "X-OpenGeni-Page-Bytes": "321",
+            "X-OpenGeni-Page-Max-Bytes": "1048576",
+            "X-OpenGeni-Page-Truncated": "true",
+            "X-OpenGeni-Has-More": "true",
+            "X-OpenGeni-Truncated-By": "bytes",
+            "X-OpenGeni-Covered-First": "42",
+            "X-OpenGeni-Covered-Last": "42",
+            "X-OpenGeni-Next-After": "42",
+            "X-OpenGeni-Forensic-Exact": "true",
+          },
+        }),
+    );
+
+    const page = await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      after: 12,
+      before: 99,
+      limit: 3,
+      compact: true,
+      mode: "forensic",
+      direction: "after",
+      payloadMode: "full",
+      includeTypes: ["turn.completed", "turn.failed"],
+      excludeTypes: ["turn.failed"],
+      includeClasses: ["terminal", "checkpoint"],
+      excludeClasses: ["failure"],
+    });
+
+    expect(page).toEqual({
+      events: [event],
+      mode: "forensic",
+      payloadMode: "full",
+      direction: "after",
+      bytes: 321,
+      maxBytes: 1_048_576,
+      truncated: true,
+      hasMore: true,
+      truncatedBy: "bytes",
+      coveredSequence: { first: 42, last: 42 },
+      nextAfter: 42,
+      nextBefore: null,
+      forensicExact: true,
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=12&before=99&limit=3&compact=1&mode=forensic&direction=after&payloadMode=full&includeTypes=turn.completed%2Cturn.failed&excludeTypes=turn.failed&includeClasses=terminal%2Ccheckpoint&excludeClasses=failure`,
+    );
+  });
+
+  test("listEventPage sends exclusive latest lookups and rejects runtime filter conflicts", async () => {
+    const event = makeEvent(42, "turn.completed", { result: "authoritative" });
+    const { client, requests } = makeClient(() => jsonResponse([event]));
+
+    await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      latest: "terminal",
+      payloadMode: "summary",
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?payloadMode=summary&latest=terminal`,
+    );
+
+    await expect(
+      client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+        latest: "terminal",
+        includeClasses: ["failure"],
+      } as never),
+    ).rejects.toThrow("latest cannot be combined with event filters");
+    expect(requests).toHaveLength(1);
   });
 
   test("sendMessage wraps text in a user.message control event", async () => {
@@ -266,6 +396,51 @@ describe("OpenGeniClient", () => {
     expect(requests[3]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
     );
+  });
+
+  test("workspace-control list exposes truthful continuation metadata", async () => {
+    const event = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: WORKSPACE_ID,
+      sequence: 7,
+      revision: 7,
+      type: "workspace.control.changed" as const,
+      scope: "workspace" as const,
+      rootSessionId: null,
+      action: "pause" as const,
+      automatic: false,
+      reason: null,
+      actor: "operator",
+      occurredAt: new Date().toISOString(),
+    };
+    const body = JSON.stringify([event]);
+    const { client, requests } = makeClient(
+      () =>
+        new Response(body, {
+          headers: {
+            "Content-Type": "application/json",
+            "X-OpenGeni-Page-Bytes": String(new TextEncoder().encode(body).byteLength),
+            "X-OpenGeni-Page-Truncated": "true",
+            "X-OpenGeni-Next-After": "7",
+          },
+        }),
+    );
+
+    await expect(
+      client.listWorkspaceControlEvents(WORKSPACE_ID, { after: 3, limit: 1 }),
+    ).resolves.toEqual([event]);
+    await expect(
+      client.listWorkspaceControlEventPage(WORKSPACE_ID, { after: 3, limit: 1 }),
+    ).resolves.toEqual({
+      events: [event],
+      bytes: new TextEncoder().encode(body).byteLength,
+      truncated: true,
+      nextAfter: 7,
+    });
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/control-events?after=3&limit=1`,
+    );
+    expect(requests[1]!.url).toBe(requests[0]!.url);
   });
 
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {

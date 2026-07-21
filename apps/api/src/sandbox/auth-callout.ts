@@ -1,5 +1,5 @@
 // apps/api/src/sandbox/auth-callout.ts — the NATS AUTH-CALLOUT responder (the
-// bring-your-own-compute M-AUTH tenancy boundary; dossier §10.1 NATS Accounts per
+// bring-your-own-compute M-AUTH tenancy boundary; NATS Accounts per
 // workspace + §17 the isolation smoke + §19 the NATS-Accounts-misconfig leak risk).
 //
 // THE BOUNDARY THIS CLOSES: an external agent connects to NATS presenting its

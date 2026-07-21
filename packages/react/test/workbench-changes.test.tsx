@@ -108,6 +108,8 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
       expect(root?.dataset.workbenchChangesLayout).toBe("compact");
       expect(picker).not.toBeNull();
       expect(picker?.options).toHaveLength(3);
+      expect(picker?.options[0]?.textContent).toBe("M · file-000.ts — src/");
+      expect(picker?.title).toBe("src/file-000.ts");
       expect(container(r).querySelector("[data-rail-file]")).toBeNull();
 
       await act(async () => {
@@ -116,7 +118,7 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
       });
       await flush();
       expect(picker!.value).toBe("2");
-      expect(container(r).textContent).toContain("src/file-002.ts");
+      expect(picker!.title).toBe("src/file-002.ts");
 
       await r.rerender(
         <WorkbenchChanges diff={manyFiles(3).reverse()} source="live" capturedAt={null} />,
@@ -126,7 +128,7 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
         "[data-compact-file-picker]",
       );
       expect(reorderedPicker?.value).toBe("0");
-      expect(container(r).textContent).toContain("src/file-002.ts");
+      expect(reorderedPicker?.title).toBe("src/file-002.ts");
       await r.unmount();
     } finally {
       Object.defineProperty(globalThis, "ResizeObserver", {
@@ -151,6 +153,34 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     grouped.rows.forEach((row) => {
       if (row.kind === "file") expect(grouped.orderedFiles[row.index]).toBe(row.file);
     });
+  });
+
+  test("a small multi-repo result groups by explicit repo ownership", async () => {
+    const files = [
+      { ...manyFiles(1, "api/src")[0]!, repoRoot: "api" },
+      { ...manyFiles(1, "web/src")[0]!, repoRoot: "web" },
+    ];
+    const rail = buildRail(files);
+    expect(rail.grouped).toBe(true);
+    expect(rail.rows.flatMap((row) => (row.kind === "group" ? [row.label] : []))).toEqual([
+      "api",
+      "web",
+    ]);
+
+    const r = await renderComponent(
+      <WorkbenchChanges diff={files} source="live" capturedAt={null} />,
+    );
+    await flush();
+    const groups = Array.from(container(r).querySelectorAll("[data-rail-group]"), (node) =>
+      node.textContent?.trim(),
+    );
+    expect(groups).toEqual(["api1", "web1"]);
+    const fileRows = Array.from(
+      container(r).querySelectorAll("[data-rail-file]"),
+      (node) => node.textContent,
+    );
+    expect(fileRows.every((text) => text?.includes("src/file-000.ts"))).toBe(true);
+    await r.unmount();
   });
 
   test("renders group headers in the rail for a large change set", async () => {

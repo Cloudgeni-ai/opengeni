@@ -1,5 +1,5 @@
 // apps/api/src/routes/enrollments.ts — the bring-your-own-compute enrollment
-// device-flow routes (M5; dossier §10.2 + §18). Mirrors the other sandbox route
+// device-flow routes (M5). Mirrors the other sandbox route
 // modules (registerSessionRoutes / registerApiKeyRoutes): a thin route over a
 // focused service (../sandbox/enrollment.ts), requireAccessGrant BEFORE any Zod
 // parse on the USER-authenticated routes, explicit HTTPException(400) on a parse
@@ -76,7 +76,7 @@ export function registerEnrollmentRoutes(app: Hono, deps: ApiRouteDeps): void {
   }
 
   // A tiny in-process IP token-bucket for the UNAUTHENTICATED agent routes (start/
-  // poll). The relay tier owns the heavy stream rate-limiting (dossier §10.5); this
+  // poll). The relay tier owns the heavy stream rate-limiting; this
   // is the application-tier abuse cap on the device-flow endpoints. Per-IP buckets
   // are pruned lazily. Not a distributed limiter (one replica per bucket) — that is
   // acceptable for a bounded, access-key-gated, short-TTL flow.

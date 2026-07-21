@@ -14,7 +14,7 @@
 # contains NO secrets. The pinned public key travels WITH this audited script,
 # so a compromised CDN or mirror cannot serve a binary that verifies.
 #
-# Run model (dossier §23.0): the default is a FOREGROUND `opengeni-agent run`,
+# Run model: the default is a FOREGROUND `opengeni-agent run`,
 # tied to its own lifetime — the machine is online while it runs and offline
 # when it stops. An always-on service is an explicit opt-in
 # (`opengeni-agent service install`), never installed by this script.
@@ -132,7 +132,7 @@ cleanup() { if [ -n "$TMPDIR_OG" ]; then rm -rf "$TMPDIR_OG" 2>/dev/null || true
 trap cleanup EXIT INT TERM
 
 # --- OS / arch detection → the release asset name ----------------------------
-# Mirrors the cargo target triples (dossier §23.1). Linux is the static musl
+# Mirrors the cargo target triples. Linux is the static musl
 # build (zero glibc dep — runs on any distro); macOS is a single universal binary.
 detect_asset() {
   os="$(uname -s)"

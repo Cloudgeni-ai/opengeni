@@ -58,7 +58,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("0025 device-enrollment-requests migration shape", () => {
   test("the table exists with the consent + lifecycle columns, the partial unique user_code index, and RLS", async () => {

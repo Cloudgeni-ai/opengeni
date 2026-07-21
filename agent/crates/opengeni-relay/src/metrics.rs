@@ -1,9 +1,9 @@
-//! Relay metrics — the operator-visible aggregates (dossier §18).
+//! Relay metrics — the operator-visible aggregates.
 //!
 //! Per-channel byte counters, buffer high-water marks, rate-limit drops, and
 //! reconnect counts, aggregated process-wide. These are operator Prometheus-style
 //! aggregates (the per-MACHINE metrics are a DIFFERENT plane — the agent samples
-//! those onto the control-plane heartbeat, dossier §10.7). The relay never holds
+//! those onto the control-plane heartbeat). The relay never holds
 //! per-channel history; counters are monotonic process totals plus a small live
 //! gauge.
 //!

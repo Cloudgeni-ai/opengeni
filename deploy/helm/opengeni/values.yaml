@@ -83,7 +83,7 @@ secret:
   #                                             OPENGENI_DELEGATION_SECRET).
   #   OPENGENI_STREAM_TOKEN_SECRET              HMAC the relay verifies the viewer
   #                                             `ogs_` stream token with (already
-  #                                             used by sandbox-surfacing).
+  #                                             used by sandbox workspace).
   #   OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET    HMAC the relay verifies the agent
   #                                             `ogr_` producer token with (may be
   #                                             omitted to reuse the stream secret).
@@ -366,7 +366,7 @@ web:
     maxReplicas: 10
     targetCPUUtilizationPercentage: 70
 
-# Bring-your-own-compute stream relay (dossier §17 / §25). A stateless wss byte
+# Bring-your-own-compute stream relay. A stateless wss byte
 # pump: the agent (producer) and the viewer (consumer) both dial IN over wss
 # through the ingress, and the relay splices their pty/desktop streams. It holds
 # NO cluster state and makes NO cluster egress. Disabled by default — the whole
@@ -717,7 +717,7 @@ nats:
     limits:
       cpu: 500m
       memory: 256Mi
-  # The bring-your-own-compute tenancy boundary (M-AUTH; dossier §10.1 NATS
+  # The bring-your-own-compute tenancy boundary (M-AUTH; NATS
   # Accounts + §17). When enabled, the chart-managed nats fixture runs the
   # auth-callout config (deploy/nats/auth-callout.conf is the version-controlled
   # source of truth) with a websocket listener the agents dial over wss through

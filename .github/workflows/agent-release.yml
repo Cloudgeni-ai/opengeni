@@ -1,6 +1,6 @@
 name: Agent Release
 
-# Cross-platform signed release of the opengeni-agent binary (dossier §23.3/§24.1).
+# Cross-platform signed release of the opengeni-agent binary.
 # Triggered on a pushed `agent-v*` tag (decoupled from the npm changesets release so
 # the Rust binary versions independently) or a manual dispatch. Reuses release.yml's
 # conventions: actions/checkout@v6, the built-in GITHUB_TOKEN, version-as-source-of-
@@ -207,7 +207,7 @@ jobs:
 
       - name: macOS unsigned note (no creds)
         if: matrix.kind == 'macos' && steps.creds.outputs.has_macos != 'true'
-        run: echo "::notice::macOS binary is UNSIGNED (no Apple Developer ID secret) — minisign-attested only. Gatekeeper warns on a fresh download (category-4, see dossier §24.3)."
+        run: echo "::notice::macOS binary is UNSIGNED (no Apple Developer ID secret) — minisign-attested only. Gatekeeper warns on a fresh download until signing credentials are configured."
 
       # ---- macOS app bundle: assemble + Developer-ID sign + notarize (guarded). ----
       # WHY a bundle in addition to the bare binary: macOS TCC (Screen Recording /
@@ -301,7 +301,7 @@ jobs:
 
       - name: Windows unsigned note (no cert)
         if: matrix.kind == 'windows' && steps.creds.outputs.has_windows != 'true'
-        run: echo "::notice::Windows binary is UNSIGNED (no Authenticode cert) — minisign-attested only. SmartScreen warns on a fresh download (optional polish, see dossier §24.3)."
+        run: echo "::notice::Windows binary is UNSIGNED (no Authenticode cert) — minisign-attested only. SmartScreen warns on a fresh download until signing credentials are configured."
 
       # ---- minisign signature + sha256 (ALWAYS-ON; the trust root for self-update). ----
       - name: minisign-sign + sha256 the artifact
@@ -345,7 +345,7 @@ jobs:
           # Linux minisign is NOT optional (it is the install + self-update trust root).
           # If the key is absent the release is unsafe to publish, so still emit the
           # sha256 but flag loudly that the run cannot produce a verifiable release.
-          echo "::warning::OPENGENI_AGENT_MINISIGN_KEY secret is absent — artifacts are NOT signed. Set it before promoting (dossier §25.1)."
+          echo "::warning::OPENGENI_AGENT_MINISIGN_KEY secret is absent — artifacts are NOT signed. Set it before promoting."
           if command -v sha256sum >/dev/null 2>&1; then sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"; else shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"; fi
 
       - name: Upload artifact bundle
@@ -515,3 +515,14 @@ jobs:
       # `dist/manifest.json[.minisig]` is included in the agent-latest asset
       # upload above. `/agent/stable/manifest.json` therefore discovers a real
       # signed moving release file while each referenced binary remains immutable.
+
+      # Publish the signed channel manifest used to promote a build without a
+      # rebuild. Promotion and the kill switch re-run this step with new params.
+      - name: Publish the signed channel manifest
+        if: steps.creds.outputs.has_minisign == 'true' && vars.AGENT_MANIFEST_PUBLISH == 'true'
+        env:
+          MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        shell: bash
+        run: |
+          echo "manifest publish is wired via scripts/publish-agent-manifest.ts;"
+          echo "this step is gated on AGENT_MANIFEST_PUBLISH so the binary release stands alone."

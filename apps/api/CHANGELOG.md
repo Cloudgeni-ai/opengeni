@@ -1,5 +1,39 @@
 # @opengeni/api-router
 
+## 0.5.9
+
+### Patch Changes
+
+- Updated dependencies [28290a0]
+- Updated dependencies [9a7dec2]
+  - @opengeni/db@0.7.5
+  - @opengeni/runtime@0.8.1
+  - @opengeni/core@0.4.12
+  - @opengeni/documents@0.2.14
+  - @opengeni/events@0.3.5
+
+## 0.5.8
+
+### Patch Changes
+
+- 14ce2e3: Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
+  for complete current model input, make compaction failure/progress transitions
+  durable and convergent, and replace recursive session discovery with a compact
+  paginated projection.
+- Updated dependencies [14ce2e3]
+- Updated dependencies [053c5df]
+- Updated dependencies [ec0697a]
+  - @opengeni/codex@0.2.4
+  - @opengeni/config@0.5.2
+  - @opengeni/db@0.7.4
+  - @opengeni/runtime@0.8.0
+  - @opengeni/contracts@0.11.0
+  - @opengeni/core@0.4.11
+  - @opengeni/documents@0.2.13
+  - @opengeni/github@0.2.11
+  - @opengeni/storage@0.2.11
+  - @opengeni/events@0.3.4
+
 ## 0.5.7
 
 ### Patch Changes

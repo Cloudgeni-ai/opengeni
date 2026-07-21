@@ -1,7 +1,7 @@
 // `SelfhostedSession` + `SelfhostedSandboxClient` — the NATS-backed structural
 // sandbox surface for the `selfhosted` backend (bring-your-own-compute).
 //
-// The insight (dossier §7): every existing seam (Channel-A exec/fs/git, the
+// The insight: every existing seam (Channel-A exec/fs/git, the
 // viewer's `resolveExposedPort`, computer-use) consumes a provider session
 // STRUCTURALLY — `session.exec ?? session.execCommand`, `session.readFile`,
 // `session.resolveExposedPort`, `session.serializeSessionState`. If the
@@ -64,7 +64,7 @@ const encoder = new TextEncoder();
  * provided-session root-delta guard (`validateProvidedSessionManifestUpdate`).
  *
  * On a bring-your-own machine this path DOES NOT EXIST: the machine's real root
- * is the agent's `workspace_root` (reported in Hello, e.g. "/home/jorge/repo").
+ * is the agent's `workspace_root` (reported in Hello, e.g. "/home/user/repo").
  * The Rust agent's `resolve_cwd` maps an EMPTY cwd / a RELATIVE path onto its
  * `workspace_root`, but takes an ABSOLUTE path AS-IS. So a virtual-root-anchored
  * path the SDK hands us ("/workspace" or "/workspace/sub", e.g. an exec workdir
@@ -741,6 +741,18 @@ export class SelfhostedSession {
     return result.output;
   }
 
+  /**
+   * Physical turn-cancellation seam used by the runtime tool fence. Only the
+   * op-stream transport has a process-tree cancellation protocol; a legacy
+   * runner returns false and the caller remains fail-closed until its exec
+   * deadline rather than claiming the machine is quiescent.
+   */
+  async cancelExecCommand(opId: string): Promise<boolean> {
+    if (!this.opStreamClient) return false;
+    await this.opStreamClient.cancel(opId);
+    return true;
+  }
+
   /** SDK shell capability never calls this (gated on `supportsPty()` which is
    *  false), but the surface advertises it. Selfhosted exec has no interactive PTY
    *  session over the structured RPC, so a stdin write is unsupported. */
@@ -994,7 +1006,7 @@ export class SelfhostedSession {
    * after asking the agent to ensure a stream channel for the port. M8b wires the
    * real relay tier (the byte pump) behind THIS seam.
    *
-   * THE CHANNEL-KEY QUERY (the M8b relay-dial contract, dossier §10.5): the relay
+   * THE CHANNEL-KEY QUERY (the M8b relay-dial contract): the relay
    * routes by `{workspaceId, agentId, port}` — the EXACT `ChannelKey::query` the
    * agent's relay client (`opengeni-agent-stream`) appends when it registers the
    * producer side: `ws=<workspaceId>&agent=<agentId>&port=<port>`. We append the
@@ -1400,7 +1412,7 @@ function kindToProtocol(kind: StreamKind | undefined): string {
 
 /**
  * The selfhosted NotFound discriminator — THE load-bearing safety property
- * (dossier §10.2/§19): for selfhosted, `agent-offline` (no responder) is NEVER a
+ *: for selfhosted, `agent-offline` (no responder) is NEVER a
  * provider NotFound. A user's real machine is not recreatable; if the lease saw
  * agent-offline as NotFound it would cold-create a RIVAL box (a Modal box) for
  * the user's machine. So this ALWAYS returns FALSE for selfhosted — there is no

@@ -36,6 +36,21 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+/** Exact activity-owned proof that the hard sandbox/tool fence physically
+ * drained. This is delivery evidence only: the workflow still validates the
+ * persisted attempt dispatch and commits the authoritative Postgres receipt. */
+export type SessionAttemptQuiescenceProof = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+};
+
+export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -45,6 +60,9 @@ export type ActivityServices = {
   documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
+  /** Durable signalWithStart fallback used only after the activity's direct
+   * physical-quiescence receipt write exhausts its bounded DB retries. */
+  signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
   /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
@@ -61,7 +79,7 @@ export type ActivityServices = {
   // admission and metering are separate operations, and only metering carries
   // the idempotency key.
   entitlements?: EntitlementsPort | null;
-  // §7.6 P4a — host connection-credential provider, the WORKER half of the
+  // §7.6 connection-credential provider — host connection-credential provider, the WORKER half of the
   // federated-connection boundary. When set, the run's per-run credential mint
   // delegates to the host instead of self-minting from `settings`:
   //   - `gitCredentials` REPLACES `createGitHubAppInstallationToken(settings,…)`
@@ -72,7 +90,7 @@ export type ActivityServices = {
   // self-mint for THAT leg. null/undefined (standalone default) → both legs
   // self-mint byte-for-byte as today.
   //
-  // FORK-7 CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
+  // workspace-scope cross-check CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
   // credential to; the consuming activity ASSERTS agreement with the run's
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.
@@ -123,7 +141,15 @@ export type SettleSessionInterruptionsInput = {
   sessionId: string;
   attemptId: string;
   workflowId: string;
+  /**
+   * Replay-only compatibility for session workflow histories created before
+   * the receipt-gated cancellation v2 patch. New histories never send this
+   * phase; the exact activity writes the authoritative receipt itself.
+   */
+  phase?: "logical" | "attempt_quiesced";
 };
+
+export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
 
 export type FailSessionAttemptInput = {
   accountId: string;
@@ -220,10 +246,11 @@ type ClaimedRunAgentTurnResult = {
   // persisted in Postgres and reconstructed after workflow/worker restart.
   // The workflow must not call maybeContinueGoal while this waiter is active.
   capacityWait?: CodexCapacityWaitRef;
-  // A maintenance execution could not run (for example, every Codex account
-  // is unavailable). End this workflow run without consuming the durable
-  // request; a later prompt/control wake starts the workflow again and normal
-  // prompt claim ordering consumes the request in-turn.
+  // This execution reached a durable terminal-for-now boundary (for example,
+  // maintenance could not run or same-turn context recovery failed). End this
+  // workflow run without synthesizing another goal continuation from unchanged
+  // state. A later prompt/control/new-update wake may retry through normal claim
+  // ordering.
   deferredUntilWake?: boolean;
 };
 

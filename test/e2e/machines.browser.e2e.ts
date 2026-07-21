@@ -24,7 +24,7 @@ import {
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const ownerHeaders = { "x-opengeni-subject": "ope14-machines-owner" };
+const ownerHeaders = { "x-opengeni-subject": "machines-owner" };
 
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
@@ -126,7 +126,7 @@ describe("machines browser lifecycle (real API + disposable PostgreSQL)", () => 
     await page.goto(webBaseUrl);
     const workspaceId = await workspaceFromPage(page);
 
-    const successMachine = await seedMachine(workspaceId, "OPE-14 mobile canary", "macos");
+    const successMachine = await seedMachine(workspaceId, "Mobile canary", "macos");
     await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/machines`);
     await openMachine(page, successMachine.sandboxId);
 
@@ -140,7 +140,7 @@ describe("machines browser lifecycle (real API + disposable PostgreSQL)", () => 
     // Cancellation proves dialog semantics, focus containment, and focus return
     // before the irreversible API path is exercised.
     await action.click();
-    const dialog = page.getByRole("dialog", { name: /Unenroll machine.*OPE-14 mobile canary/ });
+    const dialog = page.getByRole("dialog", { name: /Unenroll machine.*Mobile canary/ });
     await dialog.waitFor();
     await dialog
       .getByText(
@@ -169,7 +169,7 @@ describe("machines browser lifecycle (real API + disposable PostgreSQL)", () => 
     // Seed a second disposable machine, then intercept only its POST response.
     // A failed request must retain both the server row and the open confirmation,
     // so the UX cannot imply success after an ambiguous provider failure.
-    const failedMachine = await seedMachine(workspaceId, "OPE-14 failure canary", "linux");
+    const failedMachine = await seedMachine(workspaceId, "Failure canary", "linux");
     await page.reload();
     await openMachine(page, failedMachine.sandboxId);
     const failedAction = page.getByRole("button", { name: "Unenroll", exact: true });
@@ -188,7 +188,7 @@ describe("machines browser lifecycle (real API + disposable PostgreSQL)", () => 
     });
     await failedAction.click();
     const failedDialog = page.getByRole("dialog", {
-      name: /Unenroll machine.*OPE-14 failure canary/,
+      name: /Unenroll machine.*Failure canary/,
     });
     await failedDialog.getByRole("button", { name: "Unenroll machine" }).click();
     await page.getByText("Could not unenroll the machine", { exact: true }).waitFor();

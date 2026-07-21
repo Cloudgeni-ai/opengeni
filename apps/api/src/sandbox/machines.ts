@@ -1,4 +1,4 @@
-// apps/api/src/sandbox/machines.ts — the M10 Machines-DASHBOARD service (dossier
+// apps/api/src/sandbox/machines.ts — the M10 Machines-DASHBOARD service (design
 // §10.7). Builds the `MachinesResponse` the dashboard renders: the workspace's
 // enrolled selfhosted machines, each enriched with
 //   * STATE — the M3 liveness (online/reconnecting/offline) overlaid with the

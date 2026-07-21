@@ -70,7 +70,7 @@ export type ObjectStorage = {
    * SERVER-SIDE authenticated delete of a single object by raw storage key.
    * Idempotent: a missing key is a no-op (S3/GCS/Azure delete-by-key does not
    * 404 on absent objects, or the 404 is swallowed). Used by the Workbench v2
-   * capture GC (dossier §10.1 keep-latest-10) to reap after-image blobs that no
+   * capture GC (keep the latest 10) to reap after-image blobs that no
    * surviving revision references. Best-effort at the call site — a failed
    * delete leaves an orphan blob, never corrupts a live capture.
    */

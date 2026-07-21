@@ -1,6 +1,6 @@
 //! The `opengeni-agent` command-line surface.
 //!
-//! Subcommands (dossier §23.0/§23.1/§23.2):
+//! Subcommands:
 //!
 //! * [`Command::Run`] — the DEFAULT, FOREGROUND run model: enroll-if-needed, then
 //!   dial the control plane and serve until stopped. The machine is online while
@@ -93,7 +93,7 @@ pub struct RunArgs {
     pub machine_name: Option<String>,
 
     /// Spawn an Xvfb virtual framebuffer so a HEADLESS Linux box exposes a desktop
-    /// (off by default; dossier §3). On a host with a real display this is ignored.
+    /// (off by default). On a host with a real display this is ignored.
     /// Linux-only.
     #[arg(long)]
     pub virtual_desktop: bool,

@@ -1,5 +1,10 @@
 import type { Settings } from "@opengeni/config";
-import type { GitHubRepository } from "@opengeni/contracts";
+import type {
+  GitHubRepository,
+  GitHubRepositoryPermissions,
+  GitHubUserInstallationAccess,
+  GitHubUserRepositoryAccess,
+} from "@opengeni/contracts";
 import { createHmac, createPrivateKey, randomBytes, timingSafeEqual } from "node:crypto";
 import { SignJWT, importPKCS8 } from "jose";
 
@@ -66,6 +71,7 @@ export function buildGitHubAppManifest(input: {
     name: input.appName,
     url: base,
     redirect_url: `${base}/v1/github/app-manifest/callback`,
+    callback_urls: [`${base}/v1/github/oauth/callback`],
     public: input.public,
     request_oauth_on_install: true,
     default_permissions: permissions,
@@ -219,6 +225,28 @@ export async function verifyGitHubInstallationAccessForUser(
     throw new GitHubAppApiError("GitHub installation is not accessible to the installing user");
   }
   return installation;
+}
+
+/**
+ * Exchange a GitHub App user-authorization code and discover the installations
+ * and repositories the user can explicitly access. Repository permission bits
+ * are returned so the API can require admin authority before delegating an
+ * app's write-capable installation to an OpenGeni workspace.
+ */
+export async function authorizeGitHubAppUser(
+  settings: Settings,
+  input: { code: string },
+): Promise<GitHubUserInstallationAccess[]> {
+  const token = await exchangeGitHubOAuthCodeForUserToken(settings, input.code);
+  const installations = await listUserAccessibleInstallations(token);
+  return await Promise.all(
+    installations.map(async (installation) => ({
+      ...installation,
+      repositories: installation.suspended
+        ? []
+        : await listUserInstallationRepositories(token, installation),
+    })),
+  );
 }
 
 export async function listGitHubAppRepositories(
@@ -400,6 +428,47 @@ async function listUserAccessibleInstallations(
   }
 }
 
+async function listUserInstallationRepositories(
+  token: string,
+  installation: GitHubAppInstallationSummary,
+): Promise<GitHubUserRepositoryAccess[]> {
+  const out: GitHubUserRepositoryAccess[] = [];
+  const account = {
+    ...(installation.accountLogin ? { login: installation.accountLogin } : {}),
+    ...(installation.accountType ? { type: installation.accountType } : {}),
+  };
+  for (let page = 1; ; page += 1) {
+    const payload = await githubGet(
+      `/user/installations/${installation.installationId}/repositories`,
+      token,
+      { per_page: "100", page: String(page) },
+    );
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      Array.isArray(payload) ||
+      !Array.isArray(payload.repositories)
+    ) {
+      throw new GitHubAppApiError(
+        "GitHub returned an invalid user installation repositories payload",
+      );
+    }
+    for (const repository of payload.repositories) {
+      if (!repository || typeof repository !== "object" || Array.isArray(repository)) {
+        continue;
+      }
+      const record = repository as Record<string, unknown>;
+      out.push({
+        ...repositoryFromPayload(record, installation.installationId, account),
+        permissions: repositoryPermissionsFromPayload(record.permissions),
+      });
+    }
+    if (payload.repositories.length < 100) {
+      return out;
+    }
+  }
+}
+
 async function createInstallationToken(
   appJwt: string,
   input: {
@@ -519,6 +588,20 @@ function repositoryFromPayload(
     defaultBranch: String(payload.default_branch ?? "main"),
     accountLogin: String(account.login ?? fullName.split("/", 1)[0]),
     accountType: typeof account.type === "string" ? account.type : null,
+  };
+}
+
+function repositoryPermissionsFromPayload(payload: unknown): GitHubRepositoryPermissions {
+  const permissions =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : {};
+  return {
+    admin: permissions.admin === true,
+    maintain: permissions.maintain === true,
+    push: permissions.push === true,
+    triage: permissions.triage === true,
+    pull: permissions.pull === true,
   };
 }
 

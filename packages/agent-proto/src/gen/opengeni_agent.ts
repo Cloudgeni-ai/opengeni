@@ -983,7 +983,7 @@ export interface EnrollmentCredentials {
   workspaceId: string;
   /**
    * The NATS CONNECT AUTH-TOKEN the agent presents (the signed `oge_` enrollment
-   * bearer). The server runs with AUTH CALLOUT (dossier §10.1 / M-AUTH): on connect
+   * bearer). The server runs with AUTH CALLOUT (M-AUTH): on connect
    * the agent passes this as the auth-token; nats-server issues an authorization
    * request to the control-plane's callout responder, which validates the bearer
    * and returns a SIGNED user JWT scoping the connection to pub/sub ONLY
@@ -995,7 +995,7 @@ export interface EnrollmentCredentials {
   /**
    * The NATS server URL(s) to dial. For the control plane these are `wss://` URLs
    * (the relay-symmetric TLS ingress) so the agent rides the same TLS endpoint as
-   * the stream relay — no separate public TCP load balancer (dossier M-AUTH).
+   * the stream relay — no separate public TCP load balancer.
    */
   natsUrls: string[];
   /** The relay edge base URL for opening stream channels. */
@@ -1007,7 +1007,7 @@ export interface EnrollmentCredentials {
   /** Whether the user consented to screen capture + synthetic input. */
   consentedScreenControl: boolean;
   /**
-   * The agent's PRODUCER token for the relay edge (dossier §10.5 / the relay-dial
+   * The agent's PRODUCER token for the relay edge (the relay-dial
    * protocol). Presented as `StreamOpen.token` when the agent registers a
    * pty/desktop channel (role=AGENT). It is a control-plane-minted, workspace+agent
    * -scoped `ogr_` HMAC token the relay verifies on its own merits — DISTINCT from

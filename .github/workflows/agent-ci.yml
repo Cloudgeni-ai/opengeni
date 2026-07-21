@@ -2,7 +2,7 @@ name: Agent CI
 
 # PR gate for the Rust agent workspace (agent/**), purely additive to the bun CI.
 # The full OS matrix is cross-platform compile/unit compatibility evidence: a
-# macOS/Windows break is caught per PR rather than at tag time. It is NOT live-OS
+# macOS/Windows break is caught per PR rather than at tag time. It is not live-OS
 # acceptance evidence for SCM hosting, a logged-in Aqua display, or interactive TCC
 # grants; those require separately recorded native human verification.
 #
@@ -35,7 +35,7 @@ defaults:
 
 jobs:
   # fmt + clippy run once on ubuntu (they are platform-independent); -D warnings
-  # makes a lint a hard failure (dossier §3 idiomatic-Rust requirement).
+  # makes every lint a hard failure, as required for idiomatic Rust.
   lint:
     name: fmt + clippy
     runs-on: ubuntu-latest
@@ -97,8 +97,8 @@ jobs:
 
   # install-smoke proves the install scripts PARSE + VERIFY + INSTALL on every OS,
   # in CI (non-interactive) mode against a locally-built + minisign-signed mock
-  # release — so the curl|sh / irm|iex contract is exercised per-PR on all three OSes
-  # (dossier §23.3). It needs no network release and no production key: it generates
+  # release — so the curl|sh / irm|iex contract is exercised per PR on all three OSes.
+  # It needs no network release and no production key: it generates
   # a throwaway minisign key, signs the freshly-built binary, and runs the REAL
   # script with OPENGENI_INSTALL_BASE_URL pointed at the mock dir.
   install-smoke:

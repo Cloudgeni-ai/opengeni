@@ -13,7 +13,7 @@
   contains NO secrets. The pinned public key travels WITH this audited script, so
   a compromised CDN cannot serve a binary that verifies.
 
-  Run model (dossier §23.0): the supported Windows model is FOREGROUND
+  Run model: the supported Windows model is FOREGROUND
   `opengeni-agent run`. Windows service subcommands are intentionally unsupported:
   this binary does not host the SCM dispatcher, so it refuses service actions
   without registering or changing a service. This script is rename-running-exe
