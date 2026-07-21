@@ -93,7 +93,7 @@ describe("sessionAttachEnvironment — repo-attached git-pointer parity", () => 
     // turn builds its env from the session's backend too — an attach env keyed
     // off the deployment default would cold-create an e2b session's box with
     // /workspace-rooted HOME/token-file/askpass while the turn declares
-    // /home/user-rooted ones, the same guard-killed first turn again.
+    // /home/user ones, the same guard-killed first turn again.
     const attachEnv = await sessionAttachEnvironment(
       services,
       "ws",
