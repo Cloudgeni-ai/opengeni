@@ -11625,7 +11625,6 @@ export async function listSessionsForSubject(
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(500, Math.max(1, Math.floor(requestedLimit)))
     : 50;
-  let membershipCheckSerializationFailure = false;
   const listInTransaction = async (): Promise<SessionListResponse> => {
     return await withWorkspaceSubjectRls(
       db,
