@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { ReasoningEffort } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   bootstrapWorkspace,
   consumeNewSessionDraftInTransaction,
@@ -9,6 +9,7 @@ import {
   createSession,
   getNewSessionDraftInTransaction,
   initializeSessionStartAtomically,
+  NewSessionDraftAccessError,
   NewSessionDraftConflictError,
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
@@ -191,6 +192,37 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     );
   });
 
+  test("allows explicitly exempt API-key and delegated service actors without memberships", async () => {
+    const context = await fixture(`user:${crypto.randomUUID()}`);
+    const subjects = [`api_key:${crypto.randomUUID()}`, "worker:first-party-mcp"];
+
+    for (const subjectId of subjects) {
+      const [membership] = await shared.admin<{ count: number }[]>`
+        select count(*)::int as count
+        from workspace_memberships
+        where workspace_id = ${context.grant.workspaceId!}
+          and subject_id = ${subjectId}`;
+      expect(membership?.count).toBe(0);
+
+      const saved = await withWorkspaceSubjectRls(
+        client.db,
+        context.grant.workspaceId!,
+        subjectId,
+        (db) =>
+          saveNewSessionDraftInTransaction(db, {
+            ...draftInput(context, 0),
+            subjectId,
+            requireWorkspaceMembership: false,
+          }),
+      );
+      expect(saved).toMatchObject({ subjectId, revision: 1 });
+      expect(await readDraft(context.grant.workspaceId!, subjectId)).toMatchObject({
+        id: saved.id,
+        subjectId,
+      });
+    }
+  });
+
   test("turns a concurrent revision-zero insert race into one typed conflict", async () => {
     const context = await fixture();
     const [left, right] = await Promise.allSettled([
@@ -273,6 +305,77 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect(
       await removeWorkspaceMember(client.db, context.grant.workspaceId!, context.subjectId),
     ).toBe(true);
+
+    const [count] = await shared.admin<{ count: number }[]>`
+      select count(*)::int as count
+      from new_session_drafts
+      where workspace_id = ${context.grant.workspaceId!}
+        and subject_id = ${context.subjectId}`;
+    expect(count?.count).toBe(0);
+  });
+
+  test("a member removal that wins the lock rejects a stale authorized draft write", async () => {
+    const context = await fixture();
+    await saveDraft(context, 0);
+    let removalLocked!: () => void;
+    let finishRemoval!: () => void;
+    const locked = new Promise<void>((resolve) => {
+      removalLocked = resolve;
+    });
+    const finish = new Promise<void>((resolve) => {
+      finishRemoval = resolve;
+    });
+
+    const removal = withWorkspaceSubjectRls(
+      client.db,
+      context.grant.workspaceId!,
+      context.subjectId,
+      async (db) => {
+        const [membership] = await db
+          .select({ id: schema.workspaceMemberships.id })
+          .from(schema.workspaceMemberships)
+          .where(
+            and(
+              eq(schema.workspaceMemberships.workspaceId, context.grant.workspaceId!),
+              eq(schema.workspaceMemberships.subjectId, context.subjectId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        expect(membership).toBeDefined();
+        removalLocked();
+        await finish;
+        await db
+          .delete(schema.newSessionDrafts)
+          .where(
+            and(
+              eq(schema.newSessionDrafts.workspaceId, context.grant.workspaceId!),
+              eq(schema.newSessionDrafts.subjectId, context.subjectId),
+            ),
+          );
+        await db
+          .delete(schema.workspaceMemberships)
+          .where(eq(schema.workspaceMemberships.id, membership!.id));
+      },
+    );
+    await locked;
+
+    const staleSave = saveDraft(context, 1, { text: "must not survive removal" });
+    let stateBeforeRelease: "blocked" | "settled";
+    try {
+      stateBeforeRelease = await Promise.race([
+        staleSave.then(
+          () => "settled" as const,
+          () => "settled" as const,
+        ),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 50)),
+      ]);
+    } finally {
+      finishRemoval();
+      await removal;
+    }
+    expect(stateBeforeRelease).toBe("blocked");
+    await expect(staleSave).rejects.toBeInstanceOf(NewSessionDraftAccessError);
 
     const [count] = await shared.admin<{ count: number }[]>`
       select count(*)::int as count

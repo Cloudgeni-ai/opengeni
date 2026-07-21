@@ -6,6 +6,7 @@ import {
 } from "@opengeni/contracts";
 import {
   getNewSessionDraftInTransaction,
+  NewSessionDraftAccessError,
   saveNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
@@ -93,21 +94,33 @@ export async function saveActorNewSessionDraft(
   assertConfiguredModel(deps.settings, input.model);
   await assertWorkspaceModelPolicyAllows(deps.db, deps.settings, workspaceId, input.model);
 
-  const saved = await withWorkspaceSubjectRls(deps.db, workspaceId, grant.subjectId, (scoped) =>
-    scoped.transaction((tx) =>
-      saveNewSessionDraftInTransaction(tx as unknown as typeof scoped, {
-        accountId: grant.accountId,
-        workspaceId,
-        subjectId: grant.subjectId,
-        expectedRevision: input.expectedRevision,
-        text: input.text,
-        resources,
-        tools,
-        model: input.model,
-        reasoningEffort: input.reasoningEffort,
-        options: input.options,
-      }),
-    ),
-  );
-  return mapNewSessionDraft(saved)!;
+  try {
+    const saved = await withWorkspaceSubjectRls(deps.db, workspaceId, grant.subjectId, (scoped) =>
+      scoped.transaction((tx) =>
+        saveNewSessionDraftInTransaction(tx as unknown as typeof scoped, {
+          accountId: grant.accountId,
+          workspaceId,
+          subjectId: grant.subjectId,
+          expectedRevision: input.expectedRevision,
+          text: input.text,
+          resources,
+          tools,
+          model: input.model,
+          reasoningEffort: input.reasoningEffort,
+          options: input.options,
+          // Only managed people are removed through removeWorkspaceMember().
+          // API keys and delegated service actors (for example the first-party
+          // worker MCP principal) legitimately have no workspace_memberships
+          // row, so they must not be rejected by the human-removal fence.
+          requireWorkspaceMembership: grant.subjectId.startsWith("user:"),
+        }),
+      ),
+    );
+    return mapNewSessionDraft(saved)!;
+  } catch (error) {
+    if (error instanceof NewSessionDraftAccessError) {
+      throw new HTTPException(403, { message: error.message });
+    }
+    throw error;
+  }
 }

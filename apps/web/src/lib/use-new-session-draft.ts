@@ -36,6 +36,11 @@ export type UseNewSessionDraftResult = {
   error: Error | null;
   flush: () => Promise<FlushedNewSessionDraft | null>;
   isCurrentSignature: (signature: string) => boolean;
+  /**
+   * Fence the exact acknowledged snapshot after session creation consumes it.
+   * Returns false when a newer local edit or save won the race.
+   */
+  markConsumed: (flushed: FlushedNewSessionDraft) => boolean;
   reload: () => Promise<void>;
   resolveConflict: (choice: "keep_mine" | "use_remote") => Promise<void>;
   clearError: () => void;
@@ -265,6 +270,28 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     [],
   );
 
+  const markConsumed = useCallback((flushed: FlushedNewSessionDraft): boolean => {
+    const current = draftRef.current;
+    if (
+      !current ||
+      current.revision !== flushed.revision ||
+      lastSavedSignature.current !== flushed.signature ||
+      draftSignature(valueRef.current) !== flushed.signature
+    ) {
+      return false;
+    }
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+    autosaveTimer.current = null;
+    // The server consumed this row in the same transaction that initialized the
+    // session. Drop local persistence authority before the route clears its
+    // controlled fields: otherwise a delayed navigation can debounce-save that
+    // cleared projection as a brand-new revision-zero row.
+    draftRef.current = null;
+    lastSavedSignature.current = null;
+    setDraft(null);
+    return true;
+  }, []);
+
   const resolveConflict = useCallback(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
       if (choice === "use_remote") {
@@ -304,6 +331,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     error,
     flush,
     isCurrentSignature,
+    markConsumed,
     reload,
     resolveConflict,
     clearError: useCallback(() => {

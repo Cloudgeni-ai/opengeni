@@ -216,7 +216,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
         // if the accepted revision was consumed first, the resulting OCC
         // conflict remains visible here for an explicit keep-mine/use-remote
         // choice instead of silently losing the newer value.
-        if (newSessionDraft.isCurrentSignature(flushed.signature)) {
+        if (newSessionDraft.markConsumed(flushed)) {
           setMessage("");
           setDraft(emptySessionDraft());
           attachments.clear();

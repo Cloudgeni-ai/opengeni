@@ -18,6 +18,14 @@ export class NewSessionDraftConflictError extends Error {
   }
 }
 
+export class NewSessionDraftAccessError extends Error {
+  readonly name = "NewSessionDraftAccessError";
+
+  constructor() {
+    super("New-session draft access changed");
+  }
+}
+
 export async function getNewSessionDraftInTransaction(
   db: Database,
   input: { workspaceId: string; subjectId: string; lock?: boolean },
@@ -49,8 +57,28 @@ export async function saveNewSessionDraftInTransaction(
     model: string;
     reasoningEffort: ReasoningEffort;
     options: NewSessionDraftOptions;
+    /** API-key and delegated service subjects have no workspace-membership row. */
+    requireWorkspaceMembership?: boolean;
   },
 ): Promise<NewSessionDraftRow> {
+  if (input.requireWorkspaceMembership !== false) {
+    // Serialize with removeWorkspaceMember(), which takes FOR UPDATE before it
+    // deletes private rows and the membership. A save that wins first commits
+    // before removal's cleanup; a removal that wins first leaves no membership
+    // for a stale, already-authorized request to recreate after re-invitation.
+    const [membership] = await db
+      .select({ id: schema.workspaceMemberships.id })
+      .from(schema.workspaceMemberships)
+      .where(
+        and(
+          eq(schema.workspaceMemberships.workspaceId, input.workspaceId),
+          eq(schema.workspaceMemberships.subjectId, input.subjectId),
+        ),
+      )
+      .for("key share")
+      .limit(1);
+    if (!membership) throw new NewSessionDraftAccessError();
+  }
   const current = await getNewSessionDraftInTransaction(db, { ...input, lock: true });
   const currentRevision = current?.revision ?? 0;
   if (currentRevision !== input.expectedRevision) {

@@ -328,6 +328,49 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("marking the accepted snapshot consumed prevents a delayed clear from recreating it", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "submitted" })));
+    const flushed = await actRun(() => hook.result.current.draft.flush());
+    expect(flushed).not.toBeNull();
+    expect(requests).toHaveLength(1);
+
+    const marked = await actRun(() =>
+      flushed ? hook.result.current.draft.markConsumed(flushed) : false,
+    );
+    expect(marked).toBe(true);
+    await actRun(() => hook.result.current.setValue(editable()));
+    // Navigation may take longer than the normal autosave debounce. The clear
+    // must remain UI-only after the accepted row was consumed server-side.
+    await flush(550);
+    expect(requests).toHaveLength(1);
+    expect(await actRun(() => hook.result.current.draft.flush())).toBeNull();
+    await hook.unmount();
+  });
+
+  test("markConsumed rejects an acknowledged snapshot after a newer edit", async () => {
+    const hook = await renderDraftHook(client());
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "submitted" })));
+    const flushed = await actRun(() => hook.result.current.draft.flush());
+    expect(flushed).not.toBeNull();
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+
+    await actRun(() => hook.result.current.setValue(editable({ text: "newer local edit" })));
+    expect(hook.result.current.draft.markConsumed(flushed)).toBe(false);
+    expect(hook.result.current.draft.revision).toBe(flushed.revision);
+    await hook.unmount();
+  });
+
   test("ignores stale GET and save responses after a target switch", async () => {
     const firstGet = deferred<NewSessionDraft>();
     const firstSave = deferred<NewSessionDraft>();
