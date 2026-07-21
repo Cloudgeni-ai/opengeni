@@ -222,6 +222,10 @@ import {
   prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
+import {
+  classifyProviderInvalidContentError,
+  providerInvalidContentFailurePayload,
+} from "./provider-invalid-content";
 import { captureWorkspaceRevision } from "./workspace-capture";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import { createObjectStorage, type ObjectStorage } from "@opengeni/storage";
@@ -240,6 +244,11 @@ import {
   type SessionStatus,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
+
+export {
+  classifyProviderInvalidContentError,
+  providerInvalidContentFailurePayload,
+} from "./provider-invalid-content";
 
 // How long the session workflow holds the loop after a retryable provider
 // failure before the goal continuation re-enters the model. Azure/OpenAI TPM
@@ -423,7 +432,7 @@ export function classifyContextWindowOverflowError(
   if (!matched) {
     return null;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeErrorMessage(error);
   const code = fields.find((value) => /context[_\s-]*length[_\s-]*exceeded/i.test(value));
   return {
     message,
@@ -457,11 +466,48 @@ export function classifyMcpTransportTimeoutError(
   if (!matched) {
     return null;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeErrorMessage(error);
   return {
     message,
     ...(matched !== message ? { detail: matched } : {}),
   };
+}
+
+function safeErrorField(value: unknown, key: PropertyKey): unknown {
+  if (!value || (typeof value !== "object" && typeof value !== "function")) {
+    return undefined;
+  }
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function safeErrorMessage(value: unknown): string {
+  if (typeof value === "string") return value;
+  const message = safeErrorField(value, "message");
+  if (typeof message === "string" && message.length > 0) return message;
+  if (value === null || (typeof value !== "object" && typeof value !== "function")) {
+    try {
+      return String(value);
+    } catch {
+      return "Unknown error";
+    }
+  }
+  return "Unknown error";
+}
+
+function safeErrorStatus(value: unknown): number | undefined {
+  const status = safeErrorField(value, "status");
+  if (typeof status === "number" && Number.isFinite(status)) return status;
+  if (typeof status === "string" && /^\d{3}$/.test(status)) return Number(status);
+  return undefined;
+}
+
+function safeErrorCode(value: unknown): string | undefined {
+  const code = safeErrorField(value, "code");
+  return typeof code === "string" && code.length <= 128 ? code : undefined;
 }
 
 function collectErrorStrings(value: unknown, seen = new WeakSet<object>()): string[] {
@@ -476,15 +522,14 @@ function collectErrorStrings(value: unknown, seen = new WeakSet<object>()): stri
   }
   seen.add(value);
   const out: string[] = [];
-  const record = value as Record<string, unknown>;
   for (const key of ["message", "code", "type", "name", "param"]) {
-    const field = record[key];
+    const field = safeErrorField(value, key);
     if (typeof field === "string" && field.length > 0) {
       out.push(field);
     }
   }
   for (const key of ["error", "cause", "response", "data"]) {
-    out.push(...collectErrorStrings(record[key], seen));
+    out.push(...collectErrorStrings(safeErrorField(value, key), seen));
   }
   return out;
 }
@@ -1310,7 +1355,25 @@ export function codexCredentialLeaseDeadlineExpired(
   );
 }
 
-export function createRunAgentTurnActivity(services: () => Promise<ActivityServices>) {
+export type AgentTurnTestHooks = {
+  /**
+   * Deterministic crash-window failpoint for integration tests. Production
+   * constructors never pass hooks. Throwing here simulates worker loss after
+   * the durable no-replay boundary and before lifecycle settlement, including
+   * the case where final conversation reconciliation remained incomplete.
+   */
+  afterNoReplayCheckpoint?: (input: {
+    attemptId: string;
+    turnId: string;
+    reason: "provider_invalid_content" | "transport_acceptance_unknown";
+    checkpointSucceeded: boolean;
+  }) => Promise<void> | void;
+};
+
+export function createRunAgentTurnActivity(
+  services: () => Promise<ActivityServices>,
+  testHooks: AgentTurnTestHooks = {},
+) {
   return async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnResult> {
     const {
       settings,
@@ -1633,6 +1696,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       | null = null;
     let turnStartedPublished = false;
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+    // Resolved once model policy is authoritative. Terminal classifiers outside
+    // that setup scope fail closed while this remains null.
+    let activeProviderApi: ModelProviderApi | null = null;
     // Reconciliation is declared before provider routing so every turn-end path
     // can share one closure. It cannot run until `stream` exists, by which time
     // this value has been rebound to the turn's resolved model policy.
@@ -1865,13 +1931,65 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // inserts a fractional summary position, so total rows no longer equal
     // max(position)+1 and the slice index can no longer double as the position.
     let nextHistoryPosition = 0;
+    const persistNoReplayBoundary = async (
+      reason: "provider_invalid_content" | "transport_acceptance_unknown",
+    ): Promise<void> => {
+      if (!turnId || executionGeneration <= 0) {
+        throw new Error("no-replay boundary unavailable before turn attempt initialization");
+      }
+      const appended = await appendSessionHistoryItems(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        expectedExecutionGeneration: executionGeneration,
+        expectedAttemptId: input.attemptId,
+        producerCodexCredentialId: effectiveCodexCredentialId,
+        modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
+        items: [],
+        noReplayCheckpoint: {
+          reason,
+          conversationCheckpoint: "incomplete",
+        },
+      });
+      if (!appended) {
+        throw new TurnAttemptFencedError(
+          "turn execution generation was fenced while checkpointing no-replay intent",
+        );
+      }
+    };
     const reconcileConversationTruth = async (
-      options: { skipInputOnlyRows?: boolean; requireDurable?: boolean } = {},
+      options: {
+        skipInputOnlyRows?: boolean;
+        requireDurable?: boolean;
+        noReplayCheckpointReason?: "provider_invalid_content" | "transport_acceptance_unknown";
+      } = {},
     ) => {
       if (!stream || !turnId) {
+        if (options.requireDurable) {
+          throw new Error("conversation checkpoint unavailable before stream initialization");
+        }
         return;
       }
       try {
+        // For a terminal no-replay checkpoint, every potentially-failing
+        // companion write must finish before the history transaction upgrades
+        // the durable marker to `complete`. Once that upgrade commits, this
+        // function has no later awaited operation that can make the caller
+        // report a false checkpoint failure.
+        let terminalEnvelopeHandled = false;
+        if (options.noReplayCheckpointReason) {
+          const envelope = sandboxStateEntryFromRunState(stream.state);
+          if (envelope) {
+            await upsertSandboxSessionEnvelope(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope,
+            });
+          }
+          terminalEnvelopeHandled = true;
+        }
         const rawHistory = (stream.state as { history?: unknown[] }).history;
         if (Array.isArray(rawHistory)) {
           const { rows, nextWatermark, nextPosition } = historyRowsToAppend(
@@ -1885,7 +2003,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
           const shouldAppendRows =
             rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
-          if (shouldAppendRows) {
+          if (shouldAppendRows || options.noReplayCheckpointReason) {
             const appended = await appendSessionHistoryItems(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
@@ -1899,7 +2017,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               // it to strip cross-account reasoning.encrypted_content next turn.
               producerCodexCredentialId: effectiveCodexCredentialId,
               modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
-              items: rows,
+              items: shouldAppendRows ? rows : [],
+              ...(options.noReplayCheckpointReason
+                ? {
+                    noReplayCheckpoint: {
+                      reason: options.noReplayCheckpointReason,
+                      conversationCheckpoint: "complete",
+                    },
+                  }
+                : {}),
             });
             if (!appended) {
               throw new TurnAttemptFencedError(
@@ -1911,15 +2037,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             persistedHistoryCount = nextWatermark;
             nextHistoryPosition = nextPosition;
           }
+        } else if (options.noReplayCheckpointReason) {
+          throw new Error("final conversation history was unavailable for durable checkpointing");
         }
-        const envelope = sandboxStateEntryFromRunState(stream.state);
-        if (envelope) {
-          await upsertSandboxSessionEnvelope(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            envelope,
-          });
+        if (!terminalEnvelopeHandled) {
+          const envelope = sandboxStateEntryFromRunState(stream.state);
+          if (envelope) {
+            await upsertSandboxSessionEnvelope(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              envelope,
+            });
+          }
         }
       } catch (persistError) {
         console.error("session history dual-write failed (run unaffected)", persistError);
@@ -2838,6 +2968,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      activeProviderApi = resolvedModel?.provider.api ?? "responses";
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -4945,6 +5076,118 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnMetricOutcome = "cancelled";
         throw cancellationFailure;
       }
+      // A status-less Responses SSE invalid-content APIError is an accepted
+      // provider execution with an unusable terminal frame. It is neither a
+      // pre-accept transport failure nor a safe same-turn retry: replaying the
+      // original trigger could duplicate model, tool, history, billing, or
+      // command effects. Establish one exact-attempt no-replay boundary before
+      // final history access, fail this turn, and allow only a checkpoint-gated
+      // independently-admitted goal continuation or a later user message.
+      const providerInvalidContent =
+        activeProviderApi === "responses" ? classifyProviderInvalidContentError(error) : null;
+      if (providerInvalidContent && publish && turnId && turnStartedPublished) {
+        let noReplayBoundaryPersisted = false;
+        let checkpointSucceeded = false;
+        try {
+          // The accepted execution becomes non-replayable before touching the
+          // SDK's computed history getter. If history extraction or its final
+          // write fails, heartbeat recovery consumes the still-incomplete
+          // marker terminally instead of redispatching this logical turn.
+          await persistNoReplayBoundary("provider_invalid_content");
+          noReplayBoundaryPersisted = true;
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({
+            requireDurable: true,
+            noReplayCheckpointReason: "provider_invalid_content",
+          });
+          checkpointSucceeded = true;
+        } catch (checkpointError) {
+          observability.warn(
+            "provider invalid-content checkpoint failed; automatic continuation refused",
+            {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              code: providerInvalidContent.code,
+              phase: providerInvalidContent.phase,
+              api: providerInvalidContent.api,
+              providerRequestId: providerInvalidContent.providerRequestId,
+              checkpointErrorName:
+                checkpointError instanceof Error ? checkpointError.name : "unknown",
+            },
+          );
+        }
+        if (noReplayBoundaryPersisted) {
+          await testHooks.afterNoReplayCheckpoint?.({
+            attemptId: input.attemptId,
+            turnId,
+            reason: "provider_invalid_content",
+            checkpointSucceeded,
+          });
+        }
+
+        const goalActive = checkpointSucceeded
+          ? await getSessionGoal(db, input.workspaceId, input.sessionId)
+              .then((goal) => goal?.status === "active")
+              .catch(() => false)
+          : false;
+        const failure = providerInvalidContentFailurePayload(providerInvalidContent);
+        const recovery = goalActive ? "goal_continuation" : "user_message";
+        const publicError = checkpointSucceeded
+          ? `${failure.error} Conversation truth was checkpointed.`
+          : "The model provider produced invalid content after accepting the request, and the final conversation checkpoint could not be persisted. Automatic continuation was refused; inspect the session before sending a new message.";
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.failed",
+                payload: {
+                  ...failure,
+                  error: publicError,
+                  checkpointSucceeded,
+                  recovery,
+                  sameTurnReplay: "refused",
+                  automaticContinuationRefused: !checkpointSucceeded,
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "failed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
+        }
+        turnMetricOutcome = "failed";
+        activityStatus = "idle";
+        // `activitySpan.end` projects Error fields. Retain only product-owned
+        // text there, never the raw provider APIError/payload.
+        activityError = Object.assign(new Error(publicError), {
+          name: "ProviderInvalidContentSettledError",
+        });
+        observability.warn("provider invalid content settled without replay", {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          ...providerInvalidContent,
+          checkpointSucceeded,
+          recovery,
+        });
+        if (!checkpointSucceeded) {
+          // End this workflow run before its idle branch can synthesize an
+          // active-goal continuation from incomplete conversation truth. A
+          // later user/control wake may start a fresh, independently-admitted
+          // turn after inspection.
+          return claimedResult({ status: "idle", deferredUntilWake: true });
+        }
+        return goalActive
+          ? claimedResult({
+              status: "idle",
+              continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+            })
+          : claimedResult({ status: "idle" });
+      }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
       // the turn gracefully and idle the session so an active goal continues
       // via a synthesized continuation turn (or a user message resumes work).
@@ -5636,17 +5879,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "idle";
         return claimedResult({ status: "idle" });
       }
-      // A retryable provider/MCP failure is transient external backpressure,
-      // not a session or goal failure. The in-client retry budget is already
-      // exhausted by the time the error reaches here. Checkpoint conversation
-      // truth, recover this SAME accepted turn, then let the workflow re-claim
-      // it after a pacing delay. This is independent of goal state and never
-      // relies on a synthetic continuation prompt.
-      const failure = agentRunFailurePayload(error);
-      if (failure.retryable && publish && turnId && turnStartedPublished) {
+      // OPE-64 owns compaction convergence. Preserve its existing same-turn
+      // checkpoint-provider recovery here; compaction has no agent tool/command
+      // boundary and its tests fence the durable replacement separately.
+      const failure = agentRunFailurePayload(error, activeProviderApi ?? undefined);
+      if (
+        failure.retryable &&
+        error instanceof CompactionProviderResponseError &&
+        publish &&
+        turnId &&
+        turnStartedPublished
+      ) {
         const recoveryResult = providerRecoveryResult();
         await flushRuntimeBatcher();
-        await reconcileConversationTruth({ requireDurable: true });
+        // Compaction executes before an agent stream exists. Its request and
+        // replacement history are fenced by the compaction transaction itself,
+        // so preserve the pre-OPE-13 no-op reconciliation at this boundary.
+        // Generic provider/MCP failures below still require an exact stream
+        // checkpoint before any automatic continuation is allowed.
+        await reconcileConversationTruth();
         const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
           sessionId: input.sessionId,
           turnId,
@@ -5668,6 +5919,105 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         activityStatus = "recovering";
         activityError = error;
         return claimedResult(recoveryResult);
+      }
+      // An escaped provider/network/MCP failure has crossed the request or
+      // stream boundary without a provider execution identity that OpenGeni can
+      // reattach to. Even when the condition is transient, replaying this turn
+      // could duplicate a provider debit, model output, completed tool, history
+      // item, or command effect. Establish one exact-attempt no-replay boundary
+      // before final history access, fail this turn to idle, and permit only a
+      // NEW paced goal continuation from complete history or a later user
+      // message. If final history remains incomplete, suppress every automatic
+      // continuation.
+      if (failure.retryable && publish && turnId && turnStartedPublished) {
+        let noReplayBoundaryPersisted = false;
+        let checkpointSucceeded = false;
+        try {
+          // Acceptance is unknown, so make the exact attempt/generation
+          // terminal before reading a computed history getter that can throw.
+          await persistNoReplayBoundary("transport_acceptance_unknown");
+          noReplayBoundaryPersisted = true;
+          await flushRuntimeBatcher();
+          await reconcileConversationTruth({
+            requireDurable: true,
+            noReplayCheckpointReason: "transport_acceptance_unknown",
+          });
+          checkpointSucceeded = true;
+        } catch (checkpointError) {
+          observability.warn(
+            "recoverable provider transport checkpoint failed; automatic continuation refused",
+            {
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              code: failure.code ?? "provider_transport_failure",
+              checkpointErrorName:
+                checkpointError instanceof Error ? checkpointError.name : "unknown",
+            },
+          );
+        }
+        if (noReplayBoundaryPersisted) {
+          await testHooks.afterNoReplayCheckpoint?.({
+            attemptId: input.attemptId,
+            turnId,
+            reason: "transport_acceptance_unknown",
+            checkpointSucceeded,
+          });
+        }
+        const goalActive = checkpointSucceeded
+          ? await getSessionGoal(db, input.workspaceId, input.sessionId)
+              .then((goal) => goal?.status === "active")
+              .catch(() => false)
+          : false;
+        const recovery = goalActive ? "goal_continuation" : "user_message";
+        const publicError = checkpointSucceeded
+          ? `${failure.error} Conversation truth was checkpointed.`
+          : "The external model or tool transport failed after acceptance became uncertain, and the final conversation checkpoint could not be persisted. Automatic continuation was refused; inspect the session before sending a new message.";
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.failed",
+                payload: {
+                  ...failure,
+                  error: publicError,
+                  checkpointSucceeded,
+                  recovery,
+                  sameTurnReplay: "refused",
+                  automaticContinuationRefused: !checkpointSucceeded,
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "failed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
+        }
+        turnMetricOutcome = "failed";
+        activityStatus = "idle";
+        activityError = Object.assign(new Error(publicError), {
+          name: "ProviderTransportSettledError",
+        });
+        observability.warn("recoverable provider transport settled without replay", {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          code: failure.code ?? "provider_transport_failure",
+          checkpointSucceeded,
+          recovery,
+        });
+        if (!checkpointSucceeded) {
+          return claimedResult({ status: "idle", deferredUntilWake: true });
+        }
+        return goalActive
+          ? claimedResult({
+              status: "idle",
+              continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+            })
+          : claimedResult({ status: "idle" });
       }
       activityStatus = "failed";
       activityError = error;
@@ -6060,64 +6410,68 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 /**
  * True when the error is transient upstream backpressure — a model-provider 5xx,
  * a "server had a bad minute" body, or a dropped/again-able network connection —
- * rather than a request the session got wrong. These are safe to recover as a new
- * fenced attempt of the SAME turn after PROVIDER_BACKPRESSURE_DELAY_MS. Durable
- * tool results are preserved and ambiguous in-flight effects are closed before
- * the new attempt, independent of whether the session has an active goal.
+ * rather than a request the session got wrong. They are recoverable session
+ * conditions, but they do NOT prove the request was rejected before provider
+ * acceptance and therefore never authorize replay of the same turn.
  *
  * This is the classification gap that hard-failed a fleet of prod sessions during a
  * provider degradation window: their errors ("Our servers are currently overloaded",
  * the generic 500 "An error occurred while processing your request", "Connection
  * error") carried no retryable marker and fell through to a terminal session.failed.
  *
- * HTTP status is authoritative when present — EVERY 5xx is a server-side failure that
- * is safe to retry, while 4xx (validation, auth, 404) is a request fault that must
- * still hard-fail. The code/message matches are the fallback for network faults and
+ * HTTP status is authoritative when present — EVERY 5xx is a server-side failure,
+ * while 4xx (validation, auth, 404) is a request fault that must still hard-fail.
+ * The code/message matches are the fallback for network faults and
  * SDK-rethrown bare Errors that carry no status. A ChatGPT/Codex usage cap (a 429
  * that will NOT clear on retry) is classified and returned BEFORE this in
  * agentRunFailurePayload, so it never reaches here.
  */
 export function isTransientProviderError(error: unknown): boolean {
-  const status =
-    typeof error === "object" && error !== null && "status" in error
-      ? Number((error as { status?: unknown }).status)
-      : undefined;
+  const status = safeErrorStatus(error);
   // A real HTTP status is AUTHORITATIVE: a 5xx is transient, and ANY other status
   // (4xx validation/auth/404, plus the 429 the earlier branches already handled) is
   // a request fault that must NOT auto-retry — even if its body happens to read like
   // "connection error" or "overloaded". The code/message heuristics below apply ONLY
   // when no status survived: a network fault or an SDK-rethrown bare Error.
-  if (status !== undefined && Number.isFinite(status)) {
+  if (status !== undefined) {
     return status >= 500 && status < 600;
   }
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
+  const code = safeErrorCode(error);
   if (code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)) {
     return true;
   }
-  const message = error instanceof Error ? error.message : String(error);
+  const message = safeErrorMessage(error);
   return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
 }
 
-export function agentRunFailurePayload(error: unknown): {
+export function agentRunFailurePayload(
+  error: unknown,
+  providerApi?: ModelProviderApi,
+): {
   error: string;
   code?: string;
   retryable?: boolean;
   detail?: string;
+  phase?: string;
+  api?: string;
+  sdkErrorName?: string;
+  httpStatus?: number | null;
+  providerRequestId?: string;
+  providerErrorType?: string;
+  providerErrorCode?: string;
+  providerErrorParam?: string;
+  transportCode?: string;
 } {
-  const message = error instanceof Error ? error.message : String(error);
-  const status =
-    typeof error === "object" && error !== null && "status" in error
-      ? Number((error as { status?: unknown }).status)
-      : undefined;
-  const code =
-    typeof error === "object" && error !== null && "code" in error
-      ? String((error as { code?: unknown }).code)
-      : undefined;
+  const providerInvalidContent =
+    providerApi === "responses" ? classifyProviderInvalidContentError(error) : null;
+  if (providerInvalidContent) {
+    return providerInvalidContentFailurePayload(providerInvalidContent);
+  }
+  const message = safeErrorMessage(error);
+  const status = safeErrorStatus(error);
+  const code = safeErrorCode(error);
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
@@ -6128,7 +6482,13 @@ export function agentRunFailurePayload(error: unknown): {
   // `usage_limit_reached` shape must still outrank generic 429 retryability.
   // Credential quarantine/failover remains separately provenance-gated by
   // `isCodexTransportError`; this branch only chooses the truthful user payload.
-  const usageLimit = classifyCodexUsageLimitError(error);
+  let usageLimit: ReturnType<typeof classifyCodexUsageLimitError> = null;
+  try {
+    usageLimit = classifyCodexUsageLimitError(error);
+  } catch {
+    // Third-party error objects can expose hostile getters/proxies. A failed
+    // classifier must not escape or widen the diagnostics surface.
+  }
   if (usageLimit) {
     return codexUsageLimitFailurePayload(usageLimit, message);
   }
@@ -6136,12 +6496,10 @@ export function agentRunFailurePayload(error: unknown): {
   if (mcpTimeout) {
     return {
       error:
-        "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+        "An MCP server request timed out after acceptance became uncertain. The original turn was not replayed.",
       code: "mcp_transport_timeout",
       retryable: true,
-      ...(mcpTimeout.detail || mcpTimeout.message
-        ? { detail: mcpTimeout.detail ?? mcpTimeout.message }
-        : {}),
+      phase: "mcp_transport",
     };
   }
   if (
@@ -6153,15 +6511,29 @@ export function agentRunFailurePayload(error: unknown): {
       error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
       code: "provider_rate_limited",
       retryable: true,
-      ...(message && message !== "Too Many Requests" ? { detail: message } : {}),
+      ...(status === 429 ? { httpStatus: 429 } : {}),
+      ...(code === "rate_limit_exceeded" ? { providerErrorCode: "rate_limit_exceeded" } : {}),
     };
   }
-  // Transient upstream backpressure (5xx / overloaded / dropped connection): keep
-  // the provider's own message (it is already user-meaningful) but mark it
-  // retryable so a goal-bearing session idles and auto-continues instead of going
-  // terminal on a provider's bad minute. See isTransientProviderError.
+  // Transient upstream backpressure (5xx / overloaded / dropped connection) is
+  // recoverable, but its raw body may contain request content or credentials and
+  // acceptance is unknown. Emit only product-owned text plus bounded transport
+  // scalars; the activity settles the current turn without replay.
   if (isTransientProviderError(error)) {
-    return { error: message, code: "provider_unavailable", retryable: true };
+    const transportCode =
+      code && /^(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN|ECONNREFUSED|EPIPE)$/i.test(code)
+        ? code.toUpperCase()
+        : undefined;
+    return {
+      error:
+        "The model provider became unavailable after request acceptance became uncertain. The original turn was not replayed.",
+      code: "provider_unavailable",
+      retryable: true,
+      ...(status !== undefined && Number.isInteger(status) && status >= 500 && status < 600
+        ? { httpStatus: status }
+        : {}),
+      ...(transportCode ? { transportCode } : {}),
+    };
   }
   return { error: message };
 }

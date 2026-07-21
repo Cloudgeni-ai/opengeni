@@ -35,18 +35,41 @@ symptoms, never by counts**: the no-progress detector and budget exhaustion are
 the real guards. Do not reintroduce count- or duration-based caps on legitimate
 run length; if a run is misbehaving, detect the pathology, do not cap the clock.
 
-Recoverable conditions end a turn gracefully (idle the session, keep the
-context) instead of failing it, so a long run survives them: hitting the
-model-call cap (if one is configured), provider rate-limit backpressure,
-escaped MCP request timeouts, and budget/credit exhaustion. With an active
-goal, provider/MCP backpressure resumes after a pacing delay; without one, the
-session idles until the next user message (a long-lived session between goals
-must not go terminal because an external service had a bad minute). For an MCP
-timeout that escapes after a successful tool output, conversation truth is
-checkpointed before the turn settles and the continuation is a new follow-up —
-the completed tool call/full turn is never blindly replayed. Budget/credit
-exhaustion likewise idles the turn rather than failing the session, so a top-up
-lets the same session continue.
+Recoverable conditions preserve the session and its context so a long run can
+survive them, but they do not all settle the current turn the same way. Hitting
+the model-call cap (if configured) and budget/credit exhaustion end the turn
+gracefully and idle the session. By contrast, provider rate-limit/5xx/network
+uncertainty and escaped MCP request timeouts may arrive after external work was
+accepted. Before potentially failing final SDK-history access, the worker
+atomically stores an allow-listed `failed_idle` no-replay disposition carrying
+the exact attempt and execution generation with
+`conversationCheckpoint: incomplete`. The final-history transaction can only
+upgrade that same marker to `complete` atomically with the conversation rows;
+an idempotent late `incomplete` write cannot downgrade it. The worker then
+truthfully marks the current turn `failed` and leaves the session `idle` rather
+than replaying it. If the worker dies after either durable boundary but before
+ordinary settlement, heartbeat recovery consumes the fence into the same
+failed/idle truth; it never increments the worker-death redispatch counter or
+reclaims the logical turn. A `complete` checkpoint may let an active goal start
+a **new** follow-up turn after pacing. An `incomplete` checkpoint reports
+failure and suppresses goal/internal continuation, but the locked settlement
+also reports whether an independent human/API turn is already queued; when it
+is, the workflow continues to its canonical FIFO peek/claim even if that turn's
+signal predates the current workflow baseline. A later prompt races through its
+normal transactional queue-revision wake path.
+For an MCP timeout after a successful tool output, the durable call/result
+lineage remains exactly once — neither the completed tool call nor the full
+turn is blindly replayed. Budget/credit exhaustion likewise leaves the session
+available, so a top-up lets it continue.
+
+A status-less OpenAI Responses-stream `APIError` whose message begins with the
+exact invalid-content marker is an accepted provider failure, not a schema
+rejection or pre-accept transport error. Its public event/span diagnostics are
+product-owned and allow-list only bounded request/type/code/param scalars; raw
+provider bodies, headers, streamed payloads, and transcripts never enter the
+audit event. Missing usage is not proof of non-acceptance. The accepted call's
+turn fails once, the same turn never re-enters the model, and only the
+checkpoint-gated new-turn paths above can continue it.
 
 Codex-subscription turns add one explicit recovery boundary before the model
 run. With workspace-local leasing enabled, the worker atomically selects and
@@ -121,6 +144,22 @@ existing recovery projection because its receipt can mark a crash after memory
 was saved but before the original event publish. Only genuinely unresolved
 execution gets one explicit `interrupted / outcome unknown` closure.
 
+Sandbox command transport has the same acceptance discipline at each routing
+boundary. Read-only operations may use the existing bounded epoch-fence retry,
+but a mutating `exec`, PTY input, file/materialization/editor write, or desktop
+input is invoked only once when a transport/fence failure leaves acceptance
+unknown. The caller receives a secret-safe
+`sandbox_mutation_acceptance_unknown` checkpoint containing the operation,
+backend, and exact active epoch; it must reconcile the existing effect before
+trying again. A bounded mutation retry is permitted only when a trusted typed
+backend error proves that the invocation never crossed admission (currently a
+selfhosted `neverSent` or `fenced` error), or when a future backend can preserve
+the exact provider execution identity. Arbitrary `execId`/process fields are
+never treated as that identity. DNS or gRPC `UNAVAILABLE` is transport
+uncertainty and dominates nested `NotFound` prose; it does not prove provider
+absence or authorize route rematerialization/replay. Canonical:
+`packages/runtime/src/sandbox/routing/routing-session.ts`.
+
 Claim, interruption, and event-writing settlement share one lock order:
 workspace, then session, then exact turn, then exact attempt. Event inserts also touch the workspace through
 their foreign keys, so acquiring it later would reintroduce a claim/preemption
@@ -188,14 +227,25 @@ revision, terminal state, or successor attempt wins instead of being
 overwritten.
 
 **Ungraceful worker death is also survivable — bounded, never blind.** A hard
-kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) never
-runs the graceful checkpoint; it surfaces to the session workflow as a
+kill (SIGKILL, OOM, node loss, a rollout whose grace period expired) surfaces to the session workflow as a
 heartbeat-timeout `ActivityFailure` carrying the exact dead activity id. The
 workflow does not fail the session independently for that shape: conversation
-truth was still dual-written after every model response during the turn, so
-the fenced `recoverTurnAfterWorkerDeath` activity atomically closes the lost
-attempt, marks the same
-logical turn `recovering` and the loop dispatches its next attempt. This is not
+truth was still dual-written after every model response during the turn. When
+the exact attempt has no accepted/acceptance-unknown terminal checkpoint, the
+fenced `recoverSessionDispatch` activity atomically closes the lost attempt,
+marks the same logical turn `recovering`, and the loop dispatches its next
+attempt. When the exact attempt already stored an accepted/acceptance-unknown
+`failed_idle` no-replay disposition, that same recovery activity atomically
+fails the turn and idles the session instead; no replacement attempt exists.
+This is true for both the pre-history `incomplete` marker and its atomic
+final-history `complete` upgrade. Recovery reports checkpoint success only for
+`complete`; `incomplete` refuses automatic goal/internal continuation but
+returns the canonical locked fact for any separately queued human/API work so
+the workflow cannot close while that work is eligible and unowned. The exact
+closed attempt keeps this result idempotently recognizable when either the
+ordinary terminal settlement or recovery settlement commits but its activity
+response is lost.
+This is not
 prompt-queue work and not an automatic Temporal retry of side-effectful work:
 the resumed attempt sees everything durably checkpointed, including explicit
 `interrupted / outcome unknown` tool results when an effect cannot be proven.

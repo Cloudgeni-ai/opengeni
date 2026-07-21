@@ -21,6 +21,7 @@ import {
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
+  classifyProviderInvalidContentError,
   createTurnSandboxProvisioner,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
@@ -32,8 +33,7 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
-  PROVIDER_BACKPRESSURE_DELAY_MS,
-  providerRecoveryResult,
+  providerInvalidContentFailurePayload,
   resolveActiveSandboxBackend,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
@@ -1273,10 +1273,10 @@ describe("escaped MCP transport timeout classifier", () => {
 
     expect(agentRunFailurePayload(exact)).toEqual({
       error:
-        "An MCP server request timed out. Any completed tool output was checkpointed; the session can continue safely.",
+        "An MCP server request timed out after acceptance became uncertain. The original turn was not replayed.",
       code: "mcp_transport_timeout",
       retryable: true,
-      detail: exact.message,
+      phase: "mcp_transport",
     });
   });
 
@@ -1288,6 +1288,183 @@ describe("escaped MCP transport timeout classifier", () => {
     ).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
     expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
+  });
+});
+
+describe("Responses provider invalid-content classifier", () => {
+  const prefix = "The model produced invalid content.";
+
+  // Mirrors OpenAI SDK 6.47: APIError inherits Error without overriding
+  // Error.name, so the real discriminator is constructor.name.
+  class APIError extends Error {}
+
+  function invalidContentError(overrides: Record<string, unknown> = {}) {
+    return Object.assign(new APIError(`${prefix} raw provider text must never persist`), {
+      status: undefined,
+      requestID: "req_safe-123",
+      type: "invalid_request_error",
+      code: "invalid_content",
+      param: "response.output",
+      ...overrides,
+    });
+  }
+
+  test("matches the real status-less APIError shape and emits only allow-listed scalars", () => {
+    const error = invalidContentError({
+      body: { secret: "body-secret", nested: { prompt: "raw transcript" } },
+      headers: { authorization: "Bearer header-secret", "x-request-id": "not-used" },
+      response: { data: { request_id: "not-used" } },
+    });
+    expect(error.name).toBe("Error");
+    expect(error.constructor.name).toBe("APIError");
+
+    const diagnostic = classifyProviderInvalidContentError(error);
+    expect(diagnostic).toEqual({
+      code: "provider_invalid_content",
+      phase: "responses_stream",
+      api: "responses",
+      sdkErrorName: "APIError",
+      httpStatus: null,
+      providerRequestId: "req_safe-123",
+      providerErrorType: "invalid_request_error",
+      providerErrorCode: "invalid_content",
+      providerErrorParam: "response.output",
+    });
+    const payload = providerInvalidContentFailurePayload(diagnostic!);
+    expect(payload).toEqual({
+      error:
+        "The model provider produced invalid content after accepting the request. The accepted provider call was not replayed.",
+      ...diagnostic,
+      retryable: false,
+    });
+    expect(JSON.stringify(payload)).not.toContain("raw provider text");
+    expect(JSON.stringify(payload)).not.toContain("body-secret");
+    expect(JSON.stringify(payload)).not.toContain("header-secret");
+    expect(JSON.stringify(payload)).not.toContain("raw transcript");
+    expect(agentRunFailurePayload(error, "responses")).toEqual(payload);
+    expect(agentRunFailurePayload(error, "chat")).toEqual({
+      error: `${prefix} raw provider text must never persist`,
+    });
+  });
+
+  test("accepts only the bounded explicit request-ID surfaces", () => {
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({ requestID: undefined, requestId: "req_camel" }),
+      )?.providerRequestId,
+    ).toBe("req_camel");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          requestID: undefined,
+          headers: { "X-Request-ID": "req_header" },
+        }),
+      )?.providerRequestId,
+    ).toBe("req_header");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          requestID: undefined,
+          headers: new Headers({ "x-request-id": "req_headers_get" }),
+        }),
+      )?.providerRequestId,
+    ).toBe("req_headers_get");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          requestID: undefined,
+          message: `${prefix} Request ID: req_suffix`,
+        }),
+      )?.providerRequestId,
+    ).toBe("req_suffix");
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          requestID: undefined,
+          message: `${prefix} (request id: req_parenthesized)`,
+        }),
+      )?.providerRequestId,
+    ).toBe("req_parenthesized");
+  });
+
+  test("fails closed for near misses, unsafe IDs, and status-bearing failures", () => {
+    expect(classifyProviderInvalidContentError(invalidContentError({ status: 400 }))).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(
+        Object.assign(new Error(`${prefix} Request ID: req_wrong_constructor`), {
+          requestID: "req_wrong_constructor",
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({ message: "the model produced invalid content." }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(invalidContentError({ requestID: "bad id" })),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(invalidContentError({ requestID: "x".repeat(129) })),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          requestID: undefined,
+          message: `${prefix} provider prose mentions Request ID: req_not_exact`,
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      classifyProviderInvalidContentError(
+        invalidContentError({
+          requestID: undefined,
+          body: { requestID: "req_nested" },
+          response: { headers: { "x-request-id": "req_nested" } },
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  test("property: hostile getters, proxies, and cycles never throw or expand the surface", () => {
+    const cyclic: Record<string, unknown> = { error: null };
+    cyclic.error = cyclic;
+    const hostile = invalidContentError({
+      requestID: undefined,
+      cause: cyclic,
+      error: cyclic,
+      response: cyclic,
+      data: cyclic,
+    });
+    Object.defineProperty(hostile, "requestID", {
+      get() {
+        throw new Error("getter must not escape");
+      },
+    });
+    Object.defineProperty(hostile, "headers", {
+      get() {
+        throw new Error("headers getter must not escape");
+      },
+    });
+    expect(() => classifyProviderInvalidContentError(hostile)).not.toThrow();
+    expect(classifyProviderInvalidContentError(hostile)).toBeNull();
+
+    const hostileProxy = new Proxy(hostile, {
+      getPrototypeOf() {
+        throw new Error("prototype trap must not escape");
+      },
+    });
+    expect(() => classifyProviderInvalidContentError(hostileProxy)).not.toThrow();
+    expect(classifyProviderInvalidContentError(hostileProxy)).toBeNull();
+
+    for (let index = 0; index < 64; index += 1) {
+      const candidate = invalidContentError({
+        requestID: index % 2 === 0 ? `unsafe request ${index}` : undefined,
+        message: index % 3 === 0 ? `${prefix.slice(0, -1)}!` : `prefix ${prefix}`,
+        body: { requestID: `req_nested_${index}`, message: prefix },
+      });
+      expect(classifyProviderInvalidContentError(candidate)).toBeNull();
+    }
   });
 });
 
@@ -1365,15 +1542,17 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
   });
 
-  test("agentRunFailurePayload marks transient provider errors retryable, keeping the body", () => {
+  test("agentRunFailurePayload emits secret-safe diagnostics for transient provider errors", () => {
     const overloaded = Object.assign(
       new Error("Our servers are currently overloaded. Please try again later."),
       { status: 503 },
     );
     expect(agentRunFailurePayload(overloaded)).toEqual({
-      error: "Our servers are currently overloaded. Please try again later.",
+      error:
+        "The model provider became unavailable after request acceptance became uncertain. The original turn was not replayed.",
       code: "provider_unavailable",
       retryable: true,
+      httpStatus: 503,
     });
 
     const generic500 = Object.assign(
@@ -1386,7 +1565,51 @@ describe("transient provider error classifier", () => {
     const payload = agentRunFailurePayload(generic500);
     expect(payload.retryable).toBe(true);
     expect(payload.code).toBe("provider_unavailable");
-    expect(payload.error).toContain("request ID 8afe928d");
+    expect(payload.httpStatus).toBe(500);
+    expect(payload.error).not.toContain("request ID 8afe928d");
+    expect(JSON.stringify(payload)).not.toContain("8afe928d");
+
+    expect(
+      agentRunFailurePayload(
+        Object.assign(new Error("raw socket payload"), { code: "ECONNRESET" }),
+      ),
+    ).toEqual({
+      error:
+        "The model provider became unavailable after request acceptance became uncertain. The original turn was not replayed.",
+      code: "provider_unavailable",
+      retryable: true,
+      transportCode: "ECONNRESET",
+    });
+  });
+
+  test("hostile provider error getters and proxies fail closed without throwing", () => {
+    const hostile = {} as Record<string, unknown>;
+    for (const key of ["status", "code", "message", "error", "cause"]) {
+      Object.defineProperty(hostile, key, {
+        get() {
+          throw new Error(`${key} getter must not escape`);
+        },
+      });
+    }
+    expect(() => isTransientProviderError(hostile)).not.toThrow();
+    expect(isTransientProviderError(hostile)).toBe(false);
+    expect(() => agentRunFailurePayload(hostile)).not.toThrow();
+    expect(agentRunFailurePayload(hostile)).toEqual({ error: "Unknown error" });
+
+    const hostileProxy = new Proxy(hostile, {
+      get() {
+        throw new Error("proxy get must not escape");
+      },
+      getPrototypeOf() {
+        throw new Error("proxy prototype must not escape");
+      },
+    });
+    expect(() => classifyMcpTransportTimeoutError(hostileProxy)).not.toThrow();
+    expect(classifyMcpTransportTimeoutError(hostileProxy)).toBeNull();
+    expect(() => agentRunFailurePayload(hostileProxy, "responses")).not.toThrow();
+    expect(agentRunFailurePayload(hostileProxy, "responses")).toEqual({
+      error: "Unknown error",
+    });
   });
 
   test("agentRunFailurePayload still hard-fails a non-transient 4xx (no retryable marker)", () => {
@@ -1424,18 +1647,18 @@ describe("transient provider error classifier", () => {
     expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
   });
 
-  test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {
-    // Classifier → retryable, then the retryable turn-failure branch recovers the
-    // accepted turn itself. No goal lookup or synthetic continuation is involved.
+  test("ordinary 503 classification is recoverable but does not claim replay eligibility", () => {
     const failure = agentRunFailurePayload(
       Object.assign(new Error("Our servers are currently overloaded. Please try again later."), {
         status: 503,
       }),
     );
-    expect(failure.retryable).toBe(true); // enters the recovery branch (not the terminal one)
-    expect(providerRecoveryResult()).toEqual({
-      status: "recovering",
-      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    expect(failure).toEqual({
+      error:
+        "The model provider became unavailable after request acceptance became uncertain. The original turn was not replayed.",
+      code: "provider_unavailable",
+      retryable: true,
+      httpStatus: 503,
     });
   });
 

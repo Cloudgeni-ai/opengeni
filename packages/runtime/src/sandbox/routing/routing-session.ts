@@ -16,10 +16,10 @@
 //   - Cache the resolved backend session keyed by `activeEpoch`; when the epoch
 //     changes mid-turn (a swap bumped it), re-resolve so the NEXT op hits the new
 //     backend. Single active at a time (NOT parallel multi-attach).
-//   - An in-flight op fenced by a STALE `active_epoch` (the backend rejects with a
-//     fence error, OR the pointer moved under us between read and dispatch)
-//     RETRIES against the new active sandbox — reusing the existing fenced-retry
-//     role. Bounded retries so a pathological swap-storm can't loop forever.
+//   - A read-only op fenced by a STALE `active_epoch` retries against the new
+//     active sandbox. A mutation retries only when a trusted typed error proves
+//     the invocation never crossed admission; acceptance-unknown mutations are
+//     invoked once and surface a reconciliation checkpoint instead.
 //
 // This module is agent-loop-free (it lives in the sandbox leaf). It depends ONLY
 // on injected closures (`readPointer` + `resolveActiveBackend`), so the API
@@ -121,9 +121,9 @@ export interface RoutingSandboxSessionDeps {
    * the target backend (a sibling Modal box or a selfhosted machine session).
    */
   resolveActiveBackend(pointer: ActivePointer): Promise<ResolvedActiveBackend>;
-  /** Max fence/stale retries within a single op before surfacing the error.
+  /** Max read-only fence or proved-pre-acceptance mutation retries within one op.
    *  Defaults to 3 — enough to absorb a couple of concurrent swaps, bounded so a
-   *  swap-storm cannot loop forever. */
+   *  swap-storm cannot loop forever. Acceptance-unknown mutations never retry. */
   maxFenceRetries?: number;
   /** Optional structured-log sink for swap/fence transitions (diagnostics). */
   onTransition?: (event: RoutingTransitionEvent) => void;
@@ -145,9 +145,10 @@ export type DefaultBackendLossResult = {
 };
 
 export interface RoutingTransitionEvent {
-  type: "resolved" | "fenced-retry" | "epoch-changed";
+  type: "resolved" | "fenced-retry" | "pre-acceptance-retry" | "epoch-changed";
   fromEpoch: number;
-  toEpoch: number;
+  /** Null until a retry re-reads the authoritative pointer. Never guessed. */
+  toEpoch: number | null;
   sandboxId: string | null;
   kind: string;
 }
@@ -177,6 +178,174 @@ export class RoutingBackendRecoveryRequiredError extends Error {
   }
 }
 
+export type SandboxMutationAcceptanceCheckpoint = Readonly<{
+  op: string;
+  backend: string;
+  activeEpoch: number;
+  acceptance: "unknown";
+  transportCode?: string;
+}>;
+
+/**
+ * A mutating operation returned a typed transport/fence failure without proof
+ * that it was rejected before admission. The provider may already have run the
+ * command, write, editor mutation, or input event, so this error is a durable
+ * reconciliation boundary—not a retry ticket.
+ *
+ * The raw transport error is intentionally not retained as `cause`: provider
+ * messages and nested payloads may contain credentials, command data, or tool
+ * output. Provider execution identity is also intentionally absent because no
+ * current backend proves that an arbitrary exec/process field is a stable
+ * reattachment identity.
+ */
+export class SandboxMutationAcceptanceUnknownError extends Error {
+  readonly name = "SandboxMutationAcceptanceUnknownError";
+  readonly code = "sandbox_mutation_acceptance_unknown";
+  readonly outcome = "acceptance_unknown" as const;
+  readonly acceptance = "unknown" as const;
+  readonly checkpoint: SandboxMutationAcceptanceCheckpoint;
+
+  constructor(
+    public readonly op: string,
+    public readonly backend: string,
+    public readonly activeEpoch: number,
+    transportCode?: string,
+  ) {
+    super(
+      `The active sandbox may have accepted mutating operation "${op}" on ${backend} at epoch ${activeEpoch}; it was invoked once and was not replayed because acceptance is unknown. Reconcile the existing effect before retrying.`,
+    );
+    this.checkpoint = {
+      op,
+      backend,
+      activeEpoch,
+      acceptance: "unknown",
+      ...(transportCode ? { transportCode } : {}),
+    };
+  }
+}
+
+/** A bounded pre-acceptance retry budget exhausted without accepting work. */
+export class SandboxMutationRetryExhaustedError extends Error {
+  readonly name = "SandboxMutationRetryExhaustedError";
+  readonly code = "sandbox_mutation_pre_acceptance_retry_exhausted";
+  readonly outcome = "not_accepted" as const;
+  readonly acceptance = "not_accepted" as const;
+
+  constructor(
+    public readonly op: string,
+    public readonly backend: string,
+    public readonly activeEpoch: number,
+    public readonly invocations: number,
+    public readonly proof: "never_sent" | "fenced",
+  ) {
+    super(
+      `The active sandbox rejected mutating operation "${op}" before acceptance ${invocations} time(s) on ${backend} at epoch ${activeEpoch} (${proof}); the bounded retry budget was exhausted.`,
+    );
+  }
+}
+
+/** Methods whose second invocation can duplicate a provider or host effect. */
+export function isMutatingRoutingOperation(op: string): boolean {
+  return (
+    op === "exec" ||
+    op === "execCommand" ||
+    op === "writeStdin" ||
+    op === "writeFile" ||
+    op === "materializeEntry" ||
+    op === "desktopInput" ||
+    op.startsWith("editor.")
+  );
+}
+
+const TRANSIENT_TRANSPORT_CODES = new Set([
+  "CANCELLED",
+  "UNKNOWN",
+  "DEADLINE_EXCEEDED",
+  "INTERNAL",
+  "UNAVAILABLE",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EAI_AGAIN",
+  "ENOTFOUND",
+  "EPIPE",
+]);
+const TRANSIENT_GRPC_STATUSES = new Map<number, string>([
+  [1, "CANCELLED"],
+  [2, "UNKNOWN"],
+  [4, "DEADLINE_EXCEEDED"],
+  [13, "INTERNAL"],
+  [14, "UNAVAILABLE"],
+]);
+const SAFE_TRANSPORT_CODE = /^[A-Z0-9._:-]{1,64}$/;
+
+function safeRead(value: object, key: PropertyKey): unknown {
+  try {
+    return Reflect.get(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function isSelfhostedControlError(error: unknown): error is SelfhostedControlError {
+  try {
+    return error instanceof SelfhostedControlError;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Return a bounded typed transport signal only. Message prose is never enough
+ * to classify acceptance, and transient evidence dominates nested NotFound
+ * signals (the Modal DNS incident carried both kinds of text).
+ */
+export function mutationTransportCode(error: unknown): string | null {
+  // Selfhosted's wire ErrorCode is a numeric protobuf enum, not a gRPC status.
+  // Handle its typed admission proof before the generic scanner so enum values
+  // can never collide with gRPC 1/2/4/13/14 and fabricate transport evidence.
+  if (isSelfhostedControlError(error)) {
+    if (error.fenced) return "FENCED";
+    if (error.neverSent) return "SELFHOSTED_NEVER_SENT";
+    return null;
+  }
+  const codes: string[] = [];
+  const statuses: number[] = [];
+  const seen = new Set<object>();
+  const visit = (value: unknown, depth: number): void => {
+    if (!value || typeof value !== "object" || depth > 3 || seen.has(value)) return;
+    seen.add(value);
+    for (const key of ["code", "errorCode", "status", "statusCode"] as const) {
+      const signal = safeRead(value, key);
+      if (typeof signal === "number" && Number.isFinite(signal)) statuses.push(signal);
+      if (typeof signal === "string") {
+        const normalized = signal.trim().toUpperCase();
+        if (SAFE_TRANSPORT_CODE.test(normalized)) codes.push(normalized);
+      }
+    }
+    for (const key of ["cause", "error", "response"] as const) {
+      visit(safeRead(value, key), depth + 1);
+    }
+  };
+  visit(error, 0);
+
+  const typedCode = codes.find((code) => TRANSIENT_TRANSPORT_CODES.has(code));
+  if (typedCode) return typedCode;
+  for (const status of statuses) {
+    const grpcCode = TRANSIENT_GRPC_STATUSES.get(status);
+    if (grpcCode) return grpcCode;
+  }
+  const httpStatus = statuses.find(
+    (status) => status === 408 || status === 425 || (status >= 500 && status < 600),
+  );
+  return httpStatus === undefined ? null : `HTTP_${httpStatus}`;
+}
+
+/** Explicit proof that no provider/host work crossed the admission boundary. */
+function isProvenNotAccepted(error: unknown): boolean {
+  return isSelfhostedControlError(error) && (error.neverSent === true || error.fenced === true);
+}
+
 /** Recognize a stale-epoch FENCE error from a backend op so the proxy retries
  *  against the re-resolved active sandbox (the existing fenced-retry role). A
  *  selfhosted `SelfhostedControlError` carries `.fenced`; a generic fence is
@@ -185,21 +354,21 @@ function isFenceError(error: unknown): boolean {
   if (!error || typeof error !== "object") {
     return false;
   }
-  if ((error as { fenced?: unknown }).fenced === true) {
+  if (safeRead(error, "fenced") === true) {
     return true;
   }
-  const name =
-    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
-  const message =
-    error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
+  const rawName = safeRead(error, "name");
+  const rawMessage = safeRead(error, "message");
+  const name = typeof rawName === "string" ? rawName : "";
+  const message = typeof rawMessage === "string" ? rawMessage : "";
   const haystack = `${name} ${message}`.toLowerCase();
   return haystack.includes("fenced") || (haystack.includes("epoch") && haystack.includes("super"));
 }
 
 /**
  * ONE stable session-shaped object the SDK binds to. Every method re-reads the
- * pointer, resolves the active backend (cached by epoch), and dispatches. A
- * stale-epoch fence (the pointer moved mid-op) re-resolves and retries.
+ * pointer, resolves the active backend (cached by epoch), and dispatches.
+ * Read-only fences re-resolve; mutations require typed pre-acceptance proof.
  *
  * The proxy implements ALL of the consumed surface so the SDK (which binds method
  * presence ONCE) always sees `exec`/`readFile`/`resolveExposedPort`/… present. If
@@ -345,15 +514,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   /**
-   * Dispatch an op to the currently-active backend, retrying on a stale-epoch
-   * fence. The sequence per attempt:
+   * Dispatch an op to the currently-active backend. The sequence per attempt:
    *   1. re-read the pointer + resolve the active backend (cached by epoch),
    *   2. run `fn(activeSession)`,
-   *   3. on a FENCE error (the pointer moved under us / the backend rejected a
-   *      stale epoch), INVALIDATE the cache and retry against the re-resolved
-   *      active sandbox — up to `maxFenceRetries`.
-   * A non-fence error propagates immediately (it is a real op failure, not a swap
-   * race).
+   *   3. for read-only work, a FENCE invalidates the cache and retries against
+   *      the re-resolved active sandbox, bounded by `maxFenceRetries`;
+   *   4. for mutations, retry only with trusted typed proof of non-acceptance;
+   *      otherwise surface `SandboxMutationAcceptanceUnknownError` after the
+   *      single invocation.
    */
   private async dispatch<T>(
     op: string,
@@ -361,12 +529,28 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
+    let lastBackendKind = "unknown";
+    let lastActiveEpoch = 0;
+    let lastProof: "never_sent" | "fenced" = "fenced";
     while (attempt <= this.maxFenceRetries) {
       const backend = await this.resolve();
+      const activeEpoch = this.cachedEpoch ?? 0;
+      lastBackendKind = backend.kind;
+      lastActiveEpoch = activeEpoch;
       try {
         return await fn(backend.session);
       } catch (error) {
-        if (!isFenceError(error)) {
+        const mutating = isMutatingRoutingOperation(op);
+        const fenced = isFenceError(error);
+        const transportCode = mutationTransportCode(error);
+        const nonAcceptanceProven = isProvenNotAccepted(error);
+
+        // OPE-60's canonical provider-existence seam runs first for home-backend
+        // non-fence failures. A definitive exact-instance loss atomically retires
+        // the matching lease and returns typed recovery state; the operation is
+        // never replayed. Transient DNS/transport uncertainty returns null and
+        // falls through to OPE-13's acceptance boundary below.
+        if (!fenced) {
           if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
             const loss = await this.deps.onDefaultBackendError({
               op,
@@ -384,19 +568,38 @@ export class RoutingSandboxSession implements RoutableBackendSession {
               throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
             }
           }
+        }
+
+        if (mutating && (fenced || transportCode) && !nonAcceptanceProven) {
+          throw new SandboxMutationAcceptanceUnknownError(
+            op,
+            backend.kind,
+            activeEpoch,
+            transportCode ?? (fenced ? "FENCED" : undefined),
+          );
+        }
+        // A mutation may retry only when a typed signal proves the previous
+        // invocation did not cross admission. Read-only operations retain the
+        // existing bounded fence retry behavior.
+        const retryablePreAcceptanceMutation =
+          mutating && Boolean(transportCode) && nonAcceptanceProven;
+        if (!fenced && !retryablePreAcceptanceMutation) {
           throw error;
         }
         // Stale-epoch fence: the active pointer moved mid-op. Drop the cache so
         // the next resolve re-reads the NEW pointer and the op lands on the new
         // active sandbox (the fenced-retry role). Bounded by maxFenceRetries.
         lastError = error;
+        lastProof = fenced ? "fenced" : "never_sent";
         this.cachedEpoch = undefined;
         this.cachedSandboxId = undefined;
         this.cached = undefined;
         this.deps.onTransition?.({
-          type: "fenced-retry",
-          fromEpoch: backend.sandboxId === null ? 0 : 0,
-          toEpoch: 0,
+          type: fenced ? "fenced-retry" : "pre-acceptance-retry",
+          fromEpoch: activeEpoch,
+          // The new pointer is intentionally not guessed before the next
+          // `resolve()`.
+          toEpoch: null,
           sandboxId: backend.sandboxId,
           kind: backend.kind,
         });
@@ -405,6 +608,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     }
     // Exhausted retries against a relentless swap-storm: surface the fence so the
     // caller (turn) backs off — never loop forever.
+    if (isMutatingRoutingOperation(op) && lastError) {
+      throw new SandboxMutationRetryExhaustedError(
+        op,
+        lastBackendKind,
+        lastActiveEpoch,
+        attempt,
+        lastProof,
+      );
+    }
     throw lastError ?? new Error(`routing op "${op}" exhausted fence retries`);
   }
 
@@ -427,8 +639,17 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    * `RoutingUnsupportedError`) is re-thrown unchanged.
    */
   private renderSelfhostedFaultOrThrow(error: unknown): string {
-    if (error instanceof SelfhostedControlError && !error.fenced) {
+    if (isSelfhostedControlError(error) && !error.fenced) {
       return renderSelfhostedFault(error);
+    }
+    if (error instanceof SandboxMutationRetryExhaustedError && error.proof === "never_sent") {
+      return [
+        "[sandbox transport] the command could not reach the active sandbox",
+        `What happened: the sandbox rejected the command before acceptance ${error.invocations} time(s); the bounded retry budget was exhausted.`,
+        `Which layer: the ${error.backend} sandbox transport / admission boundary at active epoch ${error.activeEpoch}.`,
+        "What was preserved: nothing ran during these invocations; no command effect needs reconciliation.",
+        "What to try: restore the sandbox connection, then submit a new command; this command call will not retry again.",
+      ].join("\n");
     }
     throw error;
   }
@@ -562,10 +783,9 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    *  backend (establishing the box on first use, via `dispatch`) and delegate to its
    *  real editor — mirroring how this proxy defers exec/readFile. */
   createEditor(runAs?: string): unknown {
-    const eager = (this.lastResolved ?? this.deps.defaultResolved)?.session.createEditor?.(runAs);
-    if (eager) {
-      return eager;
-    }
+    // Always return the routing editor proxy, including for eager backends.
+    // Binding directly to an eager editor would pin mutations to the old box
+    // across a swap and bypass this class's acceptance boundary.
     const op =
       (name: "createFile" | "updateFile" | "deleteFile") =>
       (operation: unknown, context?: unknown): Promise<unknown> =>

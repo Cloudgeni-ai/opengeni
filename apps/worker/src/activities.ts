@@ -5,7 +5,7 @@ import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
-import { createRunAgentTurnActivity } from "./activities/agent-turn";
+import { createRunAgentTurnActivity, type AgentTurnTestHooks } from "./activities/agent-turn";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
 import { createDocumentActivities } from "./activities/documents";
 import { createFileUploadReaperActivities } from "./activities/file-upload-reaper";
@@ -142,9 +142,15 @@ export function createTurnActivities(dependencies: ActivityDependencies = {}) {
 }
 
 /** Direct activity harness for tests; production workers always choose one role. */
-export function createActivityTestHarness(dependencies: ActivityDependencies = {}) {
+export function createActivityTestHarness(
+  dependencies: ActivityDependencies = {},
+  agentTurnTestHooks: AgentTurnTestHooks = {},
+) {
   const services = createActivityServices(dependencies);
-  return { runAgentTurn: createRunAgentTurnActivity(services), ...controlActivities(services) };
+  return {
+    runAgentTurn: createRunAgentTurnActivity(services, agentTurnTestHooks),
+    ...controlActivities(services),
+  };
 }
 
 const defaultControlActivities = createControlActivities();

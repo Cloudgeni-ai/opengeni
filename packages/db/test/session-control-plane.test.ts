@@ -106,6 +106,7 @@ async function send(
   sessionId: string,
   text: string,
   delivery: "send" | "steer" = "send",
+  source: "user" | "api" = "user",
 ) {
   const accepted = await withWorkspaceSubjectRls(
     client.db,
@@ -125,7 +126,7 @@ async function send(
           resources: [],
           tools: [],
           reasoningEffortFallback: "low",
-          source: "user",
+          source,
         }),
       ),
   );
@@ -1180,6 +1181,493 @@ describe("clean session control plane", () => {
       status: "running",
       activeAttemptId: secondAttemptId,
     });
+  });
+
+  test("heartbeat recovery consumes exact final no-replay checkpoints instead of redispatching", async () => {
+    for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `checkpoint ${reason}`);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error(`no-replay ${reason} turn was not claimed`);
+      const items =
+        reason === "provider_invalid_content"
+          ? []
+          : [
+              {
+                position: 1,
+                item: {
+                  type: "message",
+                  role: "assistant",
+                  content: `durable-${reason}`,
+                },
+              },
+            ];
+      const boundary = {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        items: [],
+        noReplayCheckpoint: { reason, conversationCheckpoint: "incomplete" as const },
+      };
+      const checkpoint = {
+        ...boundary,
+        items,
+        noReplayCheckpoint: { reason, conversationCheckpoint: "complete" as const },
+      };
+
+      // The terminal boundary commits before final history inspection. Its
+      // retry is idempotent, and the final history transaction may only upgrade
+      // incomplete -> complete.
+      expect(await appendSessionHistoryItems(client.db, checkpoint)).toBe(false);
+      expect(await appendSessionHistoryItems(client.db, boundary)).toBe(true);
+      expect(await appendSessionHistoryItems(client.db, boundary)).toBe(true);
+      expect(await appendSessionHistoryItems(client.db, checkpoint)).toBe(true);
+      expect(await appendSessionHistoryItems(client.db, checkpoint)).toBe(true);
+      // A late retry of the first write never downgrades a completed checkpoint.
+      expect(await appendSessionHistoryItems(client.db, boundary)).toBe(true);
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          ...checkpoint,
+          noReplayCheckpoint: {
+            reason:
+              reason === "provider_invalid_content"
+                ? "transport_acceptance_unknown"
+                : "provider_invalid_content",
+            conversationCheckpoint: "complete",
+          },
+        }),
+      ).toBe(false);
+
+      const recovery = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovery).toMatchObject({
+        action: "settled_no_replay",
+        turnId: turn.id,
+        reason,
+        checkpointSucceeded: true,
+        queuedHumanWork: false,
+      });
+      expect(recovery.events.filter((event) => event.type === "turn.failed")).toHaveLength(1);
+      expect(recovery.events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+      expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+        status: "failed",
+        activeAttemptId: null,
+        executionGeneration: turn.executionGeneration,
+        metadata: {
+          noReplayCheckpoint: {
+            attemptId,
+            executionGeneration: turn.executionGeneration,
+            disposition: "failed_idle",
+            reason,
+            conversationCheckpoint: "complete",
+          },
+        },
+      });
+      expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+        status: "idle",
+        activeTurnId: null,
+      });
+      expect(
+        (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)).filter(
+          (row) => (row.item as Record<string, unknown>).content === `durable-${reason}`,
+        ),
+      ).toHaveLength(items.length);
+      expect(
+        await recoverSessionDispatch(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          attemptId,
+          timeoutType: "HEARTBEAT",
+          maxRedispatches: 3,
+        }),
+      ).toEqual({
+        action: "settled_no_replay",
+        turnId: turn.id,
+        reason,
+        checkpointSucceeded: true,
+        queuedHumanWork: false,
+        events: [],
+      });
+      expect(
+        await claimTestSessionWork(
+          client.db,
+          grant.workspaceId!,
+          session.id,
+          `session-${session.id}`,
+        ),
+      ).toBeNull();
+    }
+  });
+
+  test("heartbeat recovery terminally consumes incomplete no-replay boundaries", async () => {
+    for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `incomplete checkpoint ${reason}`);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error(`incomplete no-replay ${reason} turn was not claimed`);
+      if (reason === "transport_acceptance_unknown") {
+        await createSessionGoal(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          text: "Remain active without impersonating queued human work",
+          createdBy: "api",
+        });
+        await addSessionSystemUpdate(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          kind: "agent_message",
+          classification: "info",
+          sourceId: crypto.randomUUID(),
+          dedupeKey: `no-replay-internal-${crypto.randomUUID()}`,
+          summary: "Deferred internal update",
+          payload: {
+            type: "agent_message",
+            text: "Internal work must not become queuedHumanWork",
+            operationId: crypto.randomUUID(),
+          },
+        });
+      }
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn.id,
+          expectedExecutionGeneration: turn.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [],
+          noReplayCheckpoint: { reason, conversationCheckpoint: "incomplete" },
+        }),
+      ).toBe(true);
+
+      const recovery = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovery).toMatchObject({
+        action: "settled_no_replay",
+        turnId: turn.id,
+        reason,
+        checkpointSucceeded: false,
+        queuedHumanWork: false,
+      });
+      expect(recovery.events.some((event) => event.type === "turn.recovery.requested")).toBe(false);
+      expect(recovery.events.find((event) => event.type === "turn.failed")?.payload).toMatchObject({
+        checkpointSucceeded: false,
+        automaticContinuationRefused: true,
+        sameTurnReplay: "refused",
+      });
+      expect(await getSessionTurn(client.db, grant.workspaceId!, turn.id)).toMatchObject({
+        status: "failed",
+        activeAttemptId: null,
+        metadata: {
+          noReplayCheckpoint: {
+            attemptId,
+            executionGeneration: turn.executionGeneration,
+            disposition: "failed_idle",
+            reason,
+            conversationCheckpoint: "incomplete",
+          },
+        },
+      });
+      expect(
+        (await getSessionQueueSnapshot(client.db, grant.workspaceId!, session.id))?.items,
+      ).toHaveLength(0);
+      if (reason === "provider_invalid_content") {
+        expect(
+          await claimTestSessionWork(
+            client.db,
+            grant.workspaceId!,
+            session.id,
+            `session-${session.id}`,
+          ),
+        ).toBeNull();
+      } else {
+        expect(await getSessionGoal(client.db, grant.workspaceId!, session.id)).toMatchObject({
+          status: "active",
+        });
+        expect(
+          await listOutstandingSessionSystemUpdates(client.db, grant.workspaceId!, session.id),
+        ).toHaveLength(1);
+      }
+    }
+  });
+
+  test("incomplete no-replay recovery preserves independently queued human FIFO work", async () => {
+    for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `active incomplete checkpoint ${reason}`);
+      const failedAttemptId = crypto.randomUUID();
+      const failedTurn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: failedAttemptId },
+      );
+      if (!failedTurn) throw new Error(`active no-replay ${reason} turn was not claimed`);
+
+      // Both prompts are independently durable before failed-idle settlement.
+      // Their workflow signals may therefore already be part of the current
+      // signal baseline when recovery decides whether to close.
+      const older = await send(grant, session.id, `older queued after ${reason}`);
+      const newer = await send(grant, session.id, `newer queued after ${reason}`, "send", "api");
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: failedTurn.id,
+          expectedExecutionGeneration: failedTurn.executionGeneration,
+          expectedAttemptId: failedAttemptId,
+          items: [],
+          noReplayCheckpoint: { reason, conversationCheckpoint: "incomplete" },
+        }),
+      ).toBe(true);
+
+      const recovery = await recoverSessionDispatch(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        attemptId: failedAttemptId,
+        timeoutType: "HEARTBEAT",
+        maxRedispatches: 3,
+      });
+      expect(recovery).toMatchObject({
+        action: "settled_no_replay",
+        turnId: failedTurn.id,
+        reason,
+        checkpointSucceeded: false,
+        queuedHumanWork: true,
+      });
+      expect(await getSessionTurn(client.db, grant.workspaceId!, failedTurn.id)).toMatchObject({
+        status: "failed",
+        activeAttemptId: null,
+      });
+      expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+        status: "queued",
+        activeTurnId: null,
+      });
+
+      const olderAttemptId = crypto.randomUUID();
+      const olderClaim = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId: olderAttemptId },
+      );
+      expect(olderClaim?.id).toBe(older.turn.id);
+      if (!olderClaim) throw new Error("older queued prompt was not claimed");
+      expect(
+        await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          turnId: olderClaim.id,
+          triggerEventId: olderClaim.triggerEventId,
+          attemptId: olderAttemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [
+            { type: "turn.completed", payload: { triggerEventId: olderClaim.triggerEventId } },
+            { type: "session.status.changed", payload: { status: "idle" } },
+          ],
+        }),
+      ).toMatchObject({ action: "settled" });
+      const newerClaim = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+      );
+      expect(newerClaim?.id).toBe(newer.turn.id);
+      expect(newerClaim?.id).not.toBe(failedTurn.id);
+    }
+  });
+
+  test("heartbeat recovery preserves incomplete suppression after ordinary settlement", async () => {
+    for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `settled incomplete checkpoint ${reason}`);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error(`settled incomplete ${reason} turn was not claimed`);
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn.id,
+          expectedExecutionGeneration: turn.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [],
+          noReplayCheckpoint: { reason, conversationCheckpoint: "incomplete" },
+        }),
+      ).toBe(true);
+      expect(
+        await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId,
+          turnStatus: "failed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [
+            {
+              type: "turn.failed",
+              payload: {
+                triggerEventId: turn.triggerEventId,
+                code: reason,
+                checkpointSucceeded: false,
+                automaticContinuationRefused: true,
+                sameTurnReplay: "refused",
+              },
+            },
+            { type: "session.status.changed", payload: { status: "idle" } },
+          ],
+        }),
+      ).toMatchObject({ action: "settled" });
+
+      // Simulate loss of the activity completion response after the ordinary
+      // settlement committed. Recovery must retain the durable suppression
+      // result rather than classify the closed attempt as generic stale work.
+      for (let retry = 0; retry < 2; retry += 1) {
+        expect(
+          await recoverSessionDispatch(client.db, grant.workspaceId!, {
+            sessionId: session.id,
+            attemptId,
+            timeoutType: "HEARTBEAT",
+            maxRedispatches: 3,
+          }),
+        ).toEqual({
+          action: "settled_no_replay",
+          turnId: turn.id,
+          reason,
+          checkpointSucceeded: false,
+          queuedHumanWork: false,
+          events: [],
+        });
+      }
+      expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+        status: "idle",
+        activeTurnId: null,
+      });
+    }
+  });
+
+  test("response-loss recovery preserves queued human truth without duplicate settlement", async () => {
+    for (const reason of ["provider_invalid_content", "transport_acceptance_unknown"] as const) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `settle before response loss ${reason}`);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      if (!turn) throw new Error(`response-loss ${reason} turn was not claimed`);
+      const queued = await send(grant, session.id, `queued across response loss ${reason}`);
+      expect(
+        await appendSessionHistoryItems(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn.id,
+          expectedExecutionGeneration: turn.executionGeneration,
+          expectedAttemptId: attemptId,
+          items: [],
+          noReplayCheckpoint: { reason, conversationCheckpoint: "incomplete" },
+        }),
+      ).toBe(true);
+      expect(
+        await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+          sessionId: session.id,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId,
+          turnStatus: "failed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [
+            {
+              type: "turn.failed",
+              payload: {
+                triggerEventId: turn.triggerEventId,
+                code: reason,
+                checkpointSucceeded: false,
+                automaticContinuationRefused: true,
+                sameTurnReplay: "refused",
+              },
+            },
+            { type: "session.status.changed", payload: { status: "idle" } },
+          ],
+        }),
+      ).toMatchObject({ action: "settled" });
+      const settledSequence = (await getSession(client.db, grant.workspaceId!, session.id))!
+        .lastSequence;
+
+      for (let retry = 0; retry < 2; retry += 1) {
+        expect(
+          await recoverSessionDispatch(client.db, grant.workspaceId!, {
+            sessionId: session.id,
+            attemptId,
+            timeoutType: "HEARTBEAT",
+            maxRedispatches: 3,
+          }),
+        ).toEqual({
+          action: "settled_no_replay",
+          turnId: turn.id,
+          reason,
+          checkpointSucceeded: false,
+          queuedHumanWork: true,
+          events: [],
+        });
+      }
+      expect(await getSession(client.db, grant.workspaceId!, session.id)).toMatchObject({
+        status: "queued",
+        activeTurnId: null,
+        lastSequence: settledSequence,
+      });
+      const claimed = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+      );
+      expect(claimed?.id).toBe(queued.turn.id);
+      expect(claimed?.id).not.toBe(turn.id);
+    }
   });
 
   test("a waiting prompt can only be deleted with exact queue and row versions", async () => {
