@@ -158,7 +158,10 @@ describe("sessions_list compact discovery projection", () => {
 
   test("budgets opt-in previews by deterministic UTF-8 bytes and exposes drill-down metadata", () => {
     const preview = "é".repeat(600);
-    const sessions = Array.from({ length: 100 }, (_, index) => ({
+    // Keep this fixture below the page envelope after each omitted preview carries
+    // its complete bounded recovery input; the separate page-cap test covers
+    // pagination when the per-item metadata itself fills the response budget.
+    const sessions = Array.from({ length: 88 }, (_, index) => ({
       id: uuid(index + 1),
       title: `session-${index + 1}`,
       parentSessionId: null,
@@ -206,7 +209,7 @@ describe("sessions_list compact discovery projection", () => {
     expect(previewBudget).toEqual({
       bytes: 13 * Buffer.byteLength(preview, "utf8"),
       maxBytes: 16_384,
-      omittedCount: 87,
+      omittedCount: 75,
       truncated: true,
       omissionReason: "aggregatePreviewBudget",
       drillDownTool: "session_events",
@@ -221,7 +224,7 @@ describe("sessions_list compact discovery projection", () => {
     expect(previewBudget.bytes).toBe(15_600);
     expect(Math.ceil(previewBudget.bytes / 4)).toBe(3_900);
     expect(Math.ceil(previewBudget.maxBytes / 4)).toBe(4_096);
-    expect(result.sessions).toHaveLength(100);
+    expect(result.sessions).toHaveLength(88);
     expect(result.sessions[12]!.latestMessage).toMatchObject({
       preview,
       previewTruncated: false,
