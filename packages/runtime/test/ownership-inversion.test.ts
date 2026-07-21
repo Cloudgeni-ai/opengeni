@@ -32,7 +32,7 @@ import {
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
-// network), history in run_state mode (default), one model call per turn cap is
+// network), one canonical history store, one model call per turn cap is
 // fine — the scripted model finishes in 2 calls (shell -> final message).
 function localSettings() {
   return testSettings({ sandboxBackend: "local", webSearchEnabled: false });
@@ -152,6 +152,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     const settings = localSettings();
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-cold",
+      recovery: "create-or-restore",
       backendOverride: "local",
     });
     expect(established.backendId).toBe("unix_local");
@@ -166,6 +167,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
     const settings = testSettings({ sandboxBackend: "none", webSearchEnabled: false });
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-override",
+      recovery: "create-or-restore",
       backendOverride: "local",
     });
     expect(established.backendId).toBe("unix_local");
@@ -173,7 +175,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
   });
 
   test("the box is created with the SAME manifest environment the agent declares (no provided-session env delta)", async () => {
-    // BUG-1 regression (the turn-killer). The box is injected NON-OWNED and the
+    // Ownership regression (the turn-killer). The box is injected NON-OWNED and the
     // SDK then applies the AGENT's declared manifest to it as a provided-session
     // delta; applyManifestToProvidedSession throws on ANY environment delta. So
     // the box's manifest environment MUST equal the agent's declared environment.
@@ -201,6 +203,7 @@ describe("P1.2 establishSandboxSessionFromEnvelope (unix_local)", () => {
 
     const established = await establishSandboxSessionFromEnvelope(settings, null, {
       sessionId: "sess-env",
+      recovery: "create-or-restore",
       backendOverride: "local",
       environment: sandboxEnvironment,
     });

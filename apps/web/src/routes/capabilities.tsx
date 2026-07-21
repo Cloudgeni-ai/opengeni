@@ -795,8 +795,17 @@ export function CapabilitiesRoute({
 
               {catalogView === "loading" ? (
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-                  {Array.from({ length: 8 }).map((_, index) => (
-                    <div key={index} className="rounded-xl border border-border bg-surface/50 p-4">
+                  {[
+                    "catalog-skeleton-1",
+                    "catalog-skeleton-2",
+                    "catalog-skeleton-3",
+                    "catalog-skeleton-4",
+                    "catalog-skeleton-5",
+                    "catalog-skeleton-6",
+                    "catalog-skeleton-7",
+                    "catalog-skeleton-8",
+                  ].map((rowKey) => (
+                    <div key={rowKey} className="rounded-xl border border-border bg-surface/50 p-4">
                       <Skeleton className="size-10 rounded-lg" />
                       <Skeleton className="mt-3 h-4 w-24" />
                       <Skeleton className="mt-2 h-3 w-full" />

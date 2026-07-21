@@ -658,7 +658,6 @@ function UserMessageRow({
   return (
     <div className={cn(enter && "animate-og-enter", "flex justify-end")}>
       <div className="flex max-w-[85%] min-w-0 flex-col items-end gap-1">
-        {item.pending ? <span className="px-1 text-og-xs text-og-fg-subtle">queued</span> : null}
         <div className="w-fit max-w-full min-w-0 rounded-og-lg rounded-br-og-xs border border-og-border bg-og-surface-2 px-4 py-2.5 text-og-md leading-6 text-og-fg">
           {renderMessageText ? (
             renderMessageText(item.text, item)
@@ -973,7 +972,17 @@ function NoticeRow({ item }: { item: NoticeItem }) {
       <TriangleAlertIcon
         className={cn("mt-0.5 size-4 shrink-0", item.tone === "cancelled" && "opacity-60")}
       />
-      <span className="min-w-0 flex-1 whitespace-pre-wrap break-words">{item.text}</span>
+      <div className="min-w-0 flex-1">
+        <span className="whitespace-pre-wrap break-words">{item.text}</span>
+        {item.details ? (
+          <details className="mt-2 text-xs">
+            <summary className="cursor-pointer font-medium">{item.details.label}</summary>
+            <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-og-sm bg-black/5 p-2 font-mono dark:bg-white/5">
+              {JSON.stringify(item.details.value, null, 2)}
+            </pre>
+          </details>
+        ) : null}
+      </div>
       {item.action ? (
         <a
           className="shrink-0 rounded-og-sm border border-current/25 px-2 py-1 text-xs font-medium hover:bg-current/10"

@@ -3,6 +3,7 @@
 // setup/definition edit that proposes a `definition_edit` change — one editor so
 // the two paths never drift.
 import { PlusIcon, Trash2Icon } from "lucide-react";
+import { useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -34,6 +35,15 @@ export function RigDefinitionFields({
   disabled?: boolean;
   idPrefix?: string;
 }) {
+  const checkKeys = useRef<string[]>([]);
+  const nextCheckKey = useRef(1);
+  while (checkKeys.current.length < value.checks.length) {
+    checkKeys.current.push(`${idPrefix}-check-row-${nextCheckKey.current}`);
+    nextCheckKey.current += 1;
+  }
+  if (checkKeys.current.length > value.checks.length) {
+    checkKeys.current.length = value.checks.length;
+  }
   const setChecks = (checks: RigCheck[]) => onChange({ ...value, checks });
   const toggleVariableSet = (id: string) => {
     const has = value.defaultVariableSetIds.includes(id);
@@ -101,10 +111,8 @@ export function RigDefinitionFields({
         ) : (
           <div className="grid gap-1.5">
             {value.checks.map((check, index) => (
-              // Index key: rows are positional and only edited/removed in place.
-              // eslint-disable-next-line react/no-array-index-key
               <div
-                key={index}
+                key={checkKeys.current[index]}
                 className="grid grid-cols-[10rem_minmax(0,1fr)_auto] items-center gap-1.5"
               >
                 <Input
@@ -142,7 +150,10 @@ export function RigDefinitionFields({
                   disabled={disabled}
                   aria-label={`Remove check ${index + 1}`}
                   className="hover:text-status-failed"
-                  onClick={() => setChecks(value.checks.filter((_, i) => i !== index))}
+                  onClick={() => {
+                    checkKeys.current.splice(index, 1);
+                    setChecks(value.checks.filter((_, i) => i !== index));
+                  }}
                 >
                   <Trash2Icon className="size-3.5" />
                 </Button>

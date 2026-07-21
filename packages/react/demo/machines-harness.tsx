@@ -60,9 +60,8 @@ function Dashboard({ data }: { data: MachinesResponse }) {
   );
 }
 
-/** Side-by-side dock-parity: Modal vs selfhosted render IDENTICALLY below the bar. */
-function DockParity() {
-  const SurfaceStub = () => (
+function SurfaceStub() {
+  return (
     <div className="flex h-40 flex-col gap-2 p-2 font-og-mono text-[11px] text-og-fg-muted">
       <div className="flex gap-3 border-b border-og-border pb-1 text-og-fg">
         <span className="border-b-2 border-og-accent pb-1 text-og-fg">Files</span>
@@ -74,6 +73,10 @@ function DockParity() {
       <div className="text-og-fg-subtle">$ echo $HOSTNAME</div>
     </div>
   );
+}
+
+/** Side-by-side dock-parity: Modal vs selfhosted render IDENTICALLY below the bar. */
+function DockParity() {
   return (
     <div className="grid gap-4 md:grid-cols-2">
       <div className="overflow-hidden rounded-og-lg border border-og-border bg-og-surface-1">
@@ -88,7 +91,7 @@ function DockParity() {
           Selfhosted machine
         </p>
         <MachineDockBar
-          name="jorgen-desktop"
+          name="dev-desktop"
           kind="selfhosted"
           state="online"
           sharedSessionCount={2}

@@ -3,7 +3,7 @@
 
    The M5/M6 harnesses render sub-components (WorkbenchChanges, FileBrowser,
    SandboxTerminal) in isolation. M7 reviews the WHOLE dock — frame + header +
-   machine chip + tab strip + every surface — in each state of the dossier §13
+   machine chip + tab strip + every surface — in each state of the
    matrix. This module drives the real `<SandboxWorkspace>` through a mock client
    whose capability / capture / machine / git responses are chosen by a state key,
    so one harness + one screenshot runner covers every matrix cell.
@@ -165,9 +165,11 @@ function diffDense(count: number): GitFileDiff[] {
     "docs",
   ];
   return Array.from({ length: count }, (_, i) => {
-    const dir = dirs[i % dirs.length];
+    const directory = dirs[i % dirs.length];
     const size = 1 + (i % 5);
-    return file(`${dir}/module-${String(i).padStart(3, "0")}.ts`, size * 2, size, [hunk(1, size)]);
+    return file(`${directory}/module-${String(i).padStart(3, "0")}.ts`, size * 2, size, [
+      hunk(1, size),
+    ]);
   });
 }
 
@@ -176,6 +178,42 @@ const diffGuard: GitFileDiff[] = [
   file("src/index.ts", 4, 1, [hunk(1, 2)]),
   file("assets/logo.png", 0, 0, [], { isBinary: true, isImage: true, status: "modified" }),
   file("data/fixtures.json", 0, 0, [], { truncated: true, additions: 12000, deletions: 8000 }),
+];
+
+/** Unicode, spaces, a near-boundary component, and a pathological code line. */
+const longComponent =
+  "internationalisation-accessibility-observability-and-deployment-coordination-" +
+  "with-a-deliberately-long-but-valid-component-name.tsx";
+const longPath = `apps/web/src/features/naïve café/日本語/مرحبا/${longComponent}`;
+const diffContentStress: GitFileDiff[] = [
+  file(longPath, 3, 1, [
+    {
+      oldStart: 98,
+      oldLines: 2,
+      newStart: 98,
+      newLines: 4,
+      header: "@@ -98,2 +98,4 @@ export function buildInternationalisedDeploymentSummary() {",
+      lines: [
+        { type: "context", oldNo: 98, newNo: 98, text: "  const summary = createSummary();" },
+        { type: "del", oldNo: 99, newNo: null, text: "  return summary;" },
+        {
+          type: "add",
+          oldNo: null,
+          newNo: 99,
+          text: `  const labels = { ${'"localised-observability-label":"value",'.repeat(12)} };`,
+        },
+        { type: "add", oldNo: null, newNo: 100, text: "  summary.attach(labels);" },
+        { type: "add", oldNo: null, newNo: 101, text: "  return summary;" },
+      ],
+    },
+  ]),
+  file("packages/runtime/src/paths/old service → replacement service.ts", 0, 0, [], {
+    oldPath: "packages/runtime/src/paths/legacy service.ts",
+    status: "renamed",
+  }),
+  file("docs/release notes/résumé · 日本語 · مرحبا.md", 1, 0, [hunk(1, 1)], {
+    status: "added",
+  }),
 ];
 
 // ── tree builders ────────────────────────────────────────────────────────────
@@ -227,6 +265,21 @@ const treeReview: FsTreeNode = dir("", "", [
   ]),
   fsfile("package.json", "package.json", 842),
   fsfile("README.md", "README.md", 1280),
+]);
+
+const treeContentStress: FsTreeNode = dir("", "", [
+  dir("naïve café", "naïve café", [
+    dir("日本語", "naïve café/日本語", [
+      dir("مرحبا", "naïve café/日本語/مرحبا", [fsfile(longComponent, longPath, 8192)]),
+    ]),
+  ]),
+  dir("release notes with spaces", "release notes with spaces", [
+    fsfile(
+      "résumé · 日本語 · مرحبا.md",
+      "release notes with spaces/résumé · 日本語 · مرحبا.md",
+      4096,
+    ),
+  ]),
 ]);
 // The residue dirs are collapsed truncated nodes (never descended cold).
 (treeReview.children![0] as FsTreeNode).truncated = true;
@@ -458,7 +511,13 @@ const statusReview = status([
     isConflicted: false,
   },
 ]);
-const statusClean = status([]);
+const statusClean: GitStatusResponse = {
+  ...status([]),
+  head: "main",
+  upstream: "origin/main",
+  ahead: 0,
+  behind: 0,
+};
 
 // ── the state matrix ─────────────────────────────────────────────────────────
 
@@ -550,7 +609,7 @@ export const DOCK_STATES: Record<string, DockState> = {
     machines: fleet(
       machine({
         kind: "selfhosted",
-        name: "jorgen-mbp",
+        name: "dev-mbp",
         state: "offline",
         active: true,
         isSessionGroup: false,
@@ -611,6 +670,34 @@ export const DOCK_STATES: Record<string, DockState> = {
     ]),
     gitDiff: diffGuard,
     tree: treeReview,
+    announceFileCount: 3,
+  },
+  // Content stress: long host labels, path components, Unicode, and code lines.
+  "content-stress": {
+    label: "Content stress · Unicode and long labels",
+    capabilities: caps("warm"),
+    capture: captureNone,
+    machines: fleet(
+      machine({
+        name: "Production observability and deployment coordination machine — Stockholm 01",
+        state: "online",
+      }),
+    ),
+    gitStatus: {
+      ...status(
+        diffContentStress.map((entry) => ({
+          path: entry.path,
+          oldPath: entry.oldPath,
+          index: null,
+          worktree: entry.status,
+          isConflicted: false,
+        })),
+      ),
+      head: "feature/internationalisation-observability-and-deployment-coordination",
+      upstream: "origin/feature/internationalisation-observability-and-deployment-coordination",
+    },
+    gitDiff: diffContentStress,
+    tree: treeContentStress,
     announceFileCount: 3,
   },
   // Capabilities negotiation failed AND no capture → honest degraded fallback.

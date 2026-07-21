@@ -74,13 +74,14 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const attachments = useDraftAttachments(workspaceId);
+  const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
 
   useEffect(() => {
-    context.resetSessionView();
-  }, [workspaceId]);
+    resetSessionView();
+  }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
 
@@ -99,11 +100,21 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
       !context.busy &&
       !attachments.uploading &&
       computeReady,
-    // Queue-vs-steer is meaningless before the session exists.
-    mode: "queue",
-    setMode: () => {},
-    interrupt: async () => {},
-    interrupting: false,
+    pause: async () => {},
+    pausing: false,
+    resume: async () => {},
+    resumeScope: async () => {},
+    resuming: false,
+    draft: null,
+    draftRevision: 0,
+    draftLoading: false,
+    draftSaving: false,
+    draftConflict: null,
+    applyDraft: () => {},
+    reloadDraft: async () => {},
+    resolveDraftConflict: async () => {},
+    restoredResources: [],
+    removeRestoredResource: () => {},
     error: null,
     clearError: () => {},
     send: async () => {
@@ -136,6 +147,12 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
         params: { workspaceId, sessionId: created.id },
       });
       return true;
+    },
+    steer: async () => {
+      const text =
+        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      if (!text || context.busy || attachments.uploading || !computeReady) return false;
+      return await createComposer.send();
     },
   };
 
@@ -221,6 +238,8 @@ function RecentSessions({ workspaceId }: { workspaceId: string }) {
 const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
   queued: "queued",
   running: "running",
+  recovering: "running",
+  waiting_capacity: "waiting",
   requires_action: "waiting",
   idle: "idle",
   failed: "failed",
@@ -310,6 +329,8 @@ function WorkspaceRepositoryPicker({
     <RepositoryContextPicker
       configured={context.githubStatus?.configured === true}
       installUrl={context.githubStatus?.installUrl ?? null}
+      linkUrl={context.githubStatus?.linkUrl ?? null}
+      installations={context.githubStatus?.installations ?? []}
       repositories={context.githubRepos}
       groups={context.repositoryGroups}
       selectedRepoIds={context.selectedRepoIds}
@@ -340,6 +361,9 @@ function WorkspaceRepositoryPicker({
       onGitHubAppOpenChange={context.setGithubAppOpen}
       onOrgChange={context.setGithubOrg}
       onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
+      onDisconnectInstallation={(installationId) =>
+        context.disconnectGitHubInstallation(workspaceId, installationId)
+      }
     />
   );
 }

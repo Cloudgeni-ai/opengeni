@@ -9,6 +9,8 @@ import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner, usePolledValue } from "./internal";
 
+const EMPTY_INSTALLATIONS: PackInstallation[] = [];
+
 export type UsePacksOptions = ClientOverride & {
   pollIntervalMs?: number | undefined;
   enabled?: boolean | undefined;
@@ -38,49 +40,49 @@ export type UsePacksResult = {
 export function usePacks(options: UsePacksOptions = {}): UsePacksResult {
   const { client, workspaceId } = useOpenGeni(options);
   const load = useCallback(async () => await client.listPacks(workspaceId), [client, workspaceId]);
-  const state = usePolledValue(load, {
+  const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
 
   const register = useCallback(
     async (manifest: RegisterCapabilityPackRequest): Promise<WorkspaceRegisteredPack | null> => {
-      const result = await mutation.run(() => client.registerPack(workspaceId, manifest));
+      const result = await run(() => client.registerPack(workspaceId, manifest));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const enable = useCallback(
     async (packId: string, request: EnablePackRequest = {}): Promise<PackInstallation | null> => {
-      const result = await mutation.run(() => client.enablePack(workspaceId, packId, request));
+      const result = await run(() => client.enablePack(workspaceId, packId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const remove = useCallback(
     async (packId: string): Promise<boolean> => {
-      const result = await mutation.run(async () => {
+      const result = await run(async () => {
         await client.deletePack(workspaceId, packId);
         return true;
       });
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result === true;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
-  const installations = state.data?.installations ?? [];
+  const installations = data?.installations ?? EMPTY_INSTALLATIONS;
   const installationFor = useCallback(
     (packId: string): PackInstallation | null =>
       installations.find((installation) => installation.packId === packId) ?? null,
@@ -88,17 +90,17 @@ export function usePacks(options: UsePacksOptions = {}): UsePacksResult {
   );
 
   return {
-    packs: state.data?.packs ?? [],
+    packs: data?.packs ?? [],
     installations,
     installationFor,
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    loading,
+    error,
+    refresh,
     register,
     enable,
     remove,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutating,
+    mutationError,
+    clearMutationError,
   };
 }

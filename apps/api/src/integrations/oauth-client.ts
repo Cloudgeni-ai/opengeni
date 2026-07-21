@@ -255,7 +255,7 @@ export async function completeMcpOAuthCallback(
     const key = requireEnvironmentEncryption(settings);
     const verifier = decryptEnvironmentValue(key, state.encryptedPkceVerifier);
     const client = await clientForState(db, settings, state);
-    const token = await stage("token_exchange", "token_exchange_failed", () =>
+    const token = await runCallbackStage("token_exchange", "token_exchange_failed", () =>
       exchangeAuthorizationCode(settings, {
         code: input.code!,
         verifier,
@@ -280,7 +280,7 @@ export async function completeMcpOAuthCallback(
       ...(verification.tools ? { mcpTools: verification.tools } : {}),
     };
     const credentialEncrypted = encryptEnvironmentValue(key, JSON.stringify(credential));
-    const connection = await stage("persist", "persist_failed", () =>
+    const connection = await runCallbackStage("persist", "persist_failed", () =>
       state.connectionId
         ? updateConnection(db, {
             workspaceId: state.workspaceId,
@@ -922,8 +922,8 @@ async function exchangeAuthorizationCode(
   };
 }
 
-async function stage<T>(
-  stage: OAuthCallbackStage,
+async function runCallbackStage<T>(
+  callbackStage: OAuthCallbackStage,
   fallbackReason: string,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -933,7 +933,7 @@ async function stage<T>(
     if (error instanceof OAuthCallbackStageError) {
       throw error;
     }
-    throw new OAuthCallbackStageError(stage, fallbackReason, error);
+    throw new OAuthCallbackStageError(callbackStage, fallbackReason, error);
   }
 }
 
@@ -1055,7 +1055,7 @@ async function verifyMcpToolsListNonFatal(
   tools?: Array<{ name: string; description?: string }>;
 }> {
   try {
-    const tools = await stage("tools_list", "tools_list_failed", () =>
+    const tools = await runCallbackStage("tools_list", "tools_list_failed", () =>
       verifyMcpToolsList(settings, state.mcpUrl, token),
     );
     return {

@@ -185,7 +185,8 @@ export function useRelayFrameStream(
       if (decoding) return;
       decoding = true;
       try {
-        while (!disposed && pending) {
+        while (pending) {
+          if (disposed) break;
           const data = pending;
           pending = null;
           let bmp: ImageBitmap;

@@ -1,6 +1,6 @@
 //! Full-jitter exponential backoff for the resiliency supervisor.
 //!
-//! Reconnect-storm TLS-handshake CPU is the named #1 outage cause (dossier
+//! Reconnect-storm TLS-handshake CPU is the named #1 outage cause (design
 //! §10.6/§19), so backoff is a **day-1, first-class** concern, not an
 //! afterthought. We use the "full jitter" strategy from the canonical AWS
 //! Architecture Blog analysis: each delay is a uniform random draw in

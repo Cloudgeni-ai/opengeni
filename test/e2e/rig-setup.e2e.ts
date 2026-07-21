@@ -4,8 +4,10 @@ import { createDb, createRig, type DbClient } from "@opengeni/db";
 import {
   buildSandboxImage,
   freePort,
+  startE2eWorkerTopology,
   startProcess,
   startTestServices,
+  type StartedE2eWorkerTopology,
   type StartedProcess,
   type TestServices,
   waitFor,
@@ -32,7 +34,7 @@ let db: DbClient;
 describe("real Docker rig-setup e2e", () => {
   let services: TestServices;
   let api: StartedProcess;
-  let worker: StartedProcess;
+  let worker: StartedE2eWorkerTopology;
 
   beforeAll(async () => {
     await buildSandboxImage("opengeni-sandbox:local", repoRoot);
@@ -50,11 +52,11 @@ describe("real Docker rig-setup e2e", () => {
     workspaceId = await discoverWorkspaceId();
     accountId = await discoverAccountId();
     db = createDb(services.databaseUrl);
-    worker = await startProcess(["bun", "packages/testing/src/e2e-worker.ts"], {
+    worker = await startE2eWorkerTopology({
       cwd: repoRoot,
       env,
     });
-    await waitFor(() => worker.logs().includes("test worker listening"), {
+    await waitFor(() => worker.ready(), {
       timeoutMs: 90_000,
       describe: () => worker.logs(),
     });
@@ -205,7 +207,7 @@ function apiPath(path: string): string {
   return `http://127.0.0.1:${apiPort}/v1/workspaces/${workspaceId}${path}`;
 }
 
-function stackEnv(services: TestServices, apiPort: number): Record<string, string> {
+function stackEnv(services: TestServices, localApiPort: number): Record<string, string> {
   return {
     OPENGENI_ENVIRONMENT: "test",
     OPENGENI_DATABASE_URL: services.databaseUrl,
@@ -214,7 +216,7 @@ function stackEnv(services: TestServices, apiPort: number): Record<string, strin
     OPENGENI_TEMPORAL_NAMESPACE: "default",
     OPENGENI_TEMPORAL_TASK_QUEUE: `rig-setup-e2e-${crypto.randomUUID()}`,
     OPENGENI_API_HOST: "127.0.0.1",
-    OPENGENI_API_PORT: String(apiPort),
+    OPENGENI_API_PORT: String(localApiPort),
     OPENGENI_PRODUCT_ACCESS_MODE: "local",
     OPENGENI_OPENAI_API_KEY: "test",
     OPENGENI_OPENAI_MODEL: "scripted-model",

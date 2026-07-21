@@ -25,7 +25,6 @@ function fakeModal() {
       ModalClient: class {
         images = { fromRegistry };
         secrets = { fromName: secretFromName };
-        constructor(_opts: unknown) {}
       },
     }) as unknown as Awaited<ReturnType<ModalModuleLoader>>;
   return { loadModal, fromRegistry, secretFromName, fakeImage };

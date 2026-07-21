@@ -13,7 +13,7 @@ import {
   type CaptureStoragePort,
 } from "../src/routes/workspace-capture";
 
-// M2 capture-read routes (dossier §10.3). Two layers of coverage, both hermetic:
+// M2 capture-read routes. Two layers of coverage, both hermetic:
 //
 //   (1) ROUTE DISCIPLINE (static): grant-first (files:read) BEFORE any query read
 //       or DB call — the same auth-before-anything invariant the channel-a and
@@ -143,7 +143,18 @@ function makeManifest(files: WorkspaceCaptureManifest["files"]): WorkspaceCaptur
       truncated: false,
     },
     treeTruncated: false,
-    repos: [],
+    repos: [
+      {
+        root: "",
+        head: "main",
+        detached: false,
+        upstream: null,
+        ahead: 0,
+        behind: 0,
+        status: [],
+        diff: [],
+      },
+    ],
     files,
     stats: baseStats(),
   };
@@ -216,6 +227,34 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(res).toEqual({ available: false });
   });
 
+  test("failed repository discovery returns explicit degraded metadata", async () => {
+    const res = await serveWorkspaceCapture(
+      makeRow({
+        state: "failed",
+        manifestKey: null,
+        treeIndexKey: null,
+        stats: { degradedReason: "repository_discovery_timed_out" },
+      }),
+      fakeStorage({}),
+    );
+    expect(res).toEqual({
+      available: false,
+      degradedReason: "repository_discovery_timed_out",
+      revision: 3,
+      capturedAt: "2026-07-08T00:00:00.000Z",
+      turnId: "turn-1",
+      leaseEpoch: 5,
+    });
+  });
+
+  test("failed row without a known discovery reason does not invent one", async () => {
+    const res = await serveWorkspaceCapture(
+      makeRow({ state: "failed", manifestKey: null, treeIndexKey: null, stats: {} }),
+      fakeStorage({}),
+    );
+    expect(res).toEqual({ available: false });
+  });
+
   test("manifest blob GC'd out from under the row → {available:false}", async () => {
     const res = await serveWorkspaceCapture(makeRow(), fakeStorage({})); // no MANIFEST_KEY
     expect(res).toEqual({ available: false });
@@ -239,6 +278,18 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(res).toEqual({ available: false });
   });
 
+  test("schema-valid manifest under the wrong revision row fails closed", async () => {
+    const manifest = makeManifest([fileEntry({})]);
+    const storage = fakeStorage({
+      [MANIFEST_KEY]: new TextEncoder().encode(
+        JSON.stringify({ ...manifest, revision: manifest.revision + 1 }),
+      ),
+    });
+    const res = await serveWorkspaceCapture(makeRow(), storage);
+    expect(res).toEqual({ available: false });
+    expect(storage.signed).toEqual([]);
+  });
+
   test("small manifest → inline (metadata + manifest, no signed URL)", async () => {
     const manifest = makeManifest([fileEntry({})]);
     const storage = fakeStorage({
@@ -258,9 +309,11 @@ describe("serveWorkspaceCapture (manifest response)", () => {
   });
 
   test("manifest above the inline cap → signed URL, manifest omitted", async () => {
-    // Bytes bigger than the inline cap; deliberately NOT valid JSON — the large
-    // path must mint a URL WITHOUT parsing the blob.
-    const big = new Uint8Array(CAPTURE_INLINE_MANIFEST_MAX_BYTES + 1);
+    const manifest = makeManifest([
+      fileEntry({ path: `src/${"x".repeat(CAPTURE_INLINE_MANIFEST_MAX_BYTES)}` }),
+    ]);
+    const big = new TextEncoder().encode(JSON.stringify(manifest));
+    expect(big.byteLength).toBeGreaterThan(CAPTURE_INLINE_MANIFEST_MAX_BYTES);
     const storage = fakeStorage({ [MANIFEST_KEY]: big });
     const res = await serveWorkspaceCapture(makeRow(), storage);
     expect(res.available).toBe(true);
@@ -269,6 +322,14 @@ describe("serveWorkspaceCapture (manifest response)", () => {
     expect(res.manifestUrl?.url).toContain(MANIFEST_KEY);
     expect(res.manifestUrl?.expiresAt).toBe("2026-07-08T00:05:00.000Z");
     expect(storage.signed).toEqual([MANIFEST_KEY]);
+  });
+
+  test("malformed manifest above the inline cap is never signed", async () => {
+    const big = new Uint8Array(CAPTURE_INLINE_MANIFEST_MAX_BYTES + 1);
+    const storage = fakeStorage({ [MANIFEST_KEY]: big });
+    const res = await serveWorkspaceCapture(makeRow(), storage);
+    expect(res).toEqual({ available: false });
+    expect(storage.signed).toEqual([]);
   });
 });
 

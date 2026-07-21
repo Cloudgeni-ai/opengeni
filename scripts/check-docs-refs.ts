@@ -77,7 +77,7 @@ async function listWorkspacePackages(): Promise<Set<string>> {
 function checkReferences(
   file: string,
   text: string,
-  workspacePackages: Set<string>,
+  knownWorkspacePackages: Set<string>,
   out: Finding[],
 ): void {
   const lines = text.split("\n");
@@ -107,7 +107,7 @@ function checkReferences(
     }
 
     for (const token of extractPackageReferences(line)) {
-      if (!workspacePackages.has(token) && !externalPackageAllowlist.has(token)) {
+      if (!knownWorkspacePackages.has(token) && !externalPackageAllowlist.has(token)) {
         addFinding(out, seen, {
           file,
           line: lineNumber,

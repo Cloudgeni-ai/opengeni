@@ -23,7 +23,6 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         id: item.id,
         occurredAt: item.occurredAt,
         text: item.text,
-        pending: item.pending === true,
         resources: stableValue(item.resources),
         tools: stableValue(item.tools),
       };
@@ -61,7 +60,6 @@ function serializeItem(item: TimelineItem): Record<string, unknown> {
         status: item.status,
         prompt: item.prompt,
         workerSessionId: item.workerSessionId,
-        ...(item.mode ? { mode: item.mode } : {}),
       };
     case "worker-completion":
       return {

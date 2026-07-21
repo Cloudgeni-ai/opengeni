@@ -80,6 +80,8 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
     insert into managed_accounts (name) values ('acct') returning id`;
   const [workspace] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
+  await shared!
+    .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 

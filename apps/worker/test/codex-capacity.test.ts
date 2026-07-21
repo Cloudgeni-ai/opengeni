@@ -76,7 +76,7 @@ describe("Codex capacity availability diagnostics", () => {
     });
   });
 
-  test("committed wake targets prefer revisioned signals and retain queue fallback", async () => {
+  test("committed capacity targets prefer typed signals and retain generic outbox delivery", async () => {
     const target = {
       accountId: "account",
       workspaceId: "workspace",
@@ -85,6 +85,7 @@ describe("Codex capacity availability diagnostics", () => {
       waiterId: "waiter",
       generation: 3,
       wakeRevision: 9,
+      workflowWakeRevision: 11,
     };
     const revisioned = mock(async () => undefined);
     const queueWake = mock(async () => undefined);
@@ -110,6 +111,7 @@ describe("Codex capacity availability diagnostics", () => {
       workspaceId: target.workspaceId,
       sessionId: target.sessionId,
       workflowId: target.workflowId,
+      wakeRevision: target.workflowWakeRevision,
     });
   });
 

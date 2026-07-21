@@ -4,17 +4,17 @@
 //! module holds the macOS specifics — OS reporting, the POSIX shell command, and
 //! the structured desktop backend ([`MacosDesktop`]). It is
 //! `cfg(target_os = "macos")`-gated so it compiles only on macOS, but the
-//! cross-platform CI matrix (dossier §23.3) builds + tests it there.
+//! cross-platform CI matrix builds + tests it there.
 //!
-//! # Desktop (structured, live-deferred to M12)
+//! # Desktop (structured, live-deferred to native desktop milestone)
 //!
 //! macOS computer-use is **CGEvent** (synthetic input) + **ScreenCaptureKit**
 //! (capture), both **TCC-gated** (Screen Recording + Accessibility grants that
-//! cannot be auto-clicked on an ephemeral CI runner — dossier §23.4/§24.3). The
+//! cannot be auto-clicked on an ephemeral CI runner). The
 //! backend is therefore a compile-only structured seam: it has the exact
 //! [`DesktopBackend`] shape so the dispatch + capability path are identical to
 //! Linux, but `probe`/`capture`/`inject` report a typed `Unsupported`/no-display
-//! until the native code lands and is verified on the user's real Mac (M12). The
+//! until the native code lands and is verified on the user's real Mac (native desktop milestone). The
 //! ScreenCaptureKit/CGEvent calls require Apple FFI; when they are wired they will
 //! go through a safe binding crate (e.g. `core-graphics`) or a narrowly-scoped
 //! `allow(unsafe_code)` module with a justification — NOT a blanket relaxation.

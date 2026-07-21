@@ -219,6 +219,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         const runSettings = settingsWithRigImage(settings, candidateVersion.image);
         established = await establishSandboxSessionFromEnvelope(runSettings, null, {
           sessionId: `rig-verification-${change.id}`,
+          recovery: "create-or-restore",
           environment: {},
         });
         if ((candidateVersion.setupScript ?? "").trim()) {
@@ -368,6 +369,7 @@ export function createRigVerificationActivities(services: () => Promise<Activity
         const runSettings = settingsWithRigImage(settings, version.image);
         established = await establishSandboxSessionFromEnvelope(runSettings, null, {
           sessionId: `rig-version-verification-${version.id}`,
+          recovery: "create-or-restore",
           environment: {},
         });
         if ((version.setupScript ?? "").trim()) {

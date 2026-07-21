@@ -165,6 +165,28 @@
   }
 }
 
+/* Metric-history line draw-in. The chart path carries `pathLength={1}`, so the
+   dash math is resolution-independent: one full-length dash whose offset animates
+   from 1 (hidden) to 0 (drawn). Degrades to a solid line if animations are off. */
+@keyframes og-mh-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.og-mh-draw {
+  stroke-dasharray: 1;
+  animation: og-mh-draw 900ms var(--og-ease-out) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .og-mh-draw {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+
 /* Shimmer helper: gradient text the keyframe scrolls through. */
 .og-shimmer-text {
   background: linear-gradient(
@@ -194,6 +216,17 @@
   scrollbar-color: var(--og-color-border-strong) transparent;
 }
 
+/* The machine popover stays mounted so its trigger's `aria-controls` always
+   resolves. Keep Radix's positioning wrapper measurable while closed, but
+   remove the entire fixed layer from painting, hit testing, and the a11y tree.
+   Hiding only the content leaves the wrapper able to intercept pointer input. */
+[data-radix-popper-content-wrapper]:has(
+  > [data-machine-state-popover][data-state="closed"]
+) {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .og-root *,
   .og-root *::before,
@@ -203,6 +236,51 @@
     animation-iteration-count: 1 !important;
     transition-duration: 0.001ms !important;
     scroll-behavior: auto !important;
+  }
+}
+
+@media (forced-colors: active) {
+  /* Forced-colors can replace a painted background with Canvas while custom
+     properties retain their authored dark/light values. That combination is
+     dangerous: descendants may resolve a pale dark-theme foreground against a
+     light system canvas. Collapse the whole component palette onto guaranteed
+     system colors. Meaning in status/diff UI is also carried by text, icons,
+     and +/- markers, so it never depends on these colors alone. */
+  .og-root {
+    --og-color-bg: Canvas;
+    --og-color-surface-1: Canvas;
+    --og-color-surface-2: Canvas;
+    --og-color-surface-3: Canvas;
+    --og-color-border: CanvasText;
+    --og-color-border-strong: CanvasText;
+    --og-color-fg: CanvasText;
+    --og-color-fg-muted: CanvasText;
+    --og-color-fg-subtle: CanvasText;
+    --og-color-accent: CanvasText;
+    --og-color-accent-strong: CanvasText;
+    --og-color-accent-deep: CanvasText;
+    --og-color-accent-fg: CanvasText;
+    --og-color-accent-soft: Canvas;
+    --og-color-status-queued: CanvasText;
+    --og-color-status-running: CanvasText;
+    --og-color-status-idle: CanvasText;
+    --og-color-status-waiting: CanvasText;
+    --og-color-status-failed: CanvasText;
+    --og-color-status-cancelled: CanvasText;
+    --og-color-danger: CanvasText;
+    --og-color-diff-add-bg: Canvas;
+    --og-color-diff-del-bg: Canvas;
+    --og-shadow-sm: none;
+    --og-shadow-md: none;
+    --og-shadow-lg: none;
+    --og-shadow-glow: none;
+  }
+
+  /* Selected fills are flattened by the OS palette. Preserve a visible,
+     non-color-only tab selection affordance in every high-contrast theme. */
+  .og-root [role="tab"][aria-selected="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
   }
 }
 

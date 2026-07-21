@@ -27,7 +27,10 @@ import {
   FileAsset as ContractFileAsset,
   FileStatus as ContractFileStatus,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
+  GitHubAppInfo as ContractGitHubAppInfo,
+  GitHubInstallationBinding as ContractGitHubInstallationBinding,
   GitHubRepository as ContractGitHubRepository,
+  GitHubRepositoryScope as ContractGitHubRepositoryScope,
   PackInstallation as ContractPackInstallation,
   PackInstallationStatus as ContractPackInstallationStatus,
   Permission as ContractPermission,
@@ -42,7 +45,6 @@ import {
   SetWorkspaceEnvironmentVariableRequest as ContractSetVariableRequest,
   UpdateScheduledTaskRequest as ContractUpdateScheduledTaskRequest,
   UpdateSessionGoalRequest as ContractUpdateSessionGoalRequest,
-  UpdateSessionTurnRequest as ContractUpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest as ContractUpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest as ContractUpdateWorkspaceRequest,
   UsageEvent as ContractUsageEvent,
@@ -82,6 +84,9 @@ import type {
   FileAsset,
   FileStatus,
   GitHubRepository,
+  GitHubAppInfo,
+  GitHubInstallationBinding,
+  GitHubRepositoryScope,
   PackInstallation,
   PackInstallationStatus,
   ProductAccessMode,
@@ -94,7 +99,6 @@ import type {
   SessionGoalStatus,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
-  UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceRequest,
   UsageEvent,
@@ -115,6 +119,16 @@ describe("SDK / contracts parity (full coverage)", () => {
   test("permission and usage-event literals match the contracts enums", () => {
     expect([...KNOWN_PERMISSIONS].sort()).toEqual([...ContractPermission.options].sort());
     expect([...KNOWN_USAGE_EVENT_TYPES].sort()).toEqual([...ContractUsageEventType.options].sort());
+  });
+
+  test("GitHub installation binding literals and response shapes match", () => {
+    const scopes: readonly GitHubRepositoryScope[] = ContractGitHubRepositoryScope.options;
+    expect(scopes).toEqual(ContractGitHubRepositoryScope.options);
+    const acceptBinding = (
+      value: z.infer<typeof ContractGitHubInstallationBinding>,
+    ): GitHubInstallationBinding => value;
+    const acceptInfo = (value: z.infer<typeof ContractGitHubAppInfo>): GitHubAppInfo => value;
+    expect([acceptBinding, acceptInfo].every((fn) => typeof fn === "function")).toBe(true);
   });
 
   test("status/enum literals match the contracts", () => {
@@ -223,9 +237,6 @@ describe("SDK / contracts parity (full coverage)", () => {
     const acceptUpdateGoal = (
       value: UpdateSessionGoalRequest,
     ): z.input<typeof ContractUpdateSessionGoalRequest> => value;
-    const acceptUpdateTurn = (
-      value: UpdateSessionTurnRequest,
-    ): z.input<typeof ContractUpdateSessionTurnRequest> => value;
     const acceptCreateTask = (
       value: CreateScheduledTaskRequest,
     ): z.input<typeof ContractCreateScheduledTaskRequest> => value;
@@ -270,7 +281,6 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptUpdateWorkspace,
       acceptCreateApiKey,
       acceptUpdateGoal,
-      acceptUpdateTurn,
       acceptCreateTask,
       acceptUpdateTask,
       acceptCreateEnvironment,
@@ -315,11 +325,5 @@ describe("SDK / contracts parity (full coverage)", () => {
 
     const goalUpdate: UpdateSessionGoalRequest = { status: "paused", rationale: "manual review" };
     expect(ContractUpdateSessionGoalRequest.safeParse(goalUpdate).success).toBe(true);
-
-    const turnUpdate: UpdateSessionTurnRequest = {
-      prompt: "rewritten prompt",
-      reasoningEffort: "high",
-    };
-    expect(ContractUpdateSessionTurnRequest.safeParse(turnUpdate).success).toBe(true);
   });
 });

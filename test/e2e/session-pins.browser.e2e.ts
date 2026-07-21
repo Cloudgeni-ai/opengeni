@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import AxeBuilder from "@axe-core/playwright";
-import { createDb, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
+import { createDb, createSession, grantWorkspaceAccess, removeWorkspaceMember } from "@opengeni/db";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import {
@@ -23,13 +23,14 @@ import {
 import postgres from "postgres";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
-const ownerHeaders = { "x-opengeni-subject": "ope26-owner" };
-const otherMemberHeaders = { "x-opengeni-subject": "ope26-other-member" };
+const ownerHeaders = { "x-opengeni-subject": "sessionpin-owner" };
+const otherMemberHeaders = { "x-opengeni-subject": "sessionpin-other-member" };
 const workflowClient: SessionWorkflowClient = {
   signalUserMessage: async () => undefined,
   wakeSessionWorkflow: async () => undefined,
+  requestSessionWorkflowWakeDispatch: async () => undefined,
   signalApprovalDecision: async () => undefined,
-  signalInterrupt: async () => undefined,
+  signalSessionControl: async () => undefined,
   syncScheduledTask: async () => undefined,
   deleteScheduledTaskSchedule: async () => undefined,
   triggerScheduledTask: async () => undefined,
@@ -67,7 +68,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       bus: new MemoryEventBus(),
       workflowClient,
     });
-    api = Bun.serve({ hostname: "127.0.0.1", port: 0, idleTimeout: 120, fetch: app.fetch });
+    api = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 120,
+      fetch: app.fetch,
+    });
     apiBaseUrl = `http://127.0.0.1:${api.port}`;
 
     const webPort = await freePort();
@@ -87,7 +93,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       {
         cwd: `${repoRoot}/apps/web`,
         env: { VITE_API_BASE_URL: apiBaseUrl },
-        ready: async () => (await fetch(webBaseUrl).catch(() => null))?.ok === true,
+        ready: async () =>
+          (
+            await fetch(webBaseUrl, {
+              signal: AbortSignal.timeout(2_000),
+            }).catch(() => null)
+          )?.ok === true,
         timeoutMs: 45_000,
       },
     );
@@ -95,9 +106,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   }, 180_000);
 
   afterAll(async () => {
-    await browser?.close().catch(() => undefined);
-    await web?.stop().catch(() => undefined);
-    api?.stop(true);
+    await Promise.allSettled([browser?.close(), web?.stop()]);
+    // Closing the browser stops new polling first; then drain requests that
+    // already entered the API before closing its database pool. Force-stopping
+    // the listener and immediately ending the pool races those handlers and
+    // turns clean teardown into CONNECTION_ENDED noise (or an unhandled error).
+    await api?.stop(false);
     await dbClient?.close().catch(() => undefined);
     await shared?.release();
   }, 60_000);
@@ -203,7 +217,9 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     // The rail uses real roving focus. Arrow navigation changes document focus,
     // Home returns to the pin, and Enter activates the currently focused row.
-    const targetRow = pinnedB.getByRole("button", { name: /^Open Master pin target/ });
+    const targetRow = pinnedB.getByRole("button", {
+      name: /^Open Master pin target/,
+    });
     await targetRow.focus();
     await pageB.keyboard.press("ArrowDown");
     expect(
@@ -241,11 +257,11 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await setTheme(pageB, theme);
       await expectNoPageOverflow(pageB);
       await expectNoAxeViolations(pageB, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
+        "[data-sessionpin-session-header]",
+        "[data-sessionpin-session-list]",
       ]);
       await pageB.screenshot({
-        path: `/tmp/ope26-session-pin-desktop-${theme}.png`,
+        path: `/tmp/sessionpin-session-pin-desktop-${theme}.png`,
         fullPage: true,
       });
     }
@@ -281,6 +297,283 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await deviceA.close();
   }, 150_000);
 
+  test("renders one truthful queue, goal, and agents stack above the composer", async () => {
+    const desktop = await configuredContext(browser, {
+      viewport: { width: 1280, height: 800 },
+      extraHTTPHeaders: ownerHeaders,
+    });
+    let mobile: BrowserContext | null = null;
+    try {
+      const desktopPage = await desktop.newPage();
+      await desktopPage.goto(webBaseUrl);
+      const workspaceId = await workspaceFromPage(desktopPage);
+      const manager = await createSessionThroughApi(
+        desktopPage,
+        apiBaseUrl,
+        workspaceId,
+        "Inspect the full session-control surface",
+        {
+          goal: {
+            text: "Make queueing, goals, and agent activity completely understandable",
+            successCriteria: "The UI has one compact and truthful surface for each concept.",
+          },
+        },
+      );
+
+      // Child lineage is intentionally not caller-forgeable through the public
+      // create-session API: only a worker-signed parent grant may create it. This
+      // browser fixture seeds that trusted relationship directly, then exercises
+      // the ordinary authenticated lineage read and production UI rendering.
+      const childSessionIds: string[] = [];
+      for (const index of [1, 2]) {
+        const child = await createSession(dbClient.db, {
+          accountId: manager.accountId,
+          workspaceId,
+          initialMessage: `Trusted child agent ${index}`,
+          resources: [],
+          metadata: {},
+          model: "scripted-model",
+          sandboxBackend: "none",
+          parentSessionId: manager.id,
+        });
+        childSessionIds.push(child.id);
+      }
+      const grandchild = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: `Intermediate agent ${"with a long descriptive title ".repeat(4)}`.slice(
+          0,
+          200,
+        ),
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: childSessionIds[0]!,
+      });
+      const deepChild = await createSession(dbClient.db, {
+        accountId: manager.accountId,
+        workspaceId,
+        initialMessage: `Deep nested agent ${"with a long descriptive title ".repeat(5)}`.slice(
+          0,
+          200,
+        ),
+        resources: [],
+        metadata: {},
+        model: "scripted-model",
+        sandboxBackend: "none",
+        parentSessionId: grandchild.id,
+      });
+
+      const managerUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${manager.id}`;
+      await desktopPage.goto(managerUrl);
+      const queue = desktopPage.getByTestId("queue-surface");
+      const goal = desktopPage.getByTestId("goal-surface");
+      const agents = desktopPage.getByTestId("composer-agents-pill");
+      const composer = desktopPage.getByLabel("Message the agent");
+      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await goal.waitFor();
+      await agents.waitFor();
+      await composer.waitFor();
+      expect(await desktopPage.getByTestId("queue-surface").count()).toBe(1);
+      expect(await desktopPage.getByTestId("composer-agents-pill").count()).toBe(1);
+
+      // Enter appends an ordinary human prompt to the one visible queue. The
+      // inert workflow client keeps both rows waiting so the browser can inspect
+      // the exact server-authoritative order.
+      await composer.fill("A second prompt queued from the composer");
+      await composer.press("Enter");
+      await queue.getByText("2 queued prompts", { exact: true }).waitFor({ timeout: 10_000 });
+      await queue.getByRole("button", { name: /2 queued prompts/ }).click();
+      await queue.getByRole("list", { name: "Queued prompts" }).waitFor();
+      const queuedRows = queue.getByRole("listitem");
+      expect(await queuedRows.count()).toBe(2);
+      expect(await queuedRows.nth(0).innerText()).toContain(
+        "Inspect the full session-control surface",
+      );
+      expect(await queuedRows.nth(1).innerText()).toContain(
+        "A second prompt queued from the composer",
+      );
+
+      // Retain the fully expanded queue—not only its compact summary—as
+      // inspectable release evidence in both themes. This is the exact surface
+      // where users reorder, edit, steer, or delete a waiting prompt.
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(desktopPage, theme);
+        await expectNoPageOverflow(desktopPage);
+        await expectNoAxeViolations(desktopPage, ["[data-testid=queue-surface]"]);
+        await desktopPage.screenshot({
+          path: `/tmp/opengeni-session-control-queue-expanded-${theme}.png`,
+          fullPage: true,
+        });
+      }
+
+      // Menu reorder and keyboard drag both mutate the one durable queue. The
+      // server remains the order authority after every operation.
+      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
+      await desktopPage.getByRole("menuitem", { name: "Move to top" }).click();
+      await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer");
+      const secondHandle = queue.getByRole("button", {
+        name: "Reorder queued prompt 2",
+      });
+      await secondHandle.focus();
+      await desktopPage.keyboard.press("Space");
+      await queue
+        .getByText(
+          "Lifted queued prompt 2 of 2. Use arrow keys to move it, then press Space to drop.",
+          { exact: true },
+        )
+        .waitFor();
+      // Keep focus on the lifted handle for the full gesture. The projected
+      // order is visible immediately, but remains local until Space commits
+      // the move to the durable server-owned queue.
+      await desktopPage.keyboard.press("ArrowUp");
+      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
+      await desktopPage.keyboard.press("Space");
+      await queue.getByText("Queued prompt moved to position 1.", { exact: true }).waitFor();
+      await expectRowPrompt(queuedRows, 0, "Inspect the full session-control surface");
+
+      // Edit is a checkout: it removes the exact queue row and restores the
+      // complete durable prompt into the composer, where Enter submits it again.
+      // A pre-existing draft is never silently destroyed: the queue row stays
+      // put until the user explicitly confirms replacement.
+      await composer.fill("Unsent local draft that must not be overwritten");
+      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
+      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
+      await queue.getByText("Replace it with this queued prompt?").waitFor();
+      expect(await queuedRows.count()).toBe(2);
+      expect(await composer.inputValue()).toBe("Unsent local draft that must not be overwritten");
+      await queue.getByRole("button", { name: "Keep current draft" }).click();
+      expect(await queuedRows.count()).toBe(2);
+      await composer.fill("");
+      await queue.getByRole("button", { name: "More actions for queued prompt 2" }).click();
+      await desktopPage.getByRole("menuitem", { name: "Edit in composer" }).click();
+      await waitFor(
+        async () => (await composer.inputValue()) === "A second prompt queued from the composer",
+        { timeoutMs: 10_000 },
+      );
+      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await composer.fill("A second prompt queued from the composer (edited)");
+      await composer.press("Enter");
+      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+
+      // Pause is a durable workstream barrier. Row Steer is one atomic action:
+      // it preserves that row, moves it to the head, and resumes the branch.
+      await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      await queue.getByRole("button", { name: "Steer queued prompt 2" }).click();
+      await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      await expectRowPrompt(queuedRows, 0, "A second prompt queued from the composer (edited)");
+
+      // Delete removes only the selected waiting prompt. Add one final prompt so
+      // the same two-row surface can still be exercised in the mobile pass.
+      await queue.getByRole("button", { name: "Delete queued prompt 2" }).click();
+      await queue.getByText("1 queued prompt", { exact: true }).waitFor();
+      await composer.fill("A replacement prompt after delete");
+      await composer.press("Enter");
+      await queue.getByText("2 queued prompts", { exact: true }).waitFor();
+      const timeline = desktopPage.getByTestId("session-timeline");
+      expect(await timeline.getByText("Inspect the full session-control surface").count()).toBe(0);
+      expect(await timeline.getByText("A second prompt queued from the composer").count()).toBe(0);
+
+      // A recursive Pause is visible and actionable from a deeply nested
+      // session. Sending there atomically resumes only that selected branch;
+      // it does not silently resume the manager or make the submitted prompt
+      // sit inert. The header breadcrumb remains bounded and exposes every
+      // ancestor (the middle ancestors collapse into one explicit menu).
+      await desktopPage.getByRole("button", { name: "Pause this workstream" }).click();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      const deepChildUrl = `${webBaseUrl}/workspaces/${workspaceId}/sessions/${deepChild.id}`;
+      await desktopPage.goto(deepChildUrl);
+      const ancestry = desktopPage.getByRole("navigation", {
+        name: "Session ancestry",
+      });
+      await ancestry.waitFor();
+      await ancestry.getByRole("button", { name: "1 intermediate ancestor sessions" }).waitFor();
+      expect(await ancestry.getByRole("link").count()).toBe(2);
+      await desktopPage
+        .getByRole("button", {
+          name: /^Paused by .*\. Open workstream controls$/,
+        })
+        .waitFor();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      await expectContainedInViewport(ancestry, 1280);
+      const deepComposer = desktopPage.getByLabel("Message the agent");
+      await deepComposer.fill("Run this selected nested session through the parent Pause");
+      await deepComposer.press("Enter");
+      await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+      await desktopPage
+        .getByTestId("queue-surface")
+        .getByText("1 queued prompt", { exact: true })
+        .waitFor();
+
+      // The manager remains paused: explicit nested execution is a scoped
+      // override, never a hidden workspace/ancestor Resume.
+      await desktopPage.goto(managerUrl);
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).waitFor();
+      await desktopPage.getByRole("button", { name: "Resume this workstream" }).click();
+      await desktopPage.getByRole("button", { name: "Pause this workstream" }).waitFor();
+
+      const boxes = await Promise.all([
+        queue.boundingBox(),
+        goal.boundingBox(),
+        agents.boundingBox(),
+        composer.boundingBox(),
+      ]);
+      for (const box of boxes) expect(box).not.toBeNull();
+      expect(boxes[0]!.y).toBeLessThan(boxes[1]!.y);
+      expect(boxes[1]!.y).toBeLessThan(boxes[2]!.y);
+      expect(boxes[2]!.y).toBeLessThan(boxes[3]!.y);
+
+      for (const theme of ["light", "dark"] as const) {
+        await setTheme(desktopPage, theme);
+        await expectNoPageOverflow(desktopPage);
+        await expectNoAxeViolations(desktopPage, [
+          "[data-testid=queue-surface]",
+          "[data-testid=goal-surface]",
+          "[data-testid=composer-agents-pill]",
+          "textarea[aria-label='Message the agent']",
+        ]);
+        await desktopPage.screenshot({
+          path: `/tmp/opengeni-session-control-stack-desktop-${theme}.png`,
+          fullPage: true,
+        });
+      }
+
+      mobile = await configuredContext(browser, {
+        viewport: { width: 390, height: 844 },
+        hasTouch: true,
+        isMobile: true,
+        extraHTTPHeaders: ownerHeaders,
+      });
+      const mobilePage = await mobile.newPage();
+      await mobilePage.goto(deepChildUrl);
+      const mobileAncestry = mobilePage.getByRole("navigation", {
+        name: "Session ancestry",
+      });
+      await mobileAncestry.waitFor();
+      expect(await mobileAncestry.getByRole("link").count()).toBe(1);
+      await expectContainedInViewport(mobileAncestry, 390);
+      await expectNoPageOverflow(mobilePage);
+      await mobilePage.goto(managerUrl);
+      await mobilePage.getByTestId("queue-surface").waitFor();
+      await mobilePage.getByTestId("goal-surface").waitFor();
+      await mobilePage.getByTestId("composer-agents-pill").waitFor();
+      await expectNoPageOverflow(mobilePage);
+      await expectTouchTarget(
+        mobilePage.getByTestId("queue-surface").getByRole("button", { name: /2 queued prompts/ }),
+      );
+      await expectTouchTarget(mobilePage.getByTestId("composer-agents-pill"));
+      await mobilePage.screenshot({
+        path: "/tmp/opengeni-session-control-stack-mobile.png",
+        fullPage: true,
+      });
+    } finally {
+      await mobile?.close().catch(() => undefined);
+      await desktop.close().catch(() => undefined);
+    }
+  }, 150_000);
+
   test("keeps the pin/header/rail usable at 320px in light and dark themes", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 320, height: 740 },
@@ -312,6 +605,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       );
       await setSessionPinThroughApi(page, apiBaseUrl, workspaceId, extra, true);
     }
+    // The stress rows above are test fixtures inserted through raw fetches,
+    // intentionally bypassing the application's mutation invalidation. Start
+    // the responsive assertion from a fresh server projection instead of
+    // racing the rail's 15-second background reconciliation interval.
+    await page.reload();
+    await page.getByRole("button", { name: "Unpin session" }).waitFor();
 
     for (const theme of ["light", "dark"] as const) {
       await setTheme(page, theme);
@@ -331,8 +630,14 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       const navigation = page.getByRole("navigation", { name: "Primary" });
       await navigation.waitFor();
       expect(await page.getByRole("dialog").getAttribute("aria-label")).toBe("Session navigation");
-      const targetRow = navigation.getByRole("button", { name: /^Open Mobile pin/ });
+      const targetRow = navigation.getByRole("button", {
+        name: /^Open Mobile pin/,
+      });
       await targetRow.waitFor();
+      // The active route row can render from its point read before the pinned
+      // page arrives. Wait for one seeded shortcut so this assertion measures
+      // the loaded global pin section rather than that intermediate state.
+      await navigation.getByRole("button", { name: /^Open Pinned mobile stress 7/ }).waitFor();
       expect(await navigation.getByRole("group", { name: "Pinned" }).count()).toBe(1);
       expect(
         await navigation.getByRole("button", { name: /^Open Pinned mobile stress/ }).count(),
@@ -343,16 +648,21 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await expectContainedInViewport(navigation, 320);
       await expectNoPageOverflow(page);
       await expectNoAxeViolations(page, [
-        "[data-ope26-session-header]",
-        "[data-ope26-session-list]",
+        "[data-sessionpin-session-header]",
+        "[data-sessionpin-session-list]",
       ]);
       await page.screenshot({
-        path: `/tmp/ope26-session-pin-mobile-${theme}.png`,
+        path: `/tmp/sessionpin-session-pin-mobile-${theme}.png`,
         fullPage: true,
       });
 
       await page.keyboard.press("Escape");
       await page.getByRole("navigation", { name: "Primary" }).waitFor({ state: "hidden" });
+      // Radix restores focus after the drawer's close animation settles. Wait
+      // for that observable contract rather than racing the animation frame.
+      await page.waitForFunction(
+        () => document.activeElement?.getAttribute("aria-label") === "Open navigation",
+      );
       expect(await page.evaluate(() => document.activeElement?.getAttribute("aria-label"))).toBe(
         "Open navigation",
       );
@@ -360,7 +670,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     await context.close();
   }, 90_000);
 
-  test("returns authenticated 403 when removal wins a concurrent listing", async () => {
+  test("keeps token-carried listing alive when removal wins, with personal state cleaned", async () => {
     const context = await configuredContext(browser, {
       viewport: { width: 1280, height: 800 },
       extraHTTPHeaders: ownerHeaders,
@@ -368,12 +678,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
-    const raceSecret = "ope26-browser-race-secret";
-    const raceSubject = "configured:ope26-browser-race";
+    const raceSecret = "sessionpin-browser-race-secret";
+    const raceSubject = "configured:sessionpin-browser-race";
     const barrierClass = 81326028;
     const removalLock = 1;
-    const triggerFunction = "ope26_browser_removal_first_barrier";
-    const triggerName = "ope26_browser_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_browser_removal_first_barrier";
+    const triggerName = "sessionpin_browser_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     try {
       await page.goto(webBaseUrl);
@@ -438,22 +748,30 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
 
+      // The delegated token carries its own workspace grant — losing the
+      // membership row must not revoke listing (that same over-reach 403'd
+      // every workspace-scoped api_key principal in production). Membership
+      // is personalization for non-user subjects, not authorization: removal
+      // cleans their pins, and any snapshot the post-removal listing writes is
+      // TTL-bounded, not an unbounded leak.
       const response = await listingPromise;
-      expect(response.status).toBe(403);
-      expect(await response.text()).toContain("workspace access denied");
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        pinned: unknown[];
+        sessions: { id: string }[];
+      };
+      expect(body.pinned).toEqual([]);
+      expect(body.sessions.length).toBe(1);
 
-      const [counts] = await shared.admin<{ snapshots: number; orphans: number }[]>`
+      const [counts] = await shared.admin<{ pins: number; unboundedSnapshots: number }[]>`
         select
+          (select count(*)::int from session_pins
+            where workspace_id = ${workspaceId} and subject_id = ${raceSubject}) as pins,
           (select count(*)::int from session_list_snapshots
-            where workspace_id = ${workspaceId} and subject_id = ${raceSubject}) as snapshots,
-          (select count(*)::int
-            from session_list_snapshots snapshot
-            left join workspace_memberships membership
-              on membership.workspace_id = snapshot.workspace_id
-             and membership.subject_id = snapshot.subject_id
-            where snapshot.workspace_id = ${workspaceId}
-              and membership.id is null) as orphans`;
-      expect(counts).toEqual({ snapshots: 0, orphans: 0 });
+            where workspace_id = ${workspaceId}
+              and subject_id = ${raceSubject}
+              and expires_at > now() + interval '11 minutes') as "unboundedSnapshots"`;
+      expect(counts).toEqual({ pins: 0, unboundedSnapshots: 0 });
     } finally {
       await barrier`select pg_advisory_unlock_all()`.catch(() => undefined);
       await barrier
@@ -477,12 +795,12 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const page = await context.newPage();
     const barrier = postgres(shared.adminUrl, { max: 1 });
     const removalClient = createDb(shared.appUrl, { max: 1 });
-    const raceSecret = "ope26-browser-pin-race-secret";
-    const raceSubject = "configured:ope26-browser-pin-race";
+    const raceSecret = "sessionpin-browser-pin-race-secret";
+    const raceSubject = "configured:sessionpin-browser-pin-race";
     const barrierClass = 81326031;
     const removalLock = 1;
-    const triggerFunction = "ope26_browser_pin_removal_first_barrier";
-    const triggerName = "ope26_browser_pin_removal_first_membership_barrier";
+    const triggerFunction = "sessionpin_browser_pin_removal_first_barrier";
+    const triggerName = "sessionpin_browser_pin_removal_first_membership_barrier";
     let removalPromise: Promise<boolean> | null = null;
     try {
       await page.goto(webBaseUrl);
@@ -585,18 +903,44 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
   }, 60_000);
 });
 
-type BrowserSession = { id: string; pinned: boolean; pinVersion: number };
+type BrowserSession = {
+  id: string;
+  accountId: string;
+  pinned: boolean;
+  pinVersion: number;
+};
 type BrowserSessionPage = {
   pinned: BrowserSession[];
   sessions: BrowserSession[];
   nextCursor: string | null;
 };
 
+const browserDiagnostics = new WeakMap<BrowserContext, string[]>();
+
 async function configuredContext(
   browser: Browser,
   options: BrowserContextOptions,
 ): Promise<BrowserContext> {
   const context = await browser.newContext(options);
+  const diagnostics: string[] = [];
+  browserDiagnostics.set(context, diagnostics);
+  context.on("requestfailed", (request) => {
+    diagnostics.push(
+      `request failed: ${request.method()} ${request.url()} (${request.failure()?.errorText ?? "unknown"})`,
+    );
+  });
+  context.on("response", (response) => {
+    if (response.status() >= 400) {
+      diagnostics.push(
+        `response ${response.status()}: ${response.request().method()} ${response.url()}`,
+      );
+    }
+  });
+  context.on("console", (message) => {
+    if (message.type() === "error" || message.type() === "warning") {
+      diagnostics.push(`console ${message.type()}: ${message.text()}`);
+    }
+  });
   // The console's configured-token panel stores the supplied value under this
   // key. In this test-only configured deployment there is intentionally no
   // delegation secret, so the API uses its supported x-opengeni-subject
@@ -609,7 +953,20 @@ async function configuredContext(
 }
 
 async function workspaceFromPage(page: Page): Promise<string> {
-  await waitFor(() => /\/workspaces\/[^/]+\/sessions/.test(page.url()), { timeoutMs: 15_000 });
+  try {
+    await waitFor(() => /\/workspaces\/[^/]+\/sessions/.test(page.url()), {
+      timeoutMs: 15_000,
+    });
+  } catch (error) {
+    const body = await page
+      .locator("body")
+      .innerText()
+      .catch(() => "<body unavailable>");
+    throw new Error(
+      `Workspace route did not load at ${page.url()}: ${String(error)}\n${body.slice(0, 2_000)}\n${(browserDiagnostics.get(page.context()) ?? []).slice(-20).join("\n")}`,
+      { cause: error },
+    );
+  }
   return page.url().match(/\/workspaces\/([^/]+)\/sessions/)![1]!;
 }
 
@@ -618,24 +975,39 @@ async function createSessionThroughApi(
   apiBaseUrl: string,
   workspaceId: string,
   initialMessage: string,
+  options: {
+    goal?: {
+      text: string;
+      successCriteria?: string;
+    };
+  } = {},
 ): Promise<BrowserSession> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, initialMessage }) => {
-      const response = await fetch(`${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          initialMessage,
-          model: "scripted-model",
-          sandboxBackend: "none",
-        }),
-      });
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      initialMessage: sessionMessage,
+      options: sessionOptions,
+    }) => {
+      const response = await fetch(
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            initialMessage: sessionMessage,
+            model: "scripted-model",
+            sandboxBackend: "none",
+            ...sessionOptions,
+          }),
+        },
+      );
       if (!response.ok) {
         throw new Error(`session create failed: ${response.status} ${await response.text()}`);
       }
       return (await response.json()) as BrowserSession;
     },
-    { apiBaseUrl, workspaceId, initialMessage },
+    { apiBaseUrl, workspaceId, initialMessage, options },
   );
 }
 
@@ -647,13 +1019,21 @@ async function setSessionPinThroughApi(
   pinned: boolean,
 ): Promise<BrowserSession> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, session, pinned }) => {
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      session: targetSession,
+      pinned: nextPinned,
+    }) => {
       const response = await fetch(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions/${session.id}/pin`,
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions/${targetSession.id}/pin`,
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pinned, expectedVersion: session.pinVersion ?? 0 }),
+          body: JSON.stringify({
+            pinned: nextPinned,
+            expectedVersion: targetSession.pinVersion ?? 0,
+          }),
         },
       );
       if (!response.ok) {
@@ -672,12 +1052,19 @@ async function listPageFromBrowser(
   options: { limit: number; cursor?: string; search?: string },
 ): Promise<BrowserSessionPage> {
   return await page.evaluate(
-    async ({ apiBaseUrl, workspaceId, options }) => {
-      const query = new URLSearchParams({ view: "page", limit: String(options.limit) });
-      if (options.cursor) query.set("cursor", options.cursor);
-      if (options.search) query.set("search", options.search);
+    async ({
+      apiBaseUrl: browserApiBaseUrl,
+      workspaceId: targetWorkspaceId,
+      options: pageOptions,
+    }) => {
+      const query = new URLSearchParams({
+        view: "page",
+        limit: String(pageOptions.limit),
+      });
+      if (pageOptions.cursor) query.set("cursor", pageOptions.cursor);
+      if (pageOptions.search) query.set("search", pageOptions.search);
       const response = await fetch(
-        `${apiBaseUrl}/v1/workspaces/${workspaceId}/sessions?${query.toString()}`,
+        `${browserApiBaseUrl}/v1/workspaces/${targetWorkspaceId}/sessions?${query.toString()}`,
       );
       if (!response.ok) {
         throw new Error(`session page failed: ${response.status} ${await response.text()}`);
@@ -701,13 +1088,33 @@ async function expectNoPageOverflow(page: Page): Promise<void> {
 }
 
 async function setTheme(page: Page, theme: "light" | "dark"): Promise<void> {
-  await page.evaluate((nextTheme) => {
+  await page.evaluate(async (nextTheme) => {
     if (nextTheme === "light") {
       document.documentElement.setAttribute("data-og-theme", "light");
     } else {
       document.documentElement.removeAttribute("data-og-theme");
     }
+    // Theme tokens affect independently composited panels. Wait for two paint
+    // frames so retained visual evidence cannot mix layers from both themes.
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+    });
   }, theme);
+}
+
+async function expectRowPrompt(
+  rows: ReturnType<Page["getByRole"]>,
+  index: number,
+  prompt: string,
+): Promise<void> {
+  try {
+    await rows.nth(index).getByText(prompt, { exact: true }).waitFor({ timeout: 10_000 });
+  } catch (error) {
+    throw new Error(
+      `Queue row ${index + 1} did not contain ${JSON.stringify(prompt)}: ${String(error)}\n${(browserDiagnostics.get(rows.page().context()) ?? []).slice(-20).join("\n")}`,
+      { cause: error },
+    );
+  }
 }
 
 async function expectTouchTarget(locator: ReturnType<Page["getByRole"]>): Promise<void> {
@@ -734,7 +1141,11 @@ async function expectNoAxeViolations(page: Page, includes: string[]): Promise<vo
     results.violations.map((violation) => ({
       id: violation.id,
       impact: violation.impact,
-      nodes: violation.nodes.map((node) => node.target),
+      nodes: violation.nodes.map((node) => ({
+        target: node.target,
+        failureSummary: node.failureSummary,
+        checks: node.any.map((check) => ({ message: check.message, data: check.data })),
+      })),
     })),
   ).toEqual([]);
 }

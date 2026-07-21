@@ -5,7 +5,7 @@
    it reads only the structural client, so an adapter works in any frontend.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
-import { registerDom, renderHook, flush } from "./render-hook";
+import { actRun, registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, WORKSPACE_ID } from "./fake-client";
 import { useMachines, type MachinesClientLike } from "../src/hooks/use-machines";
 import type { MachinesResponse, MachineView } from "../src/types/machines";
@@ -76,7 +76,7 @@ describe("useMachines", () => {
     );
     await flush();
     expect(hook.result.current.canAttach).toBe(true);
-    const ok = await hook.result.current.attach("sh-1");
+    const ok = await actRun(() => hook.result.current.attach("sh-1"));
     await flush();
     expect(ok).toBe(true);
     expect(swappedTo).toEqual([{ sessionId: "sess-1", target: "sh-1" }]);
@@ -103,7 +103,7 @@ describe("useMachines", () => {
       undefined,
     );
     await flush();
-    const ok = await hook.result.current.attach("sh-1");
+    const ok = await actRun(() => hook.result.current.attach("sh-1"));
     await flush();
     expect(ok).toBe(true);
     expect(attachedTo).toEqual([{ sessionId: "sess-2", sandboxId: "sh-1" }]);
@@ -121,7 +121,7 @@ describe("useMachines", () => {
     );
     await flush();
     expect(hook.result.current.canAttach).toBe(false);
-    const ok = await hook.result.current.attach("sh-1");
+    const ok = await actRun(() => hook.result.current.attach("sh-1"));
     expect(ok).toBe(false);
     await hook.unmount();
   });
@@ -170,6 +170,115 @@ describe("useMachines", () => {
     await flush();
     expect(hook.result.current.error?.message).toBe("nats down");
     expect(hook.result.current.machines.length).toBe(0);
+    await hook.unmount();
+  });
+
+  test("a session switch aborts the old list and renders zero frames of its fleet", async () => {
+    let oldSignal: AbortSignal | undefined;
+    let oldCalls = 0;
+    const machinesClient: MachinesClientLike = {
+      listMachines: async (_workspaceId, options) => {
+        if (options?.sessionId === "sess-1") {
+          oldCalls += 1;
+          if (oldCalls === 1) return response;
+          oldSignal = options.signal;
+          return await new Promise<MachinesResponse>(() => {});
+        }
+        return await new Promise<MachinesResponse>(() => {});
+      },
+    };
+    const observations: Array<{ sessionId: string; activeSandboxId: string | null }> = [];
+    const hook = await renderHook(
+      (props: { sessionId: string }) => {
+        const result = useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          machinesClient,
+          sessionId: props.sessionId,
+          pollIntervalMs: 20,
+        });
+        observations.push({
+          sessionId: props.sessionId,
+          activeSandboxId: result.activeSandboxId,
+        });
+        return result;
+      },
+      { sessionId: "sess-1" },
+    );
+    await flush(50);
+    expect(hook.result.current.activeSandboxId).toBe("modal-box");
+    expect(oldSignal?.aborted).toBe(false);
+    observations.length = 0;
+
+    await hook.rerender({ sessionId: "sess-2" });
+
+    expect(oldSignal?.aborted).toBe(true);
+    expect(
+      observations.some(
+        (observation) =>
+          observation.sessionId === "sess-2" && observation.activeSandboxId === "modal-box",
+      ),
+    ).toBe(false);
+    expect(hook.result.current.activeSandboxId).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a late attach settlement from the old session cannot clear the new session spinner", async () => {
+    let resolveOld: () => void = () => {};
+    let resolveNew: () => void = () => {};
+    const oldSwap = new Promise<void>((resolve) => {
+      resolveOld = resolve;
+    });
+    const newSwap = new Promise<void>((resolve) => {
+      resolveNew = resolve;
+    });
+    const machinesClient: MachinesClientLike = {
+      listMachines: async () => response,
+      swapActiveSandbox: async (_workspaceId, sessionId) =>
+        await (sessionId === "sess-1" ? oldSwap : newSwap),
+    };
+    const hook = await renderHook(
+      (props: { sessionId: string }) =>
+        useMachines({
+          client,
+          workspaceId: WORKSPACE_ID,
+          machinesClient,
+          sessionId: props.sessionId,
+        }),
+      { sessionId: "sess-1" },
+    );
+    await flush();
+    let oldAttach!: Promise<boolean>;
+    await actRun(() => {
+      oldAttach = hook.result.current.attach("old-box");
+    });
+    await flush();
+    expect(hook.result.current.attachingSandboxId).toBe("old-box");
+
+    await hook.rerender({ sessionId: "sess-2" });
+    let newAttach!: Promise<boolean>;
+    await actRun(() => {
+      newAttach = hook.result.current.attach("new-box");
+    });
+    await flush();
+    expect(hook.result.current.attachingSandboxId).toBe("new-box");
+
+    await actRun(async () => {
+      resolveOld();
+      await oldAttach;
+    });
+    await flush();
+    expect(hook.result.current.attaching).toBe(true);
+    expect(hook.result.current.attachingSandboxId).toBe("new-box");
+    expect(hook.result.current.mutationError).toBeNull();
+
+    await actRun(async () => {
+      resolveNew();
+      await newAttach;
+    });
+    await flush();
+    expect(hook.result.current.attaching).toBe(false);
+    expect(hook.result.current.attachingSandboxId).toBeNull();
     await hook.unmount();
   });
 });

@@ -145,6 +145,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -221,7 +222,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M7 fleet service — list / attach / swap / run_on / provision", () => {
   test("sandboxes_list: the session Modal box + the enrolled machine, each with liveness + active marker", async () => {

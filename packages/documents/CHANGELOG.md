@@ -1,5 +1,77 @@
 # @opengeni/documents
 
+## 0.2.14
+
+### Patch Changes
+
+- Updated dependencies [28290a0]
+  - @opengeni/db@0.7.5
+
+## 0.2.13
+
+### Patch Changes
+
+- Updated dependencies [14ce2e3]
+- Updated dependencies [053c5df]
+- Updated dependencies [ec0697a]
+  - @opengeni/config@0.5.2
+  - @opengeni/db@0.7.4
+  - @opengeni/contracts@0.11.0
+  - @opengeni/storage@0.2.11
+
+## 0.2.12
+
+### Patch Changes
+
+- Updated dependencies [b9dbb63]
+  - @opengeni/db@0.7.3
+
+## 0.2.11
+
+### Patch Changes
+
+- @opengeni/config@0.5.1
+- @opengeni/db@0.7.2
+- @opengeni/storage@0.2.10
+
+## 0.2.10
+
+### Patch Changes
+
+- Updated dependencies [ea52b39]
+  - @opengeni/db@0.7.1
+
+## 0.2.9
+
+### Patch Changes
+
+- 0805620: Make active-sandbox pointer swaps establishment-safe. A swap or create-time seed to a target no turn can establish (a non-group Modal sibling, or an unknown backend kind) is now rejected before the epoch-fenced pointer commit with a typed rejection `code`, leaving the pointer and epoch untouched. At turn start a persisted pointer whose target is structurally unestablishable (a deleted sandbox row, a Modal sibling, or an enrollment-less selfhosted row) is reset to the session home under the epoch fence and announced with a new `session.route.reconciled` event, honoring a concurrent higher-epoch swap rather than clobbering it. A null pointer resolves to the session home backend, and the routing proxy's per-op cache is keyed on the full `(activeEpoch, activeSandboxId)` tuple so a clear-to-null re-lands the next op on home rather than a stale swapped-to session. Adds the optional `SwapActiveSandboxResponse.code` discriminant and the `session.route.reconciled` session event type to the public contracts and SDK wire types.
+- b804fd4: Add provider-neutral git credential contracts and runtime sandbox token-file seeding for GitHub, GitLab, and Azure DevOps. Sandboxes now provision `gh`, `glab`, and `az` wrappers that read current token files at invocation time without storing token values in manifests.
+- Updated dependencies [332ac15]
+- Updated dependencies [ad4502a]
+- Updated dependencies [ec508d4]
+- Updated dependencies [477b2bb]
+- Updated dependencies [04d7595]
+- Updated dependencies [0805620]
+- Updated dependencies [faf1487]
+- Updated dependencies [13d0889]
+- Updated dependencies [b125213]
+- Updated dependencies [b804fd4]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [3148404]
+- Updated dependencies [a0cb58f]
+- Updated dependencies [e4d3569]
+- Updated dependencies [810542f]
+- Updated dependencies [5942493]
+- Updated dependencies [726cf2c]
+- Updated dependencies [a5f58f9]
+- Updated dependencies [9d4283d]
+  - @opengeni/db@0.7.0
+  - @opengeni/config@0.5.0
+  - @opengeni/contracts@0.10.0
+  - @opengeni/storage@0.2.9
+
 ## 0.2.8
 
 ### Patch Changes

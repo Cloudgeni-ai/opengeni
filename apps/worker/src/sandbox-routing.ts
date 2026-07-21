@@ -4,7 +4,7 @@
 //
 // The turn resumes its group box by id (resumeBoxForTurn) and injects it
 // NON-OWNED into the run. With hot-swap, the injected `session` must be the
-// STABLE routing proxy (dossier §10.3): the SDK binds to it ONCE and calls its
+// STABLE routing proxy: the SDK binds to it ONCE and calls its
 // methods per tool call; the proxy re-reads `(active_sandbox_id, active_epoch)`
 // per op and dispatches to the currently-active backend (the group Modal box by
 // default, or a swap target — a sibling Modal box or a selfhosted machine).

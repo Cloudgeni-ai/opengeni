@@ -1,9 +1,13 @@
-import { OpenGeniApiError } from "./errors";
+import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "./errors";
 import {
   streamSessionEvents,
   type SessionEventStreamTransport,
   type StreamSessionEventsOptions,
 } from "./stream";
+import {
+  streamWorkspaceControlEvents,
+  type WorkspaceControlStreamTransport,
+} from "./workspace-control-stream";
 import type {
   AccessContext,
   AddWorkspaceMemberRequest,
@@ -85,8 +89,22 @@ import type {
   SessionListResponse,
   UpdateSessionPinRequest,
   SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
   SessionGoal,
   SessionLineageResponse,
+  SessionMcpCredentialUpdateInput,
+  SessionQueueSnapshot,
+  SessionQueueMutationResponse,
+  ComposerDraft,
+  DeleteSessionQueueItemRequest,
+  EditSessionQueueItemRequest,
+  MoveSessionQueueItemRequest,
+  SaveComposerDraftRequest,
+  SteerSessionQueueItemRequest,
+  SessionControlResponse,
+  WorkspaceInferenceControlResponse,
+  WorkspaceControlEvent,
   SessionTurn,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
@@ -117,7 +135,7 @@ import type {
   GitLogResponse,
   GitShowRequest,
   GitShowResponse,
-  // Workbench v2 turn-end capture reads (M2, dossier §10.3).
+  // Workbench v2 turn-end capture reads (M2).
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
   TerminalExecRequest,
@@ -133,7 +151,6 @@ import type {
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
-  UpdateSessionTurnRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -157,8 +174,16 @@ import type {
   OAuthStartRequest,
   OAuthStartResponse,
 } from "./types";
+import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+export type WorkspaceControlEventPage = {
+  events: WorkspaceControlEvent[];
+  bytes: number;
+  truncated: boolean;
+  nextAfter: number | null;
+};
 
 export type OpenGeniClientOptions = {
   /** Base URL of the OpenGeni API, e.g. `https://api.example.com`. */
@@ -171,6 +196,11 @@ export type OpenGeniClientOptions = {
   fetch?: FetchLike;
 };
 
+/** Per-request cancellation for identity-scoped, side-effect-free reads. */
+export type OpenGeniRequestOptions = {
+  signal?: AbortSignal | undefined;
+};
+
 export type SendMessageInput = {
   text: string;
   resources?: ResourceRef[];
@@ -178,19 +208,16 @@ export type SendMessageInput = {
   model?: string;
   reasoningEffort?: ReasoningEffort;
   clientEventId?: string;
+  controlEtag?: string;
+  expectedDraftRevision?: number;
+  mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
 };
 
 export type SteerMessageResult = {
   /** The accepted `user.message` event. */
   accepted: SessionEvent;
-  /**
-   * The turn created for the message, when it could be located — usually
-   * still queued, but already claimed (running/requires_action or even
-   * finished) when the worker picked it up mid-call.
-   */
-  turn: SessionTurn | null;
-  /** True when the running turn was interrupted to make way for the message. */
-  interrupted: boolean;
+  /** The exact turn created for this message in the same server transaction. */
+  turn: SessionTurn;
 };
 
 /**
@@ -275,7 +302,7 @@ export class OpenGeniClient {
       search?: string;
     } = {},
   ): Promise<SessionListResponse> {
-    const response = await this.requestJson<SessionListResponse | Session[]>(
+    return await this.requestJson<SessionListResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
@@ -293,23 +320,6 @@ export class OpenGeniClient {
           : {}),
       },
     );
-    if (Array.isArray(response)) {
-      // Rolling/same-major compatibility: an older API ignores `view=page` and
-      // returns the historical array. That is an honest one-page projection;
-      // never pretend it honored a cursor supplied directly by a caller.
-      if (options.cursor) {
-        throw new Error("The connected OpenGeni API does not support stable session-page cursors");
-      }
-      // Older APIs ignore unknown query parameters. Treating their unfiltered
-      // array as a successful search would be worse than an explicit rolling-
-      // upgrade error (and client-side filtering cannot recover matches beyond
-      // the old endpoint's bounded first page).
-      if (options.search?.trim()) {
-        throw new Error("The connected OpenGeni API does not support session search");
-      }
-      return { pinned: [], sessions: response, nextCursor: null };
-    }
-    return response;
   }
 
   /** Set this authenticated member's personal workspace pin for a session. */
@@ -357,7 +367,7 @@ export class OpenGeniClient {
    */
   async listMachines(
     workspaceId: string,
-    options: { sessionId?: string } = {},
+    options: { sessionId?: string; signal?: AbortSignal } = {},
   ): Promise<MachinesResponse> {
     return await this.requestJson<MachinesResponse>(
       "GET",
@@ -366,6 +376,7 @@ export class OpenGeniClient {
       {
         ...(options.sessionId !== undefined ? { sessionId: options.sessionId } : {}),
       },
+      { signal: options.signal },
     );
   }
 
@@ -497,27 +508,101 @@ export class OpenGeniClient {
   // --- Events: replay, send, stream ----------------------------------------
 
   /**
-   * Replay durable events by sequence, ascending. `before` is exclusive and
-   * returns the newest matching window. With `compact`, consecutive delta runs
-   * may be coalesced; `payload.coalescedUntil` carries the run's last sequence
-   * for resume cursors.
+   * Return the events from one bounded page. With no cursor, this uses the safe
+   * semantic monitoring tail; pass explicit forensic options and a cursor for
+   * retained audit replay. Use `listEventPage` when projection, coverage, or
+   * resume-cursor facts are required.
    */
   async listEvents(
     workspaceId: string,
     sessionId: string,
-    options: { after?: number; before?: number; limit?: number; compact?: boolean } = {},
+    options: SessionEventListOptions = {},
   ): Promise<SessionEvent[]> {
-    return await this.requestJson<SessionEvent[]>(
-      "GET",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`,
-      undefined,
-      {
+    return (await this.listEventPage(workspaceId, sessionId, options)).events;
+  }
+
+  /** Bounded durable/monitoring page plus exact projection and cursor facts. */
+  async listEventPage(
+    workspaceId: string,
+    sessionId: string,
+    options: SessionEventListOptions = {},
+  ): Promise<SessionEventPage> {
+    if (
+      options.latest &&
+      ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some((name) =>
+        Object.prototype.hasOwnProperty.call(options, name),
+      )
+    ) {
+      throw new TypeError("latest cannot be combined with event filters");
+    }
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),
         ...(options.before !== undefined ? { before: String(options.before) } : {}),
         ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
         ...(options.compact ? { compact: "1" } : {}),
+        ...(options.mode ? { mode: options.mode } : {}),
+        ...(options.direction ? { direction: options.direction } : {}),
+        ...(options.payloadMode ? { payloadMode: options.payloadMode } : {}),
+        ...(options.includeTypes?.length ? { includeTypes: options.includeTypes.join(",") } : {}),
+        ...(options.excludeTypes?.length ? { excludeTypes: options.excludeTypes.join(",") } : {}),
+        ...(options.includeClasses?.length
+          ? { includeClasses: options.includeClasses.join(",") }
+          : {}),
+        ...(options.excludeClasses?.length
+          ? { excludeClasses: options.excludeClasses.join(",") }
+          : {}),
+        ...(options.latest ? { latest: options.latest } : {}),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "application/json" },
       },
     );
+    assertApiContractResponse(response);
+    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    const events = (await response.json()) as SessionEvent[];
+    const integerHeader = (name: string): number | null => {
+      const raw = response.headers.get(name);
+      if (raw === null) return null;
+      const value = Number(raw);
+      return Number.isSafeInteger(value) && value >= 0 ? value : null;
+    };
+    const mode =
+      response.headers.get("X-OpenGeni-Event-Mode") === "forensic" ? "forensic" : "monitoring";
+    const direction =
+      response.headers.get("X-OpenGeni-Event-Direction") === "after" ? "after" : "before";
+    const payloadHeader = response.headers.get("X-OpenGeni-Payload-Mode");
+    const payloadMode =
+      payloadHeader === "none" || payloadHeader === "full" ? payloadHeader : "summary";
+    const first = integerHeader("X-OpenGeni-Covered-First");
+    const last = integerHeader("X-OpenGeni-Covered-Last");
+    const bytes =
+      integerHeader("X-OpenGeni-Page-Bytes") ??
+      new TextEncoder().encode(JSON.stringify(events)).byteLength;
+    const maxBytes = integerHeader("X-OpenGeni-Page-Max-Bytes") ?? 1024 * 1024;
+    const truncatedByHeader = response.headers.get("X-OpenGeni-Truncated-By");
+    const truncatedBy =
+      truncatedByHeader === "count" ||
+      truncatedByHeader === "bytes" ||
+      truncatedByHeader === "http_bytes"
+        ? truncatedByHeader
+        : null;
+    return {
+      events,
+      mode,
+      payloadMode,
+      direction,
+      bytes,
+      maxBytes,
+      truncated: response.headers.get("X-OpenGeni-Page-Truncated") === "true",
+      hasMore: response.headers.get("X-OpenGeni-Has-More") === "true",
+      truncatedBy,
+      coveredSequence: first === null || last === null ? null : { first, last },
+      nextAfter: integerHeader("X-OpenGeni-Next-After"),
+      nextBefore: integerHeader("X-OpenGeni-Next-Before"),
+      forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
+    };
   }
 
   /** POST a user/control event to the session. Returns the accepted event. */
@@ -547,15 +632,16 @@ export class OpenGeniClient {
     });
   }
 
-  async interrupt(
+  async pauseSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string } = {},
-  ): Promise<SessionEvent> {
-    return await this.sendEvent(workspaceId, sessionId, {
-      type: "user.interrupt",
-      ...(options.clientEventId !== undefined ? { clientEventId: options.clientEventId } : {}),
-      payload: options.reason !== undefined ? { reason: options.reason } : {},
+    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, {
+      action: "pause",
+      clientEventId: options.clientEventId ?? crypto.randomUUID(),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
     });
   }
 
@@ -617,6 +703,7 @@ export class OpenGeniClient {
       headers: { ...this.headers(), Accept: "text/event-stream" },
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    assertApiContractResponse(response);
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
@@ -628,116 +715,229 @@ export class OpenGeniClient {
 
   // --- Turn queue ------------------------------------------------------------
 
-  /** Edit a still-queued turn (prompt, model, resources, tools, ...). */
-  async updateQueuedTurn(
-    workspaceId: string,
-    sessionId: string,
-    turnId: string,
-    update: UpdateSessionTurnRequest,
-  ): Promise<SessionTurn> {
-    return await this.requestJson<SessionTurn>(
-      "PATCH",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
-      update,
+  async getQueue(workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+    return await this.requestJson<SessionQueueSnapshot>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue`,
     );
   }
 
-  /**
-   * Reorder the queued turns. `turnIds` must all reference queued turns; the
-   * server assigns positions in the given order and returns the queue.
-   */
-  async reorderQueuedTurns(
+  async moveQueueItem(
     workspaceId: string,
     sessionId: string,
-    turnIds: string[],
-  ): Promise<SessionTurn[]> {
-    return await this.requestJson<SessionTurn[]>(
+    turnId: string,
+    request: MoveSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
       "POST",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/reorder`,
-      { turnIds },
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/move`,
+      request,
     );
   }
 
-  /** Cancel a queued turn before it is claimed. Returns the cancelled turn. */
-  async deleteQueuedTurn(
+  async editQueueItem(
     workspaceId: string,
     sessionId: string,
     turnId: string,
-  ): Promise<SessionTurn> {
-    return await this.requestJson<SessionTurn>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/turns/${turnId}`,
+    request: EditSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/edit`,
+      request,
     );
   }
 
+  async steerQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: SteerSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/steer`,
+      request,
+    );
+  }
+
+  async deleteQueueItem(
+    workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: DeleteSessionQueueItemRequest,
+  ): Promise<SessionQueueMutationResponse> {
+    return await this.requestJson<SessionQueueMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/queue/${turnId}/delete`,
+      request,
+    );
+  }
+
+  async getComposerDraft(workspaceId: string, sessionId: string): Promise<ComposerDraft> {
+    return await this.requestJson<ComposerDraft>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+    );
+  }
+
+  async saveComposerDraft(
+    workspaceId: string,
+    sessionId: string,
+    request: SaveComposerDraftRequest,
+  ): Promise<ComposerDraft> {
+    return await this.requestJson<ComposerDraft>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/composer-draft`,
+      request,
+    );
+  }
+
+  async controlSession(
+    workspaceId: string,
+    sessionId: string,
+    request: {
+      action: "pause" | "resume";
+      reason?: string;
+      clientEventId: string;
+      expectedControlEtag?: string;
+    },
+  ): Promise<SessionControlResponse> {
+    return await this.requestJson<SessionControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/control`,
+      request,
+    );
+  }
+
+  async resumeSession(
+    workspaceId: string,
+    sessionId: string,
+    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+  ): Promise<SessionControlResponse> {
+    return await this.controlSession(workspaceId, sessionId, {
+      action: "resume",
+      clientEventId: options.clientEventId ?? crypto.randomUUID(),
+      ...(options.reason ? { reason: options.reason } : {}),
+      ...(options.expectedControlEtag ? { expectedControlEtag: options.expectedControlEtag } : {}),
+    });
+  }
+
+  async setWorkspaceInferenceState(
+    workspaceId: string,
+    request: {
+      action: "pause" | "resume";
+      reason?: string;
+      clientEventId: string;
+      expectedRevision?: number;
+    },
+  ): Promise<WorkspaceInferenceControlResponse> {
+    return await this.requestJson<WorkspaceInferenceControlResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/inference-control`,
+      request,
+    );
+  }
+
+  async listWorkspaceControlEvents(
+    workspaceId: string,
+    options: { after?: number; limit?: number } = {},
+  ): Promise<WorkspaceControlEvent[]> {
+    return (await this.listWorkspaceControlEventPage(workspaceId, options)).events;
+  }
+
+  /** Count/byte-bounded page plus an explicit continuation cursor. */
+  async listWorkspaceControlEventPage(
+    workspaceId: string,
+    options: { after?: number; limit?: number } = {},
+  ): Promise<WorkspaceControlEventPage> {
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/control-events`, {
+        ...(options.after !== undefined ? { after: String(options.after) } : {}),
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "application/json" },
+      },
+    );
+    assertApiContractResponse(response);
+    if (!response.ok) {
+      throw new OpenGeniApiError(response.status, await safeText(response));
+    }
+    const events = (await response.json()) as WorkspaceControlEvent[];
+    const bytesHeader = response.headers.get("X-OpenGeni-Page-Bytes");
+    const nextHeader = response.headers.get("X-OpenGeni-Next-After");
+    const parsedBytes = bytesHeader === null ? Number.NaN : Number(bytesHeader);
+    const parsedNext = nextHeader === null ? null : Number(nextHeader);
+    return {
+      events,
+      bytes:
+        Number.isSafeInteger(parsedBytes) && parsedBytes >= 0
+          ? parsedBytes
+          : new TextEncoder().encode(JSON.stringify(events)).byteLength,
+      truncated: response.headers.get("X-OpenGeni-Page-Truncated") === "true",
+      nextAfter:
+        parsedNext !== null && Number.isSafeInteger(parsedNext) && parsedNext >= 0
+          ? parsedNext
+          : null,
+    };
+  }
+
+  streamWorkspaceControlEvents(
+    workspaceId: string,
+    options: StreamSessionEventsOptions = {},
+  ): AsyncGenerator<WorkspaceControlEvent, void, void> {
+    return streamWorkspaceControlEvents(this.workspaceControlStreamTransport(workspaceId), options);
+  }
+
+  workspaceControlStreamTransport(workspaceId: string): WorkspaceControlStreamTransport {
+    return {
+      openStream: async (after, signal) =>
+        await this.openWorkspaceControlEventStream(workspaceId, {
+          after,
+          ...(signal ? { signal } : {}),
+        }),
+    };
+  }
+
+  async openWorkspaceControlEventStream(
+    workspaceId: string,
+    options: { after?: number; signal?: AbortSignal } = {},
+  ): Promise<ReadableStream<Uint8Array>> {
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/control-events/stream`, {
+        after: String(options.after ?? 0),
+      }),
+      {
+        method: "GET",
+        headers: { ...this.headers(), Accept: "text/event-stream" },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    assertApiContractResponse(response);
+    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    if (!response.body) {
+      throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
+    }
+    return response.body;
+  }
+
   /**
-   * Steer: deliver a message *now* instead of behind the queue. Sends the
-   * message, promotes its queued turn to the front, and interrupts the
-   * running turn so the session picks the steer turn up next. On a session
-   * that is not running this degrades gracefully to a plain queued message.
-   *
-   * The steer turn is located by `triggerEventId` across ALL turns (retried
-   * briefly in case the server is still materializing it) — not just the
-   * queued ones, because the worker can claim the steer turn before it is
-   * ever observed queued, and a claimed steer turn means the message is
-   * already being delivered: interrupting then would cancel the very message
-   * being steered. If the turn cannot be found while other turns are queued,
-   * the interrupt is also skipped — stopping the running turn would otherwise
-   * promote someone else's queued work over this message — and the call
-   * degrades to a plain queued send (`interrupted: false`).
+   * Steer: atomically put this prompt at the head and supersede the current
+   * inference. The client performs one request and renders server order.
    */
   async steerMessage(
     workspaceId: string,
     sessionId: string,
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
-    const accepted = await this.sendMessage(workspaceId, sessionId, message);
-    let steerTurn: SessionTurn | null = null;
-    let queued: SessionTurn[] = [];
-    for (let attempt = 0; attempt < 4; attempt += 1) {
-      if (attempt > 0) {
-        await delay(150 * attempt);
-      }
-      const turns = await this.listTurns(workspaceId, sessionId);
-      queued = turns
-        .filter((turn) => turn.status === "queued")
-        .sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
-      // Match against every turn, whatever its status: a steer turn that is
-      // already running/requires_action (or even finished) was claimed before
-      // this listing — that is delivery, not grounds for an interrupt.
-      steerTurn = turns.find((turn) => turn.triggerEventId === accepted.id) ?? null;
-      if (steerTurn) {
-        break;
-      }
-    }
-    const steerTurnQueued = steerTurn?.status === "queued";
-    if (steerTurn && steerTurnQueued && queued.length > 1) {
-      const front = steerTurn;
-      await this.reorderQueuedTurns(workspaceId, sessionId, [
-        front.id,
-        ...queued.filter((turn) => turn.id !== front.id).map((turn) => turn.id),
-      ]);
-    }
-    // Interrupting is only safe when the next claim is provably this message:
-    // either the steer turn sits queued (now at the front), or no turn
-    // materialized yet AND nothing else is queued. A steer turn observed in
-    // any non-queued state was already claimed — skip the interrupt.
-    const canDeliverNext = steerTurnQueued || (steerTurn === null && queued.length === 0);
-    const session = await this.getSession(workspaceId, sessionId);
-    // If the previously running turn already finished and the session claimed
-    // the steer turn itself, interrupting now would cancel the very message
-    // being steered. `activeTurnId` is the claim check; the residual window
-    // between this read and the interrupt landing is accepted (an interrupt
-    // can never be atomic with a status read over HTTP).
-    const steerTurnAlreadyActive = steerTurn !== null && session.activeTurnId === steerTurn.id;
-    const interrupted =
-      canDeliverNext &&
-      !steerTurnAlreadyActive &&
-      (session.status === "running" || session.status === "requires_action");
-    if (interrupted) {
-      await this.interrupt(workspaceId, sessionId, { reason: "steer" });
-    }
-    return { accepted, turn: steerTurn, interrupted };
+    const input = typeof message === "string" ? { text: message } : message;
+    return await this.requestJson<SteerMessageResult>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/steer`,
+      input,
+    );
   }
 
   // --- Goals -------------------------------------------------------------------
@@ -800,12 +1000,7 @@ export class OpenGeniClient {
     );
   }
 
-  /**
-   * Trigger conversation compaction now. On the client-managed (Azure) path this
-   * queues a forced compaction the worker honors before the next turn
-   * (`status:"queued"`); on a server-managed provider or when compaction is off
-   * it is a no-op (`status:"noop"`) with an explanatory message.
-   */
+  /** Request one durable portable compaction at the next safe model boundary. */
   async compactSessionContext(
     workspaceId: string,
     sessionId: string,
@@ -827,11 +1022,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: FsListRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<FsListResponse> {
     return await this.requestJson<FsListResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/list`,
       request,
+      {},
+      options,
     );
   }
 
@@ -840,11 +1038,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: FsReadRequest,
+    options: OpenGeniRequestOptions = {},
   ): Promise<FsReadResponse> {
     return await this.requestJson<FsReadResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/fs/read`,
       request,
+      {},
+      options,
     );
   }
 
@@ -905,11 +1106,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: GitStatusRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<GitStatusResponse> {
     return await this.requestJson<GitStatusResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/status`,
       request,
+      {},
+      options,
     );
   }
 
@@ -918,11 +1122,14 @@ export class OpenGeniClient {
     workspaceId: string,
     sessionId: string,
     request: GitDiffRequest = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<GitDiffResponse> {
     return await this.requestJson<GitDiffResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/git/diff`,
       request,
+      {},
+      options,
     );
   }
 
@@ -959,10 +1166,14 @@ export class OpenGeniClient {
   async getWorkspaceCapture(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<GetWorkspaceCaptureResponse> {
     return await this.requestJson<GetWorkspaceCaptureResponse>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -974,6 +1185,7 @@ export class OpenGeniClient {
     sessionId: string,
     path: string,
     revision?: number,
+    options: OpenGeniRequestOptions = {},
   ): Promise<GetWorkspaceCaptureFileResponse> {
     const query: Record<string, string> = { path };
     if (revision !== undefined) query.revision = String(revision);
@@ -982,6 +1194,7 @@ export class OpenGeniClient {
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/workspace/capture/file`,
       undefined,
       query,
+      options,
     );
   }
 
@@ -1066,10 +1279,14 @@ export class OpenGeniClient {
   async getStreamCapabilities(
     workspaceId: string,
     sessionId: string,
+    options: OpenGeniRequestOptions = {},
   ): Promise<SessionCapabilities> {
     return await this.requestJson<SessionCapabilities>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/stream-capabilities`,
+      undefined,
+      {},
+      options,
     );
   }
 
@@ -1142,7 +1359,14 @@ export class OpenGeniClient {
    * knowledge of the host setup; safe to call before any auth is established.
    */
   async getClientConfig(): Promise<ClientConfig> {
-    return await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+    const config = await this.requestJson<ClientConfig>("GET", "/v1/config/client");
+    if (config.apiContractRevision !== OPENGENI_API_CONTRACT_REVISION) {
+      throw new OpenGeniApiContractMismatchError(
+        OPENGENI_API_CONTRACT_REVISION,
+        String(config.apiContractRevision || "(missing)"),
+      );
+    }
+    return config;
   }
 
   /** The caller's access context: subject, account + workspace grants, defaults. */
@@ -1994,6 +2218,14 @@ export class OpenGeniClient {
     );
   }
 
+  /** Remove one workspace binding without uninstalling the GitHub App itself. */
+  async unlinkGitHubInstallation(workspaceId: string, installationId: number): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/github/installations/${installationId}`,
+    );
+  }
+
   /** Build a GitHub App manifest + the GitHub URL to submit it to. */
   async createGitHubAppManifest(
     workspaceId: string,
@@ -2079,6 +2311,7 @@ export class OpenGeniClient {
     return {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
+      [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
     };
   }
 
@@ -2219,6 +2452,7 @@ export class OpenGeniClient {
     path: string,
     body?: unknown,
     query: Record<string, string> = {},
+    options: OpenGeniRequestOptions = {},
   ): Promise<T> {
     const response = await this.fetchImpl(this.url(path, query), {
       method,
@@ -2228,7 +2462,9 @@ export class OpenGeniClient {
         ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
+    assertApiContractResponse(response);
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
@@ -2246,9 +2482,17 @@ export class OpenGeniClient {
       },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
+    assertApiContractResponse(response);
     if (!response.ok) {
       throw new OpenGeniApiError(response.status, await safeText(response));
     }
+  }
+}
+
+function assertApiContractResponse(response: Response): void {
+  const actual = response.headers.get(OPENGENI_API_CONTRACT_HEADER);
+  if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
+    throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
   }
 }
 
@@ -2258,8 +2502,4 @@ async function safeText(response: Response): Promise<string> {
   } catch {
     return "";
   }
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

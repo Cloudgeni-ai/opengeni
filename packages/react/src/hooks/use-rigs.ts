@@ -40,91 +40,89 @@ export type UseRigsResult = {
 export function useRigs(options: UseRigsOptions = {}): UseRigsResult {
   const { client, workspaceId } = useOpenGeni(options);
   const load = useCallback(async () => await client.listRigs(workspaceId), [client, workspaceId]);
-  const state = usePolledValue(load, {
+  const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
 
   const create = useCallback(
     async (request: CreateRigRequest): Promise<Rig | null> => {
-      const result = await mutation.run(() => client.createRig(workspaceId, request));
+      const result = await run(() => client.createRig(workspaceId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const update = useCallback(
     async (rigId: string, request: UpdateRigRequest): Promise<Rig | null> => {
-      const result = await mutation.run(() => client.updateRig(workspaceId, rigId, request));
+      const result = await run(() => client.updateRig(workspaceId, rigId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const remove = useCallback(
     async (rigId: string): Promise<boolean> => {
-      const result = await mutation.run(async () => {
+      const result = await run(async () => {
         await client.deleteRig(workspaceId, rigId);
         return true;
       });
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result === true;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const listVersions = useCallback(
     async (rigId: string): Promise<RigVersion[] | null> => {
-      return await mutation.run(() => client.listRigVersions(workspaceId, rigId));
+      return await run(() => client.listRigVersions(workspaceId, rigId));
     },
-    [client, workspaceId, mutation.run],
+    [client, workspaceId, run],
   );
 
   const activateVersion = useCallback(
     async (rigId: string, versionId: string): Promise<RigVersion | null> => {
-      const result = await mutation.run(() =>
-        client.activateRigVersion(workspaceId, rigId, versionId),
-      );
+      const result = await run(() => client.activateRigVersion(workspaceId, rigId, versionId));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   const listChanges = useCallback(
     async (rigId: string): Promise<RigChange[] | null> => {
-      return await mutation.run(() => client.listRigChanges(workspaceId, rigId));
+      return await run(() => client.listRigChanges(workspaceId, rigId));
     },
-    [client, workspaceId, mutation.run],
+    [client, workspaceId, run],
   );
 
   const proposeChange = useCallback(
     async (rigId: string, request: ProposeRigChangeRequest): Promise<RigChange | null> => {
-      const result = await mutation.run(() => client.proposeRigChange(workspaceId, rigId, request));
+      const result = await run(() => client.proposeRigChange(workspaceId, rigId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, mutation.run, state.refresh],
+    [client, workspaceId, run, refresh],
   );
 
   return {
-    rigs: state.data ?? [],
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    rigs: data ?? [],
+    loading,
+    error,
+    refresh,
     create,
     update,
     remove,
@@ -132,9 +130,9 @@ export function useRigs(options: UseRigsOptions = {}): UseRigsResult {
     activateVersion,
     listChanges,
     proposeChange,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutating,
+    mutationError,
+    clearMutationError,
   };
 }
 
@@ -174,88 +172,84 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     async () => await client.getRig(workspaceId, rigId),
     [client, workspaceId, rigId],
   );
-  const state = usePolledValue(load, {
+  const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
 
   const update = useCallback(
     async (request: UpdateRigRequest): Promise<Rig | null> => {
-      const result = await mutation.run(() => client.updateRig(workspaceId, rigId, request));
+      const result = await run(() => client.updateRig(workspaceId, rigId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, rigId, mutation.run, state.refresh],
+    [client, workspaceId, rigId, run, refresh],
   );
 
   const remove = useCallback(async (): Promise<boolean> => {
-    const result = await mutation.run(async () => {
+    const result = await run(async () => {
       await client.deleteRig(workspaceId, rigId);
       return true;
     });
     return result === true;
-  }, [client, workspaceId, rigId, mutation.run]);
+  }, [client, workspaceId, rigId, run]);
 
   const activateVersion = useCallback(
     async (versionId: string): Promise<RigVersion | null> => {
-      const result = await mutation.run(() =>
-        client.activateRigVersion(workspaceId, rigId, versionId),
-      );
+      const result = await run(() => client.activateRigVersion(workspaceId, rigId, versionId));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, rigId, mutation.run, state.refresh],
+    [client, workspaceId, rigId, run, refresh],
   );
 
   const proposeChange = useCallback(
     async (request: ProposeRigChangeRequest): Promise<RigChange | null> => {
-      const result = await mutation.run(() => client.proposeRigChange(workspaceId, rigId, request));
+      const result = await run(() => client.proposeRigChange(workspaceId, rigId, request));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, rigId, mutation.run, state.refresh],
+    [client, workspaceId, rigId, run, refresh],
   );
 
   const verifyChange = useCallback(
     async (changeId: string): Promise<RigChange | null> => {
-      const result = await mutation.run(() => client.verifyRigChange(workspaceId, rigId, changeId));
+      const result = await run(() => client.verifyRigChange(workspaceId, rigId, changeId));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, rigId, mutation.run, state.refresh],
+    [client, workspaceId, rigId, run, refresh],
   );
 
   const promoteChange = useCallback(
     async (changeId: string): Promise<RigVersion | null> => {
-      const result = await mutation.run(() =>
-        client.promoteRigChange(workspaceId, rigId, changeId),
-      );
+      const result = await run(() => client.promoteRigChange(workspaceId, rigId, changeId));
       if (result) {
-        await state.refresh();
+        await refresh();
       }
       return result;
     },
-    [client, workspaceId, rigId, mutation.run, state.refresh],
+    [client, workspaceId, rigId, run, refresh],
   );
 
   const verify = useCallback(async (): Promise<{ ok: boolean; versionId: string } | null> => {
-    return await mutation.run(() => client.verifyRig(workspaceId, rigId));
-  }, [client, workspaceId, rigId, mutation.run]);
+    return await run(() => client.verifyRig(workspaceId, rigId));
+  }, [client, workspaceId, rigId, run]);
 
   return {
-    rig: state.data,
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    rig: data,
+    loading,
+    error,
+    refresh,
     update,
     remove,
     activateVersion,
@@ -263,9 +257,9 @@ export function useRig(rigId: string, options: UseRigOptions = {}): UseRigResult
     verifyChange,
     promoteChange,
     verify,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    mutating,
+    mutationError,
+    clearMutationError,
   };
 }
 

@@ -3,15 +3,16 @@ import { Client, Connection } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import type { AccessGrant } from "@opengeni/contracts";
 import {
-  appendSessionEvents,
+  applySessionTurnSettlement,
   bootstrapWorkspace,
   createDb,
   createSession,
-  enqueueSessionTurn,
   getSession,
   getSessionHistoryItems,
   listSessionEvents,
   listSessionTurns,
+  mutateSessionControlInTransaction,
+  withWorkspaceRls,
 } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -27,9 +28,14 @@ import {
 } from "@opengeni/testing";
 import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
-import { createActivities } from "../../apps/worker/src/activities";
-import { WORKER_SHUTDOWN_RESUME_TEXT } from "../../apps/worker/src/activities/agent-turn";
+import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import {
+  CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+  TURN_WORKER_MAX_CONCURRENT_TURNS,
+} from "../../apps/worker/src/concurrency";
+import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 
 // Proves the campaign's robustness contract: a worker rollout restart
 // (graceful SIGTERM shutdown) mid-turn must not produce a failed session.
@@ -49,7 +55,9 @@ describe("worker restart resilience", () => {
     dbClient = createDb(services.databaseUrl);
     bus = await createNatsEventBus(services.natsUrl);
     connection = await Connection.connect({ address: services.temporalHost });
-    nativeConnection = await NativeConnection.connect({ address: services.temporalHost });
+    nativeConnection = await NativeConnection.connect({
+      address: services.temporalHost,
+    });
   }, 300_000);
 
   afterAll(async () => {
@@ -60,7 +68,7 @@ describe("worker restart resilience", () => {
     await services?.down();
   }, 60_000);
 
-  test("graceful worker shutdown mid-turn requeues the turn and a healthy worker resumes it", async () => {
+  test("graceful worker shutdown mid-turn recovers the same turn on a healthy worker", async () => {
     const grant = await testGrant();
     const mcp = startTestMcpServer();
     const taskQueue = `worker-restart-${crypto.randomUUID()}`;
@@ -93,7 +101,6 @@ describe("worker restart resilience", () => {
       natsUrl: services.natsUrl,
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
-      sessionHistorySource: "items",
       mcpServers: [
         {
           id: "docs",
@@ -104,7 +111,7 @@ describe("worker restart resilience", () => {
         },
       ],
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -121,23 +128,16 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "do the work" } },
-    ]);
-    await enqueueSessionTurn(dbClient.db, {
+    const accepted = await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: workflowId,
-      source: "user",
-      prompt: "do the work",
+      subjectId: grant.subjectId,
+      text: "do the work",
       resources: [],
       tools: [{ kind: "mcp", id: "docs" }],
-      model: "scripted-model",
-      reasoningEffort: settings.openaiReasoningEffort,
-      sandboxBackend: "none",
-      metadata: {},
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
     });
 
     const firstWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
@@ -146,7 +146,13 @@ describe("worker restart resilience", () => {
     const handle = await client.workflow.start("sessionWorkflow", {
       taskQueue,
       workflowId,
-      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+        },
+      ],
     });
 
     // Wait until the side effect ran, its progress was checkpointed to items,
@@ -160,12 +166,13 @@ describe("worker restart resilience", () => {
     firstWorker.shutdown();
     await firstRun;
 
-    // Between workers: the session must be queued (not failed) with the same
-    // turn back on the queue and the preemption recorded on the timeline.
-    const preempted = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(preempted?.status).toBe("queued");
+    // Between workers the same logical turn is recoverable, not converted into
+    // queue work and not failed.
+    const recovering = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(recovering?.status).toBe("recovering");
     const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["queued"]);
+    expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["recovering"]);
+    expect(turnsAfterShutdown[0]?.id).toBe(accepted.turn.id);
     const eventsAfterShutdown = await listSessionEvents(
       dbClient.db,
       grant.workspaceId,
@@ -173,7 +180,9 @@ describe("worker restart resilience", () => {
       0,
       200,
     );
-    expect(eventsAfterShutdown.some((event) => event.type === "turn.preempted")).toBe(true);
+    expect(eventsAfterShutdown.some((event) => event.type === "turn.recovery.requested")).toBe(
+      true,
+    );
     expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
 
     const secondWorker = await restartTestWorker(nativeConnection, taskQueue, activities);
@@ -192,17 +201,16 @@ describe("worker restart resilience", () => {
     expect(turns.map((turn) => turn.status)).toEqual(["completed"]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
-    expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
     expect(latestStatus(events)).toBe("idle");
-    // The resumed attempt entered through the resume notice with the first
-    // attempt's conversation truth threaded in...
+    // The new attempt receives the same canonical conversation truth, without
+    // a fabricated recovery message.
     expect(model.calls).toBe(3);
     const resumeRequest = JSON.stringify(
       (model.requests.at(-1) as { input?: unknown })?.input ?? "",
     );
     expect(resumeRequest).toContain("do the work");
     expect(resumeRequest).toContain("call-restart-1");
-    expect(resumeRequest).toContain(WORKER_SHUTDOWN_RESUME_TEXT.split("\n")[0]);
     // ...and did not blindly replay the already-executed side effect.
     expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "current state" } }]);
     expect(
@@ -214,22 +222,25 @@ describe("worker restart resilience", () => {
     ).toBe(true);
   }, 180_000);
 
-  test("graceful worker shutdown before the turn starts requeues it untouched and a healthy worker runs it", async () => {
+  test("graceful worker shutdown before model progress recovers the same turn untouched", async () => {
     const grant = await testGrant();
     const taskQueue = `worker-restart-early-${crypto.randomUUID()}`;
     const model = new ScriptedModel([
-      // The only model call: the first attempt is preempted before it ever
+      // The only model call: the first attempt is interrupted before it ever
       // reaches the model, so the rerun replays the original trigger cleanly.
-      { id: "early-call-1", outputText: "did the work", chunks: ["did ", "the ", "work"] },
+      {
+        id: "early-call-1",
+        outputText: "did the work",
+        chunks: ["did ", "the ", "work"],
+      },
     ]);
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
       natsUrl: services.natsUrl,
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
-      sessionHistorySource: "items",
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -240,10 +251,10 @@ describe("worker restart resilience", () => {
       ...activities,
       // The first dispatch holds the agent-turn activity in its setup window
       // (before turn.started is published) until the worker's graceful
-      // shutdown has delivered the WORKER_SHUTDOWN cancellation —
-      // deterministically landing the shutdown before the turn visibly
-      // started. The activity must preempt and requeue, not fail the session.
-      runAgentSegment: async (input: Parameters<typeof activities.runAgentSegment>[0]) => {
+      // shutdown has delivered cancellation — deterministically landing the
+      // shutdown before the turn visibly started. The same turn must become
+      // recoverable, not fail or enter the prompt queue again.
+      runAgentTurn: async (input: Parameters<typeof activities.runAgentTurn>[0]) => {
         turnDispatches += 1;
         if (turnDispatches === 1) {
           await new Promise<void>((resolve) => {
@@ -255,7 +266,7 @@ describe("worker restart resilience", () => {
             signal.addEventListener("abort", () => resolve(), { once: true });
           });
         }
-        return await activities.runAgentSegment(input);
+        return await activities.runAgentTurn(input);
       },
     };
     const session = await createSession(dbClient.db, {
@@ -269,23 +280,16 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "do the early work" } },
-    ]);
-    await enqueueSessionTurn(dbClient.db, {
+    const accepted = await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: workflowId,
-      source: "user",
-      prompt: "do the early work",
+      subjectId: grant.subjectId,
+      text: "do the early work",
       resources: [],
       tools: [],
-      model: "scripted-model",
-      reasoningEffort: settings.openaiReasoningEffort,
-      sandboxBackend: "none",
-      metadata: {},
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
     });
 
     const firstWorker = await restartTestWorker(nativeConnection, taskQueue, gatedActivities);
@@ -294,22 +298,31 @@ describe("worker restart resilience", () => {
     const handle = await client.workflow.start("sessionWorkflow", {
       taskQueue,
       workflowId,
-      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+        },
+      ],
     });
 
     // Pull the plug while the turn activity is still in setup.
-    await waitFor(() => turnDispatches === 1);
-    firstWorker.shutdown();
-    await firstRun;
+    try {
+      await waitFor(() => turnDispatches === 1);
+    } finally {
+      firstWorker.shutdown();
+      await firstRun;
+    }
 
-    // Between workers: the turn went back on the queue with the preemption on
-    // the timeline; nothing else happened (no model call, no started/failed
-    // turn events) so the rerun replays the original trigger.
-    const preempted = await getSession(dbClient.db, grant.workspaceId, session.id);
-    expect(preempted?.status).toBe("queued");
+    // Between workers the turn is recoverable; nothing else happened, so the
+    // next attempt reuses its original trigger and canonical prompt.
+    const recovering = await getSession(dbClient.db, grant.workspaceId, session.id);
+    expect(recovering?.status).toBe("recovering");
     const turnsAfterShutdown = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
-    expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["queued"]);
-    expect(turnsAfterShutdown[0]?.triggerEventId).toBe(trigger!.id);
+    expect(turnsAfterShutdown.map((turn) => turn.status)).toEqual(["recovering"]);
+    expect(turnsAfterShutdown[0]?.id).toBe(accepted.turn.id);
+    expect(turnsAfterShutdown[0]?.triggerEventId).toBe(accepted.accepted.id);
     const eventsAfterShutdown = await listSessionEvents(
       dbClient.db,
       grant.workspaceId,
@@ -317,10 +330,8 @@ describe("worker restart resilience", () => {
       0,
       200,
     );
-    const earlyPreemption = eventsAfterShutdown.find((event) => event.type === "turn.preempted");
-    expect(earlyPreemption).toBeDefined();
-    expect((earlyPreemption?.payload as { resumeWithNotice?: boolean }).resumeWithNotice).toBe(
-      false,
+    expect(eventsAfterShutdown.some((event) => event.type === "turn.recovery.requested")).toBe(
+      true,
     );
     expect(eventsAfterShutdown.some((event) => event.type === "turn.started")).toBe(false);
     expect(eventsAfterShutdown.some((event) => event.type === "turn.failed")).toBe(false);
@@ -340,17 +351,16 @@ describe("worker restart resilience", () => {
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
     expect(turns.map((turn) => turn.status)).toEqual(["completed"]);
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 500);
-    expect(events.filter((event) => event.type === "turn.preempted")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
     expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(latestStatus(events)).toBe("idle");
-    // The rerun entered through the original trigger, not a resume notice.
+    // The next attempt entered through the original trigger without a synthetic message.
     expect(model.calls).toBe(1);
     const rerunRequest = JSON.stringify(
       (model.requests.at(-1) as { input?: unknown })?.input ?? "",
     );
     expect(rerunRequest).toContain("do the early work");
-    expect(rerunRequest).not.toContain(WORKER_SHUTDOWN_RESUME_TEXT.split("\n")[0]);
     expect(
       events.some(
         (event) =>
@@ -360,12 +370,173 @@ describe("worker restart resilience", () => {
     ).toBe(true);
   }, 180_000);
 
+  test("a late activity settlement after Pause is stale and cannot override recovery truth", async () => {
+    const grant = await testGrant();
+    const taskQueue = `pause-zombie-race-${crypto.randomUUID()}`;
+    const settings = testSettings({
+      databaseUrl: services.databaseUrl,
+      natsUrl: services.natsUrl,
+      temporalHost: services.temporalHost,
+      temporalTaskQueue: taskQueue,
+    });
+    const model = new ScriptedModel([
+      {
+        id: "pause-zombie-call",
+        chunks: Array.from({ length: 10_000 }, () => "tick "),
+        delayMs: 50,
+        outputText: "must not finish",
+      },
+    ]);
+    const baseActivities = createActivityTestHarness({
+      settings,
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({ model }),
+    });
+    let dispatchedAttemptId: string | null = null;
+    let interruptSettled!: () => void;
+    const interruptSettlement = new Promise<void>((resolve) => {
+      interruptSettled = resolve;
+    });
+    let lateSettlement: Awaited<ReturnType<typeof applySessionTurnSettlement>> | null = null;
+    const activities = {
+      ...baseActivities,
+      settleSessionInterruptions: async (
+        input: Parameters<typeof baseActivities.settleSessionInterruptions>[0],
+      ) => {
+        const result = await baseActivities.settleSessionInterruptions(input);
+        interruptSettled();
+        return result;
+      },
+      runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
+        dispatchedAttemptId = input.attemptId;
+        let result: Awaited<ReturnType<typeof baseActivities.runAgentTurn>> | null = null;
+        let activityError: unknown;
+        try {
+          result = await baseActivities.runAgentTurn(input);
+          if (result.status === "unclaimed") return result;
+        } catch (error) {
+          activityError = error;
+        }
+        // Deterministically model the production zombie boundary: the real
+        // activity has observed cancellation, then this wrapper publishes a
+        // terminal settlement from that fenced attempt after Pause committed.
+        await interruptSettlement;
+        const [turn] = await listSessionTurns(dbClient.db, input.workspaceId, input.sessionId);
+        if (!turn) throw new Error(`zombie fixture turn disappeared for ${input.sessionId}`);
+        lateSettlement = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
+          attemptId: input.attemptId,
+          turnStatus: "completed",
+          sessionStatus: "idle",
+          activeTurnId: null,
+          events: [
+            {
+              type: "turn.completed",
+              payload: { output: "late zombie output" },
+            },
+          ],
+        });
+        if (activityError) throw activityError;
+        return result!;
+      },
+    };
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "hold until steer",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const workflowId = `session-${session.id}`;
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "hold until pause",
+      resources: [],
+      tools: [],
+      delivery: "send",
+      reasoningEffortFallback: "xhigh",
+    });
+
+    const worker = await restartTestWorker(nativeConnection, taskQueue, activities);
+    const workerRun = worker.run();
+    const client = new Client({ connection });
+    const handle = await client.workflow.start("sessionWorkflow", {
+      taskQueue,
+      workflowId,
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+        },
+      ],
+    });
+    try {
+      await waitFor(async () => {
+        const [turn] = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+        return (
+          dispatchedAttemptId !== null &&
+          turn?.status === "running" &&
+          turn.activeAttemptId === dispatchedAttemptId
+        );
+      });
+      const pause = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            actor: { type: "human", subjectId: grant.subjectId },
+            action: "pause",
+            reason: "operator pause",
+            operationKey: `pause-zombie-${crypto.randomUUID()}`,
+          }),
+        ),
+      );
+      expect(pause.interruptionCount).toBe(1);
+      await handle.signal("sessionControl");
+      await handle.result();
+    } finally {
+      worker.shutdown();
+      await workerRun;
+    }
+
+    expect(lateSettlement).toMatchObject({
+      action: "stale",
+      turnStatus: "recovering",
+      events: [],
+    });
+    const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id);
+    expect(turns.map((turn) => turn.status)).toEqual(["recovering"]);
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
+    expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
+    expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(0);
+    expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
+    expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
+      status: "recovering",
+      effectiveControl: { state: "paused" },
+    });
+  }, 180_000);
+
   test("a failed session accepts a new user message and revives from stored items", async () => {
     const grant = await testGrant();
     const taskQueue = `failed-revival-${crypto.randomUUID()}`;
     const model = new ScriptedModel([
       // Turn 1 completes normally so the session has stored conversation truth.
-      { id: "revive-call-1", outputText: "first answer", chunks: ["first ", "answer"] },
+      {
+        id: "revive-call-1",
+        outputText: "first answer",
+        chunks: ["first ", "answer"],
+      },
       // Turn 2 blows up with a non-retryable agent error: the session fails.
       { id: "revive-call-2", error: new Error("agent exploded mid-turn") },
       // Turn 3 is the revival turn, running from stored items.
@@ -380,9 +551,8 @@ describe("worker restart resilience", () => {
       natsUrl: services.natsUrl,
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
-      sessionHistorySource: "items",
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -399,23 +569,16 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    const [trigger] = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "answer me" } },
-    ]);
-    await enqueueSessionTurn(dbClient.db, {
+    await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
-      temporalWorkflowId: workflowId,
-      source: "user",
-      prompt: "answer me",
+      subjectId: grant.subjectId,
+      text: "answer me",
       resources: [],
       tools: [],
-      model: "scripted-model",
-      reasoningEffort: settings.openaiReasoningEffort,
-      sandboxBackend: "none",
-      metadata: {},
+      delivery: "send",
+      reasoningEffortFallback: settings.openaiReasoningEffort,
     });
     const client = new Client({ connection });
     // Same signalWithStart wiring as the production API client: revival of a
@@ -437,8 +600,9 @@ describe("worker restart resilience", () => {
           signal: "queueChanged",
         });
       },
+      requestSessionWorkflowWakeDispatch: async () => undefined,
       signalApprovalDecision: async () => undefined,
-      signalInterrupt: async () => undefined,
+      signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
       deleteScheduledTaskSchedule: async () => undefined,
       triggerScheduledTask: async () => undefined,
@@ -464,7 +628,11 @@ describe("worker restart resilience", () => {
         taskQueue,
         workflowId,
         args: [
-          { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
         ],
       });
       await waitFor(
@@ -483,7 +651,9 @@ describe("worker restart resilience", () => {
 
       // Revival: the failed session accepts the message (no 409), goes back
       // to queued, and a fresh workflow run executes the turn from stored
-      // conversation truth.
+      // conversation truth. The new run deliberately reuses the stable workflow
+      // ID and Temporal restarts its activity-ID sequence; only the first-class
+      // workflow run ID keeps this dispatch distinct from the original run.
       await sendUserMessage("are you still there?");
       await waitFor(
         async () =>
@@ -546,13 +716,33 @@ describe("worker restart resilience", () => {
 async function restartTestWorker(
   nativeConnection: NativeConnection,
   taskQueue: string,
-  activities: ReturnType<typeof createActivities>,
-): Promise<Worker> {
-  return await Worker.create({
-    connection: nativeConnection,
-    namespace: "default",
-    taskQueue,
-    workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
-    activities,
-  });
+  activities: ReturnType<typeof createActivityTestHarness>,
+): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
+  const { runAgentTurn, ...controlActivities } = activities;
+  const [control, turns] = await Promise.all([
+    Worker.create({
+      connection: nativeConnection,
+      namespace: "default",
+      taskQueue,
+      workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+      activities: controlActivities,
+      maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+    }),
+    Worker.create({
+      connection: nativeConnection,
+      namespace: "default",
+      taskQueue: turnTaskQueue(taskQueue),
+      activities: { runAgentTurn },
+      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+    }),
+  ]);
+  return {
+    run: async () => {
+      await Promise.all([control.run(), turns.run()]);
+    },
+    shutdown: () => {
+      control.shutdown();
+      turns.shutdown();
+    },
+  };
 }

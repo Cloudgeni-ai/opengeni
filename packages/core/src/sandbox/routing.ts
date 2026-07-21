@@ -62,7 +62,7 @@ export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConf
  *  the CONSUMER uses (`relayConfigFromSettings`) so producer + consumer always agree
  *  on `/stream` — even when the configured URL omits it. An unconfigured relay maps to
  *  `""` (graceful degrade: the agent reports no-relay rather than dialing a synthetic
- *  host). Fixes preview AND managed prod with no agent rebuild (dossier §V5/§V6). */
+ * host). Fixes preview AND managed prod with no agent rebuild. */
 export function relayDialBaseFromSettings(settings: Settings): string {
   if (!settings.selfhostedRelayUrl?.trim()) return "";
   const { host, port, tls, path } = relayConfigFromSettings(settings);

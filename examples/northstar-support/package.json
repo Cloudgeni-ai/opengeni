@@ -1,0 +1,31 @@
+{
+  "name": "@opengeni/example-northstar-support",
+  "version": "0.0.3",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 3101",
+    "server": "bun --env-file=.env.local src/server.ts",
+    "build": "vite build",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@opengeni/react": "workspace:*",
+    "@opengeni/sdk": "workspace:*",
+    "@tailwindcss/vite": "^4.2.4",
+    "@vitejs/plugin-react": "^6.0.1",
+    "lucide-react": "^1.8.0",
+    "motion": "^12.0.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "tailwindcss": "^4.2.4",
+    "vite": "^8.0.9",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^6.0.3"
+  }
+}

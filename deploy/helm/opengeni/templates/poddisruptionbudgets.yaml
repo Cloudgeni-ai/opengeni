@@ -13,21 +13,37 @@ spec:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
       app.kubernetes.io/component: api
 {{- end }}
-{{- if and .Values.worker.enabled ((.Values.worker).podDisruptionBudget).enabled }}
+{{- if and .Values.worker.enabled .Values.worker.control.podDisruptionBudget.enabled }}
 ---
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "opengeni.fullname" . }}-worker
+  name: {{ include "opengeni.fullname" . }}-worker-control
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
+    app.kubernetes.io/component: worker-control
 spec:
-  minAvailable: {{ ((.Values.worker).podDisruptionBudget).minAvailable }}
+  minAvailable: {{ .Values.worker.control.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: worker
+      app.kubernetes.io/component: worker-control
+{{- end }}
+{{- if and .Values.worker.enabled .Values.worker.turns.podDisruptionBudget.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "opengeni.fullname" . }}-worker-turns
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-turns
+spec:
+  minAvailable: {{ .Values.worker.turns.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker-turns
 {{- end }}
 {{- if and .Values.web.enabled .Values.web.podDisruptionBudget.enabled }}
 ---

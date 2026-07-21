@@ -5,7 +5,6 @@
       "id": "00000000-0000-4000-8000-000000000901",
       "occurredAt": "2026-01-02T10:00:01.000Z",
       "text": "Build the project on the connected machine.",
-      "pending": false,
       "resources": [],
       "tools": []
     },
@@ -34,7 +33,6 @@
         "id": "00000000-0000-4000-8000-000000000901",
         "occurredAt": "2026-01-02T10:00:01.000Z",
         "text": "Build the project on the connected machine.",
-        "pending": false,
         "resources": [],
         "tools": []
       }

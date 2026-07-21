@@ -4,7 +4,11 @@
 // whatever slow test is running — cross-file isolation contains that flake.
 
 import { describe, expect, test } from "bun:test";
-import { azureCliLoginCommand, repositoryCloneCommand } from "../src/index";
+import {
+  azureCliLoginCommand,
+  gitProviderTokenRefreshCommand,
+  repositoryCloneCommand,
+} from "../src/index";
 
 describe("lifecycle scripts — real sh execution semantics", () => {
   const { execFileSync } = require("node:child_process") as typeof import("node:child_process");
@@ -140,6 +144,43 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     }
   });
 
+  test("refresh command atomically replaces every provider token behind stable paths", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-refresh-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const first = runScript(
+        gitProviderTokenRefreshCommand({
+          github: "gh-old",
+          gitlab: "gl-old",
+          azure_devops: "az-old",
+        }),
+        { HOME: home },
+      );
+      expect(first.status).toBe(0);
+
+      const second = runScript(
+        gitProviderTokenRefreshCommand({
+          github: "gh-new",
+          gitlab: "gl-new",
+          azure_devops: "az-new",
+        }),
+        { HOME: home },
+      );
+      expect(second.status).toBe(0);
+
+      const credentialDir = join(home, ".opengeni", "git-credentials");
+      expect(readFileSync(join(home, ".opengeni", "git-token"), "utf8")).toBe("gh-new");
+      expect(readFileSync(join(credentialDir, "github-token"), "utf8")).toBe("gh-new");
+      expect(readFileSync(join(credentialDir, "gitlab-token"), "utf8")).toBe("gl-new");
+      expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe("az-new");
+      expect(readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp."))).toEqual([]);
+      expect(readdirSync(credentialDir).filter((f) => f.includes(".tmp."))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("askpass maps custom GitLab hosts from repository resources before fallback heuristics", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-custom-git-host-"));
     try {
@@ -174,6 +215,30 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           encoding: "utf8",
         }),
       ).toBe("glpat-custom-domain");
+
+      // Renewal must update only token files. Rebuilding askpass without the
+      // original repository list would erase this custom-host mapping.
+      expect(
+        runScript(
+          gitProviderTokenRefreshCommand({
+            github: "github-refreshed",
+            gitlab: "glpat-custom-refreshed",
+          }),
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+      expect(
+        execFileSync("sh", [askpass, "Username for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
+      ).toBe("oauth2\n");
+      expect(
+        execFileSync("sh", [askpass, "Password for 'https://git.company.com':"], {
+          env: askEnv,
+          encoding: "utf8",
+        }),
+      ).toBe("glpat-custom-refreshed");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

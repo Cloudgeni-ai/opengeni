@@ -12,6 +12,9 @@ import {
   CODEX_APPS_STARTUP_TIMEOUT_MS,
   CODEX_FALLBACK_MODEL_SLUGS,
   CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+  CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+  CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
   CODEX_MODEL_ID_PREFIX,
   CODEX_PROVIDER_BASE_URL,
   CODEX_PROVIDER_ID,
@@ -167,10 +170,12 @@ export function withCodexProvider(settings: Settings): Settings {
       id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
       label: slug,
       reasoningEffort: true,
-      // The subscription window is far smaller than the raw API's; declare it so
-      // proactive compaction fires before the ~340k reject cliff instead of
-      // never firing against the 1.05M global default.
+      // These three values are the live Codex CLI catalog policy, kept distinct
+      // so proactive compaction and the effective input guard match Codex core.
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+      effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+      autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      toolOutputTruncationTokens: CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
     })),
   };
   return { ...settings, modelProvidersJson: JSON.stringify([...providers, codexProvider]) };

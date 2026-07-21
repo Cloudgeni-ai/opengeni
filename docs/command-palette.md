@@ -30,9 +30,8 @@ Code wins over this doc. The canonical sources are:
   and the `session.context.cleared` event type.
 - `apps/api/src/routes/sessions.ts` — the `POST .../context/clear` and
   `POST .../context/compact` endpoints.
-- `packages/contracts/src/index.ts` — `ClearSessionContextRequest`,
-  `CompactSessionContextRequest`, and the cleared-run-state sentinel
-  (`CLEARED_RUN_STATE_BLOB`, `isClearedRunStateBlob`).
+- `packages/contracts/src/index.ts` — `ClearSessionContextRequest` and
+  `CompactSessionContextRequest`.
 - `packages/db/src/index.ts` — `clearSessionContext` (the audited DB clear),
   `requestSessionCompaction` / `consumeSessionCompactionRequest`.
 - `packages/db/drizzle/0013_session_compact_requested.sql` — the
@@ -154,10 +153,9 @@ The palette is **purely additive**: with no `commandContext` prop the
 
 ## `/clear` semantics & safety
 
-`/clear` is the one destructive command. Before #66, clearing a session's
-context was only doable by hand-deleting `session_history_items` rows — and even
-that resurrected the old context, because the model read path falls back to the
-latest serialized `RunState` blob. The shipped `/clear` fixes both.
+`/clear` is the one destructive command. It replaces the active model-facing
+history with an explicit neutral boundary while preserving the prior rows for
+audit.
 
 **Confirm-gated, twice.** The palette shows a `ConfirmBar`; the SDK then sends
 `{ confirm: true }` on the wire, and the API rejects any POST whose body isn't
@@ -167,13 +165,11 @@ context (`registry.ts:188-202`; `client.ts` `clearSessionContext`;
 `ClearSessionContextRequest = z.object({ confirm: z.literal(true) })`,
 `contracts/src/index.ts:616-618`).
 
-**Permission-gated & mid-turn-refused.** Requires `sessions:control`. The API
-refuses (409) while the session is `queued` / `running` / `requires_action` —
-clearing mid-turn would strand the in-flight `RunState` (and, in
-`requires_action`, an awaiting approval whose resume needs that blob)
-(`sessions.ts:159-165`). The client surfaces the 409 as
-"Can't clear context mid-turn — stop the current turn first."
-(`registry.ts:231-236`).
+**Permission-gated & mid-turn-refused.** Requires `sessions:control`. The
+database locks workspace then session and rejects the clear while an active turn
+or unsettled Pause exists, so a racing inference cannot start between an API
+precheck and the history rewrite. The client instructs the operator to Pause and
+wait for settlement before retrying.
 
 **Audit-preserving — nothing is deleted.** `clearSessionContext`
 (`packages/db/src/index.ts:2305-2366`) runs one transaction that:
@@ -181,11 +177,8 @@ clearing mid-turn would strand the in-flight `RunState` (and, in
 1. **Supersedes** every active history row (`active: true → false`) — the full
    transcript survives as an audit trail (same pattern as compaction).
 2. Inserts **one neutral boundary marker** (`[context cleared]`, a sanitizer-
-   clean user message) at `max(position)+1`, so the active read length is `1`
-   (not `0`).
-3. Inserts a **fresh cleared run-state** row (`CLEARED_RUN_STATE` sentinel,
-   `pendingApprovals: []`).
-4. Resets `last_input_tokens` to 0 so the next turn's compaction trigger starts
+   clean user message) at `max(position)+1`.
+3. Resets `last_input_tokens` to 0 so the next turn's compaction trigger starts
    fresh.
 
 It is idempotent, and the API emits a `session.context.cleared` event carrying
@@ -193,58 +186,26 @@ It is idempotent, and the API emits a `session.context.cleared` event carrying
 `session.context.cleared` added to `SESSION_EVENT_TYPES`,
 `packages/sdk/src/types.ts`).
 
-**The resurrection fix (both read paths).** The model can read history from two
-sources, and a naive clear leaves a stale `RunState` blob that resurrects the
-pre-clear conversation. The fix defeats both:
-
-- **items mode** — the neutral boundary marker keeps the active items read
-  non-empty, so `run-input.ts` stays on the items route and never falls through
-  to the `getLatestRunState` blob (`packages/db/src/index.ts:2243-2252`).
-- **run_state mode** — the stored sentinel blob `CLEARED_RUN_STATE_BLOB` is not
-  a real Agents-SDK run state (`RunState.fromString` would throw). Every read
-  path that deserializes a blob first checks `isClearedRunStateBlob` and treats a
-  match as "no prior state" — a fresh empty start, which is exactly what a clear
-  means (`packages/contracts/src/index.ts:621-655`;
-  `packages/runtime/src/index.ts:814-847`).
-
-This run_state-mode hardening is the round-1 review finding that was caught and
-fixed before merge (the original clear only held in items mode).
+Ordinary inference reads only `session_history_items`; it cannot fall through to
+an SDK `RunState` blob and resurrect pre-clear conversation. `agent_run_states`
+is reserved for a human approval paused mid-turn, and context clear is forbidden
+while that state can be live.
 
 ---
 
 ## `/compact` semantics
 
-`/compact` is a **trigger only** — it never duplicates the compaction engine
-(which is the separate provider-aware-compaction work, landed as #62/#65). It
-maps cleanly onto whichever compaction path the session runs
-(`apps/api/src/routes/sessions.ts:178-202`):
+`/compact` requests the single durable portable compaction path. It is a
+session control action, never a user prompt and never a visible queue row.
 
-- **client mode (Azure)** — sets the durable `sessions.compact_requested` flag
-  via `requestSessionCompaction` and returns
-  `{ status: "queued", message: "Compaction will run before the next turn." }`.
-  The worker, pre-turn, atomically consumes the flag
-  (`consumeSessionCompactionRequest` — only the turn that observes `true` runs
-  it, so concurrent turns can't double-compact) and calls
-  `maybeCompactContext(..., { force: true })`, bypassing the token-budget
-  trigger. The resulting `session.context.compacted` event carries
-  `trigger: "operator"` (`apps/worker/src/activities/agent-turn.ts:374-393`;
-  `apps/worker/src/activities/context-compaction.ts:48-65`;
-  `packages/db/src/index.ts:2383-2410`).
-- **server mode (OpenAI platform)** — compaction is automatic, so this is an
-  honest `{ status: "noop", … }`.
-- **off** — `{ status: "noop", "Context compaction is disabled…" }`.
+The API sets the idempotent `sessions.compact_requested` flag and returns
+`{ status: "pending", message }`. A model-facing turn observes the flag without
+consuming it, forces the normal Codex-local compaction transition, and clears the
+flag only in the same attempt-fenced transaction that installs replacement
+history. A failed or superseded summarizer therefore cannot lose the request.
 
-`CompactSessionContextResult` (`status: "queued" | "noop"; message`) is surfaced
-verbatim in the composer notice line. The durable column (not a transient
-signal) means a `/compact` request survives a worker restart and converges
-before the next turn (`packages/db/drizzle/0013_session_compact_requested.sql`).
-
-**Integration seam.** The API route documents the convergence point: when the
-compaction work exposes a synchronous "compact now" entry callable from the API
-process, this route should call it directly and return its result; until then
-the flag + `maybeCompactContext(force)` is the minimal honored interface
-(`apps/api/src/routes/sessions.ts:188-192`). The two efforts converge rather
-than collide — `/compact` did not fork the engine.
+The resulting `session.context.compacted` event carries
+`trigger: "operator"`, and the composer surfaces the API message verbatim.
 
 ---
 

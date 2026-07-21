@@ -1,5 +1,6 @@
 import {
   ActivityFailure,
+  ApplicationFailure,
   CancellationScope,
   condition,
   continueAsNew,
@@ -8,10 +9,16 @@ import {
   patched,
   setHandler,
   TimeoutFailure,
+  uuid4,
   workflowInfo,
 } from "@temporalio/workflow";
 import type * as activities from "../activities";
-import { activity, workflowFailureMessage } from "./activities";
+import {
+  activity,
+  goalActivity,
+  turnActivityForTaskQueue,
+  workflowFailureMessage,
+} from "./activities";
 
 /**
  * Deterministic backstop for continueAsNew. A session workflow is long-lived
@@ -46,10 +53,14 @@ const ROTATION_IDLE_FLOOR_MS = 60_000; // 60s
  * Pure + exported so the boundedness contract is unit-testable without a workflow env.
  */
 export function continuationHoldMs(
-  result: { status: string; continueDelayMs?: number; idleUntilReset?: boolean },
+  result: {
+    status: string;
+    continueDelayMs?: number;
+    idleUntilReset?: boolean;
+  },
   floorMs: number,
 ): number {
-  if (result.status !== "idle") {
+  if (result.status !== "idle" && result.status !== "recovering") {
     return 0;
   }
   const delay = result.continueDelayMs ?? 0;
@@ -60,10 +71,22 @@ export function continuationHoldMs(
 }
 
 /**
+ * A deferred activity result is terminal for this workflow run unless a new
+ * non-control wake committed while the activity was in flight. Keeping this
+ * predicate pure makes the compaction-convergence fence directly testable:
+ * repeated identical failures cannot synthesize more work from an unchanged
+ * durable state. Pause/Steer remain authoritative through the independent
+ * signal-version and interruption paths in `sessionWorkflow`.
+ */
+export function deferredResultMayContinue(entryWakeups: number, currentWakeups: number): boolean {
+  return currentWakeups !== entryWakeups;
+}
+
+/**
  * True when an agent-turn activity failure means "the worker hosting the
  * turn died or vanished" rather than "the turn itself failed": the server
  * closed the activity with a HEARTBEAT timeout (the worker was killed before
- * the graceful-preempt checkpoint could run — SIGKILL, OOM, node loss, or a
+ * the graceful recovery checkpoint could run — SIGKILL, OOM, node loss, or a
  * rollout whose grace period expired) or a SCHEDULE_TO_START timeout (no
  * worker ever picked the task up). Detection uses the SDK's typed failure
  * classes, not message-string matching: the failure converter rehydrates
@@ -73,22 +96,50 @@ export function continuationHoldMs(
  * SCHEDULE_TO_CLOSE timeouts are deliberately excluded: with the 30-day
  * startToClose they mean the turn truly overran, which stays a real failure.
  */
-function isWorkerDeathFailure(error: unknown): boolean {
+function workerDeathFailure(
+  error: unknown,
+): { timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" } | null {
   if (!(error instanceof ActivityFailure)) {
-    return false;
+    return null;
   }
   const cause = error.cause;
+  if (
+    !(cause instanceof TimeoutFailure) ||
+    (cause.timeoutType !== "HEARTBEAT" && cause.timeoutType !== "SCHEDULE_TO_START")
+  ) {
+    return null;
+  }
+  return { timeoutType: cause.timeoutType };
+}
+
+/**
+ * Classify only the exact turn-fence cancellation protocol used to arbitrate a
+ * database control commit that reaches the activity just before its Temporal
+ * signal reaches this workflow. This shape is never physical-quiescence proof:
+ * only the activity's durable post-tool-fence receipt can open replacement
+ * admission. @temporalio/worker 1.20 serializes the pre-request
+ * CancelledFailure as an ApplicationFailure with the stable `CancelledFailure`
+ * type, so accept that exact wire shape in addition to normal cancellation.
+ */
+export function isTurnActivityFenceCancellation(error: unknown): boolean {
+  if (isCancellation(error)) return true;
+  if (!(error instanceof ActivityFailure)) return false;
+  if (error.cause !== undefined && isCancellation(error.cause)) return true;
   return (
-    cause instanceof TimeoutFailure &&
-    (cause.timeoutType === "HEARTBEAT" || cause.timeoutType === "SCHEDULE_TO_START")
+    error.activityType === "runAgentTurn" &&
+    error.cause instanceof ApplicationFailure &&
+    error.cause.type === "CancelledFailure" &&
+    error.cause.message === "TURN_ATTEMPT_FENCED"
   );
 }
 
 export const userMessage = defineSignal<[string]>("userMessage");
 export const queueChanged = defineSignal("queueChanged");
 export const approvalDecision = defineSignal<[string]>("approvalDecision");
-export const interrupt = defineSignal<[string]>("interrupt");
+export const sessionControl = defineSignal("sessionControl");
 export const codexCapacityChanged = defineSignal<[number]>("codexCapacityChanged");
+export const sessionAttemptQuiesced =
+  defineSignal<[activities.SessionAttemptQuiescenceProof]>("sessionAttemptQuiesced");
 
 export type SessionWorkflowInput = {
   accountId: string;
@@ -106,10 +157,19 @@ export type SessionWorkflowInput = {
 };
 
 export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void> {
-  const approvalQueue: string[] = [];
-  let interruptedEventId: string | null = null;
+  // Existing histories recorded the v1 WAIT_CANCELLATION_COMPLETED command
+  // order and workflow-side idempotent fallback. Keep that exact replay path;
+  // every new run records v2 and uses the activity-owned receipt contract.
+  const receiptGatedCancellation = patched("session-attempt-quiescence-v2");
+  const turnActivity = turnActivityForTaskQueue(workflowInfo().taskQueue, receiptGatedCancellation);
+  let approvalWakeups = 0;
+  let interruptionWakeups = 0;
   let wakeups = 0;
   let capacityWakeups = 0;
+  let signalVersion = 0;
+  let nonControlSignalVersion = 0;
+  const pendingQuiescenceProofs = new Map<string, activities.SessionAttemptQuiescenceProof>();
+  const persistedQuiescenceProofs = new Set<string>();
   // Turns dispatched on THIS run (reset to 0 by continueAsNew). The backstop
   // for the history-overflow guard below; bounded growth is what makes a
   // weeks-long session survivable.
@@ -117,20 +177,61 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   let capacityChecksThisRun = 0;
 
   setHandler(userMessage, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     wakeups += 1;
   });
   setHandler(queueChanged, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     wakeups += 1;
   });
-  setHandler(approvalDecision, (eventId) => {
-    approvalQueue.push(eventId);
+  setHandler(approvalDecision, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
+    approvalWakeups += 1;
   });
-  setHandler(interrupt, (eventId) => {
-    interruptedEventId = eventId;
+  setHandler(sessionControl, () => {
+    signalVersion += 1;
+    interruptionWakeups += 1;
   });
   setHandler(codexCapacityChanged, () => {
+    signalVersion += 1;
+    nonControlSignalVersion += 1;
     capacityWakeups += 1;
   });
+  setHandler(sessionAttemptQuiesced, (proof) => {
+    // Temporal signals are untrusted transport payloads. Accept only the exact
+    // workflow/session scope; the DB control activity additionally validates
+    // the persisted attempt's account, run id, and activity id under lock.
+    if (
+      !isSessionAttemptQuiescenceProof(proof) ||
+      proof.accountId !== input.accountId ||
+      proof.workspaceId !== input.workspaceId ||
+      proof.sessionId !== input.sessionId ||
+      proof.workflowId !== workflowInfo().workflowId
+    ) {
+      return;
+    }
+    const key = sessionAttemptQuiescenceProofKey(proof);
+    if (persistedQuiescenceProofs.has(key) || pendingQuiescenceProofs.has(key)) return;
+    pendingQuiescenceProofs.set(key, proof);
+    signalVersion += 1;
+  });
+
+  async function persistPendingQuiescenceProofs(): Promise<void> {
+    while (pendingQuiescenceProofs.size > 0) {
+      const entry = pendingQuiescenceProofs.entries().next().value;
+      if (!entry) return;
+      const [key, proof] = entry;
+      // This DB-only activity uses an unbounded Temporal retry policy. The
+      // workflow cannot peek, close, or continue-as-new until the exact
+      // physical proof commits its idempotent receipt and wake transaction.
+      await activity.persistSessionAttemptQuiescence(proof);
+      pendingQuiescenceProofs.delete(key);
+      persistedQuiescenceProofs.add(key);
+    }
+  }
 
   async function waitForCodexCapacity(
     initial: activities.CodexCapacityWaitRef,
@@ -139,14 +240,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     let current = initial;
     let firstEntryBaseline = entryBaseline;
     for (;;) {
-      if (interruptedEventId !== null) {
-        return;
-      }
       // Signals can land after the waiter commit but before runAgentTurn returns.
       // Compare the first wait against pre-dispatch counters so they cannot be
       // baselined away; later iterations use their normal local snapshot.
       const seenWakeups = firstEntryBaseline?.wakeups ?? wakeups;
       const seenCapacityWakeups = firstEntryBaseline?.capacityWakeups ?? capacityWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
       firstEntryBaseline = undefined;
       const parsedDeadline = Date.parse(current.nextCheckAt);
       const timerMs = Number.isFinite(parsedDeadline)
@@ -160,12 +259,12 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       } else if (timerMs > 0) {
         await condition(
           () =>
-            interruptedEventId !== null ||
+            interruptionWakeups !== seenInterruptionWakeups ||
             wakeups !== seenWakeups ||
             capacityWakeups !== seenCapacityWakeups,
           timerMs,
         );
-        if (interruptedEventId !== null) {
+        if (interruptionWakeups !== seenInterruptionWakeups) {
           return;
         }
         cause =
@@ -189,13 +288,15 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       capacityChecksThisRun += 1;
       const capacityCheckBackstop =
         input.maxCapacityChecksPerRun ?? CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP;
-      if (
-        interruptedEventId === null &&
-        (workflowInfo().continueAsNewSuggested || capacityChecksThisRun >= capacityCheckBackstop)
-      ) {
+      if (workflowInfo().continueAsNewSuggested || capacityChecksThisRun >= capacityCheckBackstop) {
         // The waiter/outbox is durable in Postgres. A fresh workflow run reads
         // it before goal continuation, reconstructs its timer, and turns any
         // unobserved wake revision into an immediate evaluation.
+        // A quiescence proof is the one signal that is not merely a replaceable
+        // wake hint. It may have arrived while the reconciliation activity was
+        // running, so commit it before crossing this nested continue-as-new
+        // boundary.
+        await persistPendingQuiescenceProofs();
         await continueAsNew<typeof sessionWorkflow>({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -211,40 +312,36 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
   }
 
   while (true) {
+    // A proof signal can signalWithStart a fresh run or arrive at any prior
+    // close/continue-as-new boundary. Persist it before every ordinary workflow
+    // decision so no accepted physical fact can be dropped with run history.
+    await persistPendingQuiescenceProofs();
     // History-overflow guard. The top of the loop is the only safe
     // continueAsNew boundary: no turn is mid-flight (every path that reaches a
-    // new iteration completed or re-queued its turn first), and a pending
-    // interrupt is unbacked in-memory state that the new run could not
-    // reconstruct — so we refuse to continueAsNew while one is set and let the
-    // loop handle it first. A buffered userMessage/queueChanged signal only
+    // new iteration settled or recovered its turn first). Every interruption
+    // is already durable in Postgres, so ordinary Temporal signals are
+    // replaceable wake hints and none must be carried into the next workflow
+    // run. A
+    // buffered userMessage/queueChanged signal only
     // bumps `wakeups`, and its turn was written to Postgres BEFORE the signal
-    // was sent, so the fresh run re-claims it on its first claimNextQueuedTurn
+    // was sent, so the fresh run observes it on its first durable work peek
     // — losing the counter strands nothing. The queue living in Postgres is the
     // safety net: continueAsNew carries only the self-contained
     // SessionWorkflowInput (no initialEventId — the new run claims from the
-    // queue, it does not replay a seed event). patched() keeps in-flight
-    // histories (recorded before this branch existed) deterministic: they never
-    // see the new command.
+    // queue, it does not replay a seed event). Quiescence-proof signals are the
+    // exception: persistPendingQuiescenceProofs() immediately above commits
+    // every accepted proof before this boundary.
     //
-    // The approval queue is NOT a boundary condition, and is cleared here. A
-    // genuinely-pending approval keeps the workflow blocked INSIDE runTurn (the
-    // `await condition(...)` in the requires_action branch), so it never
-    // reaches the top of the loop — meaning every approvalQueue entry observed
-    // here is necessarily STALE (an approvalDecision signal for a turn that
-    // already settled; the API guard only checks status==='requires_action', so
-    // two decisions submitted while requires_action both land in the queue and
-    // the surplus is left behind once the turn completes without re-blocking).
-    // Coupling continueAsNew to `approvalQueue.length === 0` would let one such
-    // stale entry wedge the guard forever, re-introducing the exact
-    // history-overflow termination this branch prevents. Dropping the surplus
-    // is safe: a real pending approval also leaves the session in
-    // requires_action with the turn re-dispatchable from Postgres.
-    if (patched("session-continue-as-new")) {
+    // Approval signals are wakeups, never conversation truth. A genuinely
+    // accepted decision is already persisted on the turn and is rediscovered
+    // by the next durable peek, including after continue-as-new. Stale or
+    // duplicate signals therefore cannot block this boundary or manufacture a
+    // second approval dispatch.
+    {
       const info = workflowInfo();
       const maxTurnsPerRun = input.maxTurnsPerRun ?? TURNS_PER_RUN_BACKSTOP;
       const shouldContinue = info.continueAsNewSuggested || turnsThisRun >= maxTurnsPerRun;
-      if (shouldContinue && interruptedEventId === null) {
-        approvalQueue.length = 0;
+      if (shouldContinue) {
         await continueAsNew<typeof sessionWorkflow>({
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -256,123 +353,118 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
         });
       }
     }
+    // Capture before the final activity chain of this cycle. Temporal may
+    // accept a signal while an activity completion and workflow completion
+    // race; every terminal return below must observe that arrival and loop.
+    const closeSignalVersion = signalVersion;
+    const closeNonControlSignalVersion = nonControlSignalVersion;
     const workflowId = workflowInfo().workflowId;
-    const turn = await activity.claimNextQueuedTurn({
+    const peek = await activity.peekSessionWork({
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      workflowId,
     });
-    if (!turn) {
-      // A durable Codex capacity waiter replaces the generic goal continuation
-      // loop. This read also repairs the DB-commit -> activity-return boundary:
-      // if runAgentTurn committed the waiter and then its worker died, the fresh
-      // workflow reconstructs the timer here instead of synthesizing work.
-      if (interruptedEventId === null && patched("codex-capacity-wait-v1")) {
-        const capacityWait = await activity.getCodexCapacityWait({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-        });
-        if (capacityWait) {
-          await waitForCodexCapacity(capacityWait);
-          continue;
-        }
-      }
-      if (interruptedEventId === null) {
-        // With an active goal, idling out is replaced by a synthesized
-        // continuation turn; the queue (any non-terminal turn) always wins and
-        // the no-progress/max-continuation guards auto-pause runaway goals.
-        let continuation: activities.MaybeContinueGoalResult = { action: "none" };
-        try {
-          continuation = await activity.maybeContinueGoal({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            workflowId,
-          });
-        } catch (error) {
-          if (isCancellation(error)) {
-            throw error;
-          }
-          // A failing goal check must not kill the session (activity retry is
-          // 1). Fall through to the idle path: the goal stays active in the
-          // database and the next wake retries, which means the workflow CAN
-          // complete normally with an active goal on this error path.
-        }
-        if (continuation.action === "continue" || continuation.action === "queue") {
-          // "continue": a goal continuation turn was just enqueued; "queue":
-          // queued work appeared concurrently. Claim it on the next loop pass.
-          continue;
-        }
-      }
-      const seenWakeups = wakeups;
-      const woke = await condition(
-        () => interruptedEventId !== null || wakeups !== seenWakeups,
-        "5s",
-      );
-      if (interruptedEventId) {
-        const idleInterruptEventId = interruptedEventId;
-        interruptedEventId = null;
-        // An idle interrupt is an explicit stop: pause an active goal before
-        // shutting down so a later wake does not auto-continue it. The
-        // activity inspects the trigger and skips the pause for steer-tagged
-        // interrupts (steering redirects work, it does not stop it).
-        await activity.pauseGoalForInterrupt({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          triggerEventId: idleInterruptEventId,
-        });
-        await activity.markSessionIdle({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-        });
-        return;
-      }
-      if (woke) {
-        continue;
-      }
-      const finalTurn = await activity.claimNextQueuedTurn({
+    if (peek.kind === "interruption-pending") {
+      const settlement = await activity.settleSessionInterruptions({
+        accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        attemptId: peek.attemptId,
         workflowId,
       });
-      if (!finalTurn) {
-        await activity.markSessionIdle({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-        });
-        // A queueChanged/userMessage signal can land between the final claim and
-        // completion; Temporal blocks completion while a signal is buffered, so
-        // re-checking here guarantees the queued turn is picked up instead of
-        // stranding it (the signaler skips its start-child fallback on success).
-        if (interruptedEventId !== null || wakeups !== seenWakeups) {
+      if (settlement.action === "paused") {
+        if (pendingQuiescenceProofs.size > 0) {
           continue;
         }
-        return;
-      }
-      turnsThisRun += 1;
-      if (
-        !(await runTurn(
-          input.accountId,
-          input.workspaceId,
-          input.sessionId,
-          finalTurn.id,
-          finalTurn.triggerEventId,
-        ))
-      ) {
+        if (nonControlSignalVersion !== closeNonControlSignalVersion) {
+          continue;
+        }
         return;
       }
       continue;
     }
+    if (peek.kind === "cancellation-wait") {
+      // Logical settlement is complete, but the exact predecessor activity has
+      // not yet durably proved sandbox/tool quiescence. Wait only briefly for
+      // its transactional queueChanged wake. If provider/tool cancellation is
+      // genuinely slow, close this workflow run rather than consuming a turn
+      // slot or churning control activities; the outbox uses signalWithStart to
+      // restart this exact workflow after the receipt commits.
+      const seenSignalVersion = signalVersion;
+      const woke = await condition(() => signalVersion !== seenSignalVersion, "5s");
+      if (woke) continue;
+      // Close only against the same signal snapshot. A proof signal accepted
+      // at the timer/completion boundary must loop through the DB-only receipt
+      // activity rather than disappearing with this workflow run.
+      if (signalVersion !== seenSignalVersion || pendingQuiescenceProofs.size > 0) continue;
+      return;
+    }
+    if (peek.kind === "capacity-wait") {
+      await waitForCodexCapacity(peek.ref);
+      continue;
+    }
+    if (peek.kind === "approval-wait") {
+      const seenApprovalWakeups = approvalWakeups;
+      const seenWakeups = wakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
+      await condition(
+        () =>
+          interruptionWakeups !== seenInterruptionWakeups ||
+          approvalWakeups !== seenApprovalWakeups ||
+          wakeups !== seenWakeups,
+      );
+      continue;
+    }
+    if (peek.kind === "idle") {
+      let continuation: activities.MaybeContinueGoalResult = { action: "none" };
+      try {
+        continuation = await goalActivity.maybeContinueGoal({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          workflowId,
+        });
+      } catch (error) {
+        if (isCancellation(error)) throw error;
+        await activity.enqueueGoalRetryWake({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          workflowId,
+        });
+      }
+      if (continuation.action === "continue" || continuation.action === "queue") continue;
+      const seenWakeups = wakeups;
+      const seenApprovalWakeups = approvalWakeups;
+      const seenInterruptionWakeups = interruptionWakeups;
+      const woke = await condition(
+        () =>
+          interruptionWakeups !== seenInterruptionWakeups ||
+          wakeups !== seenWakeups ||
+          approvalWakeups !== seenApprovalWakeups,
+        "5s",
+      );
+      if (woke) continue;
+      const finalPeek = await activity.peekSessionWork({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (finalPeek.kind !== "idle") continue;
+      await activity.markSessionIdle({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+      });
+      if (signalVersion !== closeSignalVersion) {
+        continue;
+      }
+      return;
+    }
     turnsThisRun += 1;
-    if (
-      !(await runTurn(
-        input.accountId,
-        input.workspaceId,
-        input.sessionId,
-        turn.id,
-        turn.triggerEventId,
-      ))
-    ) {
+    const trigger =
+      peek.kind === "approval-pending"
+        ? ({ kind: "approval", triggerEventId: peek.triggerEventId } as const)
+        : ({ kind: "next" } as const);
+    if (!(await runTurn(input.accountId, input.workspaceId, input.sessionId, trigger))) {
+      if (signalVersion !== closeSignalVersion) continue;
       return;
     }
   }
@@ -381,143 +473,163 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
     accountId: string,
     workspaceId: string,
     sessionId: string,
-    turnId: string,
-    triggerEventId: string,
+    trigger: activities.RunAgentTurnInput["trigger"],
   ): Promise<boolean> {
-    if (interruptedEventId) {
-      await activity.interruptActiveTurn({
-        accountId,
-        workspaceId,
-        sessionId,
-        triggerEventId: interruptedEventId,
-        workflowId: workflowInfo().workflowId,
-      });
-      interruptedEventId = null;
-      return true;
-    }
-
     const capacityWaitEntryBaseline = { wakeups, capacityWakeups };
+    const attemptId = uuid4();
+    const interruptionBaseline = interruptionWakeups;
 
     const scope = new CancellationScope();
-    const workflowId = workflowInfo().workflowId;
-    // P1.2 STATELESS-LEASE GATE. The stateless resume-by-id model (lease acquire
-    // + non-owned injection + release) lives ENTIRELY in the runAgentSegment
-    // activity, gated by the sandboxOwnershipEnabled config flag — the workflow's
-    // command path is intentionally unchanged: the turn still dispatches on the
-    // EXISTING GLOBAL queue (the module-level `activity` proxy, NO taskQueue
-    // override, NO per-session worker, NO per-session queue), worker-death still
-    // re-dispatches via the `worker-death-redispatch` patch below (any worker
-    // re-resumes the box by id), and there is NO ownerHeartbeat / openStreamRequest
-    // / closeStreamRequest signal. This patched() marker records the
-    // stateless-lease cutover point in history so multi-day IN-FLIGHT workflow
-    // histories replay deterministically on the original lease-less path, and any
-    // future workflow-side lease change can branch on it without breaking replay.
-    const statelessLease = patched("sandbox-stateless-lease");
-    void statelessLease; // command path unchanged today (see comment above)
-    // Deliberately schedules the LEGACY activity name: in-flight session
-    // workflows (multi-day by design) recorded this name in their histories,
-    // and scheduling a different activity type at the same position is a
-    // non-deterministic change on replay. Migrate to runAgentTurn with
-    // patched() once pre-rename sessions have drained.
+    const workflowExecution = workflowInfo();
+    const workflowId = workflowExecution.workflowId;
+    // The stateless resume-by-id model (lease acquire + non-owned injection +
+    // release) lives entirely in the runAgentTurn activity.
     const turn: Promise<activities.RunAgentTurnResult> = scope.run(() =>
-      activity.runAgentSegment({
+      turnActivity.runAgentTurn({
         accountId,
         workspaceId,
         sessionId,
-        triggerEventId,
         workflowId,
-        turnId,
+        workflowRunId: workflowExecution.runId,
+        attemptId,
+        trigger,
       }),
     );
-    const outcome:
+    const racedOutcome:
       | { kind: "result"; result: activities.RunAgentTurnResult }
-      | { kind: "interrupt" }
+      | { kind: "control" }
       | { kind: "failure"; error: unknown } = await Promise.race([
       turn.then(
-        (result: activities.RunAgentTurnResult) => ({ kind: "result" as const, result }),
+        (result: activities.RunAgentTurnResult) => ({
+          kind: "result" as const,
+          result,
+        }),
         (error: unknown) => ({ kind: "failure" as const, error }),
       ),
-      condition(() => interruptedEventId !== null).then(() => ({ kind: "interrupt" as const })),
+      condition(() => interruptionWakeups !== interruptionBaseline).then(() => ({
+        kind: "control" as const,
+      })),
     ]);
+    // A Steer/Pause transaction fences the active attempt before its Temporal
+    // signal is necessarily handled. That fence can make the activity's typed
+    // cancellation win Promise.race by one workflow activation. Give only that
+    // confirmed cancellation shape a short deterministic arbitration window;
+    // the durable control signal is authoritative once observed. Ordinary
+    // failures and timeouts never wait here, and a cancellation with no session
+    // control still follows the failure/cancellation path below.
+    if (
+      racedOutcome.kind === "failure" &&
+      isTurnActivityFenceCancellation(racedOutcome.error) &&
+      interruptionWakeups === interruptionBaseline
+    ) {
+      await condition(() => interruptionWakeups !== interruptionBaseline, "250ms");
+    }
+    const outcome =
+      interruptionWakeups !== interruptionBaseline ? ({ kind: "control" } as const) : racedOutcome;
 
-    if (outcome.kind === "interrupt") {
-      scope.cancel();
-      await activity.interruptActiveTurn({
+    if (outcome.kind === "control") {
+      if (!receiptGatedCancellation) {
+        // Replay-only v1 command order. New histories always take the v2 path
+        // below. The current runAgentTurn still owns and writes the truthful
+        // hard-fence receipt; this call remains an idempotent history command.
+        scope.cancel();
+        const settlement = await activity.settleSessionInterruptions({
+          accountId,
+          workspaceId,
+          sessionId,
+          attemptId,
+          workflowId: workflowInfo().workflowId,
+        });
+        const termination = await turn.then(
+          () => ({ kind: "completed" as const }),
+          (error: unknown) => ({ kind: "failed" as const, error }),
+        );
+        const physicalStopConfirmed =
+          termination.kind === "completed" || isTurnActivityFenceCancellation(termination.error);
+        if (patched("session-attempt-quiescence-v1") && physicalStopConfirmed) {
+          await activity.settleSessionInterruptions({
+            accountId,
+            workspaceId,
+            sessionId,
+            attemptId,
+            workflowId: workflowInfo().workflowId,
+            phase: "attempt_quiesced",
+          });
+        }
+        if (!physicalStopConfirmed) throw termination.error;
+        return settlement.action !== "paused";
+      }
+      const settlement = await activity.settleSessionInterruptions({
         accountId,
         workspaceId,
         sessionId,
-        triggerEventId: interruptedEventId!,
+        attemptId,
         workflowId: workflowInfo().workflowId,
       });
-      interruptedEventId = null;
-      return true;
+      // The transaction above is the authority fence: every late model/tool/UI
+      // write is rejected from this point onward. Request cancellation only
+      // after it commits, then stop observing the Temporal activity promise.
+      // TRY_CANCEL allows this workflow to move to cancellation-wait without
+      // confusing Temporal completion/cancellation with local process safety.
+      scope.cancel();
+      return settlement.action !== "paused";
     }
 
     if (outcome.kind === "failure") {
       // A capacity settlement may have committed just before the activity
       // transport/worker failed. Recover that durable boundary before generic
       // failSession can overwrite the capacity-idle session.
-      if (patched("codex-capacity-wait-v1")) {
-        const capacityWait = await activity.getCodexCapacityWait({ workspaceId, sessionId });
+      {
+        const capacityWait = await activity.getCodexCapacityWait({
+          workspaceId,
+          sessionId,
+        });
         if (capacityWait) {
           await waitForCodexCapacity(capacityWait, capacityWaitEntryBaseline);
           return true;
         }
       }
       // An ungraceful worker death never reaches the activity's graceful
-      // preemption path — it surfaces here as a heartbeat-timeout failure.
+      // recovery path — it surfaces here as a heartbeat-timeout failure.
       // Conversation truth was still dual-written during the turn, so the
-      // turn is re-queued (resume notice when it persisted progress, original
-      // trigger otherwise) and the loop re-claims it on a healthy worker —
+      // same turn is marked recovering and the loop re-claims it on a healthy worker —
       // bounded by a per-turn redispatch counter persisted on the turn row.
-      // patched() keeps replays of histories recorded before this branch
-      // existed on their original failSession path.
-      if (isWorkerDeathFailure(outcome.error) && patched("worker-death-redispatch")) {
-        const requeue = await activity.requeueTurnAfterWorkerDeath({
+      const workerDeath = workerDeathFailure(outcome.error);
+      if (workerDeath) {
+        const recovery = await activity.recoverDispatch({
           accountId,
           workspaceId,
           sessionId,
-          triggerEventId,
-          workflowId,
-          turnId,
+          attemptId,
+          timeoutType: workerDeath.timeoutType,
         });
-        if (requeue.action !== "exceeded") {
-          // "requeued": the next claim re-dispatches the turn. "stale": the
+        if (recovery.action !== "exceeded") {
+          // "recovering": the next claim creates a new attempt for this same
+          // current inference. "stale": the
           // timed-out attempt actually settled the turn (a zombie finished
           // after the server gave up on its heartbeats); nothing to redo.
           return true;
         }
-        await activity.failSession({
-          accountId,
-          workspaceId,
-          sessionId,
-          triggerEventId,
-          workflowId,
-          error: `Worker died ${requeue.redispatches + 1} times while running this turn (heartbeat timeout); giving up after ${requeue.redispatches} re-dispatches.`,
-        });
+        // The worker-death activity atomically committed failed turn/session
+        // truth when the bounded redispatch ceiling was exceeded.
         return false;
       }
-      await activity.failSession({
+      await activity.failSessionAttempt({
         accountId,
         workspaceId,
         sessionId,
-        triggerEventId,
-        workflowId,
+        attemptId,
         error: workflowFailureMessage(outcome.error),
       });
       return false;
     }
 
-    if (outcome.result.status === "failed" || outcome.result.status === "cancelled") {
-      return outcome.result.status === "cancelled";
+    if (outcome.result.status === "unclaimed") {
+      return true;
     }
 
-    if (outcome.result.status === "preempted") {
-      // The hosting worker shut down gracefully mid-turn: the activity
-      // checkpointed conversation truth and put the turn back on the queue
-      // before completing. Loop again so the next claim re-dispatches it on a
-      // healthy worker (a pending interrupt is honored first by the loop).
-      return true;
+    if (outcome.result.status === "failed" || outcome.result.status === "cancelled") {
+      return outcome.result.status === "cancelled";
     }
 
     if (outcome.result.capacityWait) {
@@ -525,35 +637,46 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       return true;
     }
 
-    if (outcome.result.status === "requires_action") {
-      await condition(() => interruptedEventId !== null || approvalQueue.length > 0);
-      if (interruptedEventId) {
-        await activity.interruptActiveTurn({
-          accountId,
-          workspaceId,
-          sessionId,
-          triggerEventId: interruptedEventId,
-          workflowId,
-        });
-        interruptedEventId = null;
-        return true;
-      }
-      const approvalEventId = approvalQueue.shift();
-      if (approvalEventId) {
-        return await runTurn(accountId, workspaceId, sessionId, turnId, approvalEventId);
-      }
+    if (outcome.result.deferredUntilWake) {
+      return deferredResultMayContinue(capacityWaitEntryBaseline.wakeups, wakeups);
     }
+
+    if (outcome.result.status === "requires_action") return true;
 
     const holdMs = continuationHoldMs(outcome.result, ROTATION_IDLE_FLOOR_MS);
     if (holdMs > 0) {
-      // Provider backpressure / rotation all-capped idle: hold the loop so an active
-      // goal's continuation does not immediately re-enter the same rate-limit window.
+      // Provider recovery / rotation all-capped idle: hold the loop so the same
+      // turn or an active goal does not immediately re-enter the same rate-limit window.
       // A rotation all-capped idle is a MANDATORY hold (idleUntilReset) — a 0/elapsed
-      // delay can never skip it (invariant 4: NO THRASH). An interrupt or user signal
+      // delay can never skip it (invariant 4: NO THRASH). A control or user signal
       // ends the wait early and is handled by the main loop.
       const seenWakeups = wakeups;
-      await condition(() => interruptedEventId !== null || wakeups !== seenWakeups, holdMs);
+      const seenInterruptionWakeups = interruptionWakeups;
+      await condition(
+        () => interruptionWakeups !== seenInterruptionWakeups || wakeups !== seenWakeups,
+        holdMs,
+      );
     }
     return true;
   }
+}
+
+function isSessionAttemptQuiescenceProof(
+  value: unknown,
+): value is activities.SessionAttemptQuiescenceProof {
+  if (!value || typeof value !== "object") return false;
+  const proof = value as Record<string, unknown>;
+  return [
+    "accountId",
+    "workspaceId",
+    "sessionId",
+    "attemptId",
+    "workflowId",
+    "workflowRunId",
+    "activityId",
+  ].every((field) => typeof proof[field] === "string" && proof[field].length > 0);
+}
+
+function sessionAttemptQuiescenceProofKey(proof: activities.SessionAttemptQuiescenceProof): string {
+  return `${proof.attemptId}:${proof.workflowRunId}:${proof.activityId}`;
 }

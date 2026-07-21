@@ -192,7 +192,12 @@ export function SandboxTerminal({
   const ptyWs = terminalCapability?.transport === "pty-ws" && Boolean(terminalCapability?.url);
   // Output frames buffer here until xterm has mounted; the write effect drains it.
   const ptyOutputQueueRef = useRef<string[]>([]);
-  const ptyStream = useTerminalStream({
+  const {
+    status: ptyStatus,
+    write: ptyWrite,
+    resize: resizePty,
+    connected: ptyConnected,
+  } = useTerminalStream({
     capability: ptyWs
       ? {
           transport: terminalCapability!.transport,
@@ -209,14 +214,20 @@ export function SandboxTerminal({
 
   // PTY mode = a live ttyd socket drives the screen. Firehose mode = the
   // read-only projection (or the legacy HTTP-write fallback).
-  const ptyMode = ptyWs && ptyStream.status !== "closed";
+  const ptyMode = ptyWs && ptyStatus !== "closed";
   const interactive = !readOnly && (ptyMode || result.write !== null);
 
   // Boot-in-terminal: after the user focuses a not-yet-warm box, show styled
   // status lines INSIDE xterm instead of an overlay — but only when there is no
   // firehose transcript to show yet (otherwise the projected output is shown).
   const warm = liveness === "warm" || liveness === "draining";
-  const booting = activated && !ptyMode && !warm && liveness != null && result.chunks.length === 0;
+  const booting =
+    activated &&
+    !ptyMode &&
+    !warm &&
+    liveness !== null &&
+    liveness !== undefined &&
+    result.chunks.length === 0;
 
   function handleActivate() {
     if (!activated) setActivated(true);
@@ -433,20 +444,20 @@ export function SandboxTerminal({
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || !interactive) return;
-    const sink = ptyMode ? ptyStream.write : result.write;
+    const sink = ptyMode ? ptyWrite : result.write;
     if (!sink) return;
     const sub = term.onData((data) => sink(data));
     return () => sub.dispose();
-  }, [ready, interactive, ptyMode, ptyStream.write, result.write]);
+  }, [ready, interactive, ptyMode, ptyWrite, result.write]);
 
   // In PTY mode, tell ttyd the window size on the xterm resize event.
   useEffect(() => {
     const term = termRef.current;
     if (!ready || !term || !ptyMode) return;
-    ptyStream.resize(term.cols, term.rows);
-    const sub = term.onResize(({ cols, rows }) => ptyStream.resize(cols, rows));
+    resizePty(term.cols, term.rows);
+    const sub = term.onResize(({ cols, rows }) => resizePty(cols, rows));
     return () => sub.dispose();
-  }, [ready, ptyMode, ptyStream.connected, ptyStream.resize]);
+  }, [ready, ptyMode, ptyConnected, resizePty]);
 
   // Refit on container resize (dock drag) AND window resize.
   useEffect(() => {
@@ -497,7 +508,7 @@ export function SandboxTerminal({
                 writtenRef.current = new Set();
                 wroteFirehoseRef.current = false;
               }}
-              className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-10"
+              className="rounded-og-sm px-1.5 py-0.5 text-og-xs hover:text-og-fg pointer-coarse:min-h-11"
             >
               Clear
             </button>

@@ -14,6 +14,7 @@ import type {
   BillingUsageResponse,
   CapabilityPack,
   ClientConfig,
+  ComposerDraft,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
@@ -51,6 +52,9 @@ import type {
   SessionEvent,
   SessionGoal,
   SessionLineageResponse,
+  SessionQueueMutationResponse,
+  SessionQueueSnapshot,
+  SessionControlResponse,
   SessionStatus,
   SessionTurn,
   SteerMessageResult,
@@ -59,11 +63,11 @@ import type {
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
   UpdateSessionPinRequest,
-  UpdateSessionTurnRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateVariableSetRequest,
   UpdateWorkspaceRequest,
   Workspace,
+  WorkspaceControlEvent,
   WorkspaceEnvironment,
   WorkspaceEnvironmentVariableMetadata,
   VariableSet,
@@ -76,6 +80,15 @@ import type { MachinesResponse } from "../src/machines";
 const WORKSPACE_ID = "11111111-2222-4333-8444-555555555555";
 export const MANAGER_SESSION_ID = "3f6e1a2b-4c5d-4e6f-8a9b-0c1d2e3f4a5b";
 const WORKER_SESSION_ID = "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d";
+let nextDemoUuid = 0;
+
+/** Stable UUIDs keep screenshots deterministic and work in Vite's module
+ *  evaluation context, where the browser-only `crypto.randomUUID` API is not
+ *  guaranteed to exist. */
+function demoUuid(): string {
+  nextDemoUuid += 1;
+  return `00000000-0000-4000-8000-${String(nextDemoUuid).padStart(12, "0")}`;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -122,7 +135,8 @@ class SessionBus {
     };
     this.listeners.add(listener);
     try {
-      while (!signal?.aborted) {
+      while (true) {
+        if (signal?.aborted) break;
         const next = queue.shift();
         if (next) {
           yield next;
@@ -142,6 +156,9 @@ class SessionBus {
 
 export class MockOpenGeniClient implements SessionClientLike {
   private buses = new Map<string, SessionBus>();
+  private queueVersions = new Map<string, number>();
+  private pausedSessions = new Set<string>();
+  private drafts = new Map<string, ComposerDraft>();
   private scripted = false;
 
   bus(sessionId: string): SessionBus {
@@ -221,6 +238,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   async listSessionPage(): Promise<SessionListResponse> {
     return {
       pinned: [],
+      pinnedTruncated: false,
       sessions: FLEET.map((spec) =>
         this.fabricateSession(spec.id, spec.status, spec.title, spec.agoMinutes),
       ),
@@ -260,11 +278,19 @@ export class MockOpenGeniClient implements SessionClientLike {
     return event;
   }
 
-  async interrupt(_workspaceId: string, sessionId: string): Promise<SessionEvent> {
+  async pauseSession(_workspaceId: string, sessionId: string): Promise<SessionControlResponse> {
     const bus = this.bus(sessionId);
-    const event = bus.append("turn.cancelled", {}, "turn-live");
+    bus.append("session.control.paused", {});
+    this.pausedSessions.add(sessionId);
+    return this.controlResponse(sessionId, "pause");
+  }
+
+  async resumeSession(_workspaceId: string, sessionId: string): Promise<SessionControlResponse> {
+    const bus = this.bus(sessionId);
+    bus.append("session.control.resumed", {});
     bus.setStatus("idle");
-    return event;
+    this.pausedSessions.delete(sessionId);
+    return this.controlResponse(sessionId, "resume");
   }
 
   streamEvents(
@@ -302,62 +328,214 @@ export class MockOpenGeniClient implements SessionClientLike {
     return [...this.sessionTurns(sessionId)];
   }
 
-  async updateQueuedTurn(
+  async getQueue(_workspaceId: string, sessionId: string): Promise<SessionQueueSnapshot> {
+    return this.queueSnapshot(sessionId);
+  }
+
+  async deleteQueueItem(
     _workspaceId: string,
     sessionId: string,
     turnId: string,
-    update: UpdateSessionTurnRequest,
-  ): Promise<SessionTurn> {
+  ): Promise<SessionQueueMutationResponse> {
     const turns = this.sessionTurns(sessionId);
     const turn = turns.find(
       (candidate) => candidate.id === turnId && candidate.status === "queued",
     );
-    if (!turn) {
-      throw new Error(`queued turn not found: ${turnId}`);
-    }
-    Object.assign(turn, {
-      ...(update.prompt !== undefined ? { prompt: update.prompt } : {}),
-      ...(update.model !== undefined ? { model: update.model } : {}),
-      ...(update.reasoningEffort !== undefined ? { reasoningEffort: update.reasoningEffort } : {}),
-      updatedAt: new Date().toISOString(),
-    });
-    this.bus(sessionId).append("turn.updated", { turnId }, turnId);
-    return { ...turn };
-  }
-
-  async reorderQueuedTurns(
-    _workspaceId: string,
-    sessionId: string,
-    turnIds: string[],
-  ): Promise<SessionTurn[]> {
-    const turns = this.sessionTurns(sessionId);
-    turnIds.forEach((turnId, index) => {
-      const turn = turns.find(
-        (candidate) => candidate.id === turnId && candidate.status === "queued",
-      );
-      if (turn) {
-        turn.position = index + 1;
-      }
-    });
-    this.bus(sessionId).append("turn.updated", { reorderedTurnIds: turnIds });
-    return turns.filter((turn) => turn.status === "queued").sort((a, b) => a.position - b.position);
-  }
-
-  async deleteQueuedTurn(
-    _workspaceId: string,
-    sessionId: string,
-    turnId: string,
-  ): Promise<SessionTurn> {
-    const turns = this.sessionTurns(sessionId);
-    const turn = turns.find(
-      (candidate) => candidate.id === turnId && candidate.status === "queued",
-    );
-    if (!turn) {
-      throw new Error(`queued turn not found: ${turnId}`);
-    }
+    if (!turn) throw new Error(`queued turn not found: ${turnId}`);
     turn.status = "cancelled";
+    turn.version += 1;
     this.bus(sessionId).append("turn.cancelled", { turnId }, turnId);
-    return { ...turn };
+    return this.queueMutation(sessionId);
+  }
+
+  async moveQueueItem(
+    _workspaceId: string,
+    sessionId: string,
+    turnId: string,
+    request: { beforeTurnId: string | null },
+  ): Promise<SessionQueueMutationResponse> {
+    const turns = this.sessionTurns(sessionId).filter((turn) => turn.status === "queued");
+    const moving = turns.find((turn) => turn.id === turnId);
+    if (!moving) throw new Error("queued turn not found");
+    const ordered = turns.filter((turn) => turn.id !== turnId);
+    const index =
+      request.beforeTurnId === null
+        ? ordered.length
+        : ordered.findIndex((turn) => turn.id === request.beforeTurnId);
+    ordered.splice(Math.max(0, index), 0, moving);
+    ordered.forEach((turn, position) => (turn.position = position + 1));
+    this.turns.set(sessionId, ordered);
+    return this.queueMutation(sessionId, "queue.move", turnId);
+  }
+
+  async editQueueItem(
+    _workspaceId: string,
+    sessionId: string,
+    turnId: string,
+  ): Promise<SessionQueueMutationResponse> {
+    const turn = this.sessionTurns(sessionId).find((candidate) => candidate.id === turnId);
+    if (!turn) throw new Error("queued turn not found");
+    turn.status = "withdrawn_for_edit";
+    const draft: ComposerDraft = {
+      revision: 1,
+      text: turn.prompt,
+      resources: turn.resources,
+      tools: turn.tools,
+      model: turn.model,
+      reasoningEffort: turn.reasoningEffort,
+      sourceTurnId: turn.id,
+      sourceTurnVersion: turn.version,
+      updatedAt: new Date().toISOString(),
+    };
+    this.drafts.set(sessionId, draft);
+    return { ...this.queueMutation(sessionId, "queue.edit", turnId), draft };
+  }
+
+  async steerQueueItem(
+    _workspaceId: string,
+    sessionId: string,
+    turnId: string,
+  ): Promise<SessionQueueMutationResponse> {
+    const turns = this.sessionTurns(sessionId);
+    const index = turns.findIndex((turn) => turn.id === turnId);
+    if (index < 0) throw new Error("queued turn not found");
+    const [turn] = turns.splice(index, 1);
+    turns.unshift(turn!);
+    turns.forEach((candidate, position) => (candidate.position = position + 1));
+    this.pausedSessions.delete(sessionId);
+    return this.queueMutation(sessionId, "queue.steer", turnId);
+  }
+
+  async getComposerDraft(_workspaceId: string, sessionId: string): Promise<ComposerDraft> {
+    return (
+      this.drafts.get(sessionId) ?? {
+        revision: 0,
+        text: "",
+        resources: [],
+        tools: [],
+        model: "gpt-5.2",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: null,
+      }
+    );
+  }
+
+  async saveComposerDraft(
+    _workspaceId: string,
+    sessionId: string,
+    request: Omit<ComposerDraft, "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt">,
+  ): Promise<ComposerDraft> {
+    const current = await this.getComposerDraft(_workspaceId, sessionId);
+    const draft: ComposerDraft = {
+      ...request,
+      revision: current.revision + 1,
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    this.drafts.set(sessionId, draft);
+    return draft;
+  }
+
+  async setWorkspaceInferenceState() {
+    return {
+      receipt: this.receipt("workspace.control", null),
+      state: "active" as const,
+      revision: 1,
+      interruptionCount: 0,
+      wakeCount: 0,
+    };
+  }
+
+  private queueSnapshot(sessionId: string): SessionQueueSnapshot {
+    return {
+      version: this.queueVersions.get(sessionId) ?? 0,
+      effectiveControl: this.effectiveControl(sessionId),
+      stoppingPreviousAttempt: false,
+      items: this.sessionTurns(sessionId).filter((turn) => turn.status === "queued"),
+    };
+  }
+
+  private queueMutation(
+    sessionId: string,
+    action = "queue.delete",
+    turnId: string | null = null,
+  ): SessionQueueMutationResponse {
+    this.queueVersions.set(sessionId, (this.queueVersions.get(sessionId) ?? 0) + 1);
+    return { receipt: this.receipt(action, turnId), snapshot: this.queueSnapshot(sessionId) };
+  }
+
+  private receipt(action: string, turnId: string | null) {
+    return {
+      id: demoUuid(),
+      action,
+      operationKey: demoUuid(),
+      targetSessionId: MANAGER_SESSION_ID,
+      targetTurnId: turnId,
+      appliedControlRevision: 1,
+      appliedQueueVersion: 1,
+      appliedTurnVersion: 1,
+      appliedDraftRevision: null,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  private effectiveControl(sessionId: string) {
+    const paused = this.pausedSessions.has(sessionId);
+    return {
+      state: paused ? ("paused" as const) : ("active" as const),
+      controlVersion: paused ? 1 : 0,
+      controlEtag: `demo-${sessionId}-${paused}`,
+      directState: paused ? ("paused" as const) : ("active" as const),
+      primaryBlocker: paused
+        ? {
+            kind: "session" as const,
+            sessionId,
+            displayName: "Paused here",
+            actor: "demo operator",
+            reason: null,
+            changedAt: new Date().toISOString(),
+            revision: 1,
+          }
+        : null,
+      additionalBlockerCount: 0,
+      blockers: paused
+        ? [
+            {
+              kind: "session" as const,
+              sessionId,
+              displayName: "Paused here",
+              actor: "demo operator",
+              reason: null,
+              changedAt: new Date().toISOString(),
+              revision: 1,
+            },
+          ]
+        : [],
+      resumeOptions: paused
+        ? [
+            {
+              scope: "selected" as const,
+              targetId: sessionId,
+              selectedStateAfter: "active" as const,
+              impactCopy: "This workstream can run.",
+            },
+          ]
+        : [],
+      override: null,
+      settlement: null,
+    };
+  }
+
+  private controlResponse(sessionId: string, action: string): SessionControlResponse {
+    return {
+      receipt: this.receipt(`session.${action}`, null),
+      effectiveControl: this.effectiveControl(sessionId),
+      interruptionCount: 0,
+      wakeCount: 0,
+    };
   }
 
   async steerMessage(
@@ -366,7 +544,15 @@ export class MockOpenGeniClient implements SessionClientLike {
     message: string | SendMessageInput,
   ): Promise<SteerMessageResult> {
     const accepted = await this.sendMessage(workspaceId, sessionId, message);
-    return { accepted, turn: null, interrupted: this.bus(sessionId).status === "running" };
+    const prompt = typeof message === "string" ? message : message.text;
+    const turns = this.sessionTurns(sessionId);
+    for (const queued of turns) {
+      if (queued.status === "queued") queued.position += 1;
+    }
+    const turn = fabricateTurn(sessionId, 1, prompt);
+    turn.triggerEventId = accepted.id;
+    turns.unshift(turn);
+    return { accepted, turn: { ...turn } };
   }
 
   // --- Goal -------------------------------------------------------------------
@@ -414,9 +600,9 @@ export class MockOpenGeniClient implements SessionClientLike {
   async compactSessionContext(
     _workspaceId: string,
     sessionId: string,
-  ): Promise<{ status: "queued" | "noop"; message: string }> {
+  ): Promise<{ status: "completed" | "noop"; message: string }> {
     this.bus(sessionId).append("session.context.compacted", { trigger: "operator" });
-    return { status: "queued", message: "Compaction will run before the next turn." };
+    return { status: "completed", message: "Context compacted." };
   }
 
   async sendApprovalDecision(
@@ -772,7 +958,7 @@ export class MockOpenGeniClient implements SessionClientLike {
   ): Promise<PackInstallation> {
     const now = new Date().toISOString();
     const installation: PackInstallation = {
-      id: crypto.randomUUID(),
+      id: demoUuid(),
       accountId: ACCOUNT_ID,
       workspaceId: WORKSPACE_ID,
       packId,
@@ -804,6 +990,32 @@ export class MockOpenGeniClient implements SessionClientLike {
 
   async listWorkspaces(): Promise<Workspace[]> {
     return [...this.workspaces];
+  }
+
+  async getWorkspace(_workspaceId: string): Promise<Workspace> {
+    const workspace = this.workspaces[0];
+    if (!workspace) throw new Error("workspace not found");
+    return { ...workspace };
+  }
+
+  async listWorkspaceControlEvents() {
+    return [];
+  }
+
+  async listWorkspaceControlEventPage() {
+    return { events: [], bytes: 2, truncated: false, nextAfter: null };
+  }
+
+  async *streamWorkspaceControlEvents(
+    _workspaceId: string,
+    options: StreamSessionEventsOptions = {},
+  ): AsyncGenerator<WorkspaceControlEvent, void, void> {
+    yield* [] as WorkspaceControlEvent[];
+    options.onStateChange?.("live");
+    await new Promise<void>((resolve) => {
+      if (options.signal?.aborted) return resolve();
+      options.signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
   }
 
   async createWorkspace(request: CreateWorkspaceRequest): Promise<Workspace> {
@@ -1322,6 +1534,10 @@ export class MockOpenGeniClient implements SessionClientLike {
       createIdempotencyKey: null,
       temporalWorkflowId: null,
       activeTurnId: null,
+      queueVersion: 0,
+      queueHeadPosition: 0,
+      queueTailPosition: 0,
+      effectiveControl: this.effectiveControl(sessionId),
       lastSequence: this.bus(sessionId).events.length,
       pinned: false,
       pinnedAt: null,
@@ -1578,6 +1794,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
+  apiContractRevision: "2026-07-session-control-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -1609,10 +1826,10 @@ const CLIENT_CONFIG: ClientConfig = {
 function fabricateTurn(sessionId: string, position: number, prompt: string): SessionTurn {
   const now = new Date(Date.now() - (10 - position) * 60_000).toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     workspaceId: WORKSPACE_ID,
     sessionId,
-    triggerEventId: crypto.randomUUID(),
+    triggerEventId: demoUuid(),
     temporalWorkflowId: `wf-${sessionId.slice(0, 8)}`,
     status: "queued",
     source: "user",
@@ -1623,7 +1840,12 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     model: "gpt-5.2",
     reasoningEffort: "medium",
     sandboxBackend: "modal",
+    sandboxOs: "linux",
     metadata: {},
+    version: 1,
+    executionGeneration: 0,
+    activeAttemptId: null,
+    lineage: {},
     startedAt: null,
     finishedAt: null,
     createdAt: now,
@@ -1634,7 +1856,7 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
 function fabricateGoal(sessionId: string): SessionGoal {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: ACCOUNT_ID,
     workspaceId: WORKSPACE_ID,
     sessionId,
@@ -1661,7 +1883,7 @@ function fabricateEnvironment(
 ): WorkspaceEnvironment {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: ACCOUNT_ID,
     workspaceId: WORKSPACE_ID,
     name,
@@ -1707,13 +1929,20 @@ const DEVOPS_PACK: CapabilityPack = fabricatePack({
 function fabricateWorkspace(name: string): Workspace {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: ACCOUNT_ID,
     name,
     slug: name.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
     externalSource: null,
     externalId: null,
     agentInstructions: null,
+    inferenceControl: {
+      state: "active",
+      revision: 0,
+      reason: null,
+      changedBy: null,
+      changedAt: null,
+    },
     settings: {},
     createdAt: now,
     updatedAt: now,
@@ -1786,7 +2015,7 @@ function scheduledTask(
 ): ScheduledTask {
   const now = new Date().toISOString();
   return {
-    id: crypto.randomUUID(),
+    id: demoUuid(),
     accountId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
     workspaceId: WORKSPACE_ID,
     name,

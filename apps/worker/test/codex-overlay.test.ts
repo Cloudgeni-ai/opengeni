@@ -1,7 +1,17 @@
 import { describe, expect, test } from "bun:test";
-import { configuredModels, parseModelProvidersJson } from "@opengeni/config";
-import { CODEX_MODEL_CONTEXT_WINDOW_TOKENS } from "@opengeni/codex";
-import { clientCompactionThresholdTokens } from "@opengeni/runtime";
+import {
+  configuredModels,
+  contextInputBudgetTokens,
+  parseModelProvidersJson,
+  resolveModelProvider,
+  settingsWithResolvedModelContext,
+} from "@opengeni/config";
+import {
+  CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
+  CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
+} from "@opengeni/codex";
+import { compactionThresholdTokens } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
@@ -24,7 +34,7 @@ describe("withCodexProvider", () => {
     expect(codex?.models.some((m) => m.id === "codex/gpt-5.6-sol")).toBe(true);
   });
 
-  test("declares the codex subscription context window so proactive compaction fires before the reject cliff", () => {
+  test("declares Codex CLI's raw, effective, and auto-compact token limits", () => {
     const settings = withCodexProvider(testSettings({ modelProvidersJson: "[]" }));
     const providers = parseModelProvidersJson(settings.modelProvidersJson);
     const codex = providers.find((p) => p.id === "codex-subscription");
@@ -35,18 +45,17 @@ describe("withCodexProvider", () => {
     // It flows through to the resolved model catalog.
     const sol = configuredModels(settings).find((m) => m.id === "codex/gpt-5.6-sol");
     expect(sol?.contextWindowTokens).toBe(CODEX_MODEL_CONTEXT_WINDOW_TOKENS);
-    // The proactive client-compaction trigger (window * ratio, default 0.90 —
-    // compact as late as possible against the honest window) lands below the
-    // empirical ~334-348k reject cliff with margin for estimator skew.
-    const trigger = clientCompactionThresholdTokens({
-      contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
-      contextReservedOutputTokens: settings.contextReservedOutputTokens,
-      contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,
-    });
-    expect(trigger).toBe(288_000);
-    expect(trigger).toBeLessThan(334_000);
+    expect(sol?.effectiveContextWindowTokens).toBe(CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS);
+    expect(sol?.autoCompactTokenLimit).toBe(CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT);
+
+    const resolved = resolveModelProvider(settings, "codex/gpt-5.6-sol")!;
+    const turnSettings = settingsWithResolvedModelContext(settings, resolved.model);
+    expect(contextInputBudgetTokens(turnSettings)).toBe(258_400);
+    const trigger = compactionThresholdTokens(turnSettings);
+    expect(trigger).toBe(244_800);
+    expect(trigger).toBeLessThan(contextInputBudgetTokens(turnSettings));
     // Contrast: the old 1.05M global default never fired before the cliff.
-    const globalTrigger = clientCompactionThresholdTokens({
+    const globalTrigger = compactionThresholdTokens({
       contextWindowTokens: 1_050_000,
       contextReservedOutputTokens: settings.contextReservedOutputTokens,
       contextCompactionThresholdRatio: settings.contextCompactionThresholdRatio,

@@ -32,12 +32,17 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
+  claimSessionWorkForAttempt,
+  createSession,
   createDb,
+  initializeSessionStartAtomically,
+  mutateSessionControlInTransaction,
   listLiveModalSandboxLeaseAttributions,
   persistDrainSnapshot,
   persistWarmSnapshot,
   recordWarmingSandboxCreated,
   touchLeaseHolder,
+  withWorkspaceRls,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -128,7 +133,43 @@ async function freshWorkspace(): Promise<{
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
+}
+
+async function freshWarmSnapshotAttempt(ids: {
+  accountId: string;
+  workspaceId: string;
+}): Promise<{ sessionId: string; turnId: string; attemptId: string }> {
+  const session = await createSession(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    initialMessage: "persist this workspace",
+    resources: [],
+    metadata: {},
+    model: "scripted-model",
+    sandboxBackend: "none",
+  });
+  await initializeSessionStartAtomically(db, {
+    accountId: ids.accountId,
+    workspaceId: ids.workspaceId,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(db, ids.workspaceId, {
+    sessionId: session.id,
+    workflowId: `session-${session.id}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `snapshot-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") {
+    throw new Error(`Warm snapshot fixture did not claim its turn: ${claim.reason}`);
+  }
+  return { sessionId: session.id, turnId: claim.turn.id, attemptId };
 }
 
 type LeaseFixture = {
@@ -232,7 +273,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, spied provider stop)", () => {
   test("(1) one pass: reaps a stale viewer holder, resets warming-death, terminates a draining-past-grace box → lease cold", async () => {
@@ -342,7 +383,6 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         sessionState: { providerState: { sandboxId: "sb-old" }, workspaceReady: true },
       },
     });
-
     // First persist: folds the archive, no prior snapshot to GC.
     const archive1 = Buffer.from('MODAL_SANDBOX_FS_SNAPSHOT_V1\n{"snapshot_id":"im-1"}').toString(
       "base64",
@@ -412,6 +452,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         sessionState: { providerState: { sandboxId: "sb-warm" }, workspaceReady: true },
       },
     });
+    const attempt = await freshWarmSnapshotAttempt(ids);
 
     // Explicit capture clocks so ordering is deterministic (persistWarmSnapshot
     // orders by capture-initiation, not wall-clock-of-call).
@@ -423,6 +464,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const r1 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 5,
       workspaceArchive: archive1,
@@ -446,6 +488,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const r2 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 5,
       workspaceArchive: archive2,
@@ -465,6 +508,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const rStale = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 5,
       workspaceArchive: staleArchive,
@@ -482,6 +526,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const r3 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 5,
       workspaceArchive: archive2,
@@ -502,6 +547,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const r3b = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 5,
       workspaceArchive: archive3,
@@ -520,6 +566,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const r4 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 999,
       workspaceArchive: archive1,
@@ -535,6 +582,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     const r5 = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      ...attempt,
       sandboxGroupId: ids.groupId,
       expectedEpoch: 5,
       workspaceArchive: archive1,
@@ -542,6 +590,51 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       capturedAtMs: t0 + 5_000,
     });
     expect(r5.wrote).toBe(false);
+  }, 60_000);
+
+  test("(1b-warm-control) a committed attempt interruption fences a late warm snapshot", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 6,
+      expiresInMs: 600_000,
+      instanceId: "box-warm-control-fence",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: { backendId: "modal", sessionState: { workspaceReady: true } },
+    });
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    const paused = await withWorkspaceRls(db, ids.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof scopedDb, {
+          accountId: ids.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: attempt.sessionId,
+          actor: { type: "human", subjectId: "snapshot-control-test" },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+          reason: "prove warm snapshot control fence",
+        }),
+      ),
+    );
+    expect(paused.interruptionCount).toBe(1);
+
+    const fenced = await persistWarmSnapshot(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 6,
+      workspaceArchive: Buffer.from("must-not-land").toString("base64"),
+      minIntervalMs: 0,
+    });
+    expect(fenced).toMatchObject({ wrote: false, superseded: true });
+    const [row] =
+      await admin`select resume_state from sandbox_leases where sandbox_group_id = ${ids.groupId}`;
+    expect((row!.resume_state as any).sessionState.workspaceArchive).toBeUndefined();
   }, 60_000);
 
   test("(1c) recordWarmingSandboxCreated persists provider id on a warming lease before warm commit", async () => {
@@ -583,6 +676,20 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(row?.instance_id).toBe("sb-created");
     expect(row?.resume_state?.sessionState?.providerState?.sandboxId).toBe("sb-created");
     expect(row?.lease_epoch).toBe(9);
+
+    // Production orphan-GC safety: the provider id is recorded while the lease
+    // is still warming, before best-effort Modal tags and before warm commit.
+    // The authoritative live-instance query must include that exact state so a
+    // short unattributed grace can never terminate a legitimate warming box.
+    const liveModal = await listLiveModalSandboxLeaseAttributions(db);
+    expect(
+      liveModal.some(
+        (lease) =>
+          lease.leaseId === recorded.lease?.id &&
+          lease.instanceId === "sb-created" &&
+          lease.liveness === "warming",
+      ),
+    ).toBe(true);
 
     const stale = await recordWarmingSandboxCreated(db, {
       accountId: ids.accountId,
@@ -1294,7 +1401,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       establishSandboxSessionFromEnvelope,
       serializeEstablishedSandboxEnvelope,
     } = await import("@opengeni/runtime");
-    const client = createSandboxClientForBackend("modal", settings) as {
+    const modalClient = createSandboxClientForBackend("modal", settings) as {
       backendId: string;
       delete?: (state: unknown) => Promise<unknown>;
       serializeSessionState?: (state: unknown) => Promise<Record<string, unknown>>;
@@ -1306,6 +1413,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     try {
       established = await establishSandboxSessionFromEnvelope(settings, null, {
         sessionId: ws.groupId,
+        recovery: "create-or-restore",
         backendOverride: "modal",
       });
       // Fold the box onto the lease via the SAME serializer production uses
@@ -1331,8 +1439,8 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     } finally {
       // Defensive: ensure the box is gone even if the reaper path didn't run it.
       try {
-        if (established && client.delete) {
-          await client.delete(established.sessionState);
+        if (established && modalClient.delete) {
+          await modalClient.delete(established.sessionState);
         }
       } catch {
         /* already terminated */

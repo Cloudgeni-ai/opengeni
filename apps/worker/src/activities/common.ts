@@ -3,6 +3,7 @@ import type {
   ScheduledTask,
   Session,
   SessionStatus,
+  SessionSystemUpdatePayload,
   ToolRef,
 } from "@opengeni/contracts";
 
@@ -53,8 +54,9 @@ export function scheduledUserMessagePayload(
   tools: ToolRef[],
   taskId: string,
   runId: string,
-): Record<string, unknown> {
+): Extract<SessionSystemUpdatePayload, { type: "scheduled_occurrence" }> {
   return {
+    type: "scheduled_occurrence",
     text: prompt,
     scheduledTaskId: taskId,
     scheduledTaskRunId: runId,

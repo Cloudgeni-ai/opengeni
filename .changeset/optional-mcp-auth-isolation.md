@@ -1,5 +1,0 @@
----
-"@opengeni/runtime": patch
----
-
-Isolate optional/best-effort MCP servers so an expired credential can never fail an unrelated turn. A best-effort server (an optional ToolRef, a connection-broker-backed capability MCP, or codex_apps) whose `tools/list` throws at run time — most often an expired/failed connection credential surfacing as a StreamableHTTP "authentication required" 401 — now degrades to zero tools for the turn instead of propagating out of the SDK's run-time `getAllMcpTools` and hard-failing the whole turn. Previously the best-effort isolation only wrapped the connect handshake, so a server that connected fine but had its credential expire by tool-listing time took down turns that never even used its tools. Required (explicitly-requested, non-best-effort) servers keep the fail-loud default: a `tools/list` failure still fails the turn. The actionable `tool.auth_needed` signal is preserved — the connection-broker fetch publishes it before returning the 401 that provokes the throw, so the drop is fully observable and the user still gets prompted to re-authenticate.

@@ -25,9 +25,7 @@ import { attachViewer } from "../src/sandbox/viewer";
 import { registerSessionRoutes } from "../src/routes/sessions";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
-// P3.2 — the un-redacted/shared CONSENT GATE + viewer REVOCATION (Phase 3 close).
-// Design-of-record 08-implementation-plan.md P3.2 + modules/07-channel-b.md §6 +
-// 05-addendum-shared-sandboxes.md E.1 (shared-exposure) + stress (g).
+// The un-redacted/shared consent gate and viewer revocation contract.
 //
 //   CONSENT GATE (the desktop-stream / viewer-attach path):
 //   - 409 stream_acknowledgment_required until the principal acks the un-redacted
@@ -69,6 +67,10 @@ const settings = testSettings({
   delegationSecret: DELEGATION_SECRET,
   sandboxBackend: BACKEND,
   sandboxDesktopEnabled: true,
+  // This suite proves desktop consent and holder semantics. Its warm lease is
+  // deliberately provider-free, so an unrelated terminal capability probe must
+  // not retire that fake descriptor and turn the attach into a Modal cold-create.
+  sandboxTerminalEnabled: false,
   streamTokenSecret: "p32-stream-token-secret",
   sandboxOwnershipEnabled: true,
   sandboxLeaseTtlMs: 5_000,
@@ -76,11 +78,15 @@ const settings = testSettings({
   sandboxIdleGraceMs: 500,
 });
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(): Promise<{
+  accountId: string;
+  workspaceId: string;
+}> {
   const [a] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -89,8 +95,9 @@ function stubWorkflowClient(): SessionWorkflowClient {
   return {
     signalUserMessage: noop,
     wakeSessionWorkflow: noop,
+    requestSessionWorkflowWakeDispatch: noop,
     signalApprovalDecision: noop,
-    signalInterrupt: noop,
+    signalSessionControl: noop,
     syncScheduledTask: noop,
     deleteScheduledTaskSchedule: noop,
     triggerScheduledTask: noop,
@@ -217,7 +224,12 @@ async function soloSession(): Promise<{
     sandboxBackend: BACKEND,
   });
   await seedWarmBox(accountId, workspaceId, session.id, session.sandboxGroupId);
-  return { accountId, workspaceId, sessionId: session.id, sandboxGroupId: session.sandboxGroupId };
+  return {
+    accountId,
+    workspaceId,
+    sessionId: session.id,
+    sandboxGroupId: session.sandboxGroupId,
+  };
 }
 
 describe("P3.2 consent gate — un-redacted acknowledgment (solo box)", () => {
@@ -351,7 +363,13 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     });
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
     await seedWarmBox(accountId, workspaceId, a.id, a.sandboxGroupId);
-    return { accountId, workspaceId, a: a.id, b: b.id, sandboxGroupId: a.sandboxGroupId };
+    return {
+      accountId,
+      workspaceId,
+      a: a.id,
+      b: b.id,
+      sandboxGroupId: a.sandboxGroupId,
+    };
   }
 
   test("a shared box → 409 shared_acknowledgment_required even after a bare un-redacted ack; shared ack unblocks", async () => {
@@ -377,7 +395,10 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     await app.request(url(workspaceId, a, "/stream-capabilities/acknowledge"), {
       method: "POST",
       headers: { authorization: auth, "content-type": "application/json" },
-      body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: false }),
+      body: JSON.stringify({
+        acknowledgeUnredacted: true,
+        acknowledgeShared: false,
+      }),
     });
     const blockedShared = await app.request(url(workspaceId, a, "/viewers"), {
       method: "POST",
@@ -391,13 +412,21 @@ describe("P3.2 consent gate — shared-exposure (group >1 session)", () => {
     await app.request(url(workspaceId, a, "/stream-capabilities/acknowledge"), {
       method: "POST",
       headers: { authorization: auth, "content-type": "application/json" },
-      body: JSON.stringify({ acknowledgeUnredacted: true, acknowledgeShared: true }),
+      body: JSON.stringify({
+        acknowledgeUnredacted: true,
+        acknowledgeShared: true,
+      }),
     });
     const allowed = await app.request(url(workspaceId, a, "/viewers"), {
       method: "POST",
       headers: { authorization: auth, "content-type": "application/json" },
       body: JSON.stringify({ desktop: true }),
     });
+    if (allowed.status !== 201) {
+      throw new Error(
+        `expected viewer attach 201, received ${allowed.status}: ${await allowed.text()}`,
+      );
+    }
     expect(allowed.status).toBe(201);
   }, 60_000);
 
@@ -608,7 +637,10 @@ describe("P3.2 route auth (stream:view / stream:acknowledge)", () => {
       url(workspaceId, sessionId, "/stream-capabilities/acknowledge"),
       {
         method: "POST",
-        headers: { authorization: viewOnly, "content-type": "application/json" },
+        headers: {
+          authorization: viewOnly,
+          "content-type": "application/json",
+        },
         body: JSON.stringify({ acknowledgeUnredacted: true }),
       },
     );

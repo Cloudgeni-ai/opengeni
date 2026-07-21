@@ -205,14 +205,6 @@ describe("sandbox preparation profiles", () => {
     expect(settings.authAllowMetrics).toBe(false);
   });
 
-  test("disables child-completion parent wakes by default and parses an explicit opt-in", () => {
-    expect(withEnv({}, () => getSettings()).childCompletionParentWakeEnabled).toBe(false);
-    expect(
-      withEnv({ OPENGENI_CHILD_COMPLETION_PARENT_WAKE_ENABLED: "true" }, () => getSettings())
-        .childCompletionParentWakeEnabled,
-    ).toBe(true);
-  });
-
   test("requires an access key when shared-key auth is enabled", () => {
     expect(() =>
       withEnv(
@@ -293,7 +285,7 @@ describe("sandbox preparation profiles", () => {
       warnings.push(args.map(String).join(" "));
     };
     try {
-      // The whole point of I8/OD-8: desktop on + no secret is NOT a boot-fail.
+      // The whole point of stream-token availability contract: desktop on + no secret is NOT a boot-fail.
       // getSettings() returns settings (does not throw), emits a loud warning,
       // and streamTokenDegraded() flags the runtime degrade to transport:null.
       const settings = withEnv(

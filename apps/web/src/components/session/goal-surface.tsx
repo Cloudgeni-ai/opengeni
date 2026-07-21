@@ -1,9 +1,9 @@
 // The goal surface: ONE slim floating pill above the composer (Codex-style)
 // that carries the active goal at a glance — state, truncated title, live
 // elapsed — and expands to a panel with the full goal detail, autonomy
-// counters, and pause/resume. The goal is its own concern: the spawned-subagent
-// tree is DECOUPLED into ./subagents.tsx (the "Agents" dock tab + header chip),
-// so nothing here reaches for the session's lineage.
+// counters, and pause/resume. The goal is its own concern: spawned agents live
+// in their single composer-adjacent surface, so nothing here reaches for the
+// session's lineage.
 //
 // Copy doctrine: human language only. Internal status slugs (requires_action,
 // active, …) are translated to plain labels at this boundary; no enum leaks
@@ -31,7 +31,7 @@ import type { Session } from "@/types";
 
 /* --- state model ------------------------------------------------------------ */
 
-type GoalPillState = "pursuing" | "paused" | "attention" | "completed";
+type GoalPillState = "pursuing" | "held" | "paused" | "attention" | "completed";
 
 type GoalPillMeta = {
   label: string;
@@ -46,6 +46,12 @@ const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   pursuing: { label: "Pursuing goal", icon: ZapIcon, tint: "text-brand", ring: "border-brand/40" },
   paused: {
     label: "Goal paused",
+    icon: PauseIcon,
+    tint: "text-status-waiting",
+    ring: "border-status-waiting/40",
+  },
+  held: {
+    label: "Held by workstream",
     icon: PauseIcon,
     tint: "text-status-waiting",
     ring: "border-status-waiting/40",
@@ -79,12 +85,16 @@ function isSessionStalled(status: SessionStatus): boolean {
 function goalPillState(
   goalStatus: "active" | "paused" | "completed",
   sessionStatus: SessionStatus,
+  workstreamPaused: boolean,
 ): GoalPillState {
   if (goalStatus === "completed") {
     return "completed";
   }
   if (goalStatus === "paused") {
     return "paused";
+  }
+  if (workstreamPaused) {
+    return "held";
   }
   // An active goal on a stalled session (needs input / failed / cancelled) is
   // not "pursuing" — surface it as attention, never a live-ticking pursuit.
@@ -150,7 +160,9 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
   // elapsed clock ticks only while the goal is actively being pursued AND the
   // session is genuinely moving. A session that needs input, has failed, or was
   // cancelled must NOT keep a clock ticking under its banner.
-  const live = record?.status === "active" && !isSessionStalled(session.status);
+  const workstreamPaused = session.effectiveControl.state === "paused";
+  const live =
+    record?.status === "active" && !workstreamPaused && !isSessionStalled(session.status);
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(live),
@@ -160,8 +172,9 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
     // never a clock that kept counting past the moment work stopped.
     record?.status === "completed" ||
       record?.status === "paused" ||
+      workstreamPaused ||
       isSessionStalled(session.status)
-      ? record?.updatedAt
+      ? (session.effectiveControl.primaryBlocker?.changedAt ?? record?.updatedAt)
       : null,
   );
 
@@ -171,7 +184,7 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
     return null;
   }
 
-  const state = goalPillState(record.status, session.status);
+  const state = goalPillState(record.status, session.status, workstreamPaused);
   const meta = GOAL_PILL_META[state];
   const Icon = meta.icon;
   const canToggle = record.status !== "completed";
@@ -205,7 +218,7 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
                 <span aria-hidden className="shrink-0 text-fg-subtle">
                   ·
                 </span>
-                <span className="shrink-0 tabular-nums text-fg-subtle" title="Time on this goal">
+                <span className="shrink-0 tabular-nums text-fg-muted" title="Time on this goal">
                   {elapsed}
                 </span>
               </>
@@ -298,6 +311,11 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
         <p className="mt-2 text-xs leading-5 text-status-waiting/90">
           Paused because {record.pausedReason ?? record.rationale}
         </p>
+      ) : null}
+      {state === "held" ? (
+        <Notice tone="waiting" title="Goal held by workstream">
+          The goal is still active. It will continue when this workstream is resumed.
+        </Notice>
       ) : null}
       {record.status === "completed" && record.evidence ? (
         <p className="mt-2 text-xs leading-5 text-status-idle/90">Evidence {record.evidence}</p>

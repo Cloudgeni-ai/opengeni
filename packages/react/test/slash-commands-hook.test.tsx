@@ -9,7 +9,7 @@ import {
   type SlashCommandHandlers,
 } from "../src/hooks/use-slash-commands";
 import { fakeClient, SESSION_ID, WORKSPACE_ID } from "./fake-client";
-import { flush, registerDom, renderHook } from "./render-hook";
+import { actRun, flush, registerDom, renderHook } from "./render-hook";
 
 registerDom();
 
@@ -74,12 +74,19 @@ function setup(options: {
   }, undefined);
 }
 
+async function press(harness: Awaited<ReturnType<typeof setup>>, key: string): Promise<void> {
+  await actRun(async () => {
+    harness.result.current.command.onKeyDown(keyEvent({ key }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  });
+}
+
 const sessionCtx: SlashCommandContext = {
   client: fakeClient({
     updateGoal: async () => ({}) as never,
     clearSessionContext: async () => {},
     compactSessionContext: async () => ({
-      status: "queued",
+      status: "completed",
       message: "Compaction will run before the next turn.",
     }),
   }),
@@ -110,16 +117,16 @@ describe("useSlashCommands", () => {
     const count = h.result.current.command.items.length;
     expect(count).toBeGreaterThan(1);
     expect(h.result.current.command.highlight).toBe(0);
-    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowDown" }));
+    await press(h, "ArrowDown");
     await h.rerender();
     expect(h.result.current.command.highlight).toBe(1);
     // Wrap back to top from the last item.
     for (let i = 1; i < count; i += 1) {
-      h.result.current.command.onKeyDown(keyEvent({ key: "ArrowDown" }));
+      await press(h, "ArrowDown");
       await h.rerender();
     }
     expect(h.result.current.command.highlight).toBe(0);
-    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowUp" }));
+    await press(h, "ArrowUp");
     await h.rerender();
     expect(h.result.current.command.highlight).toBe(count - 1);
     await h.unmount();
@@ -127,7 +134,7 @@ describe("useSlashCommands", () => {
 
   test("Tab autocompletes the highlighted command name + trailing space", async () => {
     const h = await setup({ initialValue: "/comp", context: sessionCtx });
-    h.result.current.command.onKeyDown(keyEvent({ key: "Tab" }));
+    await press(h, "Tab");
     await h.rerender();
     expect(h.result.current.value).toBe("/compact ");
     await h.unmount();
@@ -136,12 +143,12 @@ describe("useSlashCommands", () => {
   test("Escape closes the palette but keeps the draft", async () => {
     const h = await setup({ initialValue: "/clear", context: sessionCtx });
     expect(h.result.current.command.open).toBe(true);
-    h.result.current.command.onKeyDown(keyEvent({ key: "Escape" }));
+    await press(h, "Escape");
     await h.rerender();
     expect(h.result.current.command.open).toBe(false);
     expect(h.result.current.value).toBe("/clear");
     // Editing re-opens.
-    h.result.current.setValue("/clear-");
+    await actRun(() => h.result.current.setValue("/clear-"));
     await h.rerender();
     expect(h.result.current.command.open).toBe(true);
     await h.unmount();
@@ -149,7 +156,7 @@ describe("useSlashCommands", () => {
 
   test("Enter runs a client command and clears the draft", async () => {
     const h = await setup({ initialValue: "/help", context: sessionCtx });
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     await flush();
     await h.rerender();
     expect(h.result.current.helpOpened).toBe(1);
@@ -160,7 +167,7 @@ describe("useSlashCommands", () => {
   test("Enter on a required-arg command without the arg does not run (waits at the hint)", async () => {
     const h = await setup({ initialValue: "/goal ", context: sessionCtx });
     expect(h.result.current.command.activeCommand?.name).toBe("goal");
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     await h.rerender();
     // Still /goal with no notice — nothing fired.
     expect(h.result.current.value).toBe("/goal ");
@@ -170,7 +177,7 @@ describe("useSlashCommands", () => {
 
   test("Enter on /goal pause runs and surfaces an ok notice", async () => {
     const h = await setup({ initialValue: "/goal pause", context: sessionCtx });
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     await flush();
     await h.rerender();
     expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Goal paused." });
@@ -189,7 +196,7 @@ describe("useSlashCommands", () => {
       }),
     };
     const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: true });
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     for (let i = 0; i < 5; i += 1) {
       await flush();
     }
@@ -249,7 +256,7 @@ describe("useSlashCommands", () => {
     // The destructive clear is present too (the exact-match the override would pick).
     expect(items.some((c) => c.name === "clear")).toBe(true);
 
-    await h.result.current.command.runAt(clearViewIndex);
+    await actRun(() => h.result.current.command.runAt(clearViewIndex));
     for (let i = 0; i < 5; i += 1) {
       await flush();
     }
@@ -259,6 +266,38 @@ describe("useSlashCommands", () => {
     expect(viewClears).toBe(1);
     expect(cleared).toBe(false);
     expect(h.result.current.notices.at(-1)).toEqual({ tone: "ok", message: "Local view cleared." });
+    await h.unmount();
+  });
+
+  test("pointer activation cannot execute an asynchronous command twice in one tick", async () => {
+    let runs = 0;
+    let resolveRun: (() => void) | undefined;
+    const slowCommand: SlashCommand = {
+      name: "slow",
+      description: "Slow side effect",
+      run: async () => {
+        runs += 1;
+        await new Promise<void>((resolve) => {
+          resolveRun = resolve;
+        });
+        return { status: "ok", keepDraft: true };
+      },
+    };
+    const h = await setup({ initialValue: "/slow", context: sessionCtx, commands: [slowCommand] });
+    let first: Promise<void> | undefined;
+    let second: Promise<void> | undefined;
+
+    await actRun(() => {
+      first = h.result.current.command.runAt(0);
+      second = h.result.current.command.runAt(0);
+    });
+    expect(runs).toBe(1);
+
+    await actRun(async () => {
+      resolveRun?.();
+      await Promise.all([first, second]);
+    });
+    expect(runs).toBe(1);
     await h.unmount();
   });
 
@@ -309,13 +348,13 @@ describe("useSlashCommands", () => {
     // clear-view sorts first, so highlight 0 is already clear-view; arrow-navigate
     // explicitly (down then up returns to 0) to mark the selection as deliberate.
     expect(h.result.current.command.items[0]?.name).toBe("clear-view");
-    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowDown" }));
+    await press(h, "ArrowDown");
     await h.rerender();
-    h.result.current.command.onKeyDown(keyEvent({ key: "ArrowUp" }));
+    await press(h, "ArrowUp");
     await h.rerender();
     expect(h.result.current.command.highlight).toBe(0);
 
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     for (let i = 0; i < 5; i += 1) {
       await flush();
     }
@@ -342,7 +381,7 @@ describe("useSlashCommands", () => {
     };
     const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: true });
     // No arrow keys — straight Enter.
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     for (let i = 0; i < 5; i += 1) {
       await flush();
     }
@@ -366,7 +405,7 @@ describe("useSlashCommands", () => {
       }),
     };
     const h = await setup({ initialValue: "/Clear", context: ctx, confirmAnswer: true });
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     for (let i = 0; i < 5; i += 1) {
       await flush();
     }
@@ -386,7 +425,7 @@ describe("useSlashCommands", () => {
       }),
     };
     const h = await setup({ initialValue: "/clear", context: ctx, confirmAnswer: false });
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     for (let i = 0; i < 5; i += 1) {
       await flush();
     }
@@ -401,7 +440,7 @@ describe("useSlashCommands", () => {
     const h = await setup({ initialValue: "/clear", context: sessionCtx });
     expect(h.result.current.command.isCommandDraft).toBe(true);
     expect(h.result.current.command.open).toBe(true);
-    h.result.current.command.onKeyDown(keyEvent({ key: "Escape" }));
+    await press(h, "Escape");
     await h.rerender();
     // Popover closed, but the draft is still a command — the composer uses this
     // to keep "/clear" from being sent to the agent as chat.
@@ -421,7 +460,7 @@ describe("useSlashCommands", () => {
 
   test("runAt out of range is a no-op", async () => {
     const h = await setup({ initialValue: "/clear", context: sessionCtx });
-    await h.result.current.command.runAt(999);
+    await actRun(() => h.result.current.command.runAt(999));
     await h.rerender();
     expect(h.result.current.notices).toHaveLength(0);
     await h.unmount();
@@ -431,7 +470,7 @@ describe("useSlashCommands", () => {
     const h = await setup({ initialValue: "/clear", context: undefined });
     // open still derives from value (commands have no perm gate for help), but
     // running does nothing without a context.
-    h.result.current.command.onKeyDown(keyEvent({ key: "Enter" }));
+    await press(h, "Enter");
     await h.rerender();
     expect(h.result.current.notices).toHaveLength(0);
     await h.unmount();

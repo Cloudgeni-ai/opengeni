@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { sanitizeEventPayload, sanitizeEventString } from "../src/event-payload-sanitizer";
+import { SESSION_EVENT_PAYLOAD_MAX_BYTES, sessionEventJsonBytes } from "@opengeni/contracts";
+import {
+  sanitizeEventPayload,
+  sanitizeEventString,
+  sanitizeModelPayload,
+} from "../src/event-payload-sanitizer";
 
 const NUL = String.fromCharCode(0);
 const REPLACEMENT = "�";
@@ -125,7 +130,10 @@ describe("sanitizeEventPayload (deep walk)", () => {
       mcpCredentialUpdates: [
         {
           id: "crm",
-          headers: { Authorization: "Bearer rotated-secret", "X-Session": "turn-2" },
+          headers: {
+            Authorization: "Bearer rotated-secret",
+            "X-Session": "turn-2",
+          },
         },
       ],
     }) as unknown as {
@@ -176,6 +184,41 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(cleaned.headers).toBe("[redacted]");
     expect((cleaned.nested as Record<string, unknown>).credentialEncrypted).toBe("[redacted]");
   });
+
+  test("bounds cyclic and multi-megabyte payloads before deep sanitation", () => {
+    const payload: Record<string, unknown> = {
+      id: "cycle-output",
+      token: "must-not-survive",
+      output: "界😀".repeat(500_000),
+    };
+    payload.self = payload;
+
+    const cleaned = sanitizeEventPayload(payload) as Record<string, unknown>;
+    expect(sessionEventJsonBytes(cleaned)).toBeLessThanOrEqual(SESSION_EVENT_PAYLOAD_MAX_BYTES);
+    expect(JSON.stringify(cleaned)).not.toContain("must-not-survive");
+    expect(JSON.stringify(cleaned)).toContain("depth boundary");
+    expect(cleaned.truncation).toMatchObject({
+      truncated: true,
+      fullEvidence: { available: false, reason: "not_retained" },
+    });
+  });
+
+  test("preserves Date JSON semantics across audit and model sanitizers", () => {
+    const timestamp = new Date("2026-07-19T03:00:00.000Z");
+    const invalid = new Date(Number.NaN);
+    expect(sanitizeEventPayload({ timestamp }) as unknown).toEqual({
+      timestamp: timestamp.toISOString(),
+    });
+    expect(sanitizeModelPayload({ timestamp }) as unknown).toEqual({
+      timestamp: timestamp.toISOString(),
+    });
+    expect(sanitizeEventPayload({ invalid }) as unknown).toEqual({
+      invalid: null,
+    });
+    expect(sanitizeModelPayload({ invalid }) as unknown).toEqual({
+      invalid: null,
+    });
+  });
 });
 
 describe("session_history_items jsonb safety (durable SDK item)", () => {
@@ -197,7 +240,7 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     // The raw nested value is NOT jsonb-safe — this is what makes the INSERT throw.
     expect(isJsonbSafe(historyItem.output.text)).toBe(false);
 
-    const cleaned = sanitizeEventPayload(historyItem);
+    const cleaned = sanitizeModelPayload(historyItem);
 
     // After sanitization the nested value is jsonb-safe.
     expect(isJsonbSafe(cleaned.output.text)).toBe(true);
@@ -215,5 +258,44 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     const reparsed = JSON.parse(JSON.stringify(cleaned)) as typeof cleaned;
     expect(reparsed.output.text).toBe(`build log  chunk ${REPLACEMENT} ${VALID_PAIR} done`);
     expect(reparsed.type).toBe("function_call_result");
+  });
+
+  test("repairs invalid text without redacting model-visible tool arguments", () => {
+    const item = {
+      type: "function_call",
+      callId: "call_secret_arg",
+      name: "configure_provider",
+      arguments: {
+        token: `actual${NUL}value`,
+        headers: { authorization: "Bearer model-visible" },
+      },
+    };
+    expect(sanitizeModelPayload(item)).toEqual({
+      ...item,
+      arguments: {
+        token: "actualvalue",
+        headers: { authorization: "Bearer model-visible" },
+      },
+    });
+    expect(sanitizeEventPayload(item)).toMatchObject({
+      arguments: { token: "[redacted]", headers: "[redacted]" },
+    });
+  });
+
+  test("makes cyclic and over-depth model payloads explicit and JSON-safe", () => {
+    const cyclic: Record<string, unknown> = { type: "function_call_result" };
+    cyclic.output = cyclic;
+    const cycleCleaned = sanitizeModelPayload(cyclic) as Record<string, unknown>;
+    expect(JSON.stringify(cycleCleaned)).toContain("omitted cyclic model payload");
+
+    const deep: Record<string, unknown> = {};
+    let cursor = deep;
+    for (let index = 0; index < 80; index += 1) {
+      const child: Record<string, unknown> = {};
+      cursor.child = child;
+      cursor = child;
+    }
+    const depthCleaned = sanitizeModelPayload(deep);
+    expect(JSON.stringify(depthCleaned)).toContain("database-safety depth");
   });
 });

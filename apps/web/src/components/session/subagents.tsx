@@ -1,13 +1,11 @@
 // The subagent-lineage surface: the shared pieces that render a session's
 // spawned workers. It is deliberately DECOUPLED from goals — a session's agent
-// tree is orthogonal to whether it carries a goal — and one compact tree
-// component ({@link SubagentTree}) backs every home:
+// tree is orthogonal to whether it carries a goal. One compact tree component
+// ({@link SubagentTree}) backs its single home:
 //   - ComposerAgentsPill (./composer-agents-pill.tsx) — the floating "N agents"
 //     pill above the composer that EXPANDS upward into the lineage popover (the
 //     glanceable, front-and-center hero); reuses {@link SubagentTree} +
 //     {@link SubagentsLabel} from here.
-//   - AgentsPanel — the persistent, roomy "Agents" right-dock tab (the deep view
-//     a manager watches while orchestrating many workers).
 // SpawnedByBreadcrumb is the inverse link a child session shows back to the
 // manager that spawned it.
 //
@@ -21,11 +19,16 @@
 import { formatRelativeTime } from "@opengeni/react";
 import type { LineageNode, SessionStatus, SessionSummary } from "@opengeni/sdk";
 import { Link } from "@tanstack/react-router";
-import { BotIcon, ChevronRightIcon, Loader2Icon } from "lucide-react";
+import { BotIcon, ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { STATUS_META, StatusDot, type StatusTone } from "@/components/ui/status-dot";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 
 /** Children (depth 0) plus one level of grandchildren (depth 1) — the tree goes
@@ -95,8 +98,9 @@ function SubagentRow({
   const [open, setOpen] = useState(false);
   const title =
     node.session.title?.trim() || node.session.initialMessage?.trim() || "Untitled session";
-  const tone = sessionStatusTone(node.session.status);
-  const live = isLiveStatus(node.session.status);
+  const paused = node.session.effectiveControl.state === "paused";
+  const tone = paused ? "waiting" : sessionStatusTone(node.session.status);
+  const live = !paused && isLiveStatus(node.session.status);
   const canExpand = depth < MAX_DEPTH && node.children.length > 0;
 
   // The trailing hint stays calm and compact for the common case (relative
@@ -108,7 +112,9 @@ function SubagentRow({
       ? "Failed"
       : node.session.status === "requires_action"
         ? "Needs you"
-        : null;
+        : paused
+          ? "Paused"
+          : null;
   const hint = attentionWord ?? formatRelativeTime(node.session.updatedAt);
   const hintClass = attentionWord ? cn(STATUS_META[tone].text, "font-medium") : "text-fg-subtle";
 
@@ -178,86 +184,104 @@ export function SubagentsLabel({ count }: { count: number }) {
   return (
     <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
       <BotIcon className="size-3.5" />
-      Subagents
+      Agents
       {count > 0 ? <span className="text-fg-subtle/70">· {count}</span> : null}
     </div>
   );
 }
 
-function LineageLoading() {
-  return (
-    <p className="flex items-center gap-2 px-0.5 py-1 text-xs text-fg-subtle">
-      <Loader2Icon className="size-3.5 animate-spin" />
-      Loading lineage
-    </p>
-  );
-}
-
-/* --- the Agents dock tab (persistent, full-height home) --------------------- */
-
-/**
- * The full-height lineage tree for the right dock's "Agents" tab — the deep,
- * goal-independent workspace for a manager actively orchestrating workers, live
- * as agents spawn and change status. Presentational: the dock owns the single
- * {@link useSessionLineage} read (so the tab count and this panel stay one
- * source of truth) and feeds children in. The tab is hidden when a session has
- * no children, so the empty state here is a belt-and-suspenders fallback.
- */
-export function AgentsPanel({
-  workspaceId,
-  nodes,
-  loading,
-  onNavigate,
-}: {
-  workspaceId: string;
-  nodes: LineageNode[];
-  loading: boolean;
-  onNavigate?: (() => void) | undefined;
-}) {
-  const count = nodes.length;
-  return (
-    <ScrollArea className="h-full min-w-0">
-      <div className="min-w-0 p-2.5">
-        <SubagentsLabel count={count} />
-        {loading && count === 0 ? (
-          <div className="mt-2">
-            <LineageLoading />
-          </div>
-        ) : count === 0 ? (
-          <p className="mt-2 px-0.5 py-1 text-xs text-fg-subtle">No agents spawned yet.</p>
-        ) : (
-          <div className="mt-2">
-            <SubagentTree workspaceId={workspaceId} nodes={nodes} onNavigate={onNavigate} />
-          </div>
-        )}
-      </div>
-    </ScrollArea>
-  );
-}
-
 /* --- "spawned by" breadcrumb (child sessions link back to their parent) ----- */
 
-export function SpawnedByBreadcrumb({
+export function SessionAncestryBreadcrumb({
   workspaceId,
-  parent,
+  ancestors,
+  error,
 }: {
   workspaceId: string;
-  /** The direct parent (last ancestor), or null when this session has none. */
-  parent: SessionSummary | null;
+  /** Root-to-direct-parent order. */
+  ancestors: SessionSummary[];
+  error?: Error | null;
 }): ReactNode {
-  if (!parent) {
+  if (error) {
+    return <span className="text-2xs text-status-failed">Session ancestry unavailable</span>;
+  }
+  if (ancestors.length === 0) {
     return null;
   }
-  const label = parent.title?.trim() || parent.initialMessage?.trim() || "manager session";
+  const parent = ancestors.at(-1)!;
+  const middle = ancestors.slice(1, -1);
+  return (
+    <nav aria-label="Session ancestry" className="flex min-w-0 items-center text-2xs text-fg-muted">
+      <Link
+        to="/workspaces/$workspaceId/sessions/$sessionId"
+        params={{ workspaceId, sessionId: parent.id }}
+        title={`Back to ${lineageLabel(parent)}`}
+        className="inline-flex min-w-0 items-center gap-1 outline-none transition-colors hover:text-fg focus-visible:text-fg sm:hidden"
+      >
+        <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
+        <span className="truncate">{lineageLabel(parent)}</span>
+      </Link>
+      <div className="hidden min-w-0 items-center sm:flex">
+        <BreadcrumbLink workspaceId={workspaceId} session={ancestors[0]!} />
+        {middle.length > 0 ? (
+          <>
+            <ChevronRightIcon className="mx-0.5 size-3 shrink-0 text-fg-subtle" />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="inline-flex size-5 items-center justify-center rounded text-fg-subtle hover:bg-surface-2 hover:text-fg"
+                  aria-label={`${middle.length} intermediate ancestor sessions`}
+                >
+                  <EllipsisIcon className="size-3" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="max-w-80">
+                {middle.map((session) => (
+                  <DropdownMenuItem key={session.id} asChild>
+                    <Link
+                      to="/workspaces/$workspaceId/sessions/$sessionId"
+                      params={{ workspaceId, sessionId: session.id }}
+                      className="min-w-0"
+                    >
+                      <span className="truncate">{lineageLabel(session)}</span>
+                    </Link>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </>
+        ) : null}
+        {ancestors.length > 1 ? (
+          <>
+            <ChevronRightIcon className="mx-0.5 size-3 shrink-0 text-fg-subtle" />
+            <BreadcrumbLink workspaceId={workspaceId} session={parent} />
+          </>
+        ) : null}
+      </div>
+    </nav>
+  );
+}
+
+function BreadcrumbLink({
+  workspaceId,
+  session,
+}: {
+  workspaceId: string;
+  session: SessionSummary;
+}) {
   return (
     <Link
       to="/workspaces/$workspaceId/sessions/$sessionId"
-      params={{ workspaceId, sessionId: parent.id }}
-      title={`Spawned by ${label}`}
-      className="inline-flex min-w-0 items-center gap-1 text-2xs text-fg-muted outline-none transition-colors hover:text-fg focus-visible:text-fg"
+      params={{ workspaceId, sessionId: session.id }}
+      title={lineageLabel(session)}
+      className="max-w-40 truncate outline-none transition-colors hover:text-fg focus-visible:text-fg"
     >
-      <ChevronRightIcon className="size-3 shrink-0 rotate-180" />
-      <span className="min-w-0 truncate">spawned by {label}</span>
+      {lineageLabel(session)}
     </Link>
   );
+}
+
+function lineageLabel(session: SessionSummary): string {
+  return session.title?.trim() || session.initialMessage?.trim() || "Untitled session";
 }

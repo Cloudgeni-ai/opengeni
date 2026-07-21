@@ -246,11 +246,12 @@ function MemoryRow({
  */
 function sandboxRowTitle(item: SandboxItem): string {
   if (item.name === "sandbox.provision") {
-    return item.status === "failed"
-      ? "Sandbox didn’t start"
-      : item.status === "running"
-        ? "Starting sandbox"
-        : "Sandbox ready";
+    if (item.status === "failed") return "Sandbox didn’t start";
+    if (item.status === "running") return "Starting sandbox";
+    if (item.origin === "resumed") return "Sandbox reattached";
+    if (item.origin === "restored") return "Sandbox restored";
+    if (item.origin === "created") return "Sandbox created";
+    return "Sandbox ready";
   }
   return toolDisplayName(item.name);
 }
@@ -294,25 +295,13 @@ function WorkerRow({
           : cancelled
             ? "Worker interrupted"
             : "Worker spawned"
-      : item.action === "interrupt"
-        ? (() => {
-            const verb = item.mode === "steer" ? "Steering" : "Stopping";
-            const done = item.mode === "steer" ? "Worker steered" : "Worker stopped";
-            return running
-              ? `${verb} worker`
-              : failed
-                ? "Worker interrupt failed"
-                : cancelled
-                  ? "Worker interrupted"
-                  : done;
-          })()
-        : running
-          ? "Messaging worker"
-          : failed
-            ? "Worker message failed"
-            : cancelled
-              ? "Worker interrupted"
-              : "Worker messaged";
+      : running
+        ? "Messaging worker"
+        : failed
+          ? "Worker message failed"
+          : cancelled
+            ? "Worker interrupted"
+            : "Worker messaged";
   // A worker is a first-class actor but still a STEP on the rail — a borderless
   // row (no card), aligned to its sibling tool rows: the chevron column is an
   // empty spacer (a worker doesn't expand), then the bot glyph, then the title

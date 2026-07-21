@@ -5,7 +5,6 @@
       "id": "00000000-0000-4000-8000-000000000102",
       "occurredAt": "2026-01-02T10:00:02.000Z",
       "text": "Run the tests and report the result.",
-      "pending": false,
       "resources": [
         {
           "kind": "repository",
@@ -73,7 +72,6 @@
         "id": "00000000-0000-4000-8000-000000000102",
         "occurredAt": "2026-01-02T10:00:02.000Z",
         "text": "Run the tests and report the result.",
-        "pending": false,
         "resources": [
           {
             "kind": "repository",

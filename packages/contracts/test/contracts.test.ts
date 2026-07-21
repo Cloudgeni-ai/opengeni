@@ -21,6 +21,7 @@ import {
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   OAuthStartRequest,
+  OPENGENI_API_CONTRACT_REVISION,
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
@@ -209,6 +210,7 @@ describe("contracts", () => {
 
   test("accepts client config payloads", () => {
     const payload = ClientConfig.parse({
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       deploymentRevision: "test-sha",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
@@ -249,6 +251,7 @@ describe("contracts", () => {
       },
     ];
     const payload = ClientConfig.parse({
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
       deploymentRevision: "test-sha",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   activateRigVersion,
@@ -31,11 +31,19 @@ let shared: SharedTestDatabase | null = null;
 let client: DbClient;
 let db: Database;
 
+// This file verifies serialized rig invariants against real PostgreSQL. Parallel
+// repository runs can queue those transactions behind other database suites, so
+// use a finite file-scoped ceiling instead of canceling live transactions at
+// Bun's five-second unit default.
+setDefaultTimeout(30_000);
+
 async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
   const [account] = await shared!.admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [workspace] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
+  await shared!
+    .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -48,6 +56,8 @@ async function twoWorkspacesOneAccount(): Promise<{ accountId: string; a: string
     insert into workspaces (account_id, name) values (${account!.id}, 'ws-a') returning id`;
   const [b] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws-b') returning id`;
+  await shared!
+    .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${a!.id}, ${account!.id}), (${b!.id}, ${account!.id})`;
   return { accountId: account!.id, a: a!.id, b: b!.id };
 }
 

@@ -11,30 +11,37 @@ import {
   type ToolRef,
 } from "@opengeni/contracts";
 import {
-  enqueueSessionTurn,
+  addSessionSystemUpdate,
+  enqueueSessionWorkflowWakeIfRunnable,
   evaluateGoalContinuation,
   getBillingBalance,
   getLatestStartedSessionTurn,
   getWorkspaceModelPolicy,
-  getSessionEvent,
   getSessionGoal,
   isCodexBilledTurn,
   recordUsageEvent,
   requireSession,
-  setSessionGoalLastContinuationTurn,
-  setSessionGoalStatus,
   sumUsageQuantity,
   type Database,
 } from "@opengeni/db";
-import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
-import type {
-  ActivityServices,
-  MaybeContinueGoalInput,
-  MaybeContinueGoalResult,
-  PauseGoalForInterruptInput,
-} from "./types";
+import { appendAndPublishEvents } from "@opengeni/events";
+import type { ActivityServices, MaybeContinueGoalInput, MaybeContinueGoalResult } from "./types";
 
 export function createGoalActivities(services: () => Promise<ActivityServices>) {
+  async function enqueueGoalRetryWake(input: MaybeContinueGoalInput): Promise<void> {
+    const { db } = await services();
+    await enqueueSessionWorkflowWakeIfRunnable(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      temporalWorkflowId: input.workflowId,
+      reason: "goal_retry",
+      // A permanently invalid goal must not become a tight workflow loop. One
+      // durable retry after a short delay preserves liveness without scanning.
+      notBefore: new Date(Date.now() + 30_000),
+    });
+  }
+
   async function maybeContinueGoal(
     input: MaybeContinueGoalInput,
   ): Promise<MaybeContinueGoalResult> {
@@ -144,52 +151,35 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       return { action: "none" };
     }
     const prompt = goalContinuationPrompt(decision.goal, decision.autoContinuation, decision.cap);
-    const [continuationEvent] = await appendAndPublishEvents(
-      db,
-      bus,
-      input.workspaceId,
-      input.sessionId,
-      [
-        {
-          type: "goal.continuation",
-          payload: {
-            goalId: decision.goal.id,
-            text: prompt,
-            autoContinuation: decision.autoContinuation,
-            maxAutoContinuations: decision.cap,
-            goalVersion: decision.goal.version,
-          },
-        },
-      ],
-    );
-    if (!continuationEvent) {
-      throw new Error("failed to append goal continuation trigger event");
-    }
-    const turn = await enqueueSessionTurn(db, {
+    const update = await addSessionSystemUpdate(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       sessionId: input.sessionId,
-      triggerEventId: continuationEvent.id,
-      temporalWorkflowId: input.workflowId,
-      source: "goal",
-      prompt,
-      resources: [],
-      // Continuations keep the session tool surface and force the first-party
-      // server so the goal_complete/goal_pause escape hatches stay reachable.
-      tools: withFirstPartyTools(settings, session.tools),
-      model: continuationModel,
-      reasoningEffort: continuationReasoningEffort,
-      sandboxBackend: session.sandboxBackend,
-      metadata: { goalId: decision.goal.id, autoContinuation: decision.autoContinuation },
-    });
-    await setSessionGoalLastContinuationTurn(db, input.workspaceId, input.sessionId, turn.id);
-    await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-      {
-        type: "turn.queued",
-        turnId: turn.id,
-        payload: { turnId: turn.id, triggerEventId: continuationEvent.id, source: turn.source },
+      kind: "goal_continuation",
+      classification: "info",
+      sourceId: decision.goal.id,
+      dedupeKey: `goal-continuation:${decision.goal.id}:${decision.goal.version}:${decision.autoContinuation}`,
+      summary: prompt,
+      payload: {
+        type: "goal_continuation",
+        goalId: decision.goal.id,
+        goalVersion: decision.goal.version,
+        autoContinuation: decision.autoContinuation,
+        maxAutoContinuations: decision.cap,
+        prompt,
+        policy: {
+          model: continuationModel,
+          reasoningEffort: continuationReasoningEffort,
+          tools: withFirstPartyTools(settings, session.tools),
+          sandboxBackend: session.sandboxBackend,
+        },
       },
-    ]);
+      lineage: { goalId: decision.goal.id },
+    });
+    if (update.reason === "session_cancelled") return { action: "none" };
+    if (update.added && update.events.length > 0) {
+      await bus.publish(input.workspaceId, input.sessionId, update.events);
+    }
     // Continuations count as agent runs for limits/metering parity with
     // user-initiated and scheduled turns.
     await recordUsageEvent(db, {
@@ -198,87 +188,17 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       eventType: "agent_run.created",
       quantity: 1,
       unit: "run",
-      sourceResourceType: "session_turn",
-      sourceResourceId: turn.id,
-      idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${turn.id}`,
+      sourceResourceType: "session_system_update",
+      sourceResourceId: update.update.id,
+      idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${update.update.id}`,
     });
     return { action: "continue" };
   }
 
-  async function pauseGoalForInterrupt(input: PauseGoalForInterruptInput): Promise<void> {
-    const { db, bus } = await services();
-    if (input.triggerEventId) {
-      const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
-      if (isSteerInterrupt(trigger)) {
-        return;
-      }
-    }
-    await pauseActiveGoalOnInterrupt(db, bus, input.workspaceId, input.sessionId);
-  }
-
   return {
+    enqueueGoalRetryWake,
     maybeContinueGoal,
-    pauseGoalForInterrupt,
   };
-}
-
-/**
- * True when an interrupt's trigger event is a STEER: `user.interrupt` tagged
- * `reason: "steer"`, sent by `OpenGeniClient.steerMessage`. Steering cancels
- * the running turn only to deliver the steered message next — it redirects
- * the work rather than stopping it, so an active goal keeps going. Every
- * other user interrupt (the stop button, a plain `interrupt()` call) is the
- * explicit act of stopping and pauses the goal.
- */
-export function isSteerInterrupt(
-  trigger: { type: string; payload: unknown } | null | undefined,
-): boolean {
-  if (!trigger || trigger.type !== "user.interrupt") {
-    return false;
-  }
-  const payload = trigger.payload;
-  return (
-    typeof payload === "object" &&
-    payload !== null &&
-    (payload as { reason?: unknown }).reason === "steer"
-  );
-}
-
-/**
- * A user interrupt is the explicit act of stopping, so it pauses an active
- * goal. Shared by the idle-interrupt activity and `interruptActiveTurn` so the
- * loop never auto-continues a goal the user just stopped. Callers gate this
- * on `isSteerInterrupt` first: steer interrupts must NOT pause the goal.
- * No-op when the session has no goal or it is not active.
- */
-export async function pauseActiveGoalOnInterrupt(
-  db: Database,
-  bus: EventBus,
-  workspaceId: string,
-  sessionId: string,
-): Promise<void> {
-  const goal = await getSessionGoal(db, workspaceId, sessionId);
-  if (!goal || goal.status !== "active") {
-    return;
-  }
-  const { goal: paused, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
-    status: "paused",
-    pausedReason: "user_interrupt",
-  });
-  if (changed) {
-    await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-      {
-        type: "goal.paused",
-        payload: {
-          goalId: paused.id,
-          actor: "user",
-          reason: "user_interrupt",
-          autoContinuations: paused.autoContinuations,
-          noProgressStreak: paused.noProgressStreak,
-        },
-      },
-    ]);
-  }
 }
 
 export function goalContinuationPrompt(
@@ -290,6 +210,7 @@ export function goalContinuationPrompt(
   return [
     `[GOAL CONTINUATION ${counter}] The session goal is not done. Goal: ${goal.text}.`,
     `Success criteria: ${goal.successCriteria ?? "none specified"}.`,
+    "Continue from the existing conversation state. Do not repeat completed session setup, persistent metadata settings, or context checks merely because this is a new continuation turn.",
     "Continue working toward the goal now. If it is actually complete, call opengeni__goal_complete with concrete evidence.",
     "If you are blocked or continuing is not productive, call opengeni__goal_pause with your rationale.",
     "You may revise the goal with opengeni__goal_update. Do not stop without one of these explicit actions.",

@@ -7,8 +7,11 @@ import {
   UpdateWorkspaceModelPolicyRequest,
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
+  WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
+  workspaceControlUtf8Bytes,
   type AccessContext,
   type Permission,
 } from "@opengeni/contracts";
@@ -23,6 +26,7 @@ import {
   grantWorkspaceAccess,
   listScheduledTasks,
   listWorkspaceMembers,
+  listWorkspaceControlEvents,
   listWorkspacesForSubject,
   removeWorkspaceMember,
   requireWorkspace,
@@ -32,6 +36,7 @@ import {
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
 } from "@opengeni/db";
+import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission, requireAccessContext, requireAccessGrant } from "@opengeni/core";
@@ -40,8 +45,11 @@ import type { ApiRouteDeps } from "@opengeni/core";
 import {
   assertWorkspaceDeletable,
   assertWorkspaceMemberRemovable,
+  controlHumanWorkspace,
   resolveMemberSubjectId,
 } from "@opengeni/core";
+import { boundedLimit } from "../http/common";
+import { sseWorkspaceControlStream } from "../http/sse";
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/access/me", async (c) => {
@@ -161,6 +169,56 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       allowedModels: payload.allowedModels ?? null,
     });
     return c.json(policy);
+  });
+
+  app.post("/v1/workspaces/:workspaceId/inference-control", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
+    const parsed = WorkspaceInferenceControlRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid workspace inference-control request" });
+    }
+    return c.json(
+      await controlHumanWorkspace(
+        { db: deps.db, bus: deps.bus, workflowClient: deps.workflowClient },
+        { accountId: grant.accountId, workspaceId, subjectId: grant.subjectId },
+        parsed.data,
+      ),
+    );
+  });
+
+  app.get("/v1/workspaces/:workspaceId/control-events", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
+    const limit = boundedLimit(c.req.query("limit"));
+    const fetched = await listWorkspaceControlEvents(deps.db, workspaceId, after, limit + 1);
+    const countHasMore = fetched.length > limit;
+    const page = boundWorkspaceControlHttpPage(fetched.slice(0, limit));
+    const truncated = countHasMore || page.truncated;
+    c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
+    c.header("X-OpenGeni-Page-Truncated", String(truncated));
+    if (page.nextSequence !== null) {
+      c.header("X-OpenGeni-Next-After", String(page.nextSequence));
+    }
+    return c.json(page.events);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/control-events/stream", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const after = Math.max(0, Number.parseInt(c.req.query("after") ?? "0", 10) || 0);
+    return await sseWorkspaceControlStream(
+      deps.db,
+      deps.bus,
+      workspaceId,
+      after,
+      c.req.raw.signal,
+      { observability: deps.observability },
+    );
   });
 
   app.put("/v1/workspaces/:workspaceId/default-rig", async (c) => {

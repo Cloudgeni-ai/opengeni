@@ -78,6 +78,20 @@ export function PierreDiff({
   className,
 }: PierreDiffProps) {
   const [failed, setFailed] = useState(false);
+  const [forcedColors, setForcedColors] = useState(false);
+
+  // Pierre's rich renderer distinguishes additions/deletions primarily through
+  // foreground and background colors inside a shadow root. In Windows forced-
+  // colors mode those paints intentionally collapse, so expose the literal
+  // unified patch (+/- markers) instead of leaving changed lines ambiguous.
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const query = window.matchMedia("(forced-colors: active)");
+    const update = () => setForcedColors(query.matches);
+    update();
+    query.addEventListener?.("change", update);
+    return () => query.removeEventListener?.("change", update);
+  }, []);
 
   // Probe the import once so a hard failure (peer missing) shows `fallback`
   // rather than a Suspense boundary that never resolves. Skipped when `plain`.
@@ -92,11 +106,18 @@ export function PierreDiff({
     };
   }, [plain]);
 
-  if (plain || failed) {
+  if (plain || failed || forcedColors) {
     // `plain` opts out of highlighting; `failed` = `@pierre/diffs` not installed.
     // Render the caller's fallback, or a plain (unhighlighted) patch dump — NOT a
     // second hunk renderer. One highlighted renderer (Pierre) + a text degrade.
-    return <div className={className}>{fallback ?? <PlainPatch diff={diff} />}</div>;
+    return (
+      <div
+        className={className}
+        data-opengeni-plain-diff={forcedColors ? "forced-colors" : "fallback"}
+      >
+        {fallback ?? <PlainPatch diff={diff} />}
+      </div>
+    );
   }
 
   // Default to the dark theme: the host UI is dark-first, and Pierre's own
@@ -106,7 +127,14 @@ export function PierreDiff({
     diffStyle: layout,
     overflow,
     stickyHeader: true,
-    ...(theme ? { theme } : { theme: { dark: "github-dark", light: "github-light" } }),
+    ...(theme
+      ? { theme }
+      : {
+          theme: {
+            dark: "github-dark-high-contrast",
+            light: "github-light-high-contrast",
+          },
+        }),
     themeType: themeType ?? "dark",
   };
 
@@ -119,6 +147,20 @@ export function PierreDiff({
     "--diffs-light-bg": "var(--og-color-bg)",
     "--diffs-bg-buffer-override": "var(--og-color-surface-1)",
     "--diffs-bg-separator-override": "var(--og-color-surface-1)",
+    "--diffs-addition-color-override": "var(--og-color-status-idle)",
+    "--diffs-deletion-color-override": "var(--og-color-status-failed)",
+    "--diffs-fg-number-addition-override": "var(--og-color-status-idle)",
+    "--diffs-fg-number-deletion-override": "var(--og-color-status-failed)",
+    "--diffs-bg-addition-override":
+      "color-mix(in oklab, var(--og-color-status-idle) 12%, var(--og-color-bg))",
+    "--diffs-bg-deletion-override":
+      "color-mix(in oklab, var(--og-color-status-failed) 12%, var(--og-color-bg))",
+    "--diffs-bg-addition-emphasis-override":
+      "color-mix(in oklab, var(--og-color-status-idle) 22%, var(--og-color-bg))",
+    "--diffs-bg-deletion-emphasis-override":
+      "color-mix(in oklab, var(--og-color-status-failed) 22%, var(--og-color-bg))",
+    "--diffs-header-font-family": "var(--og-font-sans)",
+    "--diffs-font-family": "var(--og-font-mono)",
     "--diffs-font-size": "var(--og-code-font-size)",
     "--diffs-line-height": "var(--og-code-line-height)",
   } as CSSProperties;
@@ -158,12 +200,17 @@ function PlainPatch({ diff }: { diff: GitFileDiff[] }) {
       {diff.map((file) => (
         <pre
           key={file.path}
+          aria-label={`Diff for ${file.path}`}
           className="mb-2 overflow-auto whitespace-pre rounded-og-sm border border-og-border bg-og-bg/60 p-2.5 font-og-mono text-og-xs leading-5"
+          role="region"
+          tabIndex={0}
         >
           {gitFileDiffToPatch(file)
             .split("\n")
             .map((line, index) => (
               <span
+                // Patch line position is the stable identity in this immutable plain-text fallback.
+                // oxlint-disable-next-line react/no-array-index-key
                 key={index}
                 className={cn(
                   "block",

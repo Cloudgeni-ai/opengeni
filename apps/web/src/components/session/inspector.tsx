@@ -14,6 +14,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { eventDisplayLabel, isTerminalSessionStatus, sanitizeEventForDisplay } from "@/lib/events";
 import { formatTimestamp } from "@/lib/format";
+import { withOccurrenceKeys } from "@/lib/react-key";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import type { Session, SessionEvent } from "@/types";
 
@@ -148,29 +149,31 @@ export function SessionInspector(props: {
                   </p>
                 ) : (
                   <div className="min-w-0 space-y-2">
-                    {repositories.map((resource, index) => (
-                      <div
-                        key={`${resource.uri}:${index}`}
-                        className="min-w-0 rounded-md border border-border bg-bg/35 p-2"
-                      >
-                        <div className="min-w-0 truncate text-xs font-medium">
-                          {repositoryDisplayName(resource)}
-                        </div>
-                        <div className="mt-1 min-w-0 truncate font-mono text-2xs text-fg-subtle">
-                          {resource.uri}
-                        </div>
-                        <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-2xs text-fg-subtle">
-                          <span className="max-w-full truncate rounded border border-border px-1.5 py-0.5">
-                            ref {resource.ref}
-                          </span>
-                          {resource.mountPath ? (
+                    {withOccurrenceKeys(repositories, (resource) => JSON.stringify(resource)).map(
+                      ({ key, item: resource }) => (
+                        <div
+                          key={key}
+                          className="min-w-0 rounded-md border border-border bg-bg/35 p-2"
+                        >
+                          <div className="min-w-0 truncate text-xs font-medium">
+                            {repositoryDisplayName(resource)}
+                          </div>
+                          <div className="mt-1 min-w-0 truncate font-mono text-2xs text-fg-subtle">
+                            {resource.uri}
+                          </div>
+                          <div className="mt-2 flex min-w-0 flex-wrap gap-1.5 text-2xs text-fg-subtle">
                             <span className="max-w-full truncate rounded border border-border px-1.5 py-0.5">
-                              {resource.mountPath}
+                              ref {resource.ref}
                             </span>
-                          ) : null}
+                            {resource.mountPath ? (
+                              <span className="max-w-full truncate rounded border border-border px-1.5 py-0.5">
+                                {resource.mountPath}
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      ),
+                    )}
                   </div>
                 )}
               </InspectorSection>

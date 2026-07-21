@@ -3,6 +3,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { installExactPaths, isInstallRedirectPath } from "../routes/install";
 
 const githubConnectPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/connect$/;
+const githubInstallationLinkPathPattern = /^\/v1\/workspaces\/[^/]+\/github\/installations$/;
 
 export function requireAccessKey(settings: Settings): MiddlewareHandler {
   return async (c, next) => {
@@ -64,9 +65,17 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (githubConnectPathPattern.test(path)) {
     return true;
   }
+  // The OAuth callback renders a same-origin POST form for choosing an existing
+  // installation's repositories. The signed OAuth state + per-installation and
+  // per-repository tickets are the coarse-boundary credential; the route still
+  // requires github:manage from the ordinary access resolver or a bounded
+  // configured-token browser handoff before binding.
+  if (c.req.method === "POST" && githubInstallationLinkPathPattern.test(path)) {
+    return true;
+  }
   // The get.<domain> install-serving routes (install.sh/.ps1/uninstall.sh/
   // minisign pub + the release-binary redirects). Reached by a fresh machine
-  // with no credentials; the bodies carry no secrets (dossier §23.1).
+  // with no credentials; the bodies carry no secrets.
   if (installExactPaths.has(path) || isInstallRedirectPath(path)) {
     return true;
   }

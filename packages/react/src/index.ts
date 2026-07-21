@@ -1,3 +1,6 @@
+// oxlint-disable-next-line typescript/triple-slash-reference -- package consumers must load the ambient type for this optional untyped peer without emitting a runtime import.
+/// <reference path="./types/external.d.ts" />
+
 // @opengeni/react — hooks + styled components on @opengeni/sdk.
 //
 // Import the styles once in your Tailwind entry CSS:
@@ -11,8 +14,17 @@ export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";
 export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
-export { useSessionEvents } from "./hooks/use-session-events";
+export {
+  SESSION_EVENT_BROWSER_MAX_BYTES,
+  SESSION_EVENT_BROWSER_MAX_COUNT,
+  SESSION_EVENT_BROWSER_PENDING_MAX_BYTES,
+  SESSION_EVENT_BROWSER_PENDING_MAX_COUNT,
+  SESSION_EVENT_BROWSER_SINGLE_EVENT_MAX_BYTES,
+  boundBrowserSessionEventWindow,
+  useSessionEvents,
+} from "./hooks/use-session-events";
 export type {
+  BrowserSessionEventWindow,
   SessionEventsConnectionState,
   UseSessionEventsOptions,
   UseSessionEventsResult,
@@ -20,31 +32,26 @@ export type {
 export {
   useComposer,
   composeSendInput,
+  shouldSteerOnKey,
   shouldSubmitOnKey,
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
-export type {
-  ComposerMode,
-  ComposerSendExtras,
-  ComposerState,
-  UseComposerOptions,
-} from "./hooks/use-composer";
+export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
 export { useFileAttachments } from "./hooks/use-file-attachments";
 export type {
   FileAttachment,
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
-export {
-  useTurnQueue,
-  isTurnQueueEvent,
-  queueFromTurns,
-  activeTurnFromTurns,
-  applyTurnEdit,
-  applyTurnReorder,
-  applyTurnRemoval,
+export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
+export type {
+  QueueMutationKind,
+  UseTurnQueueOptions,
+  UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
-export type { UseTurnQueueOptions, UseTurnQueueResult } from "./hooks/use-turn-queue";
+export { QueueSurface } from "./components/queue-surface";
+export type { QueueSurfaceProps } from "./components/queue-surface";
+export { OPEN_WORKSTREAM_CONTROL_EVENT } from "./components/chat-composer";
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionControl } from "./hooks/use-session-control";
@@ -125,15 +132,25 @@ export type {
   UseSandboxTerminalOptions,
   UseSandboxTerminalResult,
 } from "./hooks/use-sandbox-terminal";
-export { useSandboxFiles } from "./hooks/use-sandbox-files";
+export {
+  CapturedFileUnavailableError,
+  FileWriteConflictError,
+  useSandboxFiles,
+} from "./hooks/use-sandbox-files";
 export type {
+  CapturedFileUnavailableReason,
   FileTreeNode,
   FileTreeStatus,
+  SandboxWriteFileOptions,
   UseSandboxFilesOptions,
   UseSandboxFilesResult,
 } from "./hooks/use-sandbox-files";
 export { useSandboxGit } from "./hooks/use-sandbox-git";
-export type { UseSandboxGitOptions, UseSandboxGitResult } from "./hooks/use-sandbox-git";
+export type {
+  SandboxGitFileDiff,
+  UseSandboxGitOptions,
+  UseSandboxGitResult,
+} from "./hooks/use-sandbox-git";
 
 // Workbench v2 turn-end capture (the cold-paint data layer)
 export { useWorkspaceCapture } from "./hooks/use-workspace-capture";
@@ -277,6 +294,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 // Components
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
+export { defaultChatComposerMessages } from "./components/composer";
+export type { ChatComposerMessages } from "./components/composer";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";

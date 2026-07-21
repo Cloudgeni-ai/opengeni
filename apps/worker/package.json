@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/worker-bundle",
-  "version": "0.7.1",
+  "version": "0.7.7",
   "description": "OpenGeni worker entry: runOpenGeniWorker/createOpenGeniWorker(deps) + the un-bundled Temporal workflow source tree. An engine-distribution surface — its runtime closure includes engine-internal packages and the workflow bundle ships as on-disk TS source.",
   "license": "Apache-2.0",
   "repository": {
@@ -51,6 +51,7 @@
     "@temporalio/workflow": "^1.17.0"
   },
   "devDependencies": {
+    "@openai/agents-core": "0.13.3",
     "@opengeni/testing": "workspace:*",
     "postgres": "^3.4.9",
     "tsup": "^8.5.0",

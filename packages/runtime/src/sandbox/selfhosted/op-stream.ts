@@ -169,6 +169,37 @@ export class OpStreamExecClient {
   }
 
   /**
+   * Cancel an exec by its durable op id. OpCancel is idempotent and also acts
+   * as a cancel-before-start tombstone, so calling this while OpStart is still
+   * racing is safe: the runner either kills the accepted process tree or
+   * refuses the later start without spawning it.
+   */
+  async cancel(opId: string): Promise<void> {
+    const response = await this.deps.controlRpc.request(
+      this.deps.rpcSubject,
+      {
+        requestId: crypto.randomUUID(),
+        epoch: this.deps.epoch,
+        op: { $case: "opCancel", opCancel: { opId } },
+      },
+      { timeoutMs: this.deps.controlTimeoutMs },
+    );
+    if (response.error || !response.result) {
+      throw agentErrorToControlError(
+        response.error ?? {
+          code: ErrorCode.ERROR_CODE_PROTOCOL,
+          message: "op-stream cancel returned an empty result",
+          retryable: false,
+          detail: {},
+        },
+      );
+    }
+    if (response.result.$case !== "opStatus") {
+      throw protocolError(`op-stream cancel: unexpected result ${response.result.$case}`);
+    }
+  }
+
+  /**
    * Run one exec over the op stream. `opId` is the durable id (B1) — a re-issue
    * with the same id attaches instead of re-running. `deadlineMs` is the exec
    * process budget (relative); the runner's enforcement is authoritative.
@@ -429,6 +460,15 @@ class OpConsumer {
   }
 
   private refusedStart(status: OpStatus | undefined): SelfhostedControlError {
+    if (status?.exit?.cancelled) {
+      return new SelfhostedControlError({
+        message: "The command was cancelled before the machine admitted it.",
+        code: ErrorCode.ERROR_CODE_TIMEOUT,
+        reason: null,
+        retryable: false,
+        detail: { cancelled: "true" },
+      });
+    }
     if (status?.state === OpState.OP_STATE_LOST) {
       return lostToControlError(status);
     }

@@ -119,27 +119,29 @@ export function RailFooter() {
           </DropdownMenuContent>
         </DropdownMenu>
 
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-              onClick={rail.toggleCollapsed}
-              className="shrink-0 text-fg-subtle hover:text-fg"
-            >
-              {rail.collapsed ? (
-                <ChevronsRightIcon className="size-4" />
-              ) : (
-                <ChevronsLeftIcon className="size-4" />
-              )}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          </TooltipContent>
-        </Tooltip>
+        {!rail.isMobile ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                aria-label={rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+                onClick={rail.toggleCollapsed}
+                className="shrink-0 text-fg-subtle hover:text-fg"
+              >
+                {rail.collapsed ? (
+                  <ChevronsRightIcon className="size-4" />
+                ) : (
+                  <ChevronsLeftIcon className="size-4" />
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {rail.collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            </TooltipContent>
+          </Tooltip>
+        ) : null}
       </div>
     </div>
   );

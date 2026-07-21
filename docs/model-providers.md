@@ -52,6 +52,8 @@ const RegistryModelSchema = z.object({
   id: z.string().min(1),                 // model id sent to the provider, e.g. "accounts/fireworks/models/glm-5p2"
   label: z.string().min(1).optional(),   // display name; defaults to id
   contextWindowTokens: z.number().int().positive().optional(),
+  effectiveContextWindowTokens: z.number().int().positive().optional(),
+  autoCompactTokenLimit: z.number().int().positive().optional(),
   reasoningEffort: z.boolean().optional(),  // model accepts a reasoning-effort control
   hostedWebSearch: z.boolean().optional(),  // provider executes the hosted web_search tool for this model
   pricing: ModelPricingSchema.optional(),
@@ -80,7 +82,6 @@ export interface ResolvedModelProvider {
   apiKey?: string;
   defaultQuery?: Record<string, string>;
   defaultHeaders?: Record<string, string>;
-  compactionMode: ContextCompactionMode;   // "server" only for built-in OpenAI; "client" otherwise
 }
 
 // A single exposed model + the provider that serves it.
@@ -91,6 +92,8 @@ export interface ConfiguredModel {
   providerLabel: string;
   api: ModelProviderApi;
   contextWindowTokens?: number;
+  effectiveContextWindowTokens?: number;
+  autoCompactTokenLimit?: number;
   reasoningEffort: boolean;
   hostedWebSearch: boolean;
 }
@@ -100,14 +103,15 @@ export interface ConfiguredModel {
 - `parseModelProvidersJson(json: string): RegistryProvider[]` — parse + validate; `[]` on empty.
 - `resolveProviderApiKey(provider, source = process.env): string | undefined` — `apiKey ?? source[apiKeyEnv]`.
 - `configuredProviders(settings): ResolvedModelProvider[]` — built-in provider first
-  (id `openai`/`azure`, `api: "responses"`, `compactionMode: resolveContextCompactionMode(settings)`,
-  client inputs from the existing openai/azure fields), then registry providers
-  (`compactionMode: "client"`). Registry id may not collide with the built-in id (throw in `validateSettings`).
+  (id `openai`/`azure`, `api: "responses"`, client inputs from the existing
+  openai/azure fields), then registry providers. Registry id may not collide
+  with the built-in id (throw in `validateSettings`).
 - `configuredModels(settings): ConfiguredModel[]` — built-in models first
   (`configuredAllowedModels`-from-openai mapped: `api: "responses"`,
   `hostedWebSearch: settings.webSearchEnabled`, `contextWindowTokens: settings.contextWindowTokens`,
   `reasoningEffort: true`), then each registry provider's models (defaults: label→id,
-  `hostedWebSearch` defaults `false`, `reasoningEffort` defaults `false`). De-dup by `id`, first wins, default model first.
+  `hostedWebSearch` defaults `false`, `reasoningEffort` defaults `false`; optional
+  raw/effective/auto-compact token metadata is preserved). De-dup by `id`, first wins, default model first.
 - `configuredAllowedModels(settings)` — **reimplement** as `configuredModels(settings).map(m => m.id)`
   (keeps existing behaviour: `settings.openaiModel` first, then the openai allow-list, now plus registry ids).
 - `resolveModelProvider(settings, modelId): { provider: ResolvedModelProvider; model: ConfiguredModel } | undefined`.
@@ -158,6 +162,9 @@ provider for unconfigured names). The worker therefore passes the model as a
 **string** (`agent.model = runSettings.openaiModel`), not an instance, so every
 path resolves through the router. Gating (compaction/web-search/encrypted
 reasoning/context window) still comes from `resolveTurnModel` in the worker.
+The worker applies `settingsWithResolvedModelContext` before every model-facing
+operation, so model-specific raw/effective/auto-compact limits govern the turn
+input guard and streamed runner rather than only the agent capability.
 
 ## Runtime — `packages/runtime/src/index.ts`
 
@@ -175,18 +182,16 @@ reasoning/context window) still comes from `resolveTurnModel` in the worker.
 - `resolveTurnModel(settings, modelId): { provider, client, model: Model, configured: ConfiguredModel } | null`
   — looks up `resolveModelProvider`, builds client + Model instance. Returns `null`
   (caller falls back to the legacy global-client path) when the model isn't in the registry.
-- Extend `BuildAgentOptions` with optional gating overrides (all default to today's behaviour when omitted):
+- Extend `BuildAgentOptions` with optional provider gating overrides:
   ```ts
-  compactionMode?: ContextCompactionMode;   // default resolveContextCompactionMode(settings)
   hostedWebSearch?: boolean;                 // default settings.webSearchEnabled
   encryptedReasoning?: boolean;              // default settings.openaiReasoningEncryptedContent
-  contextWindowTokens?: number;              // default settings.contextWindowTokens
   ```
   In `buildOpenGeniAgent`: `hostedTools` gated on `options.hostedWebSearch ?? settings.webSearchEnabled`;
-  encrypted-reasoning `providerData.include` gated on `options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent`;
-  `store: false` gated on the resolved compaction mode being `server`.
-- `buildAgentCapabilities` takes the resolved `compactionMode` (+ effective context
-  window) instead of calling `resolveContextCompactionMode(settings)` internally.
+  encrypted-reasoning `providerData.include` gated on
+  `options.encryptedReasoning ?? settings.openaiReasoningEncryptedContent`.
+- `buildAgentCapabilities` deliberately omits the Agents SDK inline compaction
+  capability. Durable portable compaction owns history for every provider.
 - `summarizeForCompaction` becomes provider-aware: accept `{ client, api }`; for
   `api === "chat"` call `client.chat.completions.create({...})` and read
   `choices[0].message.content`; for `responses` keep the current
@@ -202,16 +207,14 @@ const agent = runtime.buildAgent(settings, turnResources, {
   ...(resolved
     ? {
         model: resolved.model,
-        compactionMode: resolved.provider.compactionMode,
         hostedWebSearch: resolved.configured.hostedWebSearch,
         encryptedReasoning: resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
-        contextWindowTokens: resolved.configured.contextWindowTokens ?? settings.contextWindowTokens,
       }
     : {}),                       // legacy path: settings.openaiModel + global client
   ...existingOptions,
 });
 ```
-Thread `resolved.client` + `resolved.provider.api` into the client-side compaction
+Thread `resolved.client` + `resolved.provider.api` into the portable compaction
 summarizer call. Keep the `runSettings.openaiModel = turn.model` plumbing for the
 no-resolution fallback. Cost accounting (`configuredModelPricing(settings)[input.model]`)
 already covers registry models.

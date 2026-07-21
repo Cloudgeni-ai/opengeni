@@ -163,6 +163,34 @@ Image builds default to `linux/amd64`, matching the Azure AKS reference node poo
 
 For production Helm releases, pin API, worker, web, and migration images by digest as well as tag. The chart renders images as `repository:tag@sha256:...` when `image.digest` is set, which keeps tags readable while making the deployed artifact immutable.
 
+## Verified public release
+
+Merging a changesets Version PR only commits package versions and changelogs; it
+does not publish packages or release images. Public release is an explicit
+dispatch of `.github/workflows/release.yml` from a ref pinned to the exact
+accepted source SHA. The dispatch fails closed unless it receives retained
+staging, production, and 72-hour production-canary evidence URLs, the sanitized
+acceptance bundle's direct HTTPS URL and SHA-256, and an explicit confirmation
+that there are zero known defects, skipped/late cycles, or unverified acceptance
+rows. It also
+requires the exact expected package set (for example,
+`@opengeni/react@0.15.0`). The selected
+dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
+`main` must all identify the same revision.
+
+The dispatch downloads the exact acceptance JSON, verifies its digest, and
+validates every machine-readable contract row before re-running the package
+typecheck, builds, SDK parity test, and publish closure guard. Before touching
+npm it rejects any unlisted unpublished package,
+rejects local version drift or an occupied version from another git source, and
+retains a pre-publication plan. Afterward it requires every expected registry
+entry to bind the accepted source through `gitHead` and a SHA-512 integrity
+value before release images can build. That reconciliation also makes an
+interrupted post-publication run safely resumable. The final
+`verified-release-receipt-<sha>` binds the source, acceptance evidence, bundle
+digest, and exact registry package identities. Ordinary pushes to `main` can
+open/update the Version PR but cannot publish.
+
 The sandbox image remains separate:
 
 ```bash
@@ -284,7 +312,7 @@ enqueue/claim order cannot create or revive a live turn, and a cancellation
 that wins drains any already-queued turn before commit. Keep this migration
 applied before allowing old workers to consume targeted tasks.
 
-Migration `0060_scheduled_task_target_deletion_fence.sql` is additive and
+Migration `0100_scheduled_task_target_deletion_fence.sql` is additive and
 repairs the target-session `ON DELETE RESTRICT` foreign key for installations
 that already recorded the earlier target migrations. It is also safe for
 dedicated schemas where another schema may contain a same-named constraint.

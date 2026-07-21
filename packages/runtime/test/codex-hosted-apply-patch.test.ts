@@ -16,7 +16,9 @@ import { buildAgentCapabilities } from "../src/index";
 // A model instance the SDK reads as hosted-transport-capable: its constructor
 // name does NOT contain "ChatCompletions" (so supportsApplyPatchTransport → true,
 // exactly like the real OpenAIResponsesModel our codex turns bind).
-class OpenAIResponsesModel {}
+class OpenAIResponsesModel {
+  readonly transport = "responses";
+}
 
 // The exact bind chain the SandboxAgent runs: clone() a fresh per-run instance,
 // then bind → bindRunAs → bindModel, and call tools() on the object the CHAIN

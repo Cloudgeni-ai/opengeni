@@ -6,7 +6,7 @@
     "sequence": 1,
     "type": "user.message",
     "payload": {
-      "text": "Spawn a browser worker, send it a follow-up, then steer it."
+      "text": "Spawn a browser worker, then send it a follow-up."
     },
     "occurredAt": "2026-01-02T15:00:01.000Z",
     "turnId": null
@@ -122,51 +122,13 @@
     "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
   },
   {
-    "id": "00000000-0000-4000-8000-000000000608",
-    "workspaceId": "11111111-2222-4333-9444-555555555555",
-    "sessionId": "22222222-3333-4444-9555-666666666671",
-    "sequence": 8,
-    "type": "agent.toolCall.created",
-    "payload": {
-      "id": "call-worker-interrupt",
-      "name": "session_interrupt",
-      "arguments": "{\"sessionId\":\"33333333-4444-4555-9666-777777777777\",\"mode\":\"steer\"}"
-    },
-    "occurredAt": "2026-01-02T15:00:08.000Z",
-    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
-  },
-  {
-    "id": "00000000-0000-4000-8000-000000000609",
-    "workspaceId": "11111111-2222-4333-9444-555555555555",
-    "sessionId": "22222222-3333-4444-9555-666666666671",
-    "sequence": 9,
-    "type": "agent.toolCall.output",
-    "payload": {
-      "id": "call-worker-interrupt",
-      "output": {
-        "structuredContent": {
-          "sessionId": "33333333-4444-4555-9666-777777777777",
-          "status": "cancelled"
-        },
-        "content": [
-          {
-            "type": "text",
-            "text": "{\"sessionId\":\"33333333-4444-4555-9666-777777777777\"}"
-          }
-        ]
-      }
-    },
-    "occurredAt": "2026-01-02T15:00:09.000Z",
-    "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
-  },
-  {
     "id": "00000000-0000-4000-8000-000000000610",
     "workspaceId": "11111111-2222-4333-9444-555555555555",
     "sessionId": "22222222-3333-4444-9555-666666666671",
-    "sequence": 10,
+    "sequence": 8,
     "type": "turn.completed",
     "payload": {},
-    "occurredAt": "2026-01-02T15:00:10.000Z",
+    "occurredAt": "2026-01-02T15:00:08.000Z",
     "turnId": "aaaaaaaa-0000-4000-8000-000000000011"
   }
 ]

@@ -1,0 +1,102 @@
+{{- if .Values.worker.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-worker-turns
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker-turns
+spec:
+  replicas: {{ .Values.worker.turns.replicaCount }}
+  {{- with .Values.worker.turns.strategy }}
+  strategy:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: worker-turns
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: worker-turns
+        opengeni.ai/worker-role: turns
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.secret.create }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.worker.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
+      {{- if .Values.worker.priorityClassName }}
+      priorityClassName: {{ .Values.worker.priorityClassName | quote }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: worker
+          image: {{ include "opengeni.image" (dict "root" . "image" .Values.worker.image) | quote }}
+          imagePullPolicy: {{ ((.Values.worker).image).pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.worker.securityContext | nindent 12 }}
+          {{- if .Values.worker.command }}
+          command:
+            {{- toYaml .Values.worker.command | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.worker.containerPort }}
+          envFrom:
+            - secretRef:
+                name: {{ include "opengeni.secretName" . }}
+            - configMapRef:
+                name: {{ include "opengeni.fullname" . }}-config
+          env:
+            - name: OPENGENI_WORKER_HTTP_PORT
+              value: {{ .Values.worker.containerPort | quote }}
+            - name: OPENGENI_WORKER_ROLE
+              value: turn
+            {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
+            {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
+            {{- if .Values.minio.enabled }}
+            - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
+              value: {{ include "opengeni.minioInternalEndpoint" . | quote }}
+            {{- end }}
+            {{- end }}
+          {{- if (((.Values.worker).probes).readiness).enabled }}
+          readinessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).readiness) | nindent 12 }}
+          {{- end }}
+          {{- if (((.Values.worker).probes).liveness).enabled }}
+          livenessProbe:
+            {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).liveness) | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.worker.turns.resources | nindent 12 }}
+      {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
+      topologySpreadConstraints:
+        {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker-turns" "values" .Values.worker) | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.worker.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

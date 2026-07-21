@@ -90,7 +90,14 @@ export function PierreFile({
     overflow: "scroll" as const,
     stickyHeader: true,
     showLineNumbers: true,
-    ...(theme ? { theme } : { theme: { dark: "github-dark", light: "github-light" } }),
+    ...(theme
+      ? { theme }
+      : {
+          theme: {
+            dark: "github-dark-high-contrast",
+            light: "github-light-high-contrast",
+          },
+        }),
     themeType: themeType ?? "dark",
   };
 

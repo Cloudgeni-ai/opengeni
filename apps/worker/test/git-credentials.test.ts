@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { sandboxEnvironmentForRun } from "../src/activities/environment";
+import { mintRunGitCredentials, sandboxEnvironmentForRun } from "../src/activities/environment";
 import type { GitCredentialsRequest, ResourceRef } from "@opengeni/contracts";
 
 const scope = {
@@ -11,6 +11,65 @@ const scope = {
 const provisionedSettings = () => testSettings({ sandboxBackend: "docker" });
 
 describe("sandbox git credentials", () => {
+  test("rechecks GitHub workspace authorization immediately before every direct token mint", async () => {
+    const events: string[] = [];
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/private.git",
+        ref: "main",
+        provider: "github",
+        githubInstallationId: 123,
+        githubRepositoryId: 456,
+      },
+    ];
+
+    const result = await mintRunGitCredentials(provisionedSettings(), resources, {
+      scope,
+      authorizeGitHubTokenMint: async (selection) => {
+        events.push("authorize");
+        expect(selection).toEqual({ installationId: 123, repositoryIds: [456] });
+      },
+      gitCredentials: async (input) => {
+        events.push("mint");
+        return { token: "ghs_renewed", workspaceId: input.workspaceId };
+      },
+    });
+
+    expect(events).toEqual(["authorize", "mint"]);
+    expect(result?.gitTokens).toEqual({ github: "ghs_renewed" });
+  });
+
+  test("does not call the credential broker when the current GitHub binding is rejected", async () => {
+    let brokerCalled = false;
+    await expect(
+      mintRunGitCredentials(
+        provisionedSettings(),
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            provider: "github",
+            githubInstallationId: 123,
+            githubRepositoryId: 456,
+          },
+        ],
+        {
+          scope,
+          authorizeGitHubTokenMint: async () => {
+            throw new Error("workspace binding revoked");
+          },
+          gitCredentials: async (input) => {
+            brokerCalled = true;
+            return { token: "must-not-be-minted", workspaceId: input.workspaceId };
+          },
+        },
+      ),
+    ).rejects.toThrow("workspace binding revoked");
+    expect(brokerCalled).toBe(false);
+  });
+
   test("keeps GitHub host credential legacy fields unchanged and adds repositoryRefs", async () => {
     const calls: GitCredentialsRequest[] = [];
     const result = await sandboxEnvironmentForRun(
@@ -31,7 +90,11 @@ describe("sandbox git credentials", () => {
         scope,
         gitCredentials: async (input) => {
           calls.push(input);
-          return { token: "ghs_brokered", workspaceId: input.workspaceId };
+          return {
+            token: "ghs_brokered",
+            workspaceId: input.workspaceId,
+            expiresAt: "2026-07-14T11:00:00Z",
+          };
         },
       },
     );
@@ -57,7 +120,35 @@ describe("sandbox git credentials", () => {
     ]);
     expect(result.gitToken).toBe("ghs_brokered");
     expect(result.gitTokens).toEqual({ github: "ghs_brokered" });
+    expect(result.gitTokenExpiresAt).toEqual({ github: "2026-07-14T11:00:00.000Z" });
     expect(Object.values(result.environment)).not.toContain("ghs_brokered");
+  });
+
+  test("rejects invalid broker expiry metadata before any token reaches the sandbox", async () => {
+    await expect(
+      sandboxEnvironmentForRun(
+        provisionedSettings(),
+        [
+          {
+            kind: "repository",
+            uri: "https://github.com/acme/private.git",
+            ref: "main",
+            provider: "github",
+            githubInstallationId: 123,
+            githubRepositoryId: 456,
+          },
+        ],
+        {},
+        {
+          scope,
+          gitCredentials: async (input) => ({
+            token: "must-not-be-returned",
+            workspaceId: input.workspaceId,
+            expiresAt: "not-a-date",
+          }),
+        },
+      ),
+    ).rejects.toThrow("connection-credential provider (github) returned an invalid expiresAt");
   });
 
   test("marshals non-GitHub provider credential requests with repositoryRefs", async () => {

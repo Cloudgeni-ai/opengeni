@@ -1,159 +1,127 @@
-import type { SessionEvent, SessionTurn, UpdateSessionTurnRequest } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import type {
+  ComposerDraft,
+  EffectiveSessionControl,
+  SessionEvent,
+  SessionQueueMutationResponse,
+  SessionQueueSnapshot,
+  SessionTurn,
+} from "@opengeni/sdk";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
   useDebouncedCallback,
-  useMutationRunner,
   useSessionEventTrigger,
   type SessionEventFeedOptions,
 } from "./internal";
 
-/** Event types that change the turn queue (queue/edit/reorder/claim/finish). */
+/** Events that can change the authoritative prompt queue or effective control. */
 export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
-  return event.type.startsWith("turn.");
-}
-
-/** Queued turns in execution order (position, then creation time). */
-export function queueFromTurns(turns: SessionTurn[]): SessionTurn[] {
-  return turns
-    .filter((turn) => turn.status === "queued")
-    .sort(
-      (a, b) =>
-        a.position - b.position ||
-        a.createdAt.localeCompare(b.createdAt) ||
-        a.id.localeCompare(b.id),
-    );
-}
-
-/** The turn currently holding the session (running or awaiting approval). */
-export function activeTurnFromTurns(turns: SessionTurn[]): SessionTurn | null {
   return (
-    turns.find((turn) => turn.status === "running" || turn.status === "requires_action") ?? null
+    event.type.startsWith("turn.") ||
+    event.type.startsWith("session.queue.") ||
+    event.type.startsWith("session.control.") ||
+    event.type.startsWith("workspace.inference.")
   );
 }
 
-/** Optimistic projection of a queued-turn edit. */
-export function applyTurnEdit(
-  turns: SessionTurn[],
-  turnId: string,
-  update: UpdateSessionTurnRequest,
-): SessionTurn[] {
-  return turns.map((turn) => {
-    if (turn.id !== turnId || turn.status !== "queued") {
-      return turn;
-    }
-    return {
-      ...turn,
-      ...(update.prompt !== undefined ? { prompt: update.prompt } : {}),
-      ...(update.resources !== undefined ? { resources: update.resources } : {}),
-      ...(update.tools !== undefined ? { tools: update.tools } : {}),
-      ...(update.model !== undefined ? { model: update.model } : {}),
-      ...(update.reasoningEffort !== undefined ? { reasoningEffort: update.reasoningEffort } : {}),
-      ...(update.sandboxBackend !== undefined ? { sandboxBackend: update.sandboxBackend } : {}),
-      ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
-    };
-  });
-}
-
-/**
- * Optimistic projection of a reorder, mirroring the server: the listed
- * queued turns get positions 1..n in the given order; everything else keeps
- * its position.
- */
-export function applyTurnReorder(turns: SessionTurn[], turnIds: string[]): SessionTurn[] {
-  const positions = new Map(turnIds.map((turnId, index) => [turnId, index + 1] as const));
-  return turns.map((turn) => {
-    const position = positions.get(turn.id);
-    return position !== undefined && turn.status === "queued" ? { ...turn, position } : turn;
-  });
-}
-
-/** Optimistic projection of a queued-turn delete (server marks it cancelled). */
-export function applyTurnRemoval(turns: SessionTurn[], turnId: string): SessionTurn[] {
-  return turns.map((turn) =>
-    turn.id === turnId && turn.status === "queued"
-      ? { ...turn, status: "cancelled" as const }
-      : turn,
-  );
-}
+export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
 
 export type UseTurnQueueOptions = ClientOverride &
   SessionEventFeedOptions & {
-    /** Optional safety-net polling (ms). Off by default — turn.* events drive updates. */
     pollIntervalMs?: number | undefined;
   };
 
 export type UseTurnQueueResult = {
-  /** All turns the API returned (history + queue), newest server view. */
-  turns: SessionTurn[];
-  /** Queued turns in execution order — render this as the editable queue. */
+  snapshot: SessionQueueSnapshot | null;
+  /** Human/API prompts exactly in server execution order. Never client-sorted. */
   queue: SessionTurn[];
-  /** The running / requires_action turn, if any. */
-  activeTurn: SessionTurn | null;
+  effectiveControl: EffectiveSessionControl | null;
+  /** The latest interrupted attempt has not yet durably proved physical quiescence. */
+  stoppingPreviousAttempt: boolean;
   loading: boolean;
   error: Error | null;
   refresh: () => Promise<void>;
-  /** Edit a queued turn (optimistic; rolls back via refetch on failure). */
-  editTurn: (turnId: string, update: UpdateSessionTurnRequest) => Promise<SessionTurn | null>;
-  /** Reorder the queue to the given queued-turn id order (optimistic). */
-  reorderTurns: (turnIds: string[]) => Promise<SessionTurn[] | null>;
-  /** Delete (cancel) a queued turn before it is claimed (optimistic). */
-  removeTurn: (turnId: string) => Promise<SessionTurn | null>;
-  /** True while an edit/reorder/remove is in flight. */
+  moveTurn: (turnId: string, beforeTurnId: string | null) => Promise<boolean>;
+  /** Atomically withdraw a waiting prompt into the private durable composer draft. */
+  editTurn: (
+    turnId: string,
+    options: { expectedDraftRevision: number; replaceDraft: boolean },
+  ) => Promise<ComposerDraft | null>;
+  /** Advance the same durable waiting prompt; no duplicate prompt is created. */
+  steerTurn: (turnId: string) => Promise<boolean>;
+  removeTurn: (turnId: string) => Promise<boolean>;
+  pendingByTurn: Readonly<Record<string, QueueMutationKind>>;
+  mutationFor: (turnId: string) => QueueMutationKind | null;
   mutating: boolean;
-  /** Last failed mutation, until the next mutation or clear. */
   mutationError: Error | null;
   clearMutationError: () => void;
 };
 
 /**
- * The live turn queue — the heart of the queue-by-default interaction model.
- * Messages sent mid-turn stack up here, visible and editable/reorderable/
- * deletable until the worker claims them. Updates arrive over the session
- * event stream (`turn.*`), either shared via `options.events` (pass the log
- * from `useSessionEvents` to reuse its connection) or a dedicated tail
- * stream. All mutations apply optimistically and reconcile with the server.
+ * The one authoritative human prompt queue. Every mutation carries the exact
+ * server versions the operator saw and accepts only monotonic snapshots. A
+ * conflict immediately reloads server truth; the client never invents order.
  */
 export function useTurnQueue(
   sessionId: string | null | undefined,
   options: UseTurnQueueOptions = {},
 ): UseTurnQueueResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
+    useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
-  const [turns, setTurns] = useState<SessionTurn[]>([]);
+  const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
-  const mutation = useMutationRunner();
-  const generation = useRef(0);
+  const [mutationError, setMutationError] = useState<Error | null>(null);
+  const [pendingByTurn, setPendingByTurn] = useState<Record<string, QueueMutationKind>>({});
+  const pendingRef = useRef<Record<string, QueueMutationKind>>({});
+  const readGeneration = useRef(0);
   const targetKeyRef = useRef<string | null>(null);
+  const snapshotRef = useRef<SessionQueueSnapshot | null>(null);
+
+  const acceptSnapshot = useCallback((next: SessionQueueSnapshot | null): boolean => {
+    const current = snapshotRef.current;
+    if (
+      next &&
+      current &&
+      (next.version < current.version ||
+        next.effectiveControl.controlVersion < current.effectiveControl.controlVersion)
+    ) {
+      return false;
+    }
+    snapshotRef.current = next;
+    setSnapshot(next);
+    return true;
+  }, []);
 
   const load = useCallback(async (): Promise<void> => {
-    if (!sessionId) {
-      return;
-    }
-    const ticket = ++generation.current;
+    if (!sessionId) return;
+    const ticket = ++readGeneration.current;
     try {
-      const fetched = await client.listTurns(workspaceId, sessionId);
-      if (ticket === generation.current) {
-        setTurns(fetched);
+      const fetched = await client.getQueue(workspaceId, sessionId);
+      if (ticket === readGeneration.current) {
+        acceptSnapshot(fetched);
         setError(null);
         setLoading(false);
       }
     } catch (cause) {
-      if (ticket === generation.current) {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+      if (ticket === readGeneration.current) {
+        setError(asError(cause));
         setLoading(false);
       }
     }
-  }, [client, workspaceId, sessionId]);
+  }, [client, workspaceId, sessionId, acceptSnapshot]);
 
-  // Reset when the target session changes; initial load + optional polling.
   useEffect(() => {
     const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
     if (targetKeyRef.current !== targetKey) {
       targetKeyRef.current = targetKey;
-      setTurns([]);
+      readGeneration.current += 1;
+      acceptSnapshot(null);
       setError(null);
+      setMutationError(null);
+      setPendingByTurn({});
+      pendingRef.current = {};
     }
     if (!enabled) {
       setLoading(false);
@@ -164,96 +132,156 @@ export function useTurnQueue(
     const pollIntervalMs = options.pollIntervalMs;
     if (pollIntervalMs === undefined || pollIntervalMs <= 0) {
       return () => {
-        generation.current += 1;
+        readGeneration.current += 1;
       };
     }
     const timer = setInterval(() => void load(), pollIntervalMs);
     return () => {
       clearInterval(timer);
-      generation.current += 1;
+      readGeneration.current += 1;
     };
-  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs]);
+  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, acceptSnapshot]);
 
-  // Live updates: any turn.* event re-syncs the queue (debounced).
+  useEffect(() => {
+    if (enabled && workspaceControlEvent) void load();
+  }, [enabled, load, workspaceControlEvent]);
+  useEffect(() => {
+    if (!sessionId || !enabled) return;
+    return registerSessionReconciler(sessionId, "queue", load);
+  }, [enabled, load, registerSessionReconciler, sessionId]);
+
   const scheduleRefresh = useDebouncedCallback(() => void load());
   useSessionEventTrigger(client, workspaceId, sessionId, isTurnQueueEvent, scheduleRefresh, {
     enabled,
     ...(options.events !== undefined ? { events: options.events } : {}),
   });
 
-  const editTurn = useCallback(
-    async (turnId: string, update: UpdateSessionTurnRequest): Promise<SessionTurn | null> => {
-      if (!sessionId) {
+  const mutate = useCallback(
+    async (
+      turnId: string,
+      kind: QueueMutationKind,
+      command: (
+        current: SessionQueueSnapshot,
+        turn: SessionTurn,
+      ) => Promise<SessionQueueMutationResponse>,
+    ): Promise<SessionQueueMutationResponse | null> => {
+      if (!sessionId || pendingRef.current[turnId]) return null;
+      const current = snapshotRef.current;
+      const turn = current?.items.find((candidate) => candidate.id === turnId);
+      if (!current || !turn) return null;
+      pendingRef.current = { ...pendingRef.current, [turnId]: kind };
+      setPendingByTurn(pendingRef.current);
+      setMutationError(null);
+      try {
+        const result = await command(current, turn);
+        acceptSnapshot(result.snapshot);
+        return result;
+      } catch (cause) {
+        setMutationError(asError(cause));
+        await load();
         return null;
+      } finally {
+        if (turnId in pendingRef.current) {
+          const next = { ...pendingRef.current };
+          delete next[turnId];
+          pendingRef.current = next;
+          setPendingByTurn(next);
+        }
       }
-      setTurns((current) => applyTurnEdit(current, turnId, update));
-      const result = await mutation.run(() =>
-        client.updateQueuedTurn(workspaceId, sessionId, turnId, update),
-      );
-      if (result) {
-        setTurns((current) => current.map((turn) => (turn.id === result.id ? result : turn)));
-      } else {
-        void load();
-      }
-      return result;
     },
-    [client, workspaceId, sessionId, mutation.run, load],
+    [acceptSnapshot, load, sessionId],
   );
 
-  const reorderTurns = useCallback(
-    async (turnIds: string[]): Promise<SessionTurn[] | null> => {
-      if (!sessionId || turnIds.length === 0) {
-        return null;
-      }
-      setTurns((current) => applyTurnReorder(current, turnIds));
-      const result = await mutation.run(() =>
-        client.reorderQueuedTurns(workspaceId, sessionId, turnIds),
+  const moveTurn = useCallback(
+    async (turnId: string, beforeTurnId: string | null): Promise<boolean> => {
+      const result = await mutate(turnId, "move", (current) =>
+        client.moveQueueItem(workspaceId, sessionId!, turnId, {
+          clientEventId: operationKey(),
+          expectedQueueVersion: current.version,
+          beforeTurnId,
+        }),
       );
-      if (result) {
-        // The server returns the queued turns; merge them over local state.
-        setTurns((current) => {
-          const bySId = new Map(result.map((turn) => [turn.id, turn] as const));
-          return current.map((turn) => bySId.get(turn.id) ?? turn);
-        });
-      } else {
-        void load();
-      }
-      return result;
+      return result !== null;
     },
-    [client, workspaceId, sessionId, mutation.run, load],
+    [client, mutate, sessionId, workspaceId],
+  );
+
+  const editTurn = useCallback(
+    async (
+      turnId: string,
+      edit: { expectedDraftRevision: number; replaceDraft: boolean },
+    ): Promise<ComposerDraft | null> => {
+      const result = await mutate(turnId, "edit", (_current, turn) =>
+        client.editQueueItem(workspaceId, sessionId!, turnId, {
+          clientEventId: operationKey(),
+          expectedTurnVersion: turn.version,
+          expectedDraftRevision: edit.expectedDraftRevision,
+          replaceDraft: edit.replaceDraft,
+        }),
+      );
+      return result?.draft ?? null;
+    },
+    [client, mutate, sessionId, workspaceId],
+  );
+
+  const steerTurn = useCallback(
+    async (turnId: string): Promise<boolean> => {
+      const result = await mutate(turnId, "steer", (current, turn) =>
+        client.steerQueueItem(workspaceId, sessionId!, turnId, {
+          clientEventId: operationKey(),
+          expectedTurnVersion: turn.version,
+          controlEtag: current.effectiveControl.controlEtag,
+        }),
+      );
+      return result !== null;
+    },
+    [client, mutate, sessionId, workspaceId],
   );
 
   const removeTurn = useCallback(
-    async (turnId: string): Promise<SessionTurn | null> => {
-      if (!sessionId) {
-        return null;
-      }
-      setTurns((current) => applyTurnRemoval(current, turnId));
-      const result = await mutation.run(() =>
-        client.deleteQueuedTurn(workspaceId, sessionId, turnId),
+    async (turnId: string): Promise<boolean> => {
+      const result = await mutate(turnId, "delete", (_current, turn) =>
+        client.deleteQueueItem(workspaceId, sessionId!, turnId, {
+          clientEventId: operationKey(),
+          expectedTurnVersion: turn.version,
+          reason: "Deleted from the prompt queue",
+        }),
       );
-      if (result) {
-        setTurns((current) => current.map((turn) => (turn.id === result.id ? result : turn)));
-      } else {
-        void load();
-      }
-      return result;
+      return result !== null;
     },
-    [client, workspaceId, sessionId, mutation.run, load],
+    [client, mutate, sessionId, workspaceId],
   );
 
+  const mutationFor = useCallback(
+    (turnId: string): QueueMutationKind | null => pendingByTurn[turnId] ?? null,
+    [pendingByTurn],
+  );
+  const mutating = useMemo(() => Object.keys(pendingByTurn).length > 0, [pendingByTurn]);
+
   return {
-    turns,
-    queue: queueFromTurns(turns),
-    activeTurn: activeTurnFromTurns(turns),
+    snapshot,
+    queue: snapshot?.items ?? [],
+    effectiveControl: snapshot?.effectiveControl ?? null,
+    stoppingPreviousAttempt: snapshot?.stoppingPreviousAttempt ?? false,
     loading,
     error,
     refresh: load,
+    moveTurn,
     editTurn,
-    reorderTurns,
+    steerTurn,
     removeTurn,
-    mutating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    pendingByTurn,
+    mutationFor,
+    mutating,
+    mutationError,
+    clearMutationError: useCallback(() => setMutationError(null), []),
   };
+}
+
+function operationKey(): string {
+  return globalThis.crypto.randomUUID();
+}
+
+function asError(cause: unknown): Error {
+  return cause instanceof Error ? cause : new Error(String(cause));
 }

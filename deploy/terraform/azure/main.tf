@@ -83,7 +83,7 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   default_node_pool {
     name       = "system"
-    node_count = var.aks.node_count
+    node_count = var.managed_aks_capacity != null ? var.managed_aks_capacity.node_count : var.aks.node_count
     vm_size    = var.aks.vm_size
 
     upgrade_settings {
@@ -267,8 +267,10 @@ resource "azurerm_postgresql_flexible_server" "this" {
   version                = var.postgres.version
   administrator_login    = var.postgres.administrator_login
   administrator_password = var.postgres.administrator_password
-  sku_name               = var.postgres.sku_name
-  storage_mb             = var.postgres.storage_mb
+  sku_name               = var.managed_postgres_capacity != null ? var.managed_postgres_capacity.sku_name : var.postgres.sku_name
+  storage_mb             = var.managed_postgres_capacity != null ? var.managed_postgres_capacity.storage_mb : var.postgres.storage_mb
+  storage_tier           = var.managed_postgres_capacity != null ? var.managed_postgres_capacity.storage_tier : null
+  auto_grow_enabled      = var.managed_postgres_capacity != null ? var.managed_postgres_capacity.auto_grow_enabled : null
   tags                   = local.tags
 }
 

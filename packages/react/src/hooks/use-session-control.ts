@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@opengeni/sdk";
+import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
 import { useCallback } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import { useMutationRunner } from "./internal";
@@ -6,9 +6,9 @@ import { useMutationRunner } from "./internal";
 export type UseSessionControlOptions = ClientOverride;
 
 export type UseSessionControlResult = {
-  /** Interrupt the running turn (the explicit alternative to queueing). */
-  interrupt: (reason?: string) => Promise<SessionEvent | null>;
-  interrupting: boolean;
+  pause: (reason?: string) => Promise<SessionControlResponse | null>;
+  resume: (reason?: string) => Promise<SessionControlResponse | null>;
+  controlling: boolean;
   /** Approve a pending `requires_action` approval. */
   approve: (approvalId: string, message?: string) => Promise<SessionEvent | null>;
   /** Reject a pending `requires_action` approval. */
@@ -20,7 +20,7 @@ export type UseSessionControlResult = {
 };
 
 /**
- * Session control events: interrupt and approval decisions. Pair with
+ * Session pause/resume and approval decisions. Pair with
  * `useSessionEvents` (for `session.requiresAction` payloads carrying the
  * `approvalId`) to render an approval bar.
  */
@@ -29,19 +29,39 @@ export function useSessionControl(
   options: UseSessionControlOptions = {},
 ): UseSessionControlResult {
   const { client, workspaceId } = useOpenGeni(options);
-  const interruptMutation = useMutationRunner();
-  const approvalMutation = useMutationRunner();
+  const {
+    run: runControl,
+    mutating: controlling,
+    mutationError: controlError,
+    clearMutationError: clearControlError,
+  } = useMutationRunner();
+  const {
+    run: runApproval,
+    mutating: responding,
+    mutationError: approvalError,
+    clearMutationError: clearApprovalError,
+  } = useMutationRunner();
 
-  const interrupt = useCallback(
-    async (reason?: string): Promise<SessionEvent | null> => {
+  const pause = useCallback(
+    async (reason?: string): Promise<SessionControlResponse | null> => {
       if (!sessionId) {
         return null;
       }
-      return await interruptMutation.run(() =>
-        client.interrupt(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
+      return await runControl(() =>
+        client.pauseSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
       );
     },
-    [client, workspaceId, sessionId, interruptMutation.run],
+    [client, workspaceId, sessionId, runControl],
+  );
+
+  const resume = useCallback(
+    async (reason?: string): Promise<SessionControlResponse | null> => {
+      if (!sessionId) return null;
+      return await runControl(() =>
+        client.resumeSession(workspaceId, sessionId, reason !== undefined ? { reason } : {}),
+      );
+    },
+    [client, workspaceId, sessionId, runControl],
   );
 
   const decide = useCallback(
@@ -53,7 +73,7 @@ export function useSessionControl(
       if (!sessionId) {
         return null;
       }
-      return await approvalMutation.run(() =>
+      return await runApproval(() =>
         client.sendApprovalDecision(workspaceId, sessionId, {
           approvalId,
           decision,
@@ -61,7 +81,7 @@ export function useSessionControl(
         }),
       );
     },
-    [client, workspaceId, sessionId, approvalMutation.run],
+    [client, workspaceId, sessionId, runApproval],
   );
 
   const approve = useCallback(
@@ -73,18 +93,19 @@ export function useSessionControl(
     [decide],
   );
 
-  const error = approvalMutation.mutationError ?? interruptMutation.mutationError;
+  const error = approvalError ?? controlError;
   const clearError = useCallback(() => {
-    interruptMutation.clearMutationError();
-    approvalMutation.clearMutationError();
-  }, [interruptMutation.clearMutationError, approvalMutation.clearMutationError]);
+    clearControlError();
+    clearApprovalError();
+  }, [clearControlError, clearApprovalError]);
 
   return {
-    interrupt,
-    interrupting: interruptMutation.mutating,
+    pause,
+    resume,
+    controlling,
     approve,
     reject,
-    responding: approvalMutation.mutating,
+    responding,
     error,
     clearError,
   };

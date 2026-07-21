@@ -1,27 +1,39 @@
 import { describe, expect, test } from "bun:test";
+import OpenAI from "openai";
+import {
+  codexRequestStorage,
+  codexSubscriptionFetch,
+  isCodexTransportError,
+} from "@opengeni/codex";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   COMPACTION_PROMPT,
   COMPACTION_SUMMARY_MARKER,
   CompactionNeededError,
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
   DEFAULT_COMPACTION_THRESHOLD_RATIO,
   MAX_COMPACTION_THRESHOLD_RATIO,
   MIN_COMPACTION_THRESHOLD_RATIO,
   SUMMARY_PREFIX,
   USER_MESSAGE_TRUNCATION_MARKER,
-  buildDeterministicFallbackCompactionHistory,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
   buildSummaryItem,
-  clientCompactionThresholdTokens,
+  compactionThresholdTokens,
   clampCompactionThresholdRatio,
-  decideClientCompaction,
-  enforceInputBudget,
-  estimateTokens,
+  decideCompaction,
+  estimateCompleteModelInput,
+  estimateItemTokens,
+  estimateSerializedValueTokens,
+  estimateTextTokens,
   findCompactionNeededError,
-  findKeepBoundary,
+  compactionReplacementFingerprint,
+  latestCompactionReplacementFingerprint,
   isCompactionSummary,
+  isEphemeralInternalContext,
   isUserMessage,
+  prepareCompactionPromptInput,
   renderCompactionPromptInputForChat,
   type CompactionItem,
 } from "../src/context-compaction";
@@ -51,11 +63,30 @@ function call(id: string, name = "shell"): CompactionItem {
 }
 
 function result(id: string, output = "ok"): CompactionItem {
-  return { type: "function_call_result", callId: id, status: "completed", output };
+  return {
+    type: "function_call_result",
+    callId: id,
+    status: "completed",
+    output,
+  };
 }
 
 function bigUser(tokens: number, char: string): CompactionItem {
   return user(char.repeat(tokens * 4));
+}
+
+function hasLoneSurrogate(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const WINDOW = 1_050_000;
@@ -89,23 +120,53 @@ describe("codex-parity constants and summary marker", () => {
     expect(item[COMPACTION_SUMMARY_MARKER]).toBe(true);
     expect(item.content).toBe(`${SUMMARY_PREFIX}\nhandoff body`);
   });
+
+  test("an empty provider summary fails without manufacturing durable history", () => {
+    expect(() => buildSummaryItem("   ")).toThrow(EmptyCompactionSummaryError);
+  });
 });
 
-describe("single client compaction threshold", () => {
-  test("computes 90 percent of the model context window by default", () => {
+describe("single portable compaction threshold", () => {
+  test("derives the trigger from the raw window independently of the effective ceiling", () => {
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: WINDOW,
         contextReservedOutputTokens: RESERVED_OUTPUT,
       }),
     ).toBe(THRESHOLD);
   });
 
+  test("uses 90% of a 250k raw model window by default", () => {
+    expect(
+      compactionThresholdTokens({
+        contextWindowTokens: 250_000,
+        contextReservedOutputTokens: 128_000,
+      }),
+    ).toBe(225_000);
+  });
+
+  test("honors a model-catalog auto-compact limit and clamps it to 90%", () => {
+    expect(
+      compactionThresholdTokens({
+        contextWindowTokens: 272_000,
+        contextReservedOutputTokens: 128_000,
+        contextAutoCompactThresholdTokens: 244_800,
+      }),
+    ).toBe(244_800);
+    expect(
+      compactionThresholdTokens({
+        contextWindowTokens: 272_000,
+        contextReservedOutputTokens: 128_000,
+        contextAutoCompactThresholdTokens: 260_000,
+      }),
+    ).toBe(244_800);
+  });
+
   test("supports an env-configurable ratio with a defensive clamp", () => {
     expect(clampCompactionThresholdRatio(0.1)).toBe(MIN_COMPACTION_THRESHOLD_RATIO);
     expect(clampCompactionThresholdRatio(2)).toBe(MAX_COMPACTION_THRESHOLD_RATIO);
     expect(
-      clientCompactionThresholdTokens({
+      compactionThresholdTokens({
         contextWindowTokens: 1000,
         contextReservedOutputTokens: 0,
         contextCompactionThresholdRatio: 0.75,
@@ -113,21 +174,21 @@ describe("single client compaction threshold", () => {
     ).toBe(750);
   });
 
-  test("prefers provider-reported input tokens over the estimate", () => {
-    const items = [bigUser(900_000, "x")];
-    const decision = decideClientCompaction({
+  test("never lets a stale provider count hide larger active history", () => {
+    const items = [bigUser(1_000_000, "x")];
+    const decision = decideCompaction({
       items,
       lastInputTokens: 10,
       contextWindowTokens: WINDOW,
       contextReservedOutputTokens: RESERVED_OUTPUT,
     });
-    expect(decision.signalTokens).toBe(10);
-    expect(decision.shouldCompact).toBe(false);
+    expect(decision.signalTokens).toBeGreaterThan(1_000_000);
+    expect(decision.shouldCompact).toBe(true);
   });
 
-  test("uses char/4 estimate only when there is no provider signal yet", () => {
+  test("uses the conservative local estimate only when there is no provider signal yet", () => {
     const items = [bigUser(THRESHOLD + 1, "x")];
-    const decision = decideClientCompaction({
+    const decision = decideCompaction({
       items,
       lastInputTokens: null,
       contextWindowTokens: WINDOW,
@@ -138,8 +199,20 @@ describe("single client compaction threshold", () => {
     expect(decision.reason).toBe("above_threshold");
   });
 
+  test("compacts when the token signal reaches the threshold exactly", () => {
+    const decision = decideCompaction({
+      items: [user("history")],
+      lastInputTokens: 244_800,
+      contextWindowTokens: 272_000,
+      contextReservedOutputTokens: 128_000,
+      contextAutoCompactThresholdTokens: 244_800,
+    });
+    expect(decision.shouldCompact).toBe(true);
+    expect(decision.reason).toBe("above_threshold");
+  });
+
   test("force keeps manual /compact working below the threshold", () => {
-    const decision = decideClientCompaction({
+    const decision = decideCompaction({
       items: [user("small")],
       lastInputTokens: 1,
       contextWindowTokens: WINDOW,
@@ -148,6 +221,147 @@ describe("single client compaction threshold", () => {
     });
     expect(decision.shouldCompact).toBe(true);
     expect(decision.reason).toBe("force");
+  });
+});
+
+describe("complete outgoing model-input accounting", () => {
+  test("uses one conservative estimator for ASCII, CJK, emoji, and mixed schemas", () => {
+    expect(estimateTextTokens("abcdefgh")).toBe(2);
+    expect(estimateTextTokens("界".repeat(8))).toBe(8);
+    expect(estimateTextTokens("🙂".repeat(8))).toBe(16);
+    expect(estimateTextTokens("abcd界🙂")).toBe(4);
+
+    const multilingual = {
+      name: "分析",
+      description: "🙂".repeat(100),
+      parameters: { type: "object", properties: { 城市: { type: "string" } } },
+    };
+    expect(estimateSerializedValueTokens(multilingual)).toBe(
+      estimateTextTokens(JSON.stringify(multilingual)),
+    );
+    expect(estimateItemTokens(user("界🙂".repeat(100)))).toBe(
+      estimateTextTokens(JSON.stringify(user("界🙂".repeat(100)))),
+    );
+  });
+
+  test("counts history, instructions, and tool schemas before a provider anchor exists", () => {
+    const estimate = estimateCompleteModelInput({
+      current: {
+        input: [user("u".repeat(400))],
+        instructionsTokens: 700,
+        toolSchemaTokens: 900,
+      },
+    });
+    expect(estimate.source).toBe("complete_estimate");
+    expect(estimate.tokens).toBe(
+      estimate.inputTokens + estimate.instructionsTokens + estimate.toolSchemaTokens,
+    );
+  });
+
+  test("anchors to provider total tokens and adds every item after the last model output", () => {
+    const prior = {
+      input: [user("question"), assistant("answer"), call("c1")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const current = {
+      input: [...prior.input, result("c1", "x".repeat(4_000))],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const estimate = estimateCompleteModelInput({
+      current,
+      provider: { revision: 1, totalTokens: 12_345 },
+      providerRequestFootprint: prior,
+    });
+    expect(estimate.source).toBe("provider_plus_local");
+    expect(estimate.appendedAfterModelTokens).toBeGreaterThan(1_000);
+    expect(estimate.tokens).toBe(12_345 + estimate.appendedAfterModelTokens);
+  });
+
+  test("a provider anchor adds multilingual trailing output without UTF-16 discounting", () => {
+    const prior = {
+      input: [user("question"), assistant("answer"), call("c1")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const trailing = result("c1", "界🙂".repeat(1_000));
+    const estimate = estimateCompleteModelInput({
+      current: { ...prior, input: [...prior.input, trailing] },
+      provider: { revision: 3, totalTokens: 1_000 },
+      providerRequestFootprint: prior,
+    });
+    expect(estimate.source).toBe("provider_plus_local");
+    expect(estimate.appendedAfterModelTokens).toBeGreaterThanOrEqual(3_000);
+    expect(estimate.tokens).toBe(1_000 + estimate.appendedAfterModelTokens);
+  });
+
+  test("adds positive instruction and tool-schema growth to a provider anchor", () => {
+    const prior = {
+      input: [user("question"), assistant("answer")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const estimate = estimateCompleteModelInput({
+      current: { ...prior, instructionsTokens: 130, toolSchemaTokens: 270 },
+      provider: { revision: 2, totalTokens: 10_000 },
+      providerRequestFootprint: prior,
+    });
+    expect(estimate.tokens).toBe(10_100);
+  });
+
+  test("treats an anchor without a model-generated boundary as unbound at the caller", () => {
+    const current = {
+      input: [user("only user input")],
+      instructionsTokens: 10,
+      toolSchemaTokens: 20,
+    };
+    const estimate = estimateCompleteModelInput({ current });
+    expect(estimate.source).toBe("complete_estimate");
+  });
+});
+
+describe("durable compaction progress identity", () => {
+  test("is stable across PostgreSQL JSONB object-key reordering", () => {
+    expect(
+      compactionReplacementFingerprint([
+        {
+          type: "message",
+          role: "user",
+          content: "same",
+          nested: { z: 1, a: 2 },
+        },
+      ]),
+    ).toBe(
+      compactionReplacementFingerprint([
+        {
+          nested: { a: 2, z: 1 },
+          content: "same",
+          role: "user",
+          type: "message",
+        },
+      ]),
+    );
+  });
+
+  test("recognizes an exact repeat of the latest replacement across attempts", () => {
+    const replacement = buildCompactionReplacementHistory([user("question")], "same summary");
+    expect(latestCompactionReplacementFingerprint(replacement)).toBe(
+      compactionReplacementFingerprint(replacement),
+    );
+    expect(
+      compactionReplacementFingerprint(
+        buildCompactionReplacementHistory(replacement, "same summary"),
+      ),
+    ).toBe(compactionReplacementFingerprint(replacement));
+  });
+
+  test("does not conflate a genuinely changed checkpoint with a repeat", () => {
+    const first = buildCompactionReplacementHistory([user("question")], "first summary");
+    const second = buildCompactionReplacementHistory(first, "second summary");
+    expect(compactionReplacementFingerprint(second)).not.toBe(
+      latestCompactionReplacementFingerprint(first),
+    );
   });
 });
 
@@ -186,6 +400,22 @@ describe("codex-parity rebuild", () => {
     expect(rebuilt.some((item) => item.type === "function_call")).toBe(false);
   });
 
+  test("ephemeral internal context never becomes permanent user history", () => {
+    const internalContext = {
+      type: "message",
+      role: "system",
+      content: "continue the same inference",
+    };
+    expect(isEphemeralInternalContext(internalContext)).toBe(true);
+
+    const rebuilt = buildCompactionReplacementHistory(
+      [user("real request"), internalContext],
+      "summary",
+    );
+    expect(rebuilt).toHaveLength(2);
+    expect(rebuilt[0]).toMatchObject(user("real request"));
+  });
+
   test("drops images from retained user messages", () => {
     const rebuilt = buildCompactionReplacementHistory(
       [
@@ -201,14 +431,45 @@ describe("codex-parity rebuild", () => {
     ]);
   });
 
-  test("caps each retained user message at 20k estimated tokens with a middle marker", () => {
+  test("caps an oversized newest user message at 20k estimated tokens with a middle marker", () => {
     const long = `${"a".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS * 2 * 4)}TAIL`;
     const rebuilt = buildCompactionReplacementHistory([user(long)], "summary");
     const content = String(rebuilt[0]!.content);
     expect(content).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
     expect(content.startsWith("aaaa")).toBe(true);
     expect(content.endsWith("TAIL")).toBe(true);
-    expect(Math.ceil(content.length / 4)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+    expect(estimateTextTokens(content)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+  });
+
+  test("truncates CJK and emoji under the same budget without splitting surrogates", () => {
+    for (const long of [
+      `頭${"界".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS + 2_000)}尾`,
+      `HEAD${"🙂".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS)}TAIL`,
+    ]) {
+      const rebuilt = buildCompactionReplacementHistory([user(long)], "summary");
+      const content = String(rebuilt[0]!.content);
+      expect(content).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+      expect(estimateTextTokens(content)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+      expect(hasLoneSurrogate(content)).toBeFalse();
+      expect(content).not.toContain("�");
+    }
+  });
+
+  test("shares one 20k budget across newest retained user messages", () => {
+    const oldest = bigUser(5_000, "a");
+    const boundary = bigUser(15_000, "b");
+    const newest = bigUser(10_000, "c");
+    const rebuilt = buildCompactionReplacementHistory(
+      [oldest, assistant("drop"), boundary, newest],
+      "summary",
+    );
+
+    expect(rebuilt).toHaveLength(3);
+    expect(String(rebuilt[0]!.content).startsWith("b")).toBe(true);
+    expect(String(rebuilt[0]!.content)).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+    expect(estimateTextTokens(String(rebuilt[0]!.content))).toBeLessThanOrEqual(10_000);
+    expect(rebuilt[1]!.content).toBe(newest.content);
+    expect(isCompactionSummary(rebuilt[2])).toBe(true);
   });
 
   test("rebuilt active history is orphan-clean because tool items are dropped", () => {
@@ -220,23 +481,86 @@ describe("codex-parity rebuild", () => {
   });
 });
 
+describe("bounded checkpoint input", () => {
+  test("rewrites oldest aggregate tool output while preserving recent detail", () => {
+    const oldOutput = "x".repeat(80_000);
+    const recentOutput = "recent result";
+    const prepared = prepareCompactionPromptInput(
+      [
+        user("old request"),
+        call("old-call"),
+        result("old-call", oldOutput),
+        user("recent request"),
+        call("recent-call"),
+        result("recent-call", recentOutput),
+      ],
+      4_000,
+    );
+
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(4_000);
+    expect(prepared.rewrittenToolOutputs).toBe(1);
+    expect(prepared.droppedHistoryItems).toBe(0);
+    expect(String(prepared.input[2]!.output)).toContain("tokens truncated");
+    expect(prepared.input[5]!.output).toBe(recentOutput);
+    expect(prepared.input.at(-1)).toMatchObject({
+      type: "message",
+      role: "user",
+      content: COMPACTION_PROMPT,
+    });
+  });
+
+  test("drops whole oldest user-delimited units without orphaning protocol items", () => {
+    const recent = [user("recent request"), call("recent-call"), result("recent-call", "ok")];
+    const prepared = prepareCompactionPromptInput(
+      [
+        user("x".repeat(40_000)),
+        { type: "reasoning", id: "reasoning-old" },
+        call("old-call"),
+        result("old-call", "old result"),
+        ...recent,
+      ],
+      1_000,
+    );
+    const history = prepared.input.slice(0, -1);
+
+    expect(prepared.estimatedInputTokens).toBeLessThanOrEqual(1_000);
+    expect(prepared.droppedHistoryItems).toBe(4);
+    expect(history).toEqual(recent);
+    expect(sanitizeHistoryItemsForModel(history)).toEqual(history);
+  });
+
+  test("never mutates the raw history used to build the durable replacement", () => {
+    const rawResult = result("call-1", "z".repeat(80_000));
+    const raw = [user("request"), call("call-1"), rawResult];
+    prepareCompactionPromptInput(raw, 1_000);
+
+    expect(raw[2]).toBe(rawResult);
+    expect(rawResult.output).toBe("z".repeat(80_000));
+    expect(buildCompactionReplacementHistory(raw, "summary")).toMatchObject([
+      user("request"),
+      expect.objectContaining({ [COMPACTION_SUMMARY_MARKER]: true }),
+    ]);
+  });
+});
+
 describe("provider-proof compaction transcript", () => {
-  test("renders tool calls/results to text instead of provider-validating raw SDK items", async () => {
+  test("uses the SDK Responses adapter to preserve structured history on the wire", async () => {
     let seenInput: unknown;
     const fakeClient = {
       responses: {
         create: async (request: { input?: unknown }) => {
           seenInput = request.input;
-          if (
-            Array.isArray(request.input) &&
-            request.input.some((item) => item && typeof item === "object" && "callId" in item)
-          ) {
-            throw Object.assign(
-              new Error("Missing required parameter: input[1].call_id. You provided callId."),
-              { status: 400 },
-            );
-          }
-          return { output_text: "rendered summary" };
+          return {
+            id: "resp_summary",
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "structured summary" }],
+              },
+            ],
+          };
         },
       },
     };
@@ -246,80 +570,326 @@ describe("provider-proof compaction transcript", () => {
       result("call_vern"),
     ]);
 
-    const summary = await summarizeForCompaction(
-      testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
-      input,
-      { client: fakeClient as any, api: "responses", model: "scripted-model" },
-    );
+    const summary = await summarizeForCompaction(testSettings({ openaiProvider: "azure" }), input, {
+      client: fakeClient as any,
+      api: "responses",
+      model: "scripted-model",
+    });
 
-    expect(summary).toBe("rendered summary");
-    expect(typeof seenInput).toBe("string");
-    expect(seenInput).toContain("[tool_call function_call]");
-    expect(seenInput).toContain("[tool_result]");
-    expect(seenInput).not.toContain("callId");
+    expect(summary).toBe("structured summary");
+    expect(Array.isArray(seenInput)).toBe(true);
+    expect(seenInput).toContainEqual(
+      expect.objectContaining({ type: "function_call", call_id: "call_vern" }),
+    );
+    expect(seenInput).toContainEqual(
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call_vern",
+      }),
+    );
+    expect(JSON.stringify(seenInput)).not.toContain("callId");
   });
 
   test("passes prompt_cache_key through summarizer Responses calls when provided", async () => {
     let seenKey: unknown;
+    const usages: unknown[] = [];
     const fakeClient = {
       responses: {
         create: async (request: { prompt_cache_key?: unknown }) => {
           seenKey = request.prompt_cache_key;
-          return { output_text: "rendered summary" };
+          return {
+            id: "resp_summary",
+            usage: {
+              input_tokens: 321,
+              output_tokens: 12,
+              total_tokens: 333,
+            },
+            output: [
+              {
+                type: "message",
+                role: "assistant",
+                status: "completed",
+                content: [{ type: "output_text", text: "rendered summary" }],
+              },
+            ],
+          };
         },
       },
     };
 
     const summary = await summarizeForCompaction(
-      testSettings({ openaiProvider: "azure", contextCompactionMode: "client" }),
+      testSettings({ openaiProvider: "azure" }),
       buildCompactionPromptInput([user("deploy it")]),
       {
         client: fakeClient as any,
         api: "responses",
         model: "scripted-model",
         promptCacheKey: "session-123",
+        onUsage: async (usage) => usages.push(usage),
       },
     );
 
     expect(summary).toBe("rendered summary");
     expect(seenKey).toBe("session-123");
+    expect(usages).toEqual([
+      {
+        responseId: "resp_summary",
+        usage: { inputTokens: 321, outputTokens: 12, totalTokens: 333 },
+      },
+    ]);
   });
 
-  test("hard-trimmed transcript drops oldest items and keeps the checkpoint prompt", () => {
+  test("rejects a semantically empty provider response with content-free diagnostics", async () => {
+    const fakeClient = {
+      responses: {
+        create: async () => ({
+          id: "resp_empty",
+          status: "completed",
+          usage: { input_tokens: 321, output_tokens: 0, total_tokens: 321 },
+          output: [{ type: "reasoning", content: [] }],
+        }),
+      },
+    };
+    try {
+      await summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      );
+      throw new Error("expected empty compaction response to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(EmptyCompactionSummaryError);
+      expect((error as EmptyCompactionSummaryError).diagnostics).toMatchObject({
+        responseId: "resp_empty",
+        status: "completed",
+        incompleteReason: null,
+        extractedTextLength: 0,
+      });
+      expect(JSON.stringify((error as EmptyCompactionSummaryError).diagnostics)).not.toContain(
+        "deploy it",
+      );
+    }
+  });
+
+  test("classifies a thrown provider failure without persisting its message or model input", async () => {
+    const providerError = Object.assign(
+      new Error("provider echoed deploy it and other sensitive request content"),
+      {
+        status: 502,
+        code: "server_error",
+        type: "server_error",
+        error: { code: "server_error", message: "nested sensitive provider text" },
+        headers: new Headers({ "x-request-id": "req_compaction_failed" }),
+      },
+    );
+    const fakeClient = {
+      responses: {
+        create: async () => {
+          throw providerError;
+        },
+      },
+    };
+    try {
+      await summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      );
+      throw new Error("expected provider compaction failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(CompactionProviderResponseError);
+      expect((error as CompactionProviderResponseError).diagnostics).toEqual({
+        errorName: "Error",
+        httpStatus: 502,
+        responseStatus: null,
+        responseId: null,
+        code: "server_error",
+        type: "server_error",
+        requestId: "req_compaction_failed",
+      });
+      expect(JSON.stringify(error)).not.toContain("deploy it");
+      expect(JSON.stringify(error)).not.toContain("nested sensitive provider text");
+      expect((error as Error).message).not.toContain("sensitive request content");
+    }
+  });
+
+  test("classifies a failed Responses object even when a custom client returns HTTP-200 data", async () => {
+    const fakeClient = {
+      responses: {
+        create: async () => ({
+          id: "resp_failed",
+          status: "failed",
+          error: { code: "server_error", message: "must not persist this provider text" },
+          output: [],
+        }),
+      },
+    };
+    await expect(
+      summarizeForCompaction(
+        testSettings({ openaiProvider: "azure" }),
+        buildCompactionPromptInput([user("deploy it")]),
+        {
+          client: fakeClient as any,
+          api: "responses",
+          model: "scripted-model",
+        },
+      ),
+    ).rejects.toMatchObject({
+      name: "CompactionProviderResponseError",
+      diagnostics: {
+        responseStatus: "failed",
+        responseId: "resp_failed",
+        code: "server_error",
+      },
+    });
+  });
+
+  test("propagates an HTTP-200 Codex terminal failure instead of calling it an empty summary", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://chatgpt.com/backend-api",
+      // Deliberately leave the normal SDK retry budget enabled. The adapter's
+      // x-should-retry:false must make this accepted terminal response a
+      // single request.
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(
+          'data: {"type":"response.failed","response":{"id":"resp_terminal_failure","status":"failed","error":{"type":"server_error","code":"checkpoint_failed","message":"provider checkpoint worker failed"}}}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    });
+    let observed: unknown;
+    try {
+      await codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "refreshed-test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+        },
+        () =>
+          summarizeForCompaction(
+            testSettings({ openaiProvider: "openai" }),
+            buildCompactionPromptInput([user("preserve the active history")]),
+            {
+              client,
+              api: "responses",
+              model: "gpt-5.6-sol",
+            },
+          ),
+      );
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(calls).toBe(1);
+    expect(observed).not.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(observed).toBeInstanceOf(CompactionProviderResponseError);
+    expect(observed).toMatchObject({
+      diagnostics: {
+        httpStatus: 502,
+        responseStatus: "failed",
+        responseId: "resp_terminal_failure",
+        eventType: "response.failed",
+        type: "server_error",
+        code: "checkpoint_failed",
+      },
+    });
+    expect(isCodexTransportError((observed as CompactionProviderResponseError).cause)).toBe(true);
+    expect((observed as Error).message).not.toContain("provider checkpoint worker failed");
+  });
+
+  test("classifies a null HTTP-200 Codex stream as provider failure, never empty summary", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://chatgpt.com/backend-api",
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    let observed: unknown;
+    try {
+      await codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "refreshed-test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+        },
+        () =>
+          summarizeForCompaction(
+            testSettings({ openaiProvider: "openai" }),
+            buildCompactionPromptInput([user("preserve the active history")]),
+            {
+              client,
+              api: "responses",
+              model: "gpt-5.6-sol",
+            },
+          ),
+      );
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(calls).toBe(1);
+    expect(observed).not.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(observed).toBeInstanceOf(CompactionProviderResponseError);
+    expect(observed).toMatchObject({
+      diagnostics: {
+        httpStatus: 502,
+        code: "invalid_sse_terminal",
+        type: "invalid_sse_terminal",
+      },
+    });
+    expect(isCodexTransportError((observed as CompactionProviderResponseError).cause)).toBe(true);
+  });
+
+  test("renders the full checkpoint input without silently dropping old records", () => {
     const rendered = renderCompactionPromptInputForChat(
       buildCompactionPromptInput([
         user("old ".repeat(400)),
         assistant("middle ".repeat(400)),
         user("recent user message"),
       ]),
-      { maxEstimatedTokens: 80 },
     );
 
-    expect(rendered).not.toContain("old old");
+    expect(rendered).toContain("old old");
+    expect(rendered).toContain("middle middle");
+    expect(rendered).toContain("recent user message");
     expect(rendered).toContain("CONTEXT CHECKPOINT COMPACTION");
-  });
-});
-
-describe("deterministic fallback compaction", () => {
-  test("shrinks without a model call and middle-truncates an oversized retained user message", () => {
-    const items = [
-      { type: "message", role: "system", content: "always keep deployment instructions" },
-      bigUser(10_000, "x"),
-    ];
-
-    const fallback = buildDeterministicFallbackCompactionHistory({
-      items,
-      cause: "provider 400",
-      targetTokens: 1_000,
-    });
-
-    expect(estimateTokens(fallback)).toBeLessThan(estimateTokens(items));
-    expect(fallback.at(-1)).toMatchObject({ [COMPACTION_SUMMARY_MARKER]: true });
-    expect(String(fallback.at(-1)?.content)).toContain("Non-LLM context compaction fallback");
-    expect(fallback.some((item) => item.role === "system")).toBe(true);
-    expect(String(fallback.find((item) => item.role === "user")?.content)).toContain(
-      USER_MESSAGE_TRUNCATION_MARKER.trim(),
-    );
   });
 });
 
@@ -332,60 +902,6 @@ describe("CompactionNeededError", () => {
     });
     expect(error.signalTokens).toBe(12);
     expect(findCompactionNeededError({ cause: error })).toBe(error);
-  });
-});
-
-describe("enforceInputBudget (read-path guard backstop)", () => {
-  test("leaves an in-budget input untouched", () => {
-    const items: CompactionItem[] = [user("a"), assistant("b"), user("c"), assistant("d")];
-    const out = enforceInputBudget(items, 1_000_000);
-    expect(out.trimmed).toBe(false);
-    expect(out.items).toEqual(items);
-  });
-
-  test("trims the oldest history at a clean boundary until it fits", () => {
-    const items: CompactionItem[] = [
-      user("old turn"),
-      assistant("x".repeat(1_000_000)),
-      user("recent turn"),
-      assistant("kept"),
-    ];
-    const out = enforceInputBudget(items, 100);
-    expect(out.trimmed).toBe(true);
-    expect(out.items).toContainEqual(user("recent turn"));
-    expect(out.items).not.toContainEqual(user("old turn"));
-  });
-
-  test("accounts for trailing tokens", () => {
-    const items: CompactionItem[] = [
-      user("old"),
-      assistant("x".repeat(400)),
-      user("recent"),
-      assistant("a"),
-    ];
-    const out = enforceInputBudget(items, estimateTokens(items), 200);
-    expect(out.trimmed).toBe(true);
-  });
-
-  test("does not split tool-call pairs", () => {
-    const items: CompactionItem[] = [
-      user("old"),
-      call("c0"),
-      result("c0"),
-      assistant("x".repeat(1_000_000)),
-      user("recent"),
-      call("c1"),
-      result("c1"),
-      assistant("done"),
-    ];
-    const out = enforceInputBudget(items, 100);
-    expect(sanitizeHistoryItemsForModel(out.items)).toEqual(out.items);
-    expect(out.items.some((item) => item.callId === "c0")).toBe(false);
-    expect(out.items.filter((item) => item.callId === "c1")).toHaveLength(2);
-  });
-
-  test("findKeepBoundary returns 0 when no user boundary exists", () => {
-    expect(findKeepBoundary([assistant("a"), call("c"), result("c")], 10)).toBe(0);
   });
 });
 
@@ -414,7 +930,11 @@ describe("extractResponseOutputText", () => {
   test("skips input-echo message items", () => {
     const response = {
       output: [
-        { type: "message", role: "user", content: [{ type: "input_text", text: "ECHOED PROMPT" }] },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "ECHOED PROMPT" }],
+        },
         {
           type: "message",
           role: "assistant",

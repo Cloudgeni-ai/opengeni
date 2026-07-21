@@ -18,7 +18,6 @@
       "id": "00000000-0000-4000-8000-000000000802",
       "occurredAt": "2026-01-02T17:00:02.000Z",
       "text": "Malformed completion remains a normal message.",
-      "pending": false,
       "resources": [],
       "tools": []
     }
@@ -47,7 +46,6 @@
         "id": "00000000-0000-4000-8000-000000000802",
         "occurredAt": "2026-01-02T17:00:02.000Z",
         "text": "Malformed completion remains a normal message.",
-        "pending": false,
         "resources": [],
         "tools": []
       }

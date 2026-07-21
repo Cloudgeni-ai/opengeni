@@ -4,14 +4,24 @@ import { createNatsEventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
 import { createOpenGeniWorker } from "@opengeni/worker-bundle";
 import type { Model, ModelRequest, ModelResponse, StreamEvent } from "@openai/agents";
-import { functionCall, ScriptedModel, type ScriptedModelStep } from "./scripted-model";
+import {
+  functionCall,
+  latestExecCommandState,
+  ScriptedModel,
+  type ScriptedModelStep,
+} from "./scripted-model";
 
 const settings = getSettings();
+const role = process.env.OPENGENI_WORKER_ROLE;
+if (role !== "control" && role !== "turn") {
+  throw new Error("OPENGENI_WORKER_ROLE must be 'control' or 'turn' for the E2E worker");
+}
 const dbClient = createDb(settings.databaseUrl);
 const bus = await createNatsEventBus(settings.natsUrl);
 const model = scriptedModelForScenario(process.env.OPENGENI_TEST_SCENARIO ?? "default");
 const runtime = createProductionAgentRuntime({ model });
 const { worker, connection } = await createOpenGeniWorker({
+  role,
   settings,
   activityDependencies: {
     settings,
@@ -21,7 +31,10 @@ const { worker, connection } = await createOpenGeniWorker({
   },
 });
 
-console.log(`OpenGeni test worker listening on ${settings.temporalTaskQueue}`);
+console.log(
+  `OpenGeni ${role} test worker listening on ${settings.temporalTaskQueue} ` +
+    `(ownership=${settings.sandboxOwnershipEnabled} capture=${settings.workspaceCaptureEnabled} storage=${Boolean(settings.objectStorageEndpoint)})`,
+);
 try {
   await worker.run();
 } finally {
@@ -71,12 +84,43 @@ class SandboxScriptedModel implements Model {
 
 function sandboxStepForRequest(request: ModelRequest): ScriptedModelStep {
   const body = JSON.stringify(request.input ?? request);
-  if (
-    body.includes("sandbox-ok") ||
-    body.includes("file-mounted-ok") ||
-    body.includes("sandbox-view-image")
-  ) {
+  const completionMarkers = [
+    "sandbox-ok",
+    "file-mounted-ok",
+    "sandbox-view-image",
+    "workbench-capture-e2e-complete",
+  ];
+  const execState = latestExecCommandState(body);
+  if (execState?.status === "running") {
+    return {
+      output: [
+        functionCall(
+          "write_stdin",
+          {
+            session_id: execState.sessionId,
+            chars: "",
+            yield_time_ms: 10_000,
+            max_output_tokens: 20_000,
+          },
+          `sandbox-shell-poll-${execState.sessionId}-${execState.occurrence}`,
+        ),
+      ],
+    };
+  }
+  if (execState?.status === "exited") {
+    if (completionMarkers.some((marker) => body.lastIndexOf(marker) > execState.index)) {
+      return sandboxDoneStep();
+    }
+    return {
+      chunks: ["sandbox command exited without its acceptance marker"],
+      outputText: "sandbox command exited without its acceptance marker",
+    };
+  }
+  if (completionMarkers.some((marker) => body.includes(marker))) {
     return sandboxDoneStep();
+  }
+  if (body.includes("workbench capture acceptance fixture")) {
+    return workspaceCaptureShellStep();
   }
   if (body.includes("verify mounted image")) {
     return {
@@ -92,6 +136,44 @@ function sandboxStepForRequest(request: ModelRequest): ScriptedModelStep {
     };
   }
   return sandboxShellStep();
+}
+
+function workspaceCaptureShellStep(): ScriptedModelStep {
+  return {
+    output: [
+      functionCall(
+        "exec_command",
+        {
+          cmd: [
+            "set -euo pipefail",
+            "rm -rf api web",
+            "mkdir -p api web",
+            "git -C api init -q",
+            "git -C api config user.email e2e@opengeni.dev",
+            "git -C api config user.name 'OpenGeni E2E'",
+            "printf 'base api\\n' > api/app.txt",
+            "git -C api add app.txt",
+            "git -C api commit -qm base",
+            "printf 'changed api\\n' > api/app.txt",
+            "printf 'untracked api\\n' > api/notes.txt",
+            "git -C web init -q",
+            "git -C web config user.email e2e@opengeni.dev",
+            "git -C web config user.name 'OpenGeni E2E'",
+            "printf 'rename me\\n' > web/old.txt",
+            "printf 'delete me\\n' > web/deleted.txt",
+            "git -C web add -A",
+            "git -C web commit -qm base",
+            "git -C web mv old.txt renamed.txt",
+            "git -C web rm -q deleted.txt",
+            "printf 'workbench-capture-e2e-complete\\n'",
+          ].join("\n"),
+          yield_time_ms: 10_000,
+          max_output_tokens: 20_000,
+        },
+        "workbench-capture-e2e-shell",
+      ),
+    ],
+  };
 }
 
 function sandboxShellStep(): ScriptedModelStep {

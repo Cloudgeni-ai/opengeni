@@ -1,7 +1,7 @@
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
-// (docs/design/sandbox-surfacing). It exposes the sandbox client factory plus
+// (docs/connected-machines.md). It exposes the sandbox client factory plus
 // the resume / recovery-envelope helpers that the API needs to touch a box by
 // id (resume-by-id, file/exec/port ops) WITHOUT importing the @openai/agents
 // agent-loop graph.
@@ -31,7 +31,7 @@ import type {
   SandboxSessionState,
 } from "@openai/agents/sandbox";
 import { PROVIDER_REGISTRY } from "./providers";
-import { SandboxConfigError } from "./errors";
+import { SandboxConfigError, SandboxResumeStateUnavailableError } from "./errors";
 import { isSelfhostedProviderNotFoundError } from "./selfhosted/session";
 import type { RuntimeMetricsHooks } from "../metrics";
 
@@ -51,7 +51,11 @@ export {
   assertDescriptorRegistryInvariants,
   type CapabilityDescriptor,
 } from "./capabilities";
-export { SandboxConfigError, SandboxProviderUnavailableError } from "./errors";
+export {
+  SandboxConfigError,
+  SandboxProviderUnavailableError,
+  SandboxResumeStateUnavailableError,
+} from "./errors";
 export {
   PROVIDER_REGISTRY,
   assertProviderRegistryInvariants,
@@ -134,11 +138,12 @@ export {
 } from "./stream-port";
 
 // P4.3 recording loop — plain functions over a live session handle (no agent
-// loop); finalize reads bytes + PUTs to storage in the holding process (F10).
+// loop); finalize uploads box -> object storage without buffering in the worker.
 export {
   startRecording,
   stopRecording,
-  readRecordingBytes,
+  inspectRecordingArtifact,
+  uploadRecordingArtifact,
   deleteRecordingArtifacts,
   recordingStorageKey,
   contentTypeForCodec,
@@ -149,7 +154,7 @@ export {
   type RecordingContentType,
   type StartRecordingInput,
   type RecordingProcess,
-  type FinalizeRecordingResult,
+  type RecordingArtifactMetadata,
 } from "./recording";
 
 // P4.4 Channel-A structured services — the provider-agnostic SandboxChannelAService
@@ -159,22 +164,26 @@ export {
 export {
   SandboxChannelAService,
   ChannelAValidationError,
+  ChannelAUnavailableError,
   ChannelAConflictError,
   ChannelANotFoundError,
   ChannelAUnsupportedError,
   stripExecBanner,
   parseExecBannerSessionId,
-  isWorkspaceEscapeError,
+  parseExecBannerExitCode,
   isExecSessionLostBanner,
   assertSafeRelPath,
   parsePorcelainV2,
   parseNumstatZ,
   parseUnifiedPatch,
+  REPOSITORY_DISCOVERY_LIMIT,
   type ChannelASession,
   type ChannelAExecArgs,
   type ChannelAExecResult,
   type ChannelAEmitter,
   type SandboxChannelAServiceOptions,
+  type RepositoryDiscoveryDegradedReason,
+  type RepositoryDiscoveryResult,
   type NumstatEntry,
 } from "./channel-a";
 
@@ -681,14 +690,18 @@ export async function deserializeSandboxSessionStateEnvelope(
 // The ONE resume / recovery primitive (P1.2).
 //
 // establishSandboxSessionFromEnvelope is the single re-establish-from-envelope
-// path the stateless model leans on: a turn (or any API-direct op) resolves the
-// group lease, hands us the recovery envelope, and gets back a LIVE non-owned
-// session. On a warm box this is a no-lock warm reattach by id (Modal fromId,
-// e2b reconnect — R4-safe, a stray second handle never spawns a second box).
-// When the provider reports the box genuinely gone (NotFound) we cold-restore
-// from the snapshot via create(). NEVER create() on any OTHER resume error
-// (only on NotFound) — a resume-conflict means the box is alive and the caller
-// must back off, not spawn a rival.
+// path the stateless model leans on. Creation authority is explicit:
+//
+//   - `create-or-restore` is reserved for the caller that won the durable
+//     cold->warming lease transition. It may create a cold box, or replace a
+//     resumable box that the provider proves is gone.
+//   - `resume-only` is for attached turns and API-direct operations. It may
+//     resume the leased box by id, but a provider NotFound propagates to the
+//     caller so the lease can be atomically marked cold. It NEVER creates.
+//
+// This ownership boundary is the double-spawn guard. A provider NotFound alone
+// is not creation authority: many attached callers can observe the same dead id
+// concurrently, while only one caller may own cold->warming.
 // ============================================================================
 
 /** A live, externally-owned sandbox session re-established from the group lease
@@ -708,8 +721,8 @@ export type EstablishedSandboxSession = {
    *  2026-07-06 incidents near-unattributable. Optional so external/legacy
    *  constructors of this shape stay valid. */
   origin?: "resumed" | "created" | "restored";
-  /** Set when a warm reattach found the envelope's box GONE (provider NotFound)
-   *  and fell through to cold-restore: the id of the box that was lost. */
+  /** Set when a create-authorized reattach found the envelope's box GONE
+   *  (provider NotFound) and fell through to cold-restore. */
   lostInstanceId?: string;
 };
 
@@ -800,7 +813,12 @@ export function isProviderSandboxNotFoundError(backendId: string, error: unknown
 function readInstanceId(session: unknown): string {
   const state = (session as { state?: Record<string, unknown> }).state ?? {};
   const candidate =
-    state.sandboxId ?? state.instanceId ?? state.id ?? state.hostId ?? state.containerId;
+    state.sandboxId ??
+    state.instanceId ??
+    state.id ??
+    state.hostId ??
+    state.containerId ??
+    state.workspaceRootPath;
   return typeof candidate === "string" && candidate.length > 0 ? candidate : "";
 }
 
@@ -831,24 +849,24 @@ async function terminateCreatedSandbox(
 }
 
 /**
- * Resume the one box by id from its recovery envelope, or cold-restore from the
- * snapshot when the provider reports it gone. The envelope is the lease's
- * box-identity descriptor (the same per-turn `_sandbox` envelope upserted by the
- * turn activity). A null envelope means a cold session that was never warmed →
- * create() directly.
+ * Establish from one recovery envelope under an explicit creation policy. The
+ * envelope is the lease's box-identity descriptor (the same per-turn `_sandbox`
+ * envelope upserted by the turn activity).
  *
  *  - `opts.backendOverride ?? envelope.backendId ?? settings.sandboxBackend`
  *    selects the backend; the client is built for THAT backend (resume-by-id is
  *    fenced to the original provider).
  *  - warm reattach: deserialize the envelope sessionState → client.resume(state)
- *    (no lock; R4-safe). On a provider NotFound, cold-restore via create().
- *  - cold restore / cold session: client.create() — the ONLY create() site.
+ *    (no lock; R4-safe). `resume-only` propagates provider NotFound.
+ *  - `create-or-restore`: the elected owner may replace a missing warm instance,
+ *    or create directly from a cold/null envelope.
  */
 export async function establishSandboxSessionFromEnvelope(
   settings: Settings,
   envelope: Record<string, unknown> | null,
   opts: {
     sessionId: string;
+    recovery: "create-or-restore" | "resume-only";
     backendOverride?: SandboxBackend;
     environment?: Record<string, string>;
     onSandboxCreated?: SandboxCreatedCallback;
@@ -869,7 +887,7 @@ export async function establishSandboxSessionFromEnvelope(
       `Cannot establish a sandbox session for backend "${backend}" (no client; sandboxBackend=none?)`,
     );
   }
-  if (!client.create) {
+  if (opts.recovery === "create-or-restore" && !client.create) {
     throw new SandboxConfigError(backend, `Sandbox backend "${backend}" does not support create()`);
   }
 
@@ -1034,7 +1052,8 @@ export async function establishSandboxSessionFromEnvelope(
     (envelopeProviderState.sandboxId ||
       envelopeProviderState.instanceId ||
       envelopeProviderState.id ||
-      envelopeProviderState.containerId),
+      envelopeProviderState.containerId ||
+      envelopeProviderState.workspaceRootPath),
   );
 
   // (a) WARM REATTACH BY ID — only when the envelope carries a resumable box id.
@@ -1068,10 +1087,14 @@ export async function establishSandboxSessionFromEnvelope(
           origin: "resumed",
         };
       } catch (error) {
-        // ONLY a provider NotFound (box gone) licenses a cold-restore. Anything
-        // else (transient/auth/network/resume-conflict) propagates: the caller
-        // backs off and re-fences — NEVER spawns a rival box.
-        if (!isProviderSandboxNotFoundError(client.backendId, error)) {
+        // Attached callers never own replacement. Propagate the provider
+        // NotFound so their lease-aware caller can atomically mark this exact
+        // warm epoch/instance cold and re-enter normal admission. Only the
+        // cold->warming winner may replace the missing box.
+        if (
+          !isProviderSandboxNotFoundError(client.backendId, error) ||
+          opts.recovery === "resume-only"
+        ) {
           throw error;
         }
         // COLD-RESTORE: the box is genuinely gone. Modal does NOT restore via
@@ -1087,6 +1110,7 @@ export async function establishSandboxSessionFromEnvelope(
           envelopeProviderState?.instanceId,
           envelopeProviderState?.id,
           envelopeProviderState?.containerId,
+          envelopeProviderState?.workspaceRootPath,
         ].find((value): value is string => typeof value === "string" && value.length > 0);
         const restoredSession = await coldRestore(resumedState);
         return lostInstanceId ? { ...restoredSession, lostInstanceId } : restoredSession;
@@ -1099,6 +1123,9 @@ export async function establishSandboxSessionFromEnvelope(
   // envelope confirmDrainCold preserves across draining->cold), replay it so
   // /workspace survives the box churn (sandbox-file-persistence). No archive -> a
   // clean empty box (a never-warmed session).
+  if (opts.recovery === "resume-only") {
+    throw new SandboxResumeStateUnavailableError(backend);
+  }
   return await coldRestore();
 }
 

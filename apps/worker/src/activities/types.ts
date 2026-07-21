@@ -17,13 +17,15 @@ import type { ObjectStorage } from "@opengeni/storage";
 // its workflow run complete, so a plain signal would not start one — this must
 // signalWithStart. Injected (not built from the worker's NativeConnection)
 // because the worker package owns only the worker runtime, not a client; an
-// undefined signaler degrades to "DB wake recorded, no workflow nudge" (the
-// turn is still claimed on the parent's next natural wake).
+// missing signaler leaves the committed outbox revision for the global repair
+// sweep; production workers always inject this dependency.
 export type WakeSessionWorkflowSignal = (input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
   workflowId: string;
+  wakeRevision: number;
+  interruptionRequested?: boolean;
 }) => Promise<void>;
 
 export type SignalCodexCapacityWorkflow = (input: {
@@ -34,6 +36,21 @@ export type SignalCodexCapacityWorkflow = (input: {
   wakeRevision: number;
 }) => Promise<void>;
 
+/** Exact activity-owned proof that the hard sandbox/tool fence physically
+ * drained. This is delivery evidence only: the workflow still validates the
+ * persisted attempt dispatch and commits the authoritative Postgres receipt. */
+export type SessionAttemptQuiescenceProof = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  workflowId: string;
+  workflowRunId: string;
+  activityId: string;
+};
+
+export type SignalSessionAttemptQuiesced = (input: SessionAttemptQuiescenceProof) => Promise<void>;
+
 export type ActivityServices = {
   settings: Settings;
   db: Database;
@@ -43,7 +60,10 @@ export type ActivityServices = {
   documentServices: DocumentServices;
   observability: Observability;
   wakeSessionWorkflow: WakeSessionWorkflowSignal | null;
-  /** Revision-carrying capacity nudge; queue wake remains the back-compat fallback. */
+  /** Durable signalWithStart fallback used only after the activity's direct
+   * physical-quiescence receipt write exhausts its bounded DB retries. */
+  signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced | null;
+  /** Revision-carrying capacity nudge; generic outbox repair is also sufficient. */
   signalCodexCapacityWorkflow?: SignalCodexCapacityWorkflow | null;
   // §7.5 P3 — host-entitlements port, the WORKER half of the same seam the API
   // edge exposes on `AppDependencies`. When set, `ensureRunAllowed` (turn-entry
@@ -59,7 +79,7 @@ export type ActivityServices = {
   // admission and metering are separate operations, and only metering carries
   // the idempotency key.
   entitlements?: EntitlementsPort | null;
-  // §7.6 P4a — host connection-credential provider, the WORKER half of the
+  // §7.6 connection-credential provider — host connection-credential provider, the WORKER half of the
   // federated-connection boundary. When set, the run's per-run credential mint
   // delegates to the host instead of self-minting from `settings`:
   //   - `gitCredentials` REPLACES `createGitHubAppInstallationToken(settings,…)`
@@ -70,7 +90,7 @@ export type ActivityServices = {
   // self-mint for THAT leg. null/undefined (standalone default) → both legs
   // self-mint byte-for-byte as today.
   //
-  // FORK-7 CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
+  // workspace-scope cross-check CROSS-CHECK: a provider echoes the `workspaceId` it scoped the
   // credential to; the consuming activity ASSERTS agreement with the run's
   // workspace BEFORE injecting `GH_TOKEN` (or applying decrypted values). A host
   // mapping bug returning tenant B's creds for a tenant-A run is caught here.
@@ -100,7 +120,7 @@ export type ReconcileCodexCapacityWaitInput = {
 
 export type ReconcileCodexCapacityWaitResult =
   | ({ action: "waiting" } & CodexCapacityWaitRef)
-  | { action: "resumed"; turnId: string }
+  | { action: "resumed"; updateId: string }
   | { action: "superseded" | "stale" };
 
 export type ActivityDependencies = Partial<ActivityServices>;
@@ -109,27 +129,49 @@ export type RunAgentTurnInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  triggerEventId: string;
   workflowId: string;
-  turnId?: string;
+  workflowRunId: string;
+  attemptId: string;
+  trigger: { kind: "next" } | { kind: "approval"; triggerEventId: string };
 };
 
-export type RequeueTurnAfterWorkerDeathInput = {
+export type SettleSessionInterruptionsInput = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
-  // The trigger the dead attempt was actually running (for an approval rerun
-  // this is the approval-decision event, not the turn row's original trigger).
-  triggerEventId: string;
+  attemptId: string;
   workflowId: string;
-  turnId: string;
+  /**
+   * Replay-only compatibility for session workflow histories created before
+   * the receipt-gated cancellation v2 patch. New histories never send this
+   * phase; the exact activity writes the authoritative receipt itself.
+   */
+  phase?: "logical" | "attempt_quiesced";
 };
 
-export type RequeueTurnAfterWorkerDeathResult =
-  // The turn is back on the queue; the session workflow's next claim
-  // re-dispatches it on a healthy worker. `redispatches` is the total number
-  // of worker-death re-dispatches this turn has now consumed.
-  | { action: "requeued"; redispatches: number }
+export type PersistSessionAttemptQuiescenceInput = SessionAttemptQuiescenceProof;
+
+export type FailSessionAttemptInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  error?: string;
+};
+
+export type RecoverDispatchInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  attemptId: string;
+  timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START";
+};
+
+export type RecoverDispatchResult =
+  // The same current inference is now recoverable. It never enters the prompt
+  // queue; the next claim creates a new attempt for this exact turn.
+  | { action: "unclaimed" }
+  | { action: "recovering"; turnId: string; redispatches: number }
   // The turn is no longer running/requires_action: the timed-out attempt was
   // a zombie that actually settled the turn after the server gave up on its
   // heartbeats. Nothing to redo; the workflow just continues its loop.
@@ -137,12 +179,11 @@ export type RequeueTurnAfterWorkerDeathResult =
   // The per-turn crash-loop guard tripped; the workflow must fail the
   // session for real. `redispatches` is the count already consumed (== the
   // ceiling), so the failed attempt was worker death number redispatches + 1.
-  | { action: "exceeded"; redispatches: number };
+  | { action: "exceeded"; turnId: string; redispatches: number };
 
-export type ClaimNextQueuedTurnInput = {
+export type PeekSessionWorkInput = {
   workspaceId: string;
   sessionId: string;
-  workflowId: string;
 };
 
 export type MarkSessionIdleInput = {
@@ -161,19 +202,12 @@ export type MaybeContinueGoalResult = {
   action: "none" | "queue" | "continue" | "paused";
 };
 
-export type PauseGoalForInterruptInput = {
-  workspaceId: string;
-  sessionId: string;
-  // The `user.interrupt` event that triggered the pause, when there is one.
-  // A steer-tagged interrupt (reason "steer") must NOT pause the goal:
-  // steering redirects the work, it does not stop it.
-  triggerEventId?: string;
-};
-
 export type DispatchScheduledTaskRunInput = {
   workspaceId: string;
   taskId: string;
   triggerType: ScheduledTaskTriggerType;
+  /** Stable Temporal workflow identity; retries must reuse the same source row. */
+  producerKey?: string;
   agentRunUsageIdempotencyKey?: string;
 };
 
@@ -184,6 +218,7 @@ export type DispatchScheduledTaskRunResult = {
   sessionId: string;
   triggerEventId: string;
   workflowId: string;
+  workflowWakeRevision: number | null;
 };
 
 export type IndexDocumentInput = {
@@ -192,14 +227,14 @@ export type IndexDocumentInput = {
   documentId: string;
 };
 
-export type RunAgentTurnResult = {
-  // "preempted": the worker hosting this turn shut down gracefully mid-turn;
-  // the activity checkpointed conversation truth, re-queued the turn, and the
-  // session workflow re-dispatches it on a healthy worker.
-  status: "idle" | "requires_action" | "failed" | "cancelled" | "preempted";
-  // Provider backpressure pacing: when set on an idle result, the session
-  // workflow holds the loop this long before admitting the next turn (an
-  // active goal's continuation would otherwise immediately re-hit the limit).
+type ClaimedRunAgentTurnResult = {
+  // "recovering": this attempt ended after durably preserving the same current
+  // inference for a new attempt. Recovery is not prompt queue work.
+  status: "idle" | "requires_action" | "failed" | "cancelled" | "recovering";
+  turnId: string;
+  attemptId: string;
+  // Provider backpressure pacing: when set on an idle or recovering result, the
+  // session workflow holds the loop this long before admitting the next attempt.
   continueDelayMs?: number;
   // Multi-account rotation all-capped idle: every connected Codex subscription is
   // rate-limited/cooling. This is a MANDATORY hold — session.ts must wait
@@ -211,4 +246,17 @@ export type RunAgentTurnResult = {
   // persisted in Postgres and reconstructed after workflow/worker restart.
   // The workflow must not call maybeContinueGoal while this waiter is active.
   capacityWait?: CodexCapacityWaitRef;
+  // This execution reached a durable terminal-for-now boundary (for example,
+  // maintenance could not run or same-turn context recovery failed). End this
+  // workflow run without synthesizing another goal continuation from unchanged
+  // state. A later prompt/control/new-update wake may retry through normal claim
+  // ordering.
+  deferredUntilWake?: boolean;
 };
+
+export type RunAgentTurnResult =
+  | ClaimedRunAgentTurnResult
+  | {
+      status: "unclaimed";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+    };

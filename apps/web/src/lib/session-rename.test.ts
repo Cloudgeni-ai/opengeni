@@ -52,6 +52,21 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    queueVersion: patch.queueVersion ?? 0,
+    queueHeadPosition: patch.queueHeadPosition ?? 0,
+    queueTailPosition: patch.queueTailPosition ?? 0,
+    effectiveControl: patch.effectiveControl ?? {
+      state: "active",
+      controlVersion: 0,
+      controlEtag: "active-0",
+      directState: "active",
+      primaryBlocker: null,
+      additionalBlockerCount: 0,
+      blockers: [],
+      resumeOptions: [],
+      override: null,
+      settlement: null,
+    },
   };
 }
 

@@ -1,7 +1,7 @@
 // apps/api/src/sandbox/access.ts — the API-tier sandbox access seam.
 //
 // This is the foundation of the API-DIRECT control plane
-// (docs/design/sandbox-surfacing): the apps/api process constructs its OWN
+// (docs/connected-machines.md): the apps/api process constructs its OWN
 // sandbox client and resumes boxes by id IN-PROCESS, so non-turn ops (viewer
 // attach, FS/git reads, tunnel URL mint) never touch Temporal or a worker.
 //
@@ -82,7 +82,10 @@ export function makeResumeBoxById(
     let session: ApiSandboxSession;
     try {
       const state = await client.deserializeSessionState(resumeState);
-      session = await client.resume(state);
+      // API-direct access borrows the live box. The lease remains its sole
+      // lifecycle owner, even when the serialized founding handle was owned.
+      // Clone instead of mutating the canonical resume envelope.
+      session = await client.resume({ ...state, ownsSandbox: false });
     } catch (error) {
       throw new SandboxResumeError(
         `Failed to resume sandbox box by id on backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,

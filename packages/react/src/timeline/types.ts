@@ -13,8 +13,6 @@ export type UserMessageItem = {
   kind: "user-message";
   id: string;
   text: string;
-  /** Queued for a future turn whose start has not appeared in the event log. */
-  pending?: boolean;
   /** Resources attached to this message (file uploads, repositories). */
   resources: ResourceRef[];
   /** Tools requested for the turn this message starts. */
@@ -71,16 +69,11 @@ export type WorkerItem = {
   id: string;
   turnId: string | null;
   callId: string | null;
-  action: "spawn" | "message" | "interrupt";
+  action: "spawn" | "message";
   /** The worker's initial message / the message sent to it, when parseable. */
   prompt: string | null;
   /** The target/spawned worker session id, when parseable from args/output. */
   workerSessionId: string | null;
-  /**
-   * For an `interrupt` action, whether it stops the target (default) or steers
-   * it (cancel the current turn, keep the goal). Absent on spawn/message.
-   */
-  mode?: "stop" | "steer";
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };
@@ -106,6 +99,7 @@ export type SandboxItem = {
   name: string;
   command: string | null;
   output: string;
+  origin?: "created" | "restored" | "resumed" | null;
   status: "running" | "complete" | "failed" | "cancelled";
   occurredAt: string;
 };
@@ -166,6 +160,8 @@ export type NoticeItem = {
   id: string;
   tone: "waiting" | "cancelled" | "failed";
   text: string;
+  /** Optional evidence kept inspectable without overwhelming the main rail. */
+  details?: { label: string; value: unknown };
   action?: { label: string; url: string };
   occurredAt: string;
 };

@@ -2,7 +2,7 @@
 //
 // The dock "brain" (capability negotiation, capture-backed cold reads, tab
 // construction, machine chip) lives in the package now — apps/web consumes it
-// through the exact public surface an external embedder (cloudgeni #1577) uses.
+// through the exact public surface an external embedder uses.
 // This adapter only supplies the two app-specific things the package can't know:
 //   1. the sonner-backed notification sink (the package has no toast dependency);
 //   2. app-injected extra tabs (Run / Debug) passed as leading/trailing tabs.
@@ -37,6 +37,7 @@ export function SessionWorkspace(props: {
   initialTab?: string;
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
+  mobileLeadingControl?: ReactNode;
 }) {
   return (
     <SandboxWorkspace
@@ -49,6 +50,7 @@ export function SessionWorkspace(props: {
       {...(props.initialTab ? { initialTab: props.initialTab } : {})}
       collapsed={props.collapsed}
       onCollapsedChange={props.onCollapsedChange}
+      {...(props.mobileLeadingControl ? { mobileLeadingControl: props.mobileLeadingControl } : {})}
       autoSaveId="og.session.dock"
       onNotify={notify}
     />

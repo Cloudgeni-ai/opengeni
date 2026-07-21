@@ -127,7 +127,11 @@ describe("V4A apply_patch parsing", () => {
   });
 
   test("v4aToGitFileDiff marks a delete_file and ignores any diff body", () => {
-    const diff = v4aToGitFileDiff({ type: "delete_file", path: "gone.txt", diff: "ignored" });
+    const diff = v4aToGitFileDiff({
+      type: "delete_file",
+      path: "gone.txt",
+      diff: "ignored",
+    });
     expect(diff.status).toBe("deleted");
     expect(diff.hunks).toHaveLength(0);
     expect(diff.additions).toBe(0);
@@ -155,7 +159,11 @@ describe("V4A apply_patch parsing", () => {
   });
 
   test("v4aToGitFileDiff tolerates an empty update diff (no throw)", () => {
-    const diff = v4aToGitFileDiff({ type: "update_file", path: "x.ts", diff: "" });
+    const diff = v4aToGitFileDiff({
+      type: "update_file",
+      path: "x.ts",
+      diff: "",
+    });
     expect(diff.status).toBe("modified");
     expect(diff.hunks).toHaveLength(0);
   });
@@ -169,7 +177,11 @@ describe("V4A apply_patch parsing", () => {
     // a structurally valid `@@ -0,0 +1,N @@` header and all N added lines.
     const N = 17;
     const body = Array.from({ length: N }, (_, i) => `+line ${i + 1}`).join("\n");
-    const file = v4aToGitFileDiff({ type: "create_file", path: "src/new.ts", diff: body });
+    const file = v4aToGitFileDiff({
+      type: "create_file",
+      path: "src/new.ts",
+      diff: body,
+    });
 
     // The chip count (additions) is what the collapsed header shows.
     expect(file.additions).toBe(N);
@@ -294,6 +306,13 @@ describe("MCP output unwrap", () => {
     });
   });
 
+  test("unwrapMcpOutput flattens a persisted MCP text part", () => {
+    expect(unwrapMcpOutput({ type: "text", text: '{"status":"open"}' })).toEqual({
+      text: '{"status":"open"}',
+      isError: false,
+    });
+  });
+
   test("unwrapMcpOutput surfaces isError and finds the text part among others", () => {
     const result = unwrapMcpOutput({
       isError: true,
@@ -306,7 +325,10 @@ describe("MCP output unwrap", () => {
   });
 
   test("unwrapMcpOutput passes a plain string through", () => {
-    expect(unwrapMcpOutput("plain stdout")).toEqual({ text: "plain stdout", isError: false });
+    expect(unwrapMcpOutput("plain stdout")).toEqual({
+      text: "plain stdout",
+      isError: false,
+    });
   });
 
   test("unwrapMcpOutput handles nullish output", () => {

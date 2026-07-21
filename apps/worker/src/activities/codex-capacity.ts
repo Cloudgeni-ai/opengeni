@@ -63,6 +63,7 @@ export async function signalCodexCapacityWakeTargets(
               workspaceId: target.workspaceId,
               sessionId: target.sessionId,
               workflowId: target.workflowId,
+              wakeRevision: target.workflowWakeRevision,
             })
           : Promise.resolve(),
     ),
@@ -204,7 +205,7 @@ export function createCodexCapacityActivities(services: () => Promise<ActivitySe
       }
     }
     if (result.action === "resumed") {
-      return { action: "resumed", turnId: result.turn.id };
+      return { action: "resumed", updateId: result.update.id };
     }
     if (result.action === "waiting") {
       return {

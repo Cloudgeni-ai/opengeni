@@ -1,4 +1,4 @@
-import type { SessionGoal, SessionTurn } from "@opengeni/sdk";
+import type { ComposerDraft, SessionGoal, SessionTurn } from "@opengeni/sdk";
 import type { SessionClientLike } from "../src/client";
 
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
@@ -9,9 +9,45 @@ export const SESSION_ID = "22222222-2222-4222-8222-222222222222";
  * hook under test calls; everything else throws with a clear message.
  */
 export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLike {
-  return new Proxy(partial as SessionClientLike, {
-    get(target, property) {
-      const value = (target as Record<PropertyKey, unknown>)[property];
+  const emptyDraft: ComposerDraft = {
+    revision: 0,
+    text: "",
+    resources: [],
+    tools: [],
+    model: "model-x",
+    reasoningEffort: "medium",
+    sourceTurnId: null,
+    sourceTurnVersion: null,
+    updatedAt: null,
+  };
+  const target = {
+    getClientConfig: async () =>
+      ({
+        deploymentRevision: "test",
+        apiContractRevision: "2026-07-session-control-v1",
+        defaultModel: "model-x",
+        allowedModels: ["model-x"],
+        models: [],
+        defaultReasoningEffort: "medium",
+        allowedReasoningEfforts: ["medium"],
+        mcpServers: [],
+        fileUploads: { enabled: false, maxSizeBytes: 0 },
+        productAccessMode: "local",
+        auth: { mode: "none" },
+        structuredServices: { fileSystem: false, git: false, terminalEvents: false },
+      }) as never,
+    getComposerDraft: async () => emptyDraft,
+    saveComposerDraft: async (_workspaceId: string, _sessionId: string, request: any) => ({
+      ...emptyDraft,
+      ...request,
+      revision: request.expectedRevision + 1,
+      updatedAt: new Date().toISOString(),
+    }),
+    ...partial,
+  } as SessionClientLike;
+  return new Proxy(target, {
+    get(clientTarget, property) {
+      const value = (clientTarget as Record<PropertyKey, unknown>)[property];
       if (value === undefined && typeof property === "string") {
         return () => {
           throw new Error(`fake client: ${property} is not implemented in this test`);
@@ -38,7 +74,12 @@ export function fakeTurn(overrides: Partial<SessionTurn> = {}): SessionTurn {
     model: "model-x",
     reasoningEffort: "medium",
     sandboxBackend: "none",
+    sandboxOs: null,
     metadata: {},
+    version: 1,
+    executionGeneration: 0,
+    activeAttemptId: null,
+    lineage: {},
     startedAt: null,
     finishedAt: null,
     createdAt: "2026-06-12T00:00:00.000Z",

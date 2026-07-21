@@ -60,15 +60,21 @@ function LayoutToggle({
 
 /** Raw-patch fallback for a V4A hunk string the parser could not structure. */
 export function RawPatch({ diff }: { diff: string }) {
+  const occurrences = new Map<string, number>();
+  const lines = diff.split("\n").map((line) => {
+    const occurrence = (occurrences.get(line) ?? 0) + 1;
+    occurrences.set(line, occurrence);
+    return { key: `${line}\u0000${occurrence}`, line };
+  });
   return (
     <div className="min-w-0">
       <p className="mb-1 text-og-xs font-medium uppercase tracking-[0.08em] text-og-fg-subtle">
         raw patch (could not parse hunks)
       </p>
       <pre className="max-h-72 overflow-auto border-l-2 border-og-border pl-3 font-og-mono text-og-xs leading-5">
-        {diff.split("\n").map((line, index) => (
+        {lines.map(({ key, line }) => (
           <span
-            key={index}
+            key={key}
             className={cn(
               "block",
               line.startsWith("@@")

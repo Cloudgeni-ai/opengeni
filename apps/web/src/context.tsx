@@ -14,6 +14,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useInsertionEffect,
   useMemo,
   useRef,
   useState,
@@ -63,6 +64,7 @@ import type {
   AuthSession,
   ClientConfig,
   CreateWorkspaceRequest,
+  GitHubAppInfo,
   GitHubRepository,
   ResourceRef,
   Session,
@@ -107,7 +109,7 @@ export type AppContextValue = {
   selectedRepoRefs: Record<number, string>;
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
-  githubStatus: { configured: boolean; missing: string[]; installUrl: string | null } | null;
+  githubStatus: GitHubAppInfo | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -126,6 +128,8 @@ export type AppContextValue = {
   handleManagedSignOut: () => Promise<void>;
   createWorkspace: (request: CreateWorkspaceRequest) => Promise<Workspace | null>;
   renameWorkspace: (workspaceId: string, name: string) => Promise<Workspace | null>;
+  setWorkspaceInferenceControl: (workspaceId: string, action: "pause" | "resume") => Promise<void>;
+  refreshWorkspace: (workspaceId: string) => Promise<void>;
   updateWorkspaceSettings: (
     workspaceId: string,
     settings: UpdateWorkspaceSettingsRequest,
@@ -154,6 +158,7 @@ export type AppContextValue = {
   ) => Promise<void>;
   refreshWorkspaceMcpServers: (workspaceId: string, signal?: AbortSignal) => Promise<void>;
   startGitHubAppManifestFlow: (workspaceId: string) => Promise<void>;
+  disconnectGitHubInstallation: (workspaceId: string, installationId: number) => Promise<void>;
   toggleGitHubRepository: (repo: GitHubRepository) => void;
   startSession: (
     workspaceId: string,
@@ -169,6 +174,19 @@ export type AppContextValue = {
 };
 
 const AppContext = createContext<AppContextValue | null>(null);
+
+/** Stable event identity that dispatches only to the latest committed body. */
+export function useLatestCallback<Args extends unknown[], Result>(
+  callback: (...args: Args) => Result,
+): (...args: Args) => Result {
+  const callbackRef = useRef(callback);
+  // Insertion effects run at commit before descendant layout effects can invoke
+  // an event. A suspended/abandoned render therefore cannot leak its body.
+  useInsertionEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+  return useCallback((...args: Args) => callbackRef.current(...args), []);
+}
 
 export function useAppContext(): AppContextValue {
   const value = useContext(AppContext);
@@ -216,11 +234,7 @@ export function RootRouteComponent() {
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
-  const [githubStatus, setGithubStatus] = useState<{
-    configured: boolean;
-    missing: string[];
-    installUrl: string | null;
-  } | null>(null);
+  const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -266,7 +280,12 @@ export function RootRouteComponent() {
   // The @opengeni/sdk client behind every console API call and hook. Auth
   // headers are read per request; a new identity per key version makes the
   // hooks re-fetch and the event streams reconnect with the new credentials.
-  const client = useMemo(() => createOpenGeniClient(), [accessKeyVersion]);
+  const client = useMemo(() => {
+    // The version is an explicit identity fence: credentials are read lazily,
+    // but consumers need a new client object to reconnect hooks and streams.
+    void accessKeyVersion;
+    return createOpenGeniClient();
+  }, [accessKeyVersion]);
   const setSession = useCallback<Dispatch<SetStateAction<Session | null>>>((value) => {
     setSessionState((current) => {
       const next =
@@ -433,6 +452,42 @@ export function RootRouteComponent() {
     }
   }
 
+  async function setWorkspaceInferenceControl(
+    workspaceId: string,
+    action: "pause" | "resume",
+  ): Promise<void> {
+    const current = workspaces.find((workspace) => workspace.id === workspaceId);
+    const response = await client.setWorkspaceInferenceState(workspaceId, {
+      action,
+      clientEventId: crypto.randomUUID(),
+      ...(current ? { expectedRevision: current.inferenceControl.revision } : {}),
+    });
+    setWorkspaces((all) =>
+      all.map((workspace) =>
+        workspace.id === workspaceId
+          ? {
+              ...workspace,
+              inferenceControl: {
+                state: response.state,
+                revision: response.revision,
+                reason: null,
+                changedBy: null,
+                changedAt: new Date().toISOString(),
+              },
+            }
+          : workspace,
+      ),
+    );
+  }
+
+  const refreshWorkspace = useCallback(
+    async (workspaceId: string): Promise<void> => {
+      const updated = await client.getWorkspace(workspaceId);
+      setWorkspaces((current) => upsertWorkspace(current, updated));
+    },
+    [client],
+  );
+
   // Settings PATCH deep-merges server-side; upsert the returned workspace so the
   // cached list (and any settings-derived UI, e.g. the Documents memory pane)
   // reflects the change without a reload.
@@ -590,62 +645,60 @@ export function RootRouteComponent() {
     return true;
   }
 
-  async function refreshGitHub(
-    workspaceId: string,
-    signal?: AbortSignal,
-    options?: { sync?: boolean },
-  ) {
-    const refreshId = githubRefreshId.current + 1;
-    githubRefreshId.current = refreshId;
-    setRepoBusy(true);
-    try {
-      const status = await client.getGitHubApp(workspaceId);
-      if (signal?.aborted || githubRefreshId.current !== refreshId) {
-        return;
-      }
-      setGithubStatus({
-        configured: status.configured,
-        missing: status.missing,
-        installUrl: status.installUrl,
-      });
-      setGithubAppOpen(!status.configured);
-      if (status.configured) {
-        // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
-        // so installations changed after connect show up; passive loads read
-        // OpenGeni's cached rows.
-        const { repositories } = options?.sync
-          ? await client.syncGitHubRepositories(workspaceId)
-          : await client.listGitHubRepositories(workspaceId);
+  const refreshGitHub = useCallback(
+    async (workspaceId: string, signal?: AbortSignal, options?: { sync?: boolean }) => {
+      const refreshId = githubRefreshId.current + 1;
+      githubRefreshId.current = refreshId;
+      setRepoBusy(true);
+      try {
+        const status = await client.getGitHubApp(workspaceId);
         if (signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubRepos(repositories);
-      } else {
+        setGithubStatus(status);
+        setGithubAppOpen(!status.configured);
+        if (status.configured) {
+          // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
+          // so installations changed after connect show up; passive loads read
+          // OpenGeni's cached rows.
+          const { repositories } = options?.sync
+            ? await client.syncGitHubRepositories(workspaceId)
+            : await client.listGitHubRepositories(workspaceId);
+          if (signal?.aborted || githubRefreshId.current !== refreshId) {
+            return;
+          }
+          setGithubRepos(repositories);
+        } else {
+          setGithubRepos([]);
+        }
+      } catch (error) {
+        if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
+          return;
+        }
+        setGithubStatus(null);
         setGithubRepos([]);
+        toast.error("GitHub status unavailable", { description: String(error) });
+      } finally {
+        if (githubRefreshId.current === refreshId) {
+          setRepoBusy(false);
+        }
       }
-    } catch (error) {
-      if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
+    },
+    [client],
+  );
+
+  const refreshWorkspaceMcpServers = useCallback(
+    async (workspaceId: string, signal?: AbortSignal) => {
+      const refreshId = mcpRefreshId.current + 1;
+      mcpRefreshId.current = refreshId;
+      const catalog = await client.listCapabilities(workspaceId);
+      if (signal?.aborted || mcpRefreshId.current !== refreshId) {
         return;
       }
-      setGithubStatus({ configured: false, missing: [], installUrl: null });
-      setGithubRepos([]);
-      toast.error("GitHub status unavailable", { description: String(error) });
-    } finally {
-      if (githubRefreshId.current === refreshId) {
-        setRepoBusy(false);
-      }
-    }
-  }
-
-  async function refreshWorkspaceMcpServers(workspaceId: string, signal?: AbortSignal) {
-    const refreshId = mcpRefreshId.current + 1;
-    mcpRefreshId.current = refreshId;
-    const catalog = await client.listCapabilities(workspaceId);
-    if (signal?.aborted || mcpRefreshId.current !== refreshId) {
-      return;
-    }
-    setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
-  }
+      setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+    },
+    [client],
+  );
 
   async function startSession(
     workspaceId: string,
@@ -725,6 +778,37 @@ export function RootRouteComponent() {
         description: error instanceof Error ? error.message : String(error),
       });
       setGithubAppBusy(false);
+    }
+  }
+
+  async function disconnectGitHubInstallation(
+    workspaceId: string,
+    installationId: number,
+  ): Promise<void> {
+    try {
+      await client.unlinkGitHubInstallation(workspaceId, installationId);
+      const removedRepositoryIds = new Set(
+        githubRepos
+          .filter((repository) => repository.installationId === installationId)
+          .map((repository) => repository.id),
+      );
+      setSelectedRepoIds(
+        (current) =>
+          new Set([...current].filter((repositoryId) => !removedRepositoryIds.has(repositoryId))),
+      );
+      setSelectedRepoRefs((current) =>
+        Object.fromEntries(
+          Object.entries(current).filter(
+            ([repositoryId]) => !removedRepositoryIds.has(Number(repositoryId)),
+          ),
+        ),
+      );
+      await refreshGitHub(workspaceId, undefined, { sync: true });
+      toast.success("GitHub installation unlinked from this workspace");
+    } catch (error) {
+      toast.error("Failed to unlink GitHub installation", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
@@ -811,29 +895,50 @@ export function RootRouteComponent() {
     await navigate({ to: "/", replace: true });
   }
 
-  function resetSessionView() {
+  const resetSessionView = useCallback(() => {
     setSession(null);
     setConnectionState("idle");
-  }
+  }, [setSession]);
 
   // Session-scoped model: read the session's override or fall back to the
   // deployment default; writing records it without disturbing other sessions
   // (or the new-session surface, which reads the bare `model`).
-  function modelForSession(sessionId: string): string {
-    return modelBySession[sessionId] ?? model;
-  }
-  function setModelForSession(sessionId: string, value: string): void {
+  const modelForSession = useCallback(
+    (sessionId: string): string => modelBySession[sessionId] ?? model,
+    [model, modelBySession],
+  );
+  const setModelForSession = useCallback((sessionId: string, value: string): void => {
     setModelBySession((current) => ({ ...current, [sessionId]: value }));
-  }
+  }, []);
 
-  function resetWorkspaceIntegrations() {
+  const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
     setGithubRepos([]);
     setWorkspaceMcpServers([]);
-  }
+  }, []);
 
-  const appContext =
-    clientConfig && accessContext
+  // Context actions keep one identity while reading the newest committed state
+  // through the callback ref. This prevents unrelated provider renders
+  // (for example, an access-key draft keystroke) from invalidating the entire
+  // routed application tree.
+  const contextAddManualRepository = useLatestCallback(addManualRepository);
+  const contextForgetAccessKey = useLatestCallback(forgetAccessKey);
+  const contextHandleManagedSignOut = useLatestCallback(handleManagedSignOut);
+  const contextCreateWorkspace = useLatestCallback(createWorkspace);
+  const contextRenameWorkspace = useLatestCallback(renameWorkspace);
+  const contextSetWorkspaceInferenceControl = useLatestCallback(setWorkspaceInferenceControl);
+  const contextUpdateWorkspaceSettings = useLatestCallback(updateWorkspaceSettings);
+  const contextSetWorkspaceDefaultRig = useLatestCallback(setWorkspaceDefaultRig);
+  const contextUpdateSessionTitle = useLatestCallback(updateSessionTitle);
+  const contextUpdateSessionPin = useLatestCallback(updateSessionPin);
+  const contextDeleteWorkspace = useLatestCallback(deleteWorkspace);
+  const contextStartGitHubAppManifestFlow = useLatestCallback(startGitHubAppManifestFlow);
+  const contextDisconnectGitHubInstallation = useLatestCallback(disconnectGitHubInstallation);
+  const contextToggleGitHubRepository = useLatestCallback(toggleGitHubRepository);
+  const contextStartSession = useLatestCallback(startSession);
+
+  const appContext = useMemo<AppContextValue | null>(() => {
+    return clientConfig && accessContext
       ? ({
           client,
           clientConfig,
@@ -877,25 +982,81 @@ export function RootRouteComponent() {
           repositoryGroups,
           toolMcpServers,
           currentResources,
-          addManualRepository,
-          forgetAccessKey,
-          handleManagedSignOut,
-          createWorkspace,
-          renameWorkspace,
-          updateWorkspaceSettings,
-          setWorkspaceDefaultRig,
-          updateSessionTitle,
-          updateSessionPin,
-          deleteWorkspace,
+          addManualRepository: contextAddManualRepository,
+          forgetAccessKey: contextForgetAccessKey,
+          handleManagedSignOut: contextHandleManagedSignOut,
+          createWorkspace: contextCreateWorkspace,
+          renameWorkspace: contextRenameWorkspace,
+          setWorkspaceInferenceControl: contextSetWorkspaceInferenceControl,
+          refreshWorkspace,
+          updateWorkspaceSettings: contextUpdateWorkspaceSettings,
+          setWorkspaceDefaultRig: contextSetWorkspaceDefaultRig,
+          updateSessionTitle: contextUpdateSessionTitle,
+          updateSessionPin: contextUpdateSessionPin,
+          deleteWorkspace: contextDeleteWorkspace,
           refreshGitHub,
           refreshWorkspaceMcpServers,
-          startGitHubAppManifestFlow,
-          toggleGitHubRepository,
-          startSession,
+          startGitHubAppManifestFlow: contextStartGitHubAppManifestFlow,
+          disconnectGitHubInstallation: contextDisconnectGitHubInstallation,
+          toggleGitHubRepository: contextToggleGitHubRepository,
+          startSession: contextStartSession,
           resetSessionView,
           resetWorkspaceIntegrations,
         } satisfies AppContextValue)
       : null;
+  }, [
+    accessContext,
+    accessKeyVersion,
+    authSession,
+    busy,
+    client,
+    clientConfig,
+    connectionState,
+    contextAddManualRepository,
+    contextCreateWorkspace,
+    contextDeleteWorkspace,
+    contextForgetAccessKey,
+    contextHandleManagedSignOut,
+    contextRenameWorkspace,
+    contextSetWorkspaceInferenceControl,
+    contextSetWorkspaceDefaultRig,
+    contextDisconnectGitHubInstallation,
+    contextStartGitHubAppManifestFlow,
+    contextStartSession,
+    contextToggleGitHubRepository,
+    contextUpdateSessionPin,
+    contextUpdateSessionTitle,
+    contextUpdateWorkspaceSettings,
+    currentResources,
+    githubAppBusy,
+    githubAppOpen,
+    githubOrg,
+    githubRepos,
+    githubStatus,
+    inspectorOpen,
+    keyAuthRequired,
+    manualRepos,
+    manualReposOpen,
+    model,
+    modelForSession,
+    reasoningEffort,
+    refreshGitHub,
+    refreshWorkspace,
+    refreshWorkspaceMcpServers,
+    repoBusy,
+    repositoryGroups,
+    resetSessionView,
+    resetWorkspaceIntegrations,
+    selectedCapabilityToolIds,
+    selectedInstallationId,
+    selectedRepoIds,
+    selectedRepoRefs,
+    session,
+    setModelForSession,
+    setSession,
+    toolMcpServers,
+    workspaces,
+  ]);
 
   return (
     <main className="flex h-dvh min-h-screen flex-col overflow-x-hidden bg-bg text-fg">

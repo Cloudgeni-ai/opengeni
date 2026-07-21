@@ -133,7 +133,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + setActiveSandbox", () => {
   test("the proxy routes to the GROUP box by default, then to the MACHINE after a swap, then back", async () => {
@@ -146,6 +146,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const [w] = await admin<
       { id: string }[]
     >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
     const accountId = a!.id;
     const workspaceId = w!.id;
 
@@ -228,6 +229,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     const [w] = await admin<
       { id: string }[]
     >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-lazy') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
     const accountId = a!.id;
     const workspaceId = w!.id;
     const session = await createSession(db, {
@@ -278,6 +280,7 @@ describe("M7 worker routing — turn-start reconcile (issue #341 invariant B)", 
     const [w] = await admin<
       { id: string }[]
     >`insert into workspaces (account_id, name) values (${a!.id}, ${`ws-${tag}`}) returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
     return { accountId: a!.id, workspaceId: w!.id };
   }
 

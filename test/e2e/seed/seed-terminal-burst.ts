@@ -1,4 +1,4 @@
-// seed-terminal-burst — STUB (dossier §16). Floods stdout (e.g. `seq`/`yes`
+// seed-terminal-burst — STUB. Floods stdout (e.g. `seq`/`yes`
 // bursts, ANSI color spam) to stress the terminal renderer's throughput and
 // scrollback under the WebGL overhaul (acceptance E6). Wired at M6 when the
 // interactive pty-ws terminal + WebGL addon are the thing under test; the fixture

@@ -150,7 +150,7 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
-  test("pending queued user messages show the quiet queued hint only while pending", async () => {
+  test("waiting prompts stay out of the timeline until their turn begins", async () => {
     resetTimelineEvents();
     const pendingEvents = [
       timelineEvent("user.message", { text: "Follow up after this turn" }, null),
@@ -163,8 +163,8 @@ describe("MessageTimeline — settled turn folding", () => {
     const pending = await renderComponent(<MessageTimeline events={pendingEvents} />);
     await flush();
 
-    expect(pending.container.textContent).toContain("Follow up after this turn");
-    expect(pending.container.textContent).toContain("queued");
+    expect(pending.container.textContent).not.toContain("Follow up after this turn");
+    expect(pending.container.textContent).not.toContain("queued");
     await pending.unmount();
 
     resetTimelineEvents();
@@ -329,7 +329,7 @@ describe("MessageTimeline — settled turn folding", () => {
     await r.unmount();
   });
 
-  test("a STREAMING cluster never folds, even when a pending queued message sits after it", async () => {
+  test("a STREAMING cluster never folds while another prompt waits outside the timeline", async () => {
     resetTimelineEvents();
     const events = [
       timelineEvent("user.message", { text: "Do a long job" }),
@@ -347,8 +347,8 @@ describe("MessageTimeline — settled turn folding", () => {
         name: "exec_command",
         arguments: { cmd: "step two running" },
       }),
-      // A queued follow-up renders at the tail (#197 pending anchoring) —
-      // making the running cluster second-to-last. It must STILL not fold.
+      // The queued follow-up remains exclusively in the prompt queue. Its
+      // absence from the timeline must not make the live cluster fold.
       timelineEvent("user.message", { text: "queued follow-up" }, null),
       timelineEvent(
         "turn.queued",
@@ -363,7 +363,7 @@ describe("MessageTimeline — settled turn folding", () => {
     const triggers = turnSummaryTriggers(r.container);
     expect(triggers).toHaveLength(1);
     expect(r.container.textContent).toContain("step two running");
-    expect(r.container.textContent).toContain("queued follow-up");
+    expect(r.container.textContent).not.toContain("queued follow-up");
 
     await r.unmount();
   });
@@ -487,7 +487,9 @@ describe("ApplyPatchRenderer — multi-file with one malformed op", () => {
 
     // Expand the disclosure to see the body content.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const bodyText = r.container.textContent ?? "";
@@ -589,7 +591,9 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
 
     // Expand the disclosure to see the body.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -614,7 +618,9 @@ describe("WebSearchRenderer — null/undefined entries in results array", () => 
 
     // Expand.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -664,7 +670,9 @@ describe("ExecRenderer — failed status with non-empty output", () => {
 
     // Expand.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -819,7 +827,9 @@ describe("ViewImageRenderer — running state (in-flight affordance)", () => {
 
     // Expand the row to see the body note.
     const trigger = r.container.querySelector('[role="button"]') as HTMLElement | null;
-    trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flush();
 
     const text = r.container.textContent ?? "";
@@ -949,6 +959,20 @@ describe("SandboxRow — failed chip", () => {
     const text = r.container.textContent ?? "";
     // No failure chip for a successful op.
     expect(text.toLowerCase()).not.toContain("failed");
+
+    await r.unmount();
+  });
+
+  test("sandbox establishment says whether the box was reattached", async () => {
+    const item = sandboxItem({
+      name: "sandbox.provision",
+      status: "complete",
+      origin: "resumed",
+    });
+    const r = await renderComponent(<ActivityRail items={[item]} />);
+    await flush();
+
+    expect(r.container.textContent ?? "").toContain("Sandbox reattached");
 
     await r.unmount();
   });

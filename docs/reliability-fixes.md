@@ -7,19 +7,17 @@ a silent double-charge. This document records five confirmed reliability bugs an
 the fixes shipped for them, each with **how it is verified**, honestly, including
 what was and was not re-confirmed live.
 
-Companion doc: [`manager-session-robustness.md`](./manager-session-robustness.md)
-covers a *separate* set of four manager-session failure modes (context
-compaction, worker-monitoring byte caps, `user.interrupt`). The two documents do
-not overlap; they were produced by two concurrent workstreams.
-
-Code wins over this summary. Canonical sources:
+This is a historical release record. Later clean-cutover work replaced the
+preemption/control mechanics described by the 2026-06 implementation; current
+behavior is defined by [`run-lifecycle.md`](run-lifecycle.md) and code. Code wins
+over this summary. Canonical sources:
 
 - `apps/worker/src/workflows/session.ts` — the session workflow loop +
   continueAsNew.
 - `apps/worker/src/activities/agent-turn.ts` — the turn activity, the
   conversation-truth reconcile, `historyRowsToAppend`, `modelUsageSourceKey`.
 - `packages/db/src/index.ts` — `orphanedResultRowIndicesForRepair`,
-  `claimNextQueuedTurn`, the reusable-session locked update.
+  `claimNextSessionExecution`, the reusable-session locked update.
 - `packages/db/drizzle/0014_repair_orphaned_function_call_results.sql` — the
   one-time orphan repair.
 - `packages/core/src/domain/scheduled-tasks.ts` — the manual-trigger idempotency
@@ -61,7 +59,7 @@ whether it should hand off to a fresh run and, if so, calls
 
 ```
 const shouldContinue = info.continueAsNewSuggested || turnsThisRun >= maxTurnsPerRun;
-if (shouldContinue && interruptedEventId === null) { ... await continueAsNew(...) }
+if (shouldContinue) { ... await continueAsNew(...) }
 ```
 
 - **Primary trigger:** `workflowInfo().continueAsNewSuggested` — the server's own
@@ -72,27 +70,24 @@ if (shouldContinue && interruptedEventId === null) { ... await continueAsNew(...
   relative to the event budget; rare enough not to be a per-turn cost. Tests
   override it via `maxTurnsPerRun` to exercise the boundary without thousands of
   real turns.
-- **Gated by `patched("session-continue-as-new")`** so in-flight histories
-  recorded before the branch existed stay deterministic on replay.
-
 **Correctness — nothing is stranded across the boundary:**
 
-- The new run carries only the **self-contained** `SessionWorkflowInput` (no
-  `initialEventId`): it does **not** replay a seed event, it **re-claims from the
-  durable Postgres queue** on its first `claimNextQueuedTurn`. The queue living in
-  Postgres is the safety net.
-- A buffered `userMessage` / `queueChanged` signal only bumps an in-memory
-  `wakeups` counter, and **its turn was written to Postgres before the signal was
-  sent**, so the fresh run re-claims it — losing the counter strands nothing.
-- A pending `interrupt` is unbacked in-memory state the new run could not
-  reconstruct, so the guard **refuses to `continueAsNew` while one is set**
-  (`interruptedEventId === null`) and lets the loop handle it first.
-- The stale **approval queue** is cleared at the boundary on purpose: a genuinely
-  pending approval keeps the workflow blocked **inside** `runTurn`, so it never
-  reaches the top of the loop; any `approvalQueue` entry observed here is
-  necessarily a stale surplus decision. Coupling the guard to
-  `approvalQueue.length === 0` would let one stale entry wedge it forever,
-  re-introducing the exact overflow this fixes.
+- The new run carries only the **self-contained** `SessionWorkflowInput`: it
+  does not replay a seed event. Its first durable work peek reconstructs the
+  current human queue, approval, capacity wait, interruption, recovering turn,
+  internal-update batch, and effective control gate from Postgres.
+- Buffered workflow signals only bump in-memory wake counters. The transaction
+  that created the underlying prompt, approval, update, waiter, or interruption
+  committed it before signalling, so losing a counter strands nothing.
+- Pause/Steer truth is now durable: the control plane records exact-attempt
+  interruptions in Postgres before sending a replaceable workflow wake. The
+  workflow reaches this boundary only after any claimed attempt is settled, so
+  a new run can reconstruct every pending interruption and control gate without
+  carrying an in-memory control scalar.
+- Approval signals are wake hints, never an in-memory approval queue. An
+  accepted decision is attached durably to the same logical turn and is
+  rediscovered after `continueAsNew`; a stale duplicate cannot manufacture a
+  second approval dispatch.
 
 **Verified.**
 

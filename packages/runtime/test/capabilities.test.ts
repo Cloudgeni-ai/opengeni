@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { buildAgentCapabilities, buildOpenGeniAgent } from "../src/index";
+import {
+  buildAgentCapabilities,
+  buildOpenGeniAgent,
+  type TurnToolCancellationFence,
+} from "../src/index";
 
 function capabilityTypes(settings: Parameters<typeof buildAgentCapabilities>[0]): string[] {
   return buildAgentCapabilities(settings, []).map(
@@ -8,69 +12,45 @@ function capabilityTypes(settings: Parameters<typeof buildAgentCapabilities>[0])
   );
 }
 
-describe("provider-aware capability selection", () => {
-  test("Azure (auto -> client): NO compaction capability is attached (closes the live 400 path)", () => {
-    const types = capabilityTypes(
-      testSettings({ openaiProvider: "azure", contextCompactionMode: "auto" }),
-    );
-    expect(types).not.toContain("compaction");
-    // filesystem/shell/skills are still present (only compaction is provider-gated).
-    expect(types).toContain("filesystem");
-    expect(types).toContain("shell");
-    expect(types).toContain("skills");
+describe("portable local compaction capability boundary", () => {
+  test("no provider receives the Agents SDK inline compaction capability", () => {
+    for (const openaiProvider of ["openai", "azure"] as const) {
+      const types = capabilityTypes(testSettings({ openaiProvider }));
+      expect(types).not.toContain("compaction");
+      expect(types).toContain("filesystem");
+      expect(types).toContain("shell");
+      expect(types).toContain("skills");
+    }
   });
+});
 
-  test("OpenAI platform (auto -> server): compaction capability IS attached", () => {
-    const types = capabilityTypes(
-      testSettings({ openaiProvider: "openai", contextCompactionMode: "auto" }),
+describe("turn sandbox-tool cancellation boundary", () => {
+  test("buildOpenGeniAgent installs and exposes one shared physical tool fence", async () => {
+    const abort = new AbortController();
+    let fence: TurnToolCancellationFence | null = null;
+    const agent = buildOpenGeniAgent(
+      testSettings({ sandboxBackend: "local", webSearchEnabled: false }),
+      [],
+      {
+        turnCancellationSignal: abort.signal,
+        onToolCancellationFence: (value) => {
+          fence = value;
+        },
+      },
     );
-    expect(types).toContain("compaction");
-    expect(types).toContain("filesystem");
-    expect(types).toContain("shell");
-    expect(types).toContain("skills");
-  });
+    const capabilities = (agent as unknown as { capabilities: Array<Record<string, unknown>> })
+      .capabilities;
 
-  test("explicit client mode never attaches compaction even on the OpenAI provider", () => {
-    const types = capabilityTypes(
-      testSettings({ openaiProvider: "openai", contextCompactionMode: "client" }),
-    );
-    expect(types).not.toContain("compaction");
-  });
+    expect(fence).not.toBeNull();
+    expect(capabilities.map((capability) => capability.type)).toEqual([
+      "filesystem",
+      "shell",
+      "skills",
+    ]);
+    expect(capabilities.every((capability) => Object.hasOwn(capability, "tools"))).toBe(true);
 
-  test("explicit server mode attaches compaction even on Azure (operator override)", () => {
-    const types = capabilityTypes(
-      testSettings({ openaiProvider: "azure", contextCompactionMode: "server" }),
-    );
-    expect(types).toContain("compaction");
-  });
-
-  test("off mode attaches no compaction capability (legacy unbounded escape hatch)", () => {
-    const types = capabilityTypes(
-      testSettings({ openaiProvider: "openai", contextCompactionMode: "off" }),
-    );
-    expect(types).not.toContain("compaction");
-  });
-
-  test("server-path compaction policy emits the correct gpt-5.6-sol threshold, not the 240k fallback", () => {
-    const settings = testSettings({
-      openaiProvider: "openai",
-      contextCompactionMode: "server",
-      openaiModel: "gpt-5.6-sol",
-    });
-    const caps = buildAgentCapabilities(settings, []);
-    const compactionCap = caps.find((cap) => (cap as { type?: unknown }).type === "compaction") as
-      | { samplingParams: (p: Record<string, unknown>) => Record<string, unknown> }
-      | undefined;
-    expect(compactionCap).toBeDefined();
-    const params = compactionCap!.samplingParams({ model: "gpt-5.6-sol" });
-    const contextManagement = params.context_management as Array<{
-      type: string;
-      compact_threshold: number;
-    }>;
-    expect(contextManagement[0]!.type).toBe("compaction");
-    // floor(window * defaultRatio 0.90) = 945_000, NOT the SDK's 240_000 fallback.
-    expect(contextManagement[0]!.compact_threshold).toBe(Math.floor(1_050_000 * 0.9));
-    expect(contextManagement[0]!.compact_threshold).not.toBe(240_000);
+    abort.abort(new Error("steered"));
+    await fence!.waitForQuiescence();
   });
 });
 
@@ -104,7 +84,6 @@ describe("native web search hosted tool", () => {
       testSettings({
         sandboxBackend: "none",
         openaiProvider: "azure",
-        contextCompactionMode: "client",
       }),
       [],
     );
@@ -146,28 +125,19 @@ describe("native web search hosted tool", () => {
   });
 });
 
-describe("server-path store:false precondition", () => {
-  test("server mode sets store=false (encrypted compaction item round-trips)", () => {
-    const agent = buildOpenGeniAgent(
-      testSettings({
-        sandboxBackend: "none",
-        openaiProvider: "openai",
-        contextCompactionMode: "server",
-      }),
-      [],
-    );
-    expect((agent.modelSettings as { store?: unknown }).store).toBe(false);
-  });
-
-  test("client mode does not force store=false", () => {
-    const agent = buildOpenGeniAgent(
-      testSettings({
-        sandboxBackend: "none",
-        openaiProvider: "azure",
-        contextCompactionMode: "client",
-      }),
-      [],
-    );
-    expect((agent.modelSettings as { store?: unknown }).store).toBeUndefined();
+describe("main agent request has no inline compaction policy", () => {
+  test("OpenAI and Azure both leave store/context_management unset", () => {
+    for (const openaiProvider of ["openai", "azure"] as const) {
+      const agent = buildOpenGeniAgent(
+        testSettings({ sandboxBackend: "none", openaiProvider }),
+        [],
+      );
+      const settings = agent.modelSettings as {
+        store?: unknown;
+        providerData?: Record<string, unknown>;
+      };
+      expect(settings.store).toBeUndefined();
+      expect(settings.providerData?.context_management).toBeUndefined();
+    }
   });
 });

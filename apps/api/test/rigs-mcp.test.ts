@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
-import { bootstrapWorkspace, createDb, createRig, getRigChange, type DbClient } from "@opengeni/db";
+import {
+  bootstrapWorkspace,
+  createDb,
+  createRig,
+  createRigChange,
+  createRigVersion,
+  getRigChange,
+  updateRigChangeStatus,
+  type DbClient,
+} from "@opengeni/db";
 import {
   acquireSharedTestDatabase,
   MemoryEventBus,
@@ -68,6 +77,14 @@ describe("rig MCP tools", () => {
     expect(got.rig.id).toBe(rig.id);
     expect(got.versions.length).toBeGreaterThanOrEqual(1);
     expect(Array.isArray(got.changes)).toBe(true);
+
+    const clamped = await callMcpTool<{ versions: unknown[]; changes: unknown[] }>(
+      server,
+      "rig_get",
+      { rigId: rig.id, versionLimit: 1_000, changeLimit: 1_000 },
+    );
+    expect(clamped.versions).toHaveLength(1);
+    expect(clamped.changes).toHaveLength(0);
   });
 
   test("rig_propose_change creates a setup_append change and triggers verification", async () => {
@@ -102,6 +119,110 @@ describe("rig MCP tools", () => {
     const stored = await getRigChange(client.db, workspaceId, proposed.change.id);
     expect(stored?.kind).toBe("setup_append");
     expect(stored?.proposedBy).toBe(`session:${sessionId}`);
+  });
+
+  test("rig_get keeps one bounded active definition and summary-only history", async () => {
+    if (!available) return;
+    const huge = "界🙂".repeat(75_000);
+    const rig = await createRig(client.db, {
+      accountId,
+      workspaceId,
+      name: `mcp-bounded-${crypto.randomUUID()}`,
+      createdBy: "user:mcp",
+      initialVersion: {
+        image: `registry.example.com/${huge}`,
+        setupScript: `echo active-start\n${huge}\necho active-end`,
+        checks: Array.from({ length: 40 }, (_, index) => ({
+          name: `check-${index}`,
+          command: `${huge}-${index}`,
+        })),
+        credentialHooks: Array.from({ length: 100 }, (_, index) => `${huge}-${index}`),
+        changelog: huge,
+      },
+    });
+    for (let version = 2; version <= 7; version += 1) {
+      await createRigVersion(client.db, workspaceId, rig.id, {
+        image: `registry.example.com/version-${version}-${huge}`,
+        setupScript: `echo version-${version}\n${huge}`,
+        checks: Array.from({ length: version }, (_, index) => ({
+          name: `v${version}-check-${index}`,
+          command: huge,
+        })),
+        changelog: `${huge}-${version}`,
+      });
+    }
+    for (let index = 0; index < 7; index += 1) {
+      const change = await createRigChange(client.db, {
+        accountId,
+        workspaceId,
+        rigId: rig.id,
+        baseVersionId: rig.activeVersion!.id,
+        kind: "setup_append",
+        payload: {
+          command: `echo change-${index}\n${huge}`,
+          nested: { exactPayloadMustNotReachModelHistory: huge },
+        },
+        proposedBy: `session:${crypto.randomUUID()}`,
+      });
+      await updateRigChangeStatus(client.db, workspaceId, change.id, {
+        status: "verifying",
+        verification: {
+          attempt: index + 1,
+          startedAt: `2026-07-19T00:00:0${index}.000Z`,
+          finishedAt: `2026-07-19T00:01:0${index}.000Z`,
+          passed: index % 2 === 0,
+          log: `verification-${index}-${huge}`,
+        },
+      });
+    }
+
+    const server = buildOpenGeniMcpServer(deps(new FakeWorkflowClient()), grant(["rigs:use"]));
+    const got = await callMcpTool<{
+      rig: {
+        activeVersion: { setupScript: string; checks: unknown };
+        versionCount: number;
+      };
+      versions: Array<Record<string, unknown>>;
+      versionsTotal: number;
+      versionsTruncated: boolean;
+      changes: Array<Record<string, unknown>>;
+      changesTotal: number;
+      changesTruncated: boolean;
+      projection: {
+        bytes: number;
+        maxBytes: number;
+        truncated: boolean;
+        fields: Record<string, { originalBytes: number | null; truncated: boolean }>;
+      };
+    }>(server, "rig_get", { rigId: rig.id, versionLimit: 3, changeLimit: 5 });
+    expect(got.projection.bytes).toBe(Buffer.byteLength(JSON.stringify(got, null, 2), "utf8"));
+    expect(got.projection.bytes).toBeLessThanOrEqual(64 * 1024);
+    expect(got.projection.maxBytes).toBe(64 * 1024);
+    expect(got.projection.truncated).toBeTrue();
+    expect(got.rig.versionCount).toBe(7);
+    expect(got.rig.activeVersion.setupScript).toContain("model monitoring projection");
+    expect(got.versionsTotal).toBe(7);
+    expect(got.versionsTruncated).toBeTrue();
+    expect(got.versions).toHaveLength(3);
+    expect(got.versions[0]).toMatchObject({
+      setupScriptBytes: expect.any(Number),
+      checkCount: expect.any(Number),
+    });
+    expect(got.versions[0]).not.toHaveProperty("setupScript");
+    expect(got.versions[0]).not.toHaveProperty("checks");
+    expect(got.changesTotal).toBe(7);
+    expect(got.changesTruncated).toBeTrue();
+    expect(got.changes).toHaveLength(5);
+    expect(got.changes[0]).toMatchObject({
+      payloadBytes: expect.any(Number),
+      verificationBytes: expect.any(Number),
+      verificationLogBytes: expect.any(Number),
+      verificationPassed: expect.any(Boolean),
+    });
+    expect(got.changes[0]).not.toHaveProperty("payload");
+    expect(got.changes[0]).not.toHaveProperty("verification");
+    expect(JSON.stringify(got)).not.toContain("exactPayloadMustNotReachModelHistory");
+    expect(got.projection.fields.activeSetupScript.originalBytes).toBeGreaterThan(100_000);
   });
 
   test("rig_promote is absent without rigs:manage", async () => {
@@ -179,8 +300,9 @@ class FakeWorkflowClient implements SessionWorkflowClient {
   rigVerifications: unknown[] = [];
   async signalUserMessage(): Promise<void> {}
   async wakeSessionWorkflow(): Promise<void> {}
+  async requestSessionWorkflowWakeDispatch(): Promise<void> {}
   async signalApprovalDecision(): Promise<void> {}
-  async signalInterrupt(): Promise<void> {}
+  async signalSessionControl(): Promise<void> {}
   async syncScheduledTask(): Promise<void> {}
   async deleteScheduledTaskSchedule(): Promise<void> {}
   async triggerScheduledTask(): Promise<void> {}

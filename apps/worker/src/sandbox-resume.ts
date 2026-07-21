@@ -6,13 +6,12 @@
 //
 //   1. acquireLease (group-keyed) under the DB FOR UPDATE + cold->warming CAS —
 //      the SOLE double-spawn guard (P1.1).
-//   2. establishSandboxSessionFromEnvelope — resume the one box BY ID (warm
-//      reattach, R4-safe) or cold-restore from snapshot on a provider NotFound.
-//   3. (spawner) ensureDisplayStack + exposeStreamPort, then commitWarmingToWarm
-//      (the lease_epoch++ fence + folds the resume envelope onto the lease). The
-//      ATTACHED/REARMED path RE-ensures the display stack too (idempotent) so a
-//      computer-use turn always finds a live :0 even on a box first warmed by a
-//      non-desktop op or after a snapshot rollover dropped the X stack.
+//   2. The cold->warming winner may create/restore. Every attached caller is
+//      resume-only; a missing provider box retires the exact warm epoch and
+//      re-enters admission instead of creating a rival.
+//   3. (spawner) commitWarmingToWarm (the lease_epoch++ fence + folds the resume
+//      envelope onto the lease). Optional desktop work is deliberately absent:
+//      the viewer and the first actual computer-use action initialize :0 lazily.
 //   4. the caller injects {client, session, sessionState} NON-OWNED into the run
 //      (the SDK never reaps it — the keystone), runs, then in `finally` calls the
 //      returned `release()` and drops the in-memory handle. NEVER provider-delete
@@ -27,6 +26,7 @@ import {
   commitWarmingToWarm,
   failWarmingToCold,
   getSandboxSessionEnvelope,
+  markWarmLeaseInstanceLost,
   persistWarmSnapshot,
   readLease,
   recordWarmingSandboxCreated,
@@ -38,25 +38,33 @@ import {
 } from "@opengeni/db";
 import {
   establishSandboxSessionFromEnvelope,
-  ensureDisplayStack as ensureDisplayStackOnBox,
-  desktopCapableBackend,
+  isProviderSandboxNotFoundError,
+  SandboxResumeStateUnavailableError,
   serializeEstablishedSandboxEnvelope,
   deletePriorPersistedSnapshot,
-  DisplayStackError,
-  DisplayStackUnsupportedError,
-  buildStreamUrl,
-  StreamPortUnavailableError,
   tagModalSandbox,
   type EstablishedSandboxSession,
-  type ExposedPortEndpoint,
   type RuntimeMetricsHooks,
 } from "@opengeni/runtime";
-import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
-
-export { DESKTOP_STREAM_PORT };
 
 // Re-exported for callers that just want the ack-kind union.
 export type ResumeHolderKind = LeaseHolderKind;
+
+/**
+ * The durable identity of a turn holding a shared sandbox lease.
+ *
+ * Temporal activity ids cannot satisfy this type: they are workflow-local
+ * sequence numbers and collide across sessions that share a sandbox group.
+ */
+export type TurnSandboxLeaseHolderId = `turn-attempt:${string}`;
+
+export function sandboxLeaseHolderIdForAttempt(attemptId: string): TurnSandboxLeaseHolderId {
+  const normalized = attemptId.trim();
+  if (!normalized) {
+    throw new Error("Sandbox lease holder requires a turn attempt id");
+  }
+  return `turn-attempt:${normalized}`;
+}
 
 /** The minimal services surface resumeBoxForTurn needs. A subset of
  *  ActivityServices so a test (and the API later) can pass a lean bag. */
@@ -64,6 +72,12 @@ export type SandboxResumeServices = {
   db: Database;
   settings: Settings;
   sandboxMetrics?: RuntimeMetricsHooks;
+  /** Called only by the observer that wins the exact warm->cold loss CAS. */
+  onSandboxLost?: (input: {
+    sandboxGroupId: string;
+    instanceId: string;
+    leaseEpoch: number;
+  }) => Promise<void>;
 };
 
 export type ResumeBoxIds = {
@@ -134,12 +148,77 @@ export class SandboxWarmingTimeoutError extends Error {
   }
 }
 
+/** The exact attached caller that won warm->cold after proving the provider
+ * instance gone. It is a lease supersession (the same logical turn recovers),
+ * plus the lost id needed for one durable observability event. */
+export class SandboxLeaseInstanceLostError extends SandboxLeaseSupersededError {
+  constructor(
+    sandboxGroupId: string,
+    leaseEpoch: number,
+    public readonly lostInstanceId: string,
+  ) {
+    super(sandboxGroupId, leaseEpoch);
+    this.name = "SandboxLeaseInstanceLostError";
+  }
+}
+
 // Bounded poll while a sibling spawner is mid cold-restore. The wait budget is
 // user-facing and separate from the lease TTL heartbeat/reaper horizon.
 const WARMING_POLL_INTERVAL_MS = 250;
+const MODAL_EXEC_READINESS_TIMEOUT_MS = 15_000;
 
 async function sleep(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Modal may return a sandbox handle before its command router accepts the first
+ * exec. The upstream session's yieldTimeMs starts only after sandbox.exec()
+ * returns, so it cannot bound that initial RPC. Probe it before publishing the
+ * lease as warm and enforce our own wall-clock deadline.
+ */
+export async function waitForSandboxExecReadiness(
+  established: EstablishedSandboxSession,
+  timeoutMs = MODAL_EXEC_READINESS_TIMEOUT_MS,
+): Promise<void> {
+  if (established.backendId !== "modal") return;
+
+  const session = established.session as {
+    exec?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+    execCommand?: (args: {
+      cmd: string;
+      yieldTimeMs?: number;
+      maxOutputTokens?: number;
+    }) => Promise<unknown>;
+  };
+  const run = session.exec ?? session.execCommand;
+  if (!run) {
+    throw new Error("Modal sandbox session does not expose exec");
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      run.call(session, {
+        cmd: "true",
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 1_000,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new SandboxWarmingTimeoutError(established.backendId, timeoutMs)),
+          timeoutMs,
+        );
+        if (timer && "unref" in timer && typeof timer.unref === "function") timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 class SnapshotTimeoutError extends Error {
@@ -152,11 +231,24 @@ class SnapshotTimeoutError extends Error {
 export async function waitForWarmSnapshot(
   snapshot: Promise<unknown>,
   timeoutMs: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
+  if (signal?.aborted) return false;
   let timeout: ReturnType<typeof setTimeout> | undefined;
+  let cancelListener: (() => void) | undefined;
   try {
     await Promise.race([
       snapshot,
+      ...(signal
+        ? [
+            new Promise<never>((_resolve, reject) => {
+              cancelListener = () =>
+                reject(signal.reason ?? new Error("workspace snapshot wait cancelled"));
+              signal.addEventListener("abort", cancelListener, { once: true });
+              if (signal.aborted) cancelListener();
+            }),
+          ]
+        : []),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new SnapshotTimeoutError(timeoutMs)), timeoutMs);
         if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
@@ -166,6 +258,7 @@ export async function waitForWarmSnapshot(
     ]);
     return true;
   } catch (error) {
+    if (signal?.aborted) return false;
     if (error instanceof SnapshotTimeoutError) {
       console.error("mid-session workspace snapshot wait timed out (turn unaffected)", error);
       return false;
@@ -175,6 +268,7 @@ export async function waitForWarmSnapshot(
     if (timeout) {
       clearTimeout(timeout);
     }
+    if (cancelListener) signal?.removeEventListener("abort", cancelListener);
   }
 }
 
@@ -184,7 +278,9 @@ async function terminateEstablishedSandbox(
   if (!established) {
     return true;
   }
-  const client = established.client as { delete?: (state: unknown) => Promise<unknown> };
+  const client = established.client as {
+    delete?: (state: unknown) => Promise<unknown>;
+  };
   if (typeof client.delete === "function" && established.sessionState !== undefined) {
     try {
       await client.delete(established.sessionState);
@@ -240,23 +336,36 @@ function recordSandboxWarmingTimeout(
   }
 }
 
-function workspaceArchiveFromEnvelope(
+function workspaceArchiveFieldsFromEnvelope(
   envelope: Record<string, unknown> | null | undefined,
-): string | null {
+): Record<string, string> | null {
   const sessionState =
     envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   const archive = sessionState?.workspaceArchive;
-  return typeof archive === "string" && archive.length > 0 ? archive : null;
+  if (typeof archive !== "string" || archive.length === 0) {
+    return null;
+  }
+  const previous = sessionState?.workspaceArchivePrev;
+  const capturedAt = sessionState?.workspaceArchiveAt;
+  return {
+    workspaceArchive: archive,
+    ...(typeof previous === "string" && previous.length > 0
+      ? { workspaceArchivePrev: previous }
+      : {}),
+    ...(typeof capturedAt === "string" && capturedAt.length > 0
+      ? { workspaceArchiveAt: capturedAt }
+      : {}),
+  };
 }
 
-function preserveWorkspaceArchiveOnInterimResumeState(
+function preserveWorkspaceArchivesOnResumeState(
   resumeState: Record<string, unknown> | null,
   archiveSource: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
-  const archive = workspaceArchiveFromEnvelope(archiveSource);
-  if (!archive) {
+  const archiveFields = workspaceArchiveFieldsFromEnvelope(archiveSource);
+  if (!archiveFields) {
     return resumeState;
   }
   const existingSessionState =
@@ -270,7 +379,7 @@ function preserveWorkspaceArchiveOnInterimResumeState(
       : {}),
     sessionState: {
       ...existingSessionState,
-      workspaceArchive: archive,
+      ...archiveFields,
     },
   };
 }
@@ -295,9 +404,17 @@ function preserveWorkspaceArchiveOnInterimResumeState(
  */
 export async function maybePersistWarmWorkspaceSnapshot(
   services: SandboxResumeServices,
-  ids: { accountId: string; workspaceId: string; sandboxGroupId: string },
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    attemptId: string;
+    sandboxGroupId: string;
+  },
   session: unknown,
   leaseEpoch: number,
+  signal?: AbortSignal,
 ): Promise<boolean> {
   const { db, settings } = services;
   const intervalMs = settings.sandboxSnapshotIntervalMs;
@@ -310,12 +427,18 @@ export async function maybePersistWarmWorkspaceSnapshot(
   if (typeof persistable.persistWorkspace !== "function") {
     return false;
   }
+  if (signal?.aborted) {
+    return false;
+  }
   try {
     // Cheap throttle pre-check before the (potentially slow) capture;
     // persistWarmSnapshot re-checks atomically under the row lock, so this is
     // purely a cost optimization, not the correctness guard.
     const lease = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
     if (!lease || lease.leaseEpoch !== leaseEpoch || lease.liveness !== "warm") {
+      return false;
+    }
+    if (signal?.aborted) {
       return false;
     }
     const sessionState =
@@ -343,8 +466,18 @@ export async function maybePersistWarmWorkspaceSnapshot(
     // guard this timeout exists to provide.
     const capture = persistable.persistWorkspace();
     capture.catch(() => undefined);
+    let cancelListener: (() => void) | undefined;
     const bytes = await Promise.race([
       capture,
+      ...(signal
+        ? [
+            new Promise<undefined>((resolve) => {
+              cancelListener = () => resolve(undefined);
+              signal.addEventListener("abort", cancelListener, { once: true });
+              if (signal.aborted) cancelListener();
+            }),
+          ]
+        : []),
       new Promise<undefined>((resolve) => {
         timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
         if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
@@ -355,13 +488,20 @@ export async function maybePersistWarmWorkspaceSnapshot(
       if (timeout) {
         clearTimeout(timeout);
       }
+      if (cancelListener) signal?.removeEventListener("abort", cancelListener);
     });
     if (!bytes || bytes.length === 0) {
+      return false;
+    }
+    if (signal?.aborted) {
       return false;
     }
     const { wrote, priorArchiveForGc } = await persistWarmSnapshot(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      turnId: ids.turnId,
+      attemptId: ids.attemptId,
       sandboxGroupId: ids.sandboxGroupId,
       expectedEpoch: leaseEpoch,
       workspaceArchive: Buffer.from(bytes).toString("base64"),
@@ -389,13 +529,15 @@ export async function maybePersistWarmWorkspaceSnapshot(
  * the lifecycle: inject non-owned, run, then `await release()` and drop the
  * handle in `finally`.
  *
- * holderId is the unique-per-execution id (the Temporal activityId for a turn).
+ * holderId is the globally unique durable turn-attempt id. It must not be a
+ * Temporal activity id, because activity ids are only workflow-local and
+ * collide when sibling sessions share one sandbox group.
  */
 export async function resumeBoxForTurn(
   services: SandboxResumeServices,
   ids: ResumeBoxIds,
-  kind: LeaseHolderKind,
-  holderId: string,
+  kind: "turn",
+  holderId: TurnSandboxLeaseHolderId,
 ): Promise<ResumedTurnSandbox> {
   const { db, settings } = services;
   const os = ids.os ?? "linux";
@@ -448,9 +590,9 @@ export async function resumeBoxForTurn(
   // HOLDER-LIVENESS loop: touch OUR holder row every 10s from the moment it is
   // registered until release. The dead-worker turn-holder reap judges liveness
   // by last_heartbeat_at, and the full turn heartbeat (heartbeatLeaseHolder in
-  // agent-turn) only starts AFTER this function returns — while waitForWarm,
-  // establish/cold-restore, and the display stack can legitimately run for
-  // many minutes in here, COMPOUNDING past any fixed reap horizon. With this
+  // agent-turn) only starts AFTER this function returns — while waitForWarm and
+  // establish/cold-restore can legitimately run for many minutes in here,
+  // COMPOUNDING past any fixed reap horizon. With this
   // loop no live holder is ever silent for more than one tick, so the reap
   // horizon is pure defense-in-depth, not a tuned guess about path lengths.
   // Epoch-free by design (touch only refreshes our own row's timestamp);
@@ -477,7 +619,7 @@ export async function resumeBoxForTurn(
   }
 
   // SPAWNER: we won the cold->warming CAS. Establish (cold-restore/create),
-  // expose the stream port, then commit warm (lease_epoch++).
+  // then commit warm (lease_epoch++). Optional desktop setup is lazy.
   if (acquired.role === "spawner") {
     const expectedEpoch = acquired.lease.leaseEpoch;
     let createdEstablished: EstablishedSandboxSession | null = null;
@@ -495,12 +637,13 @@ export async function resumeBoxForTurn(
       const spawnEnvelope = acquired.lease.resumeState ?? envelope;
       const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
         sessionId: ids.sessionId,
+        recovery: "create-or-restore",
         backendOverride: ids.backend as never,
         ...(ids.environment ? { environment: ids.environment } : {}),
         ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
         onSandboxCreated: async (created) => {
           createdEstablished = created;
-          const resumeEnvelope = preserveWorkspaceArchiveOnInterimResumeState(
+          const resumeEnvelope = preserveWorkspaceArchivesOnResumeState(
             (await serializeEstablishedSandboxEnvelope(created)) ?? null,
             spawnEnvelope,
           );
@@ -513,7 +656,7 @@ export async function resumeBoxForTurn(
             resumeBackendId: created.backendId,
             resumeState: resumeEnvelope,
             leaseTtlMs,
-            // Keep the warming budget after create(): display-stack + port +
+            // Keep the warming budget after create(): manifest setup and
             // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
             warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
           });
@@ -530,8 +673,11 @@ export async function resumeBoxForTurn(
         },
       });
       createdEstablished = established;
-      await ensureDisplayStack(settings, established);
-      const endpoint = await exposeStreamPort(settings, established);
+      // A sandbox handle is not sufficient evidence that Modal's command router
+      // is live. Do not publish a warm lease until one bounded no-op exec works.
+      // On timeout the catch below terminates the box and rolls warming -> cold,
+      // so the next turn cold-creates instead of hanging forever on first use.
+      await waitForSandboxExecReadiness(established);
       // Fold the LIVE box into a re-resumable envelope and persist it as the
       // lease's resume_state — exactly like the API-direct paths (channel-a.ts /
       // viewer.ts). Without this the turn committed the ORIGINAL session manifest
@@ -539,15 +685,29 @@ export async function resumeBoxForTurn(
       // terminal, the desktop viewer, the reaper) cold-restored a FRESH rival box
       // and never saw the turn's live box. Fall back to the session envelope only
       // when the client cannot serialize live state.
+      const serializedResumeEnvelope =
+        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope;
+      // A successful cold hydrate has already proved this archive usable and the
+      // replacement box now contains its files. Keep the current + fallback
+      // archive pointers on the committed live envelope until a later warm
+      // snapshot replaces them. Without this merge, serialization publishes only
+      // the new provider id; a second provider loss before the snapshot cadence
+      // fires would retire the lease with no archive and recreate an empty box.
+      // A failed hydrate falls back to a clean box with origin="created", so its
+      // unusable archive is deliberately cleared by the unmerged serialized state.
       const resumeEnvelope =
-        (await serializeEstablishedSandboxEnvelope(established)) ?? envelope ?? null;
+        established.origin === "restored"
+          ? preserveWorkspaceArchivesOnResumeState(serializedResumeEnvelope, spawnEnvelope)
+          : serializedResumeEnvelope;
       const committed = await commitWarmingToWarm(db, {
         accountId: ids.accountId,
         workspaceId: ids.workspaceId,
         sandboxGroupId: ids.sandboxGroupId,
         expectedEpoch,
         instanceId: established.instanceId,
-        dataPlaneUrl: endpoint?.url ?? null,
+        // Viewer attach resolves and records the tunnel URL lazily. A headless
+        // turn must not touch the optional desktop data plane.
+        dataPlaneUrl: null,
         resumeBackendId: established.backendId,
         resumeState: resumeEnvelope,
         leaseTtlMs,
@@ -596,8 +756,8 @@ export async function resumeBoxForTurn(
   // ATTACHED / REARMED: the box is live (or a sibling is warming it). Resume it
   // BY ID off the committed lease envelope. For an 'attached'-to-warming lease we
   // first wait for the spawner to commit warm, bounded by the explicit warming
-  // budget. A cold reset means the spawner died; requeue the turn instead of
-  // trying to enter the spawner create path from the attached branch.
+  // budget. A cold reset means the spawner died; recover the same turn instead
+  // of trying to enter the spawner create path from the attached branch.
   try {
     let leaseEpoch = acquired.lease.leaseEpoch;
     if (acquired.lease.liveness === "warming") {
@@ -609,24 +769,54 @@ export async function resumeBoxForTurn(
     // manifest into a rival. Fall back to the session envelope only when the
     // lease carries no resume_state (matches channel-a.ts's attached branch).
     const live = await readLease(db, ids.workspaceId, ids.sandboxGroupId);
-    const envelope =
-      live?.resumeState ?? (await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId));
-    const established = await establishSandboxSessionFromEnvelope(settings, envelope, {
-      sessionId: ids.sessionId,
-      backendOverride: ids.backend as never,
-      ...(ids.environment ? { environment: ids.environment } : {}),
-      ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
-    });
-    // Re-ensure the desktop display stack on the ATTACHED/REARMED path too — NOT
-    // just the spawner path. A turn attaching to a warm box whose :0 was never
-    // brought up (the box was first warmed by a Channel-A op, or a snapshot
-    // rollover dropped the X stack) would otherwise drive computer-use against a
-    // dead display: scrot yields an empty PNG, the SDK builds `image_url: ''`,
-    // and the model rejects the turn with "400 Invalid input[N].output.image_url".
-    // ensureDisplayStack is idempotent + flock-guarded (cheap no-op when up) and
-    // NO-OPs when the desktop tier is off or the backend is headless-only, so the
-    // headless turn path stays byte-for-byte unchanged.
-    await ensureDisplayStack(settings, established);
+    if (
+      !live ||
+      live.liveness !== "warm" ||
+      live.leaseEpoch !== leaseEpoch ||
+      live.instanceId === null
+    ) {
+      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, live?.leaseEpoch ?? leaseEpoch);
+    }
+    let established: EstablishedSandboxSession;
+    try {
+      established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
+        sessionId: ids.sessionId,
+        recovery: "resume-only",
+        backendOverride: ids.backend as never,
+        ...(ids.environment ? { environment: ids.environment } : {}),
+        ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
+      });
+    } catch (error) {
+      if (
+        !(error instanceof SandboxResumeStateUnavailableError) &&
+        !isProviderSandboxNotFoundError(ids.backend, error)
+      ) {
+        throw error;
+      }
+      const marked = await markWarmLeaseInstanceLost(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.sandboxGroupId,
+        expectedEpoch: leaseEpoch,
+        expectedInstanceId: live.instanceId,
+      });
+      if (marked.status === "marked") {
+        await services.onSandboxLost?.({
+          sandboxGroupId: ids.sandboxGroupId,
+          instanceId: live.instanceId,
+          leaseEpoch: marked.lease.leaseEpoch,
+        });
+        throw new SandboxLeaseInstanceLostError(
+          ids.sandboxGroupId,
+          marked.lease.leaseEpoch,
+          live.instanceId,
+        );
+      }
+      throw new SandboxLeaseSupersededError(
+        ids.sandboxGroupId,
+        marked.lease?.leaseEpoch ?? leaseEpoch,
+      );
+    }
     return { established, leaseEpoch, release };
   } catch (error) {
     await release();
@@ -654,13 +844,20 @@ export async function resumeBoxForTurn(
  * epoch + an idempotent release so the turn's lease-heartbeat + `finally` release are
  * identical to the cloud path.
  *
- * holderId is the unique-per-execution id (the Temporal activityId for a turn).
+ * holderId is the globally unique durable turn-attempt id. It must not be a
+ * Temporal activity id, because activity ids are only workflow-local and
+ * collide when sibling sessions share one sandbox group.
  */
 export async function acquireSelfhostedLeaseForTurn(
   services: SandboxResumeServices,
-  ids: { accountId: string; workspaceId: string; sandboxGroupId: string; sessionId: string },
-  kind: LeaseHolderKind,
-  holderId: string,
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    sessionId: string;
+  },
+  kind: "turn",
+  holderId: TurnSandboxLeaseHolderId,
 ): Promise<{ leaseEpoch: number; release: () => Promise<void> }> {
   const { db, settings } = services;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
@@ -772,129 +969,4 @@ async function waitForWarm(
     // still warming — keep polling.
   }
   throw new SandboxWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs);
-}
-
-// ============================================================================
-// Channel-B display-stack launch (P4.1 — ensureDisplayStack is now real).
-//
-// Idempotent + callable by ANY worker on the resumed handle (and by the API on a
-// viewer op). When the desktop tier is OFF (sandboxDesktopEnabled=false) or the
-// backend is headless-only, this is a NO-OP — the HEADLESS ROLLOVER branch (I5),
-// so the headless turn path is byte-for-byte unchanged. When the tier is ON for
-// a desktop-capable backend, it execs the canonical opengeni-desktop-up under an
-// in-box flock (re-establishes after a rollover; safe to call N times).
-// `exposeStreamPort` real body remains a P4.2 concern.
-// ============================================================================
-
-/**
- * Ensure the desktop display stack (Xvfb -> XFCE -> x11vnc ->
- * websockify:6080 -> noVNC) is up on the live box. Idempotent: the lock-free
- * pre-check + the in-box flock + the up-script's per-stage PID guards make a
- * second call a cheap no-op. NO-OP when the desktop tier is disabled or the
- * backend cannot serve a desktop (degradation is a value: a headless-only session
- * simply skips the stack). Delegates to the agent-loop-free leaf
- * (@opengeni/runtime/sandbox display-stack).
- *
- * BEST-EFFORT — NEVER fails the turn. The display stack powers the OPTIONAL
- * Channel-B desktop / computer-use surface; it is NOT load-bearing for the
- * agent's work. A `DisplayStackError` (a real stage failure, OR — the regression
- * this guards — a timeout-derived exit -1 when a viewer attach already holds /
- * contends the up-script's flock and the turn's ensure waits ~45s and times out)
- * is CAUGHT + logged and swallowed, so a slow/contended/failed stack degrades to
- * Channel-A-only rather than killing the turn. The fast lock-free pre-check
- * upstream means the already-up case resolves in milliseconds and never reaches
- * this catch in the first place. `DisplayStackUnsupportedError` (a box that can't
- * run commands at all) is likewise swallowed.
- */
-export async function ensureDisplayStack(
-  settings: Settings,
-  established: EstablishedSandboxSession,
-): Promise<void> {
-  // Headless rollover branch (I5): the tier is off OR the backend is
-  // headless-only -> no display stack. Behavior-preserving for the headless path.
-  // This is ALSO the "is the desktop relevant to this turn?" gate: we only touch
-  // the box when the desktop tier is enabled for a desktop-capable backend.
-  if (!settings.sandboxDesktopEnabled) {
-    return;
-  }
-  if (!desktopCapableBackend(established.backendId)) {
-    return;
-  }
-  try {
-    await ensureDisplayStackOnBox(established.session);
-  } catch (error) {
-    // The desktop is a value-add, not load-bearing for the agent's work, so NO
-    // display-stack failure may fail the turn:
-    //  - DisplayStackUnsupportedError: the box genuinely can't run commands ->
-    //    Channel-A-only.
-    //  - DisplayStackError: a stage failure OR a contended-lock timeout (exit -1)
-    //    after a viewer attach already brought the stack up / is mid-launch. The
-    //    pre-check makes the already-up case fast; if we still time out or a stage
-    //    really failed, degrade — don't die.
-    if (error instanceof DisplayStackUnsupportedError || error instanceof DisplayStackError) {
-      console.warn(
-        `[sandbox-resume] ensureDisplayStack degraded to Channel-A-only (turn continues): ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-      return;
-    }
-    // An unexpected non-display error (e.g. the session blew up entirely) still
-    // propagates — that is not a desktop-surface degradation.
-    throw error;
-  }
-}
-
-// The structural slice of a provider session we need to resolve the tunnel.
-type PortResolvableSession = {
-  resolveExposedPort?: (port: number) => Promise<ExposedPortEndpoint>;
-};
-
-/**
- * Resolve the desktop tunnel URL (resolveExposedPort(6080)) and assemble the
- * direct-to-provider WS URL, recorded on the lease as `data_plane_url` at
- * commit. The per-viewer scoped token is minted at viewer-attach time (the
- * handshake), NOT here — the spawner records only the box-scoped tunnel URL so
- * the lease carries a fresh value across a rollover. P4.2 productionizes the
- * P4.1 stub.
- *
- * Returns null (degradation is a value, NEVER a throw):
- *   - the desktop tier is off (sandboxDesktopEnabled=false), or
- *   - the backend is headless-only (no desktop), or
- *   - the provider session cannot resolve the port (no resolveExposedPort), or
- *   - the tunnel lookup transiently failed.
- * In every null case the lease's data_plane_url stays null and the next
- * API-direct viewer op re-mints it; the turn never fails on a desktop hiccup.
- */
-export async function exposeStreamPort(
-  settings: Settings,
-  established: EstablishedSandboxSession,
-): Promise<{ url: string; expiresAt: Date } | null> {
-  // Headless rollover branch (I5): tier !== desktop -> no stream port to expose.
-  if (!settings.sandboxDesktopEnabled) {
-    return null;
-  }
-  if (!desktopCapableBackend(established.backendId)) {
-    return null;
-  }
-  const session = established.session as PortResolvableSession;
-  if (typeof session?.resolveExposedPort !== "function") {
-    return null;
-  }
-  try {
-    const endpoint = await session.resolveExposedPort(DESKTOP_STREAM_PORT);
-    const url = buildStreamUrl(endpoint);
-    // The provider tunnel URL is box-lifetime-valid (Modal raw TLS) or
-    // provider-TTL-signed (Daytona/Blaxel); the per-viewer token's TTL bounds the
-    // viewer's freshness. We record only the URL on the lease; expiresAt here is a
-    // soft hint (the box's idle horizon), not a hard token expiry.
-    return { url, expiresAt: new Date(Date.now() + settings.sandboxLeaseTtlMs) };
-  } catch (error) {
-    // Degradation is a value: a transient resolve failure leaves data_plane_url
-    // null and the next viewer op re-mints. Never fail the turn on a desktop op.
-    if (error instanceof StreamPortUnavailableError) {
-      return null;
-    }
-    return null;
-  }
 }

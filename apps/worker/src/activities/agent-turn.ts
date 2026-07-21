@@ -1,9 +1,8 @@
 import {
-  claimNextQueuedTurn as claimNextQueuedTurnDb,
-  createTurn,
+  applySessionTurnSettlement,
+  requestSessionTurnRecovery,
+  claimSessionWorkForAttempt,
   applyCreditDebitUpToBalance,
-  finishTurn,
-  cancelTurnFromDyingDispatch,
   getBillingBalance,
   getRigName,
   getRigVersion,
@@ -13,7 +12,6 @@ import {
   requireFile,
   getSessionEvent,
   getSessionGoal,
-  getSessionTurn,
   getLatestRunState,
   isCodexBilledTurn,
   workspaceCodexSubscriptionActive,
@@ -39,47 +37,59 @@ import {
   countConsecutiveReactiveRotations,
   requireSession,
   recordUsageEvent,
+  registerPendingSessionToolCall,
+  recordPendingSessionToolCallResult,
+  clearDurablePendingSessionToolCalls,
   appendSessionHistoryItems,
-  consumeSessionCompactionRequest,
+  isSessionCompactionRequested,
   countSessionHistoryItems,
   getActiveSessionHistoryItems,
   nextSessionHistoryPosition,
-  requeuePreemptedTurn,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
-  validateCodexCapacityResumeTurn,
   saveRunState,
   upsertSandboxSessionEnvelope,
-  setSessionStatus,
-  setSessionLastInputTokens,
+  setSessionLastInputTokensForTurnAttempt,
   sumUsageQuantity,
   heartbeatLeaseHolder,
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
+  areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
+  isSessionEventPersistenceError,
   buildConnectionTokenResolver,
   getEnrollment,
+  abandonRecordingForTurnAttempt,
+  markSessionAttemptQuiesced,
   type AppendEventInput,
   type ActiveSandboxPointer,
   type SandboxRecord,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
+  type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import {
   sandboxStateEntryFromRunState,
-  agentsErrorRunState,
   maxTurnsExceededRunState,
   modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
+  isEphemeralInternalContext,
+  appendPersistentSessionSettings,
+  appendSessionInstructions,
+  appendWorkspaceMemory,
+  composeAgentInstructions,
   summarizeForCompaction,
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
+  refreshGitProviderTokenFiles,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -90,8 +100,12 @@ import {
   type ComputerToolMode,
   type ModelResponseUsage,
   type BuildAgentOptions,
+  type TurnToolCancellationFence,
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
+  type GitCredentialTokenWriterSession,
+  deleteRecordingArtifacts,
+  stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
 import {
   builtinProviderId,
@@ -99,6 +113,7 @@ import {
   configuredModelPricing,
   configuredStaticUsageLimits,
   sandboxWarmRateMicrosPerSecond,
+  settingsWithResolvedModelContext,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -143,11 +158,19 @@ import {
 } from "@opengeni/codex";
 import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
+import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
+  gitHubTokenMintSelection,
   loadWorkspaceEnvironmentForRunWithCredentials,
-  mintRunGitTokens,
+  mintRunGitCredentials,
   sandboxEnvironmentForRun,
+  type GitHubTokenMintAuthorization,
+  type MintedRunGitCredentials,
 } from "./environment";
+import {
+  startGitCredentialRenewalLoop,
+  type GitCredentialRenewalController,
+} from "./git-credential-renewal";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
@@ -156,7 +179,7 @@ import {
   settingsWithPackSandboxImage,
   settingsWithRigImage,
 } from "./packs";
-import { notifyParentOfChildTerminal } from "./parent-wake";
+import { deliverFailedChildTurnToParent } from "./parent-wake";
 import { createSecretRedactor, identityRedactor } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
 import {
@@ -165,14 +188,21 @@ import {
   nextStreamEvent,
   startActivityHeartbeat,
 } from "./streaming";
-import type { ActivityServices, RunAgentTurnInput, RunAgentTurnResult } from "./types";
+import type {
+  ActivityServices,
+  RunAgentTurnInput,
+  RunAgentTurnResult,
+  SessionAttemptQuiescenceProof,
+} from "./types";
 import {
   resumeBoxForTurn,
   acquireSelfhostedLeaseForTurn,
+  sandboxLeaseHolderIdForAttempt,
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
   SandboxWarmingTimeoutError,
   type ResumedTurnSandbox,
+  type TurnSandboxLeaseHolderId,
 } from "../sandbox-resume";
 import {
   wrapTurnBoxWithRouting,
@@ -190,8 +220,6 @@ import {
   recordCreditMicros,
   recordModelCacheTokens,
   recordModelInputTokens,
-  recordSessionEventAppendLatency,
-  recordSessionEventPublishLatency,
   runtimeMetricsHooksForObservability,
   StreamTimingMetrics,
   turnLifecycleMetricsFor,
@@ -199,8 +227,8 @@ import {
 } from "../observability-metrics";
 import {
   beginRecording,
-  discardRecording,
-  finalizeRecording,
+  discardUnpublishedRecording,
+  prepareRecordingForSettlement,
   type ActiveRecording,
 } from "./recording";
 import { captureWorkspaceRevision } from "./workspace-capture";
@@ -214,8 +242,11 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
+  type GitCredentialProvider,
   type ResourceRef,
+  type SessionEvent,
   type SessionEventType,
+  type SessionStatus,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -225,23 +256,17 @@ import { createHash, randomUUID } from "node:crypto";
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
 
-/**
- * Recovery routing for a turn failed by a RETRYABLE provider error, once the
- * activity knows whether the session still has an active goal: a goal-bearing
- * session idles and auto-continues after the backpressure delay, a goal-less one
- * idles and waits for the next user message. A NON-retryable failure never reaches
- * here — it takes the terminal session.failed path — so the contrast this encodes
- * is "retryable provider blip ⇒ idle-with-recovery, not a dead session." Single
- * source of truth for the recovery mode and continuation delay the retryable
- * turn-failure branch publishes.
- */
-export function providerRetryRecovery(goalActive: boolean): {
-  recovery: "goal_continuation" | "user_message";
-  continueDelayMs?: number;
+/** A retryable provider fault recovers the accepted turn itself. Goal state is
+ * irrelevant: autonomous continuation and infrastructure recovery are separate
+ * concerns. */
+export function providerRecoveryResult(): {
+  status: "recovering";
+  continueDelayMs: number;
 } {
-  return goalActive
-    ? { recovery: "goal_continuation", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS }
-    : { recovery: "user_message" };
+  return {
+    status: "recovering",
+    continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+  };
 }
 
 /**
@@ -276,47 +301,6 @@ export function filterUnmaterializedSandboxFileDownloads(
   return downloads.filter((download) => !materializedFileIds.has(download.fileId));
 }
 
-// Resume notice fed to the model when a turn re-enters after a graceful
-// worker shutdown (deploy/rollout restart) checkpointed it mid-flight. The
-// agent must not blindly replay side effects it cannot see in its history:
-// at most the single in-flight model step was lost, and anything it started
-// there may or may not have completed.
-// Resume notice after an in-turn context-window overflow was recovered by
-// compaction: the turn's earlier work survives (albeit summarized), so the
-// agent continues instead of the session dying or stalling idle.
-export const CONTEXT_OVERFLOW_RESUME_TEXT = [
-  "[TURN RESUMED AFTER CONTEXT COMPACTION] The conversation approached or exceeded the model's context window mid-turn; older history above was compacted into a summary.",
-  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
-].join("\n");
-
-export const WORKER_SHUTDOWN_RESUME_TEXT = [
-  "[TURN RESUMED AFTER WORKER RESTART] The platform worker running this turn restarted (deploy/rollout) before the turn finished.",
-  "Your conversation history above, including this turn's earlier work, is preserved up to the last checkpoint; at most the single in-flight model step after it was lost.",
-  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
-].join("\n");
-
-// Resume notice for the harder variant: the worker died WITHOUT running the
-// graceful checkpoint (SIGKILL, OOM, node loss — surfaced to the workflow as
-// a heartbeat-timeout activity failure). Conversation truth is still
-// dual-written after every model response, so the bound is the same order as
-// a graceful preempt, but nothing after the last reconcile was captured and
-// the agent must be even more suspicious about repeated side effects.
-export const WORKER_DEATH_RESUME_TEXT = [
-  "[TURN RESUMED AFTER WORKER CRASH] The platform worker running this turn died before the turn finished.",
-  "Your conversation history above, including this turn's earlier work, is preserved up to the last checkpoint; anything in flight after that checkpoint was lost.",
-  "Continue the original task from where it left off. Before repeating any action with side effects, check whether it already happened.",
-].join("\n");
-
-export const CODEX_ROTATION_RESUME_TEXT = [
-  "[TURN RESUMED AFTER CODEX ACCOUNT FAILOVER] The previous Codex subscription definitively refused the model request and was quarantined or placed in cooldown.",
-  "Continue the same task on the newly leased subscription. Earlier model/tool progress is already preserved; before repeating any external side effect, verify whether it already happened.",
-].join("\n");
-
-export const CODEX_LEASE_LOSS_RESUME_TEXT = [
-  "[TURN RESUMED AFTER CODEX LEASE LOSS] This turn's workspace-local Codex lease expired or was lost before the turn finished.",
-  "The durable conversation checkpoint is preserved. Continue the same task, and verify any external side effect before repeating it.",
-].join("\n");
-
 /** Fixed-length one-way tenant correlation for metrics/alerts; never a raw id. */
 export function codexWorkspaceMetricKey(workspaceId: string): string {
   return createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
@@ -325,20 +309,210 @@ export function codexWorkspaceMetricKey(workspaceId: string): string {
 /**
  * True when this activity attempt was cancelled because its hosting worker is
  * shutting down gracefully (SIGTERM during a deploy), as opposed to a
- * workflow-requested cancellation (user interrupt) or a server-side timeout.
+ * workflow-requested Pause/Steer cancellation or a server-side timeout.
  */
 export function isWorkerShutdownCancellation(error: unknown): boolean {
   return error instanceof CancelledFailure && error.message === "WORKER_SHUTDOWN";
 }
 
-export const CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE =
-  "The conversation reached the model context compaction threshold; it has been compacted. Send a message to continue.";
-const MAX_CONTEXT_COMPACTION_RECOVERY_ATTEMPTS = 3;
+/**
+ * Review captures and protective snapshots are cache/persistence housekeeping,
+ * never part of cancellation correctness. A control-fenced or Temporal-cancelled
+ * attempt must release its physical activity promptly so Steer/Pause can advance.
+ */
+export function shouldRunTurnEndWorkspacePersistence(input: {
+  activityStatus: RunAgentTurnResult["status"] | "unknown";
+  cancellationRequested: boolean;
+}): boolean {
+  return input.activityStatus !== "cancelled" && !input.cancellationRequested;
+}
+
+/**
+ * Temporal cancellation is delivery/transport state, never proof that the
+ * dying activity crossed its mandatory sandbox-tool fence. If that fence
+ * fails, surface the fence failure instead of retaining a misleading typed
+ * cancellation; replacement admission remains closed because no durable
+ * quiescence receipt was written.
+ */
+export function assertPhysicalToolQuiescenceForCancellation(input: {
+  acknowledgeQuiescence: boolean;
+  physicalToolQuiescenceConfirmed: boolean;
+  failure: unknown;
+}): void {
+  if (!input.acknowledgeQuiescence || input.physicalToolQuiescenceConfirmed) return;
+  if (input.failure instanceof Error) throw input.failure;
+  throw new Error("Physical sandbox-tool quiescence could not be confirmed", {
+    cause: input.failure,
+  });
+}
+
+/** A physically drained attempt must leave one durable recovery producer. The
+ * direct Postgres receipt is preferred; after its bounded retries exhaust, an
+ * exact Temporal proof signal is sufficient because the workflow persists it
+ * through an independently retrying DB-only control activity. */
+export function assertSessionAttemptQuiescenceRecoveryDurable(input: {
+  acknowledgeQuiescence: boolean;
+  physicalToolQuiescenceConfirmed: boolean;
+  receiptOrProofDurable: boolean;
+  failure: unknown;
+}): void {
+  if (
+    !input.acknowledgeQuiescence ||
+    !input.physicalToolQuiescenceConfirmed ||
+    input.receiptOrProofDurable
+  ) {
+    return;
+  }
+  if (input.failure instanceof Error) throw input.failure;
+  throw new Error("Physical quiescence had no durable receipt or recovery proof", {
+    cause: input.failure,
+  });
+}
+
+const QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS = 250;
+const QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS = 5_000;
+
+/** Persist the authoritative receipt or durably hand the exact physical proof
+ * to Temporal. This retries signal delivery, not DB eligibility or workflow
+ * state. The proof object never changes between attempts. */
+export async function persistOrSignalSessionAttemptQuiescence(input: {
+  proof: SessionAttemptQuiescenceProof;
+  persistReceipt: () => Promise<SessionEvent[]>;
+  publishEvents: (events: SessionEvent[]) => Promise<unknown>;
+  signalProof: ActivityServices["signalSessionAttemptQuiesced"];
+  sleep?: (ms: number) => Promise<void>;
+  heartbeat?: (attempt: number, delayMs: number) => void;
+  onReceiptFailure?: (error: unknown) => void;
+  onPublishFailure?: (error: unknown) => void;
+  onSignalFailure?: (error: unknown, attempt: number, delayMs: number) => void;
+}): Promise<"receipt" | "signal"> {
+  let events: SessionEvent[];
+  try {
+    events = await input.persistReceipt();
+  } catch (receiptError) {
+    input.onReceiptFailure?.(receiptError);
+    if (!input.signalProof) {
+      throw new Error("Session-attempt quiescence proof signaler is unavailable", {
+        cause: receiptError,
+      });
+    }
+    const delay = input.sleep ?? sleep;
+    let retryMs = QUIESCENCE_PROOF_SIGNAL_INITIAL_RETRY_MS;
+    let attempt = 1;
+    for (;;) {
+      try {
+        await input.signalProof(input.proof);
+        return "signal";
+      } catch (signalError) {
+        input.onSignalFailure?.(signalError, attempt, retryMs);
+        try {
+          input.heartbeat?.(attempt, retryMs);
+        } catch {
+          // Heartbeat telemetry is not proof delivery and cannot replace or
+          // interrupt the exact signal retry loop.
+        }
+        await delay(retryMs);
+        retryMs = Math.min(retryMs * 2, QUIESCENCE_PROOF_SIGNAL_MAX_RETRY_MS);
+        attempt += 1;
+      }
+    }
+  }
+
+  try {
+    await input.publishEvents(events);
+  } catch (publishError) {
+    // Postgres already committed quiesced_at, the queue event, and the wake.
+    // NATS is live fanout only; never misclassify its failure as receipt loss.
+    input.onPublishFailure?.(publishError);
+  }
+  return "receipt";
+}
+
+/**
+ * Await a finalizer operation only while this Temporal activity still owns its
+ * execution window. Once Pause/Steer cancellation arrives, the operation keeps
+ * its own rejection handler and may finish its idempotent, attempt-scoped
+ * cleanup in the background, but it cannot pin activity terminalization or
+ * delay the separately receipt-gated replacement dispatch.
+ */
+export async function waitForTurnFinalizerStep<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | undefined> {
+  if (!signal) return await operation;
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    return undefined;
+  }
+
+  let resolveCancellation: (() => void) | undefined;
+  const cancelled = new Promise<undefined>((resolve) => {
+    resolveCancellation = () => resolve(undefined);
+  });
+  const cancel = (): void => {
+    void operation.catch(() => undefined);
+    resolveCancellation?.();
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await Promise.race([operation, cancelled]);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
+
+/**
+ * Flush provider-facing stream state while the attempt still owns its activity
+ * window. On Pause/Steer, both promises are detached with rejection handlers:
+ * neither a runtime batcher nor an uncooperative provider completion promise
+ * may pin the activity behind cancellation after durable writes are fenced.
+ */
+export async function waitForTurnStreamCleanup(
+  batcherFlush: Promise<unknown>,
+  providerCompleted: Promise<unknown>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  await waitForTurnFinalizerStep(batcherFlush, signal);
+  await waitForTurnFinalizerStep(providerCompleted, signal);
+}
+
+function turnFinalizerCancellationSignal(
+  temporalSignal: AbortSignal | undefined,
+  activityStatus: RunAgentTurnResult["status"] | "unknown",
+): AbortSignal | undefined {
+  if (activityStatus !== "cancelled" || temporalSignal?.aborted) return temporalSignal;
+  const fenced = new AbortController();
+  fenced.abort(new Error("TURN_ATTEMPT_FENCED"));
+  return fenced.signal;
+}
 
 function compactionFailureReason(reason: string): string {
   return reason.startsWith("compaction summarization failed:")
     ? reason
     : `compaction summarization failed: ${reason}`;
+}
+
+function compactionFailureReasonFromError(error: unknown): string {
+  if (
+    error instanceof CompactionProviderResponseError ||
+    error instanceof EmptyCompactionSummaryError
+  ) {
+    return compactionFailureReason(error.message);
+  }
+  const errorName = error instanceof Error && error.name ? error.name : "unknown error";
+  return compactionFailureReason(`unexpected ${errorName}`);
+}
+
+function isCompactionSummaryFailure(error: unknown): boolean {
+  return (
+    error instanceof CompactionProviderResponseError || error instanceof EmptyCompactionSummaryError
+  );
+}
+
+export function shouldRecoverCompactionProviderFailure(error: unknown): boolean {
+  if (!(error instanceof CompactionProviderResponseError)) return false;
+  if (isCodexTransportError(error) && classifyCodexUsageLimitError(error)) return true;
+  return agentRunFailurePayload(error).retryable === true;
 }
 
 export function classifyContextWindowOverflowError(
@@ -448,16 +622,16 @@ function collectErrorStrings(value: unknown, seen = new WeakSet<object>()): stri
 /**
  * Stable+unique usage source key for one model call, used to build the per-call
  * idempotency key (`usage:model.tokens:${turnId}:${sourceKey}`). The turnId is
- * shared across a re-dispatch of the SAME turn (preemption resume, approval
+ * shared across a new attempt of the SAME turn (recovery, approval
  * rerun, activity retry), so the sourceKey alone must distinguish calls.
  *
  * - A provider responseId is globally stable+unique, so reuse it verbatim: a
  *   true activity retry that re-emits the same responseId correctly DEDUPES
  *   (one charge), while two distinct calls get distinct ids.
- * - Without a responseId the only fallback was POSITIONAL ("response-1",
+ * - Without a responseId the old synthesized key was only POSITIONAL ("response-1",
  *   "aggregate"), which collides across a re-dispatch — dispatch B's first
  *   call reuses dispatch A's "response-1" key and its charge is silently
- *   dropped (undercharge). Qualifying the positional fallback with the
+ *   dropped (undercharge). Qualifying the synthesized key with the
  *   per-execution dispatch id (the Temporal activityId, unique per scheduled
  *   execution) makes re-dispatched calls distinct while still deduping a
  *   same-execution retry.
@@ -473,10 +647,55 @@ export function modelUsageSourceKey(input: {
   return input.dispatchId ? `${input.dispatchId}:${input.positionalKey}` : input.positionalKey;
 }
 
+export function providerContextTokens(
+  usage:
+    | {
+        inputTokens?: number;
+        outputTokens?: number;
+        totalTokens?: number;
+      }
+    | null
+    | undefined,
+): number | null {
+  const total = usage?.totalTokens;
+  if (typeof total === "number" && Number.isFinite(total) && total > 0) {
+    return total;
+  }
+  const input = usage?.inputTokens;
+  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
+    return null;
+  }
+  const output = usage?.outputTokens;
+  return input + (typeof output === "number" && Number.isFinite(output) && output > 0 ? output : 0);
+}
+
+/**
+ * A provider call has already consumed tokens by the time its usage frame is
+ * available. Losing the Codex credential lease at the renewal checkpoint must
+ * stop the result from becoming authoritative, but it must not erase accounting
+ * truth for the call that already happened. Meter first, then surface the lost
+ * lease, then write attempt-owned token/context signals. A replaced attempt can
+ * reject those signals without erasing the provider usage already incurred.
+ */
+export async function recordCompletedModelCallBeforeOwnershipFences(input: {
+  renewLease: () => Promise<void>;
+  recordUsage: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+  recordAttemptSignals?: () => Promise<void>;
+}): Promise<void> {
+  await input.renewLease();
+  await input.recordUsage();
+  if (input.leaseLost()) {
+    throw new Error(input.leaseLostMessage);
+  }
+  await input.recordAttemptSignals?.();
+}
+
 type TurnEventPublisher = (
   events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
   immediate?: boolean,
-) => Promise<void>;
+) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
 
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
@@ -495,6 +714,7 @@ export async function emitModelCallUsage(input: {
   // the session's previous call — the account-switch hypothesis for cache misses.
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
+  emittedSourceKeys?: Set<string>;
 }): Promise<void> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
@@ -503,7 +723,37 @@ export async function emitModelCallUsage(input: {
   if (!usage || typeof usage !== "object") {
     return;
   }
+  if (input.emittedSourceKeys?.has(input.sourceKey)) return;
   const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  const appended = await input.publish?.(
+    [
+      {
+        type: "agent.model.usage",
+        payload: {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          provider: input.provider,
+          providerApi: input.providerApi,
+          model: input.model,
+          sourceKey: input.sourceKey,
+          ...telemetry,
+        },
+      },
+    ],
+    true,
+  );
+  input.emittedSourceKeys?.add(input.sourceKey);
+  const authoritative = appended?.events.some(
+    (event) =>
+      event.type === "agent.model.usage" &&
+      event.turnAssociation === "current" &&
+      event.payload !== null &&
+      typeof event.payload === "object" &&
+      (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
+  );
+  if (!authoritative) return;
   try {
     input.observability.info("model call usage", {
       accountId: input.accountId,
@@ -526,35 +776,7 @@ export async function emitModelCallUsage(input: {
         : {}),
     });
   } catch {
-    // Usage observability is best-effort.
-  }
-  try {
-    await input.publish?.(
-      [
-        {
-          type: "agent.model.usage",
-          payload: {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-            provider: input.provider,
-            providerApi: input.providerApi,
-            model: input.model,
-            sourceKey: input.sourceKey,
-            ...telemetry,
-          },
-        },
-      ],
-      true,
-    );
-  } catch (error) {
-    input.observability.warn("model call usage event publish failed", {
-      sessionId: input.sessionId,
-      turnId: input.turnId,
-      sourceKey: input.sourceKey,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    // Durable event + billing already committed; logging is best-effort only.
   }
 }
 
@@ -572,12 +794,15 @@ export function historyRowsToAppend(
   // persistedHistoryCount to preserve the pre-compaction behaviour (contiguous
   // positions from 0) when callers do not pass an explicit next position.
   nextPosition: number = persistedHistoryCount,
+  toolOutputTruncationTokens?: number,
 ): {
   rows: Array<{ position: number; item: Record<string, unknown> }>;
   nextWatermark: number;
   nextPosition: number;
 } {
-  const sanitized = sanitizeHistoryItemsForModel(rawHistory);
+  const sanitized = sanitizeHistoryItemsForModel(rawHistory, toolOutputTruncationTokens).filter(
+    (item) => !isEphemeralInternalContext(item),
+  );
   if (sanitized.length <= persistedHistoryCount) {
     return { rows: [], nextWatermark: persistedHistoryCount, nextPosition };
   }
@@ -585,7 +810,11 @@ export function historyRowsToAppend(
     position: nextPosition + offset,
     item: item as Record<string, unknown>,
   }));
-  return { rows, nextWatermark: sanitized.length, nextPosition: nextPosition + rows.length };
+  return {
+    rows,
+    nextWatermark: sanitized.length,
+    nextPosition: nextPosition + rows.length,
+  };
 }
 
 function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolean {
@@ -617,8 +846,7 @@ function isModelOrToolProgressHistoryItem(item: Record<string, unknown>): boolea
  *    (HOLE D); seeding from the un-stripped count would slice K genuinely-new items
  *    off the reconcile and silently lose them (incl. the user's switch-turn message).
  *
- *  - run-state BLOB path (`modelHistoryFromItems === false`: approval resume, the
- *    items-mode run-state fallback, run_state mode) — `state.history` was seeded
+ *  - approval RunState path (`modelHistoryFromItems === false`) — `state.history` was seeded
  *    from the blob, where foreign reasoning is NEUTRALIZED-IN-PLACE (the item is
  *    KEPT, only its id/encrypted_content go — see resumeRunStateForCodexAccount), so
  *    the blob's history length still COUNTS those items. Applying the strip here
@@ -716,7 +944,10 @@ export function pointerReconcileReason(
   if (!record) {
     return "stale_pointer";
   }
-  const establishable = swapTargetEstablishability({ kind: record.kind, isSessionGroup: false });
+  const establishable = swapTargetEstablishability({
+    kind: record.kind,
+    isSessionGroup: false,
+  });
   if (!establishable.ok) {
     return establishable.code;
   }
@@ -833,7 +1064,7 @@ export async function ensureTurnModalRegistryImage(
 }
 
 /**
- * Decide whether to start on-turn desktop recording for THIS turn.
+ * Decide whether the first actual computer action may start a proof recording.
  *
  * On-turn recording runs ffmpeg/x11grab INSIDE the box and reads the .mp4 back
  * out of the box's /tmp — plumbing that exists only for OpenGeni-operated cloud
@@ -852,10 +1083,9 @@ export async function ensureTurnModalRegistryImage(
  * correctly skips; a machine-home turn that degraded back to its cloud group box
  * (swap-away / flag-off) resolves to undefined and records as before.
  *
- * EDGE — mid-turn swap: this is evaluated ONCE at turn start (the box is only filmed
- * for the duration of one turn). A swap AFTER the recording starts is deliberately
- * ignored — a partial-turn recording already has defined failure semantics, so we do
- * not add machinery to stop/restart it mid-turn.
+ * EDGE — mid-turn swap: this is evaluated once when computer-use first runs. A swap
+ * after recording starts is deliberately ignored; the partial recording already has
+ * defined failure semantics, so there is no stop/restart machinery.
  */
 export function shouldStartOnTurnRecording(params: {
   recordingEnabled: boolean;
@@ -894,7 +1124,9 @@ export function shouldStartOnTurnRecording(params: {
  * Pure + exported so the mapping is unit-testable without a live turn.
  */
 export function computerToolModeForTurn(
-  resolvedModel: { provider: { kind: RegistryProviderKind; api: ModelProviderApi } } | null,
+  resolvedModel: {
+    provider: { kind: RegistryProviderKind; api: ModelProviderApi };
+  } | null,
 ): ComputerToolMode {
   if (!resolvedModel) {
     return "hosted"; // legacy built-in Responses client — real hosted support
@@ -913,6 +1145,86 @@ export type TurnSandboxProvisioner<T> = {
   hasStarted(): boolean;
   waitForSettled(timeoutMs: number): Promise<T | null>;
 };
+
+export class TurnOperationCancelledError extends Error {
+  readonly name = "TurnOperationCancelledError";
+
+  constructor(readonly reason: unknown) {
+    super("Turn operation was cancelled with its owning turn", {
+      ...(reason instanceof Error ? { cause: reason } : {}),
+    });
+  }
+}
+
+/**
+ * Normalize a preparation/provisioning cancellation race back to the Temporal
+ * cancellation that owns the activity. Several provider APIs expose no portable
+ * abort primitive, so the worker stops awaiting them and disposes any late
+ * resource. The wrapper error must never fall through as an ordinary turn
+ * failure: doing so would omit the quiescence receipt and strand a committed
+ * Steer/Pause behind `control-pending`.
+ */
+export function turnOperationCancellationFailure(error: unknown): CancelledFailure | null {
+  if (error instanceof CancelledFailure) return error;
+  if (!(error instanceof TurnOperationCancelledError)) return null;
+  return error.reason instanceof CancelledFailure
+    ? error.reason
+    : new CancelledFailure("TURN_SANDBOX_PROVISION_CANCELLED", [], error);
+}
+
+function throwIfTurnOperationCancelled(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) {
+    throw new TurnOperationCancelledError(signal.reason);
+  }
+}
+
+export async function waitForTurnOperation<T>(
+  operation: Promise<T>,
+  signal: AbortSignal | undefined,
+  disposeLateResult: ((result: T) => Promise<void> | void) | undefined,
+): Promise<T> {
+  if (!signal) return await operation;
+
+  let rejectCancellation: ((error: TurnOperationCancelledError) => void) | undefined;
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  const cancel = (): void => {
+    rejectCancellation?.(new TurnOperationCancelledError(signal.reason));
+  };
+  signal.addEventListener("abort", cancel, { once: true });
+  if (signal.aborted) cancel();
+
+  try {
+    const result = await Promise.race([operation, cancelled]);
+    // Cancellation owns an exact turn boundary even when the provider result
+    // and AbortSignal settle in the same microtask checkpoint. Never let a
+    // just-resolved lease escape after the control was already committed.
+    if (signal.aborted) {
+      throw new TurnOperationCancelledError(signal.reason);
+    }
+    return result;
+  } catch (error) {
+    if (signal.aborted) {
+      // The provider establish call has no universal cancellation seam. It may
+      // finish after the Temporal activity has correctly stopped; dispose its
+      // late lease instead of letting a cancelled turn resurrect a holder/box.
+      void operation
+        .then(async (result) => await disposeLateResult?.(result))
+        .catch(() => undefined);
+      // A provider failure may settle in the same checkpoint as the committed
+      // control. The control is authoritative; retain its cancellation shape
+      // so the activity publishes quiescence instead of looking like an
+      // unrelated turn failure.
+      if (!(error instanceof TurnOperationCancelledError)) {
+        throw new TurnOperationCancelledError(signal.reason);
+      }
+    }
+    throw error;
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -936,9 +1248,11 @@ export function createTurnSandboxProvisioner<T>(
   options: {
     maxRetries?: number;
     backoffMs?: number;
+    signal?: AbortSignal;
     onStarted?: () => Promise<void> | void;
-    onCompleted?: () => Promise<void> | void;
+    onCompleted?: (result: T) => Promise<void> | void;
     onFailed?: (error: unknown) => Promise<void> | void;
+    disposeResult?: (result: T) => Promise<void> | void;
   } = {},
 ): TurnSandboxProvisioner<T> {
   const maxRetries = options.maxRetries ?? 2;
@@ -949,9 +1263,15 @@ export function createTurnSandboxProvisioner<T>(
     let attempt = 0;
     while (true) {
       try {
-        return await establish();
+        throwIfTurnOperationCancelled(options.signal);
+        const operation = establish();
+        return await waitForTurnOperation(operation, options.signal, options.disposeResult);
       } catch (error) {
-        if (attempt >= maxRetries || !isLazySandboxProvisionRetryable(error)) {
+        if (
+          error instanceof TurnOperationCancelledError ||
+          attempt >= maxRetries ||
+          !isLazySandboxProvisionRetryable(error)
+        ) {
           throw error;
         }
         attempt += 1;
@@ -964,13 +1284,24 @@ export function createTurnSandboxProvisioner<T>(
     get(): Promise<T> {
       if (!memo) {
         memo = (async () => {
+          throwIfTurnOperationCancelled(options.signal);
           await options.onStarted?.();
+          throwIfTurnOperationCancelled(options.signal);
+          let result: T | undefined;
+          let hasResult = false;
           try {
-            const result = await run();
-            await options.onCompleted?.();
+            result = await run();
+            hasResult = true;
+            throwIfTurnOperationCancelled(options.signal);
+            await options.onCompleted?.(result);
             return result;
           } catch (error) {
-            await options.onFailed?.(error);
+            if (hasResult) {
+              await options.disposeResult?.(result as T);
+            }
+            if (!(error instanceof TurnOperationCancelledError)) {
+              await options.onFailed?.(error);
+            }
             throw error;
           }
         })().catch((error) => {
@@ -1022,7 +1353,9 @@ function sdkBackendIdForSandboxBackend(backend: Settings["sandboxBackend"]): str
  * to unknown OpenAI-compatible providers risks unsupported-parameter 400s.
  */
 export function acceptsPromptCacheKeyForTurn(
-  resolvedModel: { provider: { kind: RegistryProviderKind; builtin?: boolean } } | null,
+  resolvedModel: {
+    provider: { kind: RegistryProviderKind; builtin?: boolean };
+  } | null,
 ): boolean {
   if (!resolvedModel) {
     return true;
@@ -1093,20 +1426,54 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       objectStorage,
       observability,
       wakeSessionWorkflow,
+      signalSessionAttemptQuiesced,
       signalCodexCapacityWorkflow,
       entitlements,
       connectionCredentials,
     } = await services();
+    const activityContext = currentActivityContext();
+    const cancellationSignal = activityContext?.cancellationSignal;
+    let cancellationRequestedAt: number | null = cancellationSignal?.aborted
+      ? performance.now()
+      : null;
+    const noteCancellationRequested = (): void => {
+      cancellationRequestedAt ??= performance.now();
+    };
+    cancellationSignal?.addEventListener("abort", noteCancellationRequested, { once: true });
+    const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
       "opengeni.session_id": input.sessionId,
       "opengeni.workflow_id": input.workflowId,
-      "opengeni.trigger_event_id": input.triggerEventId,
+      "opengeni.trigger_kind": input.trigger.kind,
     });
     let activityStatus: RunAgentTurnResult["status"] | "unknown" = "unknown";
     let turnMetricOutcome: TurnOutcome | null = null;
     let activityError: unknown;
+    let acknowledgeQuiescence = false;
+    const acknowledgeLostAttemptOwnership = (): void => {
+      // A stale terminal/recovery settlement can lose either to a benign
+      // successor or to Pause/Steer closing this exact attempt. Only the
+      // receipt transaction can distinguish those cases after the hard tool
+      // fence: allowUninterrupted makes the benign case an event-free no-op.
+      acknowledgeQuiescence = true;
+      noteCancellationRequested();
+    };
     let turnId: string | undefined;
+    let triggerEventId: string | undefined;
+    const claimedResult = (
+      result: Omit<
+        Extract<RunAgentTurnResult, { status: Exclude<RunAgentTurnResult["status"], "unclaimed"> }>,
+        "turnId" | "attemptId"
+      >,
+    ): RunAgentTurnResult => {
+      if (!turnId) throw new Error("Claimed activity result produced before turn admission");
+      return {
+        ...result,
+        turnId,
+        attemptId: input.attemptId,
+      } as RunAgentTurnResult;
+    };
     // The Connected Machine op observer for this turn: meters every op AND buffers
     // the eventable ones (infra failures + healed recoveries) as machine.op.* session
     // events, drained (awaited) at turn end in the finally below. ONE instance shared
@@ -1115,13 +1482,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       runtimeMetricsHooksForObservability(observability),
     );
     let isCodexTurn = false;
-    // Worker-death redispatch counter observed when THIS dispatch claimed the
-    // turn. If a dying-attempt cancel later fences on this and the turn's
-    // current value differs, recovery already re-queued/re-dispatched the turn
-    // and the zombie must not clobber it.
+    let executionGeneration = 0;
+    // Still required by credential-loss/capacity settlements, whose own
+    // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
+    const saveRunStateFenced = async (state: Parameters<typeof saveRunState>[1]): Promise<void> => {
+      if (!(await saveRunState(db, state))) {
+        throw new TurnAttemptFencedError(
+          "turn execution generation was fenced while saving run state",
+        );
+      }
+    };
+    const setLastInputTokensFenced = async (lastInputTokens: number): Promise<void> => {
+      if (!turnId || executionGeneration <= 0) {
+        throw new Error("Turn attempt was not initialized before token accounting");
+      }
+      if (
+        !(await setSessionLastInputTokensForTurnAttempt(db, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          expectedExecutionGeneration: executionGeneration,
+          expectedAttemptId: input.attemptId,
+          lastInputTokens,
+        }))
+      ) {
+        throw new TurnAttemptFencedError("turn attempt was fenced while recording input tokens");
+      }
+    };
     let heartbeatTimer: ReturnType<typeof startActivityHeartbeat> | undefined;
-    // OPE-21: one workspace-local idempotent credential holder per running
+    // credential allocator: one workspace-local idempotent credential holder per running
     // Codex turn. The DB row is the cross-replica fairness primitive; this timer
     // only extends its short TTL. A killed worker stops heartbeating and the
     // holder self-expires. Other workspaces never see or share this holder.
@@ -1187,7 +1577,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           observability.incrementCounter({
             name: "opengeni_codex_lease_renewals_total",
             help: "Codex lease renewal checkpoints by outcome and reason.",
-            labels: { workspace_key: codexWorkspaceKey, outcome: "completed", reason },
+            labels: {
+              workspace_key: codexWorkspaceKey,
+              outcome: "completed",
+              reason,
+            },
           });
         }
       } catch (error) {
@@ -1206,7 +1600,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         observability.incrementCounter({
           name: "opengeni_codex_lease_renewals_total",
           help: "Codex lease renewal checkpoints by outcome and reason.",
-          labels: { workspace_key: codexWorkspaceKey, outcome: "error", reason },
+          labels: {
+            workspace_key: codexWorkspaceKey,
+            outcome: "error",
+            reason,
+          },
         });
       } finally {
         codexLeaseHeartbeatInFlight = false;
@@ -1235,15 +1633,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
     // connected machine (the user's real computer).
     let setupBoxSession: unknown = null;
-    // The lease holder id (Temporal activityId, unique per scheduled execution)
-    // + the group id, captured so the lease heartbeat can refresh the lease TTL
-    // epoch-fenced (a superseded owner self-evicts) and finally can release.
-    let sandboxHolderId: string | null = null;
+    // The globally unique durable turn-attempt holder id + the group id,
+    // captured so the lease heartbeat can refresh the lease TTL epoch-fenced
+    // (a superseded owner self-evicts) and finally can release.
+    let sandboxHolderId: TurnSandboxLeaseHolderId | null = null;
     let sandboxGroupId: string | null = null;
     // Lease-TTL refresh timer (parallels the activity heartbeat): while the turn
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
     let leaseHeartbeatTimer: ReturnType<typeof setInterval> | undefined;
+    // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
+    // credentials for a multi-day turn. The controller is attached only after
+    // the initial seed reached a real cloud box and is drained before capture.
+    let gitCredentialRenewal: GitCredentialRenewalController | null = null;
+    let gitCredentialRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -1252,31 +1655,72 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // the atomic DB throttle discard the fresher one). Interval throttling
     // itself lives in maybePersistWarmWorkspaceSnapshot / persistWarmSnapshot.
     let snapshotInFlight: Promise<void> | null = null;
-    // P4.3 on-turn recording: when the desktop tier + recording are enabled and
-    // the box is desktop-capable, the turn films the SAME :0 the agent's
-    // computer-use drives, finalized to storage in this activity's `finally`
-    // (read+PUT in-process — never a Temporal payload, F10). null otherwise.
+    // Computer-use-only recording. Ordinary shell/filesystem turns leave this
+    // null; the first actual computer action starts it after :0 is ready.
     let activeRecording: ActiveRecording | null = null;
-    // P4.3 recording gate: flips true the first time a computer-use/desktop tool
-    // ACTUALLY executes this turn (an SDK `computer_call` item streams through). A
-    // plain text turn ("hey"/"continue") never flips it, so finalize discards the
-    // recording with NO storage PUT and NO recording.failed — a clean no-op (a
-    // static frame of an untouched desktop is not worth uploading).
+    let computerUseRecordingStart: Promise<void> | null = null;
+    // P4.3 recording gate: flips true in `onComputerUseReady`, the runtime's
+    // execution-time callback for the first real computer action. It must flip
+    // BEFORE awaiting recording startup: the SDK tool-call stream item can arrive
+    // before ffmpeg has finished starting. A plain text turn ("hey"/"continue")
+    // never invokes the callback, so settlement performs no storage PUT.
     let didComputerUse = false;
+    const abandonActiveRecording = async (
+      reason: string,
+      disposition: "failed" | "discard" = "failed",
+    ): Promise<void> => {
+      const recording = activeRecording as ActiveRecording | null;
+      if (!recording) return;
+      activeRecording = null;
+      if (resolvedSandbox) {
+        await stopRecordingOnBox(resolvedSandbox.established.session, recording.proc).catch(
+          () => undefined,
+        );
+      }
+      if (!turnId || executionGeneration <= 0) return;
+      await abandonRecordingForTurnAttempt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        recordingId: recording.recordingId,
+        disposition,
+        reason,
+      }).catch(() => undefined);
+    };
     let batcher: ReturnType<typeof createRuntimeBatcher> | null = null;
     const flushRuntimeBatcher = async () => {
       const current = batcher as ReturnType<typeof createRuntimeBatcher> | null;
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    let publish:
-      | ((
-          events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
-          immediate?: boolean,
-        ) => Promise<void>)
+    const toolCancellationFenceRef: { current: TurnToolCancellationFence | null } = {
+      current: null,
+    };
+    let publish: TurnEventPublisher | null = null;
+    let settle:
+      | ((input: {
+          events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>;
+          turnStatus:
+            | "queued"
+            | "running"
+            | "completed"
+            | "failed"
+            | "cancelled"
+            | "requires_action";
+          sessionStatus: SessionStatus;
+          activeTurnId: string | null;
+          consumeRequestedCompactionFailure?: boolean;
+        }) => Promise<boolean>)
       | null = null;
     let turnStartedPublished = false;
     let stream: Awaited<ReturnType<OpenGeniRuntime["runStream"]>> | undefined;
+    // Reconciliation is declared before provider routing so every turn-end path
+    // can share one closure. It cannot run until `stream` exists, by which time
+    // this value has been rebound to the turn's resolved model policy.
+    let modelRunSettings: Settings = settings;
     const publishSandboxLifecycleEvents = async (sandbox: ResumedTurnSandbox): Promise<void> => {
       const established = sandbox.established;
       if (publish && established.origin && established.origin !== "resumed") {
@@ -1299,6 +1743,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         });
         await publish(lifecycleEvents).catch(() => undefined);
       }
+    };
+    const publishSandboxLost = async (lostSandbox: { instanceId: string }): Promise<void> => {
+      if (!publish) return;
+      await publish([
+        {
+          type: "sandbox.box.lost",
+          payload: { sandboxId: lostSandbox.instanceId },
+        },
+      ]).catch((publishError) => {
+        // The lease transition is already authoritative. A fenced/failed audit
+        // append must not prevent the same logical turn from recovering.
+        console.error("sandbox box lost event publish failed", publishError);
+      });
     };
     const startLeaseHeartbeat = (
       sandbox: ResumedTurnSandbox,
@@ -1363,21 +1820,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // selfhosted target has no persistWorkspace anyway. Best-effort +
         // single-flight; throttling lives in the helper.
         const snapshotSession = setupBoxSession;
-        if (snapshotSession && !snapshotInFlight) {
+        const snapshotTurnId = turnId;
+        if (snapshotSession && snapshotTurnId && !snapshotInFlight) {
           snapshotInFlight = maybePersistWarmWorkspaceSnapshot(
             { db, settings },
             {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: snapshotTurnId,
+              attemptId: input.attemptId,
               sandboxGroupId: heartbeatGroupId,
             },
             snapshotSession,
             heartbeatEpoch,
+            activityContext?.cancellationSignal,
           )
             .then(async (persisted) => {
               if (persisted && publish) {
                 await publish([
-                  { type: "sandbox.box.snapshot", payload: { trigger: "heartbeat" } },
+                  {
+                    type: "sandbox.box.snapshot",
+                    payload: { trigger: "heartbeat" },
+                  },
                 ]);
               }
             })
@@ -1395,12 +1860,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       sandbox: ResumedTurnSandbox,
       effectiveBackend: Settings["sandboxBackend"] | undefined,
     ): Promise<void> => {
-      // P4.3 on-turn recording. The box's :0 display stack was brought up by
-      // resumeBoxForTurn (spawner path) / is up from a prior turn; film it for
-      // the duration of this turn so the human can watch the agent work and the
-      // agent's computer-use proofs are captured. Best-effort: a recording start
-      // failure NEVER fails the turn (the desktop is a value-add). Finalized in
-      // `finally` (read+PUT in this same activity — never a Temporal payload).
+      if (activeRecording) {
+        return;
+      }
+      if (computerUseRecordingStart) {
+        await computerUseRecordingStart;
+        return;
+      }
+      // Called only by the runtime's first-computer-action hook. Plain sandbox
+      // operations never start ffmpeg and never boot a display merely to record
+      // an unused desktop. Recording failure never fails the computer action.
       if (
         shouldStartOnTurnRecording({
           recordingEnabled: settings.recordingEnabled,
@@ -1412,26 +1881,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           effectiveBackend,
         })
       ) {
-        try {
-          const begun = await beginRecording({
-            settings,
-            db,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: turnId!,
-            recordingId: randomUUID(),
-            mode: "on-turn",
-            session: sandbox.established.session,
-            runAs: sandboxRunAs(settings),
-            reason: null,
-          });
-          activeRecording = begun.active;
-          await publish?.([{ type: "recording.started", payload: begun.started }]);
-        } catch (recordingError) {
-          activeRecording = null;
-          console.error("on-turn recording start failed (turn outcome unaffected)", recordingError);
-        }
+        computerUseRecordingStart = (async () => {
+          let begun: Awaited<ReturnType<typeof beginRecording>> | null = null;
+          try {
+            begun = await beginRecording({
+              settings,
+              db,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turnId!,
+              recordingId: randomUUID(),
+              mode: "on-turn",
+              session: sandbox.established.session,
+              runAs: sandboxRunAs(settings),
+              reason: null,
+            });
+            if (!publish) {
+              throw new Error("recording started before the turn event publisher was ready");
+            }
+            await publish([{ type: "recording.started", payload: begun.started }]);
+            activeRecording = begun.active;
+          } catch (recordingError) {
+            activeRecording = null;
+            if (begun) {
+              await discardUnpublishedRecording({
+                db,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                active: begun.active,
+                session: sandbox.established.session,
+              });
+            }
+            console.error(
+              "computer-use recording start failed (action outcome unaffected)",
+              recordingError,
+            );
+          }
+        })();
+        await computerUseRecordingStart;
       }
     };
     // Dual-write of conversation truth (issue #35): completed items are
@@ -1450,15 +1938,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // shape of a position and can persist a `function_call_result` at a tail
     // position while its `function_call` was pruned away in an earlier slice
     // and never written — the orphan that bricks the session. We defend against
-    // it by sanitizing the current history into an API-valid sequence (the same
-    // pure function the read path uses) before persisting: a dangling call is
-    // never persisted (it is deferred until its result exists, when the pair is
-    // written together at consecutive positions), and a result is never
-    // persisted without its preceding call. The watermark counts only items we
-    // actually persisted, so a non-monotonic history can never desync it.
+    // it at the stream boundary with the turn-scoped pending-tool ledger. A
+    // partial parallel batch records raw results but does not call this
+    // reconciler. Once every registered call has a result, the SDK history is
+    // stable and this scalar append watermark is valid again. The sanitizer
+    // remains the final call/result pairing guard for every other reconcile.
     let persistedHistoryCount = 0;
-    let historyCountAtTurnStart = 0;
-    let modelOrToolProgressPersisted = false;
     // Next free WHOLE-NUMBER absolute position to append at. Tracked separately
     // from persistedHistoryCount (the in-memory slice index) because a compaction
     // inserts a fractional summary position, so total rows no longer equal
@@ -1477,6 +1962,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             rawHistory as Array<Record<string, unknown>>,
             persistedHistoryCount,
             nextHistoryPosition,
+            modelRunSettings.modelToolOutputTruncationTokens,
           );
           const hasModelOrToolProgress = rows.some((row) =>
             isModelOrToolProgressHistoryItem(row.item),
@@ -1484,25 +1970,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const shouldAppendRows =
             rows.length > 0 && (!options.skipInputOnlyRows || hasModelOrToolProgress);
           if (shouldAppendRows) {
-            await appendSessionHistoryItems(db, {
+            const appended = await appendSessionHistoryItems(db, {
               accountId: input.accountId,
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId,
+              expectedExecutionGeneration: executionGeneration,
+              expectedAttemptId: input.attemptId,
               // Tag each row with the codex account that produced it (null on the
               // non-codex path). Resolved at line ~504 before any reconcile pass
               // runs, so this is the turn's effective account. The read path uses
               // it to strip cross-account reasoning.encrypted_content next turn.
               producerCodexCredentialId: effectiveCodexCredentialId,
+              modelToolOutputTruncationTokens: modelRunSettings.modelToolOutputTruncationTokens,
               items: rows,
             });
+            if (!appended) {
+              throw new TurnAttemptFencedError(
+                "turn execution generation was fenced while saving conversation history",
+              );
+            }
           }
           if (shouldAppendRows || !options.skipInputOnlyRows) {
             persistedHistoryCount = nextWatermark;
             nextHistoryPosition = nextPosition;
-          }
-          if (hasModelOrToolProgress) {
-            modelOrToolProgressPersisted = true;
           }
         }
         const envelope = sandboxStateEntryFromRunState(stream.state);
@@ -1543,7 +2034,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Hoisted to activity scope so the finally flush (below) sees it. The sink is
     // wired into codexContext.onUsageHeaders inside the try.
     let latestCodexUsage: CodexUsageHeaderSnapshot | null = null;
-    // Hoisted for the preemption path: an approval-decision rerun must
+    // Hoisted for same-turn recovery: an approval-decision rerun must
     // re-enter through the approval resume path (its frozen mid-flight state
     // only exists in the RunState blob), never through a swapped trigger.
     let triggerType: string | null = null;
@@ -1570,61 +2061,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       runtime.configure(capabilitySettings);
       const session = await requireSession(db, input.workspaceId, input.sessionId);
-      const trigger = await getSessionEvent(db, input.workspaceId, input.triggerEventId);
+      const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+        sessionId: input.sessionId,
+        workflowId: input.workflowId,
+        workflowRunId: input.workflowRunId,
+        attemptId: input.attemptId,
+        dispatchId,
+        trigger: input.trigger,
+      });
+      if (claim.action === "unclaimed") {
+        activityStatus = "unclaimed";
+        return { status: "unclaimed", reason: claim.reason };
+      }
+      const turn = claim.turn;
+      turnId = turn.id;
+      triggerEventId = turn.triggerEventId;
+      const trigger = await getSessionEvent(db, input.workspaceId, triggerEventId);
       if (!trigger) {
-        throw new Error(`Trigger event not found: ${input.triggerEventId}`);
+        throw new Error(`Trigger event not found: ${triggerEventId}`);
       }
       triggerType = trigger.type;
-      let turn = input.turnId
-        ? await getSessionTurn(db, input.workspaceId, input.turnId)
-        : await claimNextQueuedTurnDb(db, input.workspaceId, input.sessionId, input.workflowId);
-      if (!turn && !input.turnId) {
-        const createdTurnId = await createTurn(db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          temporalWorkflowId: input.workflowId,
-          triggerEventId: input.triggerEventId,
-        });
-        turn = await getSessionTurn(db, input.workspaceId, createdTurnId);
-      }
-      if (!turn) {
-        throw new Error(`Session turn not found for trigger: ${input.triggerEventId}`);
-      }
-      turnId = turn.id;
-      const capacityWaiterId = turn.metadata?.codexCapacityWaiterId;
-      const capacityWaitGeneration = turn.metadata?.codexCapacityWaitGeneration;
-      if (
-        typeof capacityWaiterId === "string" &&
-        typeof capacityWaitGeneration === "number" &&
-        Number.isInteger(capacityWaitGeneration)
-      ) {
-        const capacityResumeValidation = await validateCodexCapacityResumeTurn(db, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId,
-          waiterId: capacityWaiterId,
-          generation: capacityWaitGeneration,
-        });
-        if (!capacityResumeValidation.valid) {
-          if (capacityResumeValidation.events.length > 0) {
-            try {
-              await bus.publish(
-                input.workspaceId,
-                input.sessionId,
-                capacityResumeValidation.events,
-              );
-            } catch {
-              // Postgres is authoritative; SSE replay/gap fill repairs fanout.
-            }
-          }
-          // A manual pause/stop, newer queue item, or policy/control change won
-          // after the capacity wake. The DB helper cancelled this claimed turn;
-          // no provider, model, tool, sandbox, or billing work may start.
-          activityStatus = "cancelled";
-          turnMetricOutcome = "cancelled";
-          return { status: "cancelled" };
-        }
-      }
+      executionGeneration = turn.executionGeneration;
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
@@ -1650,18 +2107,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
       // AND the optional host `entitlements` port (when bound, its admitRun replaces
       // the local credit read). Unset port → today's local-ledger path.
-      await ensureRunAllowed(
-        settings,
-        db,
-        input.accountId,
-        input.workspaceId,
-        isCodexTurn,
-        entitlements,
+      await waitForTurnOperation(
+        ensureRunAllowed(
+          settings,
+          db,
+          input.accountId,
+          input.workspaceId,
+          isCodexTurn,
+          entitlements,
+        ),
+        cancellationSignal,
+        undefined,
       );
-      const activityContext = currentActivityContext();
       // Setup (variableSet load, MCP connects, sandbox restore) does not
       // stream and so never observes cancellation on its own; these explicit
-      // checks let a graceful shutdown preempt the turn before the worker is
+      // checks let a graceful shutdown checkpoint the turn before the worker is
       // force-killed instead of riding the setup to a heartbeat timeout.
       const throwIfWorkerShuttingDown = () => {
         const reason = activityContext?.cancellationSignal.reason;
@@ -1669,6 +2129,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           throw reason;
         }
       };
+      const throwIfTurnCancelled = () => throwIfTurnOperationCancelled(cancellationSignal);
       // ONE shared details object for every heartbeat this activity sends (each
       // site spreads it + its own phase), so cross-site fields — the op-stream
       // settled roster in particular — survive last-write-wins instead of being
@@ -1683,7 +2144,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       heartbeatTimer = startActivityHeartbeat(activityContext, heartbeatDetails);
       let producerSeq = 0;
       // One producer per activity execution, not per turn: a turn can run
-      // again on the same workflow (preemption resume, approval rerun), and
+      // again on the same workflow (recovery, approval rerun), and
       // each execution restarts producerSeq at 1 — a shared producer id would
       // trip the per-producer uniqueness constraint on the event log. The
       // Temporal activity id is unique per scheduled execution.
@@ -1693,11 +2154,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // not collide its model-call charges with the prior dispatch's. A genuine
       // activity retry reuses the same activityId, so its re-emitted calls keep
       // deduping (no double charge).
-      const dispatchId = activityContext?.info.activityId ?? null;
       // Local/tests have no Temporal activity id; still generate an execution-
       // unique holder so a second dispatch of the same durable turn fences this
       // one exactly like production.
-      codexLeaseHolderId = dispatchId ?? `local:${randomUUID()}`;
+      codexLeaseHolderId = dispatchId;
+      const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+      const emittedModelUsageSourceKeys = new Set<string>();
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
         immediate = false,
@@ -1709,12 +2171,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           producerId,
           producerSeq: ++producerSeq,
         }));
-        await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, inputs, {
-          onAppend: ({ durationSeconds }) =>
-            recordSessionEventAppendLatency(observability, { durationSeconds }),
-          onPublish: ({ durationSeconds }) =>
-            recordSessionEventPublishLatency(observability, { durationSeconds }),
-        });
+        const appended = await appendAndPublishTurnEventsFenced(
+          db,
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          turnId!,
+          executionGeneration,
+          input.attemptId,
+          inputs,
+        );
+        if (inputs.length > 0 && !appended.accepted) {
+          throw new TurnAttemptFencedError("turn execution generation was fenced");
+        }
         activityContext?.heartbeat({
           ...heartbeatDetails,
           phase: "events_published",
@@ -1723,21 +2192,131 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (immediate) {
           await Bun.sleep(0);
         }
+        return appended;
       };
-      activityContext?.heartbeat({ ...heartbeatDetails, phase: "turn_started" });
+      settle = async (inputSettlement) => {
+        const attemptClosing = ["completed", "failed", "cancelled", "requires_action"].includes(
+          inputSettlement.turnStatus,
+        );
+        const recordingForSettlement =
+          attemptClosing && activeRecording && resolvedSandbox
+            ? (activeRecording as ActiveRecording)
+            : null;
+        const preparedRecording = recordingForSettlement
+          ? await prepareRecordingForSettlement({
+              settings,
+              objectStorage,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              active: recordingForSettlement,
+              session: resolvedSandbox!.established.session,
+              didComputerUse,
+            })
+          : null;
+        let recordingMutation: SessionTurnRecordingSettlement | undefined;
+        if (preparedRecording) {
+          const mutation = preparedRecording.mutation;
+          recordingMutation =
+            mutation.action === "discard"
+              ? mutation
+              : {
+                  ...mutation,
+                  producerId,
+                  producerSeq: ++producerSeq,
+                };
+        }
+        const compactionRequestFailure = inputSettlement.consumeRequestedCompactionFailure
+          ? {
+              reason: "summarization_failed" as const,
+              producerId,
+              producerSeq: ++producerSeq,
+            }
+          : undefined;
+        const inputs = inputSettlement.events.map((event) => ({
+          ...event,
+          payload: redact(event.payload),
+          turnId: turnId!,
+          producerId,
+          producerSeq: ++producerSeq,
+        }));
+        const result = await applySessionTurnSettlement(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId: turnId!,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          turnStatus: inputSettlement.turnStatus,
+          sessionStatus: inputSettlement.sessionStatus,
+          activeTurnId: inputSettlement.activeTurnId,
+          events: inputs,
+          ...(recordingMutation ? { recording: recordingMutation } : {}),
+          ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
+        });
+        if (result.action === "stale") {
+          // The terminal write can lose to a control transaction before the
+          // workflow delivers Temporal cancellation. That control may settle
+          // the already-closed attempt as rejected_stale, so returning without
+          // this flag would strand its replacement behind quiesced_at forever.
+          // Enter the same hard tool-fence/receipt path as an explicit
+          // TurnAttemptFencedError. If ownership was lost for an unrelated
+          // reason, allowUninterrupted makes the receipt transaction a no-op.
+          acknowledgeLostAttemptOwnership();
+          if (recordingForSettlement) {
+            await abandonActiveRecording(
+              "recording settlement lost attempt ownership",
+              preparedRecording?.mutation.action === "discard" ? "discard" : "failed",
+            );
+          }
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return false;
+        }
+        if (recordingForSettlement && preparedRecording) {
+          if (result.recordingMutationApplied) {
+            activeRecording = null;
+            if (preparedRecording.deleteArtifactsAfterCommit) {
+              await deleteRecordingArtifacts(
+                resolvedSandbox!.established.session,
+                recordingForSettlement.proc,
+              );
+            }
+          } else {
+            await abandonActiveRecording("recording row was unavailable during turn settlement");
+          }
+        }
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, result.events);
+        activityContext?.heartbeat({
+          ...heartbeatDetails,
+          phase: "events_published",
+          producerSeq,
+        });
+        return true;
+      };
+      activityContext?.heartbeat({
+        ...heartbeatDetails,
+        phase: "turn_started",
+      });
 
-      // A shutdown that landed during claim/billing setup preempts before the
-      // turn visibly starts: nothing ran yet, so the requeued turn replays the
-      // original trigger cleanly on a healthy worker.
+      // A shutdown that landed during claim/billing setup stops before the turn
+      // visibly starts: nothing ran yet, so the same inference starts cleanly
+      // on a healthy worker.
       throwIfWorkerShuttingDown();
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "running", turnId);
-      await publish(
-        [
-          { type: "session.status.changed", payload: { status: "running" } },
-          { type: "turn.started", payload: { triggerEventId: input.triggerEventId } },
-        ],
-        true,
-      );
+      throwIfTurnCancelled();
+      if (
+        !(await settle({
+          events: [
+            { type: "session.status.changed", payload: { status: "running" } },
+            {
+              type: "turn.started",
+              payload: { triggerEventId },
+            },
+          ],
+          turnStatus: "running",
+          sessionStatus: "running",
+          activeTurnId: turnId,
+        }))
+      ) {
+        return claimedResult({ status: "cancelled" });
+      }
       turnStartedPublished = true;
 
       // Multi-account (P1): resolve the effective Codex account for this turn
@@ -1880,7 +2459,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           strategy: leased.rotationStrategy as CodexRotationStrategy,
           rotationEnabled: leased.rotationEnabled,
         });
-        // OPE-31 pin persistence follows the atomic OPE-21 selection. The selector
+        // pin policy pin persistence follows the atomic credential allocator selection. The selector
         // already ran exact-turn reuse before policy filtering and vetoed pointer
         // movement for manual/policy homes; this write only records the NEXT turn's
         // policy home (or clears a policy pin whose strategy is no longer active).
@@ -1891,7 +2470,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ) {
           const pinMutation = await withCodexCapacityMutation(
             db,
-            { workspaceId: input.workspaceId, reason: "codex_policy_pin_changed" },
+            {
+              workspaceId: input.workspaceId,
+              reason: "codex_policy_pin_changed",
+            },
             async (tx) => {
               const changed = await setSessionCodexPin(
                 tx,
@@ -1916,7 +2498,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         } else if (selectedPinDisposition === "clearStale") {
           const pinMutation = await withCodexCapacityMutation(
             db,
-            { workspaceId: input.workspaceId, reason: "codex_stale_policy_pin_cleared" },
+            {
+              workspaceId: input.workspaceId,
+              reason: "codex_stale_policy_pin_cleared",
+            },
             async (tx) => {
               const changed = await setSessionCodexPin(
                 tx,
@@ -1988,9 +2573,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           effectiveCodexCredentialId === null &&
           leased.accounts.length > 0 &&
           leased.accounts.every((account) => !account.allocatorEnabled) &&
-          publish &&
           turnId
         ) {
+          if (turn.source === "compaction") {
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.cancelled",
+                    payload: {
+                      maintenance: "context_compaction",
+                      reason: "codex_allocator_disabled",
+                      requestPreserved: true,
+                    },
+                  },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
+                ],
+                turnStatus: "cancelled",
+                sessionStatus: "idle",
+                activeTurnId: null,
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
+            }
+            turnMetricOutcome = "cancelled";
+            activityStatus = "idle";
+            return claimedResult({ status: "idle", deferredUntilWake: true });
+          }
           const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(
             () => null,
           );
@@ -2000,6 +2612,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId,
+              attemptId: input.attemptId,
               workflowId: input.workflowId,
               goalId: goal.id,
               goalVersion: goal.version,
@@ -2012,14 +2625,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             });
             if (armed.action === "waiting") {
-              try {
-                await bus.publish(input.workspaceId, input.sessionId, armed.events);
-              } catch {
-                // Durable DB events + waiter are authoritative.
-              }
+              await publishDurableSessionEvents(
+                bus,
+                input.workspaceId,
+                input.sessionId,
+                armed.events,
+              );
               turnMetricOutcome = "failed";
               activityStatus = "idle";
-              return {
+              return claimedResult({
                 status: "idle",
                 capacityWait: {
                   waiterId: armed.waiter.id,
@@ -2027,32 +2641,64 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
                   wakeRevision: armed.waiter.wakeRevision,
                 },
-              };
+              });
             }
           }
-          await publish(
-            [
-              {
-                type: "turn.failed",
-                payload: {
-                  error: "All connected Codex subscriptions are disabled for new allocations.",
-                  code: "codex_allocator_disabled",
-                  retryable: false,
-                  recovery: "user_message",
+          if (
+            !(await settle!({
+              events: [
+                {
+                  type: "turn.failed",
+                  payload: {
+                    error: "All connected Codex subscriptions are disabled for new allocations.",
+                    code: "codex_allocator_disabled",
+                    retryable: false,
+                    recovery: "user_message",
+                  },
                 },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            true,
-          );
-          await finishTurn(db, input.workspaceId, turnId, "failed");
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
           turnMetricOutcome = "failed";
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
           activityStatus = "idle";
-          return { status: "idle" };
+          return claimedResult({ status: "idle" });
         }
 
-        if (rotationDecision.kind === "allCapped" && publish && turnId) {
+        if (rotationDecision.kind === "allCapped" && turnId) {
+          if (turn.source === "compaction") {
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.cancelled",
+                    payload: {
+                      maintenance: "context_compaction",
+                      reason: "codex_capacity_unavailable",
+                      requestPreserved: true,
+                    },
+                  },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
+                ],
+                turnStatus: "cancelled",
+                sessionStatus: "idle",
+                activeTurnId: null,
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
+            }
+            turnMetricOutcome = "cancelled";
+            activityStatus = "idle";
+            return claimedResult({ status: "idle", deferredUntilWake: true });
+          }
           // Every eligible account is capped/cooling (and a usage refresh did NOT
           // surface a reset): idle the turn AT THE BOUNDARY (no wasted model/sandbox
           // build) until the EARLIEST reset across all accounts — the multi-account
@@ -2086,6 +2732,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId,
+              attemptId: input.attemptId,
               workflowId: input.workflowId,
               goalId: goal.id,
               goalVersion: goal.version,
@@ -2094,14 +2741,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               failurePayload,
             });
             if (armed.action === "waiting") {
-              try {
-                await bus.publish(input.workspaceId, input.sessionId, armed.events);
-              } catch {
-                // Durable DB events + waiter are authoritative.
-              }
+              await publishDurableSessionEvents(
+                bus,
+                input.workspaceId,
+                input.sessionId,
+                armed.events,
+              );
               turnMetricOutcome = "failed";
               activityStatus = "idle";
-              return {
+              return claimedResult({
                 status: "idle",
                 capacityWait: {
                   waiterId: armed.waiter.id,
@@ -2109,38 +2757,47 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
                   wakeRevision: armed.waiter.wakeRevision,
                 },
-              };
+              });
             }
           }
-          await publish(
-            [
-              // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
-              // rotation-wait state as the reactive all-capped path, so it must freeze
-              // autoContinuations identically (evaluateGoalContinuation reads this marker)
-              // — a goal waiting out a long reset must not burn its continuation budget on
-              // the proactive path while the reactive path spares it.
-              {
-                type: "turn.failed",
-                payload: {
-                  ...failurePayload,
-                  recovery: goalActive ? "goal_continuation" : "user_message",
-                  runStateSaved: false,
-                  rotated: true,
+          if (
+            !(await settle!({
+              events: [
+                // `rotated:true` (Finding 2): the proactive all-capped wait is the SAME
+                // rotation-wait state as the reactive all-capped path, so it must freeze
+                // autoContinuations identically (evaluateGoalContinuation reads this marker)
+                // — a goal waiting out a long reset must not burn its continuation budget on
+                // the proactive path while the reactive path spares it.
+                {
+                  type: "turn.failed",
+                  payload: {
+                    ...failurePayload,
+                    recovery: goalActive ? "goal_continuation" : "user_message",
+                    rotated: true,
+                  },
                 },
-              },
-              { type: "session.status.changed", payload: { status: "idle" } },
-            ],
-            true,
-          );
-          await finishTurn(db, input.workspaceId, turnId, "failed");
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
           turnMetricOutcome = "failed";
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
           activityStatus = "idle";
           // idleUntilReset marks this a MANDATORY hold: session.ts must wait the full
           // resumeMs even if a future change made it 0 — never a tight re-dispatch.
-          return goalActive
-            ? { status: "idle", continueDelayMs: resumeMs, idleUntilReset: true }
-            : { status: "idle" };
+          return claimedResult(
+            goalActive
+              ? {
+                  status: "idle",
+                  continueDelayMs: resumeMs,
+                  idleUntilReset: true,
+                }
+              : { status: "idle" },
+          );
         }
         if (effectiveCodexCredentialId) {
           const priorAccountId = sessionCodex?.lastCredentialId ?? null;
@@ -2273,6 +2930,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
       const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      // Bind the provider/model catalog's context policy to every model-facing
+      // path for this turn. In particular, Codex subscription turns must not
+      // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
+      // raw window, effective ceiling, and auto-compact limit are distinct live
+      // catalog values and must reach pre-turn compaction, history guards, and
+      // every model call together.
+      modelRunSettings = resolvedModel
+        ? settingsWithResolvedModelContext(runSettings, resolvedModel.configured)
+        : runSettings;
       // WORKSPACE MODEL POLICY — the authoritative hard gate. Runs immediately
       // after resolution and BEFORE any model call (the compaction summarizer
       // and the main run both come later in this scope), so a blocked
@@ -2345,6 +3011,200 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : null;
       const withCodex = <T>(fn: () => Promise<T>): Promise<T> =>
         codexContext ? codexRequestStorage.run(codexContext, fn) : fn();
+      const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
+        ? input.sessionId
+        : undefined;
+      let compactionUsageCount = 0;
+      const recordCompactionUsage = async (usage: ModelResponseUsage) => {
+        await recordCompletedModelCallBeforeOwnershipFences({
+          renewLease: () => renewCodexLease("model_usage"),
+          leaseLost: () => codexLeaseLost,
+          leaseLostMessage: "Codex credential lease expired during context compaction",
+          recordUsage: async () => {
+            compactionUsageCount += 1;
+            const sourceKey = modelUsageSourceKey({
+              responseId: usage.responseId,
+              dispatchId: modelUsageDispatchId,
+              positionalKey: `compaction-${compactionUsageCount}`,
+            });
+            const responseAccountCtx = modelCallAccountContext({
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              isFirstCallOfTurn: compactionUsageCount === 1,
+            });
+            await recordModelUsageAndDebitCredits(settings, db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              model: resolvedModel?.configured.id ?? turn.model,
+              isCodexTurn,
+              usage: usage.usage,
+              sourceKey,
+              observability,
+            });
+            await emitModelCallUsage({
+              observability,
+              publish,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: turn.id,
+              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+              providerApi: resolvedModel?.provider.api ?? "responses",
+              model: resolvedModel?.configured.id ?? turn.model,
+              sourceKey,
+              usage,
+              servingAccountHash: responseAccountCtx.servingAccountHash,
+              accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+              emittedSourceKeys: emittedModelUsageSourceKeys,
+            });
+          },
+        });
+      };
+      const compactionSummarizerFor = (systemInstructions?: string) =>
+        resolvedModel
+          ? (s: Settings, m: Array<Record<string, unknown>>) =>
+              withCodex(() =>
+                summarizeForCompaction(s, m, {
+                  client: resolvedModel.client,
+                  api: resolvedModel.provider.api,
+                  model: resolvedModel.configured.id,
+                  maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+                  onUsage: recordCompactionUsage,
+                  ...(systemInstructions ? { systemInstructions } : {}),
+                  ...(promptCacheKey ? { promptCacheKey } : {}),
+                }),
+              )
+          : (s: Settings, m: Array<Record<string, unknown>>) =>
+              summarizeForCompaction(s, m, {
+                maxOutputTokens: SUMMARY_BUFFER_TOKENS,
+                onUsage: recordCompactionUsage,
+                ...(systemInstructions ? { systemInstructions } : {}),
+                ...(promptCacheKey ? { promptCacheKey } : {}),
+              });
+
+      if (turn.source === "compaction") {
+        const persistentSessionSettings = {
+          titleIsSet: Boolean(session.title?.trim()),
+        };
+        const compactionInstructions = appendPersistentSessionSettings(
+          appendSessionInstructions(
+            appendWorkspaceMemory(
+              composeAgentInstructions(
+                workspaceAgentInstructions ?? modelRunSettings.agentInstructionsTemplate,
+                undefined,
+                rigVersion && rigName ? { name: rigName, version: rigVersion.version } : undefined,
+              ),
+              workspaceMemory ?? undefined,
+            ),
+            session.instructions ?? undefined,
+          ),
+          persistentSessionSettings,
+        );
+        const requested = await isSessionCompactionRequested(
+          db,
+          input.workspaceId,
+          input.sessionId,
+        );
+        let outcome: Awaited<ReturnType<typeof maybeCompactContext>> | null = null;
+        if (requested) {
+          try {
+            outcome = await waitForTurnOperation(
+              maybeCompactContext(
+                db,
+                modelRunSettings,
+                {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
+                },
+                session.lastInputTokens,
+                compactionSummarizerFor(compactionInstructions),
+                {
+                  force: true,
+                  clearRequestedCompaction: true,
+                  trigger: "operator",
+                },
+              ),
+              cancellationSignal,
+              undefined,
+            );
+          } catch (error) {
+            // Codex retries retryable checkpoint-provider failures rather than
+            // treating them as a semantic compaction result. Keep the operator
+            // request pending and let the ordinary same-turn provider/capacity
+            // recovery path re-dispatch this exact maintenance execution.
+            if (shouldRecoverCompactionProviderFailure(error)) throw error;
+            if (!isCompactionSummaryFailure(error)) throw error;
+            const errorMessage = compactionFailureReasonFromError(error);
+            if (
+              !(await settle!({
+                events: [
+                  {
+                    type: "turn.failed",
+                    payload: {
+                      error: errorMessage,
+                      code: "context_compaction_failed",
+                      retryable: false,
+                      recovery: "user_message",
+                      compacted: false,
+                    },
+                  },
+                  { type: "session.status.changed", payload: { status: "idle" } },
+                ],
+                turnStatus: "failed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+                consumeRequestedCompactionFailure: true,
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
+            }
+            turnMetricOutcome = "failed";
+            activityStatus = "idle";
+            activityError = error;
+            return claimedResult({ status: "idle" });
+          }
+          if (outcome.events.length > 0) {
+            if (outcome.compacted) {
+              recordContextCompaction(observability, "operator");
+            }
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              outcome.events,
+            );
+          }
+        }
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: {
+                  maintenance: "context_compaction",
+                  result: outcome?.compacted ? "compacted" : (outcome?.reason ?? "already_applied"),
+                },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
+        }
+        turnMetricOutcome = "completed";
+        activityStatus = "idle";
+        return claimedResult({ status: "idle" });
+      }
+
       const turnResources = mergeResourceRefs(session.resources, turn.resources);
       // Attach the first-party MCP server to EVERY turn, regardless of how/when
       // the session was created (API, scheduled task, or a pre-existing session
@@ -2359,15 +3219,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runSettings,
         withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)),
       );
-      // §7.6 P4a — load (and decrypt) the variable set via the host
+      // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
-      const connectionScope = { accountId: input.accountId, workspaceId: input.workspaceId };
-      const workspaceVariableSet = await loadWorkspaceEnvironmentForRunWithCredentials(
-        db,
-        runSettings,
-        connectionScope,
-        session.variableSetId,
-        connectionCredentials?.sandboxSecrets,
+      const connectionScope = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+      };
+      const workspaceVariableSet = await waitForTurnOperation(
+        loadWorkspaceEnvironmentForRunWithCredentials(
+          db,
+          runSettings,
+          connectionScope,
+          session.variableSetId,
+          connectionCredentials?.sandboxSecrets,
+        ),
+        cancellationSignal,
+        undefined,
       );
       variableSetId = workspaceVariableSet?.id ?? "";
       // RIG DEFAULT VARIABLE SETS (M3): decrypt the frozen rig version's default
@@ -2382,12 +3249,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // set already relies on), keeping validateNoEnvironmentDelta empty.
       const rigDefaultEnvironmentValues: Record<string, string> = {};
       for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
-        const rigDefaultSet = await loadWorkspaceEnvironmentForRunWithCredentials(
-          db,
-          runSettings,
-          connectionScope,
-          rigDefaultVariableSetId,
-          connectionCredentials?.sandboxSecrets,
+        const rigDefaultSet = await waitForTurnOperation(
+          loadWorkspaceEnvironmentForRunWithCredentials(
+            db,
+            runSettings,
+            connectionScope,
+            rigDefaultVariableSetId,
+            connectionCredentials?.sandboxSecrets,
+          ),
+          cancellationSignal,
+          undefined,
         );
         Object.assign(rigDefaultEnvironmentValues, rigDefaultSet?.values ?? {});
       }
@@ -2436,7 +3307,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
           activeSandboxPointer,
           (sandboxId) => getSandbox(db, input.workspaceId, sandboxId),
-          publish ?? undefined,
+          publish
+            ? async (events) => {
+                await publish!(events);
+              }
+            : undefined,
         );
         activeSandboxPointer = reconciled.pointer;
         activeSandboxRecord = reconciled.record;
@@ -2467,7 +3342,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
           : runSettings.sandboxBackend;
-      await ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend);
+      throwIfTurnOperationCancelled(cancellationSignal);
+      await waitForTurnOperation(
+        ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
+        cancellationSignal,
+        undefined,
+      );
       const establishPolicy: "eager" | "on-demand" =
         lazyProvisionEnabled(settings) && !machinePrimary && runSettings.sandboxBackend !== "none"
           ? "on-demand"
@@ -2491,32 +3371,121 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // provider may supply it; unset still self-mints GitHub from settings.
       // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
+      if (activeSandboxBackend !== "selfhosted") {
+        await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
+      }
+      const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
+        await assertGitHubTokenMintSelectionAuthorized(
+          db,
+          input.workspaceId,
+          selection.installationId,
+          selection.repositoryIds,
+        );
+      };
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
         gitTokens: sandboxGitTokens,
+        gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         toolspaceToken: sandboxToolspaceToken,
-      } = await sandboxEnvironmentForRun(
-        runSettings,
-        turnResources,
-        // Rig default sets merged BELOW the session set (session wins); rig-less
-        // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
-        sandboxWorkspaceEnvironmentValues,
-        {
-          skipGitHubToken: activeSandboxBackend === "selfhosted",
-          deferGitHubToken:
-            activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
-          scope: connectionScope,
-          gitCredentials: connectionCredentials?.gitCredentials,
-          sessionId: input.sessionId,
-          runId: turnId,
-        },
+      } = await waitForTurnOperation(
+        sandboxEnvironmentForRun(
+          runSettings,
+          turnResources,
+          // Rig default sets merged BELOW the session set (session wins); rig-less
+          // turns pass exactly workspaceVariableSet?.values (byte-for-byte today).
+          sandboxWorkspaceEnvironmentValues,
+          {
+            skipGitHubToken: activeSandboxBackend === "selfhosted",
+            deferGitHubToken:
+              activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
+            scope: connectionScope,
+            gitCredentials: connectionCredentials?.gitCredentials,
+            authorizeGitHubTokenMint,
+            sessionId: input.sessionId,
+            runId: turnId,
+          },
+        ),
+        cancellationSignal,
+        undefined,
       );
+
+      const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
+        ? {
+            gitTokens: sandboxGitTokens,
+            expiresAt: sandboxGitTokenExpiresAt ?? {},
+          }
+        : undefined;
+      const attachGitCredentialRenewal = async (
+        tokenSession: GitCredentialTokenWriterSession,
+        initial: MintedRunGitCredentials | undefined,
+      ): Promise<void> => {
+        if (!initial || Object.keys(initial.gitTokens).length === 0) return;
+        const previous = gitCredentialRenewal;
+        gitCredentialRenewal = null;
+        await previous?.stop();
+        if (gitCredentialRenewalClosed) return;
+
+        const providers = Object.keys(initial.gitTokens) as GitCredentialProvider[];
+        const controller = startGitCredentialRenewalLoop({
+          expectedProviders: providers,
+          initialExpiresAt: initial.expiresAt,
+          mint: async () =>
+            await mintRunGitCredentials(runSettings, turnResources, {
+              scope: connectionScope,
+              gitCredentials: connectionCredentials?.gitCredentials,
+              authorizeGitHubTokenMint,
+            }),
+          write: async (tokens) => {
+            const runAs = sandboxRunAs(runSettings);
+            await refreshGitProviderTokenFiles(tokenSession, tokens, {
+              ...(runAs ? { runAs } : {}),
+              ...(toolCancellationFenceRef.current
+                ? {
+                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                      toolCancellationFenceRef.current,
+                    ),
+                  }
+                : {}),
+            });
+          },
+          onSuccess: ({ providers: renewedProviders }) => {
+            for (const provider of renewedProviders) {
+              observability.incrementCounter({
+                name: "opengeni_git_credential_renewals_total",
+                help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                labels: { provider, outcome: "completed" },
+              });
+            }
+          },
+          onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
+            for (const provider of failedProviders) {
+              observability.incrementCounter({
+                name: "opengeni_git_credential_renewals_total",
+                help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                labels: { provider, outcome: "error" },
+              });
+            }
+            observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+              sessionId: input.sessionId,
+              turnId,
+              providers: failedProviders.join(","),
+              errorClass,
+              retryDelayMs,
+            });
+          },
+        });
+        if (gitCredentialRenewalClosed) {
+          await controller.stop();
+          return;
+        }
+        gitCredentialRenewal = controller;
+      };
 
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
       // block is skipped entirely: resolvedSandbox stays null and runStream
       // takes the legacy per-run build-and-discard path — byte-for-byte today.
-      // With it on, acquire the group lease ('turn' holder = the activityId),
+      // With it on, acquire the group lease (holder = the durable attempt id),
       // resume the one box by id, and inject it NON-OWNED into the run. The box
       // backend is "none" -> never resolve (no box to touch).
       //
@@ -2526,7 +3495,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
-        sandboxHolderId = dispatchId ?? `turn:${turnId}`;
+        sandboxHolderId = sandboxLeaseHolderIdForAttempt(input.attemptId);
         sandboxGroupId = session.sandboxGroupId;
         // STAGE D honest-label guard: a machine-home session carries
         // turn.sandboxBackend "selfhosted", but a turn is only machine-PRIMARY
@@ -2576,16 +3545,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
           machinePrimarySession =
             established.session as import("@opengeni/runtime").SelfhostedSession;
-          const lease = await acquireSelfhostedLeaseForTurn(
-            { db, settings },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId: session.sandboxGroupId,
-              sessionId: input.sessionId,
-            },
-            "turn",
-            sandboxHolderId,
+          const lease = await waitForTurnOperation(
+            acquireSelfhostedLeaseForTurn(
+              { db, settings },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: session.sandboxGroupId,
+                sessionId: input.sessionId,
+              },
+              "turn",
+              sandboxHolderId,
+            ),
+            cancellationSignal,
+            async (lateLease) => await lateLease.release(),
           );
           setupBoxSession = established.session;
           resolvedSandbox = {
@@ -2630,38 +3603,49 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // proxy's first default-pointer op. A chat-only turn never calls it, so
           // no lease row, no provider box, no warm-meter interval.
         } else {
-          resolvedSandbox = await resumeBoxForTurn(
-            { db, settings, sandboxMetrics: runtimeMetricsHooksForObservability(observability) },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sandboxGroupId: session.sandboxGroupId,
-              sessionId: input.sessionId,
-              // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
-              // is not machine-primary resumes a real cloud group box (the
-              // deployment default), never a "selfhosted" box (which would throw
-              // for lack of a bound agentId).
-              backend: groupBoxBackend,
-              os: session.sandboxOs,
-              environment: sandboxEnvironment,
-              // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
-              // this run resolves. The lease stamps it + conflicts on a live shared box
-              // running a DIFFERENT image (solo → recreate on the new image; N-holders →
-              // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
-              // explicit Modal image ref, else the docker image. The selfhosted branch
-              // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
-              // an image — B3 lives only on this Modal else-branch.
-              ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                ? { image: runSettings.modalImageRef ?? runSettings.dockerImage }
-                : {}),
-              // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
-              // conflicts on a live shared box set up under a different rig (solo
-              // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
-              // turn -> never stamped or enforced (shares exactly as today).
-              ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
-            },
-            "turn",
-            sandboxHolderId,
+          resolvedSandbox = await waitForTurnOperation(
+            resumeBoxForTurn(
+              {
+                db,
+                settings,
+                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                onSandboxLost: publishSandboxLost,
+              },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sandboxGroupId: session.sandboxGroupId,
+                sessionId: input.sessionId,
+                // groupBoxBackend, not turn.sandboxBackend: a machine-home turn that
+                // is not machine-primary resumes a real cloud group box (the
+                // deployment default), never a "selfhosted" box (which would throw
+                // for lack of a bound agentId).
+                backend: groupBoxBackend,
+                os: session.sandboxOs,
+                environment: sandboxEnvironment,
+                // IMAGE IS SHARED STATE (B3, Modal warm-box path only): the container image
+                // this run resolves. The lease stamps it + conflicts on a live shared box
+                // running a DIFFERENT image (solo → recreate on the new image; N-holders →
+                // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
+                // explicit Modal image ref, else the docker image. The selfhosted branch
+                // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
+                // an image — B3 lives only on this Modal else-branch.
+                ...((runSettings.modalImageRef ?? runSettings.dockerImage)
+                  ? {
+                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                    }
+                  : {}),
+                // RIG IS SHARED STATE (M3): stamp the frozen rig version so the lease
+                // conflicts on a live shared box set up under a different rig (solo
+                // recreate / N-holders SandboxRigConflictError). Omitted for a rig-less
+                // turn -> never stamped or enforced (shares exactly as today).
+                ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
+              },
+              "turn",
+              sandboxHolderId,
+            ),
+            cancellationSignal,
+            async (lateSandbox) => await lateSandbox.release(),
           );
           setupBoxSession = resolvedSandbox.established.session;
           // Durable box-lifecycle events (sandbox-file-persistence observability):
@@ -2702,57 +3686,60 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
 
-      if (resolvedSandbox) {
-        await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
-      }
-
-      const fileResourceDownloads = await sandboxFileDownloadsForRun(
-        runSettings,
-        db,
-        objectStorage,
-        input.workspaceId,
-        turnResources,
+      const fileResourceDownloads = await waitForTurnOperation(
+        sandboxFileDownloadsForRun(
+          runSettings,
+          db,
+          objectStorage,
+          input.workspaceId,
+          turnResources,
+        ),
+        cancellationSignal,
+        undefined,
       );
       throwIfWorkerShuttingDown();
+      throwIfTurnCancelled();
       // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
       const resolveCredential = buildConnectionTokenResolver(db, runSettings);
-      preparedTools = await withCodex(() =>
-        runtime.prepareTools(runSettings, turnTools, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          // Sign the calling turn into the first-party token so tools classify
-          // the caller by its own identity (sacred-pause guard), not the racy
-          // live active pointer.
-          ...(turnId ? { turnId } : {}),
-          subjectId: "worker:first-party-mcp",
-          subjectLabel: "OpenGeni worker",
-          resolveCredential,
-          onAuthNeeded: async (payload) => {
-            await publish!([{ type: "tool.auth_needed", payload }], true);
-          },
-          // Manager-style sessions carry a creation-validated permission set
-          // for their first-party MCP token; null keeps the fixed default.
-          ...(session.firstPartyMcpPermissions?.length
-            ? { firstPartyPermissions: session.firstPartyMcpPermissions }
-            : {}),
-        }),
+      preparedTools = await waitForTurnOperation(
+        withCodex(() =>
+          runtime.prepareTools(runSettings, turnTools, {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            // Sign the calling turn into the first-party token so tools classify
+            // the caller by its own identity (sacred-pause guard), not the racy
+            // live active pointer.
+            ...(turnId ? { turnId } : {}),
+            attemptId: input.attemptId,
+            executionGeneration,
+            subjectId: "worker:first-party-mcp",
+            subjectLabel: "OpenGeni worker",
+            resolveCredential,
+            onAuthNeeded: async (payload) => {
+              await publish!([{ type: "tool.auth_needed", payload }], true);
+            },
+            // Manager-style sessions carry a creation-validated permission set
+            // for their first-party MCP token; null keeps the fixed default.
+            ...(session.firstPartyMcpPermissions?.length
+              ? { firstPartyPermissions: session.firstPartyMcpPermissions }
+              : {}),
+          }),
+        ),
+        cancellationSignal,
+        async (latePreparedTools) => await latePreparedTools.close().catch(() => undefined),
       );
       // Genesis turn = the first user turn (no assistant history reconciled
       // yet). Durable Postgres state (countSessionHistoryItems includes
       // superseded rows after compaction), NOT a workflow counter (turnsThisRun
       // resets on continueAsNew). Drives the one-shot title hint appended to the
-      // agent's instructions; continuation/preemption turns never match (their
-      // trigger is goal.continuation/turn.preempted).
+      // agent's instructions; later attempts and goal continuations never match.
       const isGenesisTurn =
         triggerType === "user.message" &&
         (await countSessionHistoryItems(db, input.workspaceId, input.sessionId)) === 0;
-      const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
-        ? input.sessionId
-        : undefined;
       // Clone-onto-real-disk hazard (Case B). A session keeps its CLOUD HOME
       // backend (runSettings.sandboxBackend, e.g. "modal") but its ACTIVE sandbox
       // may have been swapped to a connected machine (active_sandbox_id → a
@@ -2782,10 +3769,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             }
           : {};
-      const agent = runtime.buildAgent(runSettings, turnResources, {
+      const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         genesisTitleHint: isGenesisTurn,
+        persistentSessionSettings: {
+          titleIsSet: Boolean(session.title?.trim()),
+        },
         sandboxEnvironment,
+        ...(cancellationSignal ? { turnCancellationSignal: cancellationSignal } : {}),
+        onToolCancellationFence: (fence) => {
+          toolCancellationFenceRef.current = fence;
+        },
         // TOKEN-BROKER (B1): forward the per-turn git token OFF-MANIFEST as the clone
         // seed. ONLY when the effective backend is NOT selfhosted (the connected
         // machine uses its own git creds — mirrors the skipGitHubToken gate above)
@@ -2828,7 +3822,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // compaction threshold.
         ...(resolvedModel
           ? {
-              compactionMode: resolvedModel.provider.compactionMode,
               hostedWebSearch: resolvedModel.configured.hostedWebSearch,
               encryptedReasoning:
                 resolvedModel.provider.api === "responses" &&
@@ -2860,6 +3853,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               computerToolMode: computerToolModeForTurn(null),
               promptCacheKey: input.sessionId,
             }),
+        // Lazy computer-use seam: runtime first brings up :0 only after the model
+        // selects a computer tool, then this hook begins the optional proof
+        // recording. Shell/filesystem turns never invoke either operation.
+        onComputerUseReady: async () => {
+          if (!resolvedSandbox) {
+            throw new Error("Computer-use display became ready without a resolved sandbox");
+          }
+          // This callback is the authoritative execution boundary. Record the
+          // action before async ffmpeg startup so transport-event ordering cannot
+          // make settlement misclassify a real computer turn as unused.
+          didComputerUse = true;
+          await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
+        },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
@@ -2891,6 +3897,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
           : {}),
       });
+      if (modelRunSettings.sandboxBackend !== "none" && toolCancellationFenceRef.current === null) {
+        throw new Error(
+          "Sandbox agent construction did not install the mandatory turn tool cancellation fence",
+        );
+      }
       if (establishPolicy === "on-demand" && sandboxHolderId && sandboxGroupId) {
         const lazyHolderId = sandboxHolderId;
         const lazyGroupId = sandboxGroupId;
@@ -2904,15 +3915,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         turnSandboxProvisioner = createTurnSandboxProvisioner<ResumedTurnSandbox>(
           async () => {
             throwIfWorkerShuttingDown();
-            const lazyGitTokens =
+            throwIfTurnCancelled();
+            const lazyGitCredentials =
               activeSandboxBackend === "selfhosted"
                 ? undefined
-                : await mintRunGitTokens(runSettings, turnResources, {
+                : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
                     gitCredentials: connectionCredentials?.gitCredentials,
+                    authorizeGitHubTokenMint,
                   });
+            const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
-              { db, settings, sandboxMetrics: runtimeMetricsHooksForObservability(observability) },
+              {
+                db,
+                settings,
+                sandboxMetrics: runtimeMetricsHooksForObservability(observability),
+                onSandboxLost: publishSandboxLost,
+              },
               {
                 accountId: input.accountId,
                 workspaceId: input.workspaceId,
@@ -2922,13 +3941,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 os: session.sandboxOs,
                 environment: sandboxEnvironment,
                 ...((runSettings.modalImageRef ?? runSettings.dockerImage)
-                  ? { image: runSettings.modalImageRef ?? runSettings.dockerImage }
+                  ? {
+                      image: runSettings.modalImageRef ?? runSettings.dockerImage,
+                    }
                   : {}),
               },
               "turn",
               lazyHolderId,
             );
-            setupBoxSession = provisioned.established.session;
             await publishSandboxLifecycleEvents(provisioned);
             await runOwnedSandboxSetup(
               agent,
@@ -2941,7 +3961,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
                 ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
               },
+            );
+            await attachGitCredentialRenewal(
+              provisioned.established.session as GitCredentialTokenWriterSession,
+              lazyGitCredentials,
             );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
@@ -2950,24 +3981,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // recursion that HANGS the turn — caught live on staging 2026-07-08). The SDK
             // already holds the proxy directly (injected as lazyOwnedSandbox.session), so it
             // gets per-op routing; the worker-side handle (resolvedSandbox: release,
-            // heartbeat, on-turn recording) wants the real box, unproxied.
-            resolvedSandbox = provisioned;
-            startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
-            await maybeStartOnTurnRecording(provisioned, activeSandboxBackend);
+            // heartbeat, computer-use recording) wants the real box, unproxied.
             return provisioned;
           },
           {
+            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
             onStarted: async () => {
               await publish?.(
-                [{ type: "sandbox.operation.started", payload: { name: "sandbox.provision" } }],
+                [
+                  {
+                    type: "sandbox.operation.started",
+                    payload: { name: "sandbox.provision" },
+                  },
+                ],
                 true,
               );
             },
-            onCompleted: async () => {
+            onCompleted: async (provisioned) => {
               await publish?.(
-                [{ type: "sandbox.operation.completed", payload: { name: "sandbox.provision" } }],
+                [
+                  {
+                    type: "sandbox.operation.completed",
+                    payload: {
+                      name: "sandbox.provision",
+                      ...(provisioned.established.origin
+                        ? { origin: provisioned.established.origin }
+                        : {}),
+                    },
+                  },
+                ],
                 true,
               );
+              throwIfTurnOperationCancelled(activityContext?.cancellationSignal);
+              startLeaseHeartbeat(provisioned, activeSandboxBackend ?? groupBoxBackend);
+              setupBoxSession = provisioned.established.session;
+              resolvedSandbox = provisioned;
             },
             onFailed: async (error) => {
               await publish?.(
@@ -2982,6 +4030,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ],
                 true,
               );
+            },
+            disposeResult: async (provisioned) => {
+              await provisioned.release().catch(() => undefined);
             },
           },
         );
@@ -3005,89 +4056,100 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           },
         );
       }
-      const compactSummarizer = resolvedModel
-        ? (s: Settings, m: Array<Record<string, unknown>>, o?: { maxTranscriptTokens?: number }) =>
-            withCodex(() =>
-              summarizeForCompaction(s, m, {
-                client: resolvedModel.client,
-                api: resolvedModel.provider.api,
-                model: resolvedModel.configured.id,
-                maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
-                ...(promptCacheKey ? { promptCacheKey } : {}),
-              }),
-            )
-        : promptCacheKey
-          ? (
-              s: Settings,
-              m: Array<Record<string, unknown>>,
-              o?: { maxTranscriptTokens?: number },
-            ) =>
-              summarizeForCompaction(s, m, {
-                maxOutputTokens: SUMMARY_BUFFER_TOKENS,
-                ...(o?.maxTranscriptTokens ? { maxTranscriptTokens: o.maxTranscriptTokens } : {}),
-                promptCacheKey,
-              })
-          : undefined;
-      // Client-path compaction must budget against the RESOLVED model's real
-      // context window (the codex subscription window is far smaller than the
-      // 1.05M global default), mirroring the SDK path above. Without this the
-      // threshold (window * ratio) uses 1.05M and proactive compaction never
-      // fires for codex turns — histories grow to the ~340k model cliff.
-      const compactionContextWindowTokens =
-        resolvedModel?.configured.contextWindowTokens ?? runSettings.contextWindowTokens;
-      // Pre-turn client-side context compaction (Azure path). When the
-      // resolved mode is "client" and the single Codex-parity threshold is
-      // crossed, this summarizes the current active history and rebuilds active
+      const compactSummarizer = compactionSummarizerFor(
+        typeof agent.instructions === "string" ? agent.instructions : undefined,
+      );
+      // Pre-turn durable context compaction. When the single Codex-parity
+      // threshold is crossed, this summarizes active history and rebuilds active
       // history as [user messages..., summary] BEFORE the model input is read.
-      // Summarizer failures fall through to hard-trim retry and deterministic
-      // fallback; only structural no-ops leave the history unchanged.
-      // Skipped on approval/preempt resumes (no fresh user turn; the frozen
-      // RunState or in-flight tail must replay verbatim).
-      if (triggerType === "user.message" || triggerType === "goal.continuation") {
+      // Summarizer context overflows drop one oldest summarizer-input item and
+      // retry, exactly like Codex. Other failures end this turn honestly.
+      // Run before every fresh inference. Approval resumes replay their frozen
+      // RunState verbatim and recovering attempts already compacted, if needed,
+      // before the first attempt's model boundary.
+      if (triggerType === "user.message" || triggerType === "system.update.delivered") {
+        let forced = false;
         try {
           // Operator /compact (the slash command) sets a durable request flag;
-          // consume it atomically so a forced compaction runs now even when the
-          // budget trigger would not fire. Only the turn that observes the flag
-          // runs it, so concurrent turns can't double-compact.
-          const forced = await consumeSessionCompactionRequest(
-            db,
-            input.workspaceId,
-            input.sessionId,
-          );
-          const outcome = await maybeCompactContext(
-            db,
-            { ...runSettings, contextWindowTokens: compactionContextWindowTokens },
-            {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId,
-            },
-            session.lastInputTokens,
-            // Provider-aware summarizer: when the turn's model resolved to a
-            // registry provider, summarize on THAT provider's client + wire API
-            // (a chat provider can't summarize through OpenAI/Azure). Null
-            // resolution uses the built-in Responses summarizer with the same
-            // session prompt-cache key as the main model calls.
-            compactSummarizer,
-            forced ? { force: true } : {},
+          // observe it without consuming it so a failed/stale attempt cannot
+          // lose the request. The replacement transaction clears it on success.
+          forced = await isSessionCompactionRequested(db, input.workspaceId, input.sessionId);
+          const outcome = await waitForTurnOperation(
+            maybeCompactContext(
+              db,
+              modelRunSettings,
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: turnId!,
+                executionGeneration,
+                attemptId: input.attemptId,
+              },
+              session.lastInputTokens,
+              // Provider-aware summarizer: when the turn's model resolved to a
+              // registry provider, summarize on THAT provider's client + wire API
+              // (a chat provider can't summarize through OpenAI/Azure). Null
+              // resolution uses the built-in Responses summarizer with the same
+              // session prompt-cache key as the main model calls.
+              compactSummarizer,
+              forced
+                ? {
+                    force: true,
+                    clearRequestedCompaction: true,
+                    trigger: "operator",
+                  }
+                : { trigger: "auto" },
+            ),
+            cancellationSignal,
+            undefined,
           );
           if (outcome.compacted) {
-            const trigger = forced ? "operator" : undefined;
-            recordContextCompaction(observability, trigger ?? "auto");
-            await publish([
-              {
-                type: "session.context.compacted",
-                payload: {
-                  summaryPosition: outcome.summaryPosition,
-                  ...(trigger ? { trigger } : {}),
-                },
-              },
-            ]);
+            const compactionTrigger = forced ? "operator" : undefined;
+            recordContextCompaction(observability, compactionTrigger ?? "auto");
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              outcome.events,
+            );
           }
         } catch (compactError) {
-          console.error("context compaction failed (turn proceeds un-compacted)", compactError);
+          if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+          if (!isCompactionSummaryFailure(compactError)) throw compactError;
+          const errorMessage = compactionFailureReasonFromError(compactError);
+          observability.error("context compaction failed", {
+            sessionId: input.sessionId,
+            turnId,
+            error: errorMessage,
+          });
+          if (
+            !(await settle!({
+              events: [
+                {
+                  type: "turn.failed",
+                  payload: {
+                    error: errorMessage,
+                    code: "context_compaction_failed",
+                    retryable: false,
+                    recovery: "user_message",
+                    compacted: false,
+                  },
+                },
+                { type: "session.status.changed", payload: { status: "idle" } },
+              ],
+              turnStatus: "failed",
+              sessionStatus: "idle",
+              activeTurnId: null,
+              ...(forced ? { consumeRequestedCompactionFailure: true } : {}),
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
+          turnMetricOutcome = "failed";
+          activityStatus = "idle";
+          activityError = compactError;
+          return claimedResult({ status: "idle" });
         }
       }
       let fileMaterializationFailures: SandboxFileDownloadFailure[] = [];
@@ -3120,6 +4182,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 await publish!([{ type: event.type, payload: event.payload }], true);
               },
               ...(runAs ? { runAs } : {}),
+              ...(toolCancellationFenceRef.current
+                ? {
+                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                      toolCancellationFenceRef.current,
+                    ),
+                  }
+                : {}),
             },
           );
           fileMaterializationFailures = materialized.failures;
@@ -3162,9 +4231,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           runtime,
           agent,
           trigger,
-          runSettings,
           { currentCodexCredentialId: effectiveCodexCredentialId },
-          unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {},
+          {
+            turnId: activeTurnId,
+            recovering: turn.executionGeneration > 1,
+            ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
+          },
         );
         runInput = prepared.input;
         // Slice index = the length of the model-facing (active) history this turn
@@ -3200,7 +4272,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         persistedHistoryCount = reconcileSeedCount(activeSeedRows, prepared.modelHistoryFromItems, {
           currentCodexCredentialId: effectiveCodexCredentialId,
         });
-        historyCountAtTurnStart = persistedHistoryCount;
         nextHistoryPosition = await nextSessionHistoryPosition(
           db,
           input.workspaceId,
@@ -3209,46 +4280,47 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       };
 
       const forceContextCompaction = async (
-        triggerLabel: "overflow" | "proactive",
+        triggerLabel: "overflow" | "proactive" | "operator",
         recoverySignalTokens: number | null,
       ) => {
-        const clientCompactionSettings: Settings = {
-          ...runSettings,
-          contextCompactionMode: "client",
-          contextWindowTokens: compactionContextWindowTokens,
-        };
-        const outcome = await maybeCompactContext(
-          db,
-          clientCompactionSettings,
-          {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-          },
-          // Recovery must use the signal that triggered THIS compaction. A
-          // stale prior-turn value can be tiny (or refer to different active
-          // history), which would make the strict-shrink ceiling impossible.
-          // Proactive guards provide their exact current signal; provider
-          // overflows do not, so null derives the ceiling from active history.
-          recoverySignalTokens,
-          compactSummarizer,
-          { force: true, requireShrink: true },
-        );
-        if (outcome.compacted) {
-          recordContextCompaction(observability, triggerLabel);
-          await publish!([
+        const outcome = await waitForTurnOperation(
+          maybeCompactContext(
+            db,
+            modelRunSettings,
             {
-              type: "session.context.compacted",
-              payload: {
-                summaryPosition: outcome.summaryPosition,
-                trigger: triggerLabel,
-                method: outcome.method,
-                estimatedTokensBefore: outcome.estimatedTokensBefore,
-                estimatedTokensAfter: outcome.estimatedTokensAfter,
-              },
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              executionGeneration,
+              attemptId: input.attemptId,
             },
-          ]);
+            // Never reuse the persisted prior-turn signal for recovery. Proactive
+            // guards provide their exact current signal; provider overflows do not,
+            // so null derives decision metadata from active history. Forced
+            // recovery proves progress separately by comparing the replacement
+            // with the current active-history estimate in maybeCompactContext.
+            recoverySignalTokens,
+            compactSummarizer,
+            {
+              force: true,
+              ...(triggerLabel === "operator" ? { clearRequestedCompaction: true } : {}),
+              trigger: triggerLabel,
+            },
+          ),
+          cancellationSignal,
+          undefined,
+        );
+        if (outcome.events.length > 0) {
+          if (outcome.compacted) {
+            recordContextCompaction(observability, triggerLabel);
+          }
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            outcome.events,
+          );
         }
         return outcome;
       };
@@ -3260,13 +4332,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         stream = undefined;
         batcher = null;
         let responseUsageCount = 0;
+        // The SDK emits every processed call item for one model response before
+        // it emits any result for that response. Keep that response-local batch
+        // in memory so an orphan from an older response cannot pin later stable
+        // calls. Durable recovery remains call/result based and needs no batch
+        // schema or compatibility state.
+        let currentToolBatchCallIds = new Set<string>();
+        let currentToolBatchCompletedCallIds = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
-        let lastInputTokensObserved: number | null = null;
+        let lastProviderContextTokensObserved: number | null = null;
+        let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
+        throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
         const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
-          runtime.runStream(agent, runInput!, runSettings, {
+          runtime.runStream(agent, runInput!, modelRunSettings, {
+            ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
               await renewCodexLease("runtime_event");
@@ -3283,7 +4365,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     client: ownedEstablished.client,
                     session: ownedEstablished.session,
                     ...(resolvedSandbox?.established.sessionState
-                      ? { sessionState: resolvedSandbox.established.sessionState }
+                      ? {
+                          sessionState: resolvedSandbox.established.sessionState,
+                        }
                       : {}),
                     // Pin platform setup (hooks + file materialization) to the un-proxied
                     // established box — never through the routing proxy, which would
@@ -3294,7 +4378,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            contextCompactionSignalTokens: () => lastInputTokensObserved,
+            ...(initialGitCredentials
+              ? {
+                  onGitCredentialSessionReady: async (
+                    tokenSession: GitCredentialTokenWriterSession,
+                  ) => {
+                    await attachGitCredentialRenewal(tokenSession, initialGitCredentials);
+                  },
+                }
+              : {}),
+            contextCompactionSignal: () =>
+              lastProviderContextTokensObserved === null
+                ? null
+                : {
+                    revision: providerContextRevision,
+                    totalTokens: lastProviderContextTokensObserved,
+                  },
+            contextCompactionRequested: () =>
+              isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
+            ...(toolCancellationFenceRef.current
+              ? { turnToolCancellationFence: toolCancellationFenceRef.current }
+              : {}),
           });
         if (codexLeaseLost) {
           throw new Error("Codex credential lease expired before the model run");
@@ -3304,7 +4408,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // provider id (or the built-in OpenAI/Azure provider), never a raw
         // user-supplied model string.
         const streamProvider = resolvedModel?.provider.id ?? settings.openaiProvider ?? "openai";
-        const streamTiming = new StreamTimingMetrics(observability, { provider: streamProvider });
+        const streamTiming = new StreamTimingMetrics(observability, {
+          provider: streamProvider,
+        });
         batcher = createRuntimeBatcher(
           async (events) => {
             await publish!(events);
@@ -3324,81 +4430,80 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               streamDone = true;
               break;
             }
-            let modelUsageEventContext: Record<string, unknown> | null = null;
+            let stableToolCallIdsToClear: string[] | null = null;
+            let completedCurrentToolBatch = false;
             const responseUsage = modelResponseUsageFromSdkEvent(next.value);
             if (responseUsage) {
-              await renewCodexLease("model_usage");
-              if (codexLeaseLost) {
-                throw new Error("Codex credential lease expired during the active turn");
-              }
-              responseUsageCount += 1;
-              const responseSourceKey = modelUsageSourceKey({
-                responseId: responseUsage.responseId,
-                dispatchId,
-                positionalKey: `response-${responseUsageCount}`,
+              await recordCompletedModelCallBeforeOwnershipFences({
+                renewLease: () => renewCodexLease("model_usage"),
+                leaseLost: () => codexLeaseLost,
+                leaseLostMessage: "Codex credential lease expired during the active turn",
+                recordUsage: async () => {
+                  responseUsageCount += 1;
+                  const responseSourceKey = modelUsageSourceKey({
+                    responseId: responseUsage.responseId,
+                    dispatchId: modelUsageDispatchId,
+                    positionalKey: `response-${responseUsageCount}`,
+                  });
+                  // Within a turn the serving credential is fixed, so a switch can only
+                  // surface on the turn's FIRST model call (vs the session's prior).
+                  const responseAccountCtx = modelCallAccountContext({
+                    servingCredentialId: effectiveCodexCredentialId,
+                    priorSessionCredentialId: priorSessionCodexCredentialId,
+                    isFirstCallOfTurn: responseUsageCount === 1,
+                  });
+                  await recordModelUsageAndDebitCredits(settings, db, {
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    model: turn.model,
+                    isCodexTurn,
+                    usage: responseUsage.usage,
+                    sourceKey: responseSourceKey,
+                    observability,
+                  });
+                  await emitModelCallUsage({
+                    observability,
+                    publish,
+                    accountId: input.accountId,
+                    workspaceId: input.workspaceId,
+                    sessionId: input.sessionId,
+                    turnId: activeTurnId,
+                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                    providerApi: resolvedModel?.provider.api ?? "responses",
+                    model: turn.model,
+                    sourceKey: responseSourceKey,
+                    usage: responseUsage,
+                    servingAccountHash: responseAccountCtx.servingAccountHash,
+                    accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
+                    emittedSourceKeys: emittedModelUsageSourceKeys,
+                  });
+                  const observed = responseUsage.usage?.inputTokens;
+                  if (typeof observed === "number" && observed > 0) {
+                    recordModelInputTokens(observability, streamProvider, observed);
+                  }
+                  const observedTotal = providerContextTokens(responseUsage.usage);
+                  if (observedTotal !== null) {
+                    lastProviderContextTokensObserved = observedTotal;
+                    providerContextRevision += 1;
+                  }
+                  // Prompt-cache efficiency for this response — same usage frame as the
+                  // input-token accounting above, so the two are always consistent.
+                  recordModelCacheTokens(observability, streamProvider, {
+                    cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
+                    promptTokens: responseUsage.usage?.inputTokens,
+                  });
+                },
+                recordAttemptSignals: async () => {
+                  const observed = responseUsage.usage?.inputTokens;
+                  if (typeof observed === "number" && observed > 0) {
+                    await setLastInputTokensFenced(observed);
+                  }
+                },
               });
-              // Within a turn the serving credential is fixed, so a switch can only
-              // surface on the turn's FIRST model call (vs the session's prior).
-              const responseAccountCtx = modelCallAccountContext({
-                servingCredentialId: effectiveCodexCredentialId,
-                priorSessionCredentialId: priorSessionCodexCredentialId,
-                isFirstCallOfTurn: responseUsageCount === 1,
-              });
-              await emitModelCallUsage({
-                observability,
-                publish: null,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: responseSourceKey,
-                usage: responseUsage,
-                servingAccountHash: responseAccountCtx.servingAccountHash,
-                accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-              });
-              modelUsageEventContext = {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: responseSourceKey,
-              };
-              const observed = responseUsage.usage?.inputTokens;
-              if (typeof observed === "number" && observed > 0) {
-                recordModelInputTokens(observability, streamProvider, observed);
-                lastInputTokensObserved = observed;
-                await setSessionLastInputTokens(
-                  db,
-                  input.workspaceId,
-                  input.sessionId,
-                  observed,
-                ).catch((error) =>
-                  console.error("persist last_input_tokens failed (non-fatal)", error),
-                );
-              }
-              // Prompt-cache efficiency for this response — same usage frame as the
-              // input-token accounting above, so the two are always consistent.
-              recordModelCacheTokens(observability, streamProvider, {
-                cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
-                promptTokens: responseUsage.usage?.inputTokens,
-              });
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                model: turn.model,
-                isCodexTurn,
-                usage: responseUsage.usage,
-                sourceKey: responseSourceKey,
-                observability,
-              });
+              currentToolBatchCallIds = new Set<string>();
+              currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
               try {
                 await ensureRunAllowed(
@@ -3425,56 +4530,133 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 );
               }
             }
-            // Recording gate: a computer-use tool actually ran when an SDK
-            // `tool_call_item` whose rawItem.type is "computer_call" streams through
-            // (screenshot/click/type/scroll/etc. — the first computer action proves
-            // the desktop was driven). Match the raw SDK event (ground truth) BEFORE
-            // normalization. Only meaningful when a recording is live.
-            if (activeRecording && !didComputerUse && isComputerCallStreamEvent(next.value)) {
-              didComputerUse = true;
+            const pendingToolCall = pendingToolCallFromSdkEvent(next.value);
+            if (pendingToolCall) {
+              const registered = await registerPendingSessionToolCall(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration,
+                attemptId: input.attemptId,
+                ...pendingToolCall,
+              });
+              if (!registered.accepted) {
+                throw new TurnAttemptFencedError(
+                  "turn attempt ended while recording an in-flight tool call",
+                );
+              }
+              currentToolBatchCallIds.add(pendingToolCall.callId);
+            }
+            const completedToolCall = completedToolCallFromSdkEvent(next.value);
+            if (completedToolCall) {
+              // Keep every parallel result in the attempt ledger until the full
+              // call batch has settled. The SDK's computed history is
+              // non-monotonic while parallel calls complete (a later call may
+              // appear before an earlier persisted pair), so reconciling a
+              // partial batch through a scalar watermark can create an orphan.
+              const recorded = await recordPendingSessionToolCallResult(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration,
+                attemptId: input.attemptId,
+                callId: completedToolCall.callId,
+                resultItem: completedToolCall.resultItem,
+              });
+              if (!recorded.accepted) {
+                throw new TurnAttemptFencedError(
+                  "turn attempt ended while recording a tool-call result",
+                );
+              }
+              const belongsToCurrentBatch = currentToolBatchCallIds.has(completedToolCall.callId);
+              if (belongsToCurrentBatch) {
+                currentToolBatchCompletedCallIds.add(completedToolCall.callId);
+              }
+              const currentBatchIsStable =
+                belongsToCurrentBatch &&
+                currentToolBatchCallIds.size > 0 &&
+                currentToolBatchCompletedCallIds.size === currentToolBatchCallIds.size;
+              const standaloneStableResult =
+                !belongsToCurrentBatch && currentToolBatchCallIds.size === 0;
+              if (currentBatchIsStable || standaloneStableResult) {
+                // Persist the SDK's now-stable complete call/result batch. Keep
+                // the receipts until the normalized tool-output event below is
+                // durably flushed: recovery then covers every crash boundary
+                // without either losing or duplicating the UI projection.
+                await reconcileConversationTruth({ requireDurable: true });
+                stableToolCallIdsToClear = currentBatchIsStable
+                  ? [...currentToolBatchCallIds]
+                  : [completedToolCall.callId];
+                completedCurrentToolBatch = currentBatchIsStable;
+              }
             }
             const normalized = normalizeSdkEvent(next.value);
             for (const event of normalized) {
-              if (
-                event.type === "agent.model.usage" &&
-                modelUsageEventContext &&
-                event.payload &&
-                typeof event.payload === "object"
-              ) {
-                event.payload = { ...modelUsageEventContext, ...event.payload };
-              }
               streamTiming.onEvent(event.type);
               await batcher.push(event);
+            }
+            if (stableToolCallIdsToClear) {
+              const cleared = await clearDurablePendingSessionToolCalls(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                executionGeneration,
+                attemptId: input.attemptId,
+                callIds: stableToolCallIdsToClear,
+              });
+              if (!cleared.accepted) {
+                throw new TurnAttemptFencedError(
+                  "turn attempt ended while finalizing tool-call results",
+                );
+              }
+              if (completedCurrentToolBatch) {
+                currentToolBatchCallIds = new Set<string>();
+                currentToolBatchCompletedCallIds = new Set<string>();
+              }
             }
           }
         } finally {
           if (!streamDone) {
-            await iterator.return?.();
+            // ReadableStream cancellation synchronously trips the Agents SDK's
+            // abort controller, but its returned promise may wait for an
+            // uncooperative provider producer. Once this attempt is fenced,
+            // awaiting that provider-side cleanup pins the Temporal activity
+            // (and therefore Pause) even though every late write is already
+            // rejected. Start cancellation and detach only its cleanup wait;
+            // the SDK abort signal stops the producer and the durable attempt
+            // fence remains the authority for every callback that arrives late.
+            void iterator.return?.().catch(() => undefined);
           }
         }
-        await batcher.flush();
-        await stream.completed.catch(() => undefined);
+        await waitForTurnStreamCleanup(
+          batcher.flush(),
+          stream.completed.catch(() => undefined),
+          cancellationSignal,
+        );
         if (responseUsageCount === 0) {
-          const aggregateInput = (stream.state.usage as { inputTokens?: unknown } | undefined)
+          const aggregateUsage = stream.state.usage;
+          const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
             ?.inputTokens;
           if (typeof aggregateInput === "number" && aggregateInput > 0) {
-            lastInputTokensObserved = aggregateInput;
+            const aggregateContext = providerContextTokens(
+              aggregateUsage as {
+                inputTokens?: number;
+                outputTokens?: number;
+                totalTokens?: number;
+              },
+            );
+            if (aggregateContext !== null) {
+              lastProviderContextTokensObserved = aggregateContext;
+              providerContextRevision += 1;
+            }
           }
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,
-            dispatchId,
+            dispatchId: modelUsageDispatchId,
             positionalKey: "aggregate",
-          });
-          await recordModelUsageAndDebitCredits(settings, db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            model: turn.model,
-            isCodexTurn,
-            usage: stream.state.usage,
-            sourceKey: aggregateSourceKey,
-            observability,
           });
           // The single aggregate frame is this turn's only model-usage record, so
           // it is the first (account-switch surfaces here just like a first response).
@@ -3485,67 +4667,86 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           });
           recordModelCacheTokens(observability, streamProvider, {
             cachedTokens: modelCallUsageTelemetry(
-              stream.state.usage as Parameters<typeof modelCallUsageTelemetry>[0],
+              aggregateUsage as Parameters<typeof modelCallUsageTelemetry>[0],
             ).cachedTokens,
-            promptTokens: (stream.state.usage as { inputTokens?: unknown } | undefined)
-              ?.inputTokens as number | undefined,
+            promptTokens: (aggregateUsage as { inputTokens?: unknown } | undefined)?.inputTokens as
+              | number
+              | undefined,
           });
-          await emitModelCallUsage({
-            observability,
-            publish,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-            providerApi: resolvedModel?.provider.api ?? "responses",
-            model: turn.model,
-            sourceKey: aggregateSourceKey,
-            usage: { usage: stream.state.usage },
-            servingAccountHash: aggregateAccountCtx.servingAccountHash,
-            accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
+          await recordCompletedModelCallBeforeOwnershipFences({
+            renewLease: () => renewCodexLease("model_usage"),
+            leaseLost: () => codexLeaseLost,
+            leaseLostMessage: "Codex credential lease expired during the active turn",
+            recordUsage: async () => {
+              await recordModelUsageAndDebitCredits(settings, db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                model: turn.model,
+                isCodexTurn,
+                usage: aggregateUsage,
+                sourceKey: aggregateSourceKey,
+                observability,
+              });
+              await emitModelCallUsage({
+                observability,
+                publish,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: activeTurnId,
+                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                providerApi: resolvedModel?.provider.api ?? "responses",
+                model: turn.model,
+                sourceKey: aggregateSourceKey,
+                usage: { usage: aggregateUsage },
+                servingAccountHash: aggregateAccountCtx.servingAccountHash,
+                accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
+                emittedSourceKeys: emittedModelUsageSourceKeys,
+              });
+            },
+            recordAttemptSignals: async () => {
+              if (typeof aggregateInput === "number" && aggregateInput > 0) {
+                await setLastInputTokensFenced(aggregateInput);
+              }
+            },
           });
         }
-        if (lastInputTokensObserved !== null) {
-          await setSessionLastInputTokens(
-            db,
-            input.workspaceId,
-            input.sessionId,
-            lastInputTokensObserved,
-          ).catch((error) => console.error("persist last_input_tokens failed (non-fatal)", error));
-        }
-
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
           const approvals = runtime.serializeApprovals(stream.interruptions);
-          await saveRunState(db, {
+          await saveRunStateFenced({
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId: activeTurnId,
+            expectedExecutionGeneration: executionGeneration,
+            expectedAttemptId: input.attemptId,
             serializedRunState: stream.state.toString(),
             pendingApprovals: approvals,
             // Record the account freezing this state so a resume on a DIFFERENT
             // codex account strips its account-bound reasoning before replay (HOLE C).
             frozenCodexCredentialId: effectiveCodexCredentialId,
           });
-          await publish!(
-            [
-              { type: "session.requiresAction", payload: { approvals } },
-              { type: "session.status.changed", payload: { status: "requires_action" } },
-            ],
-            true,
-          );
-          await finishTurn(db, input.workspaceId, activeTurnId, "requires_action");
-          await setSessionStatus(
-            db,
-            input.workspaceId,
-            input.sessionId,
-            "requires_action",
-            activeTurnId,
-          );
+          if (
+            !(await settle!({
+              events: [
+                { type: "session.requiresAction", payload: { approvals } },
+                {
+                  type: "session.status.changed",
+                  payload: { status: "requires_action" },
+                },
+              ],
+              turnStatus: "requires_action",
+              sessionStatus: "requires_action",
+              activeTurnId,
+            }))
+          ) {
+            return claimedResult({ status: "cancelled" });
+          }
           activityStatus = "requires_action";
-          return { status: "requires_action" };
+          return claimedResult({ status: "requires_action" });
         }
 
         const finalOutput = String(stream.finalOutput ?? "");
@@ -3563,30 +4764,24 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // The runner's retention TTL owns the fallback.
           }
         }
-        if (settings.sessionHistorySource !== "items") {
-          // Legacy conversation memory; in items mode the blob is only written
-          // for requires_action pauses (the one RunState-only resume path).
-          await saveRunState(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            serializedRunState: stream.state.toString(),
-            pendingApprovals: [],
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "agent.message.completed",
+                payload: { text: finalOutput },
+              },
+              { type: "turn.completed", payload: { output: finalOutput } },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
         }
-        await publish!(
-          [
-            { type: "agent.message.completed", payload: { text: finalOutput } },
-            { type: "turn.completed", payload: { output: finalOutput } },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await finishTurn(db, input.workspaceId, activeTurnId, "idle");
         turnMetricOutcome = "completed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -3598,11 +4793,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
         });
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       };
 
       await prepareRunAttemptInput();
-      let compactionRecoveryAttempts = 0;
       let retriedAfterCompaction = false;
       while (true) {
         try {
@@ -3617,34 +4811,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         } catch (attemptError) {
           const overflow = classifyContextWindowOverflowError(attemptError);
           const compactionNeeded = findCompactionNeededError(attemptError);
-          const recoveryKind = compactionNeeded ? "proactive" : overflow ? "overflow" : null;
-          if (
-            recoveryKind &&
-            compactionRecoveryAttempts >= MAX_CONTEXT_COMPACTION_RECOVERY_ATTEMPTS
-          ) {
-            throw new Error(
-              `compaction summarization failed: context compaction recovery attempt cap reached (${MAX_CONTEXT_COMPACTION_RECOVERY_ATTEMPTS})`,
-              { cause: attemptError },
-            );
-          }
+          const recoveryKind = compactionNeeded
+            ? compactionNeeded.trigger === "operator"
+              ? "operator"
+              : "proactive"
+            : overflow
+              ? "overflow"
+              : null;
           if (!recoveryKind || !publish || !turnStartedPublished) {
             throw attemptError;
           }
-          compactionRecoveryAttempts += 1;
           await flushRuntimeBatcher();
           await reconcileConversationTruth({ skipInputOnlyRows: true });
-          const progressPersisted = modelOrToolProgressPersisted;
           observability.warn("context compaction recovery attempted", {
             sessionId: input.sessionId,
             turnId: activeTurnId,
             reason: recoveryKind,
-            progressPersisted,
             code: overflow?.code,
             error: overflow?.message ?? compactionNeeded?.message,
             signalTokens: compactionNeeded?.signalTokens,
             thresholdTokens: compactionNeeded?.thresholdTokens,
           });
           let compacted = false;
+          let compactionHandled = false;
           let compactionFailureMessage: string | null = null;
           try {
             const outcome = await forceContextCompaction(
@@ -3652,143 +4841,74 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               compactionNeeded?.signalTokens ?? null,
             );
             compacted = outcome.compacted;
-            if (!outcome.compacted) {
-              compactionFailureMessage = compactionFailureReason(outcome.reason);
+            if (outcome.compacted) {
+              compactionHandled = true;
+            } else {
+              compactionHandled = recoveryKind === "operator" && outcome.requestConsumed;
+              if (!compactionHandled) {
+                compactionFailureMessage = compactionFailureReason(outcome.reason);
+              }
             }
           } catch (compactError) {
-            compactionFailureMessage = compactionFailureReason(
-              compactError instanceof Error ? compactError.message : String(compactError),
-            );
+            // Transient checkpoint-provider failures recover this same accepted
+            // turn through the normal provider/capacity path. They are not an
+            // empty summary and must not create a new goal continuation.
+            if (shouldRecoverCompactionProviderFailure(compactError)) throw compactError;
+            if (!isCompactionSummaryFailure(compactError)) throw compactError;
+            compactionFailureMessage = compactionFailureReasonFromError(compactError);
             observability.warn("context compaction recovery compaction failed", {
               sessionId: input.sessionId,
               turnId: activeTurnId,
               error: compactionFailureMessage,
             });
           }
-          if (!compacted) {
+          if (!compactionHandled) {
             const errorMessage =
               compactionFailureMessage ??
               "compaction summarization failed: compaction produced no replacement history";
-            if (!progressPersisted) {
-              throw new Error(errorMessage, { cause: attemptError });
-            }
-            await publish!(
-              [
-                {
-                  type: "turn.failed",
-                  payload: {
-                    error: errorMessage,
-                    code: "context_compaction_failed",
-                    retryable: false,
-                    recovery: "user_message",
-                    compacted: false,
-                  },
-                },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              true,
-            );
-            await finishTurn(db, input.workspaceId, activeTurnId, "failed");
-            turnMetricOutcome = "failed";
-            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
-            activityStatus = "idle";
-            activityError = attemptError;
-            return { status: "idle" };
-          }
-          if (progressPersisted) {
-            // The user's intent was live mid-turn — after a successful
-            // compaction the turn AUTO-CONTINUES via the same synthesized
-            // resume-notice requeue the worker-shutdown checkpoint uses (never
-            // the original trigger, so side effects are not replayed). Idle is
-            // the fallback, not the default; it remains for: legacy run-state
-            // history (resuming the frozen pre-compaction RunState would
-            // overflow again), a compaction that could not shrink anything,
-            // and a compaction that could not strictly shrink active history.
-            // A prior compaction-resume trigger is NOT itself a stop condition:
-            // long productive turns may legitimately compact many times. The
-            // force-compaction boundary above requires estimatedTokensAfter <
-            // estimatedTokensBefore (and below the provider signal), so every
-            // requeue proves durable shrink; a no-shrink cycle stops naturally.
-            const canAutoContinue =
-              compacted && settings.sessionHistorySource === "items" && activeTurnId != null;
-            if (canAutoContinue) {
-              const [preemptedEvent] = await appendAndPublishEvents(
-                db,
-                bus,
-                input.workspaceId,
-                input.sessionId,
-                [
+            if (
+              !(await settle!({
+                events: [
                   {
-                    turnId: activeTurnId,
-                    type: "turn.preempted",
+                    type: "turn.failed",
                     payload: {
-                      triggerEventId: input.triggerEventId,
-                      reason: "context_compacted",
-                      resumeWithNotice: true,
-                      text: CONTEXT_OVERFLOW_RESUME_TEXT,
+                      error: errorMessage,
+                      code: "context_compaction_failed",
+                      retryable: false,
+                      recovery: "user_message",
+                      compacted: false,
                     },
                   },
                   {
-                    turnId: activeTurnId,
                     type: "session.status.changed",
-                    payload: { status: "queued" },
+                    payload: { status: "idle" },
                   },
                 ],
-              );
-              await requeuePreemptedTurn(
-                db,
-                input.workspaceId,
-                activeTurnId,
-                preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-              );
-              await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(
-                () => undefined,
-              );
-              activityStatus = "preempted";
-              turnMetricOutcome = "preempted";
-              observability.info(
-                "context compaction recovery succeeded by compacting and auto-continuing",
-                {
-                  sessionId: input.sessionId,
-                  turnId: activeTurnId,
-                  reason: recoveryKind,
-                  compacted,
-                },
-              );
-              return { status: "preempted" };
+                turnStatus: "failed",
+                sessionStatus: "idle",
+                activeTurnId: null,
+                ...(recoveryKind === "operator" ? { consumeRequestedCompactionFailure: true } : {}),
+              }))
+            ) {
+              return claimedResult({ status: "cancelled" });
             }
-            await publish!(
-              [
-                {
-                  type: "turn.failed",
-                  payload: {
-                    error: CONTEXT_WINDOW_OVERFLOW_RECOVERY_MESSAGE,
-                    code:
-                      recoveryKind === "overflow"
-                        ? "context_window_overflow_compacted"
-                        : "context_compacted",
-                    retryable: false,
-                    recovery: "user_message",
-                    compacted,
-                  },
-                },
-                { type: "session.status.changed", payload: { status: "idle" } },
-              ],
-              true,
-            );
-            await finishTurn(db, input.workspaceId, activeTurnId, "failed");
             turnMetricOutcome = "failed";
-            await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
             activityStatus = "idle";
             activityError = attemptError;
-            observability.info("context compaction recovery succeeded by compacting and idling", {
-              sessionId: input.sessionId,
-              turnId: activeTurnId,
-              reason: recoveryKind,
-              compacted,
-            });
-            return { status: "idle" };
+            // The failed turn settlement already defers ordinary internal
+            // updates and makes the delivered goal-continuation receipt
+            // terminal. End this workflow run as well: returning plain idle
+            // would immediately synthesize another goal continuation against
+            // the unchanged active history and repeat the same failed
+            // compaction. A new human/API prompt, Steer, or explicitly requested
+            // Compact remains a durable explicit wake and may retry; ordinary
+            // machine updates stay pending for that actionable wake.
+            return claimedResult({ status: "idle", deferredUntilWake: true });
           }
+          // Codex parity: compaction remains inside the same logical turn and
+          // the same activity. Rebuild the model-visible history from the
+          // durable replacement and continue the sampling loop; do not create
+          // a recovery event, a queue row, a fake user message, or a sandbox.
           retriedAfterCompaction = true;
           observability.info("context compaction recovery retrying turn after compaction", {
             sessionId: input.sessionId,
@@ -3800,44 +4920,57 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         }
       }
     } catch (error) {
-      // Graceful worker shutdown (deploy / rollout restart): checkpoint and
-      // hand the turn back instead of failing the session. Conversation truth
-      // is already dual-written per model response; the final reconcile below
-      // bounds the loss to at most the single in-flight model step. The turn
-      // is re-queued so the session workflow re-dispatches it on a healthy
-      // worker — through a synthesized resume notice when this turn already
-      // persisted progress (replaying the original trigger would duplicate
-      // input the model has already seen and invite it to redo side effects),
-      // or through the original trigger when nothing was persisted yet. This
-      // is an explicit checkpoint/resume, not a blind activity retry: the
-      // resumed attempt sees everything the first attempt did.
+      // Graceful worker shutdown (deploy / rollout restart): checkpoint the
+      // same current inference for a new fenced attempt instead of failing the
+      // session. Conversation truth is already persisted per model response;
+      // the final reconcile bounds loss to the one in-flight model step.
       //
       // The branch deliberately does NOT require turn.started to have been
       // published: a shutdown landing during setup (claim/billing, before the
-      // turn visibly started) must also requeue, not fail the session. In
-      // that early case nothing ran and nothing was checkpointed, so the
-      // requeued turn replays the original trigger cleanly. The turn id falls
+      // turn visibly started) must also recover, not fail the session. In that
+      // early case nothing ran, so the new attempt uses the original trigger.
+      // The turn id falls
       // back to the workflow-claimed turn when the local lookup had not
       // finished yet.
-      const preemptTurnId = turnId ?? input.turnId;
+      const recoveryTurnId = turnId;
       // P1.2: a lease supersession during resume (a newer epoch re-established
-      // the box concurrently) is NOT a session failure — re-dispatch the turn so
-      // it re-resumes by id under the current epoch. Requeue + idle, mirroring
-      // the worker-death re-dispatch (any worker re-resumes by id).
-      if (error instanceof SandboxLeaseSupersededError && preemptTurnId) {
+      // the box concurrently) is NOT a session failure. Recover the same turn
+      // so its next attempt reattaches under the current epoch.
+      if (error instanceof SandboxLeaseSupersededError && recoveryTurnId) {
         try {
-          await requeuePreemptedTurn(db, input.workspaceId, preemptTurnId, input.triggerEventId);
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(
-            () => undefined,
+          const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: recoveryTurnId,
+            triggerEventId: triggerEventId!,
+            attemptId: input.attemptId,
+            reason: "sandbox_lease_superseded",
+          });
+          if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return claimedResult({ status: "cancelled" });
+          }
+          await publishDurableSessionEvents(
+            bus,
+            input.workspaceId,
+            input.sessionId,
+            recovery.events,
           );
-          activityStatus = "preempted";
-          turnMetricOutcome = "preempted";
-          return { status: "preempted" };
-        } catch (requeueError) {
-          console.error("sandbox lease supersession requeue failed; falling back", requeueError);
+          activityStatus = "recovering";
+          turnMetricOutcome = "recovering";
+          return claimedResult({ status: "recovering" });
+        } catch (recoveryError) {
+          console.error("sandbox lease supersession recovery failed", recoveryError);
+          throw recoveryError;
         }
       }
-      if (isWorkerShutdownCancellation(error) && preemptTurnId) {
+      const cancellationFailure = turnOperationCancellationFailure(error);
+      if (
+        cancellationFailure &&
+        isWorkerShutdownCancellation(cancellationFailure) &&
+        recoveryTurnId
+      ) {
         try {
           await flushRuntimeBatcher();
           await reconcileConversationTruth();
@@ -3847,116 +4980,69 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // paused mid-flight), so swapping the trigger for a resume notice
           // could drop the user's decision. Re-applying an already-consumed
           // approval re-executes at most the single approved step — the same
-          // bound every preemption already accepts.
-          const approvalRerun = triggerType === "user.approvalDecision";
-          let resumeWithNotice =
-            !approvalRerun &&
-            settings.sessionHistorySource === "items" &&
-            persistedHistoryCount > historyCountAtTurnStart;
-          if (settings.sessionHistorySource !== "items" && stream) {
-            // Legacy run-state mode: the resume reads the RunState blob, so
-            // the checkpoint must be captured there — including any pending
-            // approval interruptions, exactly like the requires_action path,
-            // so a shutdown while approvals wait does not erase them. A
-            // failed capture falls back to the previous snapshot and a clean
-            // re-run of the original trigger.
-            try {
-              await saveRunState(db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: preemptTurnId,
-                serializedRunState: stream.state.toString(),
-                pendingApprovals: runtime.serializeApprovals(stream.interruptions ?? []),
-                frozenCodexCredentialId: effectiveCodexCredentialId,
-              });
-              resumeWithNotice = true;
-            } catch {
-              resumeWithNotice = false;
-            }
+          // bound every recovery already accepts.
+          const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+            sessionId: input.sessionId,
+            turnId: recoveryTurnId,
+            triggerEventId: triggerEventId!,
+            attemptId: input.attemptId,
+            reason: "worker_shutdown",
+          });
+          if (recovery.action === "stale") {
+            acknowledgeLostAttemptOwnership();
+            activityStatus = "cancelled";
+            turnMetricOutcome = "cancelled";
+            return claimedResult({ status: "cancelled" });
           }
-          const [preemptedEvent] = await appendAndPublishEvents(
-            db,
+          await publishDurableSessionEvents(
             bus,
             input.workspaceId,
             input.sessionId,
-            [
-              {
-                turnId: preemptTurnId,
-                type: "turn.preempted",
-                payload: {
-                  triggerEventId: input.triggerEventId,
-                  reason: "worker_shutdown",
-                  resumeWithNotice,
-                  ...(resumeWithNotice ? { text: WORKER_SHUTDOWN_RESUME_TEXT } : {}),
-                },
-              },
-              {
-                turnId: preemptTurnId,
-                type: "session.status.changed",
-                payload: { status: "queued" },
-              },
-            ],
+            recovery.events,
           );
-          await requeuePreemptedTurn(
-            db,
-            input.workspaceId,
-            preemptTurnId,
-            resumeWithNotice && preemptedEvent ? preemptedEvent.id : input.triggerEventId,
-          );
-          await setSessionStatus(db, input.workspaceId, input.sessionId, "queued", null).catch(
-            () => undefined,
-          );
-          activityStatus = "preempted";
-          turnMetricOutcome = "preempted";
-          return { status: "preempted" };
-        } catch (preemptError) {
-          // A failing checkpoint/requeue must not surface as an arbitrary
-          // activity error around a half-applied preemption (the workflow
-          // would fail the session while a requeued turn lingers). Fall
-          // through to the cancellation path below: the turn is marked
-          // cancelled — also resetting a turn this block already requeued —
-          // and the session fails like an uncheckpointed death.
-          console.error(
-            "worker-shutdown preemption failed; falling back to cancellation",
-            preemptError,
-          );
+          activityStatus = "recovering";
+          turnMetricOutcome = "recovering";
+          return claimedResult({ status: "recovering" });
+        } catch (recoveryError) {
+          // The database transition is atomic. If it could not commit, surface
+          // the failure so Temporal can retry on a healthy worker; never mutate
+          // the turn through a second cancellation path.
+          console.error("worker-shutdown recovery checkpoint failed", recoveryError);
+          throw recoveryError;
         }
       }
-      if (error instanceof CancelledFailure) {
+      if (error instanceof TurnAttemptFencedError) {
         activityStatus = "cancelled";
         activityError = error;
-        await flushRuntimeBatcher();
-        if (preemptTurnId) {
-          // FENCED settle: a heartbeat-timeout death lands here too (it is a
-          // CancelledFailure that is not WORKER_SHUTDOWN), and its zombie must
-          // NOT overwrite a turn worker-death recovery already re-queued or
-          // re-dispatched — that reintroduces the exact orphan stall this
-          // change fixes, in the reverse event order. cancelTurnFromDyingDispatch
-          // only settles a still-live turn whose redispatch counter is unchanged
-          // since this dispatch claimed it; a deliberate user interrupt (turn
-          // still running, counter unchanged) still settles as before.
-          const settled = await cancelTurnFromDyingDispatch(
-            db,
-            input.workspaceId,
-            preemptTurnId,
-            redispatchesAtDispatch,
-          ).catch(() => false);
-          if (settled) {
-            await appendAndPublishEvents(db, bus, input.workspaceId, input.sessionId, [
-              {
-                turnId: preemptTurnId,
-                type: "turn.cancelled",
-                payload: {
-                  triggerEventId: input.triggerEventId,
-                  reason: error.message || "activity_cancelled",
-                },
-              },
-            ]).catch(() => undefined);
-            turnMetricOutcome = "cancelled";
-          }
-        }
-        throw error;
+        acknowledgeQuiescence = true;
+        noteCancellationRequested();
+        await waitForTurnFinalizerStep(
+          flushRuntimeBatcher(),
+          turnFinalizerCancellationSignal(cancellationSignal, activityStatus),
+        );
+        // Ownership already moved to a newer attempt or an authoritative
+        // control transaction. Surface the exact transport cancellation rather
+        // than a normal result. Temporal terminalization remains diagnostic
+        // only; replacement admission waits for the activity-owned durable
+        // quiescence receipt written from the hard tool fence below.
+        turnMetricOutcome = "cancelled";
+        throw new CancelledFailure("TURN_ATTEMPT_FENCED", [], error);
+      }
+      if (cancellationFailure) {
+        activityStatus = "cancelled";
+        activityError = error;
+        acknowledgeQuiescence = true;
+        noteCancellationRequested();
+        await waitForTurnFinalizerStep(
+          flushRuntimeBatcher(),
+          turnFinalizerCancellationSignal(cancellationSignal, activityStatus),
+        );
+        // The workflow owns cancellation settlement: Pause/Steer controls use
+        // settleSessionControl, and heartbeat timeouts use worker-death
+        // recovery. A dying activity must never append a
+        // competing cancellation or mutate the turn/session on its own.
+        turnMetricOutcome = "cancelled";
+        throw cancellationFailure;
       }
       // The SDK's per-segment turn cap is a pacing valve, not a failure: end
       // the turn gracefully and idle the session so an active goal continues
@@ -3973,32 +5059,23 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // than a terminal failed session: the sandbox filesystem state
         // persists independently and the agent re-derives from it.
         await reconcileConversationTruth();
-        const runStateSaved =
-          Boolean(maxTurns.serializedRunState) && settings.sessionHistorySource !== "items";
-        if (maxTurns.serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId,
-            serializedRunState: maxTurns.serializedRunState,
-            pendingApprovals: [],
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: { output: "", segmentLimit: "max_turns" },
+              },
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
         }
-        await publish(
-          [
-            {
-              type: "turn.completed",
-              payload: { output: "", segmentLimit: "max_turns", runStateSaved },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await finishTurn(db, input.workspaceId, turnId, "idle");
         turnMetricOutcome = "completed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -4010,7 +5087,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
       const settleLostCodexAttempt = async (
         lostTurnId: string,
@@ -4019,35 +5096,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         historyCheckpointDurable = false,
       ): Promise<RunAgentTurnResult> => {
         let checkpointDurable = historyCheckpointDurable;
-        let resumeWithNotice =
-          settings.sessionHistorySource === "items" &&
-          persistedHistoryCount > historyCountAtTurnStart;
         try {
           if (!historyCheckpointDurable) {
             await flushRuntimeBatcher();
             await reconcileConversationTruth({ requireDurable: true });
           }
-          if (settings.sessionHistorySource === "items") {
-            // Reconciliation above may have just persisted this turn's first
-            // model/tool items. Recompute after it completes so a recovered
-            // turn never replays the original trigger over newly durable work.
-            resumeWithNotice = persistedHistoryCount > historyCountAtTurnStart;
-          }
-          if (settings.sessionHistorySource !== "items" && stream) {
-            await saveRunState(db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: lostTurnId,
-              serializedRunState: stream.state.toString(),
-              pendingApprovals: runtime.serializeApprovals(stream.interruptions ?? []),
-              frozenCodexCredentialId: effectiveCodexCredentialId,
-            });
-            resumeWithNotice = true;
-          }
           checkpointDurable = true;
         } catch (checkpointError) {
-          resumeWithNotice = false;
           observability.warn("Codex lease-loss checkpoint failed; refusing automatic turn replay", {
             workspaceId: input.workspaceId,
             turnId: lostTurnId,
@@ -4060,18 +5115,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
           turnId: lostTurnId,
-          originalTriggerEventId: input.triggerEventId,
+          attemptId: input.attemptId,
           holderId,
           generation,
           expectedRedispatches: redispatchesAtDispatch,
           checkpointDurable,
-          resumeWithNotice,
-          preemptedPayload: {
-            triggerEventId: input.triggerEventId,
+          recoveryPayload: {
+            triggerEventId: triggerEventId!,
             reason: "codex_lease_lost",
             credentialId: effectiveCodexCredentialId,
-            resumeWithNotice,
-            ...(resumeWithNotice ? { text: CODEX_LEASE_LOSS_RESUME_TEXT } : {}),
           },
           failedPayload: {
             error:
@@ -4084,37 +5136,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         observability.incrementCounter({
           name: "opengeni_codex_lease_loss_settlements_total",
           help: "Fenced Codex lease-loss settlements by outcome.",
-          labels: { workspace_key: codexWorkspaceKey, outcome: settlement.action },
+          labels: {
+            workspace_key: codexWorkspaceKey,
+            outcome: settlement.action,
+          },
         });
-        if (settlement.events.length > 0) {
-          try {
-            await bus.publish(input.workspaceId, input.sessionId, settlement.events);
-          } catch {
-            // Durable events are replayed/backfilled by the SSE path.
-          }
-        }
+        await publishDurableSessionEvents(
+          bus,
+          input.workspaceId,
+          input.sessionId,
+          settlement.events,
+        );
         activityError = error;
         if (settlement.action === "failed") {
           activityStatus = "failed";
           turnMetricOutcome = "failed";
-          await notifyParentOfChildTerminal(
+          await deliverFailedChildTurnToParent(
             { db, bus, settings, observability, wakeSessionWorkflow },
             input.workspaceId,
             input.sessionId,
-            "failed",
-            `turn:${lostTurnId}`,
+            lostTurnId,
           );
-          return { status: "failed" };
+          return claimedResult({ status: "failed" });
         }
-        activityStatus = "preempted";
-        turnMetricOutcome = "preempted";
-        return { status: "preempted" };
+        activityStatus = "recovering";
+        turnMetricOutcome = "recovering";
+        return claimedResult({ status: "recovering" });
       };
 
       // A missing/expired/superseded lease is an execution-ownership failure,
       // not a provider failure. Settle it before credential quarantine or the
-      // generic terminal path: the DB transaction requeues a still-current
-      // holder, but a successor holder/worker redispatch makes this activity
+      // generic terminal path: the DB transaction marks a still-current turn
+      // recoverable, but a successor attempt or worker recovery makes this activity
       // stale and unable to clobber the shared turn/session.
       if (
         codexLeaseLost &&
@@ -4130,7 +5183,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       // Definitive Codex credential/account refusals are the only provider
       // errors that may walk the pool. This is an explicit checkpoint + SAME
-      // turn requeue, never an SDK/Temporal blind retry. A network break,
+      // turn recovery, never an SDK/Temporal blind retry. A network break,
       // malformed/partial 200 stream, invalid content, prompt 4xx, or provider
       // 5xx does not classify here and therefore cannot consume another
       // subscription or duplicate a side effect.
@@ -4258,103 +5311,62 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             decision.credentialId !== effectiveCodexCredentialId;
 
           if (candidateAvailable && codexLeaseHolderId && codexLeaseGeneration !== null) {
-            let resumeWithNotice =
-              settings.sessionHistorySource === "items" &&
-              persistedHistoryCount > historyCountAtTurnStart;
-            let resumeCheckpointDurable = true;
-            if (settings.sessionHistorySource !== "items" && stream) {
-              try {
-                await saveRunState(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId,
-                  serializedRunState: stream.state.toString(),
-                  pendingApprovals: runtime.serializeApprovals(stream.interruptions ?? []),
-                  frozenCodexCredentialId: effectiveCodexCredentialId,
-                });
-                resumeWithNotice = true;
-              } catch {
-                resumeCheckpointDurable = false;
-              }
+            const settlement = await settleCodexCredentialFailover(db, {
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId,
+              attemptId: input.attemptId,
+              holderId: codexLeaseHolderId,
+              generation: codexLeaseGeneration,
+              expectedRedispatches: redispatchesAtDispatch,
+              maxFailovers: Math.max(1, accounts.length),
+              recoveryPayload: {
+                triggerEventId: triggerEventId!,
+                reason: "codex_credential_failover",
+                credentialId: effectiveCodexCredentialId,
+                failureKind: codexCredentialFailure.kind,
+                ...(cooldownUntil ? { cooldownUntil: cooldownUntil.toISOString() } : {}),
+              },
+            });
+            observability.incrementCounter({
+              name: "opengeni_codex_failover_settlements_total",
+              help: "Atomic Codex failover settlements by outcome.",
+              labels: {
+                workspace_key: codexWorkspaceKey,
+                outcome: settlement.action,
+              },
+            });
+            if (settlement.action === "recovering") {
+              codexLeaseHeld = false;
+              await publishDurableSessionEvents(
+                bus,
+                input.workspaceId,
+                input.sessionId,
+                settlement.events,
+              );
+              observability.observeHistogram({
+                name: "opengeni_codex_failover_recovery_seconds",
+                help: "Time from credential refusal to durable same-turn recovery.",
+                labels: {
+                  workspace_key: codexWorkspaceKey,
+                  kind: codexCredentialFailure.kind,
+                },
+                value: Math.max(0, (performance.now() - failoverStartedAt) / 1000),
+              });
+              activityStatus = "recovering";
+              turnMetricOutcome = "recovering";
+              return claimedResult({ status: "recovering" });
             }
-            if (resumeCheckpointDurable) {
-              try {
-                const settlement = await settleCodexCredentialFailover(db, {
-                  accountId: input.accountId,
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  turnId,
-                  originalTriggerEventId: input.triggerEventId,
-                  holderId: codexLeaseHolderId,
-                  generation: codexLeaseGeneration,
-                  maxFailovers: Math.max(1, accounts.length),
-                  resumeWithNotice,
-                  preemptedPayload: {
-                    triggerEventId: input.triggerEventId,
-                    reason: "codex_credential_failover",
-                    credentialId: effectiveCodexCredentialId,
-                    failureKind: codexCredentialFailure.kind,
-                    resumeWithNotice,
-                    ...(cooldownUntil ? { cooldownUntil: cooldownUntil.toISOString() } : {}),
-                    ...(resumeWithNotice ? { text: CODEX_ROTATION_RESUME_TEXT } : {}),
-                  },
-                });
-                if (settlement.action === "requeued") {
-                  codexLeaseHeld = false;
-                  observability.incrementCounter({
-                    name: "opengeni_codex_failover_settlements_total",
-                    help: "Atomic Codex failover settlements by outcome.",
-                    labels: { workspace_key: codexWorkspaceKey, outcome: "requeued" },
-                  });
-                  try {
-                    await bus.publish(input.workspaceId, input.sessionId, settlement.events);
-                  } catch {
-                    // Events are durable; SSE replay/gap fill recovers live fan-out.
-                  }
-                  observability.observeHistogram({
-                    name: "opengeni_codex_failover_recovery_seconds",
-                    help: "Time from credential refusal to durable same-turn requeue.",
-                    labels: {
-                      workspace_key: codexWorkspaceKey,
-                      kind: codexCredentialFailure.kind,
-                    },
-                    value: Math.max(0, (performance.now() - failoverStartedAt) / 1000),
-                  });
-                  activityStatus = "preempted";
-                  turnMetricOutcome = "preempted";
-                  return { status: "preempted" };
-                }
-                if (settlement.action === "stale") {
-                  observability.incrementCounter({
-                    name: "opengeni_codex_failover_settlements_total",
-                    help: "Atomic Codex failover settlements by outcome.",
-                    labels: { workspace_key: codexWorkspaceKey, outcome: "stale" },
-                  });
-                  // `stale` normally means a successor already owns or settled
-                  // this turn. It can also mean this exact holder crossed its
-                  // proven lease deadline between the live-holder quarantine and
-                  // the atomic failover transaction. Reconcile through the
-                  // lease-loss settlement before returning `preempted`: it
-                  // requeues a still-current expired/absent holder, while its
-                  // holder/generation + worker-redispatch fences keep a real
-                  // successor a no-op. The workflow may only interpret
-                  // `preempted` as safe after one of those outcomes is proven.
-                  return await settleLostCodexAttempt(
-                    turnId,
-                    codexLeaseHolderId,
-                    codexLeaseGeneration,
-                    true,
-                  );
-                }
-              } catch (failoverError) {
-                observability.incrementCounter({
-                  name: "opengeni_codex_failover_settlements_total",
-                  help: "Atomic Codex failover settlements by outcome.",
-                  labels: { workspace_key: codexWorkspaceKey, outcome: "failed" },
-                });
-                console.error("Codex credential failover settlement failed", failoverError);
-              }
+            if (settlement.action === "stale") {
+              // One transaction proves both exact-holder recovery (including a
+              // just-expired or reaped lease row) and successor/control-gate
+              // rejection. Cross the hard tool fence so a control-gate loss can
+              // write its quiescence receipt; a successor-only loss is a no-op.
+              acknowledgeLostAttemptOwnership();
+              activityStatus = "cancelled";
+              turnMetricOutcome = "cancelled";
+              return claimedResult({ status: "recovering" });
             }
           }
         }
@@ -4373,20 +5385,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const goalActive = Boolean(goal && goal.status === "active");
         await flushRuntimeBatcher();
         await reconcileConversationTruth();
-        const serializedRunState = agentsErrorRunState(error);
-        const runStateSaved =
-          Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
-        if (serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId,
-            serializedRunState,
-            pendingApprovals: [],
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
-        }
         // --- P3 reactive rotation (gated; re-fetch fresh state on this already-failed,
         // already-idling path). Mark THIS account cooling until its reset, then CONSULT the
         // engine over fresh accounts to decide continueDelayMs: a fast 0-delay re-dispatch
@@ -4469,7 +5467,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 rotated = true;
                 const pinMutation = await withCodexCapacityMutation(
                   db,
-                  { workspaceId: input.workspaceId, reason: "codex_policy_pin_resharded" },
+                  {
+                    workspaceId: input.workspaceId,
+                    reason: "codex_policy_pin_resharded",
+                  },
                   async (tx) => {
                     const changed = await setSessionCodexPin(
                       tx,
@@ -4594,13 +5595,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             turnId,
+            attemptId: input.attemptId,
             workflowId: input.workflowId,
             goalId: goal.id,
             goalVersion: goal.version,
             earliestResetAt: providerResetAt,
             resetKind: providerResetAt ? "authoritative" : "bounded_refresh",
             failurePayload,
-            runStateSaved,
             ...(codexLeaseHolderId && codexLeaseGeneration !== null
               ? {
                   leaseFence: {
@@ -4612,15 +5613,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               : {}),
           });
           if (armed.action === "waiting") {
-            try {
-              await bus.publish(input.workspaceId, input.sessionId, armed.events);
-            } catch {
-              // Durable DB events + waiter are authoritative.
-            }
+            await publishDurableSessionEvents(
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              armed.events,
+            );
             turnMetricOutcome = "failed";
             activityStatus = "idle";
             activityError = error;
-            return {
+            return claimedResult({
               status: "idle",
               capacityWait: {
                 waiterId: armed.waiter.id,
@@ -4628,29 +5630,32 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 nextCheckAt: armed.waiter.nextCheckAt.toISOString(),
                 wakeRevision: armed.waiter.wakeRevision,
               },
-            };
+            });
           }
         }
-        await publish(
-          [
-            // `rotated:true` ONLY on the reactive rotation path tells evaluateGoalContinuation to
-            // freeze autoContinuations (a rotation walk must not burn the goal's continuation budget).
-            {
-              type: "turn.failed",
-              payload: {
-                ...failurePayload,
-                recovery: goalActive ? "goal_continuation" : "user_message",
-                runStateSaved,
-                ...(rotated ? { rotated: true } : {}),
+        if (
+          !(await settle!({
+            events: [
+              // `rotated:true` ONLY on the reactive rotation path tells evaluateGoalContinuation to
+              // freeze autoContinuations (a rotation walk must not burn the goal's continuation budget).
+              {
+                type: "turn.failed",
+                payload: {
+                  ...failurePayload,
+                  recovery: goalActive ? "goal_continuation" : "user_message",
+                  ...(rotated ? { rotated: true } : {}),
+                },
               },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await finishTurn(db, input.workspaceId, turnId, "failed");
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "failed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
+        }
         turnMetricOutcome = "failed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         activityStatus = "idle";
         activityError = error;
         if (goalActive) {
@@ -4663,11 +5668,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             // slow-retry floor, and once consecutive failovers exceed the account count + margin
             // the circuit breaker returns a fixed MANDATORY idle (idleUntilReset) — never a 0-delay
             // hot loop against a capped backend + DB.
-            return {
+            return claimedResult({
               status: "idle",
               continueDelayMs: rotationResumeMs,
               ...(rotationResumeIdleUntilReset ? { idleUntilReset: true } : {}),
-            };
+            });
           }
           // All-capped: clamp to [MIN_IDLE_MS, max] — a POSITIVE, BOUNDED hold (never 0,
           // so session.ts can never tight-loop). The post-idle continuation re-dispatch
@@ -4682,13 +5687,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   CODEX_USAGE_LIMIT_MAX_RESUME_MS,
                 )
               : CODEX_USAGE_LIMIT_MAX_RESUME_MS;
-          return {
+          return claimedResult({
             status: "idle",
             continueDelayMs: resumeMs,
             ...(allCappedResetAt ? { idleUntilReset: true } : {}),
-          };
+          });
         }
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
       // Budget/limit exhaustion between model calls is account state, not an
       // agent failure: idle the session for goal-bearing and goal-less runs
@@ -4698,37 +5703,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       if (error instanceof BudgetExhaustedError && publish && turnId && turnStartedPublished) {
         await flushRuntimeBatcher();
         await reconcileConversationTruth();
-        const runStateSaved =
-          Boolean(error.serializedRunState) && settings.sessionHistorySource !== "items";
-        if (error.serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId,
-            serializedRunState: error.serializedRunState,
-            pendingApprovals: [],
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
-        }
-        await publish(
-          [
-            {
-              type: "turn.completed",
-              payload: {
-                output: "",
-                segmentLimit: "budget_exhausted",
-                detail: error.message,
-                runStateSaved,
+        if (
+          !(await settle!({
+            events: [
+              {
+                type: "turn.completed",
+                payload: {
+                  output: "",
+                  segmentLimit: "budget_exhausted",
+                  detail: error.message,
+                },
               },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await finishTurn(db, input.workspaceId, turnId, "idle");
+              { type: "session.status.changed", payload: { status: "idle" } },
+            ],
+            turnStatus: "completed",
+            sessionStatus: "idle",
+            activeTurnId: null,
+          }))
+        ) {
+          return claimedResult({ status: "cancelled" });
+        }
         turnMetricOutcome = "completed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
         await recordUsageEvent(db, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
@@ -4740,66 +5735,69 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
-        return { status: "idle" };
+        return claimedResult({ status: "idle" });
       }
       // A retryable provider/MCP failure is transient external backpressure,
-      // not a session failure: the in-client retry budget is already
-      // exhausted by the time the error reaches here, so fail the turn
-      // truthfully but idle the session. With an active goal the continuation
-      // loop resumes after a pacing delay; without one the session simply
-      // waits for the next user message. Long-lived sessions (a per-customer
-      // ops channel between goals) must never go terminal because the
-      // provider had a bad minute -- a failed session would reject the very
-      // retry message the failure asks for.
+      // not a session or goal failure. The in-client retry budget is already
+      // exhausted by the time the error reaches here. Checkpoint conversation
+      // truth, recover this SAME accepted turn, then let the workflow re-claim
+      // it after a pacing delay. This is independent of goal state and never
+      // relies on a synthetic continuation prompt.
       const failure = agentRunFailurePayload(error);
+      if (isSessionEventPersistenceError(error)) {
+        // Never pass the original Drizzle/postgres-js error to telemetry: its
+        // nested cause may contain raw SQL and bound parameters. The typed DB
+        // boundary retains only SQLSTATE, stage, correlation, and safe catalog
+        // identifiers. Provider inference has already happened and is NOT
+        // retried by this terminal classification.
+        observability.error("session event persistence failed", {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId,
+          attemptId: input.attemptId,
+          code: error.details.code,
+          sqlState: error.details.sqlState ?? "unknown",
+          stage: error.details.stage,
+          eventTypes: error.details.eventTypes.join(","),
+          correlationId: error.details.correlationId,
+          attempts: error.details.attempts,
+          retryOutcome: error.details.retryOutcome,
+          dbSeverity: error.details.database.severity,
+          dbSchema: error.details.database.schema,
+          dbTable: error.details.database.table,
+          dbColumn: error.details.database.column,
+          dbDataType: error.details.database.dataType,
+          dbConstraint: error.details.database.constraint,
+          dbRoutine: error.details.database.routine,
+        });
+      }
       if (failure.retryable && publish && turnId && turnStartedPublished) {
-        const goal = await getSessionGoal(db, input.workspaceId, input.sessionId).catch(() => null);
-        const goalActive = Boolean(goal && goal.status === "active");
-        const recoveryRouting = providerRetryRecovery(goalActive);
+        const recoveryResult = providerRecoveryResult();
         await flushRuntimeBatcher();
-        // Provider/MCP errors rarely carry SDK run state; a null falls back to
-        // the previous snapshot, same degraded-context contract as the
-        // max-turns path above.
-        await reconcileConversationTruth();
-        const serializedRunState = agentsErrorRunState(error);
-        const runStateSaved =
-          Boolean(serializedRunState) && settings.sessionHistorySource !== "items";
-        if (serializedRunState && settings.sessionHistorySource !== "items") {
-          await saveRunState(db, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId,
-            serializedRunState,
-            pendingApprovals: [],
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
+        await reconcileConversationTruth({ requireDurable: true });
+        const recovery = await requestSessionTurnRecovery(db, input.workspaceId, {
+          sessionId: input.sessionId,
+          turnId,
+          triggerEventId: triggerEventId!,
+          attemptId: input.attemptId,
+          reason: failure.code ?? "provider_unavailable",
+          detail: {
+            ...failure,
+            continueDelayMs: recoveryResult.continueDelayMs,
+          },
+        });
+        if (recovery.action === "stale") {
+          acknowledgeLostAttemptOwnership();
+          activityStatus = "cancelled";
+          turnMetricOutcome = "cancelled";
+          return claimedResult({ status: "cancelled" });
         }
-        await publish(
-          [
-            {
-              type: "turn.failed",
-              payload: {
-                ...failure,
-                recovery: recoveryRouting.recovery,
-                runStateSaved,
-              },
-            },
-            { type: "session.status.changed", payload: { status: "idle" } },
-          ],
-          true,
-        );
-        await finishTurn(db, input.workspaceId, turnId, "failed");
-        turnMetricOutcome = "failed";
-        await setSessionStatus(db, input.workspaceId, input.sessionId, "idle", null);
-        activityStatus = "idle";
+        await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, recovery.events);
+        turnMetricOutcome = "recovering";
+        activityStatus = "recovering";
         activityError = error;
-        return {
-          status: "idle",
-          ...(recoveryRouting.continueDelayMs !== undefined
-            ? { continueDelayMs: recoveryRouting.continueDelayMs }
-            : {}),
-        };
+        return claimedResult(recoveryResult);
       }
       activityStatus = "failed";
       activityError = error;
@@ -4813,279 +5811,489 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // rotate the ambiguous request.
       await flushRuntimeBatcher();
       await reconcileConversationTruth();
-      await publish(
-        [
-          { type: "turn.failed", payload: failure },
-          { type: "session.status.changed", payload: { status: "failed" } },
-        ],
-        true,
-      );
-      await finishTurn(db, input.workspaceId, turnId, "failed");
+      if (
+        !(await settle!({
+          events: [
+            { type: "turn.failed", payload: failure },
+            { type: "session.status.changed", payload: { status: "failed" } },
+          ],
+          turnStatus: "failed",
+          sessionStatus: "failed",
+          activeTurnId: null,
+        }))
+      ) {
+        return claimedResult({ status: "cancelled" });
+      }
       turnMetricOutcome = "failed";
-      await setSessionStatus(db, input.workspaceId, input.sessionId, "failed", null);
       // The common failure path ends here: runAgentTurn marks the session
       // failed and returns "failed", and the session workflow then exits
       // WITHOUT calling failSession/markSessionIdle. Wake a spawned worker's
       // parent here too, so a manager learns of a worker that died inside its
-      // turn (not just one failed by the workflow's failSession path). Deduped
-      // per terminal episode by the child's lastSequence, so it never
-      // double-fires with the workflow-level wake.
-      await notifyParentOfChildTerminal(
+      // turn (not just one failed by the workflow's failSession path). Turn
+      // settlement already owns the durable outbox payload; this call only
+      // delivers that exact turn-scoped row.
+      await deliverFailedChildTurnToParent(
         { db, bus, settings, observability, wakeSessionWorkflow },
         input.workspaceId,
         input.sessionId,
-        "failed",
-        `turn:${turnId}`,
+        turnId,
       );
-      return { status: "failed" };
+      return claimedResult({ status: "failed" });
     } finally {
-      const durationSeconds = (performance.now() - activityStarted) / 1000;
-      observability.recordWorkerActivity({
-        activity: "runAgentTurn",
-        status: activityStatus,
-        durationSeconds,
-      });
-      if (turnId && activityStatus !== "unknown") {
-        turnLifecycleMetricsFor(observability).finish(turnId, turnMetricOutcome, durationSeconds);
-      }
-      activitySpan.end({
-        attributes: {
-          "opengeni.turn_id": turnId ?? "",
-          "opengeni.status": activityStatus,
-          "opengeni.variable_set_id": variableSetId,
-          "opengeni.rig_id": rigId,
-          "opengeni.rig_version_id": rigVersionId,
-          "opengeni.codex_credential_id": effectiveCodexCredentialId ?? "",
-          "opengeni.duration_ms": Math.round(durationSeconds * 1000),
-        },
-        error: activityError,
-      });
-      // Drain the buffered Connected Machine op events (infra failures + healed
-      // recoveries) to durable session events — awaited, best-effort, never blocking
-      // the turn. Sync observer → buffer → single awaited append here (no unawaited
-      // DB write inside the activity). Scoped to this turn; skipped if no turnId
-      // (the op ran under a turn, so on the normal path turnId is set).
-      const machineOpEvents = machineOpObserver.drainEvents();
-      if (machineOpEvents.length > 0) {
-        await appendAndPublishEvents(
-          db,
-          bus,
-          input.workspaceId,
-          input.sessionId,
-          machineOpEvents.map((event) => ({ ...event, turnId: turnId ?? null })),
-        ).catch(() => undefined);
-      }
-      // Multi-account P4: flush the serving account's free per-turn caches ONCE,
-      // best-effort (same discipline as today's usage write). Both writers skip
-      // version/updatedAt, so neither can race the token-refresh CAS.
-      if (effectiveCodexCredentialId) {
-        // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
-        // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
-        // is byte-identical to the /wham/usage write — no partial-window clobber.
-        if (latestCodexUsage) {
-          const usageMutation = await recordCodexAccountUsageWithWakeTargets(
-            db,
-            input.workspaceId,
-            effectiveCodexCredentialId,
-            latestCodexUsage,
-          ).catch(() => null);
-          if (usageMutation) {
-            await signalCodexCapacityWakeTargets(
-              { signalCodexCapacityWorkflow, wakeSessionWorkflow },
-              usageMutation.wakeTargets,
-            );
+      const finalizationStarted = performance.now();
+      let finalizationError: unknown;
+      let physicalToolQuiescenceConfirmed = !acknowledgeQuiescence;
+      let quiescenceReceiptOrProofDurable = !acknowledgeQuiescence;
+      const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
+      try {
+        const toolCancellationFence = toolCancellationFenceRef.current;
+        if (acknowledgeQuiescence && toolCancellationFence) {
+          // This is an AUTHORITATIVE safety wait, not best-effort housekeeping.
+          // It actively interrupts any turn-owned shell process and drains
+          // parallel filesystem/computer operations. Never race it against the
+          // already-aborted Temporal signal: the replacement queue may open only
+          // after the old attempt can no longer mutate the workspace.
+          toolCancellationFence.cancel(
+            cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FENCED"),
+          );
+          await toolCancellationFence.waitForQuiescence();
+          physicalToolQuiescenceConfirmed = true;
+        } else if (acknowledgeQuiescence) {
+          // A cancellation can arrive before sandbox-backed capabilities exist.
+          // At that boundary there are no tool calls to drain. Sandbox agent
+          // construction itself fails closed when a backend is present but no
+          // controller was installed.
+          physicalToolQuiescenceConfirmed = true;
+        }
+        if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
+          // This receipt is part of the hard cancellation boundary, not
+          // housekeeping. Persist it immediately after the sandbox/tool fence
+          // and before lease, cache, recording, or provider cleanup. Its
+          // transaction also enqueues the exact workflow wake that will admit
+          // the replacement; Temporal activity terminalization does neither.
+          const proof: SessionAttemptQuiescenceProof = {
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            workflowId: input.workflowId,
+            workflowRunId: input.workflowRunId,
+            activityId: dispatchId,
+          };
+          const recoveryMode = await persistOrSignalSessionAttemptQuiescence({
+            proof,
+            persistReceipt: async () =>
+              await markSessionAttemptQuiesced(db, {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                temporalWorkflowId: input.workflowId,
+                temporalWorkflowRunId: input.workflowRunId,
+                temporalActivityId: dispatchId,
+                allowUninterrupted: true,
+              }),
+            publishEvents: async (events) => {
+              await waitForTurnFinalizerStep(
+                publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events),
+                finalizerSignal,
+              );
+            },
+            signalProof: signalSessionAttemptQuiesced,
+            heartbeat: (attempt, retryMs) => {
+              activityContext?.heartbeat({
+                phase: "quiescence-proof-delivery",
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                deliveryAttempt: attempt,
+                retryMs,
+                at: new Date().toISOString(),
+              });
+            },
+            onReceiptFailure: (error) => {
+              console.error("agent turn quiescence receipt exhausted; signalling proof", error);
+            },
+            onPublishFailure: (error) => {
+              console.error("agent turn quiescence event fanout failed", error);
+            },
+            onSignalFailure: (error, attempt, retryMs) => {
+              console.error("agent turn quiescence proof signal failed; retrying", {
+                error,
+                attempt,
+                retryMs,
+              });
+            },
+          });
+          quiescenceReceiptOrProofDurable = true;
+          if (recoveryMode === "signal") {
+            observability.info("agent turn quiescence proof handed to workflow recovery", {
+              "opengeni.session_id": input.sessionId,
+              "opengeni.attempt_id": input.attemptId,
+              "opengeni.workflow_run_id": input.workflowRunId,
+              "opengeni.activity_id": dispatchId,
+            });
           }
         }
-        // Part B.1: the connector namespaces codex_apps listed this turn → the
-        // connector-set cache. NON-EMPTY-only: a flaky/empty tools/list must never
-        // overwrite a known set with [] (false coverage drop). Read by reference
-        // AFTER the run, so every tools/list this turn has accumulated.
-        const connectorNamespaces = preparedTools?.codexConnectorNamespaces;
-        if (connectorNamespaces && connectorNamespaces.size > 0) {
-          await recordCodexAccountConnectors(db, input.workspaceId, effectiveCodexCredentialId, [
-            ...connectorNamespaces,
-          ]).catch(() => undefined);
+        gitCredentialRenewalClosed = true;
+        const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
+        gitCredentialRenewal = null;
+        if (renewalToStop) {
+          await waitForTurnFinalizerStep(renewalToStop.stop(), finalizerSignal);
         }
-      }
-      if (codexLeaseHeartbeatTimer) {
-        clearInterval(codexLeaseHeartbeatTimer);
-        codexLeaseHeartbeatTimer = undefined;
-      }
-      if (codexLeaseHeld && turnId && codexLeaseHolderId && codexLeaseGeneration !== null) {
-        await releaseCodexCredentialLease(
-          db,
-          input.accountId,
-          input.workspaceId,
-          turnId,
-          codexLeaseHolderId,
-          codexLeaseGeneration,
-        ).catch(() => undefined);
-        codexLeaseHeld = false;
-      }
-      // Workbench v2 turn-end workspace capture (dossier §10.1) — runs FIRST in
-      // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
-      // tool ran before this finally, so /workspace is already final; capture is
-      // FS-equivalent whether it runs before or after recording-finalize / the
-      // warm snapshot (neither mutates workspace files). Running it here — BEFORE
-      // preparedTools.close() (which tears down tools / computer-use / the display
-      // stack and is what starts the Modal box exiting a few seconds later) —
-      // gives capture the full live-box margin instead of racing the teardown
-      // tail, which was dropping 100% of captures on real Modal desktop boxes
-      // ("request cancelled due to container exiting", 0 rows). External module:
-      // self-capped at 60s, best-effort (never throws past its boundary),
-      // epoch-fenced, and it NEVER closes the box. The emitted
-      // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
-      // content).
-      if (resolvedSandbox && setupBoxSession && sandboxGroupId) {
-        // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
-        // start concurrently with capture, then drain any in-flight snapshot
-        // (bounded) — capture and the warm snapshot both exec on the box, so
-        // sequence them, exactly as the turn-end snapshot placement did.
-        if (leaseHeartbeatTimer) {
-          clearInterval(leaseHeartbeatTimer);
-          leaseHeartbeatTimer = undefined;
-        }
-        if (snapshotInFlight) {
-          await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
-        }
-        await captureWorkspaceRevision({
-          db,
-          objectStorage,
-          settings,
-          publish,
-          session: setupBoxSession as ChannelASession,
-          leaseEpoch: resolvedSandbox.leaseEpoch,
-          sandboxGroupId,
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: turnId ?? null,
-          observability,
-        });
-      }
-      await preparedTools?.close().catch(() => undefined);
-      if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-      }
-      if (turnSandboxProvisioner?.hasStarted()) {
-        await turnSandboxProvisioner.waitForSettled(30_000);
-      }
-      // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
-      // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
-      // and DROP the in-memory handle. Release NEVER stops the box — the reaper
-      // (P1.3) issues the provider stop() past the drain grace at refcount 0; the
-      // box rides the provider idle-timeout in the meantime. Best-effort: a
-      // release failure must never mask the turn's real outcome.
-      if (leaseHeartbeatTimer) {
-        clearInterval(leaseHeartbeatTimer);
-      }
-      // P4.3: finalize the on-turn recording BEFORE releasing the box handle
-      // (the read+PUT needs the live session). read bytes → storage PUT →
-      // updateRecording(available) → publish recording.available; the box file is
-      // deleted only after the PUT confirms (F9). Best-effort: a finalize failure
-      // emits recording.failed and never masks the turn outcome (F10: the bytes
-      // never become a Temporal payload — read+PUT happen here in-process).
-      const recordingToFinalize = activeRecording as ActiveRecording | null;
-      if (recordingToFinalize && resolvedSandbox) {
-        try {
-          if (!didComputerUse) {
-            // Recording gate (P4.3): the turn never drove the desktop (a plain text
-            // turn), so the film is a static frame of an untouched screen. DISCARD
-            // it — stop ffmpeg, delete the box artifact, drop the row — with NO
-            // storage PUT and NO recording.failed (a clean no-op, not a failure).
-            await discardRecording({
+        // Drain the buffered Connected Machine op events (infra failures + healed
+        // recoveries) to durable session events — awaited, best-effort, never blocking
+        // the turn. Sync observer → buffer → single awaited append here (no unawaited
+        // DB write inside the activity). Scoped to this turn; skipped if no turnId
+        // (the op ran under a turn, so on the normal path turnId is set).
+        const machineOpEvents = machineOpObserver.drainEvents();
+        if (machineOpEvents.length > 0 && turnId && executionGeneration > 0) {
+          await waitForTurnFinalizerStep(
+            appendAndPublishTurnEventsFenced(
               db,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              active: recordingToFinalize,
-              session: resolvedSandbox.established.session,
-            });
-          } else {
-            const outcome = await finalizeRecording({
-              settings,
-              db,
-              objectStorage,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              active: recordingToFinalize,
-              session: resolvedSandbox.established.session,
-              runAs: sandboxRunAs(settings),
-            });
-            if (publish) {
-              await publish(
-                outcome.ok
-                  ? [{ type: "recording.available", payload: outcome.available }]
-                  : [
-                      {
-                        type: "recording.failed",
-                        payload: {
-                          recordingId: recordingToFinalize.recordingId,
-                          turnId: recordingToFinalize.turnId,
-                          reason: outcome.reason,
-                          detail: outcome.detail,
-                        },
-                      },
-                    ],
+              bus,
+              input.workspaceId,
+              input.sessionId,
+              turnId,
+              executionGeneration,
+              input.attemptId,
+              machineOpEvents.map((event) => ({
+                ...event,
+                turnId: turnId ?? null,
+              })),
+            ).catch(() => undefined),
+            finalizerSignal,
+          );
+        }
+        // Multi-account P4: flush the serving account's free per-turn caches ONCE,
+        // best-effort (same discipline as today's usage write). Both writers skip
+        // version/updatedAt, so neither can race the token-refresh CAS.
+        if (effectiveCodexCredentialId) {
+          // Part A: the latest scraped usage-header snapshot → the P2 usage cache. A
+          // full both-windows snapshot (parseCodexUsageHeaders gates on both), so this
+          // is byte-identical to the /wham/usage write — no partial-window clobber.
+          if (latestCodexUsage) {
+            const usageMutation = await waitForTurnFinalizerStep(
+              recordCodexAccountUsageWithWakeTargets(
+                db,
+                input.workspaceId,
+                effectiveCodexCredentialId,
+                latestCodexUsage,
+              ).catch(() => null),
+              finalizerSignal,
+            );
+            if (usageMutation) {
+              await waitForTurnFinalizerStep(
+                signalCodexCapacityWakeTargets(
+                  { signalCodexCapacityWorkflow, wakeSessionWorkflow },
+                  usageMutation.wakeTargets,
+                ),
+                finalizerSignal,
               );
             }
           }
-        } catch (finalizeError) {
-          console.error("recording finalize failed (turn outcome unaffected)", finalizeError);
-        } finally {
-          activeRecording = null;
-        }
-      }
-      if (resolvedSandbox) {
-        // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
-        // turn's finished /workspace onto the lease before releasing the holder,
-        // so the work this turn just produced survives any unclean box death in
-        // the idle window ahead. Throttled by the same interval as the heartbeat
-        // tick (a short turn right after a snapshot skips — bounded-loss contract
-        // is the interval, not per-turn). Best-effort and time-capped by the
-        // helper's own failure discipline; never delays release on failure.
-        if (setupBoxSession && sandboxGroupId) {
-          // Single-flight vs the heartbeat capture: the timer is already cleared
-          // above, but a capture it launched may still be in flight — and that
-          // capture predates the turn's final writes. Wait for it, but only up
-          // to the snapshot timeout: release must never depend on an unbounded
-          // provider capture.
-          if (snapshotInFlight) {
-            await waitForWarmSnapshot(snapshotInFlight, settings.sandboxSnapshotTimeoutMs);
+          // Part B.1: the connector namespaces codex_apps listed this turn → the
+          // connector-set cache. NON-EMPTY-only: a flaky/empty tools/list must never
+          // overwrite a known set with [] (false coverage drop). Read by reference
+          // AFTER the run, so every tools/list this turn has accumulated.
+          const connectorNamespaces = preparedTools?.codexConnectorNamespaces;
+          if (connectorNamespaces && connectorNamespaces.size > 0) {
+            await waitForTurnFinalizerStep(
+              recordCodexAccountConnectors(db, input.workspaceId, effectiveCodexCredentialId, [
+                ...connectorNamespaces,
+              ]).catch(() => undefined),
+              finalizerSignal,
+            );
           }
-          const persisted = await maybePersistWarmWorkspaceSnapshot(
-            { db, settings },
-            { accountId: input.accountId, workspaceId: input.workspaceId, sandboxGroupId },
-            setupBoxSession,
-            resolvedSandbox.leaseEpoch,
+        }
+        if (codexLeaseHeartbeatTimer) {
+          clearInterval(codexLeaseHeartbeatTimer);
+          codexLeaseHeartbeatTimer = undefined;
+        }
+        if (codexLeaseHeld && turnId && codexLeaseHolderId && codexLeaseGeneration !== null) {
+          await waitForTurnFinalizerStep(
+            releaseCodexCredentialLease(
+              db,
+              input.accountId,
+              input.workspaceId,
+              turnId,
+              codexLeaseHolderId,
+              codexLeaseGeneration,
+            ).catch(() => undefined),
+            finalizerSignal,
           );
-          if (persisted && publish) {
-            await publish([
-              { type: "sandbox.box.snapshot", payload: { trigger: "turn-end" } },
-            ]).catch(() => undefined);
-          }
-          // NB workspace capture (dossier §10.1) no longer runs here — it moved to
-          // the TOP of this finally (before preparedTools.close) so it completes
-          // while the box is still solidly alive, instead of racing the turn-end
-          // teardown that was killing 100% of captures on real Modal desktop boxes.
+          codexLeaseHeld = false;
         }
-        await resolvedSandbox.release().catch((releaseError) => {
-          console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
+        // Workbench v2 turn-end workspace capture — runs FIRST in
+        // the turn-end finally, while the box is MAXIMALLY ALIVE. The agent's last
+        // tool ran before this finally, so /workspace is already final; capture is
+        // FS-equivalent to the already-settled recording preparation and the warm
+        // snapshot (neither mutates workspace files). Running it here — BEFORE
+        // preparedTools.close() (which tears down tools / computer-use / the display
+        // stack and is what starts the Modal box exiting a few seconds later) —
+        // gives capture the full live-box margin instead of racing the teardown
+        // tail, which was dropping 100% of captures on real Modal desktop boxes
+        // ("request cancelled due to container exiting", 0 rows). External module:
+        // self-capped at 60s, best-effort (never throws past its boundary),
+        // epoch-fenced, and it NEVER closes the box. The emitted
+        // workspace.revision.captured event is ANNOUNCE-ONLY (metadata, never
+        // content).
+        if (process.env.OPENGENI_TEST_SCENARIO === "sandbox") {
+          console.log(
+            `[sandbox-e2e] capture preflight ownership=${settings.sandboxOwnershipEnabled} enabled=${settings.workspaceCaptureEnabled} resolved=${Boolean(resolvedSandbox)} session=${Boolean(setupBoxSession)} group=${Boolean(sandboxGroupId)} storage=${Boolean(objectStorage)}`,
+          );
+        }
+        const runTurnEndPersistence = shouldRunTurnEndWorkspacePersistence({
+          activityStatus,
+          cancellationRequested: finalizerSignal?.aborted === true,
         });
-        resolvedSandbox = null; // drop the handle; the box survives the turn
+        if (
+          runTurnEndPersistence &&
+          turnId &&
+          resolvedSandbox &&
+          setupBoxSession &&
+          sandboxGroupId
+        ) {
+          // Stop new heartbeat snapshot/meter ticks so a mid-turn snapshot cannot
+          // start concurrently with capture, then drain any in-flight snapshot
+          // (bounded) — capture and the warm snapshot both exec on the box, so
+          // sequence them, exactly as the turn-end snapshot placement did.
+          if (leaseHeartbeatTimer) {
+            clearInterval(leaseHeartbeatTimer);
+            leaseHeartbeatTimer = undefined;
+          }
+          if (snapshotInFlight) {
+            await waitForWarmSnapshot(
+              snapshotInFlight,
+              settings.sandboxSnapshotTimeoutMs,
+              finalizerSignal,
+            );
+          }
+          await captureWorkspaceRevision({
+            db,
+            objectStorage,
+            settings,
+            publish: async (events) => {
+              await publishDurableSessionEvents(bus, input.workspaceId, input.sessionId, events);
+            },
+            session: setupBoxSession as ChannelASession,
+            leaseEpoch: resolvedSandbox.leaseEpoch,
+            sandboxGroupId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId,
+            attemptId: input.attemptId,
+            observability,
+            ...(finalizerSignal ? { signal: finalizerSignal } : {}),
+          });
+        }
+        if (preparedTools) {
+          await waitForTurnFinalizerStep(
+            preparedTools.close().catch(() => undefined),
+            finalizerSignal,
+          );
+        }
+        if (heartbeatTimer) {
+          clearInterval(heartbeatTimer);
+        }
+        if (turnSandboxProvisioner?.hasStarted()) {
+          await waitForTurnFinalizerStep(
+            turnSandboxProvisioner.waitForSettled(30_000),
+            finalizerSignal,
+          );
+        }
+        // P1.2: stop the lease-TTL refresh, release the turn holder (idempotent
+        // delete-my-row; refcount-- and warm->draining if it hit 0 with no turns),
+        // and DROP the in-memory handle. Release NEVER stops the box — the reaper
+        // (P1.3) issues the provider stop() past the drain grace at refcount 0; the
+        // box rides the provider idle-timeout in the meantime. Best-effort: a
+        // release failure must never mask the turn's real outcome.
+        if (leaseHeartbeatTimer) {
+          clearInterval(leaseHeartbeatTimer);
+        }
+        // A recording normally closes inside the attempt-fenced turn settlement.
+        // Reaching finally with one still active means settlement threw, never ran,
+        // or lost ownership. Stop ffmpeg and mark only this exact attempt-owned row
+        // failed; publish no event and leave the artifact recoverable on the box.
+        await waitForTurnFinalizerStep(
+          abandonActiveRecording(
+            "activity ended without recording settlement",
+            didComputerUse ? "failed" : "discard",
+          ),
+          finalizerSignal,
+        );
+        if (resolvedSandbox) {
+          // TURN-END mid-session snapshot (sandbox-file-persistence): fold the
+          // turn's finished /workspace onto the lease before releasing the holder,
+          // so the work this turn just produced survives any unclean box death in
+          // the idle window ahead. Throttled by the same interval as the heartbeat
+          // tick (a short turn right after a snapshot skips — bounded-loss contract
+          // is the interval, not per-turn). Best-effort and time-capped by the
+          // helper's own failure discipline; never delays release on failure.
+          const settledTurnId = turnId;
+          if (runTurnEndPersistence && setupBoxSession && sandboxGroupId && settledTurnId) {
+            // Single-flight vs the heartbeat capture: the timer is already cleared
+            // above, but a capture it launched may still be in flight — and that
+            // capture predates the turn's final writes. Wait for it, but only up
+            // to the snapshot timeout: release must never depend on an unbounded
+            // provider capture.
+            if (snapshotInFlight) {
+              await waitForWarmSnapshot(
+                snapshotInFlight,
+                settings.sandboxSnapshotTimeoutMs,
+                finalizerSignal,
+              );
+            }
+            const persisted = await maybePersistWarmWorkspaceSnapshot(
+              { db, settings },
+              {
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                turnId: settledTurnId,
+                attemptId: input.attemptId,
+                sandboxGroupId,
+              },
+              setupBoxSession,
+              resolvedSandbox.leaseEpoch,
+              finalizerSignal,
+            );
+            if (persisted && publish) {
+              await publish([
+                {
+                  type: "sandbox.box.snapshot",
+                  payload: { trigger: "turn-end" },
+                },
+              ]).catch(() => undefined);
+            }
+            // NB workspace capture no longer runs here — it moved to
+            // the TOP of this finally (before preparedTools.close) so it completes
+            // while the box is still solidly alive, instead of racing the turn-end
+            // teardown that was killing 100% of captures on real Modal desktop boxes.
+          }
+          const sandboxToRelease = resolvedSandbox;
+          resolvedSandbox = null; // drop ownership now; the exact-holder release may finish later
+          await waitForTurnFinalizerStep(
+            sandboxToRelease.release().catch((releaseError) => {
+              console.error("sandbox lease release failed (turn outcome unaffected)", releaseError);
+            }),
+            finalizerSignal,
+          );
+        }
+      } catch (error) {
+        finalizationError ??= error;
+        console.error("agent turn finalization failed (turn outcome unaffected)", error);
+      } finally {
+        cancellationSignal?.removeEventListener("abort", noteCancellationRequested);
+        const completedAt = performance.now();
+        const durationSeconds = (completedAt - activityStarted) / 1000;
+        const finalizationDurationSeconds = (completedAt - finalizationStarted) / 1000;
+        observability.observeHistogram({
+          name: "opengeni_turn_finalization_duration_seconds",
+          help: "Agent turn finalization duration, including workspace housekeeping and lease release.",
+          labels: { cancellation_requested: String(cancellationRequestedAt !== null) },
+          value: finalizationDurationSeconds,
+        });
+        if (cancellationRequestedAt !== null) {
+          const physicalCancellationDurationSeconds =
+            (completedAt - cancellationRequestedAt) / 1000;
+          observability.observeHistogram({
+            name: "opengeni_turn_physical_cancellation_duration_seconds",
+            help: "Time from Temporal cancellation delivery until the activity physically stops.",
+            value: physicalCancellationDurationSeconds,
+          });
+          observability.info("agent turn physical cancellation completed", {
+            "opengeni.session_id": input.sessionId,
+            "opengeni.turn_id": turnId ?? "",
+            "opengeni.attempt_id": input.attemptId,
+            "opengeni.physical_cancellation_duration_ms": Math.round(
+              physicalCancellationDurationSeconds * 1000,
+            ),
+          });
+        }
+        observability.recordWorkerActivity({
+          activity: "runAgentTurn",
+          status: finalizationError ? "cleanup_failed" : activityStatus,
+          durationSeconds,
+        });
+        if (turnId && activityStatus !== "unknown") {
+          turnLifecycleMetricsFor(observability).finish(turnId, turnMetricOutcome, durationSeconds);
+        }
+        activitySpan.end({
+          attributes: {
+            "opengeni.turn_id": turnId ?? "",
+            "opengeni.status": activityStatus,
+            "opengeni.variable_set_id": variableSetId,
+            "opengeni.rig_id": rigId,
+            "opengeni.rig_version_id": rigVersionId,
+            "opengeni.codex_credential_id": effectiveCodexCredentialId ?? "",
+            "opengeni.duration_ms": Math.round(durationSeconds * 1000),
+            "opengeni.finalization_duration_ms": Math.round(finalizationDurationSeconds * 1000),
+          },
+          error: finalizationError ?? activityError,
+        });
+        assertPhysicalToolQuiescenceForCancellation({
+          acknowledgeQuiescence,
+          physicalToolQuiescenceConfirmed,
+          failure: finalizationError,
+        });
+        assertSessionAttemptQuiescenceRecoveryDurable({
+          acknowledgeQuiescence,
+          physicalToolQuiescenceConfirmed,
+          receiptOrProofDurable: quiescenceReceiptOrProofDurable,
+          failure: finalizationError,
+        });
       }
     }
   };
 }
 
+async function assertGitHubResourcesRemainAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  resources: import("@opengeni/contracts").ResourceRef[],
+): Promise<void> {
+  // Must check exactly what sandboxEnvironmentForRun would mint a token for,
+  // so the selection is derived from the same extraction as the mint path.
+  const selection = gitHubTokenMintSelection(resources);
+  if (!selection) {
+    return;
+  }
+  await assertGitHubTokenMintSelectionAuthorized(
+    db,
+    workspaceId,
+    selection.installationId,
+    selection.repositoryIds,
+  );
+}
+
+async function assertGitHubTokenMintSelectionAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  installationId: number,
+  repositoryIds: number[],
+): Promise<void> {
+  if (
+    !(await areGitHubRepositoriesAllowedForWorkspace(
+      db,
+      workspaceId,
+      installationId,
+      repositoryIds,
+    ))
+  ) {
+    throw new Error(
+      "This workspace no longer authorizes one or more GitHub repositories attached to the session",
+    );
+  }
+}
+
 /**
  * True when the error is transient upstream backpressure — a model-provider 5xx,
  * a "server had a bad minute" body, or a dropped/again-able network connection —
- * rather than a request the session got wrong. These are safe to retry: the turn
- * routes into the SAME idle + goal-continuation recovery the rate-limit branch
- * uses (a goal-bearing session auto-continues after PROVIDER_BACKPRESSURE_DELAY_MS;
- * a goal-less one waits for the next user message), and the resume notice tells the
- * model to re-check side effects before repeating them.
+ * rather than a request the session got wrong. These are safe to recover as a new
+ * fenced attempt of the SAME turn after PROVIDER_BACKPRESSURE_DELAY_MS. Durable
+ * tool results are preserved and ambiguous in-flight effects are closed before
+ * the new attempt, independent of whether the session has an active goal.
  *
  * This is the classification gap that hard-failed a fleet of prod sessions during a
  * provider degradation window: their errors ("Our servers are currently overloaded",
@@ -5130,6 +6338,12 @@ export function agentRunFailurePayload(error: unknown): {
   code?: string;
   retryable?: boolean;
   detail?: string;
+  correlationId?: string;
+  stage?: string;
+  sqlState?: string | null;
+  attempts?: number;
+  retryOutcome?: string;
+  database?: Record<string, string>;
 } {
   const message = error instanceof Error ? error.message : String(error);
   const status =
@@ -5140,6 +6354,41 @@ export function agentRunFailurePayload(error: unknown): {
     typeof error === "object" && error !== null && "code" in error
       ? String((error as { code?: unknown }).code)
       : undefined;
+  // An accepted Codex stream with no terminal response is malformed/partial,
+  // not provider backpressure. Replaying the same accepted turn could repeat
+  // model or tool effects, so this marked transport failure must outrank the
+  // generic 5xx retry classifier (CodexStreamingTerminalError uses status 502).
+  if (isCodexTransportError(error) && code === "invalid_sse_terminal") {
+    return {
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    };
+  }
+  if (isSessionEventPersistenceError(error)) {
+    const { details } = error;
+    const eventLabel = details.eventTypes.join(", ") || "session events";
+    const failureLabel =
+      details.code === "db_deadlock"
+        ? "Database deadlock"
+        : details.code === "db_serialization_failure"
+          ? "Database serialization failure"
+          : "Database failure";
+    return {
+      error: `${failureLabel} while persisting ${eventLabel}. The completed provider call and external effects were not retried.`,
+      code: details.code,
+      detail:
+        details.retryOutcome === "exhausted"
+          ? `The idempotent persistence transaction failed after ${details.attempts} attempts.`
+          : "The database rejected the idempotent persistence transaction.",
+      correlationId: details.correlationId,
+      stage: details.stage,
+      sqlState: details.sqlState,
+      attempts: details.attempts,
+      retryOutcome: details.retryOutcome,
+      ...(Object.keys(details.database).length > 0 ? { database: details.database } : {}),
+    };
+  }
   // A ChatGPT/Codex usage cap is a HARD limit, not transient backpressure: it
   // must NOT be reported as a generic, retryable rate-limit (which would loop a
   // goal against a capped backend). Surface a precise, actionable message with
@@ -5372,27 +6621,48 @@ export function codexUsageLimitFailurePayload(
 // goal re-evaluates at most this far out (it will re-pause if still capped).
 const CODEX_USAGE_LIMIT_MAX_RESUME_MS = 60 * 60_000; // 1h
 
-/**
- * Recognize an SDK stream event that represents a COMPUTER-USE tool call actually
- * executing — a `run_item_stream_event` carrying a `tool_call_item` whose
- * underlying raw item is a `computer_call` (the @openai/agents computer tool's
- * action: screenshot/click/type/scroll/drag/keypress/move/wait/…). This is the
- * same shape `normalizeSdkEvent` reads (`event.item.rawItem`), matched here against
- * the raw SDK type rather than a tool NAME so it is robust to the computer tool's
- * configured name. Drives the on-turn recording gate (no computer-use → discard).
- */
-function isComputerCallStreamEvent(event: unknown): boolean {
-  if (!event || typeof event !== "object") {
-    return false;
+function pendingToolCallFromSdkEvent(event: unknown): {
+  callId: string;
+  callType: string;
+  callItem: Record<string, unknown>;
+} | null {
+  if (!event || typeof event !== "object") return null;
+  if ((event as { type?: unknown }).type !== "run_item_stream_event") return null;
+  const item = (event as { item?: { type?: unknown; rawItem?: unknown } }).item;
+  if (
+    !item ||
+    (item.type !== "tool_call_item" && item.type !== "tool_search_call_item") ||
+    !item.rawItem ||
+    typeof item.rawItem !== "object" ||
+    Array.isArray(item.rawItem)
+  ) {
+    return null;
   }
-  if ((event as { type?: unknown }).type !== "run_item_stream_event") {
-    return false;
+  const raw = item.rawItem as Record<string, unknown>;
+  const callId = raw.callId ?? raw.call_id ?? raw.id;
+  const callType = raw.type;
+  if (typeof callId !== "string" || callId.length === 0 || typeof callType !== "string") {
+    return null;
   }
-  const item = (event as { item?: { type?: unknown; rawItem?: { type?: unknown } } }).item;
-  if (!item || item.type !== "tool_call_item") {
-    return false;
+  return { callId, callType, callItem: raw };
+}
+
+function completedToolCallFromSdkEvent(event: unknown): {
+  callId: string;
+  resultItem: Record<string, unknown>;
+} | null {
+  if (!event || typeof event !== "object") return null;
+  if ((event as { type?: unknown }).type !== "run_item_stream_event") return null;
+  const item = (event as { item?: { type?: unknown; rawItem?: unknown; id?: unknown } }).item;
+  if (!item || (item.type !== "tool_call_output_item" && item.type !== "tool_search_output_item")) {
+    return null;
   }
-  return item.rawItem?.type === "computer_call";
+  const raw =
+    item.rawItem && typeof item.rawItem === "object" && !Array.isArray(item.rawItem)
+      ? (item.rawItem as Record<string, unknown>)
+      : {};
+  const callId = raw.callId ?? raw.call_id ?? item.id;
+  return typeof callId === "string" && callId.length > 0 ? { callId, resultItem: raw } : null;
 }
 
 /**

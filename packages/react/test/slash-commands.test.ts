@@ -241,7 +241,7 @@ describe("default command handlers", () => {
     expect(result.status).toBe("ok");
   });
 
-  test("/clear maps a 409 to a 'stop the turn first' error", async () => {
+  test("/clear maps a 409 to an explicit Pause-and-settle instruction", async () => {
     const ctx = makeCtx({
       client: fakeClient({
         clearSessionContext: async () => {
@@ -252,14 +252,15 @@ describe("default command handlers", () => {
     });
     const result = await run(clear, [], ctx);
     expect(result.status).toBe("error");
-    expect(result.message).toMatch(/stop the current turn/i);
+    expect(result.message).toMatch(/Pause the session/i);
+    expect(result.message).toMatch(/settle/i);
   });
 
   test("/compact surfaces the server result message", async () => {
     const ctx = makeCtx({
       client: fakeClient({
         compactSessionContext: async () => ({
-          status: "queued",
+          status: "completed",
           message: "Compaction will run before the next turn.",
         }),
       }),

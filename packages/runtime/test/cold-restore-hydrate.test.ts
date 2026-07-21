@@ -69,6 +69,7 @@ const {
   establishSandboxSessionFromEnvelope,
   readWorkspaceArchiveFromEnvelopeSessionState,
   decodeModalSnapshotId,
+  SandboxResumeStateUnavailableError,
 } = await import("@opengeni/runtime");
 const { testSettings } = await import("@opengeni/testing");
 
@@ -131,6 +132,30 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     expect(decodeModalSnapshotId(new TextEncoder().encode("PKtarbytes"))).toBeUndefined();
   });
 
+  test("resume-only propagates provider NotFound and never creates a replacement", async () => {
+    createArgs.length = 0;
+    await expect(
+      establishSandboxSessionFromEnvelope(modalSettings(), envelopeWithArchive(SNAPSHOT_B64), {
+        sessionId: "sess-attached",
+        recovery: "resume-only",
+        environment: {},
+      }),
+    ).rejects.toThrow(/not found/i);
+    expect(createArgs).toHaveLength(0);
+  });
+
+  test("resume-only rejects a missing provider identity and never creates", async () => {
+    createArgs.length = 0;
+    await expect(
+      establishSandboxSessionFromEnvelope(modalSettings(), null, {
+        sessionId: "sess-invalid-warm-lease",
+        recovery: "resume-only",
+        environment: {},
+      }),
+    ).rejects.toThrow(SandboxResumeStateUnavailableError);
+    expect(createArgs).toHaveLength(0);
+  });
+
   test("cold-restore creates a FRESH box (NO snapshot arg) and hydrates from the lease archive", async () => {
     hydrateCalls.length = 0;
     createArgs.length = 0;
@@ -138,7 +163,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     const established = await establishSandboxSessionFromEnvelope(
       modalSettings(),
       envelopeWithArchive(SNAPSHOT_B64),
-      { sessionId: "sess-cold", environment: {} },
+      { sessionId: "sess-cold", recovery: "create-or-restore", environment: {} },
     );
 
     // (1) create() was called WITHOUT a `snapshot` arg (would throw on Modal).
@@ -158,7 +183,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
     const established = await establishSandboxSessionFromEnvelope(
       modalSettings(),
       envelopeWithArchive(undefined),
-      { sessionId: "sess-cold-noarch", environment: {} },
+      { sessionId: "sess-cold-noarch", recovery: "create-or-restore", environment: {} },
     );
 
     expect(createArgs).toHaveLength(1);
@@ -177,7 +202,7 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       const established = await establishSandboxSessionFromEnvelope(
         modalSettings(),
         envelopeWithArchivePair(SNAPSHOT_B64, SNAPSHOT_PREV_B64),
-        { sessionId: "sess-hydrate-prev", environment: {} },
+        { sessionId: "sess-hydrate-prev", recovery: "create-or-restore", environment: {} },
       );
 
       expect(createArgs).toHaveLength(1);
@@ -200,7 +225,11 @@ describe("cold-restore archive+hydrate (sandbox-file-persistence)", () => {
       const established = await establishSandboxSessionFromEnvelope(
         modalSettings(),
         envelopeWithArchive(SNAPSHOT_B64),
-        { sessionId: "sess-hydrate-fail-open", environment: {} },
+        {
+          sessionId: "sess-hydrate-fail-open",
+          recovery: "create-or-restore",
+          environment: {},
+        },
       );
 
       expect(established.instanceId).toBe("sb-fresh");

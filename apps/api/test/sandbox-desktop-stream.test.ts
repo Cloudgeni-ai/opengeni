@@ -96,6 +96,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -169,7 +170,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P4.2 desktop pixel data plane (real lease + RLS + fence)", () => {
   test("WARM + acked + desktop-enabled ⇒ a coherent {url,token,expiresAt}; the token verifies; data_plane_url recorded", async () => {

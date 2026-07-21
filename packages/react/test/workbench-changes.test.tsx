@@ -7,6 +7,7 @@
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
 import type { GitFileDiff } from "@opengeni/sdk";
+import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { fakeFileDiff } from "./sandbox-fixtures";
 import { WorkbenchChanges, buildRail } from "../src/components/workbench-changes";
@@ -30,12 +31,14 @@ function manyFiles(n: number, dir = "src"): GitFileDiff[] {
 async function drivePane(pane: HTMLElement, scrollTop: number, viewport = 600) {
   Object.defineProperty(pane, "clientHeight", { value: viewport, configurable: true });
   pane.scrollTop = scrollTop;
-  pane.dispatchEvent(new Event("scroll"));
+  await act(async () => {
+    pane.dispatchEvent(new Event("scroll"));
+  });
   await flush(60);
 }
 
-function mountedIndices(container: HTMLElement): number[] {
-  return Array.from(container.querySelectorAll("[data-diff-section]"))
+function mountedIndices(root: HTMLElement): number[] {
+  return Array.from(root.querySelectorAll("[data-diff-section]"))
     .map((el) => Number(el.getAttribute("data-diff-index")))
     .sort((a, b) => a - b);
 }
@@ -76,6 +79,66 @@ describe("WorkbenchChanges — windowing (D2)", () => {
 });
 
 describe("WorkbenchChanges — rail, badge, guard", () => {
+  test("a compact surface replaces the cramped rail with a full-width file picker", async () => {
+    const original = globalThis.ResizeObserver;
+    class CompactResizeObserver {
+      constructor(private readonly callback: ResizeObserverCallback) {}
+      observe(target: Element) {
+        if (!target.hasAttribute("data-workbench-changes-layout")) return;
+        this.callback(
+          [{ target, contentRect: { width: 390 } } as ResizeObserverEntry],
+          this as unknown as ResizeObserver,
+        );
+      }
+      disconnect() {}
+      unobserve() {}
+    }
+    Object.defineProperty(globalThis, "ResizeObserver", {
+      configurable: true,
+      writable: true,
+      value: CompactResizeObserver,
+    });
+    try {
+      const r = await renderComponent(
+        <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
+      );
+      await flush();
+      const root = container(r).querySelector<HTMLElement>("[data-workbench-changes-layout]");
+      const picker = container(r).querySelector<HTMLSelectElement>("[data-compact-file-picker]");
+      expect(root?.dataset.workbenchChangesLayout).toBe("compact");
+      expect(picker).not.toBeNull();
+      expect(picker?.options).toHaveLength(3);
+      expect(picker?.options[0]?.textContent).toBe("M · file-000.ts — src/");
+      expect(picker?.title).toBe("src/file-000.ts");
+      expect(container(r).querySelector("[data-rail-file]")).toBeNull();
+
+      await act(async () => {
+        picker!.value = "2";
+        picker!.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await flush();
+      expect(picker!.value).toBe("2");
+      expect(picker!.title).toBe("src/file-002.ts");
+
+      await r.rerender(
+        <WorkbenchChanges diff={manyFiles(3).reverse()} source="live" capturedAt={null} />,
+      );
+      await flush();
+      const reorderedPicker = container(r).querySelector<HTMLSelectElement>(
+        "[data-compact-file-picker]",
+      );
+      expect(reorderedPicker?.value).toBe("0");
+      expect(reorderedPicker?.title).toBe("src/file-002.ts");
+      await r.unmount();
+    } finally {
+      Object.defineProperty(globalThis, "ResizeObserver", {
+        configurable: true,
+        writable: true,
+        value: original,
+      });
+    }
+  });
+
   test("buildRail groups by top-level dir past the threshold, flat below it", async () => {
     const flat = buildRail(manyFiles(5));
     expect(flat.rows.every((row) => row.kind === "file")).toBe(true);
@@ -90,6 +153,34 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     grouped.rows.forEach((row) => {
       if (row.kind === "file") expect(grouped.orderedFiles[row.index]).toBe(row.file);
     });
+  });
+
+  test("a small multi-repo result groups by explicit repo ownership", async () => {
+    const files = [
+      { ...manyFiles(1, "api/src")[0]!, repoRoot: "api" },
+      { ...manyFiles(1, "web/src")[0]!, repoRoot: "web" },
+    ];
+    const rail = buildRail(files);
+    expect(rail.grouped).toBe(true);
+    expect(rail.rows.flatMap((row) => (row.kind === "group" ? [row.label] : []))).toEqual([
+      "api",
+      "web",
+    ]);
+
+    const r = await renderComponent(
+      <WorkbenchChanges diff={files} source="live" capturedAt={null} />,
+    );
+    await flush();
+    const groups = Array.from(container(r).querySelectorAll("[data-rail-group]"), (node) =>
+      node.textContent?.trim(),
+    );
+    expect(groups).toEqual(["api1", "web1"]);
+    const fileRows = Array.from(
+      container(r).querySelectorAll("[data-rail-file]"),
+      (node) => node.textContent,
+    );
+    expect(fileRows.every((text) => text?.includes("src/file-000.ts"))).toBe(true);
+    await r.unmount();
   });
 
   test("renders group headers in the rail for a large change set", async () => {
@@ -120,16 +211,17 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
     await r.unmount();
   });
 
-  test("source badge reads 'live' for the live source", async () => {
+  test("source badge reads 'Live diff' for the live source", async () => {
     const r = await renderComponent(
       <WorkbenchChanges diff={manyFiles(3)} source="live" capturedAt={null} />,
     );
     await flush();
-    expect(container(r).textContent).toContain("live");
+    expect(container(r).textContent).toContain("Live diff");
     await r.unmount();
   });
 
   test("a binary file's section shows the open-live guard, not a diff body", async () => {
+    const openedPaths: string[] = [];
     const diff = [
       fakeFileDiff({
         path: "assets/logo.png",
@@ -140,11 +232,25 @@ describe("WorkbenchChanges — rail, badge, guard", () => {
       }),
     ];
     const r = await renderComponent(
-      <WorkbenchChanges diff={diff} source="live" capturedAt={null} />,
+      <WorkbenchChanges
+        diff={diff}
+        source="live"
+        capturedAt={null}
+        onOpenFile={(path) => {
+          openedPaths.push(path);
+        }}
+      />,
     );
     await flush();
     expect(container(r).textContent).toContain("Binary file");
-    expect(container(r).textContent).toContain("open it on the machine");
+    const open = [...container(r).querySelectorAll("button")].find((button) =>
+      button.textContent?.includes("Open in Files"),
+    );
+    expect(open).toBeDefined();
+    await act(async () => {
+      open!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(openedPaths).toEqual(["assets/logo.png"]);
     await r.unmount();
   });
 

@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type { Document, ScheduledTask } from "@opengeni/contracts";
+import type { Document, GitHubAppApiPort, ScheduledTask } from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
@@ -19,7 +19,11 @@ export type SessionWorkflowClient = {
     workspaceId: string;
     sessionId: string;
     workflowId: string;
+    wakeRevision: number;
+    interruptionRequested?: boolean;
   }) => Promise<void>;
+  /** Trigger one bounded drain of already-committed workflow-wake revisions. */
+  requestSessionWorkflowWakeDispatch: () => Promise<void>;
   // Dedicated, revision-carrying nudge for a durable Codex capacity waiter.
   // Optional for embedded/back-compat clients: callers may fall back to the
   // generic queueChanged wake because Postgres wakeRevision is authoritative.
@@ -29,26 +33,15 @@ export type SessionWorkflowClient = {
     sessionId: string;
     workflowId: string;
     wakeRevision: number;
+    workflowWakeRevision: number;
   }) => Promise<void>;
   signalApprovalDecision: (input: {
-    sessionId: string;
-    eventId: string;
-    workflowId: string;
-  }) => Promise<void>;
-  // Interrupt must reach the workflow whether or not an execution is currently
-  // running: a long-lived session that has gone idle (its workflow returned
-  // after markSessionIdle) has NO running execution, so a plain
-  // getHandle().signal() throws WorkflowNotFoundError -> a 500 that leaves an
-  // operator unable to stop a session. signalWithStart start-or-signals, so it
-  // needs the session-workflow args (accountId/workspaceId) to start a fresh
-  // run when none is live; the buffered `interrupt` signal is then honored by
-  // the workflow's idle-interrupt path (pause goal + mark idle).
-  signalInterrupt: (input: {
     accountId: string;
     workspaceId: string;
     sessionId: string;
     eventId: string;
     workflowId: string;
+    workflowWakeRevision: number;
   }) => Promise<void>;
   syncScheduledTask: (input: { task: ScheduledTask }) => Promise<void>;
   deleteScheduledTaskSchedule: (input: { temporalScheduleId: string }) => Promise<void>;
@@ -86,6 +79,12 @@ export type AppDependencies = {
   observability?: Observability;
   readinessChecks?: Partial<Record<"db" | "nats" | "temporal", () => Promise<void> | void>>;
   githubStateSecret?: string;
+  /**
+   * Optional host-provided GitHub App API seam. Embedded hosts can authorize
+   * users, inspect installations, and list repositories with their own GitHub
+   * App credentials; standalone deployments fall back to @opengeni/github.
+   */
+  githubAppApi?: GitHubAppApiPort;
   managedAuth?: ManagedAuth | null;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.

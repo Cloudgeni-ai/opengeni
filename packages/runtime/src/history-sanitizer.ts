@@ -28,6 +28,10 @@
  */
 
 import { SCREENSHOT_FAILURE_CARD_IMAGE_URL } from "./screenshot-error-card";
+import {
+  boundModelToolOutputItems,
+  DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+} from "@opengeni/codex";
 
 /** A history item is any JSON object; we only inspect a few discriminator fields. */
 export type HistoryItem = Record<string, unknown>;
@@ -100,6 +104,98 @@ function callIdOf(item: unknown): string | undefined {
 }
 
 /**
+ * Return the normalized local path from a sandbox `view_image` function call.
+ * Invalid/partial calls are deliberately ignored: the filter below only
+ * removes fully-paired calls whose replacement is known to be valid.
+ */
+function viewImagePathOf(item: unknown): string | undefined {
+  if (!item || typeof item !== "object") {
+    return undefined;
+  }
+  const record = item as { type?: unknown; name?: unknown; arguments?: unknown };
+  if (
+    record.type !== "function_call" ||
+    record.name !== "view_image" ||
+    typeof record.arguments !== "string"
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(record.arguments) as { path?: unknown };
+    return typeof parsed.path === "string" && parsed.path.length > 0 ? parsed.path : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Remove superseded `view_image` call/result pairs for the SAME local path,
+ * retaining the newest fully-paired observation. A `view_image` result can be
+ * hundreds of kilobytes of base64. When a model re-opens the same attachment,
+ * replaying every older copy on each subsequent model call grows input
+ * quadratically and can trap a turn in context-compaction/requeue recovery.
+ *
+ * This is state-based rather than count-based: every distinct path is kept,
+ * and an older observation is removed only after a newer successful pair for
+ * that exact path exists. The reasoning items immediately attached to a
+ * removed call are removed with it, preserving Responses API item validity.
+ */
+export function elideSupersededViewImagePairs<T extends HistoryItem>(items: readonly T[]): T[] {
+  if (items.length === 0) {
+    return [];
+  }
+
+  const callIndexById = new Map<string, number>();
+  const resultIndexById = new Map<string, number>();
+  items.forEach((item, index) => {
+    const callId = callIdOf(item);
+    if (!callId) {
+      return;
+    }
+    if (itemType(item) === "function_call") {
+      callIndexById.set(callId, index);
+    } else if (
+      itemType(item) === "function_call_result" ||
+      itemType(item) === "function_call_output"
+    ) {
+      resultIndexById.set(callId, index);
+    }
+  });
+
+  const pairedByPath = new Map<string, Array<{ callIndex: number; resultIndex: number }>>();
+  for (const [callId, callIndex] of callIndexById) {
+    const path = viewImagePathOf(items[callIndex]);
+    const resultIndex = resultIndexById.get(callId);
+    if (!path || resultIndex === undefined || resultIndex <= callIndex) {
+      continue;
+    }
+    const pairs = pairedByPath.get(path) ?? [];
+    pairs.push({ callIndex, resultIndex });
+    pairedByPath.set(path, pairs);
+  }
+
+  const dropped = new Set<number>();
+  for (const pairs of pairedByPath.values()) {
+    if (pairs.length < 2) {
+      continue;
+    }
+    pairs.sort((left, right) => left.callIndex - right.callIndex);
+    for (const pair of pairs.slice(0, -1)) {
+      dropped.add(pair.callIndex);
+      dropped.add(pair.resultIndex);
+      for (let index = pair.callIndex - 1; index >= 0; index -= 1) {
+        if (itemType(items[index]) !== "reasoning") {
+          break;
+        }
+        dropped.add(index);
+      }
+    }
+  }
+
+  return dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
+}
+
+/**
  * Sanitize a replayed history item list into a sequence the Responses API
  * accepts. Pure: returns a new array of the same item references in order,
  * with invalid items omitted. Valid histories come back byte-identical
@@ -132,7 +228,10 @@ function callIdOf(item: unknown): string | undefined {
  * types exist with that id, the call appearing before the result. Calls and
  * results that satisfy that survive untouched.
  */
-export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: readonly T[]): T[] {
+export function sanitizeHistoryItemsForModel<T extends HistoryItem>(
+  items: readonly T[],
+  toolOutputTruncationTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
+): T[] {
   if (items.length === 0) {
     return [];
   }
@@ -222,10 +321,59 @@ export function sanitizeHistoryItemsForModel<T extends HistoryItem>(items: reado
     }
   }
 
-  if (dropped.size === 0) {
-    return items.slice();
+  const paired =
+    dropped.size === 0 ? items.slice() : items.filter((_item, index) => !dropped.has(index));
+  return boundModelToolOutputItems(
+    paired.map(stripInternalResumeMarker),
+    toolOutputTruncationTokens,
+  );
+}
+
+/**
+ * Internal marker stamping machine-generated resume/continuation messages
+ * (turn-resumed notices, goal continuations) so compaction housekeeping can
+ * recognize them in STORED history. Lives here (not context-compaction, which
+ * imports from this module) so the wire sanitizer below can strip it without
+ * an import cycle; context-compaction re-exports it.
+ */
+export const INTERNAL_RESUME_MESSAGE_MARKER = "opengeni_internal_resume";
+
+/**
+ * Remove the {@link INTERNAL_RESUME_MESSAGE_MARKER} providerData key from a
+ * single item before it reaches ANY model wire. Pure + non-mutating; returns
+ * the SAME reference when there is nothing to strip (keeping the common path
+ * byte-identical, mirroring {@link stripReasoningEncryptedContent}).
+ *
+ * WHY. The @openai/agents SDK serializes providerData keys verbatim into the
+ * request item, and strict Responses backends reject unknown per-item fields —
+ * observed in production as `400 Unknown parameter:
+ * 'input[N].opengeni_internal_resume'`, which deterministically failed every
+ * turn whose replayed history contained a marked resume message (the marker is
+ * durable in conversation truth, so retries could never succeed). Detection
+ * (isInternalResumeMessage) reads STORED items and also keeps a text-prefix
+ * fallback, so stripping at the wire degrades housekeeping gracefully and
+ * never the turn.
+ */
+export function stripInternalResumeMarker<T extends HistoryItem>(item: T): T {
+  const providerData = (item as Record<string, unknown>).providerData;
+  if (
+    !providerData ||
+    typeof providerData !== "object" ||
+    !(INTERNAL_RESUME_MESSAGE_MARKER in (providerData as Record<string, unknown>))
+  ) {
+    return item;
   }
-  return items.filter((_item, index) => !dropped.has(index));
+  const { [INTERNAL_RESUME_MESSAGE_MARKER]: _dropped, ...rest } = providerData as Record<
+    string,
+    unknown
+  >;
+  const next: Record<string, unknown> = { ...(item as Record<string, unknown>) };
+  if (Object.keys(rest).length > 0) {
+    next.providerData = rest;
+  } else {
+    delete next.providerData;
+  }
+  return next as T;
 }
 
 /**
@@ -295,9 +443,8 @@ export function stripReasoningEncryptedContent<T extends HistoryItem>(item: T): 
  * a parse failure or a no-op returns the SAME string reference (so an unchanged
  * or non-codex run-state replays byte-for-byte).
  *
- * WHY (HOLE C — the run-state REPLAY paths). The approval-decision resume and the
- * items-mode run-state fallback replay the serialized RunState blob verbatim. That
- * blob round-trips `reasoning.encrypted_content` minted by the ChatGPT/Codex
+ * WHY (HOLE C — approval replay). An approval decision resumes the serialized
+ * RunState blob. That blob round-trips `reasoning.encrypted_content` minted by the ChatGPT/Codex
  * backend (bound to the freezing account/org — a foreign account 400s it) AND the
  * foreign `rs_…` reasoning ids the Responses backend validates (rejected once the
  * blob is gone). Unlike `session_history_items`, the blob carries NO per-item

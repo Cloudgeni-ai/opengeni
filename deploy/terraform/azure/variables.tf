@@ -59,6 +59,24 @@ variable "aks" {
   default = {}
 }
 
+variable "managed_aks_capacity" {
+  description = "Optional non-secret capacity policy for the managed AKS system pool. Production automation can pin live node capacity without duplicating the rest of the environment configuration."
+  type = object({
+    node_count = number
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.managed_aks_capacity == null ? true : (
+      var.managed_aks_capacity.node_count >= 1 &&
+      var.managed_aks_capacity.node_count <= 1000 &&
+      floor(var.managed_aks_capacity.node_count) == var.managed_aks_capacity.node_count
+    )
+    error_message = "managed_aks_capacity.node_count must be a whole number between 1 and 1000."
+  }
+}
+
 variable "key_vault" {
   description = "Key Vault settings."
   type = object({
@@ -162,6 +180,27 @@ variable "postgres" {
   validation {
     condition     = var.deployment_phase != "complete" || var.postgres.mode != "managed" || try(length(var.postgres.administrator_password) >= 16, false)
     error_message = "postgres.administrator_password with at least 16 characters is required when postgres.mode is managed and deployment_phase is complete."
+  }
+}
+
+variable "managed_postgres_capacity" {
+  description = "Optional non-secret capacity policy for managed PostgreSQL. Keep this separate from the credential-bearing postgres object so production automation can pin compute and storage without duplicating secrets."
+  type = object({
+    sku_name          = string
+    storage_mb        = number
+    storage_tier      = string
+    auto_grow_enabled = bool
+  })
+  default  = null
+  nullable = true
+
+  validation {
+    condition = var.managed_postgres_capacity == null ? true : (
+      can(regex("^(B|GP|MO)_Standard_", var.managed_postgres_capacity.sku_name)) &&
+      contains([32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4193280, 4194304, 8388608, 16777216, 33553408], var.managed_postgres_capacity.storage_mb) &&
+      contains(["P4", "P6", "P10", "P15", "P20", "P30", "P40", "P50", "P60", "P70", "P80"], var.managed_postgres_capacity.storage_tier)
+    )
+    error_message = "managed_postgres_capacity must use a valid Azure PostgreSQL SKU, supported storage size, and supported storage tier."
   }
 }
 

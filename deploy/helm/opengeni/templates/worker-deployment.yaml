@@ -2,25 +2,26 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "opengeni.fullname" . }}-worker
+  name: {{ include "opengeni.fullname" . }}-worker-control
   labels:
     {{- include "opengeni.labels" . | nindent 4 }}
-    app.kubernetes.io/component: worker
+    app.kubernetes.io/component: worker-control
 spec:
-  replicas: {{ .Values.worker.replicaCount }}
-  {{- with .Values.worker.strategy }}
+  replicas: {{ .Values.worker.control.replicaCount }}
+  {{- with .Values.worker.control.strategy }}
   strategy:
     {{- toYaml . | nindent 4 }}
   {{- end }}
   selector:
     matchLabels:
       {{- include "opengeni.selectorLabels" . | nindent 6 }}
-      app.kubernetes.io/component: worker
+      app.kubernetes.io/component: worker-control
   template:
     metadata:
       labels:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
-        app.kubernetes.io/component: worker
+        app.kubernetes.io/component: worker-control
+        opengeni.ai/worker-role: control
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- if .Values.secret.create }}
@@ -63,6 +64,8 @@ spec:
           env:
             - name: OPENGENI_WORKER_HTTP_PORT
               value: {{ .Values.worker.containerPort | quote }}
+            - name: OPENGENI_WORKER_ROLE
+              value: control
             {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
             {{- if .Values.minio.enabled }}
@@ -88,10 +91,10 @@ spec:
             {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).liveness) | nindent 12 }}
           {{- end }}
           resources:
-            {{- toYaml .Values.worker.resources | nindent 12 }}
+            {{- toYaml .Values.worker.control.resources | nindent 12 }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:
-        {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker" "values" .Values.worker) | nindent 8 }}
+        {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker-control" "values" .Values.worker) | nindent 8 }}
       {{- end }}
       {{- with .Values.worker.nodeSelector }}
       nodeSelector:

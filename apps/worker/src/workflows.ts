@@ -2,7 +2,8 @@ export { documentIndexWorkflow, type DocumentIndexWorkflowInput } from "./workfl
 export {
   approvalDecision,
   codexCapacityChanged,
-  interrupt,
+  sessionControl,
+  sessionAttemptQuiesced,
   queueChanged,
   sessionWorkflow,
   userMessage,
@@ -14,6 +15,7 @@ export {
 } from "./workflows/scheduled-tasks";
 export { sandboxReaperWorkflow } from "./workflows/sandbox-reaper";
 export { fileUploadReaperWorkflow } from "./workflows/file-upload-reaper";
+export { sessionWorkflowWakeDispatcherWorkflow } from "./workflows/workflow-wake";
 export {
   rigVerificationWorkflow,
   type RigVerificationWorkflowInput,

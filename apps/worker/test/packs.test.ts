@@ -151,9 +151,9 @@ describe("rig sandbox image precedence (M3): rig > pack > deployment", () => {
     { rig: null, pack: null, expected: DEPLOYMENT, expectModal: undefined }, // deployment default
   ];
 
-  for (const { rig, pack, expected, expectModal } of matrix) {
-    test(`rig=${rig ? "set" : "none"} pack=${pack ? "set" : "none"} → ${expected}`, () => {
-      const resolved = resolve(rig, pack);
+  for (const { rig, pack: packImage, expected, expectModal } of matrix) {
+    test(`rig=${rig ? "set" : "none"} pack=${packImage ? "set" : "none"} → ${expected}`, () => {
+      const resolved = resolve(rig, packImage);
       expect(resolved.dockerImage).toBe(expected);
       expect(resolved.modalImageRef).toBe(expectModal as never);
     });

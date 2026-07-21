@@ -44,6 +44,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -69,8 +70,9 @@ function stubWorkflowClient(): SessionWorkflowClient {
   return {
     signalUserMessage: noop,
     wakeSessionWorkflow: noop,
+    requestSessionWorkflowWakeDispatch: noop,
     signalApprovalDecision: noop,
-    signalInterrupt: noop,
+    signalSessionControl: noop,
     syncScheduledTask: noop,
     deleteScheduledTaskSchedule: noop,
     triggerScheduledTask: noop,
@@ -123,7 +125,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M3 rig binding: freeze at create", () => {
   test("binds the rig's active version and freezes it — a later promote never moves an existing session", async () => {
