@@ -4,17 +4,17 @@ import { readFile } from "node:fs/promises";
 import postgres from "postgres";
 
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const migrationUrl = new URL("../drizzle/0067_transcription_grants.sql", import.meta.url);
+const migrationUrl = new URL("../drizzle/0095_transcription_grants.sql", import.meta.url);
 
 let available = true;
 let blank: BlankTestDatabase | null = null;
 
 beforeAll(async () => {
-  blank = await acquireBlankTestDatabase("migration-0067-transcription");
+  blank = await acquireBlankTestDatabase("migration-0095-transcription");
   if (!blank) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0067-transcription] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
+        "[migration-0095-transcription] OPENGENI_REQUIRE_REAL_DB=1 but PostgreSQL is unavailable",
       );
     }
     available = false;
@@ -25,7 +25,7 @@ afterAll(async () => {
   await blank?.release();
 }, 180_000);
 
-describe("0067 transcription grants migration (real PostgreSQL)", () => {
+describe("0095 transcription grants migration (real PostgreSQL)", () => {
   test("is rolling, schema-safe, RLS-scoped, constrained, and credential-free", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });

@@ -37,6 +37,7 @@ export type {
   FileAsset,
   FileDownloadUrlResponse,
   GitHubAppInfo,
+  GitHubInstallationBinding,
   GitHubRepository,
   GoalSpec,
   CreateKnowledgeMemoryRequest,

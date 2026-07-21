@@ -2689,6 +2689,8 @@ export const githubInstallations = pgTable(
     installationId: integer("installation_id").notNull(),
     accountLogin: text("account_login"),
     accountType: text("account_type"),
+    repositoryScope: text("repository_scope").notNull().default("all"),
+    linkedBySubjectId: text("linked_by_subject_id"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2699,6 +2701,47 @@ export const githubInstallations = pgTable(
     ),
     installation: index("github_installations_installation_idx").on(table.installationId),
     workspace: index("github_installations_workspace_idx").on(table.workspaceId),
+    repositoryScopeCheck: check(
+      "github_installations_repository_scope_check",
+      sql`${table.repositoryScope} in ('all', 'selected')`,
+    ),
+  }),
+);
+
+export const githubInstallationRepositories = pgTable(
+  "github_installation_repositories",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    installationId: integer("installation_id").notNull(),
+    repositoryId: bigint("repository_id", { mode: "number" }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    installationRepository: uniqueIndex("github_install_repo_workspace_installation_repo_idx").on(
+      table.workspaceId,
+      table.installationId,
+      table.repositoryId,
+    ),
+    workspaceInstallation: index("github_install_repo_workspace_installation_idx").on(
+      table.workspaceId,
+      table.installationId,
+    ),
+    workspaceAccount: foreignKey({
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+      name: "github_installation_repositories_workspace_account_fk",
+    }).onDelete("cascade"),
+    installationBinding: foreignKey({
+      columns: [table.workspaceId, table.installationId],
+      foreignColumns: [githubInstallations.workspaceId, githubInstallations.installationId],
+      name: "github_installation_repositories_installation_fk",
+    }).onDelete("cascade"),
   }),
 );
 

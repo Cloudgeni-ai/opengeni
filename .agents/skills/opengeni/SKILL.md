@@ -44,7 +44,7 @@ Then open the smallest source files that answer the question:
 - Files/object storage: `apps/api/src/routes/files.ts`, `packages/storage/src/index.ts`.
 - Deployment/operator sources: `packages/deployment`, `docs/deployment.md`, `deploy/helm/opengeni`, `deploy/terraform/`, and `deploy/stacks/`.
 - Documents/retrieval/knowledge memory: `apps/api/src/routes/documents.ts`, `packages/documents/src/index.ts`, `apps/api/src/mcp/`, and the `knowledge_memories` schema/helpers in `packages/db`.
-- GitHub integration: `apps/api/src/routes/github.ts`, `packages/github/src/index.ts`.
+- GitHub integration: `apps/api/src/routes/github.ts`, shared workspace filtering in `apps/api/src/github-access.ts`, `packages/github/src/index.ts`, and the binding/allowlist helpers plus tables in `packages/db/src/index.ts` / `schema.ts`.
 - Connected Machine (bring-your-own-compute / the `selfhosted` backend): API routes `apps/api/src/routes/machines.ts` and `apps/api/src/routes/enrollments.ts`; services `apps/api/src/sandbox/machines.ts` and `apps/api/src/sandbox/enrollment.ts`; the machine-primary turn branch in `apps/worker/src/activities/agent-turn.ts` and the clone-guard in `packages/runtime/src/index.ts`; the runtime session at `packages/runtime/src/sandbox/selfhosted/`; the on-machine agent + relay in the `agent/` Rust crate; public behavior in `docs/connected-machines.md`; opt-in UI at the `@opengeni/react/machines` subpath.
 - Web usage examples: `apps/web/src/api.ts`, `apps/web/src/types.ts`, relevant UI components.
 - TypeScript SDK: `packages/sdk/src/` (typed client, SSE streaming core with reconnect/replay-by-sequence, proxy re-streaming helpers) and `packages/sdk/README.md`.
@@ -77,7 +77,8 @@ Keep these boundaries explicit:
 Keep these concepts straight while working:
 
 - **Account**: managed billing/ownership container for members, workspaces, credits, and billing mirrors.
-- **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installations, usage, and first-party MCP.
+- **Workspace**: operational data boundary for sessions, events, files, documents, schedules, GitHub installation bindings, usage, and first-party MCP.
+- **GitHub installation binding**: a workspace-local reference to a GitHub App installation plus its repository allowlist. One GitHub installation may be linked to many OpenGeni workspaces; relinking or unlinking one workspace must not mutate another workspace or uninstall the App from GitHub. New bindings require user OAuth and repository-level admin authority, and authorization is rechecked before platform token mint / GitHub-authenticated run startup. Connected Machines are exempt because they use their own git auth.
 - **Access grant**: resolved subject plus permissions for one workspace. Route code should depend on grants and permissions, not on the caller's auth mechanism.
 - **Session**: durable user-facing work container. It owns status, resources, selected tools, model/sandbox settings, event cursor, and active turn.
 - **Turn**: one queued/running unit of agent work inside a session, run as one non-retryable Temporal activity (`runAgentTurn`). Follow-ups, goal continuations, and scheduled task firings become turns. Inside a turn the SDK makes as many model/tool calls as the work needs; run length is bounded by symptoms (no-progress, budget), not by counts or clocks. A graceful worker shutdown preempts an in-flight turn (checkpoint, requeue, resume on a healthy worker) instead of failing the session. See `docs/run-lifecycle.md`.

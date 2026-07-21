@@ -43,6 +43,25 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export { useTranscription, appendFinalTranscript } from "./hooks/use-transcription";
+export type { UseTranscriptionOptions, UseTranscriptionResult } from "./hooks/use-transcription";
+export { initialTranscriptionState, transcriptionReducer } from "./transcription/reducer";
+export type {
+  TranscriptionCommit,
+  TranscriptionError,
+  TranscriptionEvent,
+  TranscriptionEventSink,
+  TranscriptionPartial,
+  TranscriptionPhase,
+  TranscriptionPrivacyRequest,
+  TranscriptionProvider,
+  TranscriptionReducerAction,
+  TranscriptionSession,
+  TranscriptionSessionRequest,
+  TranscriptionState,
+  TranscriptionUsage,
+  TranscriptionWord,
+} from "./transcription/types";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
