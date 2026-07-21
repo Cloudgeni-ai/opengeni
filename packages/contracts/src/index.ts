@@ -1948,6 +1948,41 @@ export const SessionGoalPausedReason = z.enum([
 ]);
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
 
+export const SessionGoalContinuationState = z.enum([
+  "inactive",
+  "scheduled",
+  "running",
+  "blocked",
+  "invariant_broken",
+]);
+export type SessionGoalContinuationState = z.infer<typeof SessionGoalContinuationState>;
+
+export const SessionGoalContinuationReason = z.enum([
+  "goal_inactive",
+  "wake_pending",
+  "continuation_pending",
+  "human_work_pending",
+  "goal_turn_running",
+  "human_turn_running",
+  "workstream_paused",
+  "approval_required",
+  "provider_backpressure",
+  "session_cancelled",
+  "system_work_pending",
+  "missing_obligation",
+]);
+export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
+
+export const SessionGoalContinuation = z.object({
+  state: SessionGoalContinuationState,
+  reason: SessionGoalContinuationReason,
+  wakeRevision: z.number().int().nonnegative(),
+  observedRevision: z.number().int().nonnegative(),
+  nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
+  lastError: z.string().nullable(),
+});
+export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
+
 export const SessionGoal = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -1965,6 +2000,9 @@ export const SessionGoal = z.object({
   noProgressStreak: z.number().int().nonnegative(),
   maxAutoContinuations: z.number().int().positive().nullable(),
   metadata: z.record(z.string(), z.unknown()),
+  // Optional for source compatibility with older clients; the API always
+  // supplies this authoritative continuation projection.
+  continuation: SessionGoalContinuation.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });

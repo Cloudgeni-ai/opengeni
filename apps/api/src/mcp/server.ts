@@ -48,15 +48,15 @@ import {
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
-  setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
   setVariableSetVariable,
   updateScheduledTask,
-  updateSessionGoal,
-  upsertSessionGoal,
+  updateSessionGoalWithEvent,
+  upsertSessionGoalWithEvent,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
   createSignedState,
@@ -725,7 +725,7 @@ function registerGoalTools(
           ? (grant.metadata["turnId"] as string)
           : null;
       await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
-      const { goal, replaced } = await upsertSessionGoal(deps.db, {
+      const { goal, events } = await upsertSessionGoalWithEvent(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
@@ -733,20 +733,11 @@ function registerGoalTools(
         successCriteria: successCriteria ?? null,
         maxAutoContinuations: maxAutoContinuations ?? null,
         createdBy: "agent",
+        actor: "agent",
       });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "goal.set",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            version: goal.version,
-            actor: "agent",
-            replaced,
-          },
-        },
-      ]);
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
       return json(goal);
     },
   );
@@ -760,35 +751,35 @@ function registerGoalTools(
         text: z4.string().min(1).optional(),
         successCriteria: z4.string().min(1).optional(),
         progressNote: z4.string().min(1).optional(),
+        idempotencyKey: z4.string().uuid(),
       },
     },
-    async ({ text, successCriteria, progressNote }) => {
-      await requireSession(deps.db, grant.workspaceId, sessionId);
-      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (!existing) {
-        throw new Error("this session has no goal; use goal_set first");
-      }
-      if (existing.status === "completed") {
-        throw new Error("session goal is completed; use goal_set to start a new goal");
-      }
-      const goal = await updateSessionGoal(deps.db, grant.workspaceId, sessionId, {
-        ...(text !== undefined ? { text } : {}),
-        ...(successCriteria !== undefined ? { successCriteria } : {}),
-      });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+    async ({ text, successCriteria, progressNote, idempotencyKey }) => {
+      const context = exactAgentCommandContext(grant, sessionId);
+      const { goal, events, operationId, replay } = await updateSessionGoalWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
         {
-          type: "goal.updated",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            ...(progressNote ? { progressNote } : {}),
-            version: goal.version,
-            actor: "agent",
+          ...(text !== undefined ? { text } : {}),
+          ...(successCriteria !== undefined ? { successCriteria } : {}),
+          ...(progressNote !== undefined ? { progressNote } : {}),
+          actor: "agent",
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: context.callerAttemptId,
+              sessionId: context.callerSessionId,
+              turnId: context.callerTurnId,
+              executionGeneration: context.callerExecutionGeneration,
+            },
+            operationKey: idempotencyKey,
           },
         },
-      ]);
-      return json(goal);
+      );
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      return json({ ...goal, operationId, replay });
     },
   );
 
@@ -805,17 +796,18 @@ function registerGoalTools(
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "completed",
-        evidence,
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "goal.completed",
-            payload: { goalId: goal.id, evidence, version: goal.version },
-          },
-        ]);
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "completed",
+          evidence,
+          event: { type: "goal.completed", evidence },
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },
@@ -834,25 +826,24 @@ function registerGoalTools(
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "paused",
-        rationale,
-        pausedReason: "agent",
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "paused",
+          rationale,
+          pausedReason: "agent",
+          event: {
             type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "agent",
-              reason: "agent",
-              rationale,
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
+            actor: "agent",
+            reason: "agent",
+            rationale,
           },
-        ]);
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },

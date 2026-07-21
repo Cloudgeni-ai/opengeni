@@ -9,7 +9,7 @@
 // active, …) are translated to plain labels at this boundary; no enum leaks
 // into a rendered string.
 import type { UseGoalResult } from "@opengeni/react";
-import type { SessionStatus } from "@opengeni/sdk";
+import type { SessionGoal } from "@opengeni/sdk";
 import {
   CheckCircle2Icon,
   ChevronDownIcon,
@@ -31,7 +31,14 @@ import type { Session } from "@/types";
 
 /* --- state model ------------------------------------------------------------ */
 
-type GoalPillState = "pursuing" | "held" | "paused" | "attention" | "completed";
+export type GoalPillState =
+  | "pursuing"
+  | "scheduled"
+  | "blocked"
+  | "held"
+  | "paused"
+  | "invariant_broken"
+  | "completed";
 
 type GoalPillMeta = {
   label: string;
@@ -44,6 +51,18 @@ type GoalPillMeta = {
 
 const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   pursuing: { label: "Pursuing goal", icon: ZapIcon, tint: "text-brand", ring: "border-brand/40" },
+  scheduled: {
+    label: "Continuation scheduled",
+    icon: Loader2Icon,
+    tint: "text-brand",
+    ring: "border-brand/40",
+  },
+  blocked: {
+    label: "Continuation blocked",
+    icon: TriangleAlertIcon,
+    tint: "text-status-waiting",
+    ring: "border-status-waiting/40",
+  },
   paused: {
     label: "Goal paused",
     icon: PauseIcon,
@@ -56,11 +75,7 @@ const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
     tint: "text-status-waiting",
     ring: "border-status-waiting/40",
   },
-  // "Needs attention" is the requires_action state — the SAME state the subagent
-  // rows paint with the doctrine "waiting" dot (status-waiting/purple). It wears
-  // that one hue too, so a session that needs you reads as one colour across the
-  // pill and the lineage; its triangle glyph + label set it apart from paused.
-  attention: {
+  invariant_broken: {
     label: "Needs attention",
     icon: TriangleAlertIcon,
     tint: "text-status-waiting",
@@ -74,18 +89,14 @@ const GOAL_PILL_META: Record<GoalPillState, GoalPillMeta> = {
   },
 };
 
-/** A session lifecycle state where the goal is NOT actively being pursued — the
-    agent is waiting on input, or the session has failed or been cancelled. In
-    all three the goal clock must freeze and the pill drops "Pursuing" for an
-    attention cue rather than a live-ticking one under a failure banner. */
-function isSessionStalled(status: SessionStatus): boolean {
-  return status === "requires_action" || status === "failed" || status === "cancelled";
-}
-
-function goalPillState(
+/**
+ * Select the pill state from the goal's authoritative continuation projection.
+ * An active goal without a projection is an invariant failure, never evidence
+ * that the agent is pursuing it.
+ */
+export function goalPillState(
   goalStatus: "active" | "paused" | "completed",
-  sessionStatus: SessionStatus,
-  workstreamPaused: boolean,
+  continuation: SessionGoal["continuation"],
 ): GoalPillState {
   if (goalStatus === "completed") {
     return "completed";
@@ -93,15 +104,69 @@ function goalPillState(
   if (goalStatus === "paused") {
     return "paused";
   }
-  if (workstreamPaused) {
-    return "held";
+  if (!continuation) {
+    return "invariant_broken";
   }
-  // An active goal on a stalled session (needs input / failed / cancelled) is
-  // not "pursuing" — surface it as attention, never a live-ticking pursuit.
-  if (goalStatus === "active" && isSessionStalled(sessionStatus)) {
-    return "attention";
+  if (continuation.state === "running") {
+    // `running` is meaningful only with the goal-owned reason. Keep the UI
+    // truthful even when an older or corrupt server pairs it with human work.
+    return continuation.reason === "goal_turn_running"
+      ? "pursuing"
+      : continuation.reason === "human_turn_running"
+        ? "blocked"
+        : "invariant_broken";
   }
-  return "pursuing";
+  if (continuation.state === "scheduled") {
+    return "scheduled";
+  }
+  if (continuation.state === "blocked") {
+    return continuation.reason === "workstream_paused" ? "held" : "blocked";
+  }
+  return "invariant_broken";
+}
+
+function continuationNotice(
+  state: GoalPillState,
+  continuation: SessionGoal["continuation"],
+): { tone: "info" | "waiting" | "failed"; title: string; body: string } | null {
+  if (!continuation || state === "pursuing" || state === "paused" || state === "completed") {
+    return state === "invariant_broken"
+      ? {
+          tone: "failed",
+          title: "Needs attention",
+          body:
+            continuation?.lastError ?? "The server could not verify how this goal will continue.",
+        }
+      : null;
+  }
+  if (state === "scheduled") {
+    return {
+      tone: "info",
+      title: "Continuation scheduled",
+      body: continuation.nextAttemptAt
+        ? `The next goal turn is scheduled for ${new Date(continuation.nextAttemptAt).toLocaleString()}.`
+        : "The next goal turn is scheduled and waiting for its wake signal.",
+    };
+  }
+  if (state === "held") {
+    return {
+      tone: "waiting",
+      title: "Goal held by workstream",
+      body: "The goal is still active. It will continue when this workstream is resumed.",
+    };
+  }
+  if (state === "blocked") {
+    return {
+      tone: "waiting",
+      title: "Continuation blocked",
+      body: continuation.lastError ?? "The next goal turn is blocked until the blocker clears.",
+    };
+  }
+  return {
+    tone: "failed",
+    title: "Needs attention",
+    body: continuation.lastError ?? "The server reported an invalid continuation state.",
+  };
 }
 
 /* --- elapsed clock ---------------------------------------------------------- */
@@ -153,29 +218,23 @@ function useLiveElapsed(
 
 /* --- the floating pill ------------------------------------------------------ */
 
-export function GoalSurface({ session, goal }: { session: Session; goal: UseGoalResult }) {
+export function GoalSurface({ goal }: { session: Session; goal: UseGoalResult }) {
   const [open, setOpen] = useState(false);
   const record = goal.goal;
   // All hooks run unconditionally (the null-goal early return is below): the
-  // elapsed clock ticks only while the goal is actively being pursued AND the
-  // session is genuinely moving. A session that needs input, has failed, or was
-  // cancelled must NOT keep a clock ticking under its banner.
-  const workstreamPaused = session.effectiveControl.state === "paused";
+  // elapsed clock ticks only while the server-authoritative projection says the
+  // goal turn is running. No session status is used as a pursuit proxy.
   const live =
-    record?.status === "active" && !workstreamPaused && !isSessionStalled(session.status);
+    record?.status === "active" &&
+    record.continuation?.state === "running" &&
+    record.continuation.reason === "goal_turn_running";
   const elapsed = useLiveElapsed(
     record?.createdAt,
     Boolean(live),
     // Freeze the clock whenever it stops ticking: a completed goal shows its
-    // final duration; a paused one the time up to the pause; a stalled session
-    // (needs input / failed / cancelled) freezes at the goal's last update —
-    // never a clock that kept counting past the moment work stopped.
-    record?.status === "completed" ||
-      record?.status === "paused" ||
-      workstreamPaused ||
-      isSessionStalled(session.status)
-      ? (session.effectiveControl.primaryBlocker?.changedAt ?? record?.updatedAt)
-      : null,
+    // final duration; scheduled/blocked/invariant-broken projections freeze at
+    // the goal's last update rather than implying ongoing pursuit.
+    !live ? record?.updatedAt : null,
   );
 
   // Hidden entirely when the session has no goal — the pill is a goal surface,
@@ -184,7 +243,7 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
     return null;
   }
 
-  const state = goalPillState(record.status, session.status, workstreamPaused);
+  const state = goalPillState(record.status, record.continuation);
   const meta = GOAL_PILL_META[state];
   const Icon = meta.icon;
   const canToggle = record.status !== "completed";
@@ -202,11 +261,7 @@ export function GoalSurface({ session, goal }: { session: Session; goal: UseGoal
             )}
           >
             <Icon className={cn("size-3.5 shrink-0", meta.tint)} />
-            <span
-              className={cn("shrink-0 font-medium", state === "pursuing" ? "text-fg" : meta.tint)}
-            >
-              {meta.label}
-            </span>
+            <span className="shrink-0 font-medium text-fg">{meta.label}</span>
             <span aria-hidden className="shrink-0 text-fg-subtle">
               ·
             </span>
@@ -294,6 +349,7 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
     return null;
   }
   const meta = GOAL_PILL_META[state];
+  const notice = continuationNotice(state, record.continuation);
   return (
     <div className="p-3">
       <div className="flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wider text-fg-subtle">
@@ -312,9 +368,9 @@ function GoalDetail({ goal, state }: { goal: UseGoalResult; state: GoalPillState
           Paused because {record.pausedReason ?? record.rationale}
         </p>
       ) : null}
-      {state === "held" ? (
-        <Notice tone="waiting" title="Goal held by workstream">
-          The goal is still active. It will continue when this workstream is resumed.
+      {notice ? (
+        <Notice tone={notice.tone} title={notice.title}>
+          {notice.body}
         </Notice>
       ) : null}
       {record.status === "completed" && record.evidence ? (
