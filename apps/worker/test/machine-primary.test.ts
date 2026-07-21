@@ -110,7 +110,7 @@ describe("D1-lite — establishSelfhostedTurnSession binds the machine, no Modal
         agentId: "enr_1",
         epoch: 4,
         environment: env,
-        workingDir: "/home/jorge/repo",
+        workingDir: "/home/user/repo",
       },
     );
 
