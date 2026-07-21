@@ -296,6 +296,7 @@ describe("clean session control plane", () => {
     });
     expect(pageOne).toMatchObject({ total: 3, hasMore: true });
     expect(pageOne.sessions).toHaveLength(2);
+    expect(pageOne.sessions.every((entry) => entry.latestMessage === null)).toBeTrue();
     expect(pageOne.nextCursor).toBeTruthy();
 
     const pageTwo = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
@@ -303,6 +304,7 @@ describe("clean session control plane", () => {
       cursor: pageOne.nextCursor!,
     });
     expect(pageTwo.sessions).toHaveLength(1);
+    expect(pageTwo.sessions[0]!.latestMessage).toBeNull();
     expect(pageTwo.hasMore).toBe(false);
     expect(new Set([...pageOne.sessions, ...pageTwo.sessions].map((entry) => entry.id))).toEqual(
       new Set([first.id, second.id, third.id]),

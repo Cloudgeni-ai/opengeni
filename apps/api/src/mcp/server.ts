@@ -1310,8 +1310,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description:
-          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
+        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a session_get drill-down route. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -2071,6 +2070,8 @@ function boundedSessionEventMcpLimit(limit: number | undefined): number {
 const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;
 const SESSION_DISCOVERY_MAX_LIMIT = 100;
 const SESSION_DISCOVERY_TEXT_CHARS = 600;
+const SESSION_DISCOVERY_PREVIEW_MAX_BYTES = 16_384;
+const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as const;
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
 
 function boundedSessionDiscoveryLimit(limit: number | undefined): number {
@@ -2322,8 +2323,54 @@ export function capSessionDiscoveryPage(
     };
   });
 
-  let kept = projected;
+  // The database order is already the useful discovery order. Spend the
+  // separate preview budget in that order so the first page retains previews
+  // for the most relevant rows and later rows remain discoverable by status.
+  let budgetBytes = 0;
+  const budgeted = includeLastMessage
+    ? projected.map((session) => {
+        const latestMessage = session.latestMessage;
+        if (!latestMessage || latestMessage.preview === null) return session;
+        const candidateBytes = Buffer.byteLength(latestMessage.preview, "utf8");
+        if (budgetBytes + candidateBytes <= SESSION_DISCOVERY_PREVIEW_MAX_BYTES) {
+          budgetBytes += candidateBytes;
+          return session;
+        }
+        return {
+          ...session,
+          latestMessage: {
+            ...latestMessage,
+            preview: null,
+            previewOmitted: true,
+            previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+            previewDrillDownTool: "session_get" as const,
+          },
+        };
+      })
+    : projected;
+
+  let kept = budgeted;
   const build = () => {
+    const previewBytes = includeLastMessage
+      ? kept.reduce(
+          (total, session) =>
+            total +
+            (session.latestMessage?.preview === null || !session.latestMessage
+              ? 0
+              : Buffer.byteLength(session.latestMessage.preview, "utf8")),
+          0,
+        )
+      : 0;
+    const previewOmittedCount = includeLastMessage
+      ? kept.filter((session) => {
+          const latestMessage = session.latestMessage;
+          return (
+            latestMessage != null &&
+            "previewOmitted" in latestMessage &&
+            latestMessage.previewOmitted === true
+          );
+        }).length
+      : 0;
     const lastKept = kept.at(-1);
     const droppedForByteCap = kept.length < projected.length;
     const sourceLast = lastKept
@@ -2354,6 +2401,19 @@ export function capSessionDiscoveryPage(
       snapshotRevision: page.snapshotRevision,
       updatedAfter: page.updatedAfter,
       updatedThrough: page.updatedThrough,
+      ...(includeLastMessage
+        ? {
+            latestMessagePreviewBudget: {
+              bytes: previewBytes,
+              maxBytes: SESSION_DISCOVERY_PREVIEW_MAX_BYTES,
+              omittedCount: previewOmittedCount,
+              truncated: previewOmittedCount > 0,
+              omissionReason:
+                previewOmittedCount > 0 ? SESSION_DISCOVERY_PREVIEW_OMISSION_REASON : null,
+              drillDownTool: "session_get" as const,
+            },
+          }
+        : {}),
       responseTruncated: droppedForByteCap,
       ...(droppedForByteCap
         ? {
