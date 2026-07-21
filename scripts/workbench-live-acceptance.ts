@@ -13,7 +13,7 @@ import {
 import { assertScreenshotPainted } from "@opengeni/testing";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 
-const REQUIRED_PERMISSIONS = [
+const WORKBENCH_CANARY_PERMISSIONS = [
   "workspace:read",
   "sessions:create",
   "sessions:read",
@@ -23,6 +23,11 @@ const REQUIRED_PERMISSIONS = [
   "stream:view",
   "stream:acknowledge",
   "terminal:attach",
+] as const;
+const OBSERVABILITY_PROBE_PERMISSIONS = [
+  "workspace:read",
+  "sessions:create",
+  "sessions:read",
 ] as const;
 const SETTLED = new Set(["idle", "failed", "error", "cancelled"]);
 const CHANNEL_A_PATH = /\/sessions\/[^/]+\/(?:fs|git|terminal)\//;
@@ -252,8 +257,7 @@ async function main(): Promise<void> {
     }),
   ]);
   const workspaceId = selectWorkspace(args.workspaceId, cookieAccess, tokenAccess);
-  assertWorkspacePermissions(cookieAccess, workspaceId);
-  assertWorkspacePermissions(tokenAccess, workspaceId);
+  assertAcceptancePrincipalScopes(cookieAccess, tokenAccess, workspaceId);
   pass(
     checks,
     "security.auth-preflight",
@@ -545,13 +549,39 @@ function selectWorkspace(
   return workspaceId;
 }
 
-function assertWorkspacePermissions(context: AccessContext, workspaceId: string): void {
+export function assertAcceptancePrincipalScopes(
+  cookieAccess: AccessContext,
+  tokenAccess: AccessContext,
+  workspaceId: string,
+): void {
+  assertWorkspacePermissions(
+    cookieAccess,
+    workspaceId,
+    WORKBENCH_CANARY_PERMISSIONS,
+    "workbench canary",
+  );
+  assertWorkspacePermissions(
+    tokenAccess,
+    workspaceId,
+    OBSERVABILITY_PROBE_PERMISSIONS,
+    "observability probe",
+  );
+}
+
+function assertWorkspacePermissions(
+  context: AccessContext,
+  workspaceId: string,
+  requiredPermissions: readonly string[],
+  principalLabel: string,
+): void {
   const grant = context.workspaceGrants.find((candidate) => candidate.workspaceId === workspaceId);
-  if (!grant) throw new Error("acceptance principal has no workspace grant");
-  const missing = REQUIRED_PERMISSIONS.filter(
+  if (!grant) throw new Error(`acceptance ${principalLabel} has no workspace grant`);
+  const missing = requiredPermissions.filter(
     (permission) => !grant.permissions.includes(permission),
   );
-  if (missing.length > 0) throw new Error(`acceptance principal lacks: ${missing.join(", ")}`);
+  if (missing.length > 0) {
+    throw new Error(`acceptance ${principalLabel} lacks: ${missing.join(", ")}`);
+  }
 }
 
 async function waitForSettled(

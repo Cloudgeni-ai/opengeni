@@ -42,7 +42,7 @@ describe("@opengeni/runtime/sandbox stream-token mint/verify", () => {
   });
 });
 
-describe("negotiateCapabilities — desktop graceful degrade (I8/OD-8)", () => {
+describe("negotiateCapabilities — desktop graceful degrade (stream-token availability contract)", () => {
   // Modal is desktop-capable; when desktop is enabled + warm it normally
   // advertises a vnc-ws transport. The graceful-degrade flag forces transport
   // null when no stream-token secret is resolvable, instead of crashing.
@@ -62,7 +62,7 @@ describe("negotiateCapabilities — desktop graceful degrade (I8/OD-8)", () => {
   });
 
   test("secret ABSENT -> graceful degrade: transport null + a typed reason, NOT a throw", () => {
-    // The whole point of I8: this returns a value, it does not crash.
+    // The whole point of stream-token availability contract: this returns a value, it does not crash.
     const caps = negotiateCapabilities({ ...warmDesktopCtx, streamTokenSecretAvailable: false });
     expect(caps.DesktopStream.transport).toBeNull();
     expect(caps.DesktopStream.reason).toBe("disabled_by_policy");

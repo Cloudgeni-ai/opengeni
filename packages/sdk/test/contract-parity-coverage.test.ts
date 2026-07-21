@@ -27,7 +27,10 @@ import {
   FileAsset as ContractFileAsset,
   FileStatus as ContractFileStatus,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
+  GitHubAppInfo as ContractGitHubAppInfo,
+  GitHubInstallationBinding as ContractGitHubInstallationBinding,
   GitHubRepository as ContractGitHubRepository,
+  GitHubRepositoryScope as ContractGitHubRepositoryScope,
   PackInstallation as ContractPackInstallation,
   PackInstallationStatus as ContractPackInstallationStatus,
   Permission as ContractPermission,
@@ -81,6 +84,9 @@ import type {
   FileAsset,
   FileStatus,
   GitHubRepository,
+  GitHubAppInfo,
+  GitHubInstallationBinding,
+  GitHubRepositoryScope,
   PackInstallation,
   PackInstallationStatus,
   ProductAccessMode,
@@ -113,6 +119,16 @@ describe("SDK / contracts parity (full coverage)", () => {
   test("permission and usage-event literals match the contracts enums", () => {
     expect([...KNOWN_PERMISSIONS].sort()).toEqual([...ContractPermission.options].sort());
     expect([...KNOWN_USAGE_EVENT_TYPES].sort()).toEqual([...ContractUsageEventType.options].sort());
+  });
+
+  test("GitHub installation binding literals and response shapes match", () => {
+    const scopes: readonly GitHubRepositoryScope[] = ContractGitHubRepositoryScope.options;
+    expect(scopes).toEqual(ContractGitHubRepositoryScope.options);
+    const acceptBinding = (
+      value: z.infer<typeof ContractGitHubInstallationBinding>,
+    ): GitHubInstallationBinding => value;
+    const acceptInfo = (value: z.infer<typeof ContractGitHubAppInfo>): GitHubAppInfo => value;
+    expect([acceptBinding, acceptInfo].every((fn) => typeof fn === "function")).toBe(true);
   });
 
   test("status/enum literals match the contracts", () => {

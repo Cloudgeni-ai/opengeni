@@ -5,7 +5,7 @@
 //! [`Platform`](opengeni_agent_platform::Platform) method, and builds a
 //! [`ControlResponse`] that carries the same `request_id` and either the typed
 //! result or a mapped [`AgentError`](opengeni_agent_proto::v1::AgentError) — a
-//! handler error is a value on the response, **never a panic** (dossier §10.1).
+//! handler error is a value on the response, **never a panic**.
 //!
 //! Lifecycle ops (`ping`, `hello`, `resume`, `metrics`, `update_may_proceed`) are
 //! answered by the agent itself rather than the platform: they are about the

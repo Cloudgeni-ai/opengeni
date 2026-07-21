@@ -16,7 +16,7 @@ const MIB = 1024 * 1024;
  * Process-local Temporal execution ceilings.
  *
  * Turn workers host only runAgentTurn. Sixteen remains the measured production
- * density until the OPE-52 sweep proves a different optimum. It is a hard
+ * density until the capacity sweep proves a different optimum. It is a hard
  * ceiling, not an amount the worker promises to admit: the slot supplier below
  * may expose fewer permits when the pod's memory limit cannot safely support
  * all sixteen turns.

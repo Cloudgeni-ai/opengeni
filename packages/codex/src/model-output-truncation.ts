@@ -19,6 +19,10 @@
  * function, so replayed conversation truth is identical to live model input.
  */
 
+import { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
+
+export { MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL } from "./oversized-image-card";
+
 export type ModelHistoryItem = Record<string, unknown>;
 
 export const CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS = 10_000;
@@ -36,6 +40,7 @@ const TOKEN_TRUNCATION_MARKER = /…\d{1,12} tokens truncated…/u;
 const TOOL_RESULT_TYPES = new Set([
   "function_call_result",
   "function_call_output",
+  "computer_call_result",
   "custom_tool_call_output",
   "shell_call_output",
   "apply_patch_call_output",
@@ -53,6 +58,39 @@ const STRUCTURAL_STRING_KEYS = new Set([
   "mimeType",
   "media_type",
 ]);
+const MODEL_TOOL_OUTPUT_MAX_DEPTH = 12;
+const MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES = 255;
+const MODEL_TOOL_OUTPUT_MAX_TOTAL_ENTRIES = 2_048;
+const MODEL_TOOL_OUTPUT_MAX_PROPERTY_KEY_BYTES = 256;
+const MODEL_TOOL_OUTPUT_MAX_STRUCTURAL_STRING_TOKENS = 64;
+const MODEL_TOOL_OUTPUT_STRUCTURAL_STRING_BUDGET_TOKENS = 1_024;
+export const MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES = 8 * 1024 * 1024;
+
+const DEPTH_OMISSION_MARKER =
+  "[OpenGeni omitted subtree: maximum structured tool-output depth exceeded]";
+const CYCLE_OMISSION_MARKER = "[OpenGeni omitted subtree: cyclic tool output]";
+const STRUCTURAL_STRING_OMISSION_MARKER =
+  "[OpenGeni omitted structural string: structural budget exhausted]";
+const TEXT_FIELD_OMISSION_MARKER = /^\[omitted text field \d+ \.\.\.\]$/u;
+const TEXT_ITEMS_OMISSION_MARKER = /^\[omitted \d+ text items \.\.\.\]$/u;
+const STRUCTURAL_ENTRIES_OMISSION_MARKER =
+  /^\[OpenGeni omitted \d+ structured (?:array items|object properties)\]$/u;
+const OPAQUE_PAYLOAD_OMISSION_MARKER =
+  /^\[OpenGeni omitted (?:image|file|encrypted) payload: \d+ bytes exceeded the bounded model-input allowance\]$/u;
+const STRUCTURAL_PROPERTIES_MARKER_KEY = "__opengeni_omitted_properties__";
+
+type OpaqueProtocolKind = "image" | "file" | "encrypted";
+
+type ModelOutputBoundState = {
+  remaining: number;
+  remainingStructural: number;
+  remainingEntries: number;
+  remainingOpaqueBytes: number;
+  opaqueOmissions: number;
+  lastOpaqueOmissionMarker: string | null;
+  omitted: number;
+  seen: WeakSet<object>;
+};
 
 export function modelToolOutputSerializationBudgetTokens(
   policyTokens = DEFAULT_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS,
@@ -133,11 +171,16 @@ export function boundModelToolOutputItems<T extends ModelHistoryItem>(
 }
 
 function boundToolOutputValue(output: unknown, budgetTokens: number): unknown {
+  const state = modelOutputBoundState(budgetTokens);
   if (typeof output === "string") {
+    if (isGeneratedModelOutputMarker(output)) {
+      observeGeneratedMarkerBudget(output, state);
+      return output;
+    }
     // Text-transport computer/view_image tools use a data URL because Chat
     // Completions has no structured image result. It is still image protocol,
     // not textual tool output; truncating its base64 permanently corrupts it.
-    if (isImageDataUrl(output)) return output;
+    if (isImageDataUrl(output)) return boundOpaqueProtocolString(output, state, "image");
     return truncateMiddleWithTokenBudget(output, budgetTokens);
   }
   if (Array.isArray(output)) {
@@ -145,78 +188,139 @@ function boundToolOutputValue(output: unknown, budgetTokens: number): unknown {
     // follow Codex's sequential item policy exactly. Shell/apply adapters can
     // instead return arrays of objects containing stdout/stderr; those share
     // the same total text budget through the generic leaf walker.
-    return output.every(
-      (item) =>
-        item &&
-        typeof item === "object" &&
-        (isTextContentItem(item as Record<string, unknown>) ||
-          isNonTextContentItem(item as Record<string, unknown>)),
-    )
-      ? boundStructuredOutputItems(output, budgetTokens)
-      : boundTextLeaves(output, { remaining: budgetTokens, omitted: 0 });
+    // Inspect only the prefix the boundary can retain. Cardinality itself does
+    // not make an otherwise-valid Responses content list invalid, and scanning
+    // an untrusted 100k-item tail merely to classify it defeats the bound.
+    const isProtocolContent = isResponsesProtocolContentPrefix(output);
+    return isProtocolContent
+      ? boundStructuredOutputItems(output, state)
+      : boundTextLeaves(output, state);
   }
   if (!output || typeof output !== "object") return output;
 
   const record = output as Record<string, unknown>;
-  if (isTextContentItem(record)) {
-    const text = record.text as string;
-    if (isImageDataUrl(text)) return output;
-    const bounded = truncateMiddleWithTokenBudget(text, budgetTokens);
-    return bounded === text ? output : { ...record, text: bounded };
-  }
-  if (isNonTextContentItem(record)) return output;
-
   // Shell/apply-patch result objects are not structured Responses content, but
-  // can contain arbitrarily large stdout/stderr leaves. Preserve their shape
-  // while sharing one sequential text budget across the whole value.
-  const state = { remaining: budgetTokens, omitted: 0 };
+  // can contain arbitrarily large stdout/stderr leaves. Preserve useful shape
+  // while sharing bounded text, structural, entry, depth, and opaque-protocol
+  // budgets across the whole value.
   return boundTextLeaves(record, state);
 }
 
-function boundStructuredOutputItems(items: unknown[], budgetTokens: number): unknown[] {
-  let remaining = budgetTokens;
+function modelOutputBoundState(budgetTokens: number): ModelOutputBoundState {
+  return {
+    remaining: Math.max(0, budgetTokens),
+    remainingStructural: MODEL_TOOL_OUTPUT_STRUCTURAL_STRING_BUDGET_TOKENS,
+    remainingEntries: MODEL_TOOL_OUTPUT_MAX_TOTAL_ENTRIES,
+    remainingOpaqueBytes: MODEL_TOOL_OUTPUT_OPAQUE_PAYLOAD_MAX_BYTES,
+    opaqueOmissions: 0,
+    lastOpaqueOmissionMarker: null,
+    omitted: 0,
+    seen: new WeakSet(),
+  };
+}
+
+function boundStructuredOutputItems(items: unknown[], state: ModelOutputBoundState): unknown[] {
   let omitted = 0;
   let changed = false;
   const out: unknown[] = [];
-  for (const item of items) {
-    if (!item || typeof item !== "object" || !isTextContentItem(item as Record<string, unknown>)) {
-      out.push(item);
-      continue;
+  let processed = 0;
+  // A canonical first pass can contain one typed structural trailer beyond the
+  // ordinary 255 retained parts. Preserve that exact terminal trailer when a
+  // durable/provider/recovery boundary applies the function again. Limiting
+  // this exception to an already-bounded array prevents an arbitrary huge tail
+  // with a marker-shaped last element from bypassing the first-pass count.
+  const terminalStructuralMarker =
+    items.length <= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES + 1 &&
+    isTypedStructuralArrayOmissionMarker(items.at(-1))
+      ? items.at(-1)
+      : null;
+  let preservedTerminalStructuralMarker = false;
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
+      if (terminalStructuralMarker && index <= items.length - 1) {
+        out.push(terminalStructuralMarker);
+        preservedTerminalStructuralMarker = true;
+      }
+      break;
     }
+    processed += 1;
+    state.remainingEntries -= 1;
     const record = item as Record<string, unknown>;
-    const text = record.text as string;
-    if (isImageDataUrl(text)) {
-      out.push(item);
+    if (record.type === "input_text" && isGeneratedModelOutputMarker(record.text)) {
+      const bounded = boundTextLeaves(item, state, 1);
+      out.push(bounded);
+      if (item === terminalStructuralMarker) preservedTerminalStructuralMarker = true;
+      if (bounded !== item) changed = true;
       continue;
     }
-    if (remaining === 0) {
+    if (record.type === "input_text" && state.remaining === 0) {
       omitted += 1;
       changed = true;
       continue;
     }
-    const cost = approximateTokenCount(text);
-    if (cost <= remaining) {
-      out.push(item);
-      remaining -= cost;
-      continue;
-    }
-    out.push({ ...record, text: truncateMiddleWithTokenBudget(text, remaining) });
-    remaining = 0;
-    changed = true;
+    const bounded = boundResponsesProtocolContentItem(record, state);
+    out.push(bounded);
+    if (item === terminalStructuralMarker) preservedTerminalStructuralMarker = true;
+    if (bounded !== item) changed = true;
   }
   if (omitted > 0) {
-    out.push({ type: "input_text", text: `[omitted ${omitted} text items ...]` });
+    out.push({
+      type: "input_text",
+      text: `[omitted ${omitted} text items ...]`,
+    });
+  }
+  const structurallyOmitted = preservedTerminalStructuralMarker ? 0 : items.length - processed;
+  if (structurallyOmitted > 0) {
+    out.push(typedStructuredArrayOmissionMarker(structurallyOmitted));
+    changed = true;
   }
   return changed ? out : items;
 }
 
+function boundResponsesProtocolContentItem(
+  item: Record<string, unknown>,
+  state: ModelOutputBoundState,
+): Record<string, unknown> {
+  const opaqueOmissionsBefore = state.opaqueOmissions;
+  const bounded = boundTextLeaves(item, state, 1) as Record<string, unknown>;
+  // Agents interprets fileId/file_id (and nested image.id) as a provider file
+  // reference. Replacing only that string with our data URL would manufacture
+  // a fictitious file_id. Normalize the whole overflowing image part instead,
+  // removing every ID field while staying inside the Responses content union.
+  if (item.type === "input_image" && state.opaqueOmissions > opaqueOmissionsBefore) {
+    return {
+      type: "input_image",
+      imageUrl: MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL,
+    };
+  }
+  // A marker string in `input_file.file` is interpreted by pinned Agents as a
+  // file_url. Replace the whole content part instead, so every generated
+  // omission remains inside the Responses text/image/file union without
+  // inventing a URL or file ID. This also covers cumulative opaque exhaustion.
+  if (item.type === "input_file" && state.opaqueOmissions > opaqueOmissionsBefore) {
+    return typedProtocolTextMarker(
+      state.lastOpaqueOmissionMarker ??
+        "[OpenGeni omitted file payload: 0 bytes exceeded the bounded model-input allowance]",
+    );
+  }
+  return bounded;
+}
+
 function boundTextLeaves(
   value: unknown,
-  state: { remaining: number; omitted: number },
+  state: ModelOutputBoundState,
   depth = 0,
+  opaqueKind: OpaqueProtocolKind | null = null,
 ): unknown {
   if (typeof value === "string") {
-    if (isImageDataUrl(value)) return value;
+    if (isGeneratedModelOutputMarker(value)) {
+      observeGeneratedMarkerBudget(value, state);
+      return value;
+    }
+    if (opaqueKind || isImageDataUrl(value)) {
+      return boundOpaqueProtocolString(value, state, opaqueKind ?? "image");
+    }
     if (state.remaining === 0) {
       state.omitted += 1;
       return `[omitted text field ${state.omitted} ...]`;
@@ -230,41 +334,255 @@ function boundTextLeaves(
     state.remaining = 0;
     return bounded;
   }
-  if (!value || typeof value !== "object" || depth >= 12) return value;
+  if (!value || typeof value !== "object") return value;
+  if (depth >= MODEL_TOOL_OUTPUT_MAX_DEPTH) return DEPTH_OMISSION_MARKER;
+  if (state.seen.has(value)) return CYCLE_OMISSION_MARKER;
+  state.seen.add(value);
   if (Array.isArray(value)) {
-    return value.map((entry) => boundTextLeaves(entry, state, depth + 1));
+    const out: unknown[] = [];
+    let processed = 0;
+    let changed = false;
+    for (let index = 0; index < value.length; index += 1) {
+      const entry = value[index];
+      if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
+        // A prior pass can add exactly one structural trailer beyond the normal
+        // item allowance. Retain only that final trailer for replay idempotence;
+        // marker-shaped untrusted entries otherwise consume the same caps as
+        // every other entry and cannot form an unbounded bypass.
+        if (
+          index === value.length - 1 &&
+          typeof entry === "string" &&
+          STRUCTURAL_ENTRIES_OMISSION_MARKER.test(entry)
+        ) {
+          out.push(entry);
+        }
+        break;
+      }
+      processed += 1;
+      state.remainingEntries -= 1;
+      const bounded = boundTextLeaves(entry, state, depth + 1, opaqueKind);
+      out.push(bounded);
+      if (bounded !== entry) changed = true;
+    }
+    const omitted = value.length - out.length;
+    if (omitted > 0) {
+      out.push(structuredEntriesOmissionMarker(omitted, "array"));
+      changed = true;
+    }
+    state.seen.delete(value);
+    return changed ? out : value;
   }
   const record = value as Record<string, unknown>;
-  if (isNonTextContentItem(record)) return value;
-  if (isTextContentItem(record)) {
-    const text = boundTextLeaves(record.text, state, depth + 1);
-    return text === record.text ? value : { ...record, text };
+  const recordOpaqueKind = nonTextProtocolKind(record.type) ?? opaqueKind;
+  const entries = Object.entries(record);
+  const out: Record<string, unknown> = {};
+  let processed = 0;
+  let omitted = 0;
+  let changed = false;
+  for (let index = 0; index < entries.length; index += 1) {
+    const [key, entry] = entries[index]!;
+    if (processed >= MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES || state.remainingEntries <= 0) {
+      // As with arrays, a bounded prior pass may have appended one final marker
+      // property after filling the normal property allowance. Preserve only
+      // that terminal marker; forged/interspersed marker properties remain
+      // ordinary bounded input.
+      if (index === entries.length - 1 && isGeneratedStructuralMarkerProperty(key, entry)) {
+        out[key] = entry;
+        break;
+      }
+      omitted += entries.length - index;
+      break;
+    }
+    processed += 1;
+    state.remainingEntries -= 1;
+    if (Buffer.byteLength(key, "utf8") > MODEL_TOOL_OUTPUT_MAX_PROPERTY_KEY_BYTES) {
+      omitted += 1;
+      changed = true;
+      continue;
+    }
+    const childOpaqueKind = opaqueKindForChild(recordOpaqueKind, key);
+    if (typeof entry === "string" && childOpaqueKind) {
+      const bounded = boundTextLeaves(entry, state, depth + 1, childOpaqueKind);
+      out[key] = bounded;
+      if (bounded !== entry) changed = true;
+      continue;
+    }
+    if (typeof entry === "string" && STRUCTURAL_STRING_KEYS.has(key)) {
+      const bounded = boundStructuralString(entry, state);
+      out[key] = bounded;
+      if (bounded !== entry) changed = true;
+      continue;
+    }
+    const bounded = boundTextLeaves(entry, state, depth + 1, childOpaqueKind);
+    out[key] = bounded;
+    if (bounded !== entry) changed = true;
   }
-  return Object.fromEntries(
-    Object.entries(record).map(([key, entry]) => [
-      key,
-      typeof entry === "string" && STRUCTURAL_STRING_KEYS.has(key)
-        ? entry
-        : boundTextLeaves(entry, state, depth + 1),
-    ]),
+  if (omitted > 0) {
+    out[uniqueStructuralMarkerKey(out)] = structuredEntriesOmissionMarker(omitted, "object");
+    changed = true;
+  }
+  state.seen.delete(value);
+  return changed ? out : value;
+}
+
+function boundStructuralString(value: string, state: ModelOutputBoundState): string {
+  if (isGeneratedModelOutputMarker(value)) {
+    observeGeneratedMarkerBudget(value, state);
+    return value;
+  }
+  if (state.remainingStructural === 0) return STRUCTURAL_STRING_OMISSION_MARKER;
+  const cost = approximateTokenCount(value);
+  const allowance = Math.min(
+    MODEL_TOOL_OUTPUT_MAX_STRUCTURAL_STRING_TOKENS,
+    state.remainingStructural,
+  );
+  if (cost <= allowance) {
+    state.remainingStructural -= cost;
+    return value;
+  }
+  state.remainingStructural -= allowance;
+  return truncateMiddleWithTokenBudget(value, allowance);
+}
+
+function boundOpaqueProtocolString(
+  value: string,
+  state: ModelOutputBoundState,
+  kind: OpaqueProtocolKind,
+): string {
+  // A prior pass can only have produced this exact static value. Treat it as a
+  // consumed image allowance so applying the boundary again is byte-idempotent
+  // even when more image fields follow it in the same structured result.
+  if (kind === "image" && value === MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL) {
+    state.remainingOpaqueBytes = 0;
+    return value;
+  }
+  const bytes = Buffer.byteLength(value, "utf8");
+  if (bytes <= state.remainingOpaqueBytes) {
+    state.remainingOpaqueBytes -= bytes;
+    return value;
+  }
+  state.remainingOpaqueBytes = 0;
+  if (kind === "image") {
+    state.opaqueOmissions += 1;
+    return MODEL_TOOL_OUTPUT_OVERSIZED_IMAGE_CARD_DATA_URL;
+  }
+  const marker = `[OpenGeni omitted ${kind} payload: ${bytes} bytes exceeded the bounded model-input allowance]`;
+  state.opaqueOmissions += 1;
+  state.lastOpaqueOmissionMarker = marker;
+  return marker;
+}
+
+function nonTextProtocolKind(value: unknown): OpaqueProtocolKind | null {
+  if (value === "image" || value === "input_image" || value === "computer_screenshot") {
+    return "image";
+  }
+  if (value === "file" || value === "input_file") return "file";
+  if (value === "encrypted_content") return "encrypted";
+  return null;
+}
+
+function opaqueKindForChild(
+  kind: OpaqueProtocolKind | null,
+  key: string,
+): OpaqueProtocolKind | null {
+  if (!kind) return null;
+  const opaqueKeys =
+    kind === "image"
+      ? ["image", "image_url", "imageUrl", "file_id", "fileId", "id", "data", "url", "source"]
+      : kind === "file"
+        ? [
+            "file",
+            "file_data",
+            "fileData",
+            "file_url",
+            "fileUrl",
+            "file_id",
+            "fileId",
+            "id",
+            "data",
+            "url",
+            "content",
+            "source",
+          ]
+        : ["encrypted_content", "content", "data"];
+  return opaqueKeys.includes(key) ? kind : null;
+}
+
+function structuredEntriesOmissionMarker(count: number, container: "array" | "object"): string {
+  return `[OpenGeni omitted ${count} structured ${container === "array" ? "array items" : "object properties"}]`;
+}
+
+function typedProtocolTextMarker(text: string): Record<string, unknown> {
+  return { type: "input_text", text };
+}
+
+function typedStructuredArrayOmissionMarker(count: number): Record<string, unknown> {
+  return typedProtocolTextMarker(structuredEntriesOmissionMarker(count, "array"));
+}
+
+function isTypedStructuralArrayOmissionMarker(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.type === "input_text" &&
+    typeof record.text === "string" &&
+    STRUCTURAL_ENTRIES_OMISSION_MARKER.test(record.text) &&
+    record.text.includes("structured array items")
   );
 }
 
-function isTextContentItem(value: Record<string, unknown>): boolean {
+function isGeneratedModelOutputMarker(value: unknown): value is string {
   return (
-    typeof value.text === "string" &&
-    (value.type === "text" || value.type === "input_text" || value.type === "output_text")
+    typeof value === "string" &&
+    (value === DEPTH_OMISSION_MARKER ||
+      value === CYCLE_OMISSION_MARKER ||
+      value === STRUCTURAL_STRING_OMISSION_MARKER ||
+      TEXT_FIELD_OMISSION_MARKER.test(value) ||
+      TEXT_ITEMS_OMISSION_MARKER.test(value) ||
+      STRUCTURAL_ENTRIES_OMISSION_MARKER.test(value) ||
+      OPAQUE_PAYLOAD_OMISSION_MARKER.test(value))
   );
 }
 
-function isNonTextContentItem(value: Record<string, unknown>): boolean {
+function observeGeneratedMarkerBudget(value: string, state: ModelOutputBoundState): void {
+  if (TEXT_FIELD_OMISSION_MARKER.test(value) || TEXT_ITEMS_OMISSION_MARKER.test(value)) {
+    state.remaining = 0;
+  }
+  if (value === STRUCTURAL_STRING_OMISSION_MARKER) state.remainingStructural = 0;
+  if (OPAQUE_PAYLOAD_OMISSION_MARKER.test(value)) state.remainingOpaqueBytes = 0;
+}
+
+function isGeneratedStructuralMarkerProperty(key: string, value: unknown): boolean {
   return (
-    value.type === "image" ||
-    value.type === "input_image" ||
-    value.type === "file" ||
-    value.type === "input_file" ||
-    value.type === "encrypted_content"
+    key.startsWith(STRUCTURAL_PROPERTIES_MARKER_KEY) &&
+    typeof value === "string" &&
+    STRUCTURAL_ENTRIES_OMISSION_MARKER.test(value)
   );
+}
+
+function uniqueStructuralMarkerKey(record: Record<string, unknown>): string {
+  let key = STRUCTURAL_PROPERTIES_MARKER_KEY;
+  let suffix = 1;
+  while (Object.hasOwn(record, key)) {
+    key = `${STRUCTURAL_PROPERTIES_MARKER_KEY}_${suffix}`;
+    suffix += 1;
+  }
+  return key;
+}
+
+function isResponsesProtocolContentPrefix(output: unknown[]): boolean {
+  if (output.length === 0) return false;
+  const retainedPrefixLength = Math.min(output.length, MODEL_TOOL_OUTPUT_MAX_CONTAINER_ENTRIES);
+  for (let index = 0; index < retainedPrefixLength; index += 1) {
+    const item = output[index];
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const record = item as Record<string, unknown>;
+    if (record.type === "input_text" && typeof record.text === "string") continue;
+    if (record.type === "input_image") continue;
+    if (record.type === "input_file") continue;
+    return false;
+  }
+  return true;
 }
 
 function isImageDataUrl(value: string): boolean {

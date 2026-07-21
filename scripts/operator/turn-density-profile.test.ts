@@ -34,7 +34,7 @@ import {
 } from "./turn-density-profile";
 
 describe("turn density profile release-gate helpers", () => {
-  test("defaults to the exact OPE-52 density candidates", () => {
+  test("defaults to the exact density candidates", () => {
     expect(parseDensitySweep()).toEqual([1, 2, 4, 8, 12, 16, 24, 32]);
     expect(DEFAULT_DENSITIES).toEqual([1, 2, 4, 8, 12, 16, 24, 32]);
   });

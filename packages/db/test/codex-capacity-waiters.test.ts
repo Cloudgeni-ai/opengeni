@@ -231,7 +231,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("OPE-21 durable Codex capacity waits", () => {
+describe("credential allocator durable Codex capacity waits", () => {
   test("bounded unknown-reset backoff is deterministic and capped", () => {
     expect(codexCapacityRefreshBackoffMs(-1)).toBe(60_000);
     expect(codexCapacityRefreshBackoffMs(0)).toBe(60_000);

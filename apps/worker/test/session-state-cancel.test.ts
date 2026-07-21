@@ -9,10 +9,14 @@ const controlApplications: Array<{
   attemptId: string;
 }> = [];
 const quiescenceReceipts: Array<{
+  accountId?: string;
   workspaceId: string;
   sessionId: string;
   attemptId: string;
   temporalWorkflowId: string;
+  temporalWorkflowRunId?: string;
+  temporalActivityId?: string;
+  allowUninterrupted?: boolean;
 }> = [];
 
 describe("session-state interrupt settlement", () => {
@@ -29,10 +33,6 @@ describe("session-state interrupt settlement", () => {
           wakeSessionWorkflow: null,
         }) as any,
       {
-        markSessionAttemptQuiesced: mock(async (_db, input) => {
-          quiescenceReceipts.push(input);
-          return [];
-        }),
         settleSessionAttemptInterruptions: mock(
           async (_db, workspaceId: string, sessionId: string, attemptId: string) => {
             controlApplications.push({ workspaceId, sessionId, attemptId });
@@ -103,7 +103,7 @@ describe("session-state interrupt settlement", () => {
     });
   });
 
-  test("records the exact quiescence boundary without replaying logical settlement", async () => {
+  test("keeps the v1 receipt command replay-compatible without repeating logical settlement", async () => {
     quiescenceReceipts.length = 0;
     controlApplications.length = 0;
     const activities = createSessionStateActivities(
@@ -145,5 +145,105 @@ describe("session-state interrupt settlement", () => {
       },
     ]);
     expect(controlApplications).toHaveLength(0);
+  });
+
+  test("persists and publishes an exact activity-owned quiescence proof", async () => {
+    quiescenceReceipts.length = 0;
+    publishedEvents.length = 0;
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {},
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        markSessionAttemptQuiesced: mock(async (_db, input) => {
+          quiescenceReceipts.push(input);
+          return [
+            {
+              type: "session.queue.changed",
+              payload: { operation: "attempt_quiesced" },
+            },
+          ] as any;
+        }),
+        publishDurableSessionEvents: mock(
+          async (_bus, _workspaceId, _sessionId, events: typeof publishedEvents) => {
+            publishedEvents.push(...events);
+          },
+        ),
+      },
+    );
+
+    await activities.persistSessionAttemptQuiescence({
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      workflowId: "workflow-1",
+      workflowRunId: "run-1",
+      activityId: "activity-1",
+    });
+
+    expect(quiescenceReceipts).toEqual([
+      {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        temporalWorkflowId: "workflow-1",
+        temporalWorkflowRunId: "run-1",
+        temporalActivityId: "activity-1",
+        allowUninterrupted: true,
+      },
+    ]);
+    expect(publishedEvents).toEqual([
+      {
+        type: "session.queue.changed",
+        payload: { operation: "attempt_quiesced" },
+      },
+    ]);
+  });
+
+  test("does not retry an authoritative receipt because NATS fanout failed", async () => {
+    quiescenceReceipts.length = 0;
+    const fanoutErrors: unknown[] = [];
+    const activities = createSessionStateActivities(
+      async () =>
+        ({
+          db: fakeDb,
+          bus: { publish: async () => undefined },
+          settings: {},
+          observability: {
+            error: (_message: string, attributes: unknown) => fanoutErrors.push(attributes),
+          },
+          wakeSessionWorkflow: null,
+        }) as any,
+      {
+        markSessionAttemptQuiesced: mock(async (_db, input) => {
+          quiescenceReceipts.push(input);
+          return [];
+        }),
+        publishDurableSessionEvents: mock(async () => {
+          throw new Error("NATS unavailable after receipt commit");
+        }),
+      },
+    );
+
+    await expect(
+      activities.persistSessionAttemptQuiescence({
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        attemptId: "attempt-1",
+        workflowId: "workflow-1",
+        workflowRunId: "run-1",
+        activityId: "activity-1",
+      }),
+    ).resolves.toBeUndefined();
+    expect(quiescenceReceipts).toHaveLength(1);
+    expect(fanoutErrors).toHaveLength(1);
   });
 });

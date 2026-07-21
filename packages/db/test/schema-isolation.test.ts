@@ -3,8 +3,7 @@ import { execFileSync } from "node:child_process";
 import postgres from "postgres";
 import { migrate, runMigrations } from "../src/migrate";
 
-// Step I (§7.7 + §7.8 runtime half) — schema-isolation re-confirmation (SPIKE-1
-// F1, productized). Proves the embedded dedicated-schema path through the REAL
+// Schema-isolation reconfirmation. Proves the embedded dedicated-schema path through the REAL
 // `migrate()` SDK entry point:
 //
 //   1. `migrate(DB_URL, "opengeni")` lands EVERY table + RLS policy in the
@@ -13,7 +12,7 @@ import { migrate, runMigrations } from "../src/migrate";
 //      pgTable rewrite and NO per-statement SQL rewrite.
 //   2. Re-running the chain under the SAME dedicated schema is IDEMPOTENT — the
 //      load-bearing `current_schema()` guard fix (a `'public'`-pinned guard
-//      would fail re-run with "policy ... already exists"; this is the Fork-6
+//      would fail re-run with "policy ... already exists"; this is the migration-replay
 //      silent-failure hazard the substitution closes).
 //   3. The opengeni_private SECURITY-DEFINER helpers exist (RLS GUC readers).
 //   4. STANDALONE (`migrate(DB_URL)` with no schema) keeps everything in
@@ -118,7 +117,7 @@ function publicUrl(database: string): string {
   return `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/${database}`;
 }
 
-describe("Step I — embedded dedicated-schema isolation (SPIKE-1 F1, productized)", () => {
+describe("embedded dedicated-schema isolation", () => {
   test("migrate(url, 'opengeni') isolates all tables + policies into the dedicated schema, idempotently; standalone stays in public", async () => {
     if (!available) {
       // eslint-disable-next-line no-console

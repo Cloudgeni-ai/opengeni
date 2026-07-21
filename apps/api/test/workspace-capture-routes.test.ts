@@ -13,7 +13,7 @@ import {
   type CaptureStoragePort,
 } from "../src/routes/workspace-capture";
 
-// M2 capture-read routes (dossier §10.3). Two layers of coverage, both hermetic:
+// M2 capture-read routes. Two layers of coverage, both hermetic:
 //
 //   (1) ROUTE DISCIPLINE (static): grant-first (files:read) BEFORE any query read
 //       or DB call — the same auth-before-anything invariant the channel-a and

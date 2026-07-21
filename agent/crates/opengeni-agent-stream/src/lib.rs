@@ -2,7 +2,7 @@
 //!
 //! The agent dials OUT to a stateless relay edge and pumps interactive PTY bytes
 //! and desktop framebuffer frames over it, fate-isolated from the NATS control
-//! plane (dossier §10.1/§10.5). This crate is the agent's end of that plane:
+//! plane. This crate is the agent's end of that plane:
 //!
 //! * [`transport`] — the [`RelayTransport`](transport::RelayTransport) seam: a
 //!   duplex datagram channel. The CONCRETE day-1 path is `wss`

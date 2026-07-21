@@ -9,6 +9,7 @@ type WorkflowControlActivities = Pick<
   | "getCodexCapacityWait"
   | "markSessionIdle"
   | "peekSessionWork"
+  | "persistSessionAttemptQuiescence"
   | "reconcileCodexCapacityWait"
   | "recoverDispatch"
   | "settleSessionInterruptions"
@@ -49,7 +50,7 @@ export function turnTaskQueue(baseTaskQueue: string): string {
   return `${baseTaskQueue}-turns`;
 }
 
-export function turnActivityForTaskQueue(baseTaskQueue: string) {
+export function turnActivityForTaskQueue(baseTaskQueue: string, receiptGatedCancellation = true) {
   return proxyActivities<Pick<typeof activities, "runAgentTurn">>({
     taskQueue: turnTaskQueue(baseTaskQueue),
     // Agent segments legitimately run for days. A started turn heartbeats;
@@ -57,12 +58,16 @@ export function turnActivityForTaskQueue(baseTaskQueue: string) {
     // accepts them and performs the atomic claim.
     startToCloseTimeout: "30 days",
     heartbeatTimeout: "2 minutes",
-    // Pause/Steer may complete the durable control transition immediately,
-    // but the session workflow must remain open until the old turn activity is
-    // physically gone. Leaving this implicit uses Temporal's try-cancel wire
-    // default: the activity promise rejects as soon as cancellation is
-    // requested and the workflow can close while the worker keeps streaming.
-    cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+    // Pause/Steer first closes the exact attempt in Postgres, then asks
+    // Temporal to deliver cancellation. The workflow must not wait for the
+    // Temporal activity promise: a provider cleanup promise can outlive the
+    // fenced activity body, and Temporal terminalization is not proof that
+    // sandbox tools or processes are physically quiescent. The activity owns
+    // that proof and writes an exact receipt after its hard tool fence; the
+    // receipt transaction wakes the workflow to admit a replacement.
+    cancellationType: receiptGatedCancellation
+      ? ActivityCancellationType.TRY_CANCEL
+      : ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
     retry: { maximumAttempts: 1 },
   });
 }

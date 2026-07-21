@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CI install-smoke (Unix): prove install.sh PARSES + VERIFIES + INSTALLS the
 # freshly-built binary, against a locally-signed mock release. Used by agent-ci.yml
-# on ubuntu-latest + macos-26 (dossier §23.3). Requires `minisign` on PATH.
+# on ubuntu-latest + macos-26. Requires `minisign` on PATH.
 #
 # It generates a THROWAWAY minisign key, signs the just-built binary, builds a mock
 # release tree, embeds the throwaway pubkey into a COPY of install.sh (so the

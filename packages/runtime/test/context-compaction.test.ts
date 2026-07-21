@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { runInNewContext } from "node:vm";
+import OpenAI from "openai";
+import {
+  codexRequestStorage,
+  codexSubscriptionFetch,
+  isCodexTransportError,
+} from "@opengeni/codex";
 import {
   COMPACT_USER_MESSAGE_MAX_TOKENS,
   COMPACTION_PROMPT,
@@ -19,7 +25,9 @@ import {
   clampCompactionThresholdRatio,
   decideCompaction,
   estimateCompleteModelInput,
+  estimateItemTokens,
   estimateSerializedValueTokens,
+  estimateTextTokens,
   findCompactionNeededError,
   compactionReplacementFingerprint,
   latestCompactionReplacementFingerprint,
@@ -59,11 +67,30 @@ function call(id: string, name = "shell"): CompactionItem {
 }
 
 function result(id: string, output = "ok"): CompactionItem {
-  return { type: "function_call_result", callId: id, status: "completed", output };
+  return {
+    type: "function_call_result",
+    callId: id,
+    status: "completed",
+    output,
+  };
 }
 
 function bigUser(tokens: number, char: string): CompactionItem {
   return user(char.repeat(tokens * 4));
+}
+
+function hasLoneSurrogate(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text.charCodeAt(index);
+    if (current >= 0xd800 && current <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) return true;
+      index += 1;
+    } else if (current >= 0xdc00 && current <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const WINDOW = 1_050_000;
@@ -118,7 +145,7 @@ describe("non-materializing plain JSON length", () => {
       // by one byte on some CPUs, while Node and TextEncoder report three.
       const encodedLength = new TextEncoder().encode(value).length;
       expect(utf8ByteLength(value)).toBe(encodedLength);
-      expect(estimateSerializedValueTokens(value)).toBe(Math.ceil(encodedLength / 4));
+      expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(value));
     }
 
     const descriptors: unknown[] = [
@@ -128,9 +155,7 @@ describe("non-materializing plain JSON length", () => {
       [undefined, "three", null],
     ];
     for (const value of descriptors) {
-      expect(estimateSerializedValueTokens(value)).toBe(
-        Math.ceil(Buffer.byteLength(JSON.stringify(value)!, "utf8") / 4),
-      );
+      expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(JSON.stringify(value)!));
     }
   });
 
@@ -201,9 +226,7 @@ describe("non-materializing plain JSON length", () => {
       toJSON: () => ({ text: "🦄".repeat(256 * 1024) }),
     };
     const serialized = JSON.stringify(value);
-    expect(estimateSerializedValueTokens(value)).toBe(
-      Math.ceil(Buffer.byteLength(serialized, "utf8") / 4),
-    );
+    expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(serialized));
   });
 });
 
@@ -300,7 +323,7 @@ describe("single portable compaction threshold", () => {
     expect(decision.shouldCompact).toBe(true);
   });
 
-  test("uses char/4 estimate only when there is no provider signal yet", () => {
+  test("uses the conservative local estimate only when there is no provider signal yet", () => {
     const items = [bigUser(THRESHOLD + 1, "x")];
     const decision = decideCompaction({
       items,
@@ -339,6 +362,25 @@ describe("single portable compaction threshold", () => {
 });
 
 describe("complete outgoing model-input accounting", () => {
+  test("uses one conservative estimator for ASCII, CJK, emoji, and mixed schemas", () => {
+    expect(estimateTextTokens("abcdefgh")).toBe(2);
+    expect(estimateTextTokens("界".repeat(8))).toBe(8);
+    expect(estimateTextTokens("🙂".repeat(8))).toBe(16);
+    expect(estimateTextTokens("abcd界🙂")).toBe(4);
+
+    const multilingual = {
+      name: "分析",
+      description: "🙂".repeat(100),
+      parameters: { type: "object", properties: { 城市: { type: "string" } } },
+    };
+    expect(estimateSerializedValueTokens(multilingual)).toBe(
+      estimateTextTokens(JSON.stringify(multilingual)),
+    );
+    expect(estimateItemTokens(user("界🙂".repeat(100)))).toBe(
+      estimateTextTokens(JSON.stringify(user("界🙂".repeat(100)))),
+    );
+  });
+
   test("counts history, instructions, and tool schemas before a provider anchor exists", () => {
     const estimate = estimateCompleteModelInput({
       current: {
@@ -374,6 +416,23 @@ describe("complete outgoing model-input accounting", () => {
     expect(estimate.tokens).toBe(12_345 + estimate.appendedAfterModelTokens);
   });
 
+  test("a provider anchor adds multilingual trailing output without UTF-16 discounting", () => {
+    const prior = {
+      input: [user("question"), assistant("answer"), call("c1")],
+      instructionsTokens: 100,
+      toolSchemaTokens: 200,
+    };
+    const trailing = result("c1", "界🙂".repeat(1_000));
+    const estimate = estimateCompleteModelInput({
+      current: { ...prior, input: [...prior.input, trailing] },
+      provider: { revision: 3, totalTokens: 1_000 },
+      providerRequestFootprint: prior,
+    });
+    expect(estimate.source).toBe("provider_plus_local");
+    expect(estimate.appendedAfterModelTokens).toBeGreaterThanOrEqual(3_000);
+    expect(estimate.tokens).toBe(1_000 + estimate.appendedAfterModelTokens);
+  });
+
   test("adds positive instruction and tool-schema growth to a provider anchor", () => {
     const prior = {
       input: [user("question"), assistant("answer")],
@@ -403,11 +462,21 @@ describe("durable compaction progress identity", () => {
   test("is stable across PostgreSQL JSONB object-key reordering", () => {
     expect(
       compactionReplacementFingerprint([
-        { type: "message", role: "user", content: "same", nested: { z: 1, a: 2 } },
+        {
+          type: "message",
+          role: "user",
+          content: "same",
+          nested: { z: 1, a: 2 },
+        },
       ]),
     ).toBe(
       compactionReplacementFingerprint([
-        { nested: { a: 2, z: 1 }, content: "same", role: "user", type: "message" },
+        {
+          nested: { a: 2, z: 1 },
+          content: "same",
+          role: "user",
+          type: "message",
+        },
       ]),
     );
   });
@@ -506,7 +575,21 @@ describe("codex-parity rebuild", () => {
     expect(content).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
     expect(content.startsWith("aaaa")).toBe(true);
     expect(content.endsWith("TAIL")).toBe(true);
-    expect(Math.ceil(content.length / 4)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+    expect(estimateTextTokens(content)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+  });
+
+  test("truncates CJK and emoji under the same budget without splitting surrogates", () => {
+    for (const long of [
+      `頭${"界".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS + 2_000)}尾`,
+      `HEAD${"🙂".repeat(COMPACT_USER_MESSAGE_MAX_TOKENS)}TAIL`,
+    ]) {
+      const rebuilt = buildCompactionReplacementHistory([user(long)], "summary");
+      const content = String(rebuilt[0]!.content);
+      expect(content).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
+      expect(estimateTextTokens(content)).toBeLessThanOrEqual(COMPACT_USER_MESSAGE_MAX_TOKENS);
+      expect(hasLoneSurrogate(content)).toBeFalse();
+      expect(content).not.toContain("�");
+    }
   });
 
   test("shares one 20k budget across newest retained user messages", () => {
@@ -521,7 +604,7 @@ describe("codex-parity rebuild", () => {
     expect(rebuilt).toHaveLength(3);
     expect(String(rebuilt[0]!.content).startsWith("b")).toBe(true);
     expect(String(rebuilt[0]!.content)).toContain(USER_MESSAGE_TRUNCATION_MARKER.trim());
-    expect(Math.ceil(String(rebuilt[0]!.content).length / 4)).toBeLessThanOrEqual(10_000);
+    expect(estimateTextTokens(String(rebuilt[0]!.content))).toBeLessThanOrEqual(10_000);
     expect(rebuilt[1]!.content).toBe(newest.content);
     expect(isCompactionSummary(rebuilt[2])).toBe(true);
   });
@@ -636,7 +719,10 @@ describe("provider-proof compaction transcript", () => {
       expect.objectContaining({ type: "function_call", call_id: "call_vern" }),
     );
     expect(seenInput).toContainEqual(
-      expect.objectContaining({ type: "function_call_output", call_id: "call_vern" }),
+      expect.objectContaining({
+        type: "function_call_output",
+        call_id: "call_vern",
+      }),
     );
     expect(JSON.stringify(seenInput)).not.toContain("callId");
   });
@@ -803,6 +889,131 @@ describe("provider-proof compaction transcript", () => {
     });
   });
 
+  test("propagates an HTTP-200 Codex terminal failure instead of calling it an empty summary", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://chatgpt.com/backend-api",
+      // Deliberately leave the normal SDK retry budget enabled. The adapter's
+      // x-should-retry:false must make this accepted terminal response a
+      // single request.
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(
+          'data: {"type":"response.failed","response":{"id":"resp_terminal_failure","status":"failed","error":{"type":"server_error","code":"checkpoint_failed","message":"provider checkpoint worker failed"}}}\n\n',
+          { status: 200, headers: { "content-type": "text/event-stream" } },
+        );
+      }),
+    });
+    let observed: unknown;
+    try {
+      await codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "refreshed-test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+        },
+        () =>
+          summarizeForCompaction(
+            testSettings({ openaiProvider: "openai" }),
+            buildCompactionPromptInput([user("preserve the active history")]),
+            {
+              client,
+              api: "responses",
+              model: "gpt-5.6-sol",
+            },
+          ),
+      );
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(calls).toBe(1);
+    expect(observed).not.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(observed).toBeInstanceOf(CompactionProviderResponseError);
+    expect(observed).toMatchObject({
+      diagnostics: {
+        httpStatus: 502,
+        responseStatus: "failed",
+        responseId: "resp_terminal_failure",
+        eventType: "response.failed",
+        type: "server_error",
+        code: "checkpoint_failed",
+      },
+    });
+    expect(isCodexTransportError((observed as CompactionProviderResponseError).cause)).toBe(true);
+    expect((observed as Error).message).not.toContain("provider checkpoint worker failed");
+  });
+
+  test("classifies a null HTTP-200 Codex stream as provider failure, never empty summary", async () => {
+    let calls = 0;
+    const client = new OpenAI({
+      apiKey: "test-key",
+      baseURL: "https://chatgpt.com/backend-api",
+      maxRetries: 2,
+      fetch: codexSubscriptionFetch(async () => {
+        calls += 1;
+        return new Response(null, {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }),
+    });
+    let observed: unknown;
+    try {
+      await codexRequestStorage.run(
+        {
+          clientVersion: "test",
+          getToken: async () => ({
+            accessToken: "test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          refresh: async () => ({
+            accessToken: "refreshed-test-token",
+            chatgptAccountId: "test-account",
+            isFedramp: false,
+          }),
+          resolveModel: (model) => model,
+        },
+        () =>
+          summarizeForCompaction(
+            testSettings({ openaiProvider: "openai" }),
+            buildCompactionPromptInput([user("preserve the active history")]),
+            {
+              client,
+              api: "responses",
+              model: "gpt-5.6-sol",
+            },
+          ),
+      );
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(calls).toBe(1);
+    expect(observed).not.toBeInstanceOf(EmptyCompactionSummaryError);
+    expect(observed).toBeInstanceOf(CompactionProviderResponseError);
+    expect(observed).toMatchObject({
+      diagnostics: {
+        httpStatus: 502,
+        code: "invalid_sse_terminal",
+        type: "invalid_sse_terminal",
+      },
+    });
+    expect(isCodexTransportError((observed as CompactionProviderResponseError).cause)).toBe(true);
+  });
+
   test("renders the full checkpoint input without silently dropping old records", () => {
     const rendered = renderCompactionPromptInputForChat(
       buildCompactionPromptInput([
@@ -856,7 +1067,11 @@ describe("extractResponseOutputText", () => {
   test("skips input-echo message items", () => {
     const response = {
       output: [
-        { type: "message", role: "user", content: [{ type: "input_text", text: "ECHOED PROMPT" }] },
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "ECHOED PROMPT" }],
+        },
         {
           type: "message",
           role: "assistant",

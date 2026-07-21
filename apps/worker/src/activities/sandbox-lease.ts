@@ -638,7 +638,7 @@ export async function terminateProviderBox(
     return true;
   }
 
-  // CRITICAL SAFETY (bring-your-own-compute, dossier §19/§21): NEVER provider-stop
+  // CRITICAL SAFETY (bring-your-own-compute): NEVER provider-stop
   // a selfhosted box. The "box" is a user's PHYSICAL machine — you cannot kill it,
   // and a delete()/kill() reaching the agent would be catastrophic. The reaper
   // DRAINS the lease to cold only (refcount→0 → draining → this returns true so

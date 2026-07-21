@@ -1,0 +1,13 @@
+[data-queue-harness] {
+  min-height: 100dvh;
+  background: radial-gradient(
+      circle at 50% 120%,
+      color-mix(in oklch, var(--color-brand) 9%, transparent),
+      transparent 42%
+    ),
+    var(--color-bg);
+}
+
+[data-queue-harness-frame] {
+  height: min(52rem, calc(100dvh - 2rem));
+}

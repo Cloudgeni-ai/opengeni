@@ -1,7 +1,7 @@
 // @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
 //
 // This module is the load-bearing pre-req for the API-direct control plane
-// (docs/design/sandbox-surfacing). It exposes the sandbox client factory plus
+// (docs/connected-machines.md). It exposes the sandbox client factory plus
 // the resume / recovery-envelope helpers that the API needs to touch a box by
 // id (resume-by-id, file/exec/port ops) WITHOUT importing the @openai/agents
 // agent-loop graph.

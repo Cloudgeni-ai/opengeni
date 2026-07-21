@@ -12,7 +12,7 @@
 // (never an app context), notifications flow through an optional `onNotify` prop
 // (no `sonner` import), and every surface renders with package primitives + og
 // tokens only. `apps/web` consumes this through the exact public surface an
-// external embedder (cloudgeni #1577) uses — that is criterion F1.
+// external embedder uses — that is criterion F1.
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Popover } from "radix-ui";
 import type { SessionEvent } from "@opengeni/sdk";
@@ -123,7 +123,7 @@ function sandboxProvisionInFlight(events: SessionEvent[]): boolean {
 }
 
 export type WorkspaceMachine = {
-  /** The derived live/waking/offline chip model (dossier §3 #10). */
+  /** The derived live/waking/offline chip model. */
   chip: MachineChip;
   /** The machine these surfaces are bound to (the Modal group box or a
    *  self-hosted machine), or null while the fleet is still resolving. */
@@ -240,7 +240,7 @@ export function useSandboxWorkspaceTabs(
   // The FS is writable only when it's live AND not read-only. A self-hosted box
   // that's offline (or any read-only advertisement) or a capture-served cold tree
   // must not offer create/rename/delete/edit affordances — you cannot mutate a
-  // machine you can't reach (dossier §12-A2/C3). Tree-structure ops need a warm
+  // machine you can't reach (C3). Tree-structure ops need a warm
   // writable box; content editing on a cold CLOUD box is the wake-on-edit path in
   // the editor, not tree mutation.
   const fsReadOnly = capabilities?.FileSystem.readOnly ?? false;
@@ -787,7 +787,7 @@ function chipDotClass(state: MachineChip["state"]): string {
  * with a popover carrying the machine identity, connection state, the "shown as
  * of <time>" staleness note, the shared-session disclosure, and a retry when the
  * fleet failed to resolve (the old per-surface machine bar + Sandbox info tab,
- * folded into one header affordance — dossier §10.6 recommendation).
+ * folded into one header affordance — recommendation).
  */
 function MachineStateChip({
   chip,

@@ -166,7 +166,7 @@ function mergeDiffs(
  * `GitFileDiff[]` (per-file hunks with per-line old/new numbers, rename
  * detection, binary flag, add/del counts) plus branch + ahead/behind. When the
  * box is warm the `git diff` runs in-box (API-direct); when it is cold/offline the
- * diff is served from the turn-end capture instead (dossier §10.4). Refreshes on
+ * diff is served from the turn-end capture instead. Refreshes on
  * `git.changed`; reconciles live in place on the cold→warm transition.
  */
 export function useSandboxGit(

@@ -73,7 +73,7 @@ same-turn holder is reused before either pin policy or future membership
 filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
 and `drain_then_next` remain explicit sticky product policies.
 
-Named pool membership is intentionally not an OPE-21 concept. The generic
+Named pool membership is intentionally not a credential allocator concept. The generic
 `CodexCredentialLeasePolicyScopeResolver<TPolicyScope>`,
 `CodexCredentialLeaseCandidateFilter<TPolicyScope, TUnavailableDiagnostic>`,
 and `CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>` seams
@@ -81,7 +81,7 @@ let a downstream accepted-turn policy pass a private scope such as
 `{primaryPoolId,fallbackPoolIds,policyHash}` into the existing rotation-row
 transaction. The filter chooses candidates from exactly one resolved primary or
 fallback scope and may return downstream-owned per-pool unavailable/reset
-diagnostics; OPE-21 never union-ranks memberships and stores no pool table or
+diagnostics; credential allocator never union-ranks memberships and stores no pool table or
 membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
 those diagnostics. The new-allocation filter runs only after exact live/frozen
 same-turn reuse, so a later membership/default change cannot move an already
@@ -93,7 +93,7 @@ false excludes the row from new automatic, pinned, proactive, and reactive
 selection without changing `status`, encrypted credentials, refresh behavior,
 or quota history. An exact same-turn live lease or frozen approval/preemption
 checkpoint may continue on that healthy row; reconnect and token refresh never
-flip allocator eligibility. OPE-24 owns toggle OCC/audit and product controls.
+flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it
@@ -119,8 +119,11 @@ If no healthy candidate exists for an active goal, `armCodexCapacityWait`
 atomically marks the blocked turn failed once, releases its credential lease,
 idles the session with reason `codex_capacity`, writes the audit events, and
 creates or advances one `codex_capacity_waiters` row. The common lock order is
-workspace rotation row → session → goal → blocked turn → live credential lease
-(when reactive) → waiter. A reactive arm must still own the exact
+workspace rotation row → `workspace_inference_controls FOR SHARE` → actual
+workspace `FOR KEY SHARE` → session → exact turn → exact attempt → goal → live
+credential lease (when reactive) → waiter. Arming re-evaluates effective control
+under that shared control lock and becomes an event-free stale no-op if Pause or
+an unsettled control interruption won. A reactive arm must still own the exact
 holder/generation and worker-redispatch fence. The row records goal/control
 generation, accepted `policyHash`, the earliest authoritative reset (when known),
 bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
@@ -151,11 +154,13 @@ is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
 reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
-`reconcileCodexCapacityWait` atomically rechecks human queue, effective Pause,
-goal, policy, blocked-turn identity, and duplicate-work fences before recording
-the typed capacity-resume update; ordinary attempt claim repeats admission before
-provider/model/tool/billing work starts. Reset/boost entitlement redemption is
-never automatic.
+`reconcileCodexCapacityWait` takes the same shared control/workspace prefix and
+atomically rechecks human queue, effective Pause or unsettled control, goal,
+policy, blocked-turn identity, and duplicate-work fences before recording the
+typed capacity-resume update. If Pause committed first, the waiter is superseded
+without a continuation; if reconciliation committed first, a later Pause still
+fences ordinary attempt claim before provider/model/tool/billing work starts.
+Reset/boost entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:

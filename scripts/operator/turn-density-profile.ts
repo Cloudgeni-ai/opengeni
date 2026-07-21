@@ -186,7 +186,7 @@ export type DensitySeedChild = {
 
 /**
  * Parse the allowed density candidates. The default is intentionally the exact
- * OPE-52 sweep; custom profiles may select/reorder those candidates but may not
+ * capacity sweep; custom profiles may select/reorder those candidates but may not
  * silently introduce a density that the release gate does not understand.
  */
 export function parseDensitySweep(raw?: string): number[] {

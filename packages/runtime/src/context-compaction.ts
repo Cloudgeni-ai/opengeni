@@ -107,17 +107,30 @@ export function isEphemeralInternalContext(item: unknown): boolean {
 }
 
 /**
- * Rough token estimate for an item: char/4 over its serialized text. Used for
- * the pre-first-call signal and the retained user-message budget.
+ * Conservative tokenizer-independent text estimate used for every local input
+ * budget. Preserve the stable ASCII `chars / 4` heuristic, but never discount
+ * Unicode as UTF-16 length/4: each non-ASCII code unit costs at least one token
+ * (CJK ≈ 1/code point; an astral emoji's surrogate pair ≈ 2). This intentionally
+ * errs toward compaction rather than letting multilingual current input exceed
+ * a provider context window before an authoritative usage anchor exists.
  */
-export function estimateItemTokens(item: CompactionItem): number {
-  let characters: number;
-  try {
-    characters = jsonSerializedLength(item);
-  } catch {
-    characters = materializedJsonLength(item);
+export function estimateTextTokens(text: string): number {
+  let asciiCodeUnits = 0;
+  let nonAsciiCodeUnits = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    if (text.charCodeAt(index) <= 0x7f) asciiCodeUnits += 1;
+    else nonAsciiCodeUnits += 1;
   }
-  return Math.ceil(characters / 4);
+  return nonAsciiCodeUnits + Math.ceil(asciiCodeUnits / 4);
+}
+
+/** Serialized-item estimate for pre-call accounting and retained user budgets. */
+export function estimateItemTokens(item: CompactionItem): number {
+  try {
+    return jsonSerializedTokenEstimate(item);
+  } catch {
+    return estimateTextTokens(materializedJson(item));
+  }
 }
 
 /**
@@ -134,6 +147,80 @@ export function jsonSerializedLength(value: unknown): number {
     throw new TypeError("value has no JSON representation");
   }
   return length;
+}
+
+function jsonSerializedTokenEstimate(value: unknown): number {
+  const characters = jsonSerializedLength(value);
+  const nonAsciiCodeUnits = jsonValueNonAsciiCodeUnits(value, new Set<object>());
+  if (nonAsciiCodeUnits === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return nonAsciiCodeUnits + Math.ceil((characters - nonAsciiCodeUnits) / 4);
+}
+
+function jsonValueNonAsciiCodeUnits(value: unknown, ancestors: Set<object>): number | undefined {
+  switch (typeof value) {
+    case "string":
+      return jsonStringNonAsciiCodeUnits(value);
+    case "number":
+    case "boolean":
+      return 0;
+    case "undefined":
+    case "function":
+    case "symbol":
+      return undefined;
+    case "bigint":
+      throw new TypeError("BigInt is not JSON serializable");
+    case "object": {
+      if (value === null) return 0;
+      const kind = plainJsonContainerKind(value);
+      if (ancestors.has(value)) {
+        throw new TypeError("Converting circular structure to JSON");
+      }
+      ancestors.add(value);
+      try {
+        if (kind === "array") {
+          const arrayValue = value as unknown[];
+          let count = 0;
+          for (let index = 0; index < arrayValue.length; index += 1) {
+            count +=
+              jsonValueNonAsciiCodeUnits(plainJsonArrayValue(arrayValue, index), ancestors) ?? 0;
+          }
+          assertNoNamedEnumerableArrayProperties(arrayValue);
+          return count;
+        }
+
+        let count = 0;
+        for (const property in value) {
+          if (!Object.hasOwn(value, property)) continue;
+          const child = plainJsonObjectValue(value, property);
+          const childCount = jsonValueNonAsciiCodeUnits(child, ancestors);
+          if (childCount === undefined) continue;
+          count += jsonStringNonAsciiCodeUnits(property) + childCount;
+        }
+        return count;
+      } finally {
+        ancestors.delete(value);
+      }
+    }
+  }
+}
+
+function jsonStringNonAsciiCodeUnits(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        count += 2;
+        index += 1;
+      }
+    } else if (code > 0x7f && !(code >= 0xdc00 && code <= 0xdfff)) {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 /** Count UTF-8 bytes for a persisted plain JSON/JSONB value without materializing it. */
@@ -405,17 +492,14 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
 }
 
 export function estimateSerializedValueTokens(value: unknown): number {
-  let bytes: number;
   if (typeof value === "string") {
-    bytes = utf8ByteLength(value);
-  } else {
-    try {
-      bytes = jsonSerializedUtf8ByteLength(value);
-    } catch {
-      bytes = utf8ByteLength(materializedJson(value));
-    }
+    return estimateTextTokens(value);
   }
-  return Math.ceil(bytes / 4);
+  try {
+    return jsonSerializedTokenEstimate(value);
+  } catch {
+    return estimateTextTokens(materializedJson(value));
+  }
 }
 
 function materializedJsonLength(value: unknown): number {
@@ -579,15 +663,35 @@ export function decideCompaction(input: {
   // is available in the per-call guard.
   const signalTokens = Math.max(recorded, activeHistoryEstimate);
   if (input.items.length === 0) {
-    return { shouldCompact: false, reason: "no_history", signalTokens, thresholdTokens };
+    return {
+      shouldCompact: false,
+      reason: "no_history",
+      signalTokens,
+      thresholdTokens,
+    };
   }
   if (input.force) {
-    return { shouldCompact: true, reason: "force", signalTokens, thresholdTokens };
+    return {
+      shouldCompact: true,
+      reason: "force",
+      signalTokens,
+      thresholdTokens,
+    };
   }
   if (signalTokens >= thresholdTokens) {
-    return { shouldCompact: true, reason: "above_threshold", signalTokens, thresholdTokens };
+    return {
+      shouldCompact: true,
+      reason: "above_threshold",
+      signalTokens,
+      thresholdTokens,
+    };
   }
-  return { shouldCompact: false, reason: "below_threshold", signalTokens, thresholdTokens };
+  return {
+    shouldCompact: false,
+    reason: "below_threshold",
+    signalTokens,
+    thresholdTokens,
+  };
 }
 
 export class CompactionNeededError extends Error {
@@ -801,7 +905,7 @@ export function buildCompactionReplacementHistory(
     if (!isUserMessage(item) || isCompactionSummary(item)) {
       continue;
     }
-    const textTokens = estimatedTextTokens(messageText(item));
+    const textTokens = estimateTextTokens(messageText(item));
     retainedReversed.push(compactMessageToTokenBudget(item, remaining));
     if (textTokens > remaining) {
       remaining = 0;
@@ -865,7 +969,7 @@ export function buildSummaryItem(summaryBody: string): CompactionItem {
 function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): CompactionItem {
   const text = messageText(item);
   const next = { ...item };
-  if (estimatedTextTokens(text) > maxTokens) {
+  if (estimateTextTokens(text) > maxTokens) {
     next.content = truncateMiddleByEstimatedTokens(text, maxTokens);
     return next;
   }
@@ -873,22 +977,91 @@ function compactMessageToTokenBudget(item: CompactionItem, maxTokens: number): C
   return next;
 }
 
-function estimatedTextTokens(text: string): number {
-  return Math.ceil(text.length / 4);
-}
-
 function truncateMiddleByEstimatedTokens(text: string, maxTokens: number): string {
-  const maxChars = Math.max(0, maxTokens * 4);
-  if (text.length <= maxChars) {
+  const budget = Math.max(0, Math.floor(maxTokens));
+  if (estimateTextTokens(text) <= budget) {
     return text;
   }
-  if (maxChars <= USER_MESSAGE_TRUNCATION_MARKER.length) {
-    return USER_MESSAGE_TRUNCATION_MARKER.slice(0, maxChars);
+  if (estimateTextTokens(USER_MESSAGE_TRUNCATION_MARKER) > budget) {
+    return tokenBoundedPrefix(USER_MESSAGE_TRUNCATION_MARKER, budget);
   }
-  const keepChars = maxChars - USER_MESSAGE_TRUNCATION_MARKER.length;
-  const headChars = Math.ceil(keepChars / 2);
-  const tailChars = Math.floor(keepChars / 2);
-  return `${text.slice(0, headChars)}${USER_MESSAGE_TRUNCATION_MARKER}${text.slice(text.length - tailChars)}`;
+
+  let low = 0;
+  let high = text.length;
+  let best = USER_MESSAGE_TRUNCATION_MARKER;
+  while (low <= high) {
+    const keepCodeUnits = Math.floor((low + high) / 2);
+    const candidate = middleTruncationCandidate(text, keepCodeUnits);
+    if (estimateTextTokens(candidate) <= budget) {
+      best = candidate;
+      low = keepCodeUnits + 1;
+    } else {
+      high = keepCodeUnits - 1;
+    }
+  }
+  return best;
+}
+
+function middleTruncationCandidate(text: string, keepCodeUnits: number): string {
+  const headTarget = Math.ceil(keepCodeUnits / 2);
+  const tailTarget = Math.floor(keepCodeUnits / 2);
+  const headEnd = validPrefixBoundary(text, headTarget);
+  const tailStart = validSuffixBoundary(text, text.length - tailTarget);
+  return `${text.slice(0, headEnd)}${USER_MESSAGE_TRUNCATION_MARKER}${text.slice(tailStart)}`;
+}
+
+function tokenBoundedPrefix(text: string, maxTokens: number): string {
+  let low = 0;
+  let high = text.length;
+  let best = "";
+  while (low <= high) {
+    const target = Math.floor((low + high) / 2);
+    const end = validPrefixBoundary(text, target);
+    const candidate = text.slice(0, end);
+    if (estimateTextTokens(candidate) <= maxTokens) {
+      best = candidate;
+      low = target + 1;
+    } else {
+      high = target - 1;
+    }
+  }
+  return best;
+}
+
+/** Largest boundary at or below target that does not split a surrogate pair. */
+function validPrefixBoundary(text: string, target: number): number {
+  let boundary = Math.max(0, Math.min(text.length, target));
+  if (
+    boundary > 0 &&
+    boundary < text.length &&
+    isHighSurrogate(text.charCodeAt(boundary - 1)) &&
+    isLowSurrogate(text.charCodeAt(boundary))
+  ) {
+    boundary -= 1;
+  }
+  return boundary;
+}
+
+/** Smallest boundary at or above target that does not split a surrogate pair. */
+function validSuffixBoundary(text: string, target: number): number {
+  let boundary = Math.max(0, Math.min(text.length, target));
+  if (
+    boundary > 0 &&
+    boundary < text.length &&
+    isHighSurrogate(text.charCodeAt(boundary - 1)) &&
+    isLowSurrogate(text.charCodeAt(boundary))
+  ) {
+    boundary += 1;
+  }
+  return boundary;
+}
+
+function isHighSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xd800 && codeUnit <= 0xdbff;
+}
+
+function isLowSurrogate(codeUnit: number): boolean {
+  return codeUnit >= 0xdc00 && codeUnit <= 0xdfff;
 }
 
 function contentWithoutImages(item: CompactionItem): unknown {
