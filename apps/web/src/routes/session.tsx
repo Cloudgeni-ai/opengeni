@@ -11,6 +11,7 @@ import {
   useSession,
   useSessionEvents,
   useSessionLineage,
+  QueueSurface,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
@@ -19,7 +20,7 @@ import {
   type UserMessageItem,
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { CheckIcon, Loader2Icon, MessagesSquareIcon, XIcon } from "lucide-react";
+import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -35,9 +36,9 @@ import {
   UserMessageBody,
 } from "@/components/session/banners";
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
+import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
 import { SessionInspector } from "@/components/session/inspector";
-import { QueueSurface } from "@/components/session/queue-surface";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -52,7 +53,7 @@ import {
   summarizeSessionFailure,
 } from "@/lib/events";
 import { buildTools } from "@/lib/session-tools";
-import type { LineageNode } from "@opengeni/sdk";
+import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
 export function SessionRoute({
@@ -63,6 +64,7 @@ export function SessionRoute({
   sessionId: string;
 }) {
   const context = useAppContext();
+  const rail = useRail();
   const navigate = useNavigate();
 
   // Session record + live event log via @opengeni/react. Fresh opens load a
@@ -78,14 +80,20 @@ export function SessionRoute({
     loadOlder,
     error: streamError,
   } = useSessionEvents(sessionId);
-  const session = useMemo(
-    () =>
-      fetchedSession ? { ...fetchedSession, status: sessionStatus ?? fetchedSession.status } : null,
-    [fetchedSession, sessionStatus],
-  );
   // Queue + goal share the timeline's event stream — one SSE connection total.
   const queue = useTurnQueue(sessionId, { events });
   const goal = useGoal(sessionId, { events });
+  const session = useMemo(
+    () =>
+      fetchedSession
+        ? {
+            ...fetchedSession,
+            status: sessionStatus ?? fetchedSession.status,
+            effectiveControl: queue.effectiveControl ?? fetchedSession.effectiveControl,
+          }
+        : null,
+    [fetchedSession, queue.effectiveControl, sessionStatus],
+  );
   // /clear-view: a LOCAL, this-device-only collapse of the transcript. It hides
   // every event at or before the sequence seen when the operator ran it; the
   // server log is untouched and newer events (higher sequence) keep streaming
@@ -140,26 +148,29 @@ export function SessionRoute({
       session && (session.status === "failed" || creditExhausted)
         ? summarizeSessionFailure(events, session.status)
         : null,
-    [events, session?.status, creditExhausted],
+    [events, session, creditExhausted],
   );
 
   // Keep the workspace header (title, status badge, connection pill) in sync.
+  const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
   useEffect(() => {
-    context.setSession(session);
-  }, [session]);
+    setContextSession(session);
+  }, [session, setContextSession]);
   useEffect(() => {
-    context.setConnectionState(connectionState);
-  }, [connectionState]);
+    setContextConnectionState(connectionState);
+  }, [connectionState, setContextConnectionState]);
   useEffect(
     () => () => {
-      context.setSession(null);
-      context.setConnectionState("idle");
+      setContextSession(null);
+      setContextConnectionState("idle");
     },
-    [],
+    [setContextConnectionState, setContextSession],
   );
   useEffect(() => {
     if (streamError && !isApiErrorStatus(streamError, 404)) {
-      toast.error("Event stream disconnected", { description: streamError.message });
+      toast.error("Event stream disconnected", {
+        description: streamError.message,
+      });
     }
   }, [streamError]);
   useEffect(() => {
@@ -184,9 +195,13 @@ export function SessionRoute({
     oauthReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     if (outcome === "success") {
-      toast.success("Reconnected", { description: "Send your message again to continue." });
+      toast.success("Reconnected", {
+        description: "Send your message again to continue.",
+      });
     } else {
-      toast.error("Reconnect failed", { description: params.get("reason") ?? undefined });
+      toast.error("Reconnect failed", {
+        description: params.get("reason") ?? undefined,
+      });
     }
   }, []);
 
@@ -301,7 +316,10 @@ export function SessionRoute({
   // "running" count doesn't go stale on CHILD-side status changes that emit no
   // event on this parent's feed. Must sit above the loading/error early-returns
   // — it's a hook, so it has to run unconditionally on every render.
-  const lineage = useSessionLineage(sessionId, { events, pollIntervalMs: 30_000 });
+  const lineage = useSessionLineage(sessionId, {
+    events,
+    pollIntervalMs: 30_000,
+  });
   const agentNodes = lineage.lineage?.children ?? [];
 
   if (loading || !session) {
@@ -365,7 +383,10 @@ export function SessionRoute({
         })
       }
       onNewSession={() =>
-        void navigate({ to: "/workspaces/$workspaceId/sessions", params: { workspaceId } })
+        void navigate({
+          to: "/workspaces/$workspaceId/sessions",
+          params: { workspaceId },
+        })
       }
       onApprove={(approvalId) => approve(approvalId, "approve")}
       onReject={(approvalId) => approve(approvalId, "reject")}
@@ -386,13 +407,20 @@ export function SessionRoute({
         primary={chatPane}
         dockCollapsed={!context.inspectorOpen}
         onDockCollapsedChange={(collapsed) => context.setInspectorOpen(!collapsed)}
+        onOpenNavigation={() => {
+          context.setInspectorOpen(false);
+          rail.setDrawerOpen(true);
+        }}
       />
     </div>
   );
 
   async function approve(approvalId: string, decision: "approve" | "reject") {
     try {
-      await context.client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision });
+      await context.client.sendApprovalDecision(workspaceId, sessionId, {
+        approvalId,
+        decision,
+      });
     } catch (error) {
       toast.error("Couldn't submit the decision", {
         description: error instanceof Error ? error.message : String(error),
@@ -416,6 +444,7 @@ function SessionDock(props: {
   primary: React.ReactNode;
   dockCollapsed: boolean;
   onDockCollapsedChange: (collapsed: boolean) => void;
+  onOpenNavigation: () => void;
 }) {
   // The workbench (Changes | Files | Terminal | Desktop + machine chip) lives in
   // the package now; the app injects Debug around it. Agents remain in the one
@@ -441,6 +470,18 @@ function SessionDock(props: {
       trailingTabs={[debugTab]}
       collapsed={props.dockCollapsed}
       onCollapsedChange={props.onDockCollapsedChange}
+      mobileLeadingControl={
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-sm"
+          aria-label="Open navigation"
+          onClick={props.onOpenNavigation}
+          className="pointer-coarse:size-10"
+        >
+          <MenuIcon className="size-4" />
+        </Button>
+      }
     />
   );
 }
@@ -500,7 +541,10 @@ function SessionChatPane(props: {
       setApprovalPending((current) => ({ ...current, [approvalId]: decision }));
       try {
         await (decision === "approve" ? props.onApprove(approvalId) : props.onReject(approvalId));
-        setApprovalSettled((current) => ({ ...current, [approvalId]: decision }));
+        setApprovalSettled((current) => ({
+          ...current,
+          [approvalId]: decision,
+        }));
       } catch {
         // The route already surfaced a toast; leave the buttons live to retry.
       } finally {
@@ -520,7 +564,17 @@ function SessionChatPane(props: {
   // The model is session-scoped: this session remembers its own pick (falling
   // back to the deployment default), so a switch here doesn't bleed into others.
   const model = context.modelForSession(props.session.id);
+  const { setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds } = context;
+  const applyComposerSettings = useCallback(
+    (draft: ComposerDraft) => {
+      setModelForSession(props.session.id, draft.model);
+      setReasoningEffort(draft.reasoningEffort);
+      setSelectedCapabilityToolIds(new Set(draft.tools.map((tool) => tool.id)));
+    },
+    [props.session.id, setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds],
+  );
   const composer = useComposer(props.session.id, {
+    events: props.events,
     // Evaluated at send time: attachments and tools picked while the draft was
     // being written ride along with the message.
     sendExtras: () => ({
@@ -529,6 +583,8 @@ function SessionChatPane(props: {
       model,
       reasoningEffort,
     }),
+    effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
+    onDraftApplied: applyComposerSettings,
     onSent: () => attachments.clear(),
   });
 
@@ -689,20 +745,23 @@ function SessionChatPane(props: {
       {/* The one compact control stack above the composer. Each surface hides
           when it has nothing to show, so the stack degrades to
           whichever one is present — or neither. */}
-      {!terminal ? (
-        <>
-          <QueueSurface queue={props.queue} />
-          <GoalSurface session={props.session} goal={props.goal} />
-          <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
-        </>
-      ) : null}
+      {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
+      <GoalSurface session={props.session} goal={props.goal} />
+      <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl">
           <ConsoleComposer
             composer={composer}
             attachments={attachments}
-            status={props.session.status}
+            effectiveControl={props.queue.effectiveControl ?? props.session.effectiveControl}
+            queuedAheadCount={props.queue.queue.length}
+            canControlWorkspace={workspacePermissions.includes("workspace:admin")}
+            controlLinks={{
+              workspaceHref: `/workspaces/${props.session.workspaceId}`,
+              sessionHref: (sessionId) =>
+                `/workspaces/${props.session.workspaceId}/sessions/${sessionId}`,
+            }}
             disabled={terminal}
             commandContext={commandContext}
             onClearView={props.onClearView}

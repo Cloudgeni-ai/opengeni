@@ -2,10 +2,17 @@ export { OpenGeniClient } from "./client";
 export type {
   FetchLike,
   OpenGeniClientOptions,
+  OpenGeniRequestOptions,
   SendMessageInput,
   SteerMessageResult,
+  WorkspaceControlEventPage,
 } from "./client";
-export { OpenGeniApiError, OpenGeniStreamError, isRetryableStreamError } from "./errors";
+export {
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  OpenGeniStreamError,
+  isRetryableStreamError,
+} from "./errors";
 export {
   formatSseEvent,
   proxySessionEventStream,
@@ -43,7 +50,15 @@ export type {
   StreamConnectionState,
   StreamSessionEventsOptions,
 } from "./stream";
-export { KNOWN_PERMISSIONS, KNOWN_USAGE_EVENT_TYPES, SESSION_EVENT_TYPES } from "./types";
+export { streamWorkspaceControlEvents } from "./workspace-control-stream";
+export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
+export {
+  KNOWN_PERMISSIONS,
+  KNOWN_USAGE_EVENT_TYPES,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  SESSION_EVENT_TYPES,
+} from "./types";
 export type {
   AccessContext,
   AccessGrant,
@@ -191,6 +206,16 @@ export type {
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionControlResponse,
+  ComposerDraft,
+  DeleteSessionQueueItemRequest,
+  EditSessionQueueItemRequest,
+  EffectiveControlBlocker,
+  EffectiveControlResumeOption,
+  EffectiveSessionControl,
+  MoveSessionQueueItemRequest,
+  SaveComposerDraftRequest,
+  SessionCommandReceipt,
+  SteerSessionQueueItemRequest,
   WorkspaceInferenceControlResponse,
   SessionSystemUpdate,
   SessionSystemUpdateKind,
@@ -221,6 +246,12 @@ export type {
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
   SessionEvent,
+  SessionEventListOptions,
+  SessionEventPage,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
   SessionEventType,
   SessionGoal,
   SessionGoalCreatedBy,
@@ -274,9 +305,11 @@ export type {
   SetWorkspaceEnvironmentVariableRequest,
   WorkspaceCaptureFile,
   WorkspaceCaptureRepo,
+  WorkspaceCaptureDegradedReason,
   WorkspaceCaptureStats,
   WorkspaceCaptureManifest,
   WorkspaceRevisionCapturedPayload,
+  WorkspaceRevisionDegradedPayload,
   WorkspaceCaptureSignedUrl,
   GetWorkspaceCaptureResponse,
   GetWorkspaceCaptureFileResponse,
@@ -304,6 +337,7 @@ export type {
   UserApprovalDecisionEventInput,
   UserMessageEventInput,
   Workspace,
+  WorkspaceControlEvent,
   VariableSet,
   VariableSetVariableMetadata,
   Rig,

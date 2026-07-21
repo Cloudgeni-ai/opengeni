@@ -1,6 +1,0 @@
----
-"@opengeni/worker-bundle": patch
-"@opengeni/events": patch
----
-
-Instrument the token-streaming pipeline with SLIs so "streaming is sluggish" resolves to a number and its layer is attributable. New worker Prometheus series: `opengeni_stream_ttft_seconds{provider}` (time from a model (re)start to its first streamed content delta, re-armed after every non-content event so a post-tool response measures the model's restart, not our tool time), `opengeni_stream_inter_delta_gap_seconds{provider,class}` (gap between consecutive same-class deltas, reset across boundaries), `opengeni_stream_batch_flush_events` + `opengeni_stream_batch_flush_duration_seconds` (the runtime batcher's coalescing shape), `opengeni_session_event_append_seconds` (durable DB write path) and `opengeni_session_event_publish_seconds` (best-effort NATS delivery path) split so a p99 climb points at Postgres vs. NATS, plus `opengeni_model_input_tokens{provider}` and `opengeni_context_compactions_total{trigger}` (the context-pressure pair that makes "compaction never firing while contexts run hot" queryable). All labels are bounded — never a session id or raw user-supplied model string. `appendAndPublishEvents` gains an optional timing observer (no new dependency on the observability package) and `createRuntimeBatcher` an optional `onFlush` hook; both fire on success and failure.

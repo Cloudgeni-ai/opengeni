@@ -3,11 +3,12 @@ import { createSessionStateActivities } from "../src/activities/session-state";
 
 const fakeDb = {};
 const publishedEvents: unknown[] = [];
-const workerDeathCalls: unknown[] = [];
-let currentTurn: { id: string; status: string } | null = null;
-let workerDeathResult:
-  | { action: "recovering"; redispatches: number; events: any[] }
-  | { action: "exceeded"; redispatches: number; events: any[] }
+const recoveryCalls: unknown[] = [];
+const parentWakeCalls: unknown[] = [];
+let recoveryResult:
+  | { action: "unclaimed"; events: [] }
+  | { action: "recovering"; turnId: string; redispatches: number; events: any[] }
+  | { action: "exceeded"; turnId: string; redispatches: number; events: any[] }
   | { action: "stale"; events: []; turnStatus: string | null; activeTurnId: string | null };
 
 function makeActivities() {
@@ -16,122 +17,113 @@ function makeActivities() {
       ({
         db: fakeDb,
         bus: { publish: async () => undefined },
-        settings: { sessionHistorySource: "items", openaiReasoningEffort: "medium" },
+        settings: {
+          sessionHistorySource: "items",
+          openaiReasoningEffort: "medium",
+        },
         observability: {},
         wakeSessionWorkflow: null,
       }) as any,
     {
-      getSessionTurn: mock(async () => currentTurn as any),
-      getSessionEvent: mock(async () => ({
-        id: "trigger-1",
-        type: "goal.continuation",
-        payload: {},
-      })),
-      countQueuedTurns: mock(async () => 0),
-      applySessionTurnWorkerDeath: mock(async (...args: unknown[]) => {
-        workerDeathCalls.push(args[2]);
-        return workerDeathResult;
+      recoverSessionDispatch: mock(async (...args: unknown[]) => {
+        recoveryCalls.push(args[2]);
+        return recoveryResult as any;
       }),
+      countQueuedTurns: mock(async () => 0),
       publishDurableSessionEvents: mock(
         async (_bus, _workspaceId, _sessionId, events: unknown[]) => {
           publishedEvents.push(...events);
         },
       ),
-      notifyParentOfChildTerminal: mock(async () => undefined),
+      deliverFailedChildTurnToParent: mock(async (...args: unknown[]) => {
+        parentWakeCalls.push(args);
+      }),
       recordTurnsQueuedGauge: mock(() => undefined),
     },
   );
 }
 
 async function runRecovery(timeoutType: "HEARTBEAT" | "SCHEDULE_TO_START" = "HEARTBEAT") {
-  return makeActivities().recoverTurnAfterWorkerDeath({
+  return makeActivities().recoverDispatch({
     accountId: "account-1",
     workspaceId: "workspace-1",
     sessionId: "session-1",
-    triggerEventId: "trigger-1",
-    workflowId: "workflow-1",
-    turnId: "turn-1",
     attemptId: "attempt-1",
-    dispatchId: "activity-7",
     timeoutType,
   });
 }
 
-describe("recoverTurnAfterWorkerDeath: atomic dispatch fence", () => {
-  test("passes the exact Temporal dispatch and typed timeout", async () => {
-    currentTurn = { id: "turn-1", status: "running" };
-    workerDeathCalls.length = 0;
+describe("recoverDispatch: exact attempt ownership fence", () => {
+  test("passes only the exact attempt identity and typed timeout", async () => {
+    recoveryCalls.length = 0;
     publishedEvents.length = 0;
-    workerDeathResult = {
+    parentWakeCalls.length = 0;
+    recoveryResult = {
       action: "recovering",
+      turnId: "turn-1",
       redispatches: 1,
       events: [{ id: "recovery-1", type: "turn.recovery.requested" }],
     };
 
-    expect(await runRecovery()).toEqual({ action: "recovering", redispatches: 1 });
-    expect(workerDeathCalls).toEqual([
-      expect.objectContaining({
+    expect(await runRecovery()).toEqual({
+      action: "recovering",
+      turnId: "turn-1",
+      redispatches: 1,
+    });
+    expect(recoveryCalls).toEqual([
+      {
         sessionId: "session-1",
-        turnId: "turn-1",
-        triggerEventId: "trigger-1",
         attemptId: "attempt-1",
-        dispatchId: "activity-7",
         timeoutType: "HEARTBEAT",
         maxRedispatches: 3,
-      }),
+      },
     ]);
     expect(publishedEvents).toEqual([{ id: "recovery-1", type: "turn.recovery.requested" }]);
+    expect(parentWakeCalls).toHaveLength(0);
   });
 
-  test("preserves schedule-to-start as the sole typed no-registration recovery", async () => {
-    currentTurn = { id: "turn-1", status: "running" };
-    workerDeathCalls.length = 0;
+  test("preserves schedule-to-start as the sole typed unclaimed recovery", async () => {
+    recoveryCalls.length = 0;
     publishedEvents.length = 0;
-    workerDeathResult = {
-      action: "recovering",
-      redispatches: 1,
-      events: [],
-    };
-    await runRecovery("SCHEDULE_TO_START");
-    expect(workerDeathCalls).toEqual([
-      expect.objectContaining({ timeoutType: "SCHEDULE_TO_START" }),
-    ]);
+    recoveryResult = { action: "unclaimed", events: [] };
+    expect(await runRecovery("SCHEDULE_TO_START")).toEqual({ action: "unclaimed" });
+    expect(recoveryCalls).toEqual([expect.objectContaining({ timeoutType: "SCHEDULE_TO_START" })]);
+    expect(publishedEvents).toHaveLength(0);
   });
 
-  test("does not call the atomic helper for terminal or missing turns", async () => {
-    currentTurn = { id: "turn-1", status: "completed" };
-    workerDeathCalls.length = 0;
-    expect(await runRecovery()).toEqual({ action: "stale" });
-    expect(workerDeathCalls).toHaveLength(0);
-    currentTurn = null;
-    expect(await runRecovery()).toEqual({ action: "stale" });
-    expect(workerDeathCalls).toHaveLength(0);
-  });
-
-  test("an event-free stale helper result remains stale", async () => {
-    currentTurn = { id: "turn-1", status: "running" };
-    workerDeathCalls.length = 0;
+  test("delegates terminal, missing, or successor ownership classification atomically", async () => {
+    recoveryCalls.length = 0;
     publishedEvents.length = 0;
-    workerDeathResult = {
+    recoveryResult = {
       action: "stale",
       events: [],
-      turnStatus: "running",
-      activeTurnId: "turn-1",
+      turnStatus: "completed",
+      activeTurnId: null,
     };
     expect(await runRecovery()).toEqual({ action: "stale" });
+    expect(recoveryCalls).toHaveLength(1);
     expect(publishedEvents).toHaveLength(0);
   });
 
   test("exhaustion is already terminal and wakes the parent once", async () => {
-    currentTurn = { id: "turn-1", status: "running" };
-    workerDeathCalls.length = 0;
+    recoveryCalls.length = 0;
     publishedEvents.length = 0;
-    workerDeathResult = {
+    parentWakeCalls.length = 0;
+    recoveryResult = {
       action: "exceeded",
+      turnId: "turn-1",
       redispatches: 3,
       events: [{ id: "failed-1", type: "turn.failed" }],
     };
-    expect(await runRecovery()).toEqual({ action: "exceeded", redispatches: 3 });
+    expect(await runRecovery()).toEqual({
+      action: "exceeded",
+      turnId: "turn-1",
+      redispatches: 3,
+    });
     expect(publishedEvents).toEqual([{ id: "failed-1", type: "turn.failed" }]);
+    expect(parentWakeCalls).toHaveLength(1);
+    expect(parentWakeCalls[0]).toEqual(
+      expect.arrayContaining(["workspace-1", "session-1", "turn-1"]),
+    );
   });
 });

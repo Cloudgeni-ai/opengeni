@@ -11,6 +11,19 @@ export class OpenGeniApiError extends Error {
   }
 }
 
+/** The browser bundle and API disagree about their state-changing wire contract. */
+export class OpenGeniApiContractMismatchError extends Error {
+  readonly expected: string;
+  readonly actual: string;
+
+  constructor(expected: string, actual: string) {
+    super(`OpenGeni API contract mismatch: client expects ${expected}, API serves ${actual}`);
+    this.name = "OpenGeniApiContractMismatchError";
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
 /** Error for an unrecoverable event-stream condition (not a transient drop). */
 export class OpenGeniStreamError extends Error {
   constructor(message: string) {

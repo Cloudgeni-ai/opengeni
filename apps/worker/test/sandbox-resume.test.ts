@@ -27,6 +27,7 @@ import {
   commitWarmingToWarm,
   createDb,
   heartbeatLeaseHolder,
+  markWarmLeaseInstanceLost,
   readLease,
   SandboxImageConflictError,
   type Database,
@@ -37,7 +38,12 @@ import {
   type SharedTestDatabase,
   testSettings,
 } from "@opengeni/testing";
-import { resumeBoxForTurn, SandboxWarmingTimeoutError } from "../src/sandbox-resume";
+import { establishSandboxSessionFromEnvelope } from "@opengeni/runtime";
+import {
+  resumeBoxForTurn,
+  sandboxLeaseHolderIdForAttempt,
+  SandboxWarmingTimeoutError,
+} from "../src/sandbox-resume";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -68,6 +74,7 @@ async function freshWorkspace(): Promise<{
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
 }
 
@@ -131,7 +138,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real lease + RLS)", () => {
   test("(1) FLAG-ON slice: spawner wins cold->warming, establishes (box manifest carries the threaded env), commits warm, returns a LIVE session; release -> draining", async () => {
@@ -141,7 +148,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
 
     // The SAME env object the agent will declare for this run. Threaded into
     // resumeBoxForTurn so the box manifest matches the agent manifest (no
-    // provided-session env delta — the BUG-1 turn-killer fix).
+    // provided-session env delta — the ownership regression turn-killer fix).
     const sandboxEnvironment = {
       GIT_AUTHOR_NAME: "OpenGeni Bot",
       HOME: "/workspace",
@@ -160,7 +167,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         environment: sandboxEnvironment,
       },
       "turn",
-      "activity-1",
+      sandboxLeaseHolderIdForAttempt("activity-1"),
     );
     try {
       // The box is live (unix_local session) and the lease is WARM with epoch>=1.
@@ -205,13 +212,13 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       { db, settings },
       { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
       "turn",
-      "activity-A",
+      sandboxLeaseHolderIdForAttempt("activity-A"),
     );
     const second = await resumeBoxForTurn(
       { db, settings },
       { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
       "turn",
-      "activity-B",
+      sandboxLeaseHolderIdForAttempt("activity-B"),
     );
     try {
       // Both resolved against the SAME warm lease; the second attached (same
@@ -232,6 +239,112 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
     expect(row?.liveness).toBe("draining");
   }, 60_000);
 
+  test("(2b) concurrent observers of one missing warm instance elect exactly one replacement owner", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const oldInstanceId = "box-dead";
+    const oldEpoch = 7;
+    const archive = Buffer.from("durable-workspace").toString("base64");
+    const resumeState = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        providerState: { instanceId: oldInstanceId },
+        workspaceArchive: archive,
+      },
+    });
+    const [lease] = await admin<{ id: string }[]>`
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        ${accountId}, ${workspaceId}, ${groupId}, 'warm', 10,
+        10, 0, ${oldInstanceId}, 'local', ${oldEpoch},
+        'unix_local', ${resumeState}::text::jsonb, now() + interval '60 seconds'
+      ) returning id`;
+    for (let index = 0; index < 10; index += 1) {
+      await admin`
+        insert into sandbox_lease_holders (
+          account_id, workspace_id, lease_id, kind, holder_id, last_heartbeat_at
+        ) values (
+          ${accountId}, ${workspaceId}, ${lease!.id}, 'turn',
+          ${sandboxLeaseHolderIdForAttempt(`observer-${index}`)}, now()
+        )`;
+    }
+
+    const marks = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        markWarmLeaseInstanceLost(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          expectedEpoch: oldEpoch,
+          expectedInstanceId: oldInstanceId,
+        }),
+      ),
+    );
+    expect(marks.filter((result) => result.status === "marked")).toHaveLength(1);
+    expect(marks.filter((result) => result.status === "stale")).toHaveLength(9);
+
+    const [retired] = await admin<
+      {
+        liveness: string;
+        lease_epoch: number;
+        instance_id: string | null;
+        refcount: number;
+        archive: string | null;
+        dead_id: string | null;
+      }[]
+    >`
+      select liveness, lease_epoch, instance_id, refcount,
+             resume_state #>> '{sessionState,workspaceArchive}' as archive,
+             resume_state #>> '{sessionState,providerState,instanceId}' as dead_id
+      from sandbox_leases
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+    expect(retired).toMatchObject({
+      liveness: "cold",
+      lease_epoch: oldEpoch + 1,
+      instance_id: null,
+      refcount: 10,
+      archive,
+      dead_id: null,
+    });
+
+    const admissions = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        acquireLease(db, {
+          accountId,
+          workspaceId,
+          sandboxGroupId: groupId,
+          kind: "turn",
+          holderId: sandboxLeaseHolderIdForAttempt(`replacement-${index}`),
+          backend: "local",
+          leaseTtlMs: settings.sandboxLeaseTtlMs,
+          warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+        }),
+      ),
+    );
+    expect(admissions.filter((result) => result.role === "spawner")).toHaveLength(1);
+    expect(admissions.filter((result) => result.role === "attached")).toHaveLength(9);
+    const winner = admissions.find((result) => result.role === "spawner")!;
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: winner.lease.leaseEpoch,
+      instanceId: "box-replacement",
+      resumeBackendId: "unix_local",
+      resumeState: {
+        backendId: "unix_local",
+        sessionState: { providerState: { instanceId: "box-replacement" } },
+      },
+      leaseTtlMs: settings.sandboxLeaseTtlMs,
+    });
+    expect(committed.committed).toBe(true);
+    expect(committed.lease?.instanceId).toBe("box-replacement");
+  }, 60_000);
+
   test("(3) epoch fence on the HEARTBEAT path: a re-establish bumps lease_epoch -> the stale holder's heartbeat is rejected (self-evicts)", async () => {
     if (!available) return;
     const settings = settingsFor(true);
@@ -242,7 +355,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       { db, settings },
       { accountId, workspaceId, sandboxGroupId: groupId, sessionId: groupId, backend: "local" },
       "turn",
-      "activity-live",
+      sandboxLeaseHolderIdForAttempt("activity-live"),
     );
     const liveEpoch = resumed.leaseEpoch;
 
@@ -252,7 +365,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-live",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-live"),
       leaseTtlMs: settings.sandboxLeaseTtlMs,
       expectedEpoch: liveEpoch,
     });
@@ -270,7 +383,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-new",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-new"),
       backend: "local",
       leaseTtlMs: settings.sandboxLeaseTtlMs,
     });
@@ -296,7 +409,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-new",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-new"),
       leaseTtlMs: settings.sandboxLeaseTtlMs,
       expectedEpoch: liveEpoch,
     });
@@ -308,7 +421,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       workspaceId,
       sandboxGroupId: groupId,
       kind: "turn",
-      holderId: "activity-new",
+      holderId: sandboxLeaseHolderIdForAttempt("activity-new"),
       leaseTtlMs: settings.sandboxLeaseTtlMs,
       expectedEpoch: newEpoch,
     });
@@ -347,7 +460,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           os: "linux",
         },
         "turn",
-        "activity-timeout",
+        sandboxLeaseHolderIdForAttempt("activity-timeout"),
       ),
     ).rejects.toThrow(SandboxWarmingTimeoutError);
 
@@ -363,12 +476,20 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           os: "linux",
         },
         "turn",
-        "activity-timeout-message",
+        sandboxLeaseHolderIdForAttempt("activity-timeout-message"),
       ),
     ).rejects.toThrow(/Sandbox backend "local" capacity or creation timed out/);
 
-    expect(await holderCount(workspaceId, groupId, "activity-timeout")).toBe(0);
-    expect(await holderCount(workspaceId, groupId, "activity-timeout-message")).toBe(0);
+    expect(
+      await holderCount(workspaceId, groupId, sandboxLeaseHolderIdForAttempt("activity-timeout")),
+    ).toBe(0);
+    expect(
+      await holderCount(
+        workspaceId,
+        groupId,
+        sandboxLeaseHolderIdForAttempt("activity-timeout-message"),
+      ),
+    ).toBe(0);
     const row = await readRow(workspaceId, groupId);
     expect(row?.liveness).toBe("warming");
   }, 60_000);
@@ -444,7 +565,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           os: "linux",
         },
         "turn",
-        "activity-f3",
+        sandboxLeaseHolderIdForAttempt("activity-f3"),
       );
     } catch (e) {
       spawnError = e instanceof Error ? e : new Error(String(e));
@@ -464,6 +585,92 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       select resume_state #>> '{sessionState,workspaceArchive}' as archive
       from sandbox_leases where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
     expect(archiveRow?.archive).toBeNull();
+  }, 60_000);
+
+  test("(F3-b) a successfully hydrated archive remains on the committed live lease", async () => {
+    if (!available) return;
+    const settings = settingsFor(true);
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+    const seed = await establishSandboxSessionFromEnvelope(settings, null, {
+      sessionId: groupId,
+      recovery: "create-or-restore",
+      backendOverride: "local",
+    });
+    let archiveBytes: Uint8Array;
+    try {
+      const persist = (seed.session as { persistWorkspace?: () => Promise<Uint8Array> })
+        .persistWorkspace;
+      if (typeof persist !== "function") {
+        throw new Error("Local sandbox test session cannot persist /workspace");
+      }
+      archiveBytes = await persist.call(seed.session);
+    } finally {
+      await dropSession(seed);
+    }
+
+    const currentArchive = Buffer.from(archiveBytes).toString("base64");
+    const previousArchive = Buffer.from("previous-valid-archive-pointer").toString("base64");
+    const archiveAt = "2030-03-04T05:06:07.000Z";
+    const archiveEnvelopeJson = JSON.stringify({
+      backendId: "unix_local",
+      sessionState: {
+        workspaceArchive: currentArchive,
+        workspaceArchivePrev: previousArchive,
+        workspaceArchiveAt: archiveAt,
+      },
+    });
+    await admin.unsafe(
+      `
+      insert into sandbox_leases (
+        account_id, workspace_id, sandbox_group_id, liveness, refcount,
+        turn_holders, viewer_holders, backend, lease_epoch,
+        resume_backend_id, resume_state, expires_at
+      ) values (
+        $1, $2, $3, 'cold', 0, 0, 0,
+        'local', 8, 'unix_local',
+        $4::text::jsonb,
+        now() + interval '60s'
+      )`,
+      [accountId, workspaceId, groupId, archiveEnvelopeJson],
+    );
+
+    const resumed = await resumeBoxForTurn(
+      { db, settings },
+      {
+        accountId,
+        workspaceId,
+        sandboxGroupId: groupId,
+        sessionId: groupId,
+        backend: "local",
+        os: "linux",
+      },
+      "turn",
+      sandboxLeaseHolderIdForAttempt("activity-f3-valid-archive"),
+    );
+    try {
+      expect(resumed.established.origin).toBe("restored");
+      const [archiveRow] = await admin<
+        {
+          current_archive: string | null;
+          previous_archive: string | null;
+          archive_at: string | null;
+        }[]
+      >`
+        select resume_state #>> '{sessionState,workspaceArchive}' as current_archive,
+               resume_state #>> '{sessionState,workspaceArchivePrev}' as previous_archive,
+               resume_state #>> '{sessionState,workspaceArchiveAt}' as archive_at
+        from sandbox_leases
+        where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+      expect(archiveRow).toEqual({
+        current_archive: currentArchive,
+        previous_archive: previousArchive,
+        archive_at: archiveAt,
+      });
+    } finally {
+      await resumed.release();
+      await dropSession(resumed.established);
+    }
   }, 60_000);
 
   test("(4) FLAG-OFF: the gate condition is false -> resumeBoxForTurn is NEVER invoked, so NO lease row is materialized", async () => {
@@ -503,7 +710,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         image: "img-A",
       },
       "turn",
-      "activity-1",
+      sandboxLeaseHolderIdForAttempt("activity-1"),
     );
     try {
       const warm = await readRow(workspaceId, groupId);
@@ -533,7 +740,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
         image: "img-A",
       },
       "turn",
-      "keeper",
+      sandboxLeaseHolderIdForAttempt("keeper"),
     );
     try {
       // A second holder resolving a DIFFERENT image while keeper holds -> conflict
@@ -553,7 +760,7 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
             image: "img-B",
           },
           "turn",
-          "newcomer",
+          sandboxLeaseHolderIdForAttempt("newcomer"),
         ),
       ).rejects.toThrow(SandboxImageConflictError);
       // The box is untouched — keeper's session keeps running.

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import type { SessionEvent } from "@opengeni/sdk";
 import { MessageTimeline } from "../src";
-import { registerDom, renderComponent, flush } from "./render-hook";
+import { actRun, registerDom, renderComponent, flush } from "./render-hook";
 
 registerDom();
 
@@ -78,9 +78,11 @@ describe("MessageTimeline pagination affordances", () => {
     );
     await flush();
     expect(observed).toHaveLength(1);
-    callback(
-      [{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry],
-      instance!,
+    await actRun(() =>
+      callback(
+        [{ isIntersecting: true, target: observed[0]! } as IntersectionObserverEntry],
+        instance!,
+      ),
     );
     expect(calls).toBe(1);
     await r.unmount();
@@ -100,9 +102,11 @@ describe("MessageTimeline pagination affordances", () => {
     // appears later either (nothing is toggled, so nothing can replay).
     expect(r.container.querySelector(".animate-og-enter")).toBeNull();
 
-    for (const frame of frames.splice(0)) {
-      frame(performance.now());
-    }
+    await actRun(() => {
+      for (const frame of frames.splice(0)) {
+        frame(performance.now());
+      }
+    });
     await flush();
     expect(r.container.querySelector(".animate-og-enter")).toBeNull();
 

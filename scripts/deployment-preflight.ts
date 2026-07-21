@@ -203,10 +203,10 @@ function parseArgs(values: string[]): Args {
   return out;
 }
 
-async function runLiveProbes(contract: DeploymentContract): Promise<LiveProbeResult[]> {
+async function runLiveProbes(deploymentContract: DeploymentContract): Promise<LiveProbeResult[]> {
   const results: LiveProbeResult[] = [];
-  if (contract.runtime.platform === "kubernetes") {
-    results.push(runKubectlNamespaceProbe(contract.runtime.namespace));
+  if (deploymentContract.runtime.platform === "kubernetes") {
+    results.push(runKubectlNamespaceProbe(deploymentContract.runtime.namespace));
   }
 
   const databaseUrl = process.env.OPENGENI_DATABASE_URL;
@@ -251,8 +251,8 @@ async function runLiveProbes(contract: DeploymentContract): Promise<LiveProbeRes
 }
 
 function runKubectlNamespaceProbe(namespace: string | undefined): LiveProbeResult {
-  const args = namespace ? ["get", "namespace", namespace] : ["version", "--client=true"];
-  const result = spawnSync("kubectl", args, {
+  const kubectlArgs = namespace ? ["get", "namespace", namespace] : ["version", "--client=true"];
+  const result = spawnSync("kubectl", kubectlArgs, {
     encoding: "utf8",
     timeout: 10_000,
     stdio: ["ignore", "pipe", "pipe"],

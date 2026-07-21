@@ -1,4 +1,4 @@
-// M1 unit tests (dossier §12 B-suite unit portion + §15). The pure logic:
+// Workspace-capture unit tests. The pure logic:
 // GC key-math, manifest serialization, guard constants, path/key helpers, the
 // pre-service skip gates (flag off / storage null), and the B7 static safety
 // grep (no close/terminate/kill; sandbox access only via the un-agent-loop
@@ -12,7 +12,11 @@ import { fileURLToPath } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import { computeWorkspaceCaptureGcPlan, type Database } from "@opengeni/db";
-import { WorkspaceCaptureManifest, WorkspaceRevisionCapturedPayload } from "@opengeni/contracts";
+import {
+  WorkspaceCaptureManifest,
+  WorkspaceRevisionCapturedPayload,
+  WorkspaceRevisionDegradedPayload,
+} from "@opengeni/contracts";
 import type { ObjectStorage } from "@opengeni/storage";
 import type { ChannelASession } from "@opengeni/runtime/sandbox";
 import {
@@ -73,6 +77,7 @@ function baseInput() {
     workspaceId: "00000000-0000-0000-0000-0000000000b1",
     sessionId: "00000000-0000-0000-0000-0000000000c1",
     turnId: "00000000-0000-0000-0000-0000000000d1",
+    attemptId: "00000000-0000-4000-8000-0000000000e1",
     observability,
   };
 }
@@ -87,6 +92,7 @@ describe("workspace-capture — guard constants", () => {
     expect(KEEP_LATEST_REVISIONS).toBe(10);
     expect(RESIDUE_DIRS).toContain("node_modules");
     expect(RESIDUE_DIRS).toContain(".git");
+    expect(RESIDUE_DIRS).toContain(".opengeni");
   });
 
   test("RESIDUE_DIRS excludes the desktop/system dotfile dirs the Modal desktop box churns", () => {
@@ -125,6 +131,8 @@ describe("workspace-capture — residue-path classification (S2 desktop-box fix)
     expect(isUnderResidueDir(".cache/pip/http/abc")).toBe(true);
     expect(isUnderResidueDir("web/node_modules/react/index.js")).toBe(true); // residue at any depth
     expect(isUnderResidueDir(".ssh/id_ed25519")).toBe(true);
+    expect(isUnderResidueDir(".opengeni/git-token")).toBe(true);
+    expect(isUnderResidueDir("repo/.opengeni/git-credentials/github-token")).toBe(true);
     // Kept — real workspace content with leading dots.
     expect(isUnderResidueDir(".github/workflows/ci.yml")).toBe(false);
     expect(isUnderResidueDir(".gitignore")).toBe(false);
@@ -171,7 +179,7 @@ describe("workspace-capture — path & key helpers", () => {
   });
 });
 
-describe("workspace-capture — GC key-math (dossier B5)", () => {
+describe("workspace-capture — GC key-math", () => {
   const row = (id: string, blobKeys: string[]) => ({
     id,
     manifestKey: `m/${id}`,
@@ -362,9 +370,33 @@ describe("workspace-capture — manifest & event serialization", () => {
     };
     expect(() => WorkspaceRevisionCapturedPayload.parse(payload)).not.toThrow();
   });
+
+  test("the degraded announce payload parses under the contract (metadata only)", () => {
+    expect(() =>
+      WorkspaceRevisionDegradedPayload.parse({
+        revision: 4,
+        turnId: "t2",
+        capturedAt: new Date().toISOString(),
+        leaseEpoch: 8,
+        reason: "repository_discovery_result_limit_exceeded",
+      }),
+    ).not.toThrow();
+  });
 });
 
 describe("workspace-capture — pre-service skip gates", () => {
+  test("an already-cancelled Steer/Pause owner returns before touching storage or db", async () => {
+    const controller = new AbortController();
+    controller.abort(new Error("STEER"));
+    await expect(
+      captureWorkspaceRevision({
+        ...baseInput(),
+        objectStorage: forbiddenStorage(),
+        signal: controller.signal,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   test("flag off → returns without touching storage or db", async () => {
     await expect(
       captureWorkspaceRevision({

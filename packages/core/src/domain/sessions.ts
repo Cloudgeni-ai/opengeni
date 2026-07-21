@@ -19,10 +19,7 @@ import {
 } from "@opengeni/contracts";
 import {
   createSession,
-  createSessionGoal,
   createSessionWithIdempotencyKey,
-  enqueueSessionTurn,
-  enqueueSessionMessageAtomically,
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
@@ -33,18 +30,28 @@ import {
   getSandbox,
   getSession,
   getSessionByCreateIdempotencyKey,
+  getSessionEvent,
+  getWorkspaceControlEvent,
   getSessionLineage,
   getSessionTurn,
   getWorkspaceModelPolicy,
+  initializeSessionStartAtomically,
   requireSession,
-  setTemporalWorkflowId,
+  submitHumanPromptInTransaction,
   updateSessionTitle as updateSessionTitleRow,
+  withWorkspaceSubjectRls,
   type CreateSessionMcpServerInput,
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
-  SessionQueueConflictError,
+  QueueCommandConflictError,
+  SessionControlConflictError,
 } from "@opengeni/db";
-import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import {
+  appendAndPublishEvents,
+  publishDurableSessionEvents,
+  publishDurableWorkspaceControlEvent,
+  type EventBus,
+} from "@opengeni/events";
 import { HTTPException } from "hono/http-exception";
 import { hasPermission, requirePermission } from "../access";
 import { recordWorkspaceUsage, requireLimit } from "../billing/limits";
@@ -289,8 +296,8 @@ export async function createAndStartSession(input: {
   parentSessionId?: string | null;
   // Workspace-scoped CREATE idempotency key. When present, a double-fire with
   // the same key (sequential retry OR concurrent race) collapses to a single
-  // session: a prior winner is returned as-is and the start flow below is
-  // skipped, so the dup never re-emits events / re-enqueues a turn.
+  // session. Every caller repairs or re-delivers the winner's one atomic start;
+  // the durable initializer prevents duplicate events or turns.
   createIdempotencyKey?: string | null;
   // The shared-sandbox group this session's box joins (addendum 05 §D). Null/
   // omitted ⇒ a singleton group (the new row's own id, today's 1:1 behavior); a
@@ -325,12 +332,17 @@ export async function createAndStartSession(input: {
       input.createIdempotencyKey,
     );
     if (existing) {
-      return existing;
+      return await finishStartSession(
+        existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+        existing,
+      );
     }
     // No prior session: insert under the key, racing concurrent creates. The
     // partial unique index lets exactly one insert win; a loser gets back the
-    // winner's row with created=false and must NOT run the start flow (the
-    // winner owns the events/turn/workflow), so we return it as-is.
+    // winner's row with created=false. Both callers may enter the idempotent
+    // initializer; exactly one creates the first events/turn. Each retry
+    // advances the coalesced wake revision so an in-flight stale delivery can
+    // never acknowledge work committed by the other caller.
     const { session: keyed, created } = await createSessionWithIdempotencyKey(input.db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -352,7 +364,10 @@ export async function createAndStartSession(input: {
       mcpServers: input.mcpServers ?? [],
     });
     if (!created) {
-      return keyed;
+      return await finishStartSession(
+        keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
+        keyed,
+      );
     }
     return await finishStartSession(input, keyed);
   }
@@ -379,11 +394,10 @@ export async function createAndStartSession(input: {
 }
 
 /**
- * The post-insert half of {@link createAndStartSession}: durable goal row,
- * the initial event batch (session.created / goal.set / user.message /
- * status.changed), turn enqueue, and the workflow wake. Split out so the
- * idempotency-key winner and the key-less create share one body, and the
- * idempotency-key loser/dup can skip it entirely.
+ * Complete or repair the post-insert half of {@link createAndStartSession}.
+ * All durable initial state is installed by one idempotent transaction; every
+ * caller may then advance and deliver the coalesced wake revision without
+ * duplicating the goal, events, or first turn.
  */
 async function finishStartSession(
   input: {
@@ -408,71 +422,9 @@ async function finishStartSession(
   },
   session: Session,
 ): Promise<Session> {
-  // The goal row is durable session state; the workflow picks it up from the
-  // database once the first turn completes — no extra workflow plumbing here.
-  const goal = input.goal
-    ? await createSessionGoal(input.db, {
-        accountId: session.accountId,
-        workspaceId: session.workspaceId,
-        sessionId: session.id,
-        text: input.goal.text,
-        successCriteria: input.goal.successCriteria ?? null,
-        maxAutoContinuations: input.goal.maxAutoContinuations ?? null,
-        createdBy: "api",
-      })
-    : null;
-  const initialPayload = {
-    text: input.initialMessage,
-    ...(input.resources.length ? { resources: input.resources } : {}),
-    ...(input.tools.length ? { tools: input.tools } : {}),
-  };
-  const events = await appendAndPublishEvents(
-    input.db,
-    input.bus,
-    session.workspaceId,
-    session.id,
-    [
-      {
-        type: "session.created",
-        payload: {
-          status: "queued",
-          ...(input.variableSet
-            ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
-            : {}),
-          ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
-        },
-      },
-      ...(goal
-        ? [
-            {
-              type: "goal.set" as const,
-              payload: {
-                goalId: goal.id,
-                text: goal.text,
-                ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-                version: goal.version,
-                actor: "api",
-                replaced: false,
-              },
-            },
-          ]
-        : []),
-      {
-        type: "user.message",
-        payload: initialPayload,
-        ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
-      },
-      { type: "session.status.changed", payload: { status: "queued" } },
-    ],
-  );
-  const userEvent = events.find((event) => event.type === "user.message");
-  if (!userEvent) {
-    throw new HTTPException(500, { message: "failed to append initial user event" });
-  }
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
-  // the first turn is enqueued + the workflow woken, so the FIRST turn routes to
-  // the chosen machine. Race-free: the epoch-fenced setActiveSandbox commits here,
-  // before wakeSessionWorkflow below signals the worker. swapActiveSandbox does
+  // the atomic initial turn transaction, so the FIRST turn routes to the chosen
+  // machine. swapActiveSandbox does
   // the same ownership+liveness validation as the live swap; an invalid/unowned/
   // offline target FAILS the create (422) — never a silent fall-back to the box.
   if (input.seedTargetSandbox) {
@@ -502,36 +454,40 @@ async function finishStartSession(
       });
     }
   }
-  const workflowId = workflowIdForSession(session.id);
-  await setTemporalWorkflowId(input.db, session.workspaceId, session.id, workflowId);
-  const turn = await enqueueSessionTurn(input.db, {
+  const started = await initializeSessionStartAtomically(input.db, {
     accountId: session.accountId,
     workspaceId: session.workspaceId,
     sessionId: session.id,
-    triggerEventId: userEvent.id,
-    temporalWorkflowId: workflowId,
-    source: "user",
-    prompt: input.initialMessage,
-    resources: input.resources,
-    tools: input.tools,
-    model: input.model,
-    reasoningEffort: input.reasoningEffort,
-    sandboxBackend: input.sandboxBackend,
-    metadata: {},
-  });
-  await appendAndPublishEvents(input.db, input.bus, session.workspaceId, session.id, [
-    {
-      type: "turn.queued",
-      turnId: turn.id,
-      payload: { turnId: turn.id, triggerEventId: userEvent.id, source: turn.source },
+    ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
+    reasoningEffortFallback: input.reasoningEffort,
+    createdEventPayload: {
+      ...(input.variableSet
+        ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
+        : {}),
+      ...(input.sessionMcpServers?.length ? { mcpServers: input.sessionMcpServers } : {}),
     },
-  ]);
-  await input.workflowClient.wakeSessionWorkflow({
-    accountId: session.accountId,
-    workspaceId: session.workspaceId,
-    sessionId: session.id,
-    workflowId,
+    goal: input.goal
+      ? {
+          text: input.goal.text,
+          ...(input.goal.successCriteria !== undefined
+            ? { successCriteria: input.goal.successCriteria }
+            : {}),
+          ...(input.goal.maxAutoContinuations !== undefined
+            ? { maxAutoContinuations: input.goal.maxAutoContinuations }
+            : {}),
+        }
+      : null,
   });
+  await publishDurableSessionEvents(input.bus, session.workspaceId, session.id, started.events);
+  if (started.workflowWakeRevision !== null) {
+    await input.workflowClient.wakeSessionWorkflow({
+      accountId: session.accountId,
+      workspaceId: session.workspaceId,
+      sessionId: session.id,
+      workflowId: started.temporalWorkflowId,
+      wakeRevision: started.workflowWakeRevision,
+    });
+  }
   return await requireSession(input.db, session.workspaceId, session.id);
 }
 
@@ -645,7 +601,7 @@ export function reasoningEffortForSession(
 export async function postUserMessageTurn(input: {
   db: Database;
   bus: EventBus;
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow" | "signalSessionControl">;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   settings: Settings;
   accountId: string;
   workspaceId: string;
@@ -657,11 +613,11 @@ export async function postUserMessageTurn(input: {
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
   mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
-  delivery?: "queue" | "steer";
+  delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
-  expectedControlGeneration?: number;
-  expectedWorkspaceInferenceGeneration?: number;
+  controlEtag?: string | null;
+  expectedDraftRevision?: number | null;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
   const requestedModel = input.model ?? null;
@@ -670,34 +626,37 @@ export async function postUserMessageTurn(input: {
   // model inherits the session's model downstream (always a configured id).
   assertConfiguredModel(settings, requestedModel);
   await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
+  const operationKey = input.clientEventId ?? crypto.randomUUID();
   let result;
   try {
-    result = await enqueueSessionMessageAtomically(db, {
-      accountId,
-      workspaceId,
-      sessionId,
-      actor: input.actor ?? accountId,
-      origin: input.origin ?? "human",
-      text: input.text,
-      resources: input.resources,
-      tools: input.tools,
-      model: requestedModel,
-      reasoningEffort: requestedReasoningEffort,
-      clientEventId: input.clientEventId ?? null,
-      mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-      delivery: input.delivery ?? "queue",
-      ...(input.expectedControlGeneration !== undefined
-        ? { expectedControlGeneration: input.expectedControlGeneration }
-        : {}),
-      ...(input.expectedWorkspaceInferenceGeneration !== undefined
-        ? {
-            expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
-          }
-        : {}),
-      reasoningEffortFallback: settings.openaiReasoningEffort,
-    });
+    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
+      scoped.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as Database, {
+          accountId,
+          workspaceId,
+          sessionId,
+          subjectId: input.actor ?? accountId,
+          actor: { type: "human", subjectId: input.actor ?? accountId },
+          operationKey,
+          delivery: input.delivery ?? "send",
+          controlEtag: input.controlEtag ?? null,
+          expectedDraftRevision: input.expectedDraftRevision ?? null,
+          text: input.text,
+          resources: input.resources,
+          tools: input.tools,
+          model: requestedModel,
+          reasoningEffort: requestedReasoningEffort,
+          reasoningEffortFallback: settings.openaiReasoningEffort,
+          source: input.origin === "operator" ? "api" : "user",
+          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+        }),
+      ),
+    );
   } catch (error) {
-    if (error instanceof SessionQueueConflictError) {
+    if (
+      error instanceof QueueCommandConflictError ||
+      error instanceof SessionControlConflictError
+    ) {
       throw new HTTPException(409, { message: error.message });
     }
     if (error instanceof Error && error.message.includes("cancelled")) {
@@ -708,27 +667,51 @@ export async function postUserMessageTurn(input: {
     }
     throw error;
   }
-  await bus.publish(workspaceId, sessionId, result.events);
-  if (result.shouldSignalControl && result.controlEvent) {
-    await workflowClient.signalSessionControl({
-      accountId,
+  const events = await Promise.all(
+    result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)),
+  );
+  if (events.some((event) => event === null)) {
+    throw new Error("Committed prompt events could not be reloaded");
+  }
+  const turn = await getSessionTurn(db, workspaceId, result.turnId);
+  if (!turn) throw new Error("Committed prompt turn could not be reloaded");
+  const accepted = events.find((event) => event?.id === result.acceptedEventId);
+  if (!accepted) throw new Error("Committed user.message event could not be reloaded");
+  await publishDurableSessionEvents(
+    bus,
+    workspaceId,
+    sessionId,
+    events.filter((event): event is SessionEvent => event !== null),
+  );
+  if (result.workspaceControlEventId) {
+    const controlEvent = await getWorkspaceControlEvent(
+      db,
       workspaceId,
-      sessionId,
-      eventId: result.controlEvent.id,
-      workflowId: result.temporalWorkflowId,
-    });
-  } else if (result.shouldWake) {
+      result.workspaceControlEventId,
+    );
+    if (!controlEvent) {
+      throw new Error(
+        `Committed workspace control event disappeared: ${result.workspaceControlEventId}`,
+      );
+    }
+    await publishDurableWorkspaceControlEvent(bus, workspaceId, controlEvent);
+  }
+  try {
     await workflowClient.wakeSessionWorkflow({
       accountId,
       workspaceId,
       sessionId,
-      workflowId: result.temporalWorkflowId,
+      workflowId: turn.temporalWorkflowId,
+      wakeRevision: result.wakeRevision,
+      ...(result.interruptionCount > 0 ? { interruptionRequested: true } : {}),
     });
+  } catch (error) {
+    console.warn(
+      `[sessions] workflow wake failed for committed prompt ${workspaceId}/${sessionId}; durable outbox will retry`,
+      error,
+    );
   }
-  return {
-    accepted: result.accepted,
-    turn: result.turn,
-  };
+  return { accepted, turn };
 }
 
 /**
@@ -1173,10 +1156,10 @@ export async function acceptSessionUserMessage(
     reasoningEffort?: ReasoningEffort | null;
     clientEventId?: string;
     mcpCredentialUpdates?: SessionMcpCredentialUpdateInput[];
-    delivery?: "queue" | "steer";
+    delivery?: "send" | "steer";
     origin?: "human" | "operator";
-    expectedControlGeneration?: number;
-    expectedWorkspaceInferenceGeneration?: number;
+    controlEtag?: string | null;
+    expectedDraftRevision?: number | null;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
@@ -1233,16 +1216,12 @@ export async function acceptSessionUserMessage(
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
-    delivery: input.delivery ?? "queue",
+    delivery: input.delivery ?? "send",
     origin: input.origin ?? "human",
     actor: grant.subjectId,
-    ...(input.expectedControlGeneration !== undefined
-      ? { expectedControlGeneration: input.expectedControlGeneration }
-      : {}),
-    ...(input.expectedWorkspaceInferenceGeneration !== undefined
-      ? {
-          expectedWorkspaceInferenceGeneration: input.expectedWorkspaceInferenceGeneration,
-        }
+    ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
+    ...(input.expectedDraftRevision !== undefined
+      ? { expectedDraftRevision: input.expectedDraftRevision }
       : {}),
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
   });

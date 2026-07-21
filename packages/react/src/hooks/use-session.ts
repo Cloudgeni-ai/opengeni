@@ -1,5 +1,5 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
   useMutationRunner,
@@ -37,10 +37,11 @@ export function useSession(
   sessionId: string | null | undefined,
   options: UseSessionOptions = {},
 ): UseSessionResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
+    useOpenGeni(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [override, setOverride] = useState<Session | null>(null);
-  const mutation = useMutationRunner();
+  const { run, mutating, mutationError, clearMutationError } = useMutationRunner();
   const load = useCallback(async () => {
     if (!sessionId) {
       return null;
@@ -50,12 +51,19 @@ export function useSession(
     setOverride(null);
     return fetched;
   }, [client, workspaceId, sessionId]);
-  const state = usePolledValue(load, {
+  const { data, loading, error, refresh } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled,
   });
+  useEffect(() => {
+    if (enabled && workspaceControlEvent) void refresh();
+  }, [enabled, refresh, workspaceControlEvent]);
+  useEffect(() => {
+    if (!sessionId || !enabled) return;
+    return registerSessionReconciler(sessionId, "session", refresh);
+  }, [enabled, refresh, registerSessionReconciler, sessionId]);
 
-  const base = state.data ?? null;
+  const base = data ?? null;
   // The override only ever carries title/titleSource patches; it is reset on
   // every fresh load so it can never go stale against the server snapshot.
   const session =
@@ -94,25 +102,23 @@ export function useSession(
       if (!sessionId) {
         return null;
       }
-      const result = await mutation.run(() =>
-        client.updateSession(workspaceId, sessionId, { title }),
-      );
+      const result = await run(() => client.updateSession(workspaceId, sessionId, { title }));
       if (result) {
         setOverride(result);
       }
       return result;
     },
-    [client, workspaceId, sessionId, mutation.run],
+    [client, workspaceId, sessionId, run],
   );
 
   return {
     session,
-    loading: state.loading,
-    error: state.error,
-    refresh: state.refresh,
+    loading,
+    error,
+    refresh,
     updateTitle,
-    updating: mutation.mutating,
-    mutationError: mutation.mutationError,
-    clearMutationError: mutation.clearMutationError,
+    updating: mutating,
+    mutationError,
+    clearMutationError,
   };
 }

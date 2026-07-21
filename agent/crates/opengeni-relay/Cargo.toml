@@ -1,6 +1,6 @@
 [package]
 name = "opengeni-relay"
-description = "The stateless stream-relay edge: a dumb byte-pump that pairs a self-hosted agent (producer) with a viewer (consumer) by channel key and splices pty/desktop frames bidirectionally with bounded buffers, backpressure, and per-token rate limits (dossier §10.5)."
+description = "The stateless stream-relay edge: a dumb byte-pump that pairs a self-hosted agent (producer) with a viewer (consumer) by channel key and splices pty/desktop frames bidirectionally with bounded buffers, backpressure, and per-token rate limits."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

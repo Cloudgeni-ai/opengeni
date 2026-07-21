@@ -13,6 +13,7 @@ import { createGoalActivities } from "./activities/goals";
 import { createSandboxLeaseActivities } from "./activities/sandbox-lease";
 import { createScheduledTaskActivities } from "./activities/scheduled-tasks";
 import { createSessionStateActivities } from "./activities/session-state";
+import { createWorkflowWakeActivities } from "./activities/workflow-wake";
 import { createRigVerificationActivities } from "./activities/rig-verification";
 import type { ActivityDependencies, ActivityServices } from "./activities/types";
 import {
@@ -31,13 +32,17 @@ export type {
   GetCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitInput,
   ReconcileCodexCapacityWaitResult,
-  RecoverTurnAfterWorkerDeathInput,
-  RecoverTurnAfterWorkerDeathResult,
+  RecoverDispatchInput,
+  RecoverDispatchResult,
+  PersistSessionAttemptQuiescenceInput,
   RunAgentTurnInput,
   RunAgentTurnResult,
+  SessionAttemptQuiescenceProof,
 } from "./activities/types";
 
-export function createActivities(dependencies: ActivityDependencies = {}) {
+function createActivityServices(
+  dependencies: ActivityDependencies,
+): () => Promise<ActivityServices> {
   let servicesPromise: Promise<ActivityServices> | null = null;
 
   async function services(): Promise<ActivityServices> {
@@ -70,7 +75,7 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         // broker binding (the same `createNatsEventBus(natsUrl)`) here AND on
         // the mounted API, so the two SEPARATE processes share one broker and
         // derive the IDENTICAL `sessionSubject` — the only way live fanout
-        // (worker emit → API SSE) works cross-process (SPIKE-1 F5/F6, proven).
+        // (worker emit → API SSE) works cross-process (schema-isolation contract F5/F6, proven).
         // NEVER default to an in-memory bus: it fans out intra-process only and
         // would silently break live SSE. unset → today's NATS default,
         // byte-for-byte. The bus is live-fanout ONLY — the durable Postgres
@@ -94,13 +99,14 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
         observability,
         wakeSessionWorkflow: dependencies.wakeSessionWorkflow ?? null,
+        signalSessionAttemptQuiesced: dependencies.signalSessionAttemptQuiesced ?? null,
         signalCodexCapacityWorkflow: dependencies.signalCodexCapacityWorkflow ?? null,
         // §7.5 P3 — host-entitlements port. No constructed default: standalone
         // has no host meter, so unset → null → `ensureRunAllowed` reads the
         // local ledger exactly as today (mirrors `wakeSessionWorkflow`'s
         // null-degrades-gracefully shape, not a `createX(settings)` default).
         entitlements: dependencies.entitlements ?? null,
-        // §7.6 P4a — host connection-credential provider. No constructed
+        // §7.6 connection-credential provider — host connection-credential provider. No constructed
         // default: standalone owns its own GitHub App + encryption key, so unset
         // → null → the per-run credential mint self-mints from `settings`
         // (createGitHubAppInstallationToken + environmentsEncryptionKeyBytes)
@@ -111,9 +117,11 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     return servicesPromise;
   }
 
-  const runAgentTurn = createRunAgentTurnActivity(services);
+  return services;
+}
+
+function controlActivities(services: () => Promise<ActivityServices>) {
   return {
-    runAgentTurn,
     ...createDocumentActivities(services),
     ...createSessionStateActivities(services),
     ...createScheduledTaskActivities(services),
@@ -121,26 +129,46 @@ export function createActivities(dependencies: ActivityDependencies = {}) {
     ...createCodexCapacityActivities(services),
     ...createRigVerificationActivities(services),
     ...createFileUploadReaperActivities(services),
+    ...createWorkflowWakeActivities(services),
     // P1.3: the SOLE liveness/GC/cost-stop driver. Only reapSandboxLeases — no
     // *ForViewer activities, no ownerHeartbeat, no resolveOwnerTaskQueue.
     ...createSandboxLeaseActivities(services),
   };
 }
 
-const defaultActivities = createActivities();
+export function createControlActivities(dependencies: ActivityDependencies = {}) {
+  return controlActivities(createActivityServices(dependencies));
+}
 
-export const runAgentTurn = defaultActivities.runAgentTurn;
-export const indexDocument = defaultActivities.indexDocument;
-export const failSession = defaultActivities.failSession;
-export const settleSessionControl = defaultActivities.settleSessionControl;
-export const recoverTurnAfterWorkerDeath = defaultActivities.recoverTurnAfterWorkerDeath;
-export const claimNextSessionExecution = defaultActivities.claimNextSessionExecution;
-export const markSessionIdle = defaultActivities.markSessionIdle;
-export const dispatchScheduledTaskRun = defaultActivities.dispatchScheduledTaskRun;
-export const maybeContinueGoal = defaultActivities.maybeContinueGoal;
-export const getCodexCapacityWait = defaultActivities.getCodexCapacityWait;
-export const reconcileCodexCapacityWait = defaultActivities.reconcileCodexCapacityWait;
-export const reapSandboxLeases = defaultActivities.reapSandboxLeases;
-export const reapExpiredFileUploads = defaultActivities.reapExpiredFileUploads;
-export const verifyRigChange = defaultActivities.verifyRigChange;
-export const verifyRigVersion = defaultActivities.verifyRigVersion;
+export function createTurnActivities(dependencies: ActivityDependencies = {}) {
+  return { runAgentTurn: createRunAgentTurnActivity(createActivityServices(dependencies)) };
+}
+
+/** Direct activity harness for tests; production workers always choose one role. */
+export function createActivityTestHarness(dependencies: ActivityDependencies = {}) {
+  const services = createActivityServices(dependencies);
+  return { runAgentTurn: createRunAgentTurnActivity(services), ...controlActivities(services) };
+}
+
+const defaultControlActivities = createControlActivities();
+const defaultTurnActivities = createTurnActivities();
+
+export const runAgentTurn = defaultTurnActivities.runAgentTurn;
+export const indexDocument = defaultControlActivities.indexDocument;
+export const failSessionAttempt = defaultControlActivities.failSessionAttempt;
+export const settleSessionInterruptions = defaultControlActivities.settleSessionInterruptions;
+export const persistSessionAttemptQuiescence =
+  defaultControlActivities.persistSessionAttemptQuiescence;
+export const recoverDispatch = defaultControlActivities.recoverDispatch;
+export const peekSessionWork = defaultControlActivities.peekSessionWork;
+export const markSessionIdle = defaultControlActivities.markSessionIdle;
+export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
+export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;
+export const maybeContinueGoal = defaultControlActivities.maybeContinueGoal;
+export const getCodexCapacityWait = defaultControlActivities.getCodexCapacityWait;
+export const reconcileCodexCapacityWait = defaultControlActivities.reconcileCodexCapacityWait;
+export const reapSandboxLeases = defaultControlActivities.reapSandboxLeases;
+export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUploads;
+export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
+export const verifyRigChange = defaultControlActivities.verifyRigChange;
+export const verifyRigVersion = defaultControlActivities.verifyRigVersion;

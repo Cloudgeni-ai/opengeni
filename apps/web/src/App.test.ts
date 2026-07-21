@@ -26,8 +26,16 @@ import {
 } from "./lib/routes";
 import { sameSessionForContext } from "./lib/session-context";
 import {
+  defaultExpandedAncestors,
+  sessionAncestorPath,
+  sessionStateLabel,
+  visualTreeDepth,
+} from "./lib/session-rail";
+import {
   buildRailForest,
   groupSessionsForRail,
+  isRunningStatus,
+  mergeSessionForRail,
   recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
@@ -109,7 +117,11 @@ describe("rail session grouping", () => {
           status: "running",
           updatedAt: "2026-01-01T00:00:00.000Z",
         }),
-        railSession({ id: "today-idle", status: "idle", updatedAt: "2026-06-19T09:00:00.000Z" }),
+        railSession({
+          id: "today-idle",
+          status: "idle",
+          updatedAt: "2026-06-19T09:00:00.000Z",
+        }),
         railSession({
           id: "new-running",
           status: "running",
@@ -196,8 +208,16 @@ describe("rail session grouping", () => {
   test("buildRailForest keeps sessions in a parent cycle visible at the root", () => {
     const forest = buildRailForest(
       [
-        railSession({ id: "a", parentSessionId: "b", updatedAt: "2026-06-19T10:00:00.000Z" }),
-        railSession({ id: "b", parentSessionId: "a", updatedAt: "2026-06-19T11:00:00.000Z" }),
+        railSession({
+          id: "a",
+          parentSessionId: "b",
+          updatedAt: "2026-06-19T10:00:00.000Z",
+        }),
+        railSession({
+          id: "b",
+          parentSessionId: "a",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
       ],
       NOW,
     );
@@ -209,7 +229,11 @@ describe("rail session grouping", () => {
   test("buildRailForest pins a manager whose only activity is a live child", () => {
     const forest = buildRailForest(
       [
-        railSession({ id: "manager", status: "idle", updatedAt: "2026-06-01T10:00:00.000Z" }),
+        railSession({
+          id: "manager",
+          status: "idle",
+          updatedAt: "2026-06-01T10:00:00.000Z",
+        }),
         railSession({
           id: "worker",
           status: "running",
@@ -221,6 +245,53 @@ describe("rail session grouping", () => {
     );
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager"]);
     expect(forest.running[0]?.hasActiveDescendant).toBe(true);
+  });
+
+  test("buildRailForest trusts server descendant activity before children are loaded", () => {
+    const manager = railSession({
+      id: "manager-summary",
+      status: "idle",
+      updatedAt: "2026-06-01T10:00:00.000Z",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 7,
+        runningDescendants: 1,
+        queuedDescendants: 2,
+        attentionDescendants: 0,
+        pausedDescendants: 3,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const forest = buildRailForest([manager], NOW);
+    expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
+  });
+
+  test("selected-session detail preserves the list-only hierarchy summary", () => {
+    const listProjection = railSession({
+      id: "selected-manager",
+      status: "idle",
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 4,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const selectedDetail = railSession({ id: "selected-manager", status: "running" });
+
+    const merged = mergeSessionForRail(listProjection, selectedDetail);
+    expect(merged.status).toBe("running");
+    expect(merged.treeStats).toEqual(listProjection.treeStats);
+
+    const refreshedStats = { ...listProjection.treeStats!, directChildren: 3 };
+    expect(
+      mergeSessionForRail(merged, { ...selectedDetail, treeStats: refreshedStats }).treeStats,
+    ).toEqual(refreshedStats);
   });
 
   test("visibleForestRows expands only where the set says so", () => {
@@ -244,6 +315,96 @@ describe("rail session grouping", () => {
   });
 });
 
+describe("rail effective state and deep-path presentation", () => {
+  test("does not claim an idle exception is running", () => {
+    expect(
+      sessionStateLabel(session({ status: "idle", effectiveControl: activeControl(true) })),
+    ).toBe("Idle · Resumed workstream");
+    expect(
+      sessionStateLabel(session({ status: "running", effectiveControl: activeControl(true) })),
+    ).toBe("Running · Resumed workstream");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "idle",
+          effectiveControl: pausedControl("workspace"),
+        }),
+      ),
+    ).toBe("Workspace paused");
+  });
+
+  test("reports workspace pause transitions and attention honestly", () => {
+    expect(
+      sessionStateLabel(
+        session({
+          status: "running",
+          effectiveControl: pausedControl("workspace", true),
+        }),
+      ),
+    ).toBe("Pausing…");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "idle",
+          effectiveControl: pausedControl("workspace"),
+        }),
+      ),
+    ).toBe("Workspace paused");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "requires_action",
+          effectiveControl: pausedControl("workspace"),
+        }),
+      ),
+    ).toBe("Needs you · Workspace paused");
+  });
+
+  test("keeps direct session pause distinct from workspace pause", () => {
+    expect(
+      sessionStateLabel(session({ status: "idle", effectiveControl: pausedControl("session") })),
+    ).toBe("Paused here");
+    expect(
+      sessionStateLabel(
+        session({
+          status: "failed",
+          effectiveControl: pausedControl("session"),
+        }),
+      ),
+    ).toBe("Failed · Paused here");
+  });
+
+  test("keeps recovering and capacity-waiting workstreams in the active group", () => {
+    expect(isRunningStatus("recovering")).toBe(true);
+    expect(isRunningStatus("waiting_capacity")).toBe(true);
+  });
+
+  test("defaults a deep active path to three visible levels and respects manual collapse", () => {
+    const parentOf = new Map([
+      ["current", "level-5"],
+      ["level-5", "level-4"],
+      ["level-4", "level-3"],
+      ["level-3", "level-2"],
+      ["level-2", "root"],
+    ]);
+    const path = sessionAncestorPath("current", parentOf);
+    expect(path).toEqual(["root", "level-2", "level-3", "level-4", "level-5"]);
+    expect([...defaultExpandedAncestors(path, new Set())]).toEqual(["root", "level-2"]);
+    expect([...defaultExpandedAncestors(path, new Set(["level-2"]))]).toEqual(["root"]);
+  });
+
+  test("guards corrupt parent cycles and caps visual indentation", () => {
+    const cyclicParents = new Map([
+      ["current", "a"],
+      ["a", "b"],
+      ["b", "a"],
+    ]);
+    expect(sessionAncestorPath("current", cyclicParents)).toEqual(["b", "a"]);
+    expect(visualTreeDepth(1)).toBe(1);
+    expect(visualTreeDepth(20)).toBe(3);
+  });
+});
+
 describe("session context equality", () => {
   test("treats equivalent live-status overlay objects as unchanged", () => {
     const current = session({ status: "running" });
@@ -254,7 +415,11 @@ describe("session context equality", () => {
 
   test("detects meaningful session changes", () => {
     const current = session({ status: "queued", activeTurnId: null });
-    const next = { ...current, status: "running" as const, activeTurnId: "turn-1" };
+    const next = {
+      ...current,
+      status: "running" as const,
+      activeTurnId: "turn-1",
+    };
 
     expect(sameSessionForContext(current, next)).toBe(false);
   });
@@ -282,6 +447,13 @@ describe("organization helpers", () => {
       externalId: null,
       agentInstructions: null,
       settings: {},
+      inferenceControl: {
+        state: "active",
+        revision: 0,
+        reason: null,
+        changedBy: null,
+        changedAt: null,
+      },
       createdAt: "2026-06-11T00:00:00.000Z",
       updatedAt: "2026-06-11T00:00:00.000Z",
     };
@@ -481,7 +653,11 @@ describe("session create draft", () => {
       goalMaxAutoContinuations: "-3",
     };
     expect(submissionFromSessionDraft(draft).extras).toEqual({});
-    const withGoal = { ...draft, goalText: "goal", goalMaxAutoContinuations: "not-a-number" };
+    const withGoal = {
+      ...draft,
+      goalText: "goal",
+      goalMaxAutoContinuations: "not-a-number",
+    };
     expect(submissionFromSessionDraft(withGoal).extras).toEqual({
       goal: { text: "goal", successCriteria: "criteria without a goal" },
     });
@@ -500,7 +676,10 @@ describe("session create draft", () => {
     };
     expect(submissionFromSessionDraft(draft)).toEqual({
       extras: {},
-      options: { targetSandboxId: "sbx-machine-1", workingDir: "~/repos/opengeni" },
+      options: {
+        targetSandboxId: "sbx-machine-1",
+        workingDir: "~/repos/opengeni",
+      },
       omitWorkspaceResources: true,
     });
   });
@@ -515,7 +694,10 @@ describe("session create draft", () => {
       },
     };
     const submission = submissionFromSessionDraft(draft);
-    expect(submission.options).toEqual({ targetSandboxId: "sbx-machine-2", workingDir: null });
+    expect(submission.options).toEqual({
+      targetSandboxId: "sbx-machine-2",
+      workingDir: null,
+    });
     expect(submission.omitWorkspaceResources).toBe(true);
   });
 
@@ -532,7 +714,11 @@ describe("session create draft", () => {
     expect(
       isSessionDraftComputeReady({
         ...emptySessionDraft(),
-        compute: { kind: "machine", sandboxId: "sbx-1", folder: { kind: "root" } },
+        compute: {
+          kind: "machine",
+          sandboxId: "sbx-1",
+          folder: { kind: "root" },
+        },
       }),
     ).toBe(true);
   });
@@ -541,7 +727,11 @@ describe("session create draft", () => {
     // §3 backend row: options = managed descriptors (backend !== "selfhosted");
     // the Connected Machine kind is the selfhosted target, never a backend choice.
     const options = managedBackendOptions();
-    expect(options[0]).toEqual({ value: "", label: "Deployment default", chips: [] });
+    expect(options[0]).toEqual({
+      value: "",
+      label: "Deployment default",
+      chips: [],
+    });
     const values = options.map((option) => option.value);
     expect(values).not.toContain("selfhosted");
     expect(values).toContain("modal");
@@ -559,7 +749,9 @@ describe("projectSessionTimeline", () => {
       event(1, "user.message", { text: "Inspect the repo" }),
       event(2, "turn.started", {}),
       event(3, "agent.message.delta", { text: "I will inspect first." }),
-      event(4, "agent.reasoning.delta", { text: "Checking the repository state." }),
+      event(4, "agent.reasoning.delta", {
+        text: "Checking the repository state.",
+      }),
       event(5, "agent.toolCall.created", {
         id: "call-1",
         name: "exec_command",
@@ -628,7 +820,9 @@ describe("projectSessionTimeline", () => {
       event(4, "turn.completed", { output: "Done." }),
     ]);
 
-    expect(items.find((item) => item.kind === "reasoning")).toMatchObject({ streaming: false });
+    expect(items.find((item) => item.kind === "reasoning")).toMatchObject({
+      streaming: false,
+    });
     expect(JSON.stringify(items)).not.toContain('"running"');
   });
 
@@ -652,7 +846,23 @@ describe("projectSessionTimeline", () => {
   test("falls back to the initial message while the event log is empty", () => {
     const items = projectSessionTimeline(session({ initialMessage: "Bootstrap the cluster" }), []);
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "user-message", text: "Bootstrap the cluster" });
+    expect(items[0]).toMatchObject({
+      kind: "user-message",
+      text: "Bootstrap the cluster",
+    });
+  });
+
+  test("does not resurrect the initial message while its turn is still queued", () => {
+    const items = projectSessionTimeline(session({ initialMessage: "Queued bootstrap" }), [
+      { ...event(1, "user.message", { text: "Queued bootstrap" }), turnId: null },
+      event(2, "turn.queued", {
+        turnId: "turn-1",
+        triggerEventId: "event-1",
+        source: "user",
+      }),
+    ]);
+
+    expect(items).toEqual([]);
   });
 
   test("hides archived terminal failure payloads in the main timeline projection", () => {
@@ -860,7 +1070,12 @@ describe("buildTools", () => {
             notes: null,
           },
         }),
-        capabilityItem({ id: "api:social", kind: "api", name: "Social API", enabled: true }),
+        capabilityItem({
+          id: "api:social",
+          kind: "api",
+          name: "Social API",
+          enabled: true,
+        }),
       ]),
     ).toEqual([{ id: "cap-ready", name: "Ready MCP" }]);
   });
@@ -896,6 +1111,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
+      apiContractRevision: "2026-07-session-control-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -905,6 +1121,11 @@ describe("composer reasoning-effort picker (full host enum)", () => {
       fileUploads: { enabled: false, maxSizeBytes: 0 },
       productAccessMode: "local",
       auth: { mode: "none" },
+      structuredServices: {
+        fileSystem: false,
+        git: false,
+        terminalEvents: false,
+      },
       ...patch,
     };
   }
@@ -985,14 +1206,14 @@ describe("capability catalog helpers", () => {
     expect(
       capabilityErrorToast(
         new Error(
-          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+          'API 422: MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
         ),
         "Capability update failed",
       ),
     ).toEqual({
       title: "Connection failed",
       description:
-        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize https://api.4fetch.com/mcp/v1/fetch: Unable to connect.',
+        'MCP capability "4fetch" could not be enabled because OpenGeni could not initialize api.4fetch.com. Check the endpoint configuration or try again.',
     });
   });
 
@@ -1030,7 +1251,12 @@ describe("capability catalog helpers", () => {
             {
               id: "daily-social-analysis",
               name: "Daily social analysis",
-              defaultSchedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
+              defaultSchedule: {
+                type: "calendar",
+                timeZone: "UTC",
+                hour: 9,
+                minute: 0,
+              },
             },
           ],
         },
@@ -1074,11 +1300,19 @@ describe("scheduled task form helpers", () => {
 
     expect(form.scheduleType).toBe("interval");
     expect(form.intervalMinutes).toBe(30);
-    expect(scheduleFromFormState(form)).toEqual({ type: "interval", everySeconds: 1800 });
+    expect(scheduleFromFormState(form)).toEqual({
+      type: "interval",
+      everySeconds: 1800,
+    });
   });
 
   test("hydrates and serializes calendar schedules", () => {
-    const task = scheduledTask({ type: "calendar", timeZone: "Europe/Oslo", hour: 9, minute: 5 });
+    const task = scheduledTask({
+      type: "calendar",
+      timeZone: "Europe/Oslo",
+      hour: 9,
+      minute: 5,
+    });
     const form = formStateFromScheduledTask(task);
 
     expect(form.scheduleType).toBe("calendar");
@@ -1132,7 +1366,11 @@ describe("scheduled task form helpers", () => {
         },
       },
     );
-    const form = { ...formStateFromScheduledTask(task), prompt: "new", includeOpenGeniTool: false };
+    const form = {
+      ...formStateFromScheduledTask(task),
+      prompt: "new",
+      includeOpenGeniTool: false,
+    };
 
     expect(form.resources).toEqual(resources);
     expect(agentConfigFromFormState(form, task)).toEqual({
@@ -1177,7 +1415,10 @@ describe("scheduled task form helpers", () => {
         githubRepositoryId: 456,
       },
     ];
-    const form = { ...formStateFromScheduledTask(task), resources: selectedResources };
+    const form = {
+      ...formStateFromScheduledTask(task),
+      resources: selectedResources,
+    };
 
     expect(agentConfigFromFormState(form, task)).toMatchObject({
       resources: selectedResources,
@@ -1192,7 +1433,11 @@ describe("scheduled task form helpers", () => {
 describe("scheduled task run summaries", () => {
   test("summarizes the most recent run with honest tones", () => {
     const summary = summarizeLastRun([
-      taskRun({ id: "run-1", firedAt: "2026-06-10T08:00:00.000Z", status: "dispatched" }),
+      taskRun({
+        id: "run-1",
+        firedAt: "2026-06-10T08:00:00.000Z",
+        status: "dispatched",
+      }),
       taskRun({
         id: "run-2",
         firedAt: "2026-06-11T08:00:00.000Z",
@@ -1330,12 +1575,7 @@ function session(patch: Partial<Session> = {}): Session {
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,
-    controlState: patch.controlState ?? "active",
-    controlGeneration: patch.controlGeneration ?? 0,
-    controlReason: patch.controlReason ?? null,
-    controlChangedBy: patch.controlChangedBy ?? null,
-    controlChangedAt: patch.controlChangedAt ?? null,
-    workspaceRunExceptionGeneration: patch.workspaceRunExceptionGeneration ?? null,
+    effectiveControl: patch.effectiveControl ?? activeControl(false),
   };
 }
 
@@ -1518,8 +1758,16 @@ describe("workspace switcher helpers", () => {
     const context = accessContext({
       defaultAccountId: "account-default",
       accountGrants: [
-        { accountId: "account-default", subjectId: "subject-1", permissions: ["workspace:create"] },
-        { accountId: "account-active", subjectId: "subject-1", permissions: ["account:admin"] },
+        {
+          accountId: "account-default",
+          subjectId: "subject-1",
+          permissions: ["workspace:create"],
+        },
+        {
+          accountId: "account-active",
+          subjectId: "subject-1",
+          permissions: ["account:admin"],
+        },
       ],
     });
     expect(workspaceCreationAccountId(context, "account-active")).toBe("account-active");
@@ -1529,14 +1777,22 @@ describe("workspace switcher helpers", () => {
     const context = accessContext({
       defaultAccountId: "account-default",
       accountGrants: [
-        { accountId: "account-default", subjectId: "subject-1", permissions: ["workspace:create"] },
+        {
+          accountId: "account-default",
+          subjectId: "subject-1",
+          permissions: ["workspace:create"],
+        },
       ],
     });
     expect(workspaceCreationAccountId(context, "account-other")).toBe("account-default");
 
     const indirect = accessContext({
       accountGrants: [
-        { accountId: "account-3", subjectId: "subject-1", permissions: ["workspace:create"] },
+        {
+          accountId: "account-3",
+          subjectId: "subject-1",
+          permissions: ["workspace:create"],
+        },
       ],
     });
     expect(workspaceCreationAccountId(indirect, null)).toBe("account-3");
@@ -1546,7 +1802,11 @@ describe("workspace switcher helpers", () => {
     const context = accessContext({
       defaultAccountId: "account-default",
       accountGrants: [
-        { accountId: "account-default", subjectId: "subject-1", permissions: ["billing:read"] },
+        {
+          accountId: "account-default",
+          subjectId: "subject-1",
+          permissions: ["billing:read"],
+        },
       ],
     });
     expect(workspaceCreationAccountId(context, null)).toBeNull();
@@ -1573,9 +1833,64 @@ describe("workspace switcher helpers", () => {
       externalId: null,
       agentInstructions: null,
       settings: {},
+      inferenceControl: {
+        state: "active",
+        revision: 0,
+        reason: null,
+        changedBy: null,
+        changedAt: null,
+      },
       createdAt: "2026-06-11T08:00:00.000Z",
       updatedAt: "2026-06-11T08:00:00.000Z",
       ...patch,
     };
   }
 });
+
+function activeControl(withOverride: boolean): Session["effectiveControl"] {
+  return {
+    state: "active",
+    controlVersion: withOverride ? 7 : 0,
+    controlEtag: withOverride ? "override-7" : "active-0",
+    directState: "active",
+    primaryBlocker: null,
+    additionalBlockerCount: 0,
+    blockers: [],
+    resumeOptions: [],
+    override: withOverride ? { rootSessionId: "session-1", revision: 7 } : null,
+    settlement: null,
+  };
+}
+
+function pausedControl(
+  kind: "session" | "workspace",
+  stopping = false,
+): Session["effectiveControl"] {
+  const blocker = {
+    kind,
+    ...(kind === "session" ? { sessionId: "session-1" } : {}),
+    displayName: kind === "workspace" ? "Workspace paused" : "Paused here",
+    actor: null,
+    reason: null,
+    changedAt: null,
+    revision: 1,
+  };
+  return {
+    ...activeControl(false),
+    state: "paused",
+    controlVersion: 1,
+    controlEtag: `${kind}-paused-1`,
+    directState: kind === "session" ? "paused" : "active",
+    primaryBlocker: blocker,
+    blockers: [blocker],
+    resumeOptions: [
+      {
+        scope: "selected",
+        targetId: "session-1",
+        selectedStateAfter: "active",
+        impactCopy: "This workstream can run.",
+      },
+    ],
+    settlement: stopping ? { state: "stopping", attemptCount: 1 } : null,
+  };
+}

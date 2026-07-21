@@ -1,187 +1,37 @@
-// P4.1 — the worker-side ensureDisplayStack GATING (creds-free, no live box).
-//
-// resumeBoxForTurn's spawner branch calls ensureDisplayStack(settings, established)
-// on every cold-restore. This pins the I5 headless-rollover gate:
-//
-//   (1) sandboxDesktopEnabled=false  -> NO-OP (the box is never touched).
-//   (2) flag ON but the backend is headless-only (unix_local: DesktopStream
-//       unavailable) -> NO-OP (degradation is a value, not a throw).
-//   (3) flag ON + a desktop-capable backendId (modal) -> DELEGATES: execs the
-//       canonical flock-wrapped opengeni-desktop-up on the box exactly once.
-//   (4) a desktop-capable box that cannot run commands degrades to Channel-A
-//       (DisplayStackUnsupportedError is swallowed) rather than failing the turn.
-//
-// The live proof (xdpyinfo/sockets/XTEST/scrot on real Modal/gVisor) is the
-// OPENGENI_P41_LIVE_MODAL-gated integration test below this one.
-
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { testSettings } from "@opengeni/testing";
-import type { EstablishedSandboxSession } from "@opengeni/runtime";
-import { ensureDisplayStack } from "../src/sandbox-resume";
 
-function fakeBox(backendId: string) {
-  const calls: string[] = [];
-  const session = {
-    exec: async ({ cmd }: { cmd: string }) => {
-      calls.push(cmd);
-      return {
-        output: "OPENGENI_DESKTOP_UP port=6080 geometry=1280x800 dpi=96",
-        stdout: "OPENGENI_DESKTOP_UP port=6080 geometry=1280x800 dpi=96",
-        stderr: "",
-        exitCode: 0,
-        wallTimeSeconds: 0.1,
-      };
-    },
-  };
-  const established: EstablishedSandboxSession = {
-    client: {},
-    session,
-    sessionState: {},
-    instanceId: "box-1",
-    backendId,
-  };
-  return { established, calls };
-}
+// Regression for the production capacity incident of 2026-07-15: every
+// filesystem turn eagerly started Xvfb/XFCE/ffmpeg, occupying all turn-worker
+// slots for minutes and creating a large Modal burst. The turn resume path is
+// now strictly compute-only. Viewer attach and actual computer-use own desktop
+// initialization in their respective lazy paths.
+describe("turn sandbox resume is desktop-free", () => {
+  const resumeSource = readFileSync(
+    join(import.meta.dir, "..", "src", "sandbox-resume.ts"),
+    "utf8",
+  );
+  const agentTurnSource = readFileSync(
+    join(import.meta.dir, "..", "src", "activities", "agent-turn.ts"),
+    "utf8",
+  );
 
-describe("P4.1 worker ensureDisplayStack gating (I5 headless-rollover branch)", () => {
-  test("(1) flag OFF -> no-op (box never touched)", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: false });
-    const { established, calls } = fakeBox("modal");
-    await ensureDisplayStack(settings, established);
-    expect(calls).toHaveLength(0);
+  test("resumeBoxForTurn never launches the display or resolves a stream port", () => {
+    expect(resumeSource).not.toContain("ensureDisplayStack(");
+    expect(resumeSource).not.toContain("exposeStreamPort(");
+    expect(resumeSource).not.toContain("resolveExposedPort(");
+    expect(resumeSource).toContain("dataPlaneUrl: null");
   });
 
-  test("(2) flag ON but headless-only backend (unix_local) -> no-op", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: true });
-    const { established, calls } = fakeBox("unix_local");
-    await ensureDisplayStack(settings, established);
-    expect(calls).toHaveLength(0);
-  });
-
-  test("(3) flag ON + desktop-capable backend (modal) -> execs the flock-wrapped up-script once", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: true });
-    const { established, calls } = fakeBox("modal");
-    await ensureDisplayStack(settings, established);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toContain("flock");
-    expect(calls[0]).toContain("opengeni-desktop-up");
-    expect(calls[0]).toContain("STREAM_PORT=6080");
-  });
-
-  test("(4) a desktop-capable box that cannot run commands degrades (no throw)", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: true });
-    const established: EstablishedSandboxSession = {
-      client: {},
-      session: {}, // no exec/execCommand
-      sessionState: {},
-      instanceId: "box-2",
-      backendId: "modal",
-    };
-    // Channel-A-only fallback: swallowed, not thrown.
-    await ensureDisplayStack(settings, established);
-    expect(true).toBe(true);
-  });
-});
-
-// ── REGRESSION: the flock-contention turn-failure (display-stack best-effort) ──
-// The env-manifest/computer-use work added ensureDisplayStack to the agent TURN
-// path. When a VIEWER attach already brought the stack up and holds/contends the
-// up-script's outer flock (or the up-script is mid-run), the turn's ensure waited
-// on the lock, timed out at ~45s, got empty output -> inferExitFromOutput=-1 ->
-// DisplayStackError -> the WHOLE TURN failed ("desktop display stack failed at
-// stage unknown (exit -1) ... Wall time ~45.91s"). That blocked EVERY desktop
-// turn after an attach. FIX 2: the turn's ensureDisplayStack is BEST-EFFORT — a
-// DisplayStackError (timeout-derived exit -1 OR a real stage failure) is caught,
-// logged, and swallowed so the desktop surface degrades to Channel-A WITHOUT
-// failing the turn. (FIX 1 — the lock-free pre-check — makes the already-up case
-// resolve fast so this catch is rarely reached; we still pin tolerance here.)
-describe("REGRESSION: the turn's ensureDisplayStack is BEST-EFFORT (a contended-flock timeout never fails the turn)", () => {
-  function fakeBoxExit(exitCode: number, output: string) {
-    const calls: string[] = [];
-    const session = {
-      exec: async ({ cmd }: { cmd: string }) => {
-        calls.push(cmd);
-        return { output, stdout: output, stderr: output, exitCode, wallTimeSeconds: 45.91 };
-      },
-    };
-    const established: EstablishedSandboxSession = {
-      client: {},
-      session,
-      sessionState: {},
-      instanceId: "box-contended",
-      backendId: "modal",
-    };
-    return { established, calls };
-  }
-
-  test("a contended-flock TIMEOUT (empty output -> exit -1 -> DisplayStackError) is swallowed — the turn continues", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: true });
-    // The exact live signature: flock -w timed out, the exec yielded empty output,
-    // inferExitFromOutput returned -1, the leaf threw DisplayStackError(exit -1).
-    const { established, calls } = fakeBoxExit(-1, "");
-    // MUST NOT THROW (pre-fix this propagated and failed the turn).
-    await ensureDisplayStack(settings, established);
-    expect(calls).toHaveLength(1); // it did attempt the ensure...
-  });
-
-  test("a real STAGE failure (exit 13, websockify) is also swallowed — the desktop degrades, the turn survives", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: true });
-    const { established } = fakeBoxExit(13, "websockify failed on 6080");
-    // A genuine stage failure is still a desktop-surface degradation, not a turn
-    // killer (the agent's work doesn't depend on the optional pixel stack).
-    await ensureDisplayStack(settings, established);
-    expect(true).toBe(true);
-  });
-
-  test("an UNEXPECTED non-display error (the session itself blew up) still propagates", async () => {
-    const settings = testSettings({ sandboxDesktopEnabled: true });
-    const session = {
-      exec: async () => {
-        throw new Error("provider session connection reset");
-      },
-    };
-    const established: EstablishedSandboxSession = {
-      client: {},
-      session,
-      sessionState: {},
-      instanceId: "box-broken",
-      backendId: "modal",
-    };
-    // Not a DisplayStack* error -> NOT a desktop degradation -> it propagates.
-    await expect(ensureDisplayStack(settings, established)).rejects.toThrow(
-      "provider session connection reset",
-    );
-  });
-});
-
-// ── Regression: the computer-use "400 Invalid input[N].output.image_url" fix ───
-// The trigger was that resumeBoxForTurn brought up the desktop :0 ONLY on the
-// SPAWNER branch; a turn ATTACHING to a warm box whose display was never up (box
-// first warmed by a Channel-A op, or a snapshot rollover dropped the X stack)
-// drove computer-use against a dead :0 — scrot returned an empty PNG, the Agents
-// SDK built `image_url: ''`, and the model 400'd the turn. FIX A re-ensures the
-// display stack on the ATTACHED/REARMED branch too. We pin the structural
-// invariant (source-level, no live modal box needed): BOTH resume branches call
-// ensureDisplayStack(settings, established). This fails loud if the attached-path
-// ensure is ever removed.
-describe("REGRESSION: resumeBoxForTurn ensures the display stack on BOTH the spawner AND the attached branch", () => {
-  const source = readFileSync(join(import.meta.dir, "..", "src", "sandbox-resume.ts"), "utf8");
-
-  test("ensureDisplayStack is called at least twice in the source (spawner + attached)", () => {
-    const calls = source.match(/await ensureDisplayStack\(settings, established\)/g) ?? [];
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-  });
-
-  test("the attached/rearmed branch (resume-by-id) ensures the stack before returning the established session", () => {
-    // The attached branch establishes from the lease's resume_state then returns
-    // { established, leaseEpoch, release }. Assert ensureDisplayStack runs between
-    // that establish and that return — i.e. an attaching turn always finds a live :0.
-    const attachedBranch = source.slice(source.indexOf("Prefer the lease's resume_state"));
-    const ensureIdx = attachedBranch.indexOf("await ensureDisplayStack(settings, established)");
-    const returnIdx = attachedBranch.indexOf("return { established, leaseEpoch, release }");
-    expect(ensureIdx).toBeGreaterThan(0);
-    expect(returnIdx).toBeGreaterThan(ensureIdx);
+  test("recording starts only from the actual computer-use callback", () => {
+    expect(agentTurnSource).toContain("onComputerUseReady: async () =>");
+    const eagerCalls = agentTurnSource.match(/await maybeStartOnTurnRecording\(/g) ?? [];
+    expect(eagerCalls).toHaveLength(1);
+    const callback = agentTurnSource.slice(agentTurnSource.indexOf("onComputerUseReady: async"));
+    const observation = callback.indexOf("didComputerUse = true");
+    const recordingStart = callback.indexOf("await maybeStartOnTurnRecording(");
+    expect(observation).toBeGreaterThan(0);
+    expect(recordingStart).toBeGreaterThan(observation);
   });
 });

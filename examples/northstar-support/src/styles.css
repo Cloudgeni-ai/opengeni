@@ -1,0 +1,36 @@
+@import "tailwindcss";
+@import "@opengeni/react/styles.css";
+@source "../../../packages/react/src";
+
+html,
+body,
+#root {
+  margin: 0;
+  min-height: 100%;
+  font-family: var(--og-font-sans);
+}
+
+.northstar {
+  --og-color-accent: oklch(0.56 0.18 288);
+  --og-color-accent-strong: oklch(0.49 0.2 288);
+  --og-color-accent-deep: oklch(0.44 0.2 288);
+  --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 10%, transparent);
+  --og-color-bg: #f7f7f9;
+  --og-color-surface-1: #ffffff;
+  --og-color-surface-2: #f5f5f8;
+  --og-color-surface-3: #eeeeF3;
+  --og-color-border: rgba(31, 34, 45, 0.08);
+  --og-color-border-strong: rgba(31, 34, 45, 0.17);
+  --og-color-fg: #242631;
+  --og-color-fg-muted: #666a75;
+  --og-color-fg-subtle: #9699a3;
+}
+
+.northstar ::selection {
+  background: color-mix(in oklch, var(--og-color-accent) 22%, white);
+}
+
+.northstar * {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(45, 48, 60, 0.15) transparent;
+}

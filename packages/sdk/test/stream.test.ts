@@ -56,6 +56,23 @@ function sequences(events: SessionEvent[]): number[] {
 const FAST = { reconnectDelayMs: 1, maxReconnectDelayMs: 2 };
 
 describe("streamSessionEvents", () => {
+  test("awaits authoritative reconciliation before reporting Live", async () => {
+    let reconciled = false;
+    const states: string[] = [];
+    const events = collect(
+      streamSessionEvents(scriptedTransport([{ events: [makeEvent(1)] }]), {
+        reconnect: false,
+        beforeLive: async () => {
+          await Bun.sleep(1);
+          reconciled = true;
+        },
+        onStateChange: (state) => states.push(state),
+      }),
+    );
+    expect((await events).map((event) => event.sequence)).toEqual([1]);
+    expect(reconciled).toBe(true);
+    expect(states).toEqual(["connecting", "live"]);
+  });
   test("yields ordered events from a single connection and ends when reconnect is off", async () => {
     const transport = scriptedTransport([{ events: [makeEvent(1), makeEvent(2), makeEvent(3)] }]);
     const events = await collect(streamSessionEvents(transport, { reconnect: false }));

@@ -1,6 +1,6 @@
 // Wire shapes come from @opengeni/sdk (pinned to @opengeni/contracts by the
 // SDK's contract-parity tests) — the console does not mirror them. Only the
-// console-local shapes (client config, managed auth session, drafts) live here.
+// console-local shapes (managed auth session and drafts) live here.
 export type {
   AccessContext,
   AccessGrant,
@@ -16,6 +16,7 @@ export type {
   CapabilityKind,
   CapabilityPack,
   CapabilitySource,
+  ClientConfig,
   ConnectionKind,
   ConnectionMetadata,
   ConnectionStatus,
@@ -85,7 +86,6 @@ export type WorkspaceVariableSet = VariableSet;
 export type WorkspaceVariableSetVariableMetadata = VariableSetVariableMetadata;
 export type { CreateCapabilityCatalogItemRequest as CreateCapabilityInput } from "@opengeni/sdk";
 import type {
-  ClientModel,
   GoalSpec,
   ReasoningEffort,
   ResourceRef,
@@ -110,32 +110,6 @@ export type TurnSubmission = {
   rigId?: string;
   goal?: GoalSpec;
   firstPartyMcpPermissions?: string[];
-};
-
-export type ClientConfig = {
-  deploymentRevision: string;
-  defaultModel: string;
-  allowedModels: string[];
-  // Richer provider-grouped model list the host exposes for the picker (labels +
-  // provider grouping). Empty on older hosts, where the picker falls back to the
-  // flat `allowedModels` id list. Mirrors the SDK's `ClientConfig.models`.
-  models: ClientModel[];
-  defaultReasoningEffort: ReasoningEffort;
-  allowedReasoningEfforts: ReasoningEffort[];
-  mcpServers: Array<{
-    id: string;
-    name: string;
-  }>;
-  fileUploads: {
-    enabled: boolean;
-    maxSizeBytes: number;
-  };
-  productAccessMode: "local" | "configured" | "managed";
-  auth:
-    | { mode: "none" }
-    | { mode: "deploymentKey"; headerName: "x-opengeni-access-key" }
-    | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
-    | { mode: "managedSession"; session: "cookie" };
 };
 
 export type AuthSession = {

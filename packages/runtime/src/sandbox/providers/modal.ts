@@ -6,7 +6,14 @@ import { SandboxConfigError } from "../errors";
 import type { ProviderRegistration } from "./types";
 
 const MODAL_ORPHAN_SWEEP_LIMIT = 50;
-const MODAL_UNATTRIBUTED_ORPHAN_GRACE_MS = 30 * 60_000;
+// A provider box is invisible to the lease until Modal create + manifest
+// materialization returns and the creation callback records its instance id.
+// Production baseline (2026-07-15, all 8 turn workers): 155/155 completed creates
+// finished under 10s (154 under 2.5s). Two minutes is a 12x observed-max buffer,
+// while avoiding the former 30-minute retention of boxes abandoned by a rolling
+// worker restart. The live-instance guard below remains authoritative: once a box
+// is recorded by any lease, age and missing/stale tags can never terminate it.
+const MODAL_UNATTRIBUTED_ORPHAN_GRACE_MS = 2 * 60_000;
 
 export type ModalSandboxAttribution = {
   leaseId: string;
@@ -74,10 +81,11 @@ export const modalProvider: ProviderRegistration = {
       sandboxCreateTimeoutS: Math.ceil(settings.sandboxWarmingTimeoutMs / 1000),
       exposedPorts,
       env: environment,
-      // The Modal JS SDK's sandbox default command already sleeps until timeout
-      // or explicit termination. Do not let the Agents extension stamp a separate
-      // hardcoded sleep command; OPENGENI_MODAL_TIMEOUT_SECONDS owns lifetime.
-      useSleepCmd: false,
+      // A registry image's own CMD is not a sandbox keepalive contract (for
+      // example, python:3.12-slim can exit immediately). Keep the provider's
+      // control process alive so exec/resume remains available; Modal's hard
+      // timeout and explicit OpenGeni teardown still own the box lifetime.
+      useSleepCmd: true,
     };
     // gap-fill (module 03 §4.1): these SDK options were previously unmapped.
     // ALWAYS pin idleTimeoutMs (sandbox-file-persistence): an UNSET idle timeout

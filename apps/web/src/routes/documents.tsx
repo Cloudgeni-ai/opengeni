@@ -8,7 +8,7 @@ import {
   PlusIcon,
   RefreshCwIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
@@ -100,9 +100,40 @@ export function DocumentsRoute({
     count: documents.length,
   });
 
+  const refreshBases = useCallback(async () => {
+    setBasesLoading(true);
+    try {
+      const next = await client.listDocumentBases(workspaceId);
+      setBases(next);
+      setBasesError(null);
+      setSelectedBaseId((current) => current ?? next[0]?.id ?? null);
+    } catch (error) {
+      setBasesError(error instanceof Error ? error : new Error(String(error)));
+      toast.error("Failed to load document bases", { description: String(error) });
+    } finally {
+      setBasesLoading(false);
+    }
+  }, [client, workspaceId]);
+
+  const refreshDocuments = useCallback(
+    async (baseId: string) => {
+      setDocumentsLoading(true);
+      try {
+        setDocuments(await client.listDocuments(workspaceId, baseId));
+        setDocumentsError(null);
+      } catch (error) {
+        setDocumentsError(error instanceof Error ? error : new Error(String(error)));
+        toast.error("Failed to load documents", { description: String(error) });
+      } finally {
+        setDocumentsLoading(false);
+      }
+    },
+    [client, workspaceId],
+  );
+
   useEffect(() => {
     void refreshBases();
-  }, [workspaceId]);
+  }, [refreshBases]);
 
   useEffect(() => {
     setResults([]);
@@ -114,7 +145,7 @@ export function DocumentsRoute({
       return;
     }
     void refreshDocuments(selectedBaseId);
-  }, [workspaceId, selectedBaseId]);
+  }, [selectedBaseId, refreshDocuments]);
 
   useEffect(() => {
     if (
@@ -133,35 +164,7 @@ export function DocumentsRoute({
         .catch(() => setPollFailed(true));
     }, 1200);
     return () => window.clearInterval(timer);
-  }, [workspaceId, selectedBaseId, documents]);
-
-  async function refreshBases() {
-    setBasesLoading(true);
-    try {
-      const next = await client.listDocumentBases(workspaceId);
-      setBases(next);
-      setBasesError(null);
-      setSelectedBaseId((current) => current ?? next[0]?.id ?? null);
-    } catch (error) {
-      setBasesError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load document bases", { description: String(error) });
-    } finally {
-      setBasesLoading(false);
-    }
-  }
-
-  async function refreshDocuments(baseId: string) {
-    setDocumentsLoading(true);
-    try {
-      setDocuments(await client.listDocuments(workspaceId, baseId));
-      setDocumentsError(null);
-    } catch (error) {
-      setDocumentsError(error instanceof Error ? error : new Error(String(error)));
-      toast.error("Failed to load documents", { description: String(error) });
-    } finally {
-      setDocumentsLoading(false);
-    }
-  }
+  }, [client, workspaceId, selectedBaseId, documents]);
 
   async function handleCreateBase() {
     const trimmed = name.trim();

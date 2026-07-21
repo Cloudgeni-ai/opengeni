@@ -8,7 +8,7 @@ import {
   appendSessionEvents,
   applySessionTurnSettlement,
   bootstrapWorkspace,
-  claimNextSessionExecution,
+  claimSessionWorkForAttempt,
   createKnowledgeMemory,
   getKnowledgeMemory,
   saveWorkspaceMemory,
@@ -32,7 +32,7 @@ import {
   getSessionByCreateIdempotencyKey,
   dbSql,
   enableCapabilityInstallation,
-  enqueueSessionMessageAtomically,
+  ensureManagedAccessForUser,
   evaluateGoalContinuation,
   findActiveApiKeyByHash,
   getSession,
@@ -47,13 +47,14 @@ import {
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEvents,
-  registerSessionTurnDispatch,
+  listSessionsForSubject,
   updateScheduledTask,
   updateScheduledTaskRun,
   updateSessionMcpServerCredentials,
   withRlsContext,
   upsertCapabilityCatalogItem,
 } from "@opengeni/db";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 import type { AccessGrant, Permission } from "@opengeni/contracts";
 import {
   applyRawSql,
@@ -77,6 +78,56 @@ describe("DB integration", () => {
     await services?.down();
   }, 60_000);
 
+  test("repeated access bootstrap is read-only once identity state is current", async () => {
+    const suffix = crypto.randomUUID();
+    const input = {
+      accountExternalSource: "test:stable-bootstrap",
+      accountExternalId: `account:${suffix}`,
+      accountName: "Stable bootstrap account",
+      workspaceExternalSource: "test:stable-bootstrap",
+      workspaceExternalId: `workspace:${suffix}`,
+      workspaceName: "Stable bootstrap workspace",
+      subjectId: `configured:${suffix}`,
+      subjectLabel: "Stable configured principal",
+    };
+    const context = await bootstrapWorkspace(dbClient.db, input);
+    const grant = context.workspaceGrants[0]!;
+    const readUpdatedAt = async () =>
+      await withRlsContext(
+        dbClient.db,
+        { accountId: grant.accountId, workspaceId: grant.workspaceId },
+        async (scopedDb) => {
+          const [row] = await scopedDb.execute<{
+            account: Date;
+            workspace: Date;
+            membership: Date;
+          }>(dbSql`
+						select account.updated_at as account,
+						       workspace.updated_at as workspace,
+						       membership.updated_at as membership
+						from workspace_memberships membership
+						join workspaces workspace on workspace.id = membership.workspace_id
+						join managed_accounts account on account.id = membership.account_id
+						where membership.workspace_id = ${grant.workspaceId}
+						  and membership.subject_id = ${input.subjectId}
+						limit 1
+					`);
+          if (!row) throw new Error("stable bootstrap fixture was not created");
+          return row;
+        },
+      );
+
+    const before = await readUpdatedAt();
+    await Bun.sleep(5);
+    const repeated = await Promise.all(
+      Array.from({ length: 24 }, async () => await bootstrapWorkspace(dbClient.db, input)),
+    );
+    expect(repeated.every((candidate) => candidate.defaultWorkspaceId === grant.workspaceId)).toBe(
+      true,
+    );
+    expect(await readUpdatedAt()).toEqual(before);
+  }, 60_000);
+
   test("migrates, creates sessions, and replays ordered events", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createSession(dbClient.db, {
@@ -90,12 +141,159 @@ describe("DB integration", () => {
     });
     const events = await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
       { type: "session.created" },
-      { type: "user.message", payload: { text: "inspect this" }, clientEventId: "client-1" },
+      {
+        type: "user.message",
+        payload: { text: "inspect this" },
+        clientEventId: "client-1",
+      },
       { type: "session.status.changed", payload: { status: "queued" } },
     ]);
     expectContiguousSequences(events);
     expect(await listSessionEvents(dbClient.db, grant.workspaceId, session.id)).toHaveLength(3);
     expect(await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 1)).toHaveLength(2);
+  });
+
+  test("keeps repeated access bootstrap read-only and conflict-free with session listing", async () => {
+    const suffix = crypto.randomUUID();
+    const subjectId = `user:bootstrap-${suffix}`;
+    const input = {
+      accountExternalSource: "test:bootstrap-idempotency",
+      accountExternalId: `account:${suffix}`,
+      accountName: "Stable account",
+      workspaceExternalSource: "test:bootstrap-idempotency",
+      workspaceExternalId: `workspace:${suffix}`,
+      workspaceName: "Stable workspace",
+      subjectId,
+      subjectLabel: "Stable owner",
+    };
+    const first = await bootstrapWorkspace(dbClient.db, input);
+    const grant = first.workspaceGrants[0]!;
+    const session = await createSession(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      initialMessage: "Bootstrap contention regression",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const sentinel = new Date("2001-02-03T04:05:06.000Z");
+    const sentinelIso = sentinel.toISOString();
+    await dbClient.db.execute(
+      dbSql`update managed_accounts set updated_at = ${sentinelIso}::timestamptz where id = ${grant.accountId}`,
+    );
+    await dbClient.db.execute(
+      dbSql`update workspaces set updated_at = ${sentinelIso}::timestamptz where id = ${grant.workspaceId}`,
+    );
+    await dbClient.db.execute(dbSql`
+      update workspace_memberships set updated_at = ${sentinelIso}::timestamptz
+      where workspace_id = ${grant.workspaceId} and subject_id = ${subjectId}
+    `);
+
+    // Model the real browser workload: access resolution and session-list
+    // polling overlap. An idempotent bootstrap must neither create new row
+    // versions nor abort repeatable-read membership locks with SQLSTATE 40001.
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        index % 2 === 0
+          ? bootstrapWorkspace(dbClient.db, input)
+          : listSessionsForSubject(dbClient.db, grant.workspaceId, {
+              subjectId,
+              limit: 20,
+            }),
+      ),
+    );
+
+    const [row] = await dbClient.db.execute<{
+      account_unchanged: boolean;
+      workspace_unchanged: boolean;
+      membership_unchanged: boolean;
+      account_count: number;
+      workspace_count: number;
+      membership_count: number;
+    }>(dbSql`
+      select
+        max(a.updated_at) = ${sentinelIso}::timestamptz as account_unchanged,
+        max(w.updated_at) = ${sentinelIso}::timestamptz as workspace_unchanged,
+        max(m.updated_at) = ${sentinelIso}::timestamptz as membership_unchanged,
+        count(distinct a.id)::int as account_count,
+        count(distinct w.id)::int as workspace_count,
+        count(distinct m.id)::int as membership_count
+      from managed_accounts a
+      join workspaces w on w.account_id = a.id
+      join workspace_memberships m on m.workspace_id = w.id
+      where a.id = ${grant.accountId}
+        and w.id = ${grant.workspaceId}
+        and m.subject_id = ${subjectId}
+    `);
+    expect(row).toMatchObject({
+      account_unchanged: true,
+      workspace_unchanged: true,
+      membership_unchanged: true,
+      account_count: 1,
+      workspace_count: 1,
+      membership_count: 1,
+    });
+    expect(
+      (await listSessionsForSubject(dbClient.db, grant.workspaceId, { subjectId, limit: 20 }))
+        .sessions[0]?.id,
+    ).toBe(session.id);
+  });
+
+  test("keeps repeated managed-user access read-only and conflict-free with session listing", async () => {
+    const suffix = crypto.randomUUID();
+    const user = {
+      userId: `managed-bootstrap-${suffix}`,
+      email: `managed-${suffix}@example.test`,
+      name: "Stable managed user",
+    };
+    const first = await ensureManagedAccessForUser(dbClient.db, user);
+    const grant = first.workspaceGrants[0]!;
+    const subjectId = `user:${user.userId}`;
+    const sentinelIso = "2002-03-04T05:06:07.000Z";
+    await dbClient.db.execute(
+      dbSql`update managed_accounts set updated_at = ${sentinelIso}::timestamptz where id = ${grant.accountId}`,
+    );
+    await dbClient.db.execute(
+      dbSql`update workspaces set updated_at = ${sentinelIso}::timestamptz where id = ${grant.workspaceId}`,
+    );
+    await dbClient.db.execute(dbSql`
+      update workspace_memberships set updated_at = ${sentinelIso}::timestamptz
+      where workspace_id = ${grant.workspaceId} and subject_id = ${subjectId}
+    `);
+
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        index % 2 === 0
+          ? ensureManagedAccessForUser(dbClient.db, user)
+          : listSessionsForSubject(dbClient.db, grant.workspaceId, {
+              subjectId,
+              limit: 20,
+            }),
+      ),
+    );
+
+    const [row] = await dbClient.db.execute<{
+      account_unchanged: boolean;
+      workspace_unchanged: boolean;
+      membership_unchanged: boolean;
+    }>(dbSql`
+      select
+        a.updated_at = ${sentinelIso}::timestamptz as account_unchanged,
+        w.updated_at = ${sentinelIso}::timestamptz as workspace_unchanged,
+        m.updated_at = ${sentinelIso}::timestamptz as membership_unchanged
+      from managed_accounts a
+      join workspaces w on w.account_id = a.id
+      join workspace_memberships m on m.workspace_id = w.id
+      where a.id = ${grant.accountId}
+        and w.id = ${grant.workspaceId}
+        and m.subject_id = ${subjectId}
+    `);
+    expect(row).toEqual({
+      account_unchanged: true,
+      workspace_unchanged: true,
+      membership_unchanged: true,
+    });
   });
 
   test("stores per-session MCP credentials encrypted and bumps credential version on rotation", async () => {
@@ -254,17 +452,35 @@ describe("DB integration", () => {
       sandboxBackend: "none",
     });
     await appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-      { type: "user.message", payload: { text: "one" }, clientEventId: "same-client" },
-      { type: "agent.message.delta", payload: { text: "a" }, producerId: "p", producerSeq: 1 },
+      {
+        type: "user.message",
+        payload: { text: "one" },
+        clientEventId: "same-client",
+      },
+      {
+        type: "agent.message.delta",
+        payload: { text: "a" },
+        producerId: "p",
+        producerSeq: 1,
+      },
     ]);
     await expect(
       appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "user.message", payload: { text: "two" }, clientEventId: "same-client" },
+        {
+          type: "user.message",
+          payload: { text: "two" },
+          clientEventId: "same-client",
+        },
       ]),
     ).rejects.toThrow();
     await expect(
       appendSessionEvents(dbClient.db, grant.workspaceId, session.id, [
-        { type: "agent.message.delta", payload: { text: "b" }, producerId: "p", producerSeq: 1 },
+        {
+          type: "agent.message.delta",
+          payload: { text: "b" },
+          producerId: "p",
+          producerSeq: 1,
+        },
       ]),
     ).rejects.toThrow();
   });
@@ -465,7 +681,9 @@ describe("DB integration", () => {
     });
     expect(completed.goal.evidence).toBe("pipeline live, CI green");
     await expect(
-      setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, { status: "active" }),
+      setSessionGoalStatus(dbClient.db, grant.workspaceId, session.id, {
+        status: "active",
+      }),
     ).rejects.toThrow("completed");
 
     const replaced = await upsertSessionGoal(dbClient.db, {
@@ -513,16 +731,15 @@ describe("DB integration", () => {
     });
 
     // Queued work always wins.
-    const queuedUser = await enqueueSessionMessageAtomically(dbClient.db, {
+    const queuedUser = await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: "go",
       resources: [],
       tools: [],
-      delivery: "queue",
+      delivery: "send",
       reasoningEffortFallback: "low",
     });
     expect(
@@ -555,12 +772,10 @@ describe("DB integration", () => {
         payload: { approvalId: "goal-test", decision: "approve" },
       },
     ]);
-    const resumedUserTurn = await registerTurnAttempt(
-      dbClient.db,
-      grant,
-      queuedUserTurn.turn,
-      approval!.id,
-    );
+    const resumedUserTurn = await claimRegisteredExecution(dbClient.db, grant, session.id, {
+      kind: "approval",
+      triggerEventId: approval!.id,
+    });
     await settleRegisteredExecution(dbClient.db, grant, resumedUserTurn, "completed");
 
     // First continuation.
@@ -569,7 +784,11 @@ describe("DB integration", () => {
       sessionId: session.id,
       ...guards,
     });
-    expect(first).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 5 });
+    expect(first).toMatchObject({
+      decision: "continue",
+      autoContinuation: 1,
+      cap: 5,
+    });
 
     // A continuation turn that finishes without tool calls or a goal revision
     // increments the no-progress streak; noProgressLimit 2 pauses the goal.
@@ -584,7 +803,10 @@ describe("DB integration", () => {
       if (round < 2) {
         expect(next.decision).toBe("continue");
       } else {
-        expect(next).toMatchObject({ decision: "paused", reason: "no_progress" });
+        expect(next).toMatchObject({
+          decision: "paused",
+          reason: "no_progress",
+        });
       }
     }
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.pausedReason).toBe(
@@ -605,7 +827,11 @@ describe("DB integration", () => {
       sessionId: session.id,
       ...guards,
     });
-    expect(capped).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 1 });
+    expect(capped).toMatchObject({
+      decision: "continue",
+      autoContinuation: 1,
+      cap: 1,
+    });
     // Mark progress in that continuation so the cap (not no-progress) triggers.
     const capTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
     await settleRegisteredExecution(dbClient.db, grant, capTurn, "completed", [
@@ -616,7 +842,10 @@ describe("DB integration", () => {
       sessionId: session.id,
       ...guards,
     });
-    expect(atCap).toMatchObject({ decision: "paused", reason: "max_auto_continuations" });
+    expect(atCap).toMatchObject({
+      decision: "paused",
+      reason: "max_auto_continuations",
+    });
   });
 
   test("provider backpressure turns freeze the no-progress streak", async () => {
@@ -666,7 +895,10 @@ describe("DB integration", () => {
         sessionId: session.id,
         ...guards,
       });
-      expect(next).toMatchObject({ decision: "continue", autoContinuation: 1 + round });
+      expect(next).toMatchObject({
+        decision: "continue",
+        autoContinuation: 1 + round,
+      });
     }
 
     // Ordinary empty continuations still count: two of them pause the goal.
@@ -681,7 +913,10 @@ describe("DB integration", () => {
       if (round < 2) {
         expect(next.decision).toBe("continue");
       } else {
-        expect(next).toMatchObject({ decision: "paused", reason: "no_progress" });
+        expect(next).toMatchObject({
+          decision: "paused",
+          reason: "no_progress",
+        });
       }
     }
   });
@@ -713,7 +948,11 @@ describe("DB integration", () => {
       sessionId: session.id,
       ...guards,
     });
-    expect(decision).toMatchObject({ decision: "continue", autoContinuation: 1, cap: null });
+    expect(decision).toMatchObject({
+      decision: "continue",
+      autoContinuation: 1,
+      cap: null,
+    });
     for (let round = 2; round <= 25; round += 1) {
       const turn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
       await settleRegisteredExecution(dbClient.db, grant, turn, "completed", [
@@ -724,7 +963,11 @@ describe("DB integration", () => {
         sessionId: session.id,
         ...guards,
       });
-      expect(decision).toMatchObject({ decision: "continue", autoContinuation: round, cap: null });
+      expect(decision).toMatchObject({
+        decision: "continue",
+        autoContinuation: round,
+        cap: null,
+      });
     }
     // A per-goal cap still applies on its own, without any deployment default.
     await upsertSessionGoal(dbClient.db, {
@@ -740,7 +983,11 @@ describe("DB integration", () => {
       sessionId: session.id,
       ...guards,
     });
-    expect(bounded).toMatchObject({ decision: "continue", autoContinuation: 1, cap: 1 });
+    expect(bounded).toMatchObject({
+      decision: "continue",
+      autoContinuation: 1,
+      cap: 1,
+    });
     const boundedTurn = await claimGoalContinuationExecution(dbClient.db, grant, session.id);
     await settleRegisteredExecution(dbClient.db, grant, boundedTurn, "completed", [
       { type: "agent.toolCall.created", payload: {} },
@@ -750,7 +997,10 @@ describe("DB integration", () => {
       sessionId: session.id,
       ...guards,
     });
-    expect(atCap).toMatchObject({ decision: "paused", reason: "max_auto_continuations" });
+    expect(atCap).toMatchObject({
+      decision: "paused",
+      reason: "max_auto_continuations",
+    });
   });
 
   test("migration backfills goals:manage into goal-bearing sessions with explicit first-party permissions", async () => {
@@ -868,7 +1118,9 @@ describe("DB integration", () => {
       });
 
       const hidden = await appDbClient.db.execute(
-        dbSql<{ count: string }>`select count(*)::text as count from session_goals`,
+        dbSql<{
+          count: string;
+        }>`select count(*)::text as count from session_goals`,
       );
       expect(Number(hidden[0]?.count ?? 0)).toBe(0);
 
@@ -893,7 +1145,9 @@ describe("DB integration", () => {
         grantA,
         async (db) =>
           await db.execute(
-            dbSql<{ workspace_id: string }>`select workspace_id::text from session_goals`,
+            dbSql<{
+              workspace_id: string;
+            }>`select workspace_id::text from session_goals`,
           ),
       );
       expect(visible.map((row) => row.workspace_id)).toEqual([grantA.workspaceId]);
@@ -1001,7 +1255,9 @@ describe("DB integration", () => {
       });
 
       const hidden = await appDbClient.db.execute(
-        dbSql<{ count: string }>`select count(*)::text as count from knowledge_memories`,
+        dbSql<{
+          count: string;
+        }>`select count(*)::text as count from knowledge_memories`,
       );
       expect(Number(hidden[0]?.count ?? 0)).toBe(0);
 
@@ -1059,7 +1315,10 @@ describe("DB integration", () => {
   // cosine-identical, which exercises the near-dup gate (distinct hash, sim = 1).
   const collidingEmbedder = (model: string): MemoryEmbedder => {
     const fixed = new Array(3072).fill(0.0125);
-    return { model, embedMany: async (texts: string[]) => texts.map(() => fixed) };
+    return {
+      model,
+      embedMany: async (texts: string[]) => texts.map(() => fixed),
+    };
   };
   const throwingEmbedder: MemoryEmbedder = {
     model: "throwing-embedder",
@@ -1123,7 +1382,9 @@ describe("DB integration", () => {
     expect(again.deduped).toBe(true);
     expect(again.dedupeReason).toBe("exact");
     expect(again.memory.id).toBe(first.memory.id);
-    const all = await listKnowledgeMemories(dbClient.db, grant.workspaceId, { kind: "semantic" });
+    const all = await listKnowledgeMemories(dbClient.db, grant.workspaceId, {
+      kind: "semantic",
+    });
     expect(all.filter((memory) => memory.status === "active")).toHaveLength(1);
   });
 
@@ -1965,7 +2226,9 @@ describe("DB integration", () => {
 
       for (const table of newCapabilityTables) {
         const hidden = await appDbClient.db.execute(
-          dbSql<{ count: string }>`select count(*)::text as count from ${dbSql.raw(table)}`,
+          dbSql<{
+            count: string;
+          }>`select count(*)::text as count from ${dbSql.raw(table)}`,
         );
         expect(Number(hidden[0]?.count ?? 0)).toBe(0);
       }
@@ -2011,7 +2274,9 @@ describe("DB integration", () => {
 
       for (const table of ["workspace_variable_sets", "workspace_variable_set_variables"]) {
         const hidden = await appDbClient.db.execute(
-          dbSql<{ count: string }>`select count(*)::text as count from ${dbSql.raw(table)}`,
+          dbSql<{
+            count: string;
+          }>`select count(*)::text as count from ${dbSql.raw(table)}`,
         );
         expect(Number(hidden[0]?.count ?? 0)).toBe(0);
       }
@@ -2026,7 +2291,9 @@ describe("DB integration", () => {
           grantA,
           async (db) =>
             await db.execute(
-              dbSql<{ workspace_id: string }>`select workspace_id::text from ${dbSql.raw(table)}`,
+              dbSql<{
+                workspace_id: string;
+              }>`select workspace_id::text from ${dbSql.raw(table)}`,
             ),
         );
         expect(visible.map((row) => row.workspace_id)).toEqual([grantA.workspaceId]);
@@ -2078,7 +2345,11 @@ describe("DB integration", () => {
       capabilityId,
       kind: "mcp",
       metadata: {
-        mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 },
+        mcpConnectivity: {
+          status: "ok",
+          checkedAt: new Date().toISOString(),
+          toolCount: 1,
+        },
       },
     });
     expect(
@@ -2110,7 +2381,11 @@ describe("DB integration", () => {
       capabilityId: gatedCapabilityId,
       kind: "mcp",
       metadata: {
-        mcpConnectivity: { status: "ok", checkedAt: new Date().toISOString(), toolCount: 1 },
+        mcpConnectivity: {
+          status: "ok",
+          checkedAt: new Date().toISOString(),
+          toolCount: 1,
+        },
       },
     });
     expect(
@@ -2156,7 +2431,12 @@ describe("DB integration", () => {
       },
       {
         position: 2,
-        item: { type: "function_call", callId: "paired", name: "tool", arguments: "{}" },
+        item: {
+          type: "function_call",
+          callId: "paired",
+          name: "tool",
+          arguments: "{}",
+        },
       },
       {
         position: 3,
@@ -2169,11 +2449,20 @@ describe("DB integration", () => {
       // snake_case orphan: a result whose call_id has no earlier call.
       {
         position: 4,
-        item: { type: "shell_call_output", call_id: "orphan_snake", output: "leaked2" },
+        item: {
+          type: "shell_call_output",
+          call_id: "orphan_snake",
+          output: "leaked2",
+        },
       },
       {
         position: 5,
-        item: { type: "function_call", callId: "dangling", name: "tool", arguments: "{}" },
+        item: {
+          type: "function_call",
+          callId: "dangling",
+          name: "tool",
+          arguments: "{}",
+        },
       },
     ]);
     // The other session holds a call with the SAME id as this session's orphan,
@@ -2181,7 +2470,12 @@ describe("DB integration", () => {
     await insertHistoryMigrationFixture(dbClient.db, grant, otherSession.id, [
       {
         position: 0,
-        item: { type: "function_call", callId: "orphan_x", name: "tool", arguments: "{}" },
+        item: {
+          type: "function_call",
+          callId: "orphan_x",
+          name: "tool",
+          arguments: "{}",
+        },
       },
       {
         position: 1,
@@ -2258,44 +2552,39 @@ describe("DB integration", () => {
 });
 
 type RegisteredExecution = {
-  turn: NonNullable<Awaited<ReturnType<typeof claimNextSessionExecution>>>;
+  turn: Extract<
+    Awaited<ReturnType<typeof claimSessionWorkForAttempt>>,
+    { action: "claimed" }
+  >["turn"];
   triggerEventId: string;
   attemptId: string;
 };
-
-async function registerTurnAttempt(
-  db: ReturnType<typeof createDb>["db"],
-  grant: AccessGrant,
-  turn: RegisteredExecution["turn"],
-  triggerEventId = turn.triggerEventId,
-): Promise<RegisteredExecution> {
-  const attemptId = crypto.randomUUID();
-  const registered = await registerSessionTurnDispatch(db, grant.workspaceId, {
-    sessionId: turn.sessionId,
-    turnId: turn.id,
-    triggerEventId,
-    attemptId,
-    dispatchId: `dispatch-${crypto.randomUUID()}`,
-  });
-  if (registered.action !== "registered") {
-    throw new Error(`goal fixture could not register turn ${turn.id}`);
-  }
-  return { turn, triggerEventId, attemptId };
-}
 
 async function claimRegisteredExecution(
   db: ReturnType<typeof createDb>["db"],
   grant: AccessGrant,
   sessionId: string,
+  trigger: Parameters<typeof claimSessionWorkForAttempt>[2]["trigger"] = {
+    kind: "next",
+  },
 ): Promise<RegisteredExecution> {
-  const turn = await claimNextSessionExecution(
-    db,
-    grant.workspaceId,
+  const attemptId = crypto.randomUUID();
+  const result = await claimSessionWorkForAttempt(db, grant.workspaceId, {
     sessionId,
-    `session-${sessionId}`,
-  );
-  if (!turn) throw new Error(`goal fixture could not claim work for ${sessionId}`);
-  return await registerTurnAttempt(db, grant, turn);
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger,
+  });
+  if (result.action !== "claimed") {
+    throw new Error(`goal fixture could not claim work for ${sessionId}: ${result.reason}`);
+  }
+  return {
+    turn: result.turn,
+    triggerEventId: result.turn.triggerEventId,
+    attemptId,
+  };
 }
 
 async function claimGoalContinuationExecution(
@@ -2312,7 +2601,7 @@ async function claimGoalContinuationExecution(
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
     sessionId,
-    kind: "lifecycle_event",
+    kind: "goal_continuation",
     classification: "info",
     sourceId: goal.id,
     dedupeKey: `goal-test:${goal.id}:${crypto.randomUUID()}`,

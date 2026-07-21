@@ -22,6 +22,25 @@ export type CodexRotationStrategy =
   | "sharded";
 
 /**
+ * The ONE strategy rotation-enabled workspaces run: sticky-sharded. The legacy
+ * strategies are all strictly dominated post-cache-affinity — session
+ * stickiness is worth ~half the prompt-cache hit rate, and round_robin /
+ * most_remaining churn accounts per turn while drain_then_next concentrates
+ * every concurrent session on ONE account (the measured concurrency-eviction
+ * failure sharding replaced). Stored `rotation_strategy` values are therefore
+ * NORMALIZED here at every read site: legacy values (and any future unknown
+ * string) behave as "sharded". The column and the legacy branch code are kept
+ * intact for old-binary rollback safety — they are simply unreachable through
+ * this normalization. The API accepts-but-ignores strategy writes for the same
+ * reason (no SDK caller breaks). User-facing choice is intentionally gone: the
+ * remaining real intents are rotation on/off, per-account allocator
+ * include/exclude, and manual pins — not algorithm selection.
+ */
+export function effectiveRotationStrategy(_stored: string): CodexRotationStrategy {
+  return "sharded";
+}
+
+/**
  * How a session's codex pin governs THIS turn's account selection (pure). Encodes the
  * policy-pin LIFECYCLE rule: a 'policy' pin is meaningful ONLY while the sharded policy
  * is active.
@@ -55,7 +74,7 @@ export function classifyCodexPin(args: {
   if (pinned && pinSource !== "policy") {
     return "manual";
   }
-  const shardedActive = rotationEnabled && strategy === "sharded";
+  const shardedActive = rotationEnabled && effectiveRotationStrategy(strategy) === "sharded";
   if (shardedActive) {
     return "sharded";
   }
@@ -502,14 +521,11 @@ export function chooseRotationActive(args: {
   // P3 (every account trivially covers → Tier 1 == all eligibles). Self-gating.
   usedConnectors?: string[];
 }): RotationDecision {
-  const {
-    rotationStrategy,
-    activeCredentialId,
-    priorCredentialId,
-    accounts,
-    nearExhaustionPct,
-    now,
-  } = args;
+  const { activeCredentialId, priorCredentialId, accounts, nearExhaustionPct, now } = args;
+  // Normalize at the entry point: rotation-enabled ALWAYS behaves as sharded
+  // (see effectiveRotationStrategy). args keeps the field so call sites and
+  // tests can still express stored legacy values.
+  const rotationStrategy = effectiveRotationStrategy(args.rotationStrategy);
   const allocatableAccounts = accounts.filter((account) => account.allocatorEnabled);
   const usedConnectors = args.usedConnectors ?? [];
 
@@ -524,7 +540,7 @@ export function chooseRotationActive(args: {
   // The active pointer is a cursor/manual preference, NOT a sticky lease. In
   // particular, most_remaining must rank the whole eligible pool every turn;
   // keeping a healthy active account until 90% was the production monopolization
-  // defect fixed by OPE-21. drain_then_next remains the one explicitly sticky
+  // defect fixed by credential allocator. drain_then_next remains the one explicitly sticky
   // strategy, and a manual pin is handled by the caller as explicit policy.
   const decide = (chosen: CodexRotationAccount | undefined): RotationDecision => {
     if (!chosen) {
@@ -674,7 +690,9 @@ export function selectCodexCredentialLeaseForTurn(args: {
     existingCredentialId,
   } = args.context;
   const leasingEnabled = args.leasingEnabled && leaseRotationEnabled;
-  const strategy = rotationStrategy as CodexRotationStrategy;
+  // Normalized: rotation-enabled always behaves as sharded (see
+  // effectiveRotationStrategy); the stored value is only ever legacy residue.
+  const strategy = effectiveRotationStrategy(rotationStrategy);
   const existing = existingCredentialId
     ? accounts.find((account) => account.id === existingCredentialId)
     : undefined;
@@ -741,8 +759,8 @@ export function selectCodexCredentialLeaseForTurn(args: {
     };
   }
 
-  // OPE-31 policy homes compose with OPE-21 by sharding only the candidate list
-  // handed to this selector. A future OPE-32 filter may therefore choose one
+  // Pin-policy homes compose with the credential allocator by sharding only the candidate list
+  // handed to this selector. A future policy filter may therefore choose one
   // primary/fallback pool before this ranker runs; accounts from different pools
   // are never union-ranked here.
   if (pinDisposition === "sharded") {

@@ -1,4 +1,4 @@
-//! Op-stream driver plumbing (`.agent/ENGINE-SCENARIOS.md` §1): the harness
+//! Op-stream driver plumbing (the engine scenario contract §1): the harness
 //! plays the SERVER for the op-stream plane — it issues `OpStart`/`OpCancel`/
 //! `OpQuery`/`OpAttach` on the rpc subject, subscribes the per-op frame
 //! subject BEFORE `OpStart` (the subscription-before-start invariant),

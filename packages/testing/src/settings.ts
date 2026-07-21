@@ -47,6 +47,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     contextWindowTokens: 1_050_000,
     contextCompactionThresholdRatio: 0.9,
     contextReservedOutputTokens: 128_000,
+    modelToolOutputTruncationTokens: 10_000,
     betterAuthSecret: undefined,
     betterAuthAllowedHosts: "",
     betterAuthCookieDomain: undefined,

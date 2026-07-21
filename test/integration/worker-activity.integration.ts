@@ -15,7 +15,7 @@ import {
   bootstrapWorkspace,
   completeFileUpload,
   applyCreditLedgerEntry,
-  claimNextSessionExecution,
+  claimSessionWorkForAttempt,
   createDb,
   createFileUpload,
   createScheduledTask,
@@ -24,7 +24,6 @@ import {
   createWorkspaceEnvironment,
   dbSql,
   encryptEnvironmentValue,
-  enqueueSessionMessageAtomically,
   enablePackInstallation,
   registerWorkspacePack,
   setWorkspaceEnvironmentVariable,
@@ -35,20 +34,21 @@ import {
   getLatestRunState,
   getSessionHistoryItems,
   listSessions,
-  listPendingSessionSystemUpdates,
+  listOutstandingSessionSystemUpdates,
   listSessionTurns,
   listUsageEvents,
   listSessionEvents,
   listScheduledTaskRuns,
   recordUsageEvent,
-  registerSessionTurnDispatch,
   requireScheduledTask,
   saveRunState,
+  mutateWorkspaceControlInTransaction,
   sumUsageQuantity,
   updateScheduledTask,
   withWorkspaceRls,
   type Database,
 } from "@opengeni/db";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 import type { AccessGrant, SessionStatus } from "@opengeni/contracts";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
@@ -57,7 +57,7 @@ import {
   MaxTurnsExceededError,
   type OpenGeniRuntime,
 } from "@opengeni/runtime";
-import { createActivities as createWorkerActivities } from "../../apps/worker/src/activities";
+import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
 import {
@@ -118,10 +118,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -133,11 +133,13 @@ describe("worker activities integration", () => {
     });
 
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-activity",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -234,7 +236,7 @@ describe("worker activities integration", () => {
           },
         ],
       });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "search please" } },
       ]);
       const model = new ScriptedModel([
@@ -246,7 +248,7 @@ describe("worker activities integration", () => {
         },
         { id: "approval-call-2", outputText: "found it", chunks: ["found ", "it"] },
       ]);
-      const activities = createActivities({
+      const activities = createWorkerActivities({
         settings,
         db: dbClient.db,
         bus,
@@ -255,11 +257,13 @@ describe("worker activities integration", () => {
 
       // Turn 1: the tool call is gated — the turn pauses instead of running it.
       const first = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-mcp-approval",
+        workflowRunId: crypto.randomUUID(),
       });
       expect(first.status).toBe("requires_action");
       const afterFirst = await listSessionEvents(
@@ -286,15 +290,16 @@ describe("worker activities integration", () => {
         },
       ]);
       const second = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: approvalTrigger!.id,
+        trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
         // Distinct workflowId so the resume's event producerId
         // (`${workflowId}:${turnId}`) does not collide with turn 1's — the real
         // system disambiguates via the Temporal activityId, which is absent here.
         workflowId: "workflow-mcp-approval-resume",
-        turnId: activeTurnId!,
+        workflowRunId: crypto.randomUUID(),
       });
       expect(second.status).toBe("idle");
       expect(mcp.calls).toEqual([{ tool: "search_documents", args: { query: "network policy" } }]);
@@ -319,6 +324,7 @@ describe("worker activities integration", () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
       signalApprovalDecision: async () => undefined,
       signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
@@ -369,21 +375,23 @@ describe("worker activities integration", () => {
         sandboxBackend: "none",
         firstPartyMcpPermissions: ["workspace:read", "sessions:read", "sessions:create"],
       });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "list the fleet" } },
       ]);
-      const activities = createActivities({
+      const activities = createWorkerActivities({
         settings,
         db: dbClient.db,
         bus,
         runtime: createProductionAgentRuntime({ model }),
       });
       const result = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-manager-mcp",
+        workflowRunId: crypto.randomUUID(),
       });
       expect(result.status).toBe("idle");
       // The sessions_list result (containing this very session) was fed back
@@ -410,6 +418,7 @@ describe("worker activities integration", () => {
     const noopWorkflowClient: SessionWorkflowClient = {
       signalUserMessage: async () => undefined,
       wakeSessionWorkflow: async () => undefined,
+      requestSessionWorkflowWakeDispatch: async () => undefined,
       signalApprovalDecision: async () => undefined,
       signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
@@ -466,21 +475,23 @@ describe("worker activities integration", () => {
         sandboxBackend: "none",
         firstPartyMcpPermissions: ["workspace:read", "sessions:read", "sessions:create"],
       });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, manager.id, [
+      await appendOwnedEvents(dbClient.db, grant, manager.id, [
         { type: "user.message", payload: { text: "spawn a worker" } },
       ]);
-      const activities = createActivities({
+      const activities = createWorkerActivities({
         settings,
         db: dbClient.db,
         bus,
         runtime: createProductionAgentRuntime({ model }),
       });
       await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: manager.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-spawn-link",
+        workflowRunId: crypto.randomUUID(),
       });
       // The manager created exactly one other session: the spawned worker.
       const allSessions = await listSessions(dbClient.db, grant.workspaceId, 50);
@@ -505,31 +516,35 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({ model }),
     });
-    const [firstTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "first question" } },
     ]);
     await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: firstTrigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-followup",
+      workflowRunId: crypto.randomUUID(),
     });
-    const [secondTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "second question" } },
     ]);
     await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: secondTrigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-followup",
+      workflowRunId: crypto.randomUUID(),
     });
 
     expect(model.calls).toBe(2);
@@ -562,10 +577,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "look at this", resources: [resource] } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -573,11 +588,13 @@ describe("worker activities integration", () => {
     });
 
     await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-image-context",
+      workflowRunId: crypto.randomUUID(),
     });
 
     const request = JSON.stringify(model.requests[0]?.input ?? {});
@@ -613,10 +630,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "look at this", resources: [resource] } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -624,11 +641,13 @@ describe("worker activities integration", () => {
     });
 
     await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-oversized-image-context",
+      workflowRunId: crypto.randomUUID(),
     });
 
     const request = JSON.stringify(model.requests[0]?.input ?? {});
@@ -677,10 +696,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -690,11 +709,13 @@ describe("worker activities integration", () => {
     });
 
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-pack-image-conflict",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("failed");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -715,10 +736,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "fail" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -729,13 +750,15 @@ describe("worker activities integration", () => {
 
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-fail",
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "failed" });
+    ).resolves.toMatchObject({ status: "failed" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(true);
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("failed");
@@ -750,10 +773,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "long task" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -764,13 +787,15 @@ describe("worker activities integration", () => {
 
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-max-turns",
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "idle" });
+    ).resolves.toMatchObject({ status: "idle" });
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
     expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     const completed = events.find((event) => event.type === "turn.completed");
@@ -780,7 +805,7 @@ describe("worker activities integration", () => {
     expect(turns.every((turn) => turn.status !== "failed")).toBe(true);
   });
 
-  test("idles the session on a retryable provider failure without a goal", async () => {
+  test("recovers the same turn on a retryable provider failure without a goal", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "rate limit",
@@ -789,12 +814,12 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "rate limit" } },
     ]);
     const error = new Error("Too Many Requests");
     Object.assign(error, { status: 429 });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -803,32 +828,44 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-rate-limit",
-      }),
-    ).resolves.toEqual({ status: "idle" });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(failed?.payload).toEqual({
-      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
-      code: "provider_rate_limited",
-      retryable: true,
-      recovery: "user_message",
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-rate-limit",
+      workflowRunId: crypto.randomUUID(),
     });
-    // The turn is truthfully failed, but a transient provider failure must
-    // not kill a long-lived session: it idles and the next user message
-    // resumes it (no continuation pacing -- there is no goal to continue).
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(result).toMatchObject({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        error:
+          "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+        code: "provider_rate_limited",
+        reason: "provider_rate_limited",
+        retryable: true,
+        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      },
+    );
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
-    expect(turns.some((turn) => turn.status === "failed")).toBe(true);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      id: result.turnId,
+      status: "recovering",
+      activeAttemptId: null,
+    });
   });
 
-  test("idles the session on a retryable provider failure when a goal is active", async () => {
+  test("recovers the same turn on a retryable provider failure when a goal is active", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "rate limit with goal",
@@ -844,12 +881,12 @@ describe("worker activities integration", () => {
       text: "finish the long-running provisioning",
       createdBy: "api",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "rate limit with goal" } },
     ]);
     const error = new Error("Too Many Requests");
     Object.assign(error, { status: 429 });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -858,34 +895,47 @@ describe("worker activities integration", () => {
       }),
     });
 
-    await expect(
-      activities.runAgentTurn({
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        triggerEventId: trigger!.id,
-        workflowId: "workflow-rate-limit-goal",
-      }),
-    ).resolves.toEqual({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
-    const failed = events.find((event) => event.type === "turn.failed");
-    expect(failed?.payload).toEqual({
-      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
-      code: "provider_rate_limited",
-      retryable: true,
-      recovery: "goal_continuation",
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-rate-limit-goal",
+      workflowRunId: crypto.randomUUID(),
     });
-    // The turn is truthfully failed, but the session stays resumable and the
-    // goal remains active for the continuation loop to pick up.
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect(result).toMatchObject({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
+    expect(events.find((event) => event.type === "turn.recovery.requested")?.payload).toMatchObject(
+      {
+        error:
+          "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+        code: "provider_rate_limited",
+        reason: "provider_rate_limited",
+        retryable: true,
+        continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+      },
+    );
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
     const turns = await listSessionTurns(dbClient.db, grant.workspaceId, session.id, 10);
-    expect(turns.some((turn) => turn.status === "failed")).toBe(true);
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toMatchObject({
+      id: result.turnId,
+      status: "recovering",
+      activeAttemptId: null,
+    });
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
   });
 
-  test("an MCP stream timeout after a successful tool output checkpoints once and continues the active goal", async () => {
+  test("an MCP stream timeout after a successful tool output checkpoints once and recovers the same turn", async () => {
     const grant = await testGrant(dbClient.db);
     const session = await createOwnedSession(dbClient.db, grant, {
       initialMessage: "continue after transient MCP transport loss",
@@ -901,7 +951,7 @@ describe("worker activities integration", () => {
       text: "finish without repeating completed tool side effects",
       createdBy: "api",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "continue after transient MCP transport loss" } },
     ]);
     const callId = "call-before-mcp-timeout";
@@ -971,7 +1021,7 @@ describe("worker activities integration", () => {
           finalOutput: "",
         }) as never,
     };
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -980,24 +1030,30 @@ describe("worker activities integration", () => {
 
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-mcp-timeout-after-output",
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "idle", continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS });
+    ).resolves.toMatchObject({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
 
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
     const outputIndex = events.findIndex((event) => event.type === "agent.toolCall.output");
-    const failedIndex = events.findIndex((event) => event.type === "turn.failed");
+    const recoveryIndex = events.findIndex((event) => event.type === "turn.recovery.requested");
     expect(outputIndex).toBeGreaterThanOrEqual(0);
-    expect(failedIndex).toBeGreaterThan(outputIndex);
-    expect(events[failedIndex]?.payload).toMatchObject({
+    expect(recoveryIndex).toBeGreaterThan(outputIndex);
+    expect(events[recoveryIndex]?.payload).toMatchObject({
       code: "mcp_transport_timeout",
       retryable: true,
-      recovery: "goal_continuation",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
     });
+    expect(events.some((event) => event.type === "turn.failed")).toBe(false);
     expect(events.filter((event) => event.type === "agent.toolCall.output")).toHaveLength(1);
     const activeHistory = await getActiveSessionHistoryItems(
       dbClient.db,
@@ -1011,7 +1067,15 @@ describe("worker activities integration", () => {
           (row.item as Record<string, unknown>).callId === callId,
       ),
     ).toHaveLength(1);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
+    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
+      "recovering",
+    );
+    expect(
+      (await listSessionTurns(dbClient.db, grant.workspaceId, session.id)).at(-1),
+    ).toMatchObject({
+      status: "recovering",
+      activeAttemptId: null,
+    });
     expect((await getSessionGoal(dbClient.db, grant.workspaceId, session.id))?.status).toBe(
       "active",
     );
@@ -1031,7 +1095,7 @@ describe("worker activities integration", () => {
         exported.push({ body });
       },
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings,
       db: dbClient.db,
       bus,
@@ -1043,11 +1107,13 @@ describe("worker activities integration", () => {
 
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: crypto.randomUUID(),
-        triggerEventId: crypto.randomUUID(),
+        trigger: { kind: "next" },
         workflowId: "workflow-missing-session",
+        workflowRunId: crypto.randomUUID(),
       }),
     ).rejects.toThrow("Session not found");
     await Bun.sleep(0);
@@ -1068,16 +1134,9 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
-    const claimed = await claimNextSessionExecution(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      "workflow-status-update-fails",
-    );
-    expect(claimed).not.toBeNull();
     let updateCalls = 0;
     const failSecondUpdate = (targetDb: typeof dbClient.db): typeof dbClient.db =>
       new Proxy(targetDb, {
@@ -1093,9 +1152,9 @@ describe("worker activities integration", () => {
           if (prop === "update" && typeof value === "function") {
             return (...args: unknown[]) => {
               updateCalls += 1;
-              // Dispatch registration is update 1. Failing update 2 lands after
-              // the atomic start settlement inserted its events, proving that
-              // the nested transaction rolls those events back with the turn.
+              // Atomic claim updates the turn then the session. Failing update 2
+              // proves the whole admission transaction rolls back before any
+              // turn-start event can become authoritative.
               if (updateCalls === 2) {
                 throw new Error("status update failed");
               }
@@ -1106,7 +1165,7 @@ describe("worker activities integration", () => {
         },
       }) as typeof dbClient.db;
     const failingDb = failSecondUpdate(dbClient.db);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: failingDb,
       bus,
@@ -1117,12 +1176,13 @@ describe("worker activities integration", () => {
 
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-status-update-fails",
-        turnId: claimed!.id,
+        workflowRunId: crypto.randomUUID(),
       }),
     ).rejects.toThrow("status update failed");
 
@@ -1143,32 +1203,28 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [initialTrigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "needs approval" } },
     ]);
-    const turn = await claimNextSessionExecution(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      workflowId,
-    );
-    expect(turn).not.toBeNull();
     const initialAttemptId = crypto.randomUUID();
-    expect(
-      await registerSessionTurnDispatch(dbClient.db, grant.workspaceId, {
-        sessionId: session.id,
-        turnId: turn!.id,
-        triggerEventId: initialTrigger!.id,
-        attemptId: initialAttemptId,
-        dispatchId: `approval-fixture-${crypto.randomUUID()}`,
-      }),
-    ).toMatchObject({ action: "registered" });
+    const initialClaim = await claimSessionWorkForAttempt(dbClient.db, grant.workspaceId, {
+      sessionId: session.id,
+      workflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: initialAttemptId,
+      dispatchId: `approval-fixture-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    if (initialClaim.action !== "claimed") {
+      throw new Error(`approval fixture was not claimed: ${initialClaim.reason}`);
+    }
+    const turn = initialClaim.turn;
     await saveRunState(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      turnId: turn!.id,
-      expectedExecutionGeneration: turn!.executionGeneration,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
       expectedAttemptId: initialAttemptId,
       serializedRunState: "saved-state",
       pendingApprovals: [{ id: "approval-1" }],
@@ -1176,12 +1232,12 @@ describe("worker activities integration", () => {
     expect(
       await applySessionTurnSettlement(dbClient.db, grant.workspaceId, {
         sessionId: session.id,
-        turnId: turn!.id,
-        triggerEventId: initialTrigger!.id,
+        turnId: turn.id,
+        triggerEventId: turn.triggerEventId,
         attemptId: initialAttemptId,
         turnStatus: "requires_action",
         sessionStatus: "requires_action",
-        activeTurnId: turn!.id,
+        activeTurnId: turn.id,
         events: [],
       }),
     ).toMatchObject({ action: "settled" });
@@ -1214,7 +1270,7 @@ describe("worker activities integration", () => {
       },
       serializeApprovals: () => [],
     };
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -1223,16 +1279,17 @@ describe("worker activities integration", () => {
 
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: approvalTrigger!.id,
+        trigger: { kind: "approval", triggerEventId: approvalTrigger!.id },
         workflowId,
-        turnId: turn!.id,
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "idle" });
+    ).resolves.toMatchObject({ status: "idle", turnId: turn.id });
 
-    expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turn!.id });
+    expect(observedDuringRun).toEqual({ status: "running", activeTurnId: turn.id });
     expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("idle");
   });
 
@@ -1321,11 +1378,11 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "modal",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "read repo" } },
     ]);
     const sandboxExecCalls: Array<Record<string, unknown>> = [];
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -1345,11 +1402,13 @@ describe("worker activities integration", () => {
     });
 
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-modal-repo-clone",
+      workflowRunId: crypto.randomUUID(),
     });
 
     expect(result.status).toBe("failed");
@@ -1392,10 +1451,10 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "search docs" } },
       ]);
-      const activities = createActivities({
+      const activities = createWorkerActivities({
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           natsUrl: services.natsUrl,
@@ -1415,11 +1474,13 @@ describe("worker activities integration", () => {
       });
 
       const result = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-mcp",
+        workflowRunId: crypto.randomUUID(),
       });
 
       expect(result.status).toBe("idle");
@@ -1469,10 +1530,10 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
         { type: "user.message", payload: { text: "search docs" } },
       ]);
-      const activities = createActivities({
+      const activities = createWorkerActivities({
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           natsUrl: services.natsUrl,
@@ -1499,11 +1560,13 @@ describe("worker activities integration", () => {
       });
 
       const result = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-per-response-usage",
+        workflowRunId: crypto.randomUUID(),
       });
 
       expect(result.status).toBe("idle");
@@ -1546,10 +1609,10 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "expensive run" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -1575,11 +1638,13 @@ describe("worker activities integration", () => {
     });
 
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-capped-model-debit",
+      workflowRunId: crypto.randomUUID(),
     });
 
     // Budget exhaustion is account state, not an agent failure: the segment
@@ -1620,24 +1685,26 @@ describe("worker activities integration", () => {
       { id: "items-t1", outputText: "noted: zebra", chunks: ["noted: zebra"] },
       { id: "items-t2", outputText: "the codeword is zebra", chunks: ["the codeword is zebra"] },
     ]);
-    const firstTurnActivities = createActivities({
+    const firstTurnActivities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
       runtime: createProductionAgentRuntime({ model }),
     });
-    const [trigger1] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "remember the codeword zebra" } },
     ]);
     await expect(
       firstTurnActivities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger1!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-items-turn-1",
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "idle" });
+    ).resolves.toMatchObject({ status: "idle" });
     const itemsAfterTurn1 = await getSessionHistoryItems(
       dbClient.db,
       grant.workspaceId,
@@ -1650,7 +1717,7 @@ describe("worker activities integration", () => {
     expect(JSON.stringify(itemsAfterTurn1[0]?.item)).toContain("remember the codeword zebra");
 
     // The follow-up reads conversation truth from the canonical items table.
-    const itemsActivities = createActivities({
+    const itemsActivities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -1659,18 +1726,20 @@ describe("worker activities integration", () => {
       bus,
       runtime: createProductionAgentRuntime({ model }),
     });
-    const [trigger2] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "what is the codeword?" } },
     ]);
     await expect(
       itemsActivities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger2!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-items-turn-2",
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "idle" });
+    ).resolves.toMatchObject({ status: "idle" });
     const lastRequestInput = JSON.stringify(
       (model.requests.at(-1) as { input?: unknown })?.input ?? "",
     );
@@ -1738,7 +1807,7 @@ describe("worker activities integration", () => {
     const model = new ScriptedModel([
       { id: "orphan-recover", outputText: "recovered", chunks: ["recovered"] },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -1747,20 +1816,22 @@ describe("worker activities integration", () => {
       bus,
       runtime: createProductionAgentRuntime({ model }),
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "continue please" } },
     ]);
 
     // The turn SUCCEEDS instead of failing the session with a 400.
     await expect(
       activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-orphan-recover",
+        workflowRunId: crypto.randomUUID(),
       }),
-    ).resolves.toEqual({ status: "idle" });
+    ).resolves.toMatchObject({ status: "idle" });
 
     // The orphan never reached the model: the sanitized request omits it while
     // keeping the surrounding valid items and the new user turn.
@@ -1804,7 +1875,7 @@ describe("worker activities integration", () => {
       fileId: file.id,
     });
     let embedderCalled = false;
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -1906,7 +1977,7 @@ describe("worker activities integration", () => {
       fileId: fileTwo.id,
     });
     let embedCalls = 0;
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -1981,7 +2052,7 @@ describe("worker activities integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "allowed first run" } },
     ]);
     await recordUsageEvent(dbClient.db, {
@@ -1994,7 +2065,7 @@ describe("worker activities integration", () => {
       sourceResourceId: session.id,
       idempotencyKey: `test-agent-run-created:${session.id}`,
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2009,11 +2080,13 @@ describe("worker activities integration", () => {
     });
 
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-exact-run-cap",
+      workflowRunId: crypto.randomUUID(),
     });
 
     expect(result.status).toBe("idle");
@@ -2045,7 +2118,7 @@ describe("worker activities integration", () => {
         model: "scripted-model",
         sandboxBackend: "none",
       });
-      const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+      await appendOwnedEvents(dbClient.db, grant, session.id, [
         {
           type: "user.message",
           payload: {
@@ -2054,7 +2127,7 @@ describe("worker activities integration", () => {
           },
         },
       ]);
-      const activities = createActivities({
+      const activities = createWorkerActivities({
         settings: testSettings({
           databaseUrl: services.databaseUrl,
           natsUrl: services.natsUrl,
@@ -2074,11 +2147,13 @@ describe("worker activities integration", () => {
       });
 
       const result = await activities.runAgentTurn({
+        attemptId: crypto.randomUUID(),
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId: session.id,
-        triggerEventId: trigger!.id,
+        trigger: { kind: "next" },
         workflowId: "workflow-follow-up-mcp",
+        workflowRunId: crypto.randomUUID(),
       });
 
       expect(result.status).toBe("idle");
@@ -2091,6 +2166,7 @@ describe("worker activities integration", () => {
 
   test("dispatches scheduled tasks into new sessions as typed internal updates", async () => {
     const grant = await testGrant(dbClient.db);
+    const workflowWakes: unknown[] = [];
     const task = await createOwnedScheduledTask(dbClient.db, grant, {
       name: "scheduled-new-session",
       status: "active",
@@ -2106,7 +2182,7 @@ describe("worker activities integration", () => {
       },
       metadata: {},
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2114,6 +2190,9 @@ describe("worker activities integration", () => {
       }),
       db: dbClient.db,
       bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
       runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
     });
 
@@ -2125,6 +2204,15 @@ describe("worker activities integration", () => {
 
     expect(result.action).toBe("start");
     expect(result.workflowId).toBe(`session-${result.sessionId}`);
+    expect(workflowWakes).toEqual([
+      {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId,
+        sessionId: result.sessionId,
+        workflowId: result.workflowId,
+        wakeRevision: result.workflowWakeRevision,
+      },
+    ]);
     const session = await getSession(dbClient.db, grant.workspaceId, result.sessionId);
     expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
     expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
@@ -2134,16 +2222,16 @@ describe("worker activities integration", () => {
       "session.status.changed",
       "system.update.pending",
     ]);
-    const pendingUpdates = await listPendingSessionSystemUpdates(
+    const pendingUpdates = await listOutstandingSessionSystemUpdates(
       dbClient.db,
       grant.workspaceId,
       result.sessionId,
     );
     expect(pendingUpdates).toHaveLength(1);
     expect(pendingUpdates[0]).toMatchObject({
-      kind: "scheduled_wake",
+      kind: "scheduled_occurrence",
       summary: "inspect nightly",
-      payload: { text: "inspect nightly", scheduledTaskId: task.id },
+      payload: { type: "scheduled_occurrence", text: "inspect nightly", scheduledTaskId: task.id },
     });
     expect(await listSessionTurns(dbClient.db, grant.workspaceId, result.sessionId)).toHaveLength(
       0,
@@ -2153,6 +2241,72 @@ describe("worker activities integration", () => {
       status: "dispatched",
       sessionId: result.sessionId,
       triggerEventId: result.triggerEventId,
+    });
+  });
+
+  test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {
+    const grant = await testGrant(dbClient.db);
+    await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+      db.transaction((tx) =>
+        mutateWorkspaceControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          actor: { type: "human", subjectId: grant.subjectId },
+          action: "pause",
+          reason: "test",
+          operationKey: `pause:${crypto.randomUUID()}`,
+          expectedRevision: 0,
+        }),
+      ),
+    );
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "paused-scheduled-session",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "wait for resume", resources: [], tools: [], metadata: {} },
+      metadata: {},
+    });
+    const workflowWakes: unknown[] = [];
+    const activities = createWorkerActivities({
+      settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
+      db: dbClient.db,
+      bus,
+      wakeSessionWorkflow: async (input) => {
+        workflowWakes.push(input);
+      },
+      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+    });
+    const producerKey = `paused-fire:${crypto.randomUUID()}`;
+
+    const first = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+    const retry = await activities.dispatchScheduledTaskRun({
+      workspaceId: grant.workspaceId,
+      taskId: task.id,
+      triggerType: "scheduled",
+      producerKey,
+    });
+
+    expect(first.workflowWakeRevision).toBeNull();
+    expect(retry).toMatchObject({ sessionId: first.sessionId, workflowWakeRevision: null });
+    expect(workflowWakes).toHaveLength(0);
+    expect(await getSession(dbClient.db, grant.workspaceId, first.sessionId)).toMatchObject({
+      status: "queued",
+      effectiveControl: { state: "paused" },
+    });
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, first.sessionId, 0, 10);
+    expect(events.find((event) => event.type === "session.created")?.payload).toMatchObject({
+      status: "queued",
+    });
+    expect(events.find((event) => event.type === "session.status.changed")?.payload).toMatchObject({
+      status: "queued",
     });
   });
 
@@ -2183,7 +2337,7 @@ describe("worker activities integration", () => {
       sourceResourceId: task.id,
       idempotencyKey: `test:scheduled-cost-cap:${task.id}`,
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2235,7 +2389,7 @@ describe("worker activities integration", () => {
       sourceResourceId: task.id,
       idempotencyKey: reservationKey,
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2286,7 +2440,7 @@ describe("worker activities integration", () => {
       subscribe: async () => async () => undefined,
       close: async () => undefined,
     };
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2341,7 +2495,7 @@ describe("worker activities integration", () => {
       },
       metadata: {},
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2372,7 +2526,7 @@ describe("worker activities integration", () => {
     expect(events.filter((event) => event.type === "user.message")).toHaveLength(0);
     expect(events.filter((event) => event.type === "system.update.pending")).toHaveLength(2);
     expect(
-      await listPendingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
+      await listOutstandingSessionSystemUpdates(dbClient.db, grant.workspaceId, first.sessionId),
     ).toHaveLength(2);
     expect(
       await listSessionTurns(dbClient.db, grant.workspaceId, first.sessionId, 10),
@@ -2473,10 +2627,10 @@ describe("worker activities integration", () => {
       sandboxBackend: "none",
       variableSetId: environment.id,
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2494,11 +2648,13 @@ describe("worker activities integration", () => {
       }),
     });
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-environment-redaction",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("idle");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100);
@@ -2506,7 +2662,7 @@ describe("worker activities integration", () => {
     expect(serialized).not.toContain(secret);
     expect(serialized).toContain("[redacted:LEAKED_TOKEN]");
     const completed = events.find((event) => event.type === "agent.message.completed");
-    expect((completed?.payload as { text: string }).text).toBe(
+    expect((completed?.payload as { text?: string } | undefined)?.text).toBe(
       "the token is [redacted:LEAKED_TOKEN] end",
     );
   });
@@ -2524,10 +2680,10 @@ describe("worker activities integration", () => {
       sandboxBackend: "none",
       variableSetId: environment.id,
     });
-    const [trigger] = await appendOwnedEvents(dbClient.db, grant, session.id, [
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
       { type: "user.message", payload: { text: "run" } },
     ]);
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -2536,11 +2692,13 @@ describe("worker activities integration", () => {
       }),
     });
     const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      triggerEventId: trigger!.id,
+      trigger: { kind: "next" },
       workflowId: "workflow-environment-missing-key",
+      workflowRunId: crypto.randomUUID(),
     });
     expect(result.status).toBe("failed");
     const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
@@ -2565,7 +2723,7 @@ describe("worker activities integration", () => {
       variableSetId: environment.id,
       metadata: {},
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2624,7 +2782,7 @@ describe("worker activities integration", () => {
     await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
       reusableSessionId: session.id,
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -2671,7 +2829,7 @@ describe("worker activities integration", () => {
     await updateScheduledTask(dbClient.db, grant.workspaceId, task.id, {
       reusableSessionId: session.id,
     });
-    const activities = createActivities({
+    const activities = createWorkerActivities({
       settings: testSettings({ databaseUrl: services.databaseUrl, natsUrl: services.natsUrl }),
       db: dbClient.db,
       bus,
@@ -2703,22 +2861,6 @@ describe("worker activities integration", () => {
 });
 
 type TestDb = ReturnType<typeof createDb>["db"];
-
-function createActivities(input: Parameters<typeof createWorkerActivities>[0]) {
-  const activities = createWorkerActivities(input);
-  return {
-    ...activities,
-    runAgentTurn: async (
-      turn: Omit<Parameters<typeof activities.runAgentTurn>[0], "attemptId"> & {
-        attemptId?: string;
-      },
-    ) =>
-      await activities.runAgentTurn({
-        ...turn,
-        attemptId: turn.attemptId ?? crypto.randomUUID(),
-      }),
-  };
-}
 
 const workerEnvironmentsKey = Buffer.alloc(32, 8).toString("base64");
 
@@ -2787,12 +2929,11 @@ async function appendOwnedEvents(
   if (events.length === 1 && events[0]?.type === "user.message") {
     const event = events[0];
     const payload = (event.payload ?? {}) as Record<string, unknown>;
-    const accepted = await enqueueSessionMessageAtomically(db, {
+    const accepted = await submitTestHumanPrompt(db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: String(payload.text ?? ""),
       resources: Array.isArray(payload.resources) ? (payload.resources as never[]) : [],
       tools: Array.isArray(payload.tools) ? (payload.tools as never[]) : [],
@@ -2800,8 +2941,8 @@ async function appendOwnedEvents(
       ...(typeof payload.reasoningEffort === "string"
         ? { reasoningEffort: payload.reasoningEffort as "low" | "medium" | "high" | "xhigh" }
         : {}),
-      ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      delivery: "queue",
+      ...(event.clientEventId ? { operationKey: event.clientEventId } : {}),
+      delivery: "send",
       reasoningEffortFallback: "medium",
     });
     return [accepted.accepted];

@@ -3,9 +3,11 @@ import { describe, expect, test } from "bun:test";
 import { ScheduleNotFoundError, ScheduleOverlapPolicy } from "@temporalio/client";
 import { HTTPException } from "hono/http-exception";
 import {
+  API_MAX_REQUEST_BODY_BYTES,
   allowedCorsOrigin,
   createApp,
   httpStatusForError,
+  isApiContractProtectedMutation,
   normalizeResources,
   replaySessionEvents,
   routeLabel,
@@ -32,12 +34,23 @@ import { encryptEnvironmentValue } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import {
   ClientConfig,
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
   type CapabilityCatalogItem,
   type CapabilityInstallation,
   type SessionEvent,
 } from "@opengeni/contracts";
 
 describe("API helpers", () => {
+  test("protects product mutations while leaving external protocol callbacks alone", () => {
+    expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/sessions/s/events")).toBe(
+      true,
+    );
+    expect(isApiContractProtectedMutation("GET", "/v1/workspaces/ws/sessions/s")).toBe(false);
+    expect(isApiContractProtectedMutation("POST", "/v1/workspaces/ws/mcp")).toBe(false);
+    expect(isApiContractProtectedMutation("POST", "/v1/webhooks/stripe")).toBe(false);
+    expect(isApiContractProtectedMutation("POST", "/v1/enrollments/device/poll")).toBe(false);
+  });
   test("normalizes repository resources into sandbox mount paths", () => {
     const [resource] = normalizeResources([
       {
@@ -252,8 +265,23 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/lineage`)).toBe(
       "/v1/workspaces/:workspaceId/sessions/:id/lineage",
     );
-    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/turns/turn-1`)).toBe(
-      "/v1/workspaces/:workspaceId/sessions/:id/turns/:turnId",
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/queue/turn-1/move`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/queue/:turnId/:action",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/queue`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/queue",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/composer-draft`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/composer-draft",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/sessions/session-1/control`)).toBe(
+      "/v1/workspaces/:workspaceId/sessions/:id/:controlAction",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/control-events/stream`)).toBe(
+      "/v1/workspaces/:workspaceId/control-events/stream",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/inference-control`)).toBe(
+      "/v1/workspaces/:workspaceId/inference-control",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/files/uploads/upload-1/complete`)).toBe(
       "/v1/workspaces/:workspaceId/files/uploads/:id/complete",
@@ -339,6 +367,36 @@ describe("API helpers", () => {
     expect(body.ok).toBe(false);
     expect(body.checks.nats.ok).toBe(false);
     expect(body.checks.nats.error).toContain("nats down");
+  });
+
+  test("rejects oversized streamed request bodies before route parsing", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(API_MAX_REQUEST_BODY_BYTES));
+        controller.enqueue(new Uint8Array([0x20]));
+        controller.close();
+      },
+    });
+    const response = await app.request(
+      new Request("http://localhost/v1/workspaces", {
+        method: "POST",
+        body,
+        duplex: "half",
+      } as RequestInit),
+    );
+
+    expect(response.status).toBe(413);
+    expect(await response.json()).toEqual({
+      code: "PAYLOAD_TOO_LARGE",
+      message: "Request body is too large.",
+    });
   });
 
   test("builds Stripe Checkout sessions that can collect tax addresses for existing customers", () => {
@@ -661,6 +719,40 @@ describe("API helpers", () => {
     ).rejects.toThrow("could not be enabled");
   });
 
+  test("does not echo credentials from MCP probe errors", async () => {
+    const item = capabilityItem({
+      id: "mcp:redacted-error",
+      kind: "mcp",
+      name: "Redacted MCP",
+      endpointUrl: "https://configured.example/mcp",
+      runtime: {
+        available: true,
+        mcpServerId: "cap-redacted-error",
+        transport: "streamable-http",
+        notes: null,
+      },
+    });
+    const fixtureSecret = "fixture-secret-value";
+    const fixturePassword = "fixture-password-value";
+
+    let message = "";
+    try {
+      await validateMcpCapabilityConnection(item, async () => {
+        throw new Error(
+          `HTTP 401 for https://fixture-user:${fixturePassword}@provider.example/mcp?token=${fixtureSecret}`,
+        );
+      });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain("OpenGeni could not initialize configured.example");
+    expect(message).not.toContain(fixturePassword);
+    expect(message).not.toContain(fixtureSecret);
+    expect(message).not.toContain("fixture-user");
+    expect(message).not.toContain("?");
+  });
+
   test("reports invalid MCP catalog endpoints with human copy", async () => {
     const item = capabilityItem({
       id: "mcp:gmail",
@@ -680,7 +772,7 @@ describe("API helpers", () => {
         throw new Error("Streamable HTTP error: POSTing to endpoint: HTTP 404 Not Found");
       }),
     ).rejects.toThrow(
-      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at https://gmail.googleapis.com/mcp. Check the endpoint URL or choose a different catalog entry.',
+      'MCP capability "Gmail" could not be enabled because OpenGeni could not reach a valid Streamable HTTP MCP server at gmail.googleapis.com. Check the endpoint URL or choose a different catalog entry.',
     );
   });
 
@@ -719,6 +811,35 @@ describe("API helpers", () => {
       { after: 0, limit: 1000 },
       { after: 1000, limit: 1000 },
     ]);
+  });
+
+  test("rejects a full stale SSE replay page instead of looping forever", async () => {
+    const stale = Array.from(
+      { length: 100 },
+      (_, index) =>
+        ({
+          id: `stale-${index + 1}`,
+          sessionId: "session-1",
+          sequence: index + 1,
+          type: "agent.message.delta",
+          payload: { text: String(index + 1) },
+          occurredAt: "2026-05-07T00:00:00.000Z",
+        }) satisfies SessionEvent,
+    );
+    let loads = 0;
+
+    await expect(
+      replaySessionEvents(
+        async () => {
+          loads += 1;
+          return stale;
+        },
+        async () => {},
+        100,
+        100,
+      ),
+    ).rejects.toThrow("made no progress");
+    expect(loads).toBe(1);
   });
 });
 
@@ -793,13 +914,31 @@ describe("GET /v1/config/client", () => {
   async function fetchClientConfig(settings: Settings) {
     const response = await appFor(settings).request("/v1/config/client");
     expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(response.headers.get(OPENGENI_API_CONTRACT_HEADER)).toBe(OPENGENI_API_CONTRACT_REVISION);
     return ClientConfig.parse(await response.json());
   }
+
+  test("rejects a stale production mutation before route state can change", async () => {
+    const settings = testSettings({ environment: "production" });
+    const response = await appFor(settings).request("/v1/workspaces/ws/sessions/session/control", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(response.status).toBe(409);
+    expect(response.headers.get(OPENGENI_API_CONTRACT_HEADER)).toBe(OPENGENI_API_CONTRACT_REVISION);
+    expect(await response.json()).toMatchObject({
+      code: "API_CONTRACT_CHANGED",
+      apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
+    });
+  });
 
   test("returns a models[] whose ids match configuredAllowedModels", async () => {
     const settings = testSettings();
     const config = await fetchClientConfig(settings);
 
+    expect(config.apiContractRevision).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(config.models.length).toBeGreaterThan(0);
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     // Built-in provider models project the openai/azure responses shape.

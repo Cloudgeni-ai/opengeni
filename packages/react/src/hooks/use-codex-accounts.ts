@@ -129,12 +129,16 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     };
   }, [codexClient, workspaceId, sessionId]);
 
-  const state = usePolledValue(load, {
+  const {
+    data: loadedData,
+    loading,
+    refresh,
+  } = usePolledValue(load, {
     pollIntervalMs: options.pollIntervalMs,
     enabled: options.enabled,
   });
-  const mutation = useMutationRunner();
-  const usageMutation = useMutationRunner();
+  const { run: runMutation, mutating: pinning, mutationError } = useMutationRunner();
+  const { run: runUsageMutation, mutating: refreshingUsage } = useMutationRunner();
   const [pinningTarget, setPinningTarget] = useState<string | null>(null);
 
   // Live flip: a manual switch (P1) or a failover (P3) emits codex.account.switched;
@@ -144,7 +148,7 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     workspaceId,
     sessionId,
     isCodexAccountEvent,
-    () => void state.refresh(),
+    () => void refresh(),
     {
       enabled: options.enabled ?? true,
       ...(sharedEvents !== undefined ? { events: sharedEvents } : {}),
@@ -157,15 +161,15 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
         return false;
       }
       setPinningTarget(target);
-      const result = await mutation.run(async () => {
+      const result = await runMutation(async () => {
         await codexClient.pinSessionCodexAccount!(workspaceId, sessionId, target);
         return true;
       });
       setPinningTarget(null);
-      if (result) await state.refresh();
+      if (result) await refresh();
       return result === true;
     },
-    [codexClient, workspaceId, sessionId, mutation.run, state.refresh],
+    [codexClient, workspaceId, sessionId, runMutation, refresh],
   );
 
   // Live usage refresh: hit the batched provider read, then re-read cached
@@ -175,15 +179,15 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     if (!codexClient.refreshCodexUsage) {
       return false;
     }
-    const result = await usageMutation.run(async () => {
+    const result = await runUsageMutation(async () => {
       await codexClient.refreshCodexUsage!(workspaceId);
       return true;
     });
-    if (result) await state.refresh();
+    if (result) await refresh();
     return result === true;
-  }, [codexClient, workspaceId, usageMutation.run, state.refresh]);
+  }, [codexClient, workspaceId, runUsageMutation, refresh]);
 
-  const data = state.data ?? EMPTY_STATE;
+  const data = loadedData ?? EMPTY_STATE;
   const effectiveAccountId = data.pinnedAccountId ?? data.activeAccountId;
 
   return {
@@ -193,13 +197,13 @@ export function useCodexAccounts(options: UseCodexAccountsOptions = {}): UseCode
     effectiveAccountId,
     lastAccountId: data.lastAccountId,
     settings: data.settings,
-    loading: state.loading,
-    refresh: state.refresh,
+    loading,
+    refresh,
     refreshUsage,
-    refreshingUsage: usageMutation.mutating,
+    refreshingUsage,
     pin,
-    pinning: mutation.mutating,
+    pinning,
     pinningTarget,
-    mutationError: mutation.mutationError,
+    mutationError,
   };
 }

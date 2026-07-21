@@ -73,7 +73,7 @@ same-turn holder is reused before either pin policy or future membership
 filtering, so cache policy never moves in-flight work. `rotation_enabled=false`
 and `drain_then_next` remain explicit sticky product policies.
 
-Named pool membership is intentionally not an OPE-21 concept. The generic
+Named pool membership is intentionally not a credential allocator concept. The generic
 `CodexCredentialLeasePolicyScopeResolver<TPolicyScope>`,
 `CodexCredentialLeaseCandidateFilter<TPolicyScope, TUnavailableDiagnostic>`,
 and `CodexCredentialLeaseCandidateFilterResult<TUnavailableDiagnostic>` seams
@@ -81,7 +81,7 @@ let a downstream accepted-turn policy pass a private scope such as
 `{primaryPoolId,fallbackPoolIds,policyHash}` into the existing rotation-row
 transaction. The filter chooses candidates from exactly one resolved primary or
 fallback scope and may return downstream-owned per-pool unavailable/reset
-diagnostics; OPE-21 never union-ranks memberships and stores no pool table or
+diagnostics; credential allocator never union-ranks memberships and stores no pool table or
 membership rule. `CodexCredentialLeaseResult<T, TUnavailableDiagnostic>` returns
 those diagnostics. The new-allocation filter runs only after exact live/frozen
 same-turn reuse, so a later membership/default change cannot move an already
@@ -93,7 +93,7 @@ false excludes the row from new automatic, pinned, proactive, and reactive
 selection without changing `status`, encrypted credentials, refresh behavior,
 or quota history. An exact same-turn live lease or frozen approval/preemption
 checkpoint may continue on that healthy row; reconnect and token refresh never
-flip allocator eligibility. OPE-24 owns toggle OCC/audit and product controls.
+flip allocator eligibility. account eligibility policy owns toggle OCC/audit and product controls.
 
 The unique same-turn lease is idempotent. A one-minute heartbeat renews its
 five-minute TTL throughout long tool/model runs; normal completion releases it
@@ -119,8 +119,11 @@ If no healthy candidate exists for an active goal, `armCodexCapacityWait`
 atomically marks the blocked turn failed once, releases its credential lease,
 idles the session with reason `codex_capacity`, writes the audit events, and
 creates or advances one `codex_capacity_waiters` row. The common lock order is
-workspace rotation row → session → goal → blocked turn → live credential lease
-(when reactive) → waiter. A reactive arm must still own the exact
+workspace rotation row → `workspace_inference_controls FOR SHARE` → actual
+workspace `FOR KEY SHARE` → session → exact turn → exact attempt → goal → live
+credential lease (when reactive) → waiter. Arming re-evaluates effective control
+under that shared control lock and becomes an event-free stale no-op if Pause or
+an unsettled control interruption won. A reactive arm must still own the exact
 holder/generation and worker-redispatch fence. The row records goal/control
 generation, accepted `policyHash`, the earliest authoritative reset (when known),
 bounded-refresh state, and `wakeRevision`/`observedWakeRevision`; it stores no
@@ -150,11 +153,14 @@ workflow's `codexCapacityChanged` signal is only a nudge; the Postgres revision
 is authoritative. The workflow snapshots its wake counters before dispatching a
 turn, so a signal delivered after waiter commit but before the activity result
 returns causes immediate reconciliation instead of being baselined away. It
-reconstructs pending timers on worker/Temporal restart and `continueAsNew`, while
-`validateCodexCapacityResumeTurn` closes the wake→claim race against user queue,
-pause/stop, goal/control/policy changes, and duplicate turns before
-provider/model/tool/billing work starts. Reset/boost entitlement redemption is
-never automatic.
+reconstructs pending timers on worker/Temporal restart and `continueAsNew`.
+`reconcileCodexCapacityWait` takes the same shared control/workspace prefix and
+atomically rechecks human queue, effective Pause or unsettled control, goal,
+policy, blocked-turn identity, and duplicate-work fences before recording the
+typed capacity-resume update. If Pause committed first, the waiter is superseded
+without a continuation; if reconciliation committed first, a later Pause still
+fences ordinary attempt claim before provider/model/tool/billing work starts.
+Reset/boost entitlement redemption is never automatic.
 
 Only a **definitive credential/account refusal** can move the same durable turn to
 another credential:
@@ -169,11 +175,14 @@ another credential:
 | Network break, 5xx, invalid content, malformed/partial 200 stream | No credential quarantine | **No** |
 
 Before definitive failover, the worker flushes streamed events and reconciles
-`session_history_items`, then quarantines status/cooldown only through the exact
-live holder/generation. It increments a persisted per-turn failover counter,
-emits `turn.preempted`, and requeues the **same turn row**. This is an explicit
-checkpoint/resume, not a Temporal or SDK blind retry. The resumed attempt receives
-a side-effect verification notice when progress already exists. The counter is
+attempt-fenced `session_history_items`, then quarantines status/cooldown only
+through the exact live credential holder/generation. One transaction closes the
+first-class turn attempt as recoverable, closes ambiguous in-flight tool calls
+as `interrupted / outcome unknown`, increments a persisted per-turn failover
+counter, emits `turn.recovery.requested`, and leaves the **same logical turn** in
+`recovering`. It creates no prompt queue row or synthetic user/resume message.
+The next attempt reconstructs durable model history and tool lineage. This is an
+explicit checkpoint/resume, not a Temporal or SDK blind retry. The counter is
 bounded by pool size so a malformed classification cannot walk forever; a stale
 holder cannot quarantine a credential or settle the turn.
 
@@ -243,7 +252,7 @@ provider response body.
 The default PrometheusRule alerts when a workspace observes zero eligible
 credentials (critical) or one eligible credential (warning). Operators should
 correlate those alerts with `codex.credential.selected`,
-`codex.account.switched`, and `turn.preempted`/`turn.failed` events.
+`codex.account.switched`, and `turn.recovery.requested`/`turn.failed` events.
 
 ## Verification
 

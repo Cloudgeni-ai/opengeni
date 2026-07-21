@@ -351,13 +351,13 @@ async function deleteJson(url: URL): Promise<any> {
 }
 
 async function waitForTerminalSessionStatus(
-  sessionId: string,
+  targetSessionId: string,
   timeoutSeconds: number,
 ): Promise<string> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let status = "unknown";
   while (Date.now() < deadline) {
-    const current = await getJson(workspaceUrl(`/sessions/${sessionId}`));
+    const current = await getJson(workspaceUrl(`/sessions/${targetSessionId}`));
     status = stringField(current, "status");
     if (["idle", "failed", "cancelled"].includes(status)) {
       break;
@@ -411,14 +411,14 @@ async function preflightObjectPut(
   ]
     .sort()
     .join(", ");
-  const requestHeaders = {
+  const preflightHeaders = {
     origin,
     "access-control-request-method": "PUT",
     ...(accessControlHeaders ? { "access-control-request-headers": accessControlHeaders } : {}),
   };
   const response = connectTo
-    ? curlPreflight(url, requestHeaders, connectTo)
-    : await fetchPreflight(url, requestHeaders);
+    ? curlPreflight(url, preflightHeaders, connectTo)
+    : await fetchPreflight(url, preflightHeaders);
   if (response.status < 200 || response.status >= 300) {
     throw new Error(
       `browser upload CORS preflight returned HTTP ${response.status}: ${response.body.trim()}`,
@@ -525,8 +525,8 @@ async function readStreamUntilAbort(response: Response, signal: AbortSignal): Pr
   return text + decoder.decode();
 }
 
-function runCurl(args: string[], input?: string): string {
-  const result = spawnSync("curl", args, {
+function runCurl(curlArgs: string[], input?: string): string {
+  const result = spawnSync("curl", curlArgs, {
     encoding: "utf8",
     input,
     stdio: ["pipe", "pipe", "pipe"],

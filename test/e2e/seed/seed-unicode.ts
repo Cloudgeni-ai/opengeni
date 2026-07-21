@@ -1,4 +1,4 @@
-// seed-unicode — STUB (dossier §16). CJK / emoji / RTL in both file PATHS and
+// seed-unicode — STUB. CJK / emoji / RTL in both file PATHS and
 // file CONTENTS, to catch tofu glyphs, byte-vs-codepoint width bugs in the diff
 // and tree, and mojibake in the terminal. Wired once the Changes tab + terminal
 // theming land (M5/M6) so the screenshots have a real target.

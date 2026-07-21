@@ -1,6 +1,5 @@
-// M-AUTH — the NATS AUTH-CALLOUT tenancy boundary proven against a REAL nats-server
-// configured WITH auth_callout (dossier §10.1 NATS Accounts per workspace + §17 the
-// isolation smoke + §19 the NATS-Accounts-misconfig leak risk).
+// Proves the NATS AUTH-CALLOUT tenancy boundary against a REAL nats-server
+// configured WITH auth_callout and NATS Accounts per workspace.
 //
 // The M4 transport test proved the CODE constructs workspace-scoped SUBJECTS; this
 // test proves the SERVER cryptographically ENFORCES the per-workspace boundary. A

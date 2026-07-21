@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
 /**
@@ -14,15 +14,19 @@ describe("source hygiene", () => {
   const repoRoot = resolve(import.meta.dir, "..");
 
   test("no tracked TypeScript source contains a raw NUL byte", () => {
-    const list = spawnSync("git", ["ls-files", "-z", "--", "*.ts", "*.tsx"], {
-      cwd: repoRoot,
-      maxBuffer: 64 * 1024 * 1024,
-    });
+    const list = spawnSync(
+      "git",
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", "*.ts", "*.tsx"],
+      {
+        cwd: repoRoot,
+        maxBuffer: 64 * 1024 * 1024,
+      },
+    );
     expect(list.status).toBe(0);
     const files = list.stdout
       .toString("utf8")
       .split("\u0000")
-      .filter((file) => file.length > 0);
+      .filter((file) => file.length > 0 && existsSync(join(repoRoot, file)));
     expect(files.length).toBeGreaterThan(100);
 
     const binaryFiles = files.filter((file) => readFileSync(join(repoRoot, file)).includes(0));

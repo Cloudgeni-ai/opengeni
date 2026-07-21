@@ -4,7 +4,16 @@
 // org's workspaces plus create / settings actions. Collapsed, the whole block
 // reduces to a workspace-initial avatar that opens the same workspace menu.
 import { Link } from "@tanstack/react-router";
-import { BuildingIcon, CheckIcon, ChevronsUpDownIcon, PlusIcon, SettingsIcon } from "lucide-react";
+import {
+  BuildingIcon,
+  CheckIcon,
+  ChevronsUpDownIcon,
+  Loader2Icon,
+  PauseIcon,
+  PlayIcon,
+  PlusIcon,
+  SettingsIcon,
+} from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { toast } from "sonner";
 
@@ -70,6 +79,27 @@ export function SwitcherBlock() {
   const [dialog, setDialog] = useState<"create" | "rename" | null>(null);
   const [nameDraft, setNameDraft] = useState("");
   const [busy, setBusy] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const workspacePermissions = context.accessContext.workspaceGrants.find(
+    (grant) => grant.workspaceId === rail.workspaceId,
+  )?.permissions;
+  const canControlWorkspace = workspacePermissions?.includes("workspace:admin") === true;
+
+  async function toggleWorkspaceControl() {
+    if (!activeWorkspace || controlBusy) return;
+    const action = activeWorkspace.inferenceControl.state === "paused" ? "resume" : "pause";
+    setControlBusy(true);
+    try {
+      await context.setWorkspaceInferenceControl(activeWorkspace.id, action);
+      toast.success(action === "pause" ? "Workspace paused" : "Workspace resumed");
+    } catch (error) {
+      toast.error(`Couldn't ${action} the workspace`, {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setControlBusy(false);
+    }
+  }
 
   function openDialog(mode: "create" | "rename") {
     setNameDraft(mode === "rename" ? (activeWorkspace?.name ?? "") : "");
@@ -115,6 +145,10 @@ export function SwitcherBlock() {
           canCreate={createAccountId !== null}
           onSelect={rail.openWorkspace}
           onCreate={() => openDialog("create")}
+          activeWorkspace={activeWorkspace}
+          canControl={canControlWorkspace}
+          controlBusy={controlBusy}
+          onToggleControl={() => void toggleWorkspaceControl()}
           align="start"
         >
           <button
@@ -147,6 +181,10 @@ export function SwitcherBlock() {
         canCreate={createAccountId !== null}
         onSelect={rail.openWorkspace}
         onCreate={() => openDialog("create")}
+        activeWorkspace={activeWorkspace}
+        canControl={canControlWorkspace}
+        controlBusy={controlBusy}
+        onToggleControl={() => void toggleWorkspaceControl()}
         align="start"
       >
         <button
@@ -256,6 +294,10 @@ function WorkspaceMenu(props: {
   canCreate: boolean;
   onSelect: (workspaceId: string) => void;
   onCreate: () => void;
+  activeWorkspace: Workspace | null;
+  canControl: boolean;
+  controlBusy: boolean;
+  onToggleControl: () => void;
   align: "start" | "end";
   children: ReactNode;
 }) {
@@ -280,12 +322,35 @@ function WorkspaceMenu(props: {
               {workspaceInitial(workspace)}
             </span>
             <span className="min-w-0 flex-1 truncate">{workspace.name}</span>
+            {workspace.inferenceControl.state === "paused" ? (
+              <PauseIcon
+                className="size-3.5 fill-current text-status-waiting"
+                aria-label="Paused"
+              />
+            ) : null}
             {workspace.id === props.activeWorkspaceId ? (
               <CheckIcon className="size-4 text-brand" />
             ) : null}
           </DropdownMenuItem>
         ))}
         <DropdownMenuSeparator />
+        {props.activeWorkspace && props.canControl ? (
+          <>
+            <DropdownMenuItem onSelect={props.onToggleControl} disabled={props.controlBusy}>
+              {props.controlBusy ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : props.activeWorkspace.inferenceControl.state === "paused" ? (
+                <PlayIcon className="size-4 fill-current" />
+              ) : (
+                <PauseIcon className="size-4 fill-current" />
+              )}
+              {props.activeWorkspace.inferenceControl.state === "paused"
+                ? "Resume workspace"
+                : "Pause workspace"}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+          </>
+        ) : null}
         {props.canCreate ? (
           <DropdownMenuItem
             onSelect={(event) => {

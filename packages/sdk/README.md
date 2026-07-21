@@ -44,12 +44,39 @@ contiguous `sequence` number:
 - Ends gracefully when the provided `AbortSignal` aborts; throws on
   non-retryable failures (e.g. 401/403/404).
 
-Use `client.listEvents(workspaceId, sessionId, { before, after, limit })` for
-durable replay pages. `before` is an exclusive sequence cursor that returns the
-newest matching page, still ordered ascending in the response. Pass
-`compact: true` for history windows that do not need individual delta fragments;
-delta runs may be coalesced and expose `payload.coalescedUntil` as the true last
-sequence for stream resume cursors.
+Use `client.listEventPage(...)` when monitoring another session. A call without
+a cursor is safe by default: it returns a newest-first-selected (but
+ascending-in-response) semantic tail, uses bounded `summary` payloads, and omits
+raw message/reasoning/command/PTY deltas. The page returns exact
+`coveredSequence`, `nextBefore`/`nextAfter`, byte, truncation, and projection
+metadata. Filters can select canonical event types or the `control`, `terminal`,
+`failure`, `checkpoint`, `tool_receipt`, and `provider_account` semantic classes;
+`latest` is an exclusive typed lookup that returns the newest event in exactly
+the requested class. It cannot be combined with any type or class include/exclude
+filter, so an unrelated newer event cannot displace the requested result and an
+exclusion cannot remove it.
+
+```ts
+const terminal = await client.listEventPage(workspaceId, sessionId, {
+  latest: "terminal",
+  payloadMode: "summary",
+});
+
+const older = await client.listEventPage(workspaceId, sessionId, {
+  before: terminal.nextBefore ?? undefined,
+  includeClasses: ["failure", "checkpoint"],
+  payloadMode: "none",
+});
+```
+
+Use explicit `mode: "forensic", payloadMode: "full"` with `after`/`before` for
+exact retained audit replay. “Full” means the exact durable audit projection;
+it cannot restore source bytes that the audit boundary never retained. REST/SDK
+pages remain count- and byte-bounded, so continue with the returned cursor. The
+convenience `client.listEvents(...)` returns only the page's event array. Pass
+`compact: true` for forensic history windows that do not need individual delta
+fragments; delta runs may be coalesced and expose `payload.coalescedUntil` as
+the true last sequence for stream resume cursors.
 
 ```ts
 const controller = new AbortController();
@@ -70,19 +97,41 @@ the explicit alternative: deliver now by interrupting the running turn.
 
 ```ts
 // Queue (default): stacks behind the running turn.
-await client.sendMessage(workspaceId, sessionId, "Also check the nginx config");
+await client.sendMessage(workspaceId, sessionId, {
+  text: "Also check the nginx config",
+  clientEventId: crypto.randomUUID(),
+});
 
 // Steer: send + promote to the queue front + interrupt the running turn.
-await client.steerMessage(workspaceId, sessionId, "Stop — prod is paging, look at that first");
+await client.steerMessage(workspaceId, sessionId, {
+  text: "Stop — prod is paging, look at that first",
+  clientEventId: crypto.randomUUID(),
+});
 
-// Manage the queue while it waits.
-const turns = await client.listTurns(workspaceId, sessionId);
-await client.updateQueuedTurn(workspaceId, sessionId, turnId, { prompt: "rewritten" });
-await client.reorderQueuedTurns(workspaceId, sessionId, [turnB, turnA]);
-await client.deleteQueuedTurn(workspaceId, sessionId, turnId);
+// Manage the server-authoritative queue while it waits.
+const queue = await client.getQueue(workspaceId, sessionId);
+const waiting = queue.items.at(-1)!;
+await client.moveQueueItem(workspaceId, sessionId, waiting.id, {
+  expectedQueueVersion: queue.version,
+  beforeTurnId: queue.items[0]?.id ?? null,
+  clientEventId: crypto.randomUUID(),
+});
+await client.editQueueItem(workspaceId, sessionId, waiting.id, {
+  expectedTurnVersion: waiting.version,
+  expectedDraftRevision: 0,
+  replaceDraft: false,
+  clientEventId: crypto.randomUUID(),
+});
 
-// Control events.
-await client.interrupt(workspaceId, sessionId, { reason: "stop and report" });
+// Pause/Resume is recursive workstream control; it creates no queue row.
+await client.pauseSession(workspaceId, sessionId, {
+  reason: "hold this workstream",
+  expectedControlEtag: queue.effectiveControl.controlEtag,
+});
+const paused = await client.getQueue(workspaceId, sessionId);
+await client.resumeSession(workspaceId, sessionId, {
+  expectedControlEtag: paused.effectiveControl.controlEtag,
+});
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
@@ -149,9 +198,9 @@ Every public endpoint group has typed methods:
 | Group | Methods |
 | --- | --- |
 | Access + workspaces | `getAccessContext`, `listWorkspaces`, `createWorkspace`, `getWorkspace`, `updateWorkspace` |
-| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `interrupt`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
+| Sessions + events | `createSession`, `listSessions`, `getSession`, `updateSession`, `listEvents`, `sendEvent`, `sendMessage`, `steerMessage`, `pauseSession`, `resumeSession`, `sendApprovalDecision`, `streamEvents`, `openEventStream` |
 | Machines (bring-your-own-compute) | `listMachines`, `machineMetricsSeries`, `swapActiveSandbox`, `mintEnrollToken`, `lookupDeviceEnrollment`, `approveDeviceEnrollment`, `denyDeviceEnrollment` |
-| Turn queue | `listTurns`, `updateQueuedTurn`, `reorderQueuedTurns`, `deleteQueuedTurn` |
+| Turn queue | `getQueue`, `moveQueueItem`, `editQueueItem`, `steerQueueItem`, `deleteQueueItem` |
 | Goal | `getGoal`, `updateGoal`, `pauseGoal`, `resumeGoal` |
 | Scheduled tasks | `createScheduledTask`, `listScheduledTasks`, `getScheduledTask`, `updateScheduledTask`, `pauseScheduledTask`, `resumeScheduledTask`, `triggerScheduledTask`, `deleteScheduledTask`, `listScheduledTaskRuns` |
 | Variable sets | `listVariable sets`, `createVariable set`, `getVariable set`, `updateVariable set`, `deleteVariable set`, `setVariable setVariable`, `deleteVariable setVariable` (values are write-only) |

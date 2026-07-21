@@ -26,7 +26,6 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
-import { Select } from "@/components/ui/select";
 import { useAppContext } from "@/context";
 
 // Cache TTL: a row whose cached snapshot is older than this (or never fetched)
@@ -372,12 +371,6 @@ export function CodexSubscriptionsCard({
   const accounts = data?.accounts ?? [];
   const activeAccountId = data?.activeAccountId ?? null;
   const rotationEnabled = data?.settings?.rotationEnabled ?? false;
-  const rotationStrategy = data?.settings?.rotationStrategy ?? "most_remaining";
-  const ROTATION_STRATEGY_LABELS: Record<CodexRotationSettings["rotationStrategy"], string> = {
-    most_remaining: "most remaining quota",
-    round_robin: "round-robin",
-    drain_then_next: "drain then next",
-  };
 
   return (
     <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
@@ -412,7 +405,8 @@ export function CodexSubscriptionsCard({
             <span className="text-xs">
               <span className="font-medium">Auto-rotate subscriptions</span>
               <span className="ml-1 text-fg-subtle">
-                — fail over to another plan when one hits its cap, never mid-turn.
+                — each session sticks to one plan for maximum prompt-cache reuse, spread across all
+                of them; a capped plan hands its sessions to the others, never mid-turn.
               </span>
             </span>
             <input
@@ -423,25 +417,6 @@ export function CodexSubscriptionsCard({
               onChange={(e) => void setRotation({ rotationEnabled: e.target.checked })}
             />
           </label>
-          {rotationEnabled ? (
-            <label className="flex items-center justify-between gap-3 text-xs">
-              <span className="text-fg-muted">Strategy</span>
-              <Select
-                className="h-7 bg-surface text-xs"
-                value={rotationStrategy}
-                disabled={busy}
-                onChange={(e) =>
-                  void setRotation({
-                    rotationStrategy: e.target.value as CodexRotationSettings["rotationStrategy"],
-                  })
-                }
-              >
-                <option value="most_remaining">Most remaining quota</option>
-                <option value="round_robin">Round-robin</option>
-                <option value="drain_then_next">Drain then next</option>
-              </Select>
-            </label>
-          ) : null}
         </div>
       ) : null}
 
@@ -624,9 +599,8 @@ export function CodexSubscriptionsCard({
           <p className="text-2xs text-fg-subtle">
             {rotationEnabled ? (
               <>
-                Auto-rotating across {accounts.length} subscriptions by{" "}
-                <span className="font-medium">{ROTATION_STRATEGY_LABELS[rotationStrategy]}</span>.
-                Pinned sessions stay on their pin.
+                Sessions are spread across all {accounts.length} subscriptions, each sticking to its
+                own plan for maximum prompt-cache reuse. Pinned sessions stay on their pin.
               </>
             ) : (
               <>

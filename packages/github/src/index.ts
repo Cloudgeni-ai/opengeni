@@ -5,6 +5,7 @@ import { SignJWT, importPKCS8 } from "jose";
 
 const githubApiBase = "https://api.github.com";
 const githubApiVersion = "2022-11-28";
+const githubTokenMintTimeoutMs = 60_000;
 export const stateMaxAgeSeconds = 60 * 60;
 const pkcs8PrivateKeyHeader = `-----BEGIN ${"PRIVATE KEY"}-----`;
 const rsaPrivateKeyHeader = `-----BEGIN ${"RSA PRIVATE KEY"}-----`;
@@ -253,7 +254,9 @@ export async function listGitHubAppRepositories(
         ? (installation.account as Record<string, unknown>)
         : {};
     const token = await createInstallationToken(jwt, { installationId });
-    repositories.push(...(await listInstallationRepositories(token, installationId, account)));
+    repositories.push(
+      ...(await listInstallationRepositories(token.token, installationId, account)),
+    );
   }
   repositories.sort((left, right) => left.fullName.localeCompare(right.fullName));
   return repositories;
@@ -266,6 +269,21 @@ export async function createGitHubAppInstallationToken(
     repositoryIds?: number[];
   },
 ): Promise<string> {
+  return (await createGitHubAppInstallationTokenWithExpiry(settings, input)).token;
+}
+
+export type GitHubAppInstallationToken = {
+  token: string;
+  expiresAt: string | null;
+};
+
+export async function createGitHubAppInstallationTokenWithExpiry(
+  settings: Settings,
+  input: {
+    installationId: number;
+    repositoryIds?: number[];
+  },
+): Promise<GitHubAppInstallationToken> {
   const missing = githubAppMissingSettings(settings);
   if (missing.length > 0) {
     throw new GitHubAppConfigurationError(missing);
@@ -388,7 +406,7 @@ async function createInstallationToken(
     installationId: number;
     repositoryIds?: number[];
   },
-): Promise<string> {
+): Promise<GitHubAppInstallationToken> {
   const scoped = input.repositoryIds && input.repositoryIds.length > 0;
   const response = await fetch(
     `${githubApiBase}/app/installations/${input.installationId}/access_tokens`,
@@ -398,6 +416,7 @@ async function createInstallationToken(
         ...githubHeaders(appJwt),
         ...(scoped ? { "Content-Type": "application/json" } : {}),
       },
+      signal: AbortSignal.timeout(githubTokenMintTimeoutMs),
       ...(scoped ? { body: JSON.stringify({ repository_ids: input.repositoryIds }) } : {}),
     },
   );
@@ -408,7 +427,10 @@ async function createInstallationToken(
   if (!payload || typeof payload !== "object" || typeof payload.token !== "string") {
     throw new GitHubAppApiError("GitHub returned an invalid installation token payload");
   }
-  return payload.token;
+  return {
+    token: payload.token,
+    expiresAt: typeof payload.expires_at === "string" ? payload.expires_at : null,
+  };
 }
 
 async function listInstallationRepositories(

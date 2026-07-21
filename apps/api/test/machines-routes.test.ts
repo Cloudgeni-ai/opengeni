@@ -221,6 +221,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -265,7 +266,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 type SeedOpts = { online?: boolean; hasDisplay?: boolean; allowScreenControl?: boolean };
 async function seed(opts: SeedOpts = {}) {
@@ -489,19 +490,21 @@ describe("M10 GET /machines — dashboard list + states + metrics", () => {
     const app = appFor(bus);
     const auth = `Bearer ${await bearer(accountId, workspaceId, ["enrollments:read"])}`;
 
-    const startedAt = performance.now();
     const res = await app.request(`/v1/workspaces/${workspaceId}/machines`, {
       headers: { authorization: auth },
     });
-    const elapsedMs = performance.now() - startedAt;
 
     expect(res.status).toBe(200);
     const body = (await res.json()) as { machines: Array<{ sandboxId: string }> };
     expect(body.machines.map((machine) => machine.sandboxId)).toEqual(expectedOrder);
     expect(bus.startedSubjects.length).toBe(3);
     expect(bus.completed).toBe(3);
+    // This is the deterministic concurrency proof: each request increments the
+    // in-flight counter before its artificial delay. A serial implementation can
+    // never observe all three outstanding together. Do not replace this with an
+    // endpoint wall-clock budget, which also measures unrelated database
+    // contention and turns host load into a false performance regression.
     expect(bus.maxInFlight).toBe(3);
-    expect(elapsedMs).toBeLessThan(450);
   }, 30_000);
 });
 

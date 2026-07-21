@@ -2,9 +2,10 @@ import {
   AcknowledgeStreamRequest,
   AttachViewerRequest,
   ClearSessionContextRequest,
-  CancelSessionQueueItemRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
+  DeleteSessionQueueItemRequest,
+  EditSessionQueueItemRequest,
   FsDeleteRequest,
   FsListRequest,
   FsMkdirRequest,
@@ -15,17 +16,28 @@ import {
   GitLogRequest,
   GitShowRequest,
   GitStatusRequest,
+  MoveSessionQueueItemRequest,
   PtyCloseRequest,
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
   SessionControlRequest,
+  SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventPayloadMode,
+  SessionEventReadDirection,
+  SessionEventReadMode,
+  SessionEventSemanticClass,
+  SessionEventType,
+  SaveComposerDraftRequest,
+  SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
   ViewerHeartbeatRequest,
+  WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  workspaceControlUtf8Bytes,
   type SandboxBackend,
   type Session,
   type TerminalPtyExitedPayload,
@@ -34,7 +46,7 @@ import {
 } from "@opengeni/contracts";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
-  cancelQueuedSessionTurnWithVersion,
+  acceptSessionApprovalDecision,
   clearSessionGoal,
   clearSessionContext,
   closePtySession,
@@ -46,13 +58,12 @@ import {
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
-  listSessionEvents,
+  listSessionEventPage,
   listSessionIdsInGroup,
   listSessionsForSubject,
   listSessionTurns,
   recordStreamAcknowledgment,
   requestSessionCompaction,
-  requireSession,
   setSessionCodexPin,
   withCodexCapacityMutation,
   setSessionPin,
@@ -64,14 +75,20 @@ import {
   revokeViewer,
   setSessionGoalStatus,
   updatePtySessionActivity,
-  requestSessionControl,
-  SessionQueueConflictError,
+  QueueCommandConflictError,
+  SessionCommandIdempotencyError,
+  SessionControlConflictError,
   SessionContextBusyError,
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
 } from "@opengeni/db";
-import { appendAndPublishEvents, coalesceSessionEventDeltas } from "@opengeni/events";
+import {
+  appendAndPublishEvents,
+  boundSessionEventHttpPage,
+  coalesceSessionEventDeltas,
+  publishDurableSessionEvents,
+} from "@opengeni/events";
 import { z } from "zod";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
@@ -93,8 +110,15 @@ import {
 } from "../sandbox/viewer";
 import {
   acceptSessionUserMessage,
+  controlHumanSessionWorkstream,
   createSessionForRequest,
+  deleteHumanQueuePrompt,
+  editHumanQueuePrompt,
+  getHumanComposerDraft,
+  moveHumanQueuePrompt,
   readSessionLineage,
+  saveHumanComposerDraft,
+  steerHumanQueuePrompt,
   updateSessionTitle,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -135,6 +159,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       throw error;
     }
+    // The page body carries this fact directly. Preserve the historical array
+    // body for older clients while still making its older-pin omission visible
+    // to raw HTTP consumers without changing that response shape.
+    c.header("x-opengeni-pinned-truncated", page.pinnedTruncated === true ? "true" : "false");
     if (pageView) {
       return c.json(page);
     }
@@ -191,7 +219,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       if (error instanceof SessionPinVersionConflictError) {
         return c.json(
-          { message: "session pin changed in another client", current: error.current },
+          {
+            message: "session pin changed in another client",
+            current: error.current,
+          },
           409,
         );
       }
@@ -217,7 +248,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const body = (await c.req.json()) as { target?: string };
     const target = typeof body.target === "string" ? body.target : "";
     if (!target) {
-      throw new HTTPException(400, { message: 'target is required ("auto" or an account id)' });
+      throw new HTTPException(400, {
+        message: 'target is required ("auto" or an account id)',
+      });
     }
     const pinned = target === "auto" ? null : target;
     const mutation = await withCodexCapacityMutation(
@@ -230,7 +263,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     );
     const ok = mutation.result;
     if (!ok) {
-      throw new HTTPException(404, { message: "session or codex account not found" });
+      throw new HTTPException(404, {
+        message: "session or codex account not found",
+      });
     }
     await Promise.allSettled(
       mutation.wakeTargets.map((wake) =>
@@ -241,12 +276,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
               sessionId: wake.sessionId,
               workflowId: wake.workflowId,
               wakeRevision: wake.wakeRevision,
+              workflowWakeRevision: wake.workflowWakeRevision,
             })
           : workflowClient.wakeSessionWorkflow({
               accountId: wake.accountId,
               workspaceId: wake.workspaceId,
               sessionId: wake.sessionId,
               workflowId: wake.workflowId,
+              wakeRevision: wake.workflowWakeRevision,
             }),
       ),
     );
@@ -329,9 +366,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: `session goal is ${existing.status}; only paused goals can be resumed`,
       });
     }
-    const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
-      status: "active",
-    });
+    const { goal, changed, workflowWakeRevision } = await setSessionGoalStatus(
+      db,
+      workspaceId,
+      sessionId,
+      {
+        status: "active",
+      },
+    );
     // `changed` guards the racing-PATCH case: both requests can pass the
     // status pre-check, but only the transition winner emits and wakes.
     if (changed) {
@@ -347,14 +389,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           },
         },
       ]);
-      // signalWithStart restarts a completed workflow whose first claim finds no
-      // queued turn, so maybeContinueGoal fires — resume works on an idle session.
-      await workflowClient.wakeSessionWorkflow({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        workflowId: workflowIdForSession(sessionId),
-      });
+      // signalWithStart restarts an eligible idle workflow so maybeContinueGoal
+      // fires. A closed workspace/session gate keeps the resumed goal durable
+      // and inert until that gate's own Resume mutation commits its wake.
+      if (workflowWakeRevision !== null) {
+        await workflowClient.wakeSessionWorkflow({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          workflowId: workflowIdForSession(sessionId),
+          wakeRevision: workflowWakeRevision,
+        });
+      }
     }
     return c.json(goal);
   });
@@ -430,14 +476,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     // /compact sets one durable request. The worker clears it only in the same
     // fenced transaction that installs replacement history, so failed or stale
     // attempts cannot lose the request.
-    await requestSessionCompaction(db, workspaceId, sessionId);
+    const requested = await requestSessionCompaction(db, workspaceId, sessionId);
     await workflowClient.wakeSessionWorkflow({
       accountId: grant.accountId,
       workspaceId,
       sessionId,
-      workflowId: workflowIdForSession(sessionId),
+      workflowId: requested.temporalWorkflowId,
+      wakeRevision: requested.wakeRevision,
     });
-    return c.json({ status: "pending", message: "Compaction will run at the next safe boundary." });
+    return c.json({
+      status: "pending",
+      message: "Compaction will run at the next safe boundary.",
+    });
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -445,16 +495,120 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const after = eventSequence(c.req.query("after"), 0);
-    const before = optionalEventSequence(c.req.query("before"));
+    const rawAfter = c.req.query("after");
+    const rawBefore = c.req.query("before");
+    const after = eventSequence(rawAfter, 0);
+    const before = optionalEventSequence(rawBefore);
     const compact = compactEvents(c.req.query("compact"));
-    const limit = eventListLimit(c.req.query("limit"), compact ? 5000 : 2000);
-    const events = await listSessionEvents(db, workspaceId, sessionId, {
+    const explicitReplay = rawAfter !== undefined || rawBefore !== undefined || compact;
+    const mode = eventEnumValue(
+      c.req.query("mode"),
+      SessionEventReadMode,
+      "mode",
+      explicitReplay ? "forensic" : "monitoring",
+    );
+    const latestClass = eventEnumValue(
+      c.req.query("latest"),
+      SessionEventSemanticClass,
+      "latest",
+      undefined,
+    );
+    if (
+      latestClass &&
+      ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some(
+        (name) => c.req.query(name) !== undefined,
+      )
+    ) {
+      throw new HTTPException(400, {
+        message: "latest cannot be combined with event filters",
+      });
+    }
+    const direction = latestClass
+      ? "before"
+      : eventEnumValue(
+          c.req.query("direction"),
+          SessionEventReadDirection,
+          "direction",
+          before !== undefined
+            ? "before"
+            : rawAfter !== undefined
+              ? "after"
+              : mode === "monitoring"
+                ? "before"
+                : "after",
+        );
+    const payloadMode = eventEnumValue(
+      c.req.query("payloadMode"),
+      SessionEventPayloadMode,
+      "payloadMode",
+      mode === "monitoring" ? "summary" : "full",
+    );
+    const includeTypes = eventEnumList(
+      c.req.query("includeTypes"),
+      SessionEventType,
+      "includeTypes",
+    );
+    const excludeTypes = eventEnumList(
+      c.req.query("excludeTypes"),
+      SessionEventType,
+      "excludeTypes",
+    );
+    const includeClasses = eventEnumList(
+      c.req.query("includeClasses"),
+      SessionEventSemanticClass,
+      "includeClasses",
+    );
+    const excludeClasses = eventEnumList(
+      c.req.query("excludeClasses"),
+      SessionEventSemanticClass,
+      "excludeClasses",
+    );
+    const limit = latestClass
+      ? 1
+      : eventListLimit(
+          c.req.query("limit"),
+          compact ? 5000 : mode === "monitoring" ? 250 : 2000,
+          mode === "monitoring" ? 40 : 500,
+        );
+    const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
+      direction,
+      payloadMode,
+      includeTypes,
+      excludeTypes,
+      includeClasses: latestClass ? [latestClass] : includeClasses,
+      excludeClasses,
+      ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
     });
-    return c.json(compact ? coalesceSessionEventDeltas(events) : events);
+    const events = dbPage.events;
+    const projected = compact ? coalesceSessionEventDeltas(events) : events;
+    const page = boundSessionEventHttpPage(projected, {
+      direction,
+    });
+    const hasMore = dbPage.hasMore || page.truncated;
+    c.header("X-OpenGeni-Page-Bytes", String(page.bytes));
+    c.header("X-OpenGeni-Page-Max-Bytes", String(1024 * 1024));
+    c.header("X-OpenGeni-Page-Truncated", String(hasMore));
+    c.header("X-OpenGeni-Has-More", String(hasMore));
+    c.header("X-OpenGeni-Event-Mode", mode);
+    c.header("X-OpenGeni-Event-Direction", direction);
+    c.header("X-OpenGeni-Payload-Mode", payloadMode);
+    c.header("X-OpenGeni-Forensic-Exact", String(mode === "forensic" && payloadMode === "full"));
+    const coveredFirst = page.events[0]?.sequence;
+    const coveredLast = page.events.at(-1)?.sequence;
+    if (coveredFirst !== undefined) c.header("X-OpenGeni-Covered-First", String(coveredFirst));
+    if (coveredLast !== undefined) c.header("X-OpenGeni-Covered-Last", String(coveredLast));
+    const truncatedBy = page.truncated ? "http_bytes" : dbPage.truncatedBy;
+    if (truncatedBy) c.header("X-OpenGeni-Truncated-By", truncatedBy);
+    if (page.nextSequence !== null) {
+      c.header(
+        direction === "before" ? "X-OpenGeni-Next-Before" : "X-OpenGeni-Next-After",
+        String(page.nextSequence),
+      );
+    }
+    return c.json(page.events);
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
@@ -470,6 +624,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       Number.isFinite(after) ? after : 0,
       c.req.raw.signal,
+      { observability: deps.observability },
     );
   });
 
@@ -492,101 +647,170 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     return c.json(snapshot);
   });
 
-  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/cancel", async (c) => {
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/move", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const payload = CancelSessionQueueItemRequest.parse(await c.req.json());
+    const payload = MoveSessionQueueItemRequest.parse(await c.req.json());
     try {
-      const result = await cancelQueuedSessionTurnWithVersion(
-        db,
+      return c.json(
+        await moveHumanQueuePrompt(
+          { db, bus },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/edit", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = EditSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await editHumanQueuePrompt(
+          { db, bus },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/steer", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = SteerSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await steerHumanQueuePrompt(
+          { db, bus },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/delete", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const payload = DeleteSessionQueueItemRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await deleteHumanQueuePrompt(
+          { db, bus },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          c.req.param("turnId"),
+          payload,
+        ),
+      );
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    return c.json(
+      await getHumanComposerDraft(db, {
+        accountId: grant.accountId,
         workspaceId,
         sessionId,
-        c.req.param("turnId"),
-        payload.expectedQueueVersion,
-        payload.expectedItemVersion,
-        grant.subjectId,
-        payload.reason ?? null,
+        subjectId: grant.subjectId,
+      }),
+    );
+  });
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/composer-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = SaveComposerDraftRequest.parse(await c.req.json());
+    try {
+      return c.json(
+        await saveHumanComposerDraft(
+          db,
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          payload,
+        ),
       );
-      await bus.publish(workspaceId, sessionId, result.events);
-      if (result.shouldWake) {
-        await workflowClient.wakeSessionWorkflow({
-          accountId: grant.accountId,
-          workspaceId,
-          sessionId,
-          workflowId: workflowIdForSession(sessionId),
-        });
-      }
-      return c.json(result);
     } catch (error) {
-      throwQueueConflict(error);
+      return commandConflictResponse(c, error);
     }
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/control", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
+      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+    }
     const sessionId = c.req.param("sessionId");
-    const payload = SessionControlRequest.parse(await c.req.json());
-    let result;
+    const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session control request" });
+    }
     try {
-      result = await requestSessionControl(db, {
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        actor: grant.subjectId,
-        mode: payload.mode,
-        reason: payload.reason ?? null,
-        clientEventId: payload.clientEventId ?? null,
-        ...(payload.expectedControlState !== undefined
-          ? { expectedControlState: payload.expectedControlState }
-          : {}),
-        ...(payload.expectedControlGeneration !== undefined
-          ? { expectedControlGeneration: payload.expectedControlGeneration }
-          : {}),
-        ...(payload.expectedWorkspaceInferenceGeneration !== undefined
-          ? {
-              expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
-            }
-          : {}),
-      });
+      return c.json(
+        await controlHumanSessionWorkstream(
+          { db, bus, workflowClient },
+          {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          parsed.data,
+        ),
+      );
     } catch (error) {
-      throwQueueConflict(error);
+      return commandConflictResponse(c, error);
     }
-    await bus.publish(workspaceId, sessionId, result.events);
-    const workflowId = workflowIdForSession(sessionId);
-    if (result.shouldSignalControl) {
-      await workflowClient.signalSessionControl({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        eventId: result.event.id,
-        workflowId,
-      });
-    } else if (result.shouldWake) {
-      await workflowClient.wakeSessionWorkflow({
-        accountId: grant.accountId,
-        workspaceId,
-        sessionId,
-        workflowId,
-      });
-    }
-    return c.json(
-      {
-        operationId: result.operationId,
-        event: result.event,
-        controlState: result.controlState,
-        controlGeneration: result.controlGeneration,
-        expectedActiveTurnId: result.expectedActiveTurnId,
-        expectedExecutionGeneration: result.expectedExecutionGeneration,
-        expectedAttemptId: result.expectedAttemptId,
-        deliveryEventId: result.deliveryEventId,
-        shouldSignalControl: result.shouldSignalControl,
-        shouldWake: result.shouldWake,
-      },
-      202,
-    );
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/steer", async (c) => {
@@ -606,13 +830,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
       delivery: "steer",
       origin: "human",
-      ...(payload.expectedControlGeneration !== undefined
-        ? { expectedControlGeneration: payload.expectedControlGeneration }
-        : {}),
-      ...(payload.expectedWorkspaceInferenceGeneration !== undefined
-        ? {
-            expectedWorkspaceInferenceGeneration: payload.expectedWorkspaceInferenceGeneration,
-          }
+      ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+      ...(payload.expectedDraftRevision !== undefined
+        ? { expectedDraftRevision: payload.expectedDraftRevision }
         : {}),
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
     });
@@ -634,32 +854,42 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         model: event.payload.model ?? null,
         reasoningEffort: event.payload.reasoningEffort ?? null,
         mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+        ...(event.payload.controlEtag !== undefined
+          ? { controlEtag: event.payload.controlEtag }
+          : {}),
+        ...(event.payload.expectedDraftRevision !== undefined
+          ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+          : {}),
         ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
       });
       return c.json(accepted, 202);
     }
 
-    const session = await requireSession(db, workspaceId, sessionId);
-    if (event.type === "user.approvalDecision" && session.status !== "requires_action") {
-      throw new HTTPException(409, {
-        message: `session is ${session.status}; no approval is pending`,
-      });
-    }
-    const eventsToAppend: AppendEventInput[] = [
-      {
-        type: event.type,
+    if (event.type === "user.approvalDecision") {
+      const accepted = await acceptSessionApprovalDecision(db, {
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
         payload: event.payload,
-        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      },
-    ];
-    const appended = await appendAndPublishEvents(db, bus, workspaceId, sessionId, eventsToAppend);
-    const accepted = appended[0];
-    if (!accepted) {
-      throw new HTTPException(500, { message: "failed to append client event" });
+        clientEventId: event.clientEventId ?? null,
+      });
+      if (accepted.action === "conflict") {
+        throw new HTTPException(409, {
+          message: `session is ${accepted.sessionStatus}; no unhandled approval is pending`,
+        });
+      }
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
+      const workflowId = workflowIdForSession(sessionId);
+      await workflowClient.signalApprovalDecision({
+        accountId: grant.accountId,
+        workspaceId,
+        sessionId,
+        eventId: accepted.event.id,
+        workflowId,
+        workflowWakeRevision: accepted.workflowWakeRevision,
+      });
+      return c.json(accepted.event, 202);
     }
-    const workflowId = workflowIdForSession(sessionId);
-    await workflowClient.signalApprovalDecision({ sessionId, eventId: accepted.id, workflowId });
-    return c.json(accepted, 202);
   });
 
   // ── API-direct stream capabilities + viewer attach (P1.4) ─────────────────
@@ -806,7 +1036,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       // tracks the desktop tier + a desktop-capable backend.
       computerUseEnabled: settings.computerUseEnabled,
       computerUseReadOnly: settings.computerUseReadOnly,
-      // Graceful degrade (I8/OD-8): if desktop is enabled but no stream-token
+      // Graceful degrade (stream-token availability contract): if desktop is enabled but no stream-token
       // secret is resolvable, the desktop cell reports transport:null rather
       // than advertising a plane we can never authorize.
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
@@ -894,7 +1124,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const parsed = AcknowledgeStreamRequest.safeParse(await c.req.json().catch(() => ({})));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "invalid stream acknowledgment request" });
+        throw new HTTPException(400, {
+          message: "invalid stream acknowledgment request",
+        });
       }
       const recorded = await recordStreamAcknowledgment(db, {
         accountId: grant.accountId,
@@ -930,7 +1162,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     const parsed = AttachViewerRequest.safeParse(await c.req.json().catch(() => ({})));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid viewer attach request" });
+      throw new HTTPException(400, {
+        message: "invalid viewer attach request",
+      });
     }
     // Consent gate (P3.2 / addendum E.1): ONLY the un-redacted DESKTOP pixel plane
     // requires the calling principal's acknowledgment (recorded per group+subject;
@@ -951,10 +1185,14 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         subjectId: grant.subjectId,
       });
       if (!ack?.acknowledgedUnredacted) {
-        throw new HTTPException(409, { message: "stream_acknowledgment_required" });
+        throw new HTTPException(409, {
+          message: "stream_acknowledgment_required",
+        });
       }
       if (shared && !ack.acknowledgedShared) {
-        throw new HTTPException(409, { message: "shared_acknowledgment_required" });
+        throw new HTTPException(409, {
+          message: "shared_acknowledgment_required",
+        });
       }
     }
     // SELFHOSTED ACTIVE: when the session's active sandbox is selfhosted, skip
@@ -1111,7 +1349,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
       const parsed = ViewerHeartbeatRequest.safeParse(await c.req.json().catch(() => ({})));
       if (!parsed.success) {
-        throw new HTTPException(400, { message: "viewer heartbeat requires { leaseEpoch }" });
+        throw new HTTPException(400, {
+          message: "viewer heartbeat requires { leaseEpoch }",
+        });
       }
       const alive = await heartbeatViewer(
         { db, settings },
@@ -1174,7 +1414,10 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         idleGraceMs: settings.sandboxIdleGraceMs,
       });
       // null ⇒ the lease was already cold-and-reaped (revoke is an idempotent no-op).
-      return c.json({ liveness: result?.liveness ?? null, refcount: result?.refcount ?? null });
+      return c.json({
+        liveness: result?.liveness ?? null,
+        refcount: result?.refcount ?? null,
+      });
     },
   );
 
@@ -1215,12 +1458,19 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    return { accountId: grant.accountId, workspaceId, session, subjectId: grant.subjectId };
+    return {
+      accountId: grant.accountId,
+      workspaceId,
+      session,
+      subjectId: grant.subjectId,
+    };
   }
 
   async function parseChannelABody<T>(
     c: Context,
-    schema: { safeParse: (v: unknown) => { success: true; data: T } | { success: false } },
+    schema: {
+      safeParse: (v: unknown) => { success: true; data: T } | { success: false };
+    },
   ): Promise<T> {
     const raw = await c.req.json().catch(() => undefined);
     const result = schema.safeParse(raw ?? {});
@@ -1350,7 +1600,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId") ?? "";
     const path = c.req.query("path");
     if (!path) {
-      throw new HTTPException(400, { message: "path query parameter is required" });
+      throw new HTTPException(400, {
+        message: "path query parameter is required",
+      });
     }
     const session = await getSession(db, workspaceId, sessionId);
     if (!session) {
@@ -1365,7 +1617,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (revisionParam !== undefined && revisionParam !== "") {
       const revision = Number(revisionParam);
       if (!Number.isInteger(revision) || revision < 0) {
-        throw new HTTPException(400, { message: "revision must be a non-negative integer" });
+        throw new HTTPException(400, {
+          message: "revision must be a non-negative integer",
+        });
       }
       row = await workspaceCaptureAtRevision(db, workspaceId, sessionId, revision);
     } else {
@@ -1437,7 +1691,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
     if (pty.execSessionId === null) {
-      throw new HTTPException(409, { message: "interactive terminal unsupported on this backend" });
+      throw new HTTPException(409, {
+        message: "interactive terminal unsupported on this backend",
+      });
     }
     let seq = 1;
     await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
@@ -1499,7 +1755,11 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId: ctx.workspaceId,
         ptyId: req.ptyId,
       });
-      const exited: TerminalPtyExitedPayload = { ptyId: req.ptyId, exitCode: 0, reason: "exit" };
+      const exited: TerminalPtyExitedPayload = {
+        ptyId: req.ptyId,
+        exitCode: 0,
+        reason: "exit",
+      };
       await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
         { type: "terminal.pty.exited", payload: exited },
       ]);
@@ -1508,12 +1768,60 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function eventListLimit(raw: string | undefined, max = 2000): number {
-  const limit = Number(raw ?? 500);
+function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): number {
+  const limit = Number(raw ?? fallback);
   if (!Number.isFinite(limit)) {
-    return 500;
+    return fallback;
   }
   return Math.min(max, Math.max(1, Math.floor(limit)));
+}
+
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: T,
+): T;
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: undefined,
+): T | undefined;
+function eventEnumValue<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+  fallback: T | undefined,
+): T | undefined {
+  if (raw === undefined) return fallback;
+  const parsed = schema.safeParse(raw);
+  if (!parsed.success) {
+    throw new HTTPException(400, { message: `${name} is invalid` });
+  }
+  return parsed.data as T;
+}
+
+function eventEnumList<T extends string>(
+  raw: string | undefined,
+  schema: { safeParse(value: unknown): { success: boolean; data?: T } },
+  name: string,
+): T[] {
+  if (raw === undefined || raw.trim() === "") return [];
+  const values = raw
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (values.length > 100) {
+    throw new HTTPException(400, { message: `${name} accepts at most 100 values` });
+  }
+  return values.map((value) => {
+    const parsed = schema.safeParse(value);
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: `${name} contains an invalid value` });
+    }
+    return parsed.data as T;
+  });
 }
 
 function sessionListQuery(
@@ -1545,7 +1853,9 @@ function sessionListQuery(
   }
   const search = query.search?.trim();
   if (search && search.length > 200) {
-    throw new HTTPException(400, { message: "search must be at most 200 characters" });
+    throw new HTTPException(400, {
+      message: "search must be at most 200 characters",
+    });
   }
   return {
     limit: query.limit,
@@ -1597,17 +1907,15 @@ function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean 
   return hasOwnProperty(payload, key);
 }
 
-function throwQueueConflict(error: unknown): never {
-  if (error instanceof SessionQueueConflictError) {
-    throw new HTTPException(409, {
-      message: JSON.stringify({
-        message: error.message,
-        currentQueueVersion: error.currentQueueVersion,
-        ...(error.currentItemVersion !== undefined
-          ? { currentItemVersion: error.currentItemVersion }
-          : {}),
-      }),
-    });
+function commandConflictResponse(c: Context, error: unknown): Response {
+  if (error instanceof QueueCommandConflictError) {
+    return c.json({ code: error.code, message: error.message, current: error.current }, 409);
+  }
+  if (error instanceof SessionControlConflictError) {
+    return c.json({ code: error.code, message: error.message }, 409);
+  }
+  if (error instanceof SessionCommandIdempotencyError) {
+    return c.json({ code: error.code, message: error.message }, 409);
   }
   throw error;
 }

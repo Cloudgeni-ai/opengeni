@@ -7,14 +7,17 @@
 // codex account indicator — arrive as slots so the whole bar can be rendered
 // (and screenshotted) in isolation. `CanvasTopStrip` in rail-shell owns the
 // data wiring and passes the real slots.
-import { SessionStatus as SessionStatusBadge } from "@opengeni/react";
+import {
+  OPEN_WORKSTREAM_CONTROL_EVENT,
+  SessionStatus as SessionStatusBadge,
+} from "@opengeni/react";
 import type { SessionEventsConnectionState } from "@opengeni/react";
 import type { SessionSummary } from "@opengeni/sdk";
-import { LockIcon, PanelRightIcon, PencilIcon, PinIcon } from "lucide-react";
+import { LockIcon, PanelRightIcon, PauseIcon, PencilIcon, PinIcon, PlayIcon } from "lucide-react";
 import { useId, useState, type ReactNode } from "react";
 
 import { ConnectionPill } from "@/components/common";
-import { SpawnedByBreadcrumb } from "@/components/session/subagents";
+import { SessionAncestryBreadcrumb } from "@/components/session/subagents";
 import { Button } from "@/components/ui/button";
 import {
   SESSION_TITLE_MAX_LENGTH,
@@ -25,7 +28,8 @@ import type { Session } from "@/types";
 
 export function SessionHeader({
   session,
-  parent,
+  ancestors,
+  lineageError,
   connectionState,
   status,
   keyAuthRequired,
@@ -39,8 +43,9 @@ export function SessionHeader({
   leading,
 }: {
   session: Session;
-  /** The direct parent (last ancestor), or null when this session has none. */
-  parent: SessionSummary | null;
+  /** Root-to-direct-parent order. */
+  ancestors: SessionSummary[];
+  lineageError?: Error | null;
   connectionState: SessionEventsConnectionState;
   status: Session["status"];
   keyAuthRequired: boolean;
@@ -62,14 +67,18 @@ export function SessionHeader({
     // needs its own surface + a crisp divider to look intentional (and it lifts
     // the dark bar a touch above the canvas too).
     <header
-      data-ope26-session-header
+      data-sessionpin-session-header
       className="flex h-14 min-w-0 shrink-0 items-center gap-1.5 overflow-hidden border-b border-border bg-surface/80 px-2 backdrop-blur supports-[backdrop-filter]:bg-surface/65 sm:gap-3 sm:px-5"
     >
       {leading}
       <div className="flex min-w-0 flex-1 flex-col justify-center gap-0.5 overflow-hidden">
         {/* Child sessions link back to the manager that spawned them. */}
-        <div className="hidden min-w-0 sm:block">
-          <SpawnedByBreadcrumb workspaceId={session.workspaceId} parent={parent} />
+        <div className="min-w-0">
+          <SessionAncestryBreadcrumb
+            workspaceId={session.workspaceId}
+            ancestors={ancestors}
+            error={lineageError}
+          />
         </div>
         <SessionTitleEditor session={session} onRename={onRename} />
         {/* One quiet metadata voice: no label-colon grammar, no separator
@@ -94,6 +103,7 @@ export function SessionHeader({
           <ConnectionPill state={connectionState} />
           <SessionStatusBadge status={status} />
         </div>
+        <WorkstreamControlIndicator session={session} />
         <span className="sr-only md:hidden">
           Connection {connectionState}. Session {status}.
         </span>
@@ -121,6 +131,44 @@ export function SessionHeader({
         </Button>
       </div>
     </header>
+  );
+}
+
+function WorkstreamControlIndicator({ session }: { session: Session }) {
+  const control = session.effectiveControl;
+  const blocker = control.primaryBlocker;
+  const label =
+    control.state === "active"
+      ? "Active"
+      : blocker?.kind === "workspace"
+        ? "Workspace paused"
+        : control.directState === "paused" || blocker?.sessionId === session.id
+          ? "Paused here"
+          : `Paused by ${blocker?.displayName ?? "parent"}`;
+  return (
+    <button
+      type="button"
+      aria-label={`${label}. Open workstream controls`}
+      title={`${label} · open workstream controls`}
+      onClick={() => {
+        document.dispatchEvent(new Event(OPEN_WORKSTREAM_CONTROL_EVENT));
+      }}
+      className={`inline-flex min-w-0 max-w-48 items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium ${
+        control.state === "paused"
+          ? "border-status-waiting/35 bg-status-waiting/10 text-fg hover:bg-status-waiting/15"
+          : "border-status-running/30 bg-status-running/10 text-fg hover:bg-status-running/15"
+      }`}
+    >
+      {control.state === "paused" ? (
+        <PauseIcon className="size-3 shrink-0 fill-current text-status-waiting" />
+      ) : (
+        <PlayIcon className="size-3 shrink-0 fill-current text-status-running" />
+      )}
+      <span className="hidden truncate sm:inline">{label}</span>
+      {control.additionalBlockerCount > 0 ? (
+        <span className="hidden shrink-0 sm:inline">+{control.additionalBlockerCount}</span>
+      ) : null}
+    </button>
   );
 }
 

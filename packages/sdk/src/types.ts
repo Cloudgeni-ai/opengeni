@@ -10,7 +10,6 @@ export type SessionStatus =
   | "requires_action"
   | "recovering"
   | "waiting_capacity"
-  | "paused"
   | "failed"
   | "cancelled";
 
@@ -149,7 +148,11 @@ export type StreamUrlRotatedPayload = {
   transport: "vnc-ws";
   viewerId: string | null;
 };
-export type StreamOpenedPayload = { viewerId: string; shared: boolean; viewerCount: number };
+export type StreamOpenedPayload = {
+  viewerId: string;
+  shared: boolean;
+  viewerCount: number;
+};
 export type StreamClosedPayload = {
   viewerId: string;
   reason: "client-disconnect" | "reaped" | "revoked" | "box-rollover";
@@ -165,7 +168,10 @@ export type StreamRevokedPayload = {
 // `desktop:true` opts into the un-redacted pixel plane (the consent-gated noVNC
 // stream); a terminal/files-only warm attach omits it (defaults false) so it
 // warms the box + mints the pty-ws terminal cell WITHOUT tripping the consent 409.
-export type AttachViewerRequest = { viewerId?: string | undefined; desktop?: boolean | undefined };
+export type AttachViewerRequest = {
+  viewerId?: string | undefined;
+  desktop?: boolean | undefined;
+};
 
 // Mirror of `@opengeni/contracts` ViewerHolder + the P4.2 desktop-stream fields
 // the POST /viewers handler folds in when the pixel plane is minted in-process.
@@ -203,7 +209,10 @@ export type AcknowledgeStreamRequest = {
   acknowledgeUnredacted?: boolean | undefined;
   acknowledgeShared?: boolean | undefined;
 };
-export type AcknowledgeStreamResponse = { acknowledged: boolean; acknowledgedShared: boolean };
+export type AcknowledgeStreamResponse = {
+  acknowledged: boolean;
+  acknowledgedShared: boolean;
+};
 
 // Mirror of `@opengeni/contracts` ViewerHeartbeatRequest/Response — the
 // Channel-A viewer-liveness ping, epoch-fenced (a stale-epoch beat → alive:false
@@ -400,12 +409,7 @@ export type Session = {
   queueVersion: number;
   queueHeadPosition: number;
   queueTailPosition: number;
-  controlState: "active" | "paused";
-  controlGeneration: number;
-  controlReason: string | null;
-  controlChangedBy: string | null;
-  controlChangedAt: string | null;
-  workspaceRunExceptionGeneration: number | null;
+  effectiveControl: EffectiveSessionControl;
   lastSequence: number;
   /** Multi-account Codex (P1): the account this session is pinned to (null ⇒ follow workspace active). */
   codexPinnedCredentialId?: string | null;
@@ -417,6 +421,20 @@ export type Session = {
   pinnedAt?: string | null;
   /** Optimistic pin-state revision; zero represents an absent pin relation. */
   pinVersion?: number;
+  /** Server-authoritative descendant counts populated by session-list reads. */
+  treeStats?:
+    | {
+        directChildren: number;
+        totalDescendants: number;
+        runningDescendants: number;
+        queuedDescendants: number;
+        attentionDescendants: number;
+        pausedDescendants: number;
+        failedDescendants: number;
+        /** Counts are lower bounds rather than exact totals when true. */
+        truncated: boolean;
+      }
+    | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -426,6 +444,8 @@ export type SessionSummary = Session;
 /** Canonical session-list page; pinned rows are excluded from ordinary pages. */
 export type SessionListResponse = {
   pinned: Session[];
+  /** True when the server omitted older pins from its bounded pinned section. */
+  pinnedTruncated?: boolean;
   sessions: Session[];
   nextCursor: string | null;
 };
@@ -455,7 +475,8 @@ export type SessionTurnStatus =
   | "completed"
   | "failed"
   | "cancelled"
-  | "superseded";
+  | "superseded"
+  | "withdrawn_for_edit";
 
 export type SessionTurnSource =
   | "user"
@@ -496,6 +517,8 @@ export type SessionTurn = {
 
 export const SESSION_EVENT_TYPES = [
   "session.created",
+  // Defensive bounded projection for malformed/legacy oversized envelopes.
+  "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
   "session.context.compaction.requested",
@@ -545,6 +568,7 @@ export const SESSION_EVENT_TYPES = [
   "session.control.steer_requested",
   "workspace.inference.paused",
   "workspace.inference.resumed",
+  "session.queue.changed",
   "session.queue.prompt.cancelled",
   "session.queue.history",
   "turn.event.rejected_late",
@@ -570,9 +594,9 @@ export const SESSION_EVENT_TYPES = [
   "session.title_set",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
-  // OPE-21 metadata-only per-turn credential selection audit.
+  // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
-  // OPE-21 durable zero-capacity wait lifecycle. These are system/runtime
+  // credential allocator durable zero-capacity wait lifecycle. These are system/runtime
   // events, never synthetic user messages.
   "codex.capacity.waiting",
   "codex.capacity.resumed",
@@ -590,6 +614,7 @@ export const SESSION_EVENT_TYPES = [
   // Workbench v2 turn-end workspace capture (announce-only; mirror of contracts
   // SessionEventType — the contract-parity test asserts sorted equality).
   "workspace.revision.captured",
+  "workspace.revision.degraded",
   // Connected Machine op-outcome observability (announce-only, quiet; mirror of
   // contracts SessionEventType — the contract-parity test asserts sorted equality).
   "machine.op.failed",
@@ -622,7 +647,65 @@ export type SessionEvent = {
   turnId?: string | null | undefined;
   turnGeneration?: number | null | undefined;
   turnAttemptId?: string | null | undefined;
-  turnAssociation?: "current" | "late_rejected" | null | undefined;
+  turnAssociation?: "current" | "late_rejected" | "duplicate" | null | undefined;
+  duplicateOfEventId?: string | null | undefined;
+  duplicateReason?: string | null | undefined;
+};
+
+export type SessionEventSemanticClass =
+  | "control"
+  | "terminal"
+  | "failure"
+  | "checkpoint"
+  | "tool_receipt"
+  | "provider_account";
+export type SessionEventPayloadMode = "none" | "summary" | "full";
+export type SessionEventReadMode = "monitoring" | "forensic";
+export type SessionEventReadDirection = "after" | "before";
+
+type SessionEventListCommonOptions = {
+  after?: number;
+  before?: number;
+  limit?: number;
+  compact?: boolean;
+  mode?: SessionEventReadMode;
+  direction?: SessionEventReadDirection;
+  payloadMode?: SessionEventPayloadMode;
+};
+
+export type SessionEventListOptions = SessionEventListCommonOptions &
+  (
+    | {
+        latest?: never;
+        includeTypes?: SessionEventType[];
+        excludeTypes?: SessionEventType[];
+        includeClasses?: SessionEventSemanticClass[];
+        excludeClasses?: SessionEventSemanticClass[];
+      }
+    | {
+        /** Exclusive lookup for the newest event in exactly this semantic class. */
+        latest: SessionEventSemanticClass;
+        includeTypes?: never;
+        excludeTypes?: never;
+        includeClasses?: never;
+        excludeClasses?: never;
+      }
+  );
+
+export type SessionEventPage = {
+  events: SessionEvent[];
+  mode: SessionEventReadMode;
+  payloadMode: SessionEventPayloadMode;
+  direction: SessionEventReadDirection;
+  bytes: number;
+  maxBytes: number;
+  truncated: boolean;
+  hasMore: boolean;
+  truncatedBy: "count" | "bytes" | "http_bytes" | null;
+  coveredSequence: { first: number; last: number } | null;
+  nextAfter: number | null;
+  nextBefore: number | null;
+  forensicExact: boolean;
 };
 
 export type ToolAuthNeededPayload = {
@@ -761,8 +844,16 @@ export type FsListRequest = {
   maxEntries?: number;
   includeHidden?: boolean;
 };
-export type FsListResponse = { root: FsTreeNode; revision: number; truncated: boolean };
-export type FsReadRequest = { path: string; encoding?: FsEncoding; maxBytes?: number };
+export type FsListResponse = {
+  root: FsTreeNode;
+  revision: number;
+  truncated: boolean;
+};
+export type FsReadRequest = {
+  path: string;
+  encoding?: FsEncoding;
+  maxBytes?: number;
+};
 export type FsReadResponse = {
   path: string;
   encoding: FsEncoding;
@@ -779,7 +870,11 @@ export type FsWriteRequest = {
   overwrite?: boolean;
   createParents?: boolean;
 };
-export type FsWriteResponse = { path: string; sizeBytes: number; revision: number };
+export type FsWriteResponse = {
+  path: string;
+  sizeBytes: number;
+  revision: number;
+};
 export type FsDeleteRequest = { path: string; recursive?: boolean };
 export type FsDeleteResponse = { revision: number };
 export type FsMoveRequest = {
@@ -788,7 +883,11 @@ export type FsMoveRequest = {
   overwrite?: boolean;
   createParents?: boolean;
 };
-export type FsMoveResponse = { path: string; newPath: string; revision: number };
+export type FsMoveResponse = {
+  path: string;
+  newPath: string;
+  revision: number;
+};
 export type FsMkdirRequest = { path: string; recursive?: boolean };
 export type FsMkdirResponse = { path: string; revision: number };
 
@@ -850,6 +949,7 @@ export type GitFileDiff = {
 export type GitDiffRequest = {
   path?: string;
   staged?: boolean;
+  includeUntracked?: boolean;
   fromRef?: string;
   toRef?: string;
   pathspec?: string[];
@@ -885,12 +985,17 @@ export type GitShowRequest = {
 export type GitShowResponse = {
   commit: GitCommit | null;
   files: GitFileDiff[];
-  blob: { content: string; encoding: FsEncoding; sizeBytes: number; truncated: boolean } | null;
+  blob: {
+    content: string;
+    encoding: FsEncoding;
+    sizeBytes: number;
+    truncated: boolean;
+  } | null;
   revision: number;
 };
 
 // Workbench v2 turn-end capture (mirror of `@opengeni/contracts` WorkspaceCapture*
-// + the M2 read-API response shapes, dossier §10.3). Reuses FsTreeNode /
+// + the M2 read-API response shapes). Reuses FsTreeNode /
 // GitFileStatus / GitFileDiff / GitFileStatusCode / FsEncoding above.
 export type WorkspaceCaptureFile = {
   path: string;
@@ -913,6 +1018,10 @@ export type WorkspaceCaptureRepo = {
   status: GitFileStatus[];
   diff: GitFileDiff[];
 };
+export type WorkspaceCaptureDegradedReason =
+  | "repository_discovery_command_failed"
+  | "repository_discovery_timed_out"
+  | "repository_discovery_result_limit_exceeded";
 export type WorkspaceCaptureStats = {
   repoCount: number;
   fileCount: number;
@@ -945,10 +1054,24 @@ export type WorkspaceRevisionCapturedPayload = {
   leaseEpoch: number;
   stats: WorkspaceCaptureStats;
 };
+export type WorkspaceRevisionDegradedPayload = {
+  revision: number;
+  turnId: string | null;
+  capturedAt: string;
+  leaseEpoch: number;
+  reason: WorkspaceCaptureDegradedReason;
+};
 export type WorkspaceCaptureSignedUrl = { url: string; expiresAt: string };
 // GET …/workspace/capture. Exactly one of manifest/manifestUrl is non-null.
 export type GetWorkspaceCaptureResponse =
-  | { available: false }
+  | {
+      available: false;
+      degradedReason?: WorkspaceCaptureDegradedReason | null;
+      revision?: number | null;
+      capturedAt?: string | null;
+      turnId?: string | null;
+      leaseEpoch?: number | null;
+    }
   | {
       available: true;
       revision: number;
@@ -990,8 +1113,17 @@ export type TerminalExecResponse = {
   running: boolean;
   wallTimeSeconds: number;
 };
-export type PtyOpenRequest = { cols?: number; rows?: number; cwd?: string; shell?: string };
-export type PtyOpenResponse = { ptyId: string; streamVia: "sse-events"; supportsInput: boolean };
+export type PtyOpenRequest = {
+  cols?: number;
+  rows?: number;
+  cwd?: string;
+  shell?: string;
+};
+export type PtyOpenResponse = {
+  ptyId: string;
+  streamVia: "sse-events";
+  supportsInput: boolean;
+};
 export type PtyWriteRequest = { ptyId: string; data: string };
 export type PtyResizeRequest = { ptyId: string; cols: number; rows: number };
 export type PtyCloseRequest = { ptyId: string };
@@ -1122,7 +1254,7 @@ export const KNOWN_PERMISSIONS = [
   "sessions:create",
   "sessions:read",
   "sessions:control",
-  // Sandbox-surfacing (mirror of @opengeni/contracts Permission). stream:view is
+  // sandbox workspace (mirror of @opengeni/contracts Permission). stream:view is
   // strictly broader than sessions:read (un-redacted pixels); stream:control is
   // the never-granted-v1 raw-input plane; stream:acknowledge is the secret-leak
   // consent gate.
@@ -1195,7 +1327,11 @@ export type CodexConnectionStatus = {
   lastError?: string | null;
   models?: ClientModel[];
   /** The account a session runs on when unpinned (label for the in-session indicator). */
-  activeAccount?: { id: string; label?: string | null; chatgptAccountId?: string | null } | null;
+  activeAccount?: {
+    id: string;
+    label?: string | null;
+    chatgptAccountId?: string | null;
+  } | null;
   /** How many Codex accounts the workspace has connected. */
   accountCount?: number;
 };
@@ -1301,7 +1437,12 @@ export type CodexConnectStart = {
 export type CodexConnectPoll =
   | { status: "pending" }
   | { status: "expired" }
-  | { status: "connected"; plan?: string | null; accountId?: string; isActive?: boolean };
+  | {
+      status: "connected";
+      plan?: string | null;
+      accountId?: string;
+      isActive?: boolean;
+    };
 
 /** Remaining usage/limits for one account. `usage` is the normalized P2 payload. */
 export type CodexUsage = {
@@ -1323,6 +1464,11 @@ export type ClientAuthConfig =
   | { mode: "configuredToken"; headerName: "authorization"; scheme: "bearer" }
   | { mode: "managedSession"; session: "cookie" };
 
+// Kept value-identical to @opengeni/contracts and pinned by the SDK contract
+// parity suite. The SDK has no runtime dependency on the Zod contracts package.
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+
 /**
  * Public, unauthenticated-by-default client bootstrap config returned by
  * `GET /v1/config/client`: which models + reasoning efforts are exposed, the
@@ -1332,6 +1478,8 @@ export type ClientAuthConfig =
  */
 export type ClientConfig = {
   deploymentRevision: string;
+  apiContractRevision: typeof OPENGENI_API_CONTRACT_REVISION;
+  serverVersion?: string | undefined;
   defaultModel: string;
   allowedModels: string[];
   models: ClientModel[];
@@ -1345,7 +1493,11 @@ export type ClientConfig = {
   // at all (P4.4). Per-session availability is negotiated on /stream-capabilities;
   // this is the coarse on/off the client uses to decide whether to even attempt
   // the fs/git/terminal panels.
-  structuredServices: { fileSystem: boolean; git: boolean; terminalEvents: boolean };
+  structuredServices: {
+    fileSystem: boolean;
+    git: boolean;
+    terminalEvents: boolean;
+  };
 };
 
 export type AccountRole = "owner" | "admin" | "member";
@@ -1387,11 +1539,13 @@ export type Workspace = {
   externalId: string | null;
   agentInstructions: string | null;
   settings: Record<string, unknown>;
-  inferenceState?: "active" | "paused";
-  inferenceGeneration?: number;
-  inferenceReason?: string | null;
-  inferenceChangedBy?: string | null;
-  inferenceChangedAt?: string | null;
+  inferenceControl: {
+    state: "active" | "paused";
+    revision: number;
+    reason: string | null;
+    changedBy: string | null;
+    changedAt: string | null;
+  };
   defaultRigId?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -1529,25 +1683,86 @@ export type CompactSessionContextResult = {
 
 // --- Turn queue --------------------------------------------------------------
 
+export type EffectiveControlBlocker = {
+  kind: "session" | "workspace";
+  sessionId?: string | undefined;
+  displayName: string;
+  actor: string | null;
+  reason: string | null;
+  changedAt: string | null;
+  revision: number;
+};
+
+export type EffectiveControlResumeOption = {
+  scope: "selected" | "session" | "workspace";
+  targetId?: string | undefined;
+  selectedStateAfter: "active" | "paused";
+  remainingPrimaryBlocker?: EffectiveControlBlocker | undefined;
+  impactCopy: string;
+};
+
+export type EffectiveSessionControl = {
+  state: "active" | "paused";
+  controlVersion: number;
+  controlEtag: string;
+  directState: "active" | "paused";
+  primaryBlocker: EffectiveControlBlocker | null;
+  additionalBlockerCount: number;
+  blockers: EffectiveControlBlocker[];
+  resumeOptions: EffectiveControlResumeOption[];
+  override: { rootSessionId: string; revision: number } | null;
+  settlement: { state: "stopping"; attemptCount: number } | null;
+};
+
+export type SessionCommandReceipt = {
+  id: string;
+  action: string;
+  operationKey: string;
+  targetSessionId: string | null;
+  targetTurnId: string | null;
+  appliedControlRevision: number | null;
+  appliedQueueVersion: number | null;
+  appliedTurnVersion: number | null;
+  appliedDraftRevision: number | null;
+  createdAt: string;
+};
+
+export type ComposerDraft = {
+  revision: number;
+  text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  sourceTurnId: string | null;
+  sourceTurnVersion: number | null;
+  updatedAt: string | null;
+};
+
 export type SessionQueueSnapshot = {
   version: number;
-  controlState: "active" | "paused";
-  controlGeneration: number;
-  workspaceInferenceState: "active" | "paused";
-  workspaceInferenceGeneration: number;
-  workspaceRunExceptionGeneration: number | null;
+  effectiveControl: EffectiveSessionControl;
+  /** The latest interrupted attempt has not yet durably proved physical quiescence. */
+  stoppingPreviousAttempt: boolean;
   items: SessionTurn[];
 };
 
 export type SystemUpdateClassification = "success" | "failure" | "action_required" | "info";
 
 export type SessionSystemUpdateKind =
-  | "child_session_update"
-  | "scheduled_wake"
-  | "lifecycle_event"
-  | "runtime_notice";
+  | "scheduled_occurrence"
+  | "goal_continuation"
+  | "agent_message"
+  | "agent_steer_instruction"
+  | "child_terminal_result";
 
-export type SessionSystemUpdateState = "pending" | "delivered" | "cancelled" | "failed";
+export type SessionSystemUpdateState =
+  | "pending"
+  | "deferred"
+  | "delivered"
+  | "cancelled"
+  | "superseded"
+  | "failed";
 
 export type SessionSystemUpdate = {
   id: string;
@@ -1566,32 +1781,91 @@ export type SessionSystemUpdate = {
 };
 
 export type SessionControlResponse = {
-  operationId: string;
-  event: SessionEvent;
-  controlState: "active" | "paused";
-  controlGeneration: number;
-  expectedActiveTurnId: string | null;
-  expectedExecutionGeneration: number | null;
-  expectedAttemptId: string | null;
-  deliveryEventId: string | null;
-  shouldSignalControl: boolean;
-  shouldWake: boolean;
+  receipt: SessionCommandReceipt;
+  effectiveControl: EffectiveSessionControl;
+  interruptionCount: number;
+  wakeCount: number;
 };
 
 export type WorkspaceInferenceControlResponse = {
-  operationId: string;
+  receipt: SessionCommandReceipt;
   state: "active" | "paused";
-  generation: number;
-  affectedSessionIds: string[];
-  controlSessionIds: string[];
-  exceptionSessionIds: string[];
+  revision: number;
+  interruptionCount: number;
+  wakeCount: number;
+};
+
+export type WorkspaceControlEvent = {
+  id: string;
+  workspaceId: string;
+  /** Same monotonic value as revision; named sequence for SSE resume cursors. */
+  sequence: number;
+  revision: number;
+  type: "workspace.control.changed";
+  scope: "workspace" | "session";
+  rootSessionId: string | null;
+  action: "pause" | "resume";
+  automatic: boolean;
+  reason: string | null;
+  actor: string;
+  occurredAt: string;
+  truncation?: {
+    truncated: true;
+    surface:
+      | "durable_control"
+      | "database_guard"
+      | "http_projection"
+      | "nats_legacy_guard"
+      | "sse_legacy_guard";
+    deliveredBytes: number;
+    fields: Array<{
+      field: "reason" | "actor";
+      originalBytes: number;
+      deliveredBytes: number;
+      omittedBytes: number;
+    }>;
+    fullEvidence: {
+      available: false;
+      reason: "not_retained";
+    };
+  } | null;
 };
 
 export type SessionQueueMutationResponse = {
+  receipt: SessionCommandReceipt;
   snapshot: SessionQueueSnapshot;
-  events: SessionEvent[];
-  shouldWake: boolean;
+  draft?: ComposerDraft;
 };
+
+export type MoveSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedQueueVersion: number;
+  beforeTurnId: string | null;
+};
+
+export type EditSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedTurnVersion: number;
+  expectedDraftRevision: number;
+  replaceDraft: boolean;
+};
+
+export type SteerSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedTurnVersion: number;
+  controlEtag?: string;
+};
+
+export type DeleteSessionQueueItemRequest = {
+  clientEventId: string;
+  expectedTurnVersion: number;
+  reason?: string;
+};
+
+export type SaveComposerDraftRequest = Omit<
+  ComposerDraft,
+  "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
+> & { expectedRevision: number };
 
 // --- Scheduled tasks: requests + runs ----------------------------------------
 
@@ -2304,7 +2578,11 @@ export type CapabilityCatalogItem = {
   enabled: boolean;
   enabledReason: string | null;
   /** The connection backing this enabled installation, or null when none is involved. */
-  connectionRef: { connectionId: string; providerDomain: string; kind: string } | null;
+  connectionRef: {
+    connectionId: string;
+    providerDomain: string;
+    kind: string;
+  } | null;
   metadata: Record<string, unknown>;
   createdAt?: string | undefined;
   updatedAt?: string | undefined;

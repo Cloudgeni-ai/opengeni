@@ -25,8 +25,10 @@ import { migrate } from "../src/migrate";
 // resolver (refresh-if-stale + (id,version) CAS) and then the /wham/usage read; the
 // OAuth refresh + wham endpoints are mocked on globalThis.fetch. Throwaway pg17.
 
-const CONTAINER = "ogcodex-pg-usage";
-const PORT = 55487;
+// Fixed Docker listeners stay above Linux's default ephemeral client-port range;
+// the container name binds the listener contract across worktrees.
+const PORT = 61443;
+const CONTAINER = `ogcodex-pg-usage-${PORT}`;
 const PASSWORD = "x";
 const APP_PASSWORD = "apppw";
 const ADMIN_URL = `postgres://postgres:${PASSWORD}@127.0.0.1:${PORT}/postgres`;
@@ -45,7 +47,7 @@ function docker(args: string[]): string {
 }
 function removeContainer(): void {
   try {
-    docker(["rm", "-f", CONTAINER]);
+    docker(["rm", "-f", "-v", CONTAINER]);
   } catch {
     /* gone */
   }
@@ -132,6 +134,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 

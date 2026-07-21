@@ -7,10 +7,13 @@
 // manual device-flow approve kept as a secondary option).
 import {
   EnrollmentDeviceFlow,
+  MachineDetail,
   MachinesDashboard,
   connectionStatusForState,
   useMachines,
   type DeviceFlowPhase,
+  type MetricSample,
+  type MetricWindow,
 } from "@opengeni/react/machines";
 import {
   ArrowLeftIcon,
@@ -56,6 +59,90 @@ async function copyToClipboard(text: string, successMessage: string) {
 export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
   const machines = useMachines({ pollIntervalMs: 5000 });
   const [enrollOpen, setEnrollOpen] = useState(false);
+
+  // The machine whose telemetry detail is open (by sandboxId), and its history.
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailWindow, setDetailWindow] = useState<MetricWindow>("1h");
+  const [detailSeries, setDetailSeries] = useState<MetricSample[]>([]);
+  const [detailLoading, setDetailLoading] = useState(false);
+  // Short (15m) history per machine for the card sparklines, keyed by sandboxId.
+  const [cardSeries, setCardSeries] = useState<Record<string, MetricSample[]>>({});
+  // A shared, slowly-ticking clock so "Live / updated Xago" stays honest without
+  // re-rendering on every animation frame.
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 2000);
+    return () => clearInterval(id);
+  }, []);
+
+  const { fetchSeries } = machines;
+  const selectedMachine = detailId
+    ? (machines.machines.find((m) => m.sandboxId === detailId) ?? null)
+    : null;
+  const selectedEnrollmentId = selectedMachine?.enrollmentId ?? null;
+
+  // Fetch the compact card sparkline history for every enrolled machine. Keyed on
+  // the SET of enrollment ids (not the 5s-polled array identity) + a 30s refresh,
+  // so it doesn't refetch on every liveness poll.
+  const enrolledKey = machines.machines
+    .filter((m) => m.enrollmentId && !m.isSessionGroup)
+    .map((m) => m.enrollmentId)
+    .sort()
+    .join(",");
+  useEffect(() => {
+    const enrolled = machines.machines.filter((m) => m.enrollmentId && !m.isSessionGroup);
+    if (enrolled.length === 0) {
+      setCardSeries({});
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      const entries = await Promise.all(
+        enrolled.map(async (m) => {
+          try {
+            return [m.sandboxId, await fetchSeries(m.enrollmentId!, "15m")] as const;
+          } catch {
+            return [m.sandboxId, [] as MetricSample[]] as const;
+          }
+        }),
+      );
+      if (!cancelled) setCardSeries(Object.fromEntries(entries));
+    };
+    void load();
+    const id = setInterval(() => void load(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrolledKey, fetchSeries]);
+
+  // Fetch the open machine's detail history: on select, on window change, and on
+  // a 10s refresh while open.
+  useEffect(() => {
+    if (!selectedEnrollmentId) {
+      setDetailSeries([]);
+      return;
+    }
+    let cancelled = false;
+    setDetailLoading(true);
+    const load = async () => {
+      try {
+        const samples = await fetchSeries(selectedEnrollmentId, detailWindow);
+        if (!cancelled) setDetailSeries(samples);
+      } catch {
+        if (!cancelled) setDetailSeries([]);
+      } finally {
+        if (!cancelled) setDetailLoading(false);
+      }
+    };
+    void load();
+    const id = setInterval(() => void load(), 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [selectedEnrollmentId, detailWindow, fetchSeries]);
 
   // "Machine connected" moment: watch the polled fleet and, once a machine first
   // shows online (a fresh enrollment coming up, or a reconnect), toast it. The
@@ -112,12 +199,25 @@ export function MachinesRoute({ workspaceId }: { workspaceId: string }) {
             Connected machines aren't enabled on this deployment. Sessions run on the managed
             sandbox.
           </Notice>
+        ) : selectedMachine ? (
+          <MachineDetail
+            machine={selectedMachine}
+            series={detailSeries}
+            window={detailWindow}
+            onWindowChange={setDetailWindow}
+            loadingSeries={detailLoading}
+            onBack={() => setDetailId(null)}
+            now={now}
+          />
         ) : (
           <MachinesDashboard
             machines={machines.machines}
             activeSandboxId={machines.activeSandboxId}
             loading={machines.loading}
             error={machines.error}
+            seriesByMachine={cardSeries}
+            onOpenDetail={(m) => setDetailId(m.sandboxId)}
+            now={now}
             onRefresh={() => void machines.refresh()}
             onEnroll={() => setEnrollOpen(true)}
             {...(machines.canAttach

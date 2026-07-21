@@ -1,5 +1,79 @@
 # @opengeni/react
 
+## 0.16.1
+
+### Patch Changes
+
+- 4e9c48c: Preserve the exact autosaved composer text when sending or steering so trailing whitespace cannot trip the draft consistency fence.
+- 9a7dec2: Keep captured workspace files and diffs usable when the live sandbox provider is temporarily unavailable, surface a truthful retryable degraded state, and distinguish provider failures from invalid workspace paths.
+
+## 0.16.0
+
+### Minor Changes
+
+- ec0697a: Ship the production-hardened captured workspace workbench, physically verified Steer/Pause cancellation across cloud, local, and self-hosted model tools, pre-model preparation, sandbox provisioning, and lifecycle/setup commands, durable quiescence admission fencing, cancellation-aware SDK reads and turn cleanup, single-round-trip pruned workspace indexing, truthful shutdown states, a responsive and accessible review dock, Unicode coverage, and package-safe CSS/SSR integration.
+
+### Patch Changes
+
+- 14ce2e3: Bound model-facing textual tool output with Codex-compatible, replay-idempotent semantics, account
+  for complete current model input, make compaction failure/progress transitions
+  durable and convergent, and replace recursive session discovery with a compact
+  paginated projection.
+- Updated dependencies [ec0697a]
+  - @opengeni/sdk@0.16.0
+
+## 0.15.0
+
+### Minor Changes
+
+- f42cd4a: Replace the old queue and interruption surface with one revisioned prompt queue, durable composer drafts, atomic Steer, recursive Pause/Resume, workspace control invalidation, stale-client contract fencing, and a shared accessible queue UI for first- and third-party consumers. Remove the obsolete passive child-notification setting so every child terminal result follows the one bounded, coalescible internal-update contract.
+- 0399277: Add a per-machine telemetry detail view and upgrade the machine cards. The card now leads with a fused health verdict (connection + resource pressure + sample freshness), previews a CPU trend, and shows live freshness; opening a card reveals full metric history (CPU, memory, disk, load, GPU) over 15m/1h/6h/24h with threshold guides and a hover crosshair — rendering the downsampled series the API already served but nothing consumed. Resource meters now read as a coherent green/amber/red traffic-light aligned with the health verdict, and load average renders neutral (it is not core-normalized) with the run queue carrying the real saturation signal.
+
+### Patch Changes
+
+- 215d01d: Render normalized persisted MCP text outputs in custom timeline tool cards.
+- Updated dependencies [f42cd4a]
+  - @opengeni/sdk@0.15.0
+
+## 0.14.0
+
+### Minor Changes
+
+- dc79905: Harden the workspace dock with persistent tab state, authoritative live-versus-capture defaults, accessible mobile navigation, guarded-file routing, and deterministic browser acceptance coverage.
+
+## 0.13.0
+
+### Patch Changes
+
+- 7a7126d: Fence session events, workspace capture, file tree, git state, warm intents, and tab latches by session identity; bound signed-manifest fetches; refresh same-shape diffs when hunk content changes; and clear stale file metadata during reconciliation.
+- ad4502a: Make the workbench and console dependency-safe, keep list identities stable, preserve caught error causes, isolate desktop consent tests from real transports, and enforce warning-free repository lint plus aggregate React tests in CI.
+- 04d7595: Discover repositories at any workspace nesting depth, including linked worktrees whose `.git` marker is a file, while pruning dependency/build residue and enforcing timeout and repository-count bounds. An incomplete discovery now persists an epoch-fenced degraded capture revision, announces its typed reason, and makes clients prefer live workspace data instead of presenting a misleading empty capture.
+- 0805620: Make active-sandbox pointer swaps establishment-safe. A swap or create-time seed to a target no turn can establish (a non-group Modal sibling, or an unknown backend kind) is now rejected before the epoch-fenced pointer commit with a typed rejection `code`, leaving the pointer and epoch untouched. At turn start a persisted pointer whose target is structurally unestablishable (a deleted sandbox row, a Modal sibling, or an enrollment-less selfhosted row) is reset to the session home under the epoch fence and announced with a new `session.route.reconciled` event, honoring a concurrent higher-epoch swap rather than clobbering it. A null pointer resolves to the session home backend, and the routing proxy's per-op cache is keyed on the full `(activeEpoch, activeSandboxId)` tuple so a clear-to-null re-lands the next op on home rather than a stale swapped-to session. Adds the optional `SwapActiveSandboxResponse.code` discriminant and the `session.route.reconciled` session event type to the public contracts and SDK wire types.
+- fbf029c: Make the workspace dock usable on narrow and touch surfaces: replace the cramped two-column diff with an identity-stable changed-file picker, preserve selection across reordered captures, provide accessible target sizes for dock and file controls, and raise text/diff contrast to WCAG 2.2 AA.
+- b804fd4: Add provider-neutral git credential contracts and runtime sandbox token-file seeding for GitHub, GitLab, and Azure DevOps. Sandboxes now provision `gh`, `glab`, and `az` wrappers that read current token files at invocation time without storing token values in manifests.
+- e4d3569: Add per-member workspace session pins with stable pinned-first listing, subject-scoped FORCE-RLS persistence, snapshot-backed activity pagination, optimistic OCC-safe pin/unpin updates, and accessible responsive web controls.
+- 810542f: Commit workspace capture announcements atomically with their revision rows and keep harmless late capture bookkeeping out of the user timeline.
+- 5942493: Repair missing file-upload usage records on idempotent finalize retries, reclaim abandoned direct-upload objects through a fenced Temporal cleanup schedule, and preserve accessible provider-backed image previews across reloads.
+- a5f58f9: Make "stop" mean stop, and stop the child-completion flood from outrunning it.
+
+  - **Stop drains the queue.** A non-steer interrupt now cancels the active turn AND all queued turns, emitting one `turn.queue_drained` summary event. Steer still promotes exactly one steered message.
+  - **A user-paused goal is sacred.** A machine child-completion turn can no longer re-activate a goal the user paused (`goal_set` is refused for such callers), and the wake text drops the "resume it now" nudge when the manager's own goal is user-paused. The caller is classified by its own signed turn identity (a new `turnId` claim on the first-party MCP token), not the session's live active pointer — so the guard cannot be raced into refusing a legitimate human `goal_set`.
+  - **Child-completion notifications coalesce.** N spawned workers reaching terminal states now fold into ONE queued digest turn (one model run) instead of N turns, so the flood can no longer outrun a human's stop button. Each worker still gets its own result card.
+  - **Human messages preempt machine notifications.** A person's message jumps ahead of any queued child-completion notification turns (behind the running turn and earlier human turns) — it never waits behind a flood of "worker FAILED" notices.
+  - **Child-completion suppression opt-in.** A new first-party `set_child_notifications_mode` tool lets a manager switch spawned-worker completions to `passive`: they appear as timeline cards only and never queue a turn or a model run. `digest` remains the default.
+  - **Honest steering copy.** The composer no longer claims steer "injects this message now"; it cancels the current step and runs the message next while the goal continues, and the stop button says it clears queued messages and pauses the goal.
+
+- Updated dependencies [ad4502a]
+- Updated dependencies [04d7595]
+- Updated dependencies [0805620]
+- Updated dependencies [faf1487]
+- Updated dependencies [b804fd4]
+- Updated dependencies [4a25bfc]
+- Updated dependencies [3148404]
+- Updated dependencies [e4d3569]
+- Updated dependencies [a5f58f9]
+  - @opengeni/sdk@0.13.0
+
 ## 0.12.0
 
 ### Minor Changes
@@ -134,7 +208,7 @@
 
 ### Minor Changes
 
-- a1c82c5: Add the world-class timeline tool-call renderer module and the sandbox-surfacing client surface to `@opengeni/react`.
+- a1c82c5: Add the world-class timeline tool-call renderer module and the sandbox workspace client surface to `@opengeni/react`.
 
   - **Timeline renderers**: per-tool disclosure cards (full-row toggle, keyboard-accessible), screenshots → lightbox, theme-aware Pierre diffs, turn-collapse summary chips, sub-agent worker/goal landmarks, a consumer-extensible tool registry, and complete state handling (running / complete / failed / cancelled), each with its own affordance.
   - **Sandbox surfacing**: file/terminal/git/desktop hooks and components (`useSandboxFiles`, `useSandboxTerminal`, `useSandboxGit`, `useDesktopStream`, `useTerminalStream`, `useSessionCapabilities`, `SandboxFiles`, `SandboxTerminal`, `DesktopViewer`, `WorkspaceDock`, Pierre diff/file views, `CodeEditor`).

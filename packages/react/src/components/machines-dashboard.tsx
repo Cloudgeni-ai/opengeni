@@ -1,7 +1,7 @@
 import { type ReactNode } from "react";
 import { LaptopIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
 import { cn } from "../lib/cn";
-import type { MachineView } from "../types/machines";
+import type { MachineView, MetricSample } from "../types/machines";
 import { MachineCard } from "./machine-card";
 
 export type MachinesDashboardProps = {
@@ -14,6 +14,12 @@ export type MachinesDashboardProps = {
   onAttach?: ((machine: MachineView) => void) | undefined;
   /** The sandbox id currently being attached/swapped to (disables that card). */
   attachingSandboxId?: string | null | undefined;
+  /** Short recent history per machine (keyed by sandboxId) — drives card sparklines. */
+  seriesByMachine?: Record<string, MetricSample[]> | undefined;
+  /** Open the per-machine telemetry detail (makes each card actionable). */
+  onOpenDetail?: ((machine: MachineView) => void) | undefined;
+  /** Shared clock so freshness/relative times render consistently across cards. */
+  now?: number | undefined;
   /** Open the enrollment flow (the "Enroll a machine" CTA). */
   onEnroll?: (() => void) | undefined;
   onRefresh?: (() => void) | undefined;
@@ -40,7 +46,7 @@ function EmptyState({ onEnroll }: { onEnroll?: (() => void) | undefined }) {
           type="button"
           data-enroll-cta
           onClick={onEnroll}
-          className="inline-flex items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-10"
+          className="inline-flex items-center gap-1.5 rounded-og-sm bg-og-accent px-3 py-1.5 text-og-sm font-medium text-og-accent-fg transition-colors hover:bg-og-accent-strong pointer-coarse:min-h-11"
         >
           <PlusIcon className="size-3.5" aria-hidden />
           Enroll a machine
@@ -84,7 +90,7 @@ function Header({
             type="button"
             data-enroll-cta
             onClick={onEnroll}
-            className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg pointer-coarse:min-h-10"
+            className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-border px-2.5 py-1 text-og-sm font-medium text-og-fg-muted transition-colors hover:border-og-border-strong hover:text-og-fg pointer-coarse:min-h-11"
           >
             <PlusIcon className="size-3.5" aria-hidden />
             Enroll machine
@@ -109,6 +115,9 @@ export function MachinesDashboard({
   error,
   onAttach,
   attachingSandboxId,
+  seriesByMachine,
+  onOpenDetail,
+  now,
   onEnroll,
   onRefresh,
   className,
@@ -131,7 +140,7 @@ export function MachinesDashboard({
               data-machines-retry
               onClick={onRefresh}
               disabled={loading}
-              className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-status-failed/30 px-2 py-1 text-og-xs font-medium transition-colors hover:border-og-status-failed/50 disabled:cursor-not-allowed disabled:opacity-60 pointer-coarse:min-h-10"
+              className="inline-flex items-center gap-1.5 rounded-og-sm border border-og-status-failed/30 px-2 py-1 text-og-xs font-medium transition-colors hover:border-og-status-failed/50 disabled:cursor-not-allowed disabled:opacity-60 pointer-coarse:min-h-11"
             >
               <RefreshCwIcon className={cn("size-3.5", loading && "animate-og-spin")} aria-hidden />
               {loading ? "Retrying…" : "Retry"}
@@ -162,6 +171,9 @@ export function MachinesDashboard({
               }}
               onAttach={onAttach}
               attaching={attachingSandboxId === machine.sandboxId}
+              series={seriesByMachine?.[machine.sandboxId]}
+              onOpenDetail={onOpenDetail}
+              now={now}
             />
           ))}
         </div>

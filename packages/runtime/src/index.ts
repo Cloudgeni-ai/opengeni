@@ -15,6 +15,8 @@ import {
   CAPABILITY_DESCRIPTORS,
   isClearedRunStateBlob,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
+  sessionEventMediaPreview,
+  sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
   type GitCredentialProvider,
   type McpServerConnectionRef,
@@ -22,6 +24,7 @@ import {
   type ReasoningEffort,
   type ResourceRef,
   type SessionEventType,
+  type SessionEventMediaPreview,
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
@@ -105,6 +108,7 @@ import {
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
   CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
+  boundModelToolOutputItems,
   codexAppsSanitizingFetch,
   codexRequestStorage,
   codexSubscriptionFetch,
@@ -120,13 +124,18 @@ import {
   sanitizeHistoryItemsForModel,
 } from "./history-sanitizer";
 import { installCodexToolSearch } from "./codex-tool-search";
-import { modelCallUsageTelemetry } from "./usage-telemetry";
 import {
   CompactionNeededError,
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
   SUMMARY_BUFFER_TOKENS,
   compactionThresholdTokens,
-  estimateTokens,
+  estimateCompleteModelInput,
+  estimateSerializedValueTokens,
+  hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
+  type CompleteModelInputFootprint,
+  type ProviderContextTokenSignal,
 } from "./context-compaction";
 import {
   createSandboxClient,
@@ -135,10 +144,19 @@ import {
   setSelfhostedApplyDiff,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+  wrapCapabilityToolsForTurnCancellation,
+  type TurnSandboxCommandArgs,
+  type TurnSandboxCommandSession,
+  type TurnToolCancellationFence,
+} from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
 
 export type { RuntimeMetricsHooks } from "./metrics";
+export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -190,17 +208,25 @@ export { OpenAIChatCompletionsModel, OpenAIResponsesModel } from "@openai/agents
 
 export {
   CompactionNeededError,
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
   buildCompactionPromptInput,
   buildCompactionReplacementHistory,
+  compactionReplacementFingerprint,
   compactionThresholdTokens,
   clampCompactionThresholdRatio,
   decideCompaction,
   buildSummaryItem,
   findCompactionNeededError,
   isCompactionSummary,
+  latestCompactionReplacementFingerprint,
+  prepareCompactionPromptInput,
   isUserMessage,
   estimateTokens,
   estimateItemTokens,
+  estimateCompleteModelInput,
+  estimateSerializedValueTokens,
+  hasModelGeneratedItem,
   renderCompactionPromptInputForChat,
   COMPACTION_SUMMARY_MARKER,
   COMPACTION_PROMPT,
@@ -213,7 +239,11 @@ export {
   isEphemeralInternalContext,
   USER_MESSAGE_TRUNCATION_MARKER,
 } from "./context-compaction";
-export type { CompactionDecision, CompactionItem } from "./context-compaction";
+export type {
+  CompactionDecision,
+  CompactionItem,
+  PreparedCompactionPromptInput,
+} from "./context-compaction";
 export { modelCallUsageTelemetry } from "./usage-telemetry";
 export type { ModelCallUsageTelemetry } from "./usage-telemetry";
 
@@ -251,7 +281,12 @@ export type ResolveConnectionCredentialInput = {
 };
 
 export type ResolveConnectionCredentialResult =
-  | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
+  | {
+      status: "ok";
+      headers: Record<string, string>;
+      connectionId: string;
+      expiresAt?: Date | null;
+    }
   | {
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
@@ -805,19 +840,28 @@ export async function summarizeForCompaction(
   const maxTokens = options.maxOutputTokens ?? SUMMARY_BUFFER_TOKENS;
   if (api === "chat") {
     const transcript = renderCompactionPromptInputForChat(input);
-    const completion = await client.chat.completions.create({
-      model,
-      max_tokens: maxTokens,
-      messages: [{ role: "user", content: transcript }],
-      ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
-    } as any);
+    let completion: unknown;
+    try {
+      completion = await client.chat.completions.create({
+        model,
+        max_tokens: maxTokens,
+        messages: [{ role: "user", content: transcript }],
+        ...(options.promptCacheKey ? { prompt_cache_key: options.promptCacheKey } : {}),
+      } as any);
+    } catch (error) {
+      throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+    }
     const usage = modelResponseUsageFromResponse(completion);
     if (usage) {
       await options.onUsage?.(usage);
     }
     const text = (completion as { choices?: Array<{ message?: { content?: unknown } }> })
       .choices?.[0]?.message?.content;
-    return typeof text === "string" ? text.trim() : "";
+    const summary = typeof text === "string" ? text.trim() : "";
+    if (!summary) {
+      throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(completion, summary));
+    }
+    return summary;
   }
   // Use the same SDK Responses adapter as the real agent call. It converts the
   // structured AgentInputItems (callId/providerData/etc.) to provider wire
@@ -840,12 +884,205 @@ export async function summarizeForCompaction(
     handoffs: [],
     tracing: false,
   };
-  const response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+  let response: unknown;
+  try {
+    response = await new CompactionResponsesModel(client, model).fetchResponse(request);
+  } catch (error) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(error), error);
+  }
   const usage = modelResponseUsageFromResponse(response);
   if (usage) {
     await options.onUsage?.(usage);
   }
-  return extractResponseOutputText(response).trim();
+  if (isFailedCompactionProviderResponse(response)) {
+    throw new CompactionProviderResponseError(compactionProviderFailureDiagnostics(response));
+  }
+  const summary = extractResponseOutputText(response).trim();
+  if (!summary) {
+    throw new EmptyCompactionSummaryError(compactionResponseDiagnostics(response, summary));
+  }
+  return summary;
+}
+
+function isFailedCompactionProviderResponse(response: unknown): boolean {
+  if (!response || typeof response !== "object") return false;
+  const record = response as Record<string, unknown>;
+  return (
+    record.status === "failed" ||
+    record.status === "incomplete" ||
+    (record.error !== null && record.error !== undefined)
+  );
+}
+
+/** Bounded provider diagnostics: identifiers and classifications, never messages or model data. */
+export function compactionProviderFailureDiagnostics(error: unknown): Record<string, unknown> {
+  let current = error;
+  let errorName: string | null = null;
+  let httpStatus: number | null = null;
+  let responseStatus: string | null = null;
+  let responseId: string | null = null;
+  let code: string | null = null;
+  let type: string | null = null;
+  let requestId: string | null = null;
+  let eventType: string | null = null;
+  const seen = new Set<object>();
+  for (let depth = 0; depth < 6 && current && typeof current === "object"; depth += 1) {
+    if (seen.has(current)) break;
+    seen.add(current);
+    const record = current as Record<string, unknown>;
+    if (!errorName && current instanceof Error) {
+      errorName = boundCompactionDiagnosticField(current.name);
+    }
+    if (
+      httpStatus === null &&
+      typeof record.status === "number" &&
+      Number.isFinite(record.status)
+    ) {
+      httpStatus = record.status;
+    }
+    if (responseStatus === null && typeof record.status === "string") {
+      responseStatus = boundCompactionDiagnosticField(record.status);
+    }
+    const directResponseStatus = record.response_status ?? record.responseStatus;
+    if (responseStatus === null && typeof directResponseStatus === "string") {
+      responseStatus = boundCompactionDiagnosticField(directResponseStatus);
+    }
+    const directResponseId = record.response_id ?? record.responseId ?? record.id;
+    if (responseId === null && typeof directResponseId === "string") {
+      responseId = boundCompactionDiagnosticField(directResponseId);
+    }
+    if (code === null && typeof record.code === "string") {
+      code = boundCompactionDiagnosticField(record.code);
+    }
+    if (type === null && typeof record.type === "string") {
+      type = boundCompactionDiagnosticField(record.type);
+    }
+    const directEventType = record.event_type ?? record.eventType;
+    if (eventType === null && typeof directEventType === "string") {
+      eventType = boundCompactionDiagnosticField(directEventType);
+    }
+    if (requestId === null) {
+      const directRequestId = record.request_id ?? record.requestId ?? record._request_id;
+      if (typeof directRequestId === "string") {
+        requestId = boundCompactionDiagnosticField(directRequestId);
+      }
+      const headers = record.headers;
+      if (!requestId && headers && typeof headers === "object") {
+        const get = (headers as { get?: unknown }).get;
+        if (typeof get === "function") {
+          const headerId = get.call(headers, "x-request-id");
+          if (typeof headerId === "string") {
+            requestId = boundCompactionDiagnosticField(headerId);
+          }
+        }
+      }
+    }
+    const nestedError = record.error;
+    if (nestedError && typeof nestedError === "object" && !seen.has(nestedError)) {
+      const nested = nestedError as Record<string, unknown>;
+      if (code === null && typeof nested.code === "string") {
+        code = boundCompactionDiagnosticField(nested.code);
+      }
+      if (type === null && typeof nested.type === "string") {
+        type = boundCompactionDiagnosticField(nested.type);
+      }
+      const nestedResponseStatus = nested.response_status ?? nested.responseStatus;
+      if (responseStatus === null && typeof nestedResponseStatus === "string") {
+        responseStatus = boundCompactionDiagnosticField(nestedResponseStatus);
+      }
+      const nestedResponseId = nested.response_id ?? nested.responseId ?? nested.id;
+      if (responseId === null && typeof nestedResponseId === "string") {
+        responseId = boundCompactionDiagnosticField(nestedResponseId);
+      }
+      const nestedEventType = nested.event_type ?? nested.eventType;
+      if (eventType === null && typeof nestedEventType === "string") {
+        eventType = boundCompactionDiagnosticField(nestedEventType);
+      }
+    }
+    current = record.cause;
+  }
+  return {
+    errorName,
+    httpStatus,
+    responseStatus,
+    responseId,
+    code,
+    type,
+    requestId,
+    ...(eventType ? { eventType } : {}),
+  };
+}
+
+const COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES = 256;
+const COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER = "…[truncated]";
+
+function boundCompactionDiagnosticField(value: string): string {
+  const bytes = Buffer.from(value, "utf8");
+  if (bytes.length <= COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES) return value;
+  const markerBytes = Buffer.byteLength(COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER, "utf8");
+  let end = COMPACTION_DIAGNOSTIC_FIELD_MAX_BYTES - markerBytes;
+  while (end > 0 && isUtf8ContinuationByte(bytes[end]!)) end -= 1;
+  return `${bytes.subarray(0, end).toString("utf8")}${COMPACTION_DIAGNOSTIC_TRUNCATION_MARKER}`;
+}
+
+function isUtf8ContinuationByte(value: number): boolean {
+  return (value & 0xc0) === 0x80;
+}
+
+/** Bounded, content-free diagnostics for a semantically empty checkpoint. */
+export function compactionResponseDiagnostics(
+  response: unknown,
+  extractedText = extractResponseOutputText(response).trim(),
+): Record<string, unknown> {
+  if (!response || typeof response !== "object") {
+    return { responseShape: typeof response, extractedTextLength: extractedText.length };
+  }
+  const record = response as Record<string, unknown>;
+  const output = Array.isArray(record.output) ? record.output : [];
+  const outputItems = output.slice(0, 50).map((item) => {
+    if (!item || typeof item !== "object") return { type: typeof item };
+    const value = item as Record<string, unknown>;
+    const content = Array.isArray(value.content) ? value.content : [];
+    return {
+      type: typeof value.type === "string" ? value.type : null,
+      role: typeof value.role === "string" ? value.role : null,
+      status: typeof value.status === "string" ? value.status : null,
+      contentPartTypes: content
+        .slice(0, 50)
+        .map((part) =>
+          part && typeof part === "object" && typeof (part as { type?: unknown }).type === "string"
+            ? (part as { type: string }).type
+            : typeof part,
+        ),
+      contentPartCount: content.length,
+    };
+  });
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  const usage = modelResponseUsageFromResponse(response)?.usage;
+  const incomplete =
+    record.incomplete_details && typeof record.incomplete_details === "object"
+      ? (record.incomplete_details as Record<string, unknown>)
+      : null;
+  return {
+    responseId: typeof record.id === "string" ? record.id : null,
+    status: typeof record.status === "string" ? record.status : null,
+    outputItemCount: output.length,
+    outputItems,
+    choiceCount: choices.length,
+    finishReasons: choices
+      .slice(0, 20)
+      .map((choice) =>
+        choice && typeof choice === "object"
+          ? ((choice as Record<string, unknown>).finish_reason ?? null)
+          : null,
+      ),
+    incompleteReason:
+      incomplete && typeof incomplete.reason === "string" ? incomplete.reason : null,
+    inputTokens: usage?.inputTokens ?? null,
+    outputTokens: usage?.outputTokens ?? null,
+    totalTokens: usage?.totalTokens ?? null,
+    extractedTextLength: extractedText.length,
+  };
 }
 
 /**
@@ -910,6 +1147,7 @@ class CompactionResponsesModel extends OpenAIResponsesModel {
 }
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
+export type GitCredentialTokenWriterSession = SandboxSessionLike;
 
 export type BuildAgentOptions = {
   model?: Model;
@@ -947,6 +1185,13 @@ export type BuildAgentOptions = {
   // on the SDK's constructor-name sniff. When omitted, the legacy sniff +
   // `structuredToolTransport` neutralize path is preserved byte-for-byte.
   computerToolMode?: ComputerToolMode;
+  /**
+   * Invoked once, immediately before the first real computer action and after
+   * the display is ready. Merely advertising computer-use does not call it.
+   * The worker uses this seam for computer-use-only recording; ordinary
+   * shell/filesystem turns never pay that cost.
+   */
+  onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
   // The LIVE, by-reference connector-namespace Set from prepareAgentTools
   // (codexConnectorNamespaces): fills during each turn's codex_apps tools/list,
   // read per model call by the codex tool_search description so the model sees
@@ -1037,6 +1282,18 @@ export type BuildAgentOptions = {
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  /**
+   * Internal per-attempt cancellation boundary. The worker supplies Temporal's
+   * signal so an in-flight shell process is interrupted immediately instead of
+   * holding Steer/Pause behind its requested yield or natural exit.
+   */
+  turnCancellationSignal?: AbortSignal;
+  /**
+   * Receives the physical sandbox-tool fence at agent construction time. A
+   * cancelled/fenced worker attempt must await it before publishing its durable
+   * attempt-quiesced receipt.
+   */
+  onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
 };
 
 export type PackSkillFile = {
@@ -1068,7 +1325,6 @@ export type WorkspaceEnvironmentContext = {
 
 export type PersistentSessionSettings = {
   titleIsSet: boolean;
-  childNotificationsMode?: "digest" | "passive";
 };
 
 /**
@@ -1179,13 +1435,7 @@ export function appendPersistentSessionSettings(
   if (!settings) {
     return composed;
   }
-  const childState = settings.childNotificationsMode
-    ? `; spawned-worker completion notifications are ${settings.childNotificationsMode}`
-    : "";
-  const persistentTools = settings.childNotificationsMode
-    ? "opengeni__set_session_title or opengeni__set_child_notifications_mode"
-    : "opengeni__set_session_title";
-  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}${childState}. These settings persist across turns, continuations, and interruptions. Do not call ${persistentTools} merely to reassert an unchanged value; call them only when the current value actually needs to change.`;
+  return `${composed} Persistent session settings already in effect: the display title is ${settings.titleIsSet ? "set" : "not set"}. This setting persists across turns, continuations, and interruptions. Do not call opengeni__set_session_title merely to reassert an unchanged value; call it only when the current value actually needs to change.`;
 }
 
 /**
@@ -1429,6 +1679,13 @@ export function buildOpenGeniAgent(
       ...(options.computerToolMode !== undefined
         ? { computerToolMode: options.computerToolMode }
         : {}),
+      ...(options.onComputerUseReady ? { onComputerUseReady: options.onComputerUseReady } : {}),
+      ...(options.turnCancellationSignal
+        ? { turnCancellationSignal: options.turnCancellationSignal }
+        : {}),
+      ...(options.onToolCancellationFence
+        ? { onToolCancellationFence: options.onToolCancellationFence }
+        : {}),
     }),
   });
   if (options.genesisTitleHint) {
@@ -1508,7 +1765,10 @@ function mcpToolRequiresApproval(policy: boolean | string[], unprefixedName: str
 }
 
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
-type McpApprovalPolicy = { prefix: string; requireApproval: boolean | string[] };
+type McpApprovalPolicy = {
+  prefix: string;
+  requireApproval: boolean | string[];
+};
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
 type ApprovalCapableAgent = {
@@ -1723,8 +1983,16 @@ export function buildAgentCapabilities(
     // without the constructor-name sniff. When absent, the legacy neutralize +
     // imageFunctionResults path (driven by structuredToolTransport) is unchanged.
     computerToolMode?: ComputerToolMode;
+    onComputerUseReady?: (session: SandboxSessionLike) => Promise<void>;
+    turnCancellationSignal?: AbortSignal;
+    onToolCancellationFence?: (fence: TurnToolCancellationFence) => void;
   } = {},
 ): ReturnType<typeof Capabilities.default> {
+  const toolCancellation =
+    options.turnCancellationSignal || options.onToolCancellationFence
+      ? createTurnToolCancellationController(options.turnCancellationSignal)
+      : null;
+  if (toolCancellation) options.onToolCancellationFence?.(toolCancellation);
   // The `filesystem()` capability picks hosted-vs-function tool variants from the
   // bound model instance (supportsApplyPatchTransport / structured tool output).
   // When the caller declares the backend does NOT support that structured/hosted
@@ -1743,7 +2011,7 @@ export function buildAgentCapabilities(
   }
   const caps: ReturnType<typeof Capabilities.default> = [
     filesystemCapability,
-    shell({ configureTools: withExecOpCorrelation }),
+    shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
   ];
   caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
@@ -1777,6 +2045,7 @@ export function buildAgentCapabilities(
     const computerCapability = computerUse({
       dimensions: [settings.streamResolutionWidth, settings.streamResolutionHeight],
       readOnly: settings.computerUseReadOnly,
+      ...(options.onComputerUseReady ? { onReady: options.onComputerUseReady } : {}),
       ...(explicitMode
         ? { toolMode: explicitMode }
         : // Legacy (no explicit mode): on the codex path the function tools deliver
@@ -1795,6 +2064,14 @@ export function buildAgentCapabilities(
       neutralizeStructuredToolTransport(computerCapability);
     }
     caps.push(computerCapability as unknown as ReturnType<typeof Capabilities.default>[number]);
+  }
+  if (toolCancellation) {
+    for (const capability of caps) {
+      wrapCapabilityToolsForTurnCancellation(
+        capability as unknown as { tools(): Tool<unknown>[] },
+        toolCancellation,
+      );
+    }
   }
   return caps;
 }
@@ -1824,6 +2101,9 @@ export type PrepareToolsOptions = {
   // The calling turn's id, signed into the token so tools can classify the
   // caller from its own identity instead of the session's live active pointer.
   turnId?: string;
+  // The exact executing attempt that owns the MCP call.
+  attemptId?: string;
+  executionGeneration?: number;
   subjectId?: string;
   subjectLabel?: string;
   // Overrides the fixed first-party MCP permission set for this session's
@@ -2129,7 +2409,9 @@ async function authNeededFetchResponse(
   if (request.method === "tools/call") {
     return mcpToolAuthNeededResponse(request.id);
   }
-  return new Response("Authentication required for MCP server connection", { status: 401 });
+  return new Response("Authentication required for MCP server connection", {
+    status: 401,
+  });
 }
 
 async function publishAuthNeeded(
@@ -2290,7 +2572,10 @@ function mcpToolUnavailableMessage(reason: string): string {
 // transport error carries the raw response BODY in its `.message` (a broker
 // 401/403 body can echo request detail), so `.message` is never included; the
 // numeric `.code`/`.status` (e.g. 401) is safe and useful.
-function safeMcpErrorFields(error: unknown): { errorClass: string; status?: number } {
+function safeMcpErrorFields(error: unknown): {
+  errorClass: string;
+  status?: number;
+} {
   const errorClass = error instanceof Error ? error.constructor.name : typeof error;
   const raw = (error as { code?: unknown; status?: unknown } | null)?.code;
   const status = typeof raw === "number" ? raw : undefined;
@@ -2378,6 +2663,8 @@ async function signFirstPartyDelegatedBearer(
     permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.turnId ? { turnId: options.turnId } : {}),
+    ...(options.attemptId ? { attemptId: options.attemptId } : {}),
+    ...(options.executionGeneration ? { executionGeneration: options.executionGeneration } : {}),
     exp: Math.floor(Date.now() / 1000) + 60 * 60,
   });
 }
@@ -2572,6 +2859,7 @@ class PrefixedMcpServer implements MCPServer {
   // doesn't spam the log when the SDK re-lists across model turns.
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
+  private listedToolSchemaTokens = 0;
 
   constructor(
     private readonly inner: MCPServer,
@@ -2628,9 +2916,19 @@ class PrefixedMcpServer implements MCPServer {
       }
       return [];
     }
-    return tools
+    const exposed = tools
       .filter((tool) => this.isAllowed(tool.name))
-      .map((tool) => ({ ...tool, name: prefixedMcpToolName(this.name, tool.name) }));
+      .map((tool) => ({
+        ...tool,
+        name: prefixedMcpToolName(this.name, tool.name),
+      }));
+    this.listedToolSchemaTokens = estimateSerializedValueTokens(exposed);
+    return exposed;
+  }
+
+  /** Latest exact tools/list projection used to build the model request. */
+  modelToolSchemaTokens(): number {
+    return this.listedToolSchemaTokens;
   }
 
   async callTool(
@@ -2652,7 +2950,10 @@ class PrefixedMcpServer implements MCPServer {
       // This applies to ANY server — an auth-needed is recoverable once the user
       // re-links, so even a required tool degrades gracefully here.
       if (isAuthNeededMcpError(error)) {
-        return { isError: true, content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: MCP_AUTH_NEEDED_MESSAGE }],
+        };
       }
       // Best-effort INVOCATION isolation (sibling to the listTools guard). When
       // the model calls a best-effort server's tool and the call throws for ANY
@@ -2674,7 +2975,12 @@ class PrefixedMcpServer implements MCPServer {
         );
         return {
           isError: true,
-          content: [{ type: "text", text: mcpToolUnavailableMessage(mcpErrorReason(fields)) }],
+          content: [
+            {
+              type: "text",
+              text: mcpToolUnavailableMessage(mcpErrorReason(fields)),
+            },
+          ],
         };
       }
       throw error;
@@ -2810,11 +3116,18 @@ export async function prepareRunInput(
 }
 
 export type RunAgentStreamOptions = {
+  /** Abort the provider/tool loop when the owning activity is cancelled. */
+  signal?: AbortSignal;
   sandboxClient?: unknown;
   sandboxEnvironment?: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
-  contextCompactionSignalTokens?: () => number | null | undefined;
+  contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
+  // Host-managed git credential renewal registration. Called only after the
+  // initial token-file seed completed on a real provisioned box. The worker
+  // owns the multi-day timer and uses this pinned, un-proxied session to
+  // atomically replace token files; runtime never mints credentials itself.
+  onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -2845,6 +3158,13 @@ export type RunAgentStreamOptions = {
     // after establish, so runAgentStream must not run it eagerly here.
     deferredSetup?: boolean;
   };
+  /**
+   * The attempt's authoritative physical sandbox-operation fence. Platform
+   * lifecycle commands use its command runner too, so Steer/Pause can interrupt
+   * repository clone, rig setup, file materialization, and credential seeding
+   * before the attempt-quiesced receipt opens queue admission.
+   */
+  turnToolCancellationFence?: TurnToolCancellationFence;
   // A per-turn model-input filter chained AFTER the provider-item-id strip.
   // Used by the genesis-title injection to prepend a hidden, NON-PERSISTED
   // directive: a callModelInputFilter mutates only `modelData.input` for each
@@ -2854,7 +3174,7 @@ export type RunAgentStreamOptions = {
 };
 
 export type ContextRobustnessFilterOptions = {
-  contextCompactionSignalTokens?: () => number | null | undefined;
+  contextCompactionSignal?: () => ProviderContextTokenSignal | null | undefined;
   contextCompactionRequested?: () => boolean | Promise<boolean>;
   throwOnCompactionNeeded?: boolean;
 };
@@ -2961,24 +3281,89 @@ export const elideSupersededViewImagesFilter: CallModelInputFilter = ({ modelDat
   ) as unknown as AgentInputItem[],
 });
 
+/**
+ * Canonical Codex-style tool-result bound at the final model-input seam. The
+ * identical pure normalizer also runs before conversation rows are persisted,
+ * so this is a live-turn defense rather than a request-only alternate history.
+ */
+export function boundModelToolOutputsFilterForSettings(settings: Settings): CallModelInputFilter {
+  return ({ modelData }) => ({
+    ...modelData,
+    input: boundModelToolOutputItems(
+      modelData.input as unknown as Array<Record<string, unknown>>,
+      settings.modelToolOutputTruncationTokens,
+    ) as unknown as AgentInputItem[],
+  });
+}
+
+function estimateAgentToolSchemaTokens(agent: Agent<any, any>): number {
+  const localTools = Array.isArray((agent as { tools?: unknown }).tools)
+    ? ((agent as { tools: unknown[] }).tools ?? [])
+    : [];
+  const localDescriptors = localTools.map((candidate) => {
+    if (!candidate || typeof candidate !== "object") return candidate;
+    const tool = candidate as Record<string, unknown>;
+    return {
+      type: tool.type,
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters,
+      inputSchema: tool.inputSchema,
+      strict: tool.strict,
+      providerData: tool.providerData,
+    };
+  });
+  const mcpServers = Array.isArray((agent as { mcpServers?: unknown }).mcpServers)
+    ? ((agent as { mcpServers: unknown[] }).mcpServers ?? [])
+    : [];
+  const mcpTokens = mcpServers.reduce<number>((total, server) => {
+    const getter = (server as { modelToolSchemaTokens?: () => number } | null)
+      ?.modelToolSchemaTokens;
+    return total + (typeof getter === "function" ? getter.call(server) : 0);
+  }, 0);
+  return estimateSerializedValueTokens(localDescriptors) + mcpTokens;
+}
+
 export function contextRobustnessFilterForSettings(
   settings: Settings,
   options: ContextRobustnessFilterOptions = {},
 ): CallModelInputFilter {
   const thresholdTokens = compactionThresholdTokens(settings);
-  return async ({ modelData }) => {
+  let previousRequest: { revision: number; footprint: CompleteModelInputFootprint } | null = null;
+  let requestRevision = 0;
+  return async ({ modelData, agent }) => {
     const input = modelData.input;
     if (options.throwOnCompactionNeeded) {
-      const reported = options.contextCompactionSignalTokens?.();
-      const hasReported = typeof reported === "number" && reported > 0;
-      const signalTokens = hasReported
-        ? reported
-        : estimateTokens(input as unknown as Array<Record<string, unknown>>);
+      const reported = options.contextCompactionSignal?.();
+      const current: CompleteModelInputFootprint = {
+        input: input as unknown as Array<Record<string, unknown>>,
+        instructionsTokens: estimateSerializedValueTokens(modelData.instructions ?? ""),
+        toolSchemaTokens: estimateAgentToolSchemaTokens(agent),
+      };
+      // Stream consumption can lag the SDK's background model loop. A provider
+      // usage signal is safe only when its response revision belongs to the
+      // immediately preceding request. Never attach a delayed response count to
+      // a newer footprint: doing so can hide all model output produced between
+      // them and recreate an under-counting compaction loop.
+      const boundProvider =
+        reported &&
+        previousRequest &&
+        reported.revision === previousRequest.revision &&
+        hasModelGeneratedItem(current.input)
+          ? reported
+          : null;
+      const estimate = estimateCompleteModelInput({
+        current,
+        provider: boundProvider,
+        providerRequestFootprint: boundProvider ? (previousRequest?.footprint ?? null) : null,
+      });
+      const signalTokens = estimate.tokens;
+      previousRequest = { revision: ++requestRevision, footprint: current };
       if (await options.contextCompactionRequested?.()) {
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: hasReported ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "estimate",
           trigger: "operator",
         });
       }
@@ -2986,7 +3371,7 @@ export function contextRobustnessFilterForSettings(
         throw new CompactionNeededError({
           signalTokens,
           thresholdTokens,
-          signalSource: hasReported ? "provider" : "estimate",
+          signalSource: boundProvider ? "provider" : "estimate",
         });
       }
     }
@@ -3023,6 +3408,7 @@ export function callModelInputFilterForSettings(
   const filters: CallModelInputFilter[] = [
     normalizeComputerCallsFilter,
     elideSupersededViewImagesFilter,
+    boundModelToolOutputsFilterForSettings(settings),
   ];
   if (settings.openaiProviderItemIds === "strip") {
     filters.push(stripProviderItemIdsFilter);
@@ -3071,7 +3457,15 @@ export async function runAgentStream(
           ? { fileDownloadsMaterialized: true }
           : {}),
         ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
+        ...(overrides.turnToolCancellationFence
+          ? {
+              commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
+                overrides.turnToolCancellationFence,
+              ),
+            }
+          : {}),
       });
+      await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
     const fileDownloads = sandboxFileDownloadsForAgent(agent);
@@ -3080,6 +3474,13 @@ export async function runAgentStream(
         ? withSandboxFileDownloads(ownedClient as SandboxClient, fileDownloads, {
             ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
             ...(runAs ? { runAs } : {}),
+            ...(overrides.turnToolCancellationFence
+              ? {
+                  commandRunner: overrides.turnToolCancellationFence.runSandboxCommand.bind(
+                    overrides.turnToolCancellationFence,
+                  ),
+                }
+              : {}),
           })
         : (ownedClient as SandboxClient);
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
@@ -3098,6 +3499,7 @@ export async function runAgentStream(
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
       ...sandboxRepositoryCloneHooksForAgent(agent),
+      ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
     ];
     const ownedHookContext: SandboxLifecycleHookContext = {
       environment,
@@ -3112,25 +3514,31 @@ export async function runAgentStream(
     const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
     const ownedFilter = composeCallModelInputFilters(
       [
-        callModelInputFilterForSettings(settings, {
+        callModelInputFilterForSettings(settings),
+        genesisTitleInputFilter,
+        overrides.callModelInputFilter,
+        // A caller filter may synthesize model input. Re-apply the idempotent
+        // canonical bound at the literal final seam before accounting/provider
+        // serialization so no extension can bypass the policy.
+        boundModelToolOutputsFilterForSettings(settings),
+        contextRobustnessFilterForSettings(settings, {
           throwOnCompactionNeeded: Boolean(
-            overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
+            overrides.contextCompactionSignal || overrides.contextCompactionRequested,
           ),
-          ...(overrides.contextCompactionSignalTokens
-            ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+          ...(overrides.contextCompactionSignal
+            ? { contextCompactionSignal: overrides.contextCompactionSignal }
             : {}),
           ...(overrides.contextCompactionRequested
             ? { contextCompactionRequested: overrides.contextCompactionRequested }
             : {}),
         }),
-        genesisTitleInputFilter,
-        overrides.callModelInputFilter,
       ].filter((f): f is CallModelInputFilter => Boolean(f)),
     );
     const ownedRunOptions: Parameters<typeof run>[2] = {
       stream: true,
       maxTurns: settings.agentMaxModelCallsPerTurn,
       callModelInputFilter: ownedFilter,
+      ...(overrides.signal ? { signal: overrides.signal } : {}),
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
@@ -3178,6 +3586,7 @@ export async function runAgentStream(
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
           ...sandboxRepositoryCloneHooksForAgent(agent),
+          ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
         ],
         {
           environment,
@@ -3197,19 +3606,21 @@ export async function runAgentStream(
   // OpenGeni's durable conversation truth is still reconciled explicitly below.
   const callModelInputFilter = composeCallModelInputFilters(
     [
-      callModelInputFilterForSettings(settings, {
+      callModelInputFilterForSettings(settings),
+      genesisTitleInputFilter,
+      overrides.callModelInputFilter,
+      boundModelToolOutputsFilterForSettings(settings),
+      contextRobustnessFilterForSettings(settings, {
         throwOnCompactionNeeded: Boolean(
-          overrides.contextCompactionSignalTokens || overrides.contextCompactionRequested,
+          overrides.contextCompactionSignal || overrides.contextCompactionRequested,
         ),
-        ...(overrides.contextCompactionSignalTokens
-          ? { contextCompactionSignalTokens: overrides.contextCompactionSignalTokens }
+        ...(overrides.contextCompactionSignal
+          ? { contextCompactionSignal: overrides.contextCompactionSignal }
           : {}),
         ...(overrides.contextCompactionRequested
           ? { contextCompactionRequested: overrides.contextCompactionRequested }
           : {}),
       }),
-      genesisTitleInputFilter,
-      overrides.callModelInputFilter,
     ].filter((f): f is CallModelInputFilter => Boolean(f)),
   );
   const runOptions: Parameters<typeof run>[2] = {
@@ -3220,6 +3631,7 @@ export async function runAgentStream(
     // raise the proactive compaction signal. This runs for turn-start replay AND
     // every mid-turn follow-up.
     callModelInputFilter,
+    ...(overrides.signal ? { signal: overrides.signal } : {}),
   };
   if (client) {
     runOptions.sandbox = {
@@ -3269,7 +3681,9 @@ function appendSandboxFileDownloadFailureNote(
  * default runner. setDefaultModelProvider remains only as a boot-time fallback.
  */
 function runScopedRunner(settings: Settings): Runner {
-  return new Runner({ modelProvider: new MultiProviderModelProvider(settings) });
+  return new Runner({
+    modelProvider: new MultiProviderModelProvider(settings),
+  });
 }
 
 export { MaxTurnsExceededError } from "@openai/agents";
@@ -3325,7 +3739,9 @@ export function withManifestRefreshOnResume(
       ? { supportsDefaultOptions: client.supportsDefaultOptions }
       : {}),
     ...(client.create
-      ? { create: async (...args: any[]) => await (client.create as any)(...args) }
+      ? {
+          create: async (...args: any[]) => await (client.create as any)(...args),
+        }
       : {}),
     resume: async (state: SandboxSessionState) => {
       const session = await client.resume!(state);
@@ -3333,7 +3749,9 @@ export function withManifestRefreshOnResume(
       return session;
     },
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -3382,7 +3800,11 @@ export async function applyMissingManifestEntries(
       state?: {
         manifest?:
           | Manifest
-          | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> };
+          | {
+              root?: string;
+              entries?: Record<string, any>;
+              environment?: Record<string, any>;
+            };
       };
     }
   ).state?.manifest;
@@ -3492,7 +3914,11 @@ export function manifestEnvironmentDrift(
   if (added.length === 0 && removed.length === 0 && changed.length === 0) {
     return null;
   }
-  return { added: added.sort(), removed: removed.sort(), changed: changed.sort() };
+  return {
+    added: added.sort(),
+    removed: removed.sort(),
+    changed: changed.sort(),
+  };
 }
 
 async function reportManifestEnvironmentDrift(
@@ -3507,7 +3933,10 @@ async function reportManifestEnvironmentDrift(
   // Reporting must never break a resume: the drift itself is benign under the
   // env pin (the box keeps running on its baked env); only the SIGNAL matters.
   try {
-    await context.onRuntimeEvent?.({ type: "sandbox.env.drift", payload: drift });
+    await context.onRuntimeEvent?.({
+      type: "sandbox.env.drift",
+      payload: drift,
+    });
   } catch {
     // Swallow: a failed emit must not fail the turn.
   }
@@ -3536,7 +3965,11 @@ export async function pinProvidedSessionManifestEnvironment(
       state?: {
         manifest?:
           | Manifest
-          | { root?: string; entries?: Record<string, any>; environment?: Record<string, any> };
+          | {
+              root?: string;
+              entries?: Record<string, any>;
+              environment?: Record<string, any>;
+            };
       };
     }
   ).state?.manifest;
@@ -3590,6 +4023,7 @@ export async function runOwnedSandboxSetup(
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
   const { settings, environment } = opts;
@@ -3635,6 +4069,7 @@ export async function runOwnedSandboxSetup(
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
+    ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
   // OWNED-PATH HOOKS: run the beforeAgentStart hooks directly against the provided
   // box, once per turn, BEFORE the run starts (repository-clone hook seeds the B1
@@ -3654,6 +4089,7 @@ export async function runOwnedSandboxSetup(
       const materialized = await materializeSandboxFileDownloads(setupSession, fileDownloads, {
         ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
         ...(runAs ? { runAs } : {}),
+        ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
       });
       if (opts.preparedInput) {
         appendSandboxFileDownloadFailureNote(opts.preparedInput, materialized.failures);
@@ -3687,7 +4123,7 @@ function mergePathGrants(
 export function withSandboxFileDownloads(
   client: SandboxClient,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
 ): SandboxClient {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -3719,7 +4155,9 @@ export function withSandboxFileDownloads(
         }
       : {}),
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -3751,7 +4189,7 @@ export function withSandboxFileDownloads(
 export async function materializeSandboxFileDownloads(
   session: SandboxSessionLike,
   downloads: SandboxFileDownload[],
-  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs"> = {},
+  context: Pick<SandboxLifecycleHookContext, "onRuntimeEvent" | "runAs" | "commandRunner"> = {},
 ): Promise<SandboxFileDownloadMaterializationResult> {
   const normalizedDownloads = normalizeSandboxFileDownloads(downloads);
   if (normalizedDownloads.length === 0) {
@@ -3789,27 +4227,24 @@ export async function materializeSandboxFileDownloads(
     }
     let result: unknown;
     try {
-      result = session.exec
-        ? await session.exec({
-            cmd: sandboxFileDownloadCommand(download, targetPath),
-            workdir: "/workspace",
-            ...(context.runAs ? { runAs: context.runAs } : {}),
-            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-            maxOutputTokens: 20_000,
-          })
-        : await session.execCommand!({
-            cmd: sandboxFileDownloadCommand(download, targetPath),
-            workdir: "/workspace",
-            ...(context.runAs ? { runAs: context.runAs } : {}),
-            yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-            maxOutputTokens: 20_000,
-          });
+      result = await runSandboxLifecycleCommand(
+        session,
+        {
+          cmd: sandboxFileDownloadCommand(download, targetPath),
+          workdir: "/workspace",
+          ...(context.runAs ? { runAs: context.runAs } : {}),
+          yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+          maxOutputTokens: 20_000,
+        },
+        context.commandRunner,
+      );
       assertSandboxCommandSucceeded(result, `Sandbox file resource download ${download.fileId}`);
       await context.onRuntimeEvent?.({
         type: "sandbox.operation.completed",
         payload: { name: "file-resource-download", ...payload },
       });
     } catch (error) {
+      if (error instanceof TurnSandboxCommandCancelledError) throw error;
       const failure = sandboxFileDownloadFailure(download, targetPath, error, result);
       failures.push(failure);
       await context.onRuntimeEvent?.({
@@ -3886,82 +4321,87 @@ function ensureManifest(
   });
 }
 
-/** Coerce the various binary shapes a tool-output image `data` field can take into
- *  a Uint8Array. Handles a live `Uint8Array`, a plain number[] , and the
- *  object-of-numbers (`{"0":137,"1":80,…}`) that a `Uint8Array` degrades into after
- *  a JSON round-trip — the exact 10x-bloat shape this normalizer exists to kill. */
-function toImageBytes(data: unknown): Uint8Array | null {
-  if (data instanceof Uint8Array) {
-    return data;
-  }
-  if (Array.isArray(data)) {
-    return data.every((n) => typeof n === "number") ? Uint8Array.from(data as number[]) : null;
-  }
-  if (data && typeof data === "object") {
-    const values = Object.values(data as Record<string, unknown>);
-    if (values.length > 0 && values.every((n) => typeof n === "number")) {
-      return Uint8Array.from(values as number[]);
-    }
-  }
-  return null;
+function base64DecodedByteLength(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.max(0, Math.floor((value.length * 3) / 4) - padding);
 }
 
-/** Compact a structured image tool output — the SDK's `{type:'image', image:{data,mediaType}}`
- *  shape (produced by the codex-path `computer_screenshot` function tool) OR the already-
- *  normalized protocol `{type:'input_image', image:'data:…'}` item — into a `data:<mt>;base64,…`
- *  string. Returns null when `value` is not an image output. */
-function structuredImageToDataUrl(value: unknown): string | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return null;
+/** Determine image byte length without allocating another binary/base64 copy. */
+function imageDataByteLength(data: unknown): number | null {
+  if (ArrayBuffer.isView(data)) return data.byteLength;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (Array.isArray(data)) {
+    return data.every((value) => typeof value === "number") ? data.length : null;
   }
-  const v = value as { type?: unknown; image?: unknown };
-  if (v.type === "input_image") {
-    // Protocol item: `image` is already a `data:…` (or plain URL) string.
-    return typeof v.image === "string" && v.image.length > 0 ? v.image : null;
+  if (!data || typeof data !== "object") return null;
+  const record = data as Record<string, unknown>;
+  if (record.type === "Buffer" && Array.isArray(record.data)) {
+    return record.data.every((value) => typeof value === "number") ? record.data.length : null;
   }
-  if (v.type !== "image" || !v.image || typeof v.image !== "object") {
-    return null;
+  const keys = Object.keys(record);
+  return keys.length > 0 &&
+    keys.every((key) => /^\d+$/.test(key) && typeof record[key] === "number")
+    ? keys.length
+    : null;
+}
+
+/**
+ * Convert one image-shaped tool result into a content-free audit fact. This is
+ * intentionally different from model history: the model keeps its structured
+ * image item, while `session_events` never becomes an implicit image blob store.
+ */
+function toolOutputMediaPreview(value: unknown): SessionEventMediaPreview | null {
+  if (typeof value === "string") {
+    return sessionEventMediaPreviewFromDataUrl(value);
   }
-  const image = v.image as { data?: unknown; mediaType?: unknown; url?: unknown };
-  if (typeof image.url === "string" && image.url.length > 0) {
-    return image.url;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.type === "input_image") {
+    const source = record.image ?? record.image_url ?? record.imageUrl;
+    const url =
+      typeof source === "string"
+        ? source
+        : source && typeof source === "object"
+          ? (source as Record<string, unknown>).url
+          : null;
+    if (typeof url !== "string" || url.length === 0) return null;
+    return sessionEventMediaPreviewFromDataUrl(url) ?? sessionEventMediaPreview("image/*", null);
   }
+  if (record.type !== "image" || !record.image || typeof record.image !== "object") return null;
+  const image = record.image as Record<string, unknown>;
   const mediaType =
     typeof image.mediaType === "string" && image.mediaType.length > 0
       ? image.mediaType
       : "image/png";
-  if (typeof image.data === "string") {
-    return image.data.startsWith("data:") ? image.data : `data:${mediaType};base64,${image.data}`;
+  if (typeof image.url === "string" && image.url.length > 0) {
+    return (
+      sessionEventMediaPreviewFromDataUrl(image.url) ?? sessionEventMediaPreview(mediaType, null)
+    );
   }
-  const bytes = toImageBytes(image.data);
-  return bytes ? `data:${mediaType};base64,${Buffer.from(bytes).toString("base64")}` : null;
+  if (typeof image.data === "string") {
+    return (
+      sessionEventMediaPreviewFromDataUrl(image.data) ??
+      sessionEventMediaPreview(mediaType, base64DecodedByteLength(image.data))
+    );
+  }
+  const byteLength = imageDataByteLength(image.data);
+  return byteLength === null ? null : sessionEventMediaPreview(mediaType, byteLength);
 }
 
 /**
- * Compact a tool-call output for the `agent.toolCall.output` SESSION EVENT so it
- * never carries a raw binary payload. The codex-path `computer_screenshot` function
- * tool returns a structured `{type:'image', image:{data: Uint8Array, mediaType}}`;
- * captured verbatim its `Uint8Array` JSON-serializes as an object-of-numbers (~12.7MB
- * per screenshot in session_events — ~10x the base64 form). This mirrors the desktop
- * screenshot to the SAME compact `data:<mediaType>;base64,…` STRING the HOSTED
- * `computer_call` event already carries (agents-core sets its output to that data-URL),
- * so both computer-use transports emit one representation. The full data-URL is kept
- * (not truncated) because the web timeline RENDERS the screenshot from this event
- * payload — packages/react/src/timeline/tool-renderers.tsx ComputerCallRenderer
- * (`out.startsWith("data:image")` → <ScreenshotFigure src={out}/>) and ViewImageRenderer.
- * Non-image outputs (text strings, MCP `{isError,content}` objects, hosted computer_call
- * data-URL strings) pass through unchanged.
+ * Normalize a tool-call output for the lossy `agent.toolCall.output` audit event.
+ * Inline image bytes/data URLs become a compact `media_preview` with exact byte
+ * length where knowable and `fullOutputAvailable:false`. The model-facing output
+ * is not changed here, and mixed arrays retain their non-image text/error facts.
  */
 export function normalizeToolOutputForEvent(output: unknown): unknown {
-  const single = structuredImageToDataUrl(output);
+  const single = toolOutputMediaPreview(output);
   if (single !== null) {
     return single;
   }
   if (Array.isArray(output)) {
-    const normalized = output.map((el) => structuredImageToDataUrl(el) ?? el);
-    // A lone image content item unwraps to the bare data-URL string the timeline
-    // image renderers expect; a mixed/multi array keeps its (now-compact) shape.
-    if (normalized.length === 1 && typeof normalized[0] === "string") {
+    const normalized = output.map((el) => toolOutputMediaPreview(el) ?? el);
+    if (normalized.length === 1 && normalized[0]?.type === "media_preview") {
       return normalized[0];
     }
     return normalized;
@@ -3978,16 +4418,6 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       return out;
     }
     if (data?.type === "response_done") {
-      const responseUsage = modelResponseUsageFromSdkEvent(event);
-      if (responseUsage) {
-        out.push({
-          type: "agent.model.usage",
-          payload: {
-            responseId: responseUsage.responseId ?? null,
-            ...modelCallUsageTelemetry(responseUsage.usage),
-          },
-        });
-      }
       return out;
     }
   }
@@ -3996,22 +4426,13 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
     if (raw?.type === "response.reasoning_summary_text.delta" && typeof raw.delta === "string") {
       out.push({ type: "agent.reasoning.delta", payload: { text: raw.delta } });
     }
-    if (raw?.type === "response.completed") {
-      const responseUsage = modelResponseUsageFromSdkEvent(event);
-      if (responseUsage) {
-        out.push({
-          type: "agent.model.usage",
-          payload: {
-            responseId: responseUsage.responseId ?? null,
-            ...modelCallUsageTelemetry(responseUsage.usage),
-          },
-        });
-      }
-    }
     return out;
   }
   if (event.type === "agent_updated_stream_event") {
-    out.push({ type: "agent.updated", payload: { agent: (event as any).agent?.name ?? null } });
+    out.push({
+      type: "agent.updated",
+      payload: { agent: (event as any).agent?.name ?? null },
+    });
     return out;
   }
   if (event.type !== "run_item_stream_event") {
@@ -4037,8 +4458,8 @@ export function normalizeSdkEvent(event: RunStreamEvent): NormalizedRuntimeEvent
       type: "agent.toolCall.output",
       payload: {
         id: item.rawItem?.callId ?? item.id ?? null,
-        // Compact any structured/binary image output to a data-URL string so a
-        // screenshot never bloats session_events ~10x as an object-of-numbers.
+        // Inline media becomes a content-free audit fact. Model history keeps
+        // the provider's real structured image output on its separate path.
         output: normalizeToolOutputForEvent(item.output),
       },
     });
@@ -4173,7 +4594,9 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
   if (!details || typeof details !== "object") {
     return {};
   }
-  return { inputTokensDetails: details as Record<string, number> | Array<Record<string, number>> };
+  return {
+    inputTokensDetails: details as Record<string, number> | Array<Record<string, number>>,
+  };
 }
 
 function outputTokenDetailsProp(
@@ -4291,7 +4714,9 @@ function objectStorageFileMount(settings: Settings, prefix: string): any {
       accountKey: config.accountKey,
       endpointUrl: config.endpointUrl,
       readOnly: true,
-      mountStrategy: inContainerMountStrategy({ pattern: { type: "rclone", mode: "fuse" } }),
+      mountStrategy: inContainerMountStrategy({
+        pattern: { type: "rclone", mode: "fuse" },
+      }),
     });
   }
   if (settings.objectStorageBackend === "aws-s3" || settings.objectStorageBackend === "gcs") {
@@ -4460,6 +4885,11 @@ function shellQuote(value: string): string {
 
 export type SandboxLifecycleHookPhase = "beforeAgentStart";
 
+export type SandboxLifecycleCommandRunner = (
+  session: TurnSandboxCommandSession,
+  args: TurnSandboxCommandArgs,
+) => Promise<unknown>;
+
 export type SandboxLifecycleHookContext = {
   environment: Record<string, string>;
   onRuntimeEvent?: (event: NormalizedRuntimeEvent) => Promise<void> | void;
@@ -4475,7 +4905,21 @@ export type SandboxLifecycleHookContext = {
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
+  commandRunner?: SandboxLifecycleCommandRunner;
 };
+
+async function runSandboxLifecycleCommand(
+  session: SandboxSessionLike,
+  args: TurnSandboxCommandArgs,
+  commandRunner?: SandboxLifecycleCommandRunner,
+): Promise<unknown> {
+  if (commandRunner) {
+    return await commandRunner(session as TurnSandboxCommandSession, args);
+  }
+  if (session.exec) return await session.exec(args);
+  if (session.execCommand) return await session.execCommand(args);
+  throw new Error("Sandbox session does not support command execution");
+}
 
 // M3: everything the rig-setup hook needs to run the frozen rig version's setup
 // script exactly once per box. `versionId` keys the idempotence marker
@@ -4583,7 +5027,9 @@ export function withSandboxLifecycleHooks(
         }
       : {}),
     ...(client.delete
-      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      ? {
+          delete: async (state: SandboxSessionState) => await client.delete!(state),
+        }
       : {}),
     ...(client.serializeSessionState
       ? {
@@ -4679,6 +5125,22 @@ function unionCredentialHooks(
   }
   const seen = new Set(deploymentHooks.map((hook) => hook.id));
   return [...deploymentHooks, ...rigHooks.filter((hook) => !seen.has(hook.id))];
+}
+
+function gitCredentialSessionRegistrationHooks(
+  callback: RunAgentStreamOptions["onGitCredentialSessionReady"],
+): SandboxLifecycleHook[] {
+  return callback
+    ? [
+        {
+          id: "git-credential-renewal-registration",
+          phase: "beforeAgentStart",
+          run: async (session) => {
+            await callback(session);
+          },
+        },
+      ]
+    : [];
 }
 
 function sandboxRepositoryCloneHooks(
@@ -4793,14 +5255,11 @@ function gitAskpassHostProviderCaseLines(
     );
 }
 
-function gitCredentialHelperCommandLines(
-  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
-): string[] {
-  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
+function gitCredentialTokenWriterCommandLines(): string[] {
   return [
     // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
-    // provision git/provider-CLI helpers at SETUP (runtime) before any clone runs.
-    // Token VALUES are supplied only by the per-exec command prefix
+    // atomically replace each provider file. Token VALUES are supplied only by
+    // the per-exec command prefix
     // (OPENGENI_GIT_*_TOKEN_SEED), never by the box/agent manifest. Helper paths
     // are stable manifest values from @opengeni/config.
     "git_provider_token_file() {",
@@ -4831,6 +5290,18 @@ function gitCredentialHelperCommandLines(
     'write_git_provider_token gitlab "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}"',
     'write_git_provider_token azure_devops "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}"',
     'umask "$seed_umask"',
+  ];
+}
+
+function gitCredentialHelperCommandLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+): string[] {
+  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
+  return [
+    ...gitCredentialTokenWriterCommandLines(),
+    // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
+    // runs. Renewal updates only token files and deliberately leaves these
+    // repository-specific host mappings intact.
     'git_askpass="${GIT_ASKPASS:-$HOME/.opengeni/askpass}"',
     'mkdir -p "$(dirname "$git_askpass")"',
     "cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'",
@@ -4933,6 +5404,49 @@ function gitCredentialHelperCommandLines(
     '  mv -f "$wrapper.tmp.$$" "$wrapper"',
     "done",
   ];
+}
+
+/**
+ * Build the off-manifest command used to atomically replace provider token files.
+ *
+ * Token values exist only in this one sandbox exec command. The stable askpass
+ * and provider-CLI wrappers always read the files at invocation time, so an
+ * in-flight multi-day turn observes the replacement without changing its
+ * manifest environment or rebuilding the sandbox.
+ */
+export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
+  const seedPrefix = gitTokenSeedExportPrefix(seeds);
+  if (!seedPrefix) {
+    return "";
+  }
+  return [
+    seedPrefix,
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialTokenWriterCommandLines(),
+  ].join("\n");
+}
+
+export async function refreshGitProviderTokenFiles(
+  session: GitCredentialTokenWriterSession,
+  seeds: GitTokenSeeds,
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+): Promise<void> {
+  const command = gitProviderTokenRefreshCommand(seeds);
+  if (!command) {
+    return;
+  }
+  const args = {
+    cmd: command,
+    workdir: "/workspace",
+    ...(options.runAs ? { runAs: options.runAs } : {}),
+    yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+    maxOutputTokens: 4_000,
+  };
+  assertSandboxCommandSucceeded(
+    await runSandboxLifecycleCommand(session, args, options.commandRunner),
+    "Git credential refresh",
+  );
 }
 
 export function repositoryCloneCommand(
@@ -5070,27 +5584,18 @@ export async function runToolspaceTokenSeedHook(
     return;
   }
   const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
-  if (session.exec) {
-    const result = await session.exec({
+  const result = await runSandboxLifecycleCommand(
+    session,
+    {
       cmd: command,
       workdir: "/workspace",
       ...(context.runAs ? { runAs: context.runAs } : {}),
       yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
       maxOutputTokens: 4_000,
-    });
-    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
-  } else if (session.execCommand) {
-    const result = await session.execCommand({
-      cmd: command,
-      workdir: "/workspace",
-      ...(context.runAs ? { runAs: context.runAs } : {}),
-      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-      maxOutputTokens: 4_000,
-    });
-    assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
-  } else {
-    throw new Error("Sandbox session does not support command execution");
-  }
+    },
+    context.commandRunner,
+  );
+  assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
@@ -5199,21 +5704,19 @@ export async function runRigSetupHook(
   };
   let result: unknown;
   try {
-    if (session.exec) {
-      result = await session.exec(execArgs);
-    } else if (session.execCommand) {
-      result = await session.execCommand(execArgs);
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
+    result = await runSandboxLifecycleCommand(session, execArgs, context.commandRunner);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
-      payload: { ...payload, error: message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) },
+      payload: {
+        ...payload,
+        error: message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT),
+      },
     });
     throw new Error(
       `Rig setup failed for rig "${rigSetup.rigName}" (version ${rigSetup.versionId}): ${message}`,
+      { cause: error },
     );
   }
   const output = sandboxCommandOutput(result);
@@ -5241,7 +5744,10 @@ export async function runRigSetupHook(
     );
     await context.onRuntimeEvent?.({
       type: "rig.setup.failed",
-      payload: { ...payload, error: failure.message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT) },
+      payload: {
+        ...payload,
+        error: failure.message.slice(-RIG_SETUP_OUTPUT_TAIL_LIMIT),
+      },
     });
     throw failure;
   }
@@ -5256,8 +5762,14 @@ export async function runRepositoryCloneHook(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   context: SandboxLifecycleHookContext = { environment: {} },
 ): Promise<void> {
-  const payload = { name: "repository-clone", repositoryCount: resources.length };
-  await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
+  const payload = {
+    name: "repository-clone",
+    repositoryCount: resources.length,
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload,
+  });
   try {
     // TOKEN-BROKER (B1): thread run-scoped provider tokens PER-EXEC, never on
     // the manifest. The SDK's ExecCommandArgs has no `environment` field (exec
@@ -5275,28 +5787,22 @@ export async function runRepositoryCloneHook(
     const command = seedPrefix
       ? `${seedPrefix}\n${repositoryCloneCommand(resources)}`
       : repositoryCloneCommand(resources);
-    if (session.exec) {
-      const result = await session.exec({
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
         cmd: command,
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Repository clone hook");
-    } else if (session.execCommand) {
-      const result = await session.execCommand({
-        cmd: command,
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Repository clone hook");
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload });
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, "Repository clone hook");
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
+      payload,
+    });
   } catch (error) {
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.failed",
@@ -5409,31 +5915,31 @@ export async function runAzureCliLoginHook(
   session: SandboxSessionLike,
   context: SandboxLifecycleHookContext = { environment: {} },
 ): Promise<void> {
-  const payload = { name: "azure-cli-login", command: "az login --service-principal" };
-  await context.onRuntimeEvent?.({ type: "sandbox.operation.started", payload });
+  const payload = {
+    name: "azure-cli-login",
+    command: "az login --service-principal",
+  };
+  await context.onRuntimeEvent?.({
+    type: "sandbox.operation.started",
+    payload,
+  });
   try {
-    if (session.exec) {
-      const result = await session.exec({
+    const result = await runSandboxLifecycleCommand(
+      session,
+      {
         cmd: azureCliLoginCommand(),
         workdir: "/workspace",
         ...(context.runAs ? { runAs: context.runAs } : {}),
         yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
         maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Azure CLI login hook");
-    } else if (session.execCommand) {
-      const result = await session.execCommand({
-        cmd: azureCliLoginCommand(),
-        workdir: "/workspace",
-        ...(context.runAs ? { runAs: context.runAs } : {}),
-        yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
-        maxOutputTokens: 20_000,
-      });
-      assertSandboxCommandSucceeded(result, "Azure CLI login hook");
-    } else {
-      throw new Error("Sandbox session does not support command execution");
-    }
-    await context.onRuntimeEvent?.({ type: "sandbox.operation.completed", payload });
+      },
+      context.commandRunner,
+    );
+    assertSandboxCommandSucceeded(result, "Azure CLI login hook");
+    await context.onRuntimeEvent?.({
+      type: "sandbox.operation.completed",
+      payload,
+    });
   } catch (error) {
     await context.onRuntimeEvent?.({
       type: "sandbox.operation.failed",

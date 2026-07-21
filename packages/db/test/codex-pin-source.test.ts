@@ -29,6 +29,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -70,7 +71,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("codex_pin_source (AM-2)", () => {
   test("a fresh (never-pinned) session reads pin=null, source=null", async () => {

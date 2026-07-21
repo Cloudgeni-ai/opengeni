@@ -42,6 +42,7 @@ describe("P1.2 live Modal keystone re-confirm (gated)", () => {
       // Establish a REAL Modal box by id from a cold (null) envelope -> create().
       const established = await establishSandboxSessionFromEnvelope(settings, null, {
         sessionId: `live-keystone-${crypto.randomUUID()}`,
+        recovery: "create-or-restore",
         backendOverride: "modal",
       });
       const session = established.session as {

@@ -22,13 +22,24 @@ The provisioner is a memoized promise scoped to one turn. Parallel tool calls sh
 2. lazy run-scoped Git token mint, if repo resources need one
 3. `resumeBoxForTurn(...)`
 4. `runOwnedSandboxSetup(...)` against the un-proxied real session
-5. lease heartbeat, warm-meter tick, and on-turn recording startup
+5. lease heartbeat and warm-meter tick
+
+Desktop work is not part of provisioning. Registering the computer-use tools is
+side-effect free; the first actual computer action idempotently starts the display
+stack and only then begins its optional proof recording. A human viewer attach has
+the separate API-direct lazy path that starts the display and resolves the stream
+port. A shell/filesystem-only turn never starts Xvfb, XFCE, ffmpeg, or a stream
+tunnel.
 
 It emits existing `sandbox.operation.started/completed/failed` events with `name: "sandbox.provision"` around the whole establish. Failures propagate to the awaiting sandbox operation; the SDK then surfaces them through its normal tool-error path.
 
 Retries are deliberately narrow: provider create/capacity/timeout classes and `SandboxLeaseSupersededError` get two short retries inside the provisioner. `SandboxImageConflictError` is not retried because the operator action is to resolve the live image conflict. On final failure, all waiters reject and the memo resets so a later sandbox operation can try a fresh establish.
 
-Turn cleanup is conditional. If the provisioner never ran, there is no lease, timer, recording, or box to release. If it ran or is still in flight, the activity waits briefly for it to settle, then uses the same release/snapshot/recording finalization path as eager ownership.
+Turn cleanup is conditional. If the provisioner never ran, there is no lease,
+timer, recording, or box to release. If it ran or is still in flight, the activity
+waits briefly for it to settle, then uses the same release/snapshot finalization
+path as eager ownership. Recording cleanup exists only when computer-use actually
+started one.
 
 Machine-primary Connected Machine turns are not lazy. They still establish the `SelfhostedSession` directly at turn start, never create a phantom cloud box, and bill zero cloud warm-seconds.
 

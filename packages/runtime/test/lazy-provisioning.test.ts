@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { ScriptedModel, testSettings } from "@opengeni/testing";
 import { buildManifest, buildOpenGeniAgent, runOwnedSandboxSetup } from "../src/index";
 import { RoutingSandboxSession, type RoutableBackendSession } from "../src/sandbox";
-import { applyManifestToProvidedSession } from "../../../node_modules/.bun/@openai+agents-core@0.11.6+4b65e697391ccbcb/node_modules/@openai/agents-core/dist/sandbox/runtime/providedSessionManifest.js";
+
+const agentsCoreEntry = import.meta.resolve("@openai/agents-core");
+const { applyManifestToProvidedSession } = (await import(
+  new URL("./sandbox/runtime/providedSessionManifest.mjs", agentsCoreEntry).href
+)) as {
+  applyManifestToProvidedSession: (session: never, manifest: never) => Promise<void>;
+};
 
 async function manifestEnv(manifest: {
   resolveEnvironment?: () => Promise<Record<string, string>>;
@@ -139,6 +145,42 @@ describe("lazy provisioning synthetic manifest", () => {
 
     // The rig-setup hook exec'd its marker-guarded program against the box.
     expect(execCmds.some((cmd) => cmd.includes("/var/opengeni/rig-setup-ver-9.done"))).toBe(true);
+  });
+
+  test("runOwnedSandboxSetup routes lifecycle commands through the attempt cancellation fence", async () => {
+    const settings = testSettings({ sandboxBackend: "modal", webSearchEnabled: false });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      rigSetup: {
+        rigId: "rig-1",
+        rigName: "dev-machine",
+        versionId: "ver-cancellable",
+        script: "sleep 60",
+        timeoutMs: 60_000,
+      },
+    });
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async () => {
+        throw new Error("lifecycle command bypassed the cancellation fence");
+      },
+    };
+    const commands: string[] = [];
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      commandRunner: async (session, args) => {
+        expect(session).toBe(backend);
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    });
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toContain("sleep 60");
   });
 
   // REGRESSION (caught live on staging 2026-07-08): the SDK's FilesystemCapability

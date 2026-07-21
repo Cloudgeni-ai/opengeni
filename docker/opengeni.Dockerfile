@@ -9,6 +9,7 @@ COPY package.json bun.lock tsconfig.base.json ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
+COPY examples/northstar-support/package.json examples/northstar-support/package.json
 COPY packages/agent-proto/package.json packages/agent-proto/package.json
 COPY packages/codex/package.json packages/codex/package.json
 COPY packages/config/package.json packages/config/package.json

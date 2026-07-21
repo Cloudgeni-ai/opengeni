@@ -162,6 +162,7 @@ export function useSessionCapabilities(
   const attachFiles = options.attachFiles ?? false;
   const warmingPollMs = options.warmingPollMs ?? 1500;
   const warmingDeadlineMs = options.warmingDeadlineMs ?? 30_000;
+  const identityKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${enabled}`;
 
   const [capabilities, setCapabilities] = useState<SessionCapabilities | null>(null);
   const [state, setState] = useState<SessionCapabilitiesState>("idle");
@@ -171,6 +172,7 @@ export function useSessionCapabilities(
   >(null);
   const [viewerCapReached, setViewerCapReached] = useState(false);
   const [viewerId, setViewerId] = useState<string | null>(null);
+  const [stateIdentity, setStateIdentity] = useState(identityKey);
   // Bumped to force a fresh negotiation cycle.
   const [nonce, setNonce] = useState(0);
 
@@ -178,6 +180,7 @@ export function useSessionCapabilities(
   // from the event log, and echoed on heartbeats.
   const epochRef = useRef(0);
   const viewerIdRef = useRef<string | null>(null);
+  const previousIdentityRef = useRef(identityKey);
 
   const renegotiate = useCallback(() => {
     setNonce((n) => n + 1);
@@ -185,6 +188,19 @@ export function useSessionCapabilities(
 
   // ── Negotiation + viewer lifecycle ──────────────────────────────────────────
   useEffect(() => {
+    const identityChanged = previousIdentityRef.current !== identityKey;
+    previousIdentityRef.current = identityKey;
+    if (identityChanged) {
+      setStateIdentity(identityKey);
+      setCapabilities(null);
+      setState("idle");
+      setError(null);
+      setAcknowledgmentRequired(null);
+      setViewerCapReached(false);
+      setViewerId(null);
+      epochRef.current = 0;
+      viewerIdRef.current = null;
+    }
     if (!enabled || !sessionId) {
       setState("idle");
       setCapabilities(null);
@@ -194,6 +210,7 @@ export function useSessionCapabilities(
     let pollTimer: ReturnType<typeof setTimeout> | null = null;
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
     let localViewerId: string | null = null;
+    const requestAbort = new AbortController();
     const startedAt = Date.now();
 
     const clearTimers = () => {
@@ -241,7 +258,7 @@ export function useSessionCapabilities(
       pollTimer = setTimeout(() => {
         if (cancelled) return;
         void client
-          .getStreamCapabilities(workspaceId, sessionId)
+          .getStreamCapabilities(workspaceId, sessionId, { signal: requestAbort.signal })
           .then((caps) => {
             if (cancelled) return;
             settle(caps);
@@ -270,7 +287,9 @@ export function useSessionCapabilities(
       setAcknowledgmentRequired(null);
       setViewerCapReached(false);
       try {
-        const caps = await client.getStreamCapabilities(workspaceId, sessionId);
+        const caps = await client.getStreamCapabilities(workspaceId, sessionId, {
+          signal: requestAbort.signal,
+        });
         if (cancelled) return;
         settle(caps);
 
@@ -310,7 +329,14 @@ export function useSessionCapabilities(
             const holder = await client.attachViewer(workspaceId, sessionId, {
               desktop: wantDesktopAttach,
             });
-            if (cancelled) return;
+            if (cancelled) {
+              // The attach crossed an identity/unmount boundary after the server
+              // had already minted a holder. It is too late to publish the result,
+              // but abandoning it would keep the old sandbox warm until the
+              // reaper runs. Release that exact old-session holder immediately.
+              void client.detachViewer(workspaceId, sessionId, holder.viewerId).catch(() => {});
+              return;
+            }
             localViewerId = holder.viewerId;
             viewerIdRef.current = holder.viewerId;
             setViewerId(holder.viewerId);
@@ -415,6 +441,7 @@ export function useSessionCapabilities(
 
     return () => {
       cancelled = true;
+      requestAbort.abort();
       clearTimers();
       // Fire-and-forget detach (idempotent delete-my-row). Capture the id so a
       // re-render/unmount race still releases the right holder.
@@ -435,6 +462,7 @@ export function useSessionCapabilities(
     warmingPollMs,
     warmingDeadlineMs,
     nonce,
+    identityKey,
   ]);
 
   // ── Fold stream.url.rotated from the live event log (no round trip) ──────────
@@ -461,13 +489,14 @@ export function useSessionCapabilities(
     });
   }, [events]);
 
+  const identityMatches = enabled && stateIdentity === identityKey;
   return {
-    capabilities,
-    state,
-    error,
-    acknowledgmentRequired,
-    viewerCapReached,
-    viewerId,
+    capabilities: identityMatches ? capabilities : null,
+    state: identityMatches ? state : "idle",
+    error: identityMatches ? error : null,
+    acknowledgmentRequired: identityMatches ? acknowledgmentRequired : null,
+    viewerCapReached: identityMatches && viewerCapReached,
+    viewerId: identityMatches ? viewerId : null,
     renegotiate,
   };
 }

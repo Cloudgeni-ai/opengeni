@@ -17,28 +17,48 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const activeWorkspace =
     context.workspaces.find((workspace) => workspace.id === workspaceId) ?? null;
+  const activeWorkspaceId = activeWorkspace?.id ?? null;
+  const {
+    accessKeyVersion,
+    resetSessionView,
+    resetWorkspaceIntegrations,
+    setSelectedRepoIds,
+    setSelectedRepoRefs,
+    refreshGitHub,
+    refreshWorkspaceMcpServers,
+  } = context;
   const previousWorkspaceId = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!activeWorkspace) {
+    if (!activeWorkspaceId) {
       return;
     }
     const abortController = new AbortController();
     if (previousWorkspaceId.current !== workspaceId) {
-      context.resetSessionView();
+      resetSessionView();
     }
     previousWorkspaceId.current = workspaceId;
-    context.resetWorkspaceIntegrations();
-    context.setSelectedRepoIds(new Set());
-    context.setSelectedRepoRefs({});
-    void context.refreshGitHub(workspaceId, abortController.signal);
-    void context.refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
+    resetWorkspaceIntegrations();
+    setSelectedRepoIds(new Set());
+    setSelectedRepoRefs({});
+    void refreshGitHub(workspaceId, abortController.signal);
+    void refreshWorkspaceMcpServers(workspaceId, abortController.signal).catch((error) => {
       if (!isAbortError(error)) {
         toast.error("Failed to load workspace MCP tools", { description: String(error) });
       }
     });
     return () => abortController.abort();
-  }, [workspaceId, context.accessKeyVersion, activeWorkspace?.id]);
+  }, [
+    accessKeyVersion,
+    activeWorkspaceId,
+    refreshGitHub,
+    refreshWorkspaceMcpServers,
+    resetSessionView,
+    resetWorkspaceIntegrations,
+    setSelectedRepoIds,
+    setSelectedRepoRefs,
+    workspaceId,
+  ]);
 
   if (!activeWorkspace) {
     return (
@@ -59,7 +79,11 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <OpenGeniProvider client={context.client} workspaceId={workspaceId}>
+    <OpenGeniProvider
+      client={context.client}
+      workspaceId={workspaceId}
+      onWorkspaceControlEvent={() => void context.refreshWorkspace(workspaceId)}
+    >
       <RailProvider workspaceId={workspaceId}>
         <RailShell>
           <Outlet />

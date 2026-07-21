@@ -22,6 +22,7 @@ import {
   execTruncated,
   isExecSessionLostBanner,
   looksBinary,
+  mediaPreviewFact,
   parseExecBannerSessionId,
   parseToolArgs,
   redactSecrets,
@@ -555,6 +556,7 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
   const rejected = raw.providerData?.approvalStatus === "rejected";
   const readOnly = typeof out === "string" && out.includes("read-only");
   const shotUrl = screenshotDataUrl(out);
+  const omittedMedia = mediaPreviewFact(out);
   const empty = out === "" || out == null;
   const batched = actions.length > 1 ? actions.map((a) => computerVerb(a)).join(" · ") : null;
   // Fold the batched-action count into the title (one media affordance per row),
@@ -635,6 +637,26 @@ function ComputerCallRenderer({ item }: ToolRendererProps) {
     );
   }
 
+  if (omittedMedia) {
+    return (
+      <ActivityDisclosure
+        icon={<CameraOffIcon className={ICON_SIZE} />}
+        iconTone={isFailed ? "failed" : "muted"}
+        title={`${verb}${countSuffix} · image omitted · not retained`}
+        failed={isFailed}
+        cancelled={isCancelled}
+        preview="inline image omitted · not retained"
+        media={<MediaEmpty />}
+      >
+        <BodyNote>
+          The inline {omittedMedia.mediaType} output was omitted from the audit timeline and its
+          source bytes were not retained.
+        </BodyNote>
+        {batched ? <BodyNote>batched: {batched}</BodyNote> : null}
+      </ActivityDisclosure>
+    );
+  }
+
   if (empty) {
     return (
       <ActivityDisclosure
@@ -692,6 +714,13 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
   const results = Array.isArray(rawResults)
     ? (rawResults as unknown[]).filter((r): r is WebSearchResult => !!r && typeof r === "object")
     : undefined;
+  const resultOccurrences = new Map<string, number>();
+  const keyedResults = results?.map((result) => {
+    const contentKey = `${result.domain}\u0000${result.title}\u0000${result.snippet}`;
+    const occurrence = (resultOccurrences.get(contentKey) ?? 0) + 1;
+    resultOccurrences.set(contentKey, occurrence);
+    return { key: `${contentKey}\u0000${occurrence}`, result };
+  });
 
   if (running) {
     return (
@@ -716,10 +745,10 @@ function WebSearchRenderer({ item }: ToolRendererProps) {
       failed={item.status === "failed"}
       cancelled={item.status === "cancelled"}
     >
-      {results && results.length ? (
+      {keyedResults && keyedResults.length ? (
         <ul className="flex flex-col gap-2">
-          {results.map((result, index) => (
-            <li key={index} className="flex gap-2.5">
+          {keyedResults.map(({ key, result }) => (
+            <li key={key} className="flex gap-2.5">
               <GlobeIcon className="mt-0.5 size-3.5 shrink-0 text-og-fg-subtle" />
               <div className="min-w-0">
                 <p className="truncate text-og-base text-og-fg">
@@ -752,6 +781,7 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
   const path = typeof args.path === "string" ? args.path : "";
   const out = item.output;
   const text = typeof out === "string" ? out : "";
+  const omittedMedia = mediaPreviewFact(out);
 
   if (item.status === "running") {
     return (
@@ -797,6 +827,24 @@ function ViewImageRenderer({ item }: ToolRendererProps) {
         preview={path}
       >
         <BodyNote>{text}</BodyNote>
+      </ActivityDisclosure>
+    );
+  }
+  if (omittedMedia) {
+    return (
+      <ActivityDisclosure
+        icon={<ImageIcon className={ICON_SIZE} />}
+        iconTone={viewFailed ? "failed" : "muted"}
+        title={`Viewed ${basename(path)} · image omitted · not retained`}
+        failed={viewFailed}
+        cancelled={viewCancelled}
+        preview="inline image omitted · not retained"
+        media={<MediaEmpty />}
+      >
+        <BodyNote>
+          The inline {omittedMedia.mediaType} output was omitted from the audit timeline and its
+          source bytes were not retained.
+        </BodyNote>
       </ActivityDisclosure>
     );
   }

@@ -7,12 +7,12 @@ import {
   bootstrapWorkspace,
   createDb,
   createSession,
-  enqueueSessionMessageAtomically,
   getSession,
   getSessionHistoryItems,
   listSessionEvents,
   listSessionTurns,
-  requestSessionControl,
+  mutateSessionControlInTransaction,
+  withWorkspaceRls,
 } from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import { createProductionAgentRuntime } from "@opengeni/runtime";
@@ -28,8 +28,14 @@ import {
 } from "@opengeni/testing";
 import { postUserMessageTurn } from "@opengeni/core";
 import type { SessionWorkflowClient } from "../../apps/api/src/app";
-import { createActivities } from "../../apps/worker/src/activities";
+import { createActivityTestHarness } from "../../apps/worker/src/activities";
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
+import {
+  CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+  TURN_WORKER_MAX_CONCURRENT_TURNS,
+} from "../../apps/worker/src/concurrency";
+import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
+import { submitTestHumanPrompt } from "./helpers/session-control";
 
 // Proves the campaign's robustness contract: a worker rollout restart
 // (graceful SIGTERM shutdown) mid-turn must not produce a failed session.
@@ -49,7 +55,9 @@ describe("worker restart resilience", () => {
     dbClient = createDb(services.databaseUrl);
     bus = await createNatsEventBus(services.natsUrl);
     connection = await Connection.connect({ address: services.temporalHost });
-    nativeConnection = await NativeConnection.connect({ address: services.temporalHost });
+    nativeConnection = await NativeConnection.connect({
+      address: services.temporalHost,
+    });
   }, 300_000);
 
   afterAll(async () => {
@@ -103,7 +111,7 @@ describe("worker restart resilience", () => {
         },
       ],
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -120,16 +128,15 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    const accepted = await enqueueSessionMessageAtomically(dbClient.db, {
+    const accepted = await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: "do the work",
       resources: [],
       tools: [{ kind: "mcp", id: "docs" }],
-      delivery: "queue",
+      delivery: "send",
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
 
@@ -139,7 +146,13 @@ describe("worker restart resilience", () => {
     const handle = await client.workflow.start("sessionWorkflow", {
       taskQueue,
       workflowId,
-      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+        },
+      ],
     });
 
     // Wait until the side effect ran, its progress was checkpointed to items,
@@ -215,7 +228,11 @@ describe("worker restart resilience", () => {
     const model = new ScriptedModel([
       // The only model call: the first attempt is interrupted before it ever
       // reaches the model, so the rerun replays the original trigger cleanly.
-      { id: "early-call-1", outputText: "did the work", chunks: ["did ", "the ", "work"] },
+      {
+        id: "early-call-1",
+        outputText: "did the work",
+        chunks: ["did ", "the ", "work"],
+      },
     ]);
     const settings = testSettings({
       databaseUrl: services.databaseUrl,
@@ -223,7 +240,7 @@ describe("worker restart resilience", () => {
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -263,16 +280,15 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    const accepted = await enqueueSessionMessageAtomically(dbClient.db, {
+    const accepted = await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: "do the early work",
       resources: [],
       tools: [],
-      delivery: "queue",
+      delivery: "send",
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
 
@@ -282,7 +298,13 @@ describe("worker restart resilience", () => {
     const handle = await client.workflow.start("sessionWorkflow", {
       taskQueue,
       workflowId,
-      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+        },
+      ],
     });
 
     // Pull the plug while the turn activity is still in setup.
@@ -365,7 +387,7 @@ describe("worker restart resilience", () => {
         outputText: "must not finish",
       },
     ]);
-    const baseActivities = createActivities({
+    const baseActivities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -379,30 +401,46 @@ describe("worker restart resilience", () => {
     let lateSettlement: Awaited<ReturnType<typeof applySessionTurnSettlement>> | null = null;
     const activities = {
       ...baseActivities,
-      settleSessionControl: async (
-        input: Parameters<typeof baseActivities.settleSessionControl>[0],
+      settleSessionInterruptions: async (
+        input: Parameters<typeof baseActivities.settleSessionInterruptions>[0],
       ) => {
-        await baseActivities.settleSessionControl(input);
+        const result = await baseActivities.settleSessionInterruptions(input);
         interruptSettled();
+        return result;
       },
       runAgentTurn: async (input: Parameters<typeof baseActivities.runAgentTurn>[0]) => {
         dispatchedAttemptId = input.attemptId;
-        const result = await baseActivities.runAgentTurn(input);
+        let result: Awaited<ReturnType<typeof baseActivities.runAgentTurn>> | null = null;
+        let activityError: unknown;
+        try {
+          result = await baseActivities.runAgentTurn(input);
+          if (result.status === "unclaimed") return result;
+        } catch (error) {
+          activityError = error;
+        }
         // Deterministically model the production zombie boundary: the real
         // activity has observed cancellation, then this wrapper publishes a
         // terminal settlement from that fenced attempt after Pause committed.
         await interruptSettlement;
+        const [turn] = await listSessionTurns(dbClient.db, input.workspaceId, input.sessionId);
+        if (!turn) throw new Error(`zombie fixture turn disappeared for ${input.sessionId}`);
         lateSettlement = await applySessionTurnSettlement(dbClient.db, input.workspaceId, {
           sessionId: input.sessionId,
-          turnId: input.turnId!,
-          triggerEventId: input.triggerEventId,
+          turnId: turn.id,
+          triggerEventId: turn.triggerEventId,
           attemptId: input.attemptId,
           turnStatus: "completed",
           sessionStatus: "idle",
           activeTurnId: null,
-          events: [{ type: "turn.completed", payload: { output: "late zombie output" } }],
+          events: [
+            {
+              type: "turn.completed",
+              payload: { output: "late zombie output" },
+            },
+          ],
         });
-        return result;
+        if (activityError) throw activityError;
+        return result!;
       },
     };
     const session = await createSession(dbClient.db, {
@@ -416,16 +454,15 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    await enqueueSessionMessageAtomically(dbClient.db, {
+    await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: "hold until pause",
       resources: [],
       tools: [],
-      delivery: "queue",
+      delivery: "send",
       reasoningEffortFallback: "xhigh",
     });
 
@@ -435,7 +472,13 @@ describe("worker restart resilience", () => {
     const handle = await client.workflow.start("sessionWorkflow", {
       taskQueue,
       workflowId,
-      args: [{ accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id }],
+      args: [
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: session.id,
+        },
+      ],
     });
     try {
       await waitFor(async () => {
@@ -446,17 +489,21 @@ describe("worker restart resilience", () => {
           turn.activeAttemptId === dispatchedAttemptId
         );
       });
-      const pause = await requestSessionControl(dbClient.db, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        sessionId: session.id,
-        actor: grant.subjectId,
-        mode: "pause",
-        reason: "operator pause",
-        clientEventId: `pause-zombie-${crypto.randomUUID()}`,
-      });
-      expect(pause.shouldSignalControl).toBe(true);
-      await handle.signal("sessionControl", pause.event.id);
+      const pause = await withWorkspaceRls(dbClient.db, grant.workspaceId, (db) =>
+        db.transaction((tx) =>
+          mutateSessionControlInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+            actor: { type: "human", subjectId: grant.subjectId },
+            action: "pause",
+            reason: "operator pause",
+            operationKey: `pause-zombie-${crypto.randomUUID()}`,
+          }),
+        ),
+      );
+      expect(pause.interruptionCount).toBe(1);
+      await handle.signal("sessionControl");
       await handle.result();
     } finally {
       worker.shutdown();
@@ -474,7 +521,10 @@ describe("worker restart resilience", () => {
     expect(events.filter((event) => event.type === "turn.recovery.requested")).toHaveLength(1);
     expect(events.filter((event) => event.type === "turn.completed")).toHaveLength(0);
     expect(events.filter((event) => event.type === "turn.failed")).toHaveLength(0);
-    expect((await getSession(dbClient.db, grant.workspaceId, session.id))?.status).toBe("paused");
+    expect(await getSession(dbClient.db, grant.workspaceId, session.id)).toMatchObject({
+      status: "recovering",
+      effectiveControl: { state: "paused" },
+    });
   }, 180_000);
 
   test("a failed session accepts a new user message and revives from stored items", async () => {
@@ -482,7 +532,11 @@ describe("worker restart resilience", () => {
     const taskQueue = `failed-revival-${crypto.randomUUID()}`;
     const model = new ScriptedModel([
       // Turn 1 completes normally so the session has stored conversation truth.
-      { id: "revive-call-1", outputText: "first answer", chunks: ["first ", "answer"] },
+      {
+        id: "revive-call-1",
+        outputText: "first answer",
+        chunks: ["first ", "answer"],
+      },
       // Turn 2 blows up with a non-retryable agent error: the session fails.
       { id: "revive-call-2", error: new Error("agent exploded mid-turn") },
       // Turn 3 is the revival turn, running from stored items.
@@ -498,7 +552,7 @@ describe("worker restart resilience", () => {
       temporalHost: services.temporalHost,
       temporalTaskQueue: taskQueue,
     });
-    const activities = createActivities({
+    const activities = createActivityTestHarness({
       settings,
       db: dbClient.db,
       bus,
@@ -515,16 +569,15 @@ describe("worker restart resilience", () => {
       sandboxBackend: "none",
     });
     const workflowId = `session-${session.id}`;
-    await enqueueSessionMessageAtomically(dbClient.db, {
+    await submitTestHumanPrompt(dbClient.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
       sessionId: session.id,
-      actor: grant.subjectId,
-      origin: "human",
+      subjectId: grant.subjectId,
       text: "answer me",
       resources: [],
       tools: [],
-      delivery: "queue",
+      delivery: "send",
       reasoningEffortFallback: settings.openaiReasoningEffort,
     });
     const client = new Client({ connection });
@@ -547,6 +600,7 @@ describe("worker restart resilience", () => {
           signal: "queueChanged",
         });
       },
+      requestSessionWorkflowWakeDispatch: async () => undefined,
       signalApprovalDecision: async () => undefined,
       signalSessionControl: async () => undefined,
       syncScheduledTask: async () => undefined,
@@ -574,7 +628,11 @@ describe("worker restart resilience", () => {
         taskQueue,
         workflowId,
         args: [
-          { accountId: grant.accountId, workspaceId: grant.workspaceId, sessionId: session.id },
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId: session.id,
+          },
         ],
       });
       await waitFor(
@@ -593,7 +651,9 @@ describe("worker restart resilience", () => {
 
       // Revival: the failed session accepts the message (no 409), goes back
       // to queued, and a fresh workflow run executes the turn from stored
-      // conversation truth.
+      // conversation truth. The new run deliberately reuses the stable workflow
+      // ID and Temporal restarts its activity-ID sequence; only the first-class
+      // workflow run ID keeps this dispatch distinct from the original run.
       await sendUserMessage("are you still there?");
       await waitFor(
         async () =>
@@ -656,13 +716,33 @@ describe("worker restart resilience", () => {
 async function restartTestWorker(
   nativeConnection: NativeConnection,
   taskQueue: string,
-  activities: ReturnType<typeof createActivities>,
-): Promise<Worker> {
-  return await Worker.create({
-    connection: nativeConnection,
-    namespace: "default",
-    taskQueue,
-    workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
-    activities,
-  });
+  activities: ReturnType<typeof createActivityTestHarness>,
+): Promise<{ run: () => Promise<void>; shutdown: () => void }> {
+  const { runAgentTurn, ...controlActivities } = activities;
+  const [control, turns] = await Promise.all([
+    Worker.create({
+      connection: nativeConnection,
+      namespace: "default",
+      taskQueue,
+      workflowsPath: new URL("../../apps/worker/src/workflows.ts", import.meta.url).pathname,
+      activities: controlActivities,
+      maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+    }),
+    Worker.create({
+      connection: nativeConnection,
+      namespace: "default",
+      taskQueue: turnTaskQueue(taskQueue),
+      activities: { runAgentTurn },
+      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+    }),
+  ]);
+  return {
+    run: async () => {
+      await Promise.all([control.run(), turns.run()]);
+    },
+    shutdown: () => {
+      control.shutdown();
+      turns.shutdown();
+    },
+  };
 }

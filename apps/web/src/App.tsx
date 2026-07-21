@@ -23,27 +23,53 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
 } from "@tanstack/react-router";
 
 import { ProblemPanel } from "@/components/common";
 import { RootRouteComponent, useAppContext } from "@/context";
 import { parseCheckoutOutcome, type CheckoutOutcome } from "@/lib/routes";
-import { CapabilitiesRoute } from "@/routes/capabilities";
-import { DeviceRoute } from "@/routes/device";
-import { DocumentsRoute } from "@/routes/documents";
-import { VariableSetsRoute } from "@/routes/variable-sets";
-import { MachinesRoute } from "@/routes/machines";
-import { OrgSettingsRoute } from "@/routes/org-settings";
-import { ResetPasswordRoute } from "@/routes/reset-password";
-import { RigsRoute } from "@/routes/rigs";
-import { RigDetailRoute } from "@/routes/rig-detail";
-import { SchedulesRoute } from "@/routes/schedules";
-import { SessionRoute } from "@/routes/session";
-import { SessionsIndexRoute } from "@/routes/sessions-index";
-import { WorkspaceSettingsRoute } from "@/routes/workspace-settings";
-import { WorkspaceShellRoute } from "@/routes/workspace";
 
 export { workspaceAgentPath, workspaceSessionPath, workspaceSessionsPath } from "@/lib/routes";
+
+const LazyCapabilitiesRoute = lazyRouteComponent(
+  () => import("@/routes/capabilities"),
+  "CapabilitiesRoute",
+);
+const LazyDeviceRoute = lazyRouteComponent(() => import("@/routes/device"), "DeviceRoute");
+const LazyDocumentsRoute = lazyRouteComponent(() => import("@/routes/documents"), "DocumentsRoute");
+const LazyVariableSetsRoute = lazyRouteComponent(
+  () => import("@/routes/variable-sets"),
+  "VariableSetsRoute",
+);
+const LazyMachinesRoute = lazyRouteComponent(() => import("@/routes/machines"), "MachinesRoute");
+const LazyOrgSettingsRoute = lazyRouteComponent(
+  () => import("@/routes/org-settings"),
+  "OrgSettingsRoute",
+);
+const LazyResetPasswordRoute = lazyRouteComponent(
+  () => import("@/routes/reset-password"),
+  "ResetPasswordRoute",
+);
+const LazyRigsRoute = lazyRouteComponent(() => import("@/routes/rigs"), "RigsRoute");
+const LazyRigDetailRoute = lazyRouteComponent(
+  () => import("@/routes/rig-detail"),
+  "RigDetailRoute",
+);
+const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
+const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazySessionsIndexRoute = lazyRouteComponent(
+  () => import("@/routes/sessions-index"),
+  "SessionsIndexRoute",
+);
+const LazyWorkspaceSettingsRoute = lazyRouteComponent(
+  () => import("@/routes/workspace-settings"),
+  "WorkspaceSettingsRoute",
+);
+const LazyWorkspaceShellRoute = lazyRouteComponent(
+  () => import("@/routes/workspace"),
+  "WorkspaceShellRoute",
+);
 
 const rootRoute = createRootRoute({
   component: RootRouteComponent,
@@ -259,22 +285,22 @@ function WorkspaceIndexRedirect() {
 
 function WorkspaceShell() {
   const { workspaceId } = workspaceRoute.useParams();
-  return <WorkspaceShellRoute workspaceId={workspaceId} />;
+  return <LazyWorkspaceShellRoute workspaceId={workspaceId} />;
 }
 
 function SessionsIndex() {
   const { workspaceId } = workspaceSessionsRoute.useParams();
-  return <SessionsIndexRoute workspaceId={workspaceId} />;
+  return <LazySessionsIndexRoute workspaceId={workspaceId} />;
 }
 
 function SessionView() {
   const { workspaceId, sessionId } = workspaceSessionRoute.useParams();
-  return <SessionRoute workspaceId={workspaceId} sessionId={sessionId} />;
+  return <LazySessionRoute workspaceId={workspaceId} sessionId={sessionId} />;
 }
 
 function VariableSets() {
   const { workspaceId } = workspaceVariableSetsRoute.useParams();
-  return <VariableSetsRoute workspaceId={workspaceId} />;
+  return <LazyVariableSetsRoute workspaceId={workspaceId} />;
 }
 
 function VariableSetsRedirect() {
@@ -284,17 +310,17 @@ function VariableSetsRedirect() {
 
 function Rigs() {
   const { workspaceId } = workspaceRigsRoute.useParams();
-  return <RigsRoute workspaceId={workspaceId} />;
+  return <LazyRigsRoute workspaceId={workspaceId} />;
 }
 
 function RigDetail() {
   const { workspaceId, rigId } = workspaceRigDetailRoute.useParams();
-  return <RigDetailRoute workspaceId={workspaceId} rigId={rigId} />;
+  return <LazyRigDetailRoute workspaceId={workspaceId} rigId={rigId} />;
 }
 
 function Machines() {
   const { workspaceId } = workspaceMachinesRoute.useParams();
-  return <MachinesRoute workspaceId={workspaceId} />;
+  return <LazyMachinesRoute workspaceId={workspaceId} />;
 }
 
 function PacksRedirect() {
@@ -312,29 +338,29 @@ function PacksRedirect() {
 function Capabilities() {
   const { workspaceId } = workspaceCapabilitiesRoute.useParams();
   const { section } = workspaceCapabilitiesRoute.useSearch();
-  return <CapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
+  return <LazyCapabilitiesRoute workspaceId={workspaceId} initialSection={section} />;
 }
 
 function Schedules() {
   const { workspaceId } = workspaceSchedulesRoute.useParams();
-  return <SchedulesRoute workspaceId={workspaceId} />;
+  return <LazySchedulesRoute workspaceId={workspaceId} />;
 }
 
 function Documents() {
   const { workspaceId } = workspaceDocumentsRoute.useParams();
   const { memory } = workspaceDocumentsRoute.useSearch();
-  return <DocumentsRoute workspaceId={workspaceId} focusMemoryId={memory} />;
+  return <LazyDocumentsRoute workspaceId={workspaceId} focusMemoryId={memory} />;
 }
 
 function WorkspaceSettings() {
   const { workspaceId } = workspaceSettingsRoute.useParams();
-  return <WorkspaceSettingsRoute workspaceId={workspaceId} />;
+  return <LazyWorkspaceSettingsRoute workspaceId={workspaceId} />;
 }
 
 function Organization() {
   const { workspaceId } = workspaceOrganizationRoute.useParams();
   const { checkout } = workspaceOrganizationRoute.useSearch();
-  return <OrgSettingsRoute workspaceId={workspaceId} checkout={checkout} />;
+  return <LazyOrgSettingsRoute workspaceId={workspaceId} checkout={checkout} />;
 }
 
 function AccountRedirect() {
@@ -352,12 +378,12 @@ function AccountRedirect() {
 
 function Device() {
   const { user_code } = deviceRoute.useSearch();
-  return <DeviceRoute userCode={user_code} />;
+  return <LazyDeviceRoute userCode={user_code} />;
 }
 
 function ResetPassword() {
   const { token } = resetPasswordRoute.useSearch();
-  return <ResetPasswordRoute token={token} />;
+  return <LazyResetPasswordRoute token={token} />;
 }
 
 function BillingReturnRoute() {

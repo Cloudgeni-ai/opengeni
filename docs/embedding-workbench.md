@@ -7,6 +7,10 @@ backend embedding guide in `docs/embedding.md`, and it is the exact surface
 `apps/web` itself consumes (see `apps/web/src/components/session/sandbox-workspace.tsx`),
 so an external embedder and the first-party app run the same code path.
 
+Shipping that code path is not acceptance by itself. The required live,
+performance, accessibility, identity-race, browser/device, and visual evidence
+is defined by [`workbench-acceptance.md`](workbench-acceptance.md).
+
 Everything ships from `@opengeni/react`. The whole dock "brain" — capability
 negotiation, capture-backed cold reads, tab construction, prewarm, and the
 machine chip — lives in `packages/react/src/components/sandbox-workspace.tsx`; you
@@ -98,6 +102,13 @@ That is the whole integration. The dock paints instantly from the latest
 turn-end capture (no machine round-trip), then reconciles to live data when the
 box is warm, with no tab switch or layout shift in between.
 
+Repository discovery walks the workspace filesystem without a fixed nesting
+depth, recognizes both ordinary `.git` directories and linked-worktree `.git`
+files, and prunes dependency/build residue. The walk is still bounded by a
+timeout and repository-count guard. If either guard trips or discovery fails,
+OpenGeni persists and announces an explicit degraded revision instead of an
+authoritative-looking empty capture; consumers keep live files authoritative.
+
 ### Props worth knowing
 
 | Prop | Purpose |
@@ -106,7 +117,7 @@ box is warm, with no tab switch or layout shift in between.
 | `primary` | the pane shown beside the dock (your chat/timeline). |
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
-| `initialTab` | override the default landing tab. Omit it and the workbench decides **Changes when the session has changes, else Files** — pre-paint, from local capture stats, so there is never a post-render switch. |
+| `initialTab` | override the default landing tab. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 
 The machine-state chip (live / waking… / offline — as of `<time>`) is rendered in

@@ -74,6 +74,7 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
   const [w] = await admin<
     { id: string }[]
   >`insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id };
 }
 
@@ -112,7 +113,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCredentials", () => {
   test("the full flow lands an enrollment + sandbox and returns a signed bearer", async () => {
@@ -214,7 +215,7 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     // (path-less) configured `selfhostedRelayUrl`. The agent's producer appends only
     // its routing query and assumes the base already carries `/stream`; without this
     // normalization the producer dials a path-less URL the relay 400s and the
-    // terminal/desktop streams are unreachable (dossier §V5/§V6).
+    // terminal/desktop streams are unreachable.
     expect(creds.relayUrl).toBe("wss://relay.example/stream");
     // M-AUTH closed the placeholder: the agent presents the bearer as the NATS
     // connect auth-token (auth-callout), so natsAccountCreds is vestigial and

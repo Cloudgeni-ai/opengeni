@@ -1,8 +1,8 @@
 // TOKEN-BROKER (B1): the askpass helper (docker/opengeni-git-askpass) now reads the
 // git token from a FILE ($OPENGENI_GIT_TOKEN_FILE, default $HOME/.opengeni/git-token)
 // rather than from the GITHUB_TOKEN/GH_TOKEN manifest env vars. This lets the agent
-// refresh the token mid-turn (github_token MCP tool -> write the file) without any
-// manifest-env change (validateNoEnvironmentDelta stays happy). Baked into the sandbox
+// atomically refresh the token mid-turn without any manifest-env change
+// (validateNoEnvironmentDelta stays happy). Baked into the sandbox
 // + desktop images by CONTENT (sandbox.Dockerfile / desktop.Dockerfile), so this test
 // exercises the shipped script directly with /bin/sh.
 

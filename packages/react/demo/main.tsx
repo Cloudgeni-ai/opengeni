@@ -31,7 +31,7 @@ const ALL_STATUSES: SessionStatusValue[] = [
 function Harness() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   // Mount the whole workbench through its public `<SandboxWorkspace>` surface —
-  // the exact integration an external embedder (cloudgeni #1577) uses. This is
+  // the exact integration an external embedder uses. This is
   // the F2 embedder proof: provider + styles + mock client, no app plumbing.
   const { events } = useSessionEvents(MANAGER_SESSION_ID);
   return (
@@ -95,6 +95,7 @@ function OpsChannel() {
   // time so it always reflects the current selection).
   const composer = useComposer(MANAGER_SESSION_ID, {
     sendExtras: () => (model ? { model } : {}),
+    effectiveControl: session?.effectiveControl,
   });
   const status = sessionStatus ?? session?.status ?? null;
   // Surface the slash-command palette (type "/"): operator controls on this
@@ -130,7 +131,7 @@ function OpsChannel() {
       <div className="shrink-0 px-4 pb-4 pt-1">
         <ChatComposer
           composer={composer}
-          status={status}
+          effectiveControl={session?.effectiveControl}
           placeholder="Message your infrastructure…"
           autoFocus
           commandContext={commandContext}

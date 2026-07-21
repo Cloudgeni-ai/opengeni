@@ -1,7 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import type { Settings } from "@opengeni/config";
-import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  signDelegatedAccessToken,
+  type Permission,
+} from "@opengeni/contracts";
 import {
   createDb,
   decryptEnvironmentValue,
@@ -122,6 +127,8 @@ async function freshWorkspace(): Promise<{ accountId: string; workspaceId: strin
     insert into managed_accounts (name) values ('acct') returning id`;
   const [workspace] = await shared!.admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
+  await shared!
+    .admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 
@@ -1167,6 +1174,7 @@ describe("connections routes", () => {
           headers: {
             authorization: await bearer(workspace, "subject-a", ["connections:write"]),
             "content-type": "application/json",
+            [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
           },
           body: JSON.stringify({
             providerDomain: "redirect.example.com",
@@ -1174,8 +1182,9 @@ describe("connections routes", () => {
           }),
         },
       );
-      expect(response.status).toBe(422);
-      expect(await response.text()).toContain("private network");
+      const responseText = await response.text();
+      expect(response.status, responseText).toBe(422);
+      expect(responseText).toContain("private network");
       expect(hits).toEqual(["https://1.1.1.1/mcp", "https://1.1.1.1/prm"]);
       expect(privateHopHits).toBe(0);
     } finally {

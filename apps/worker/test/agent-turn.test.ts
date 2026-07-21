@@ -3,15 +3,28 @@ import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
 import {
+  codexRequestStorage,
+  codexSubscriptionFetch,
+  type CodexRequestContext,
+} from "@opengeni/codex";
+import {
   interruptedToolCallResult,
+  runIdempotentPersistenceTransaction,
   SandboxImageConflictError,
   SandboxLeaseSupersededError,
+  SessionEventPersistenceError,
 } from "@opengeni/db";
-import { sanitizeHistoryItemsForModel } from "@opengeni/runtime";
+import {
+  CompactionProviderResponseError,
+  EmptyCompactionSummaryError,
+  sanitizeHistoryItemsForModel,
+} from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import {
   acceptsPromptCacheKeyForTurn,
   agentRunFailurePayload,
+  assertPhysicalToolQuiescenceForCancellation,
+  assertSessionAttemptQuiescenceRecoveryDurable,
   classifyContextWindowOverflowError,
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
@@ -27,11 +40,20 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   pointerReconcileReason,
+  persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
-  providerRetryRecovery,
+  providerRecoveryResult,
   resolveActiveSandboxBackend,
+  shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
+  shouldRunTurnEndWorkspacePersistence,
+  turnOperationCancellationFailure,
+  waitForTurnOperation,
+  waitForTurnFinalizerStep,
+  waitForTurnStreamCleanup,
+  TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
+import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 
 // Item shapes mirror the SDK history representation persisted into
@@ -55,6 +77,88 @@ function functionResult(callId: string) {
     status: "completed",
     output: { type: "text", text: "ok" },
   };
+}
+
+async function actualCodexStreamingFailure(event: Record<string, unknown>): Promise<{
+  calls: number;
+  error: unknown;
+  forwarded: string;
+}> {
+  let calls = 0;
+  const token = {
+    accessToken: "worker-test-token",
+    chatgptAccountId: "worker-test-account",
+    isFedramp: false,
+  };
+  const context: CodexRequestContext = {
+    clientVersion: "largeoutput-worker-test",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+  };
+  const response = await codexRequestStorage.run(context, () =>
+    codexSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response(`data: ${JSON.stringify(event)}\n\n`, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    })("https://chatgpt.com/backend-api/responses", {
+      method: "POST",
+      body: JSON.stringify({ stream: true, model: "gpt-5.6-sol", input: [] }),
+    }),
+  );
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let forwarded = "";
+  let error: unknown;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      forwarded += decoder.decode(chunk.value, { stream: true });
+    }
+    forwarded += decoder.decode();
+  } catch (streamError) {
+    error = streamError;
+  }
+  return { calls, error, forwarded };
+}
+
+async function actualCodexNullBodyFailure(): Promise<{ calls: number; error: unknown }> {
+  let calls = 0;
+  const token = {
+    accessToken: "worker-test-token",
+    chatgptAccountId: "worker-test-account",
+    isFedramp: false,
+  };
+  const context: CodexRequestContext = {
+    clientVersion: "largeoutput-worker-test",
+    getToken: async () => token,
+    refresh: async () => token,
+    resolveModel: (model) => model,
+  };
+  const response = await codexRequestStorage.run(context, () =>
+    codexSubscriptionFetch(async () => {
+      calls += 1;
+      return new Response(null, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    })("https://chatgpt.com/backend-api/responses", {
+      method: "POST",
+      body: JSON.stringify({ stream: true, model: "gpt-5.6-sol", input: [] }),
+    }),
+  );
+
+  let error: unknown;
+  try {
+    await response.text();
+  } catch (streamError) {
+    error = streamError;
+  }
+  return { calls, error };
 }
 
 /**
@@ -98,7 +202,7 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     expect(unsafe).not.toEqual([user, callA, callB, resultB, resultA]);
 
     // The live worker's durable receipt gate deliberately skips the partial B
-    // snapshot (`allResultsRecorded === false`) and reconciles only after both
+    // snapshot (the response batch is not settled) and reconciles only after both
     // raw results exist, when the SDK history is stable again.
     const persisted = persistAcrossReconciles([[user], [user, callA, callB, resultB, resultA]]);
     expect(persisted).toEqual([user, callA, callB, resultB, resultA]);
@@ -482,6 +586,29 @@ describe("model usage source key (re-dispatch charge stability)", () => {
   });
 });
 
+describe("sandbox lease holder identity", () => {
+  test("does not collide when sibling workflows reuse the same Temporal activity id", () => {
+    const siblingAttemptA = sandboxLeaseHolderIdForAttempt("11111111-1111-4111-8111-111111111111");
+    const siblingAttemptB = sandboxLeaseHolderIdForAttempt("22222222-2222-4222-8222-222222222222");
+
+    expect(siblingAttemptA).not.toBe(siblingAttemptB);
+    expect(siblingAttemptA).toBe("turn-attempt:11111111-1111-4111-8111-111111111111");
+  });
+
+  test("is stable for an activity retry of the same durable attempt", () => {
+    const attemptId = "33333333-3333-4333-8333-333333333333";
+    expect(sandboxLeaseHolderIdForAttempt(attemptId)).toBe(
+      sandboxLeaseHolderIdForAttempt(attemptId),
+    );
+  });
+
+  test("rejects a missing durable attempt identity", () => {
+    expect(() => sandboxLeaseHolderIdForAttempt("  ")).toThrow(
+      "Sandbox lease holder requires a turn attempt id",
+    );
+  });
+});
+
 describe("completed model-call metering at ownership fences", () => {
   test("records already-spent usage before surfacing a lost lease", async () => {
     const order: string[] = [];
@@ -555,6 +682,14 @@ describe("model call usage observability", () => {
             payload: event.payload,
           })),
         );
+        return {
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })) as any,
+        };
       },
       accountId: "acct-1",
       workspaceId: "ws-1",
@@ -617,7 +752,14 @@ describe("model call usage observability", () => {
 
     await emitModelCallUsage({
       observability: observability as any,
-      publish: null,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      }),
       accountId: "acct-1",
       workspaceId: "ws-1",
       sessionId: "sess-1",
@@ -644,6 +786,37 @@ describe("model call usage observability", () => {
       servingAccountHash: "abc123def456",
       accountChangedFromPrevCall: true,
     });
+  });
+
+  test("does not log a duplicate usage observation as authoritative", async () => {
+    const infos: Array<Record<string, unknown>> = [];
+    await emitModelCallUsage({
+      observability: {
+        info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+        warn: mock(),
+      } as any,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "duplicate" as const,
+          duplicateOfEventId: crypto.randomUUID(),
+          duplicateReason: "duplicate_provider_response_usage",
+        })) as any,
+      }),
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-duplicate",
+      usage: { usage: { inputTokens: 10, outputTokens: 1 } },
+    });
+
+    expect(infos).toEqual([]);
   });
 });
 
@@ -930,6 +1103,98 @@ describe("lazy sandbox provisioner single-flight", () => {
       true,
     );
   });
+
+  test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {
+    const controller = new AbortController();
+    let resolveEstablish!: (value: { lease: string }) => void;
+    const establish = new Promise<{ lease: string }>((resolve) => {
+      resolveEstablish = resolve;
+    });
+    let completed = 0;
+    let failed = 0;
+    let disposed = 0;
+    let resolveDisposed!: () => void;
+    const disposal = new Promise<void>((resolve) => {
+      resolveDisposed = resolve;
+    });
+    const provisioner = createTurnSandboxProvisioner(() => establish, {
+      signal: controller.signal,
+      onCompleted: () => {
+        completed += 1;
+      },
+      onFailed: () => {
+        failed += 1;
+      },
+      disposeResult: () => {
+        disposed += 1;
+        resolveDisposed();
+      },
+    });
+
+    const pending = provisioner.get();
+    await Bun.sleep(0);
+    const cancelledAt = performance.now();
+    controller.abort(new Error("STEER"));
+
+    await expect(pending).rejects.toBeInstanceOf(TurnOperationCancelledError);
+    expect(performance.now() - cancelledAt).toBeLessThan(100);
+    expect(await provisioner.waitForSettled(30_000)).toBeNull();
+    expect(completed).toBe(0);
+    expect(failed).toBe(0);
+
+    resolveEstablish({ lease: "late" });
+    await disposal;
+    expect(disposed).toBe(1);
+  });
+
+  test("eager provisioning returns at the cancellation boundary and disposes its late lease", async () => {
+    const controller = new AbortController();
+    let resolveEstablish!: (value: { release: () => void }) => void;
+    const establish = new Promise<{ release: () => void }>((resolve) => {
+      resolveEstablish = resolve;
+    });
+    let releases = 0;
+    const pending = waitForTurnOperation(establish, controller.signal, async (late) =>
+      late.release(),
+    );
+
+    const temporalCancellation = new CancelledFailure("CANCELLED");
+    const cancelledAt = performance.now();
+    controller.abort(temporalCancellation);
+
+    const wrapped = await pending.catch((error: unknown) => error);
+    expect(wrapped).toBeInstanceOf(TurnOperationCancelledError);
+    expect(turnOperationCancellationFailure(wrapped)).toBe(temporalCancellation);
+    expect(performance.now() - cancelledAt).toBeLessThan(100);
+
+    resolveEstablish({ release: () => (releases += 1) });
+    await Bun.sleep(0);
+    expect(releases).toBe(1);
+  });
+
+  test("a non-Temporal provisioning abort still becomes an activity cancellation", () => {
+    const wrapped = new TurnOperationCancelledError(new Error("STEER"));
+    const cancellation = turnOperationCancellationFailure(wrapped);
+
+    expect(cancellation).toBeInstanceOf(CancelledFailure);
+    expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
+    expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+  });
+
+  test("a committed control outranks a same-checkpoint provider failure", async () => {
+    const controller = new AbortController();
+    const temporalCancellation = new CancelledFailure("CANCELLED");
+    controller.abort(temporalCancellation);
+
+    const error = await waitForTurnOperation(
+      Promise.reject(new Error("provider connection reset")),
+      controller.signal,
+      undefined,
+    ).catch((failure: unknown) => failure);
+
+    expect(error).toBeInstanceOf(TurnOperationCancelledError);
+    expect(turnOperationCancellationFailure(error)).toBe(temporalCancellation);
+  });
 });
 
 describe("worker shutdown preemption", () => {
@@ -941,6 +1206,202 @@ describe("worker shutdown preemption", () => {
     expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
     expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
+  });
+
+  test("skips slow workspace housekeeping for every physical cancellation boundary", () => {
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "cancelled",
+        cancellationRequested: false,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "recovering",
+        cancellationRequested: true,
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunTurnEndWorkspacePersistence({
+        activityStatus: "idle",
+        cancellationRequested: false,
+      }),
+    ).toBe(true);
+  });
+
+  test("turns an unconfirmed physical tool fence into a hard failure", () => {
+    const fenceFailure = new Error("remote process identity could not be verified");
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: false,
+        failure: fenceFailure,
+      }),
+    ).toThrow(fenceFailure);
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        failure: fenceFailure,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertPhysicalToolQuiescenceForCancellation({
+        acknowledgeQuiescence: false,
+        physicalToolQuiescenceConfirmed: false,
+        failure: fenceFailure,
+      }),
+    ).not.toThrow();
+  });
+
+  test("requires a durable receipt or exact proof after the physical fence", () => {
+    const persistenceFailure = new Error("receipt and proof delivery failed");
+    expect(() =>
+      assertSessionAttemptQuiescenceRecoveryDurable({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        receiptOrProofDurable: false,
+        failure: persistenceFailure,
+      }),
+    ).toThrow(persistenceFailure);
+    expect(() =>
+      assertSessionAttemptQuiescenceRecoveryDurable({
+        acknowledgeQuiescence: true,
+        physicalToolQuiescenceConfirmed: true,
+        receiptOrProofDurable: true,
+        failure: persistenceFailure,
+      }),
+    ).not.toThrow();
+  });
+
+  test("retries one immutable quiescence proof after receipt exhaustion", async () => {
+    const proof = {
+      accountId: "account-1",
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      attemptId: "attempt-1",
+      workflowId: "workflow-1",
+      workflowRunId: "run-1",
+      activityId: "activity-1",
+    };
+    const signals: Array<typeof proof> = [];
+    const sleeps: number[] = [];
+    const heartbeats: Array<{ attempt: number; delayMs: number }> = [];
+    let signalAttempts = 0;
+    expect(
+      await persistOrSignalSessionAttemptQuiescence({
+        proof,
+        persistReceipt: async () => {
+          throw new Error("three DB attempts exhausted");
+        },
+        publishEvents: async () => {
+          throw new Error("unreachable publish");
+        },
+        signalProof: async (delivered) => {
+          signals.push(delivered);
+          signalAttempts += 1;
+          if (signalAttempts < 3) throw new Error("Temporal unavailable");
+        },
+        sleep: async (ms) => {
+          sleeps.push(ms);
+        },
+        heartbeat: (attempt, delayMs) => {
+          heartbeats.push({ attempt, delayMs });
+        },
+      }),
+    ).toBe("signal");
+    expect(signals).toEqual([proof, proof, proof]);
+    expect(sleeps).toEqual([250, 500]);
+    expect(heartbeats).toEqual([
+      { attempt: 1, delayMs: 250 },
+      { attempt: 2, delayMs: 500 },
+    ]);
+  });
+
+  test("a live-fanout failure cannot masquerade as receipt loss", async () => {
+    let signalCalls = 0;
+    let publishFailures = 0;
+    expect(
+      await persistOrSignalSessionAttemptQuiescence({
+        proof: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "workflow-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+        },
+        persistReceipt: async () => [],
+        publishEvents: async () => {
+          throw new Error("NATS unavailable");
+        },
+        signalProof: async () => {
+          signalCalls += 1;
+        },
+        onPublishFailure: () => {
+          publishFailures += 1;
+        },
+      }),
+    ).toBe("receipt");
+    expect(signalCalls).toBe(0);
+    expect(publishFailures).toBe(1);
+  });
+
+  test("receipt exhaustion fails closed when the proof signaler is missing", async () => {
+    await expect(
+      persistOrSignalSessionAttemptQuiescence({
+        proof: {
+          accountId: "account-1",
+          workspaceId: "workspace-1",
+          sessionId: "session-1",
+          attemptId: "attempt-1",
+          workflowId: "workflow-1",
+          workflowRunId: "run-1",
+          activityId: "activity-1",
+        },
+        persistReceipt: async () => {
+          throw new Error("DB unavailable");
+        },
+        publishEvents: async () => undefined,
+        signalProof: null,
+      }),
+    ).rejects.toThrow(/signaler is unavailable/);
+  });
+
+  test("a cancelled activity never waits for a hung idempotent finalizer step", async () => {
+    const controller = new AbortController();
+    let rejectLate: ((error: Error) => void) | undefined;
+    const hung = new Promise<never>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    const startedAt = performance.now();
+    const waiting = waitForTurnFinalizerStep(hung, controller.signal);
+    controller.abort(new Error("STEER"));
+    await expect(waiting).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectLate?.(new Error("late cleanup failure"));
+    await Bun.sleep(0);
+  });
+
+  test("a cancelled activity detaches both hung batch flush and provider completion", async () => {
+    const controller = new AbortController();
+    let rejectFlush: ((error: Error) => void) | undefined;
+    let rejectProvider: ((error: Error) => void) | undefined;
+    const flush = new Promise<never>((_resolve, reject) => {
+      rejectFlush = reject;
+    });
+    const providerCompleted = new Promise<never>((_resolve, reject) => {
+      rejectProvider = reject;
+    });
+    const startedAt = performance.now();
+    const cleanup = waitForTurnStreamCleanup(flush, providerCompleted, controller.signal);
+    controller.abort(new Error("STEER"));
+    await expect(cleanup).resolves.toBeUndefined();
+    expect(performance.now() - startedAt).toBeLessThan(100);
+    rejectFlush?.(new Error("late batch failure"));
+    rejectProvider?.(new Error("late provider failure"));
+    await Bun.sleep(0);
   });
 });
 
@@ -1113,6 +1574,197 @@ describe("Codex response timeout recovery", () => {
 // goal-continuation recovery instead of a terminal session.failed — the gap that
 // hard-failed a fleet of prod sessions during a provider degradation window.
 describe("transient provider error classifier", () => {
+  test("a null accepted Codex stream settles terminally without same-turn recovery", async () => {
+    const observed = await actualCodexNullBodyFailure();
+    expect(observed.calls).toBe(1);
+    expect(agentRunFailurePayload(observed.error)).toEqual({
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    });
+
+    const wrapped = new CompactionProviderResponseError(
+      { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
+      observed.error,
+    );
+    expect(agentRunFailurePayload(wrapped)).toEqual({
+      error: "The Codex response stream ended without a terminal response",
+      code: "invalid_sse_terminal",
+      retryable: false,
+    });
+    expect(shouldRecoverCompactionProviderFailure(wrapped)).toBe(false);
+  });
+
+  test("an actual streamed Codex server failure settles as redacted same-turn recovery", async () => {
+    const observed = await actualCodexStreamingFailure({
+      type: "response.failed",
+      response: {
+        id: "resp_worker_server",
+        status: "failed",
+        error: {
+          type: "server_error",
+          code: "server_error",
+          message: "SECRET worker server provider detail",
+        },
+      },
+    });
+
+    expect(observed.calls).toBe(1);
+    expect(observed.forwarded).toBe("");
+    const payload = agentRunFailurePayload(observed.error);
+    expect(payload).toEqual({
+      error: "The Codex response failed",
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(providerRecoveryResult()).toEqual({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+  });
+
+  test("an actual streamed Codex context failure remains redacted and nonretryable", async () => {
+    const observed = await actualCodexStreamingFailure({
+      type: "response.failed",
+      response: {
+        id: "resp_worker_context",
+        status: "failed",
+        error: {
+          type: "invalid_request_error",
+          code: "context_length_exceeded",
+          message: "SECRET worker context provider detail",
+        },
+      },
+    });
+
+    expect(observed.calls).toBe(1);
+    expect(observed.forwarded).toBe("");
+    expect(classifyContextWindowOverflowError(observed.error)?.code).toBe(
+      "context_length_exceeded",
+    );
+    const payload = agentRunFailurePayload(observed.error);
+    expect(payload).toEqual({ error: "The Codex response failed" });
+    expect(payload.retryable).toBeUndefined();
+    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+  });
+
+  test("actual streamed Codex rate and usage terminals keep distinct truthful settlement", async () => {
+    const rate = await actualCodexStreamingFailure({
+      type: "error",
+      code: "rate_limit_exceeded",
+      message: "SECRET worker rate provider detail",
+    });
+    expect(rate.calls).toBe(1);
+    expect(rate.forwarded).toBe("");
+    expect(agentRunFailurePayload(rate.error)).toEqual({
+      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+      code: "provider_rate_limited",
+      retryable: true,
+      detail: "The Codex response stream reported an error",
+    });
+
+    const usage = await actualCodexStreamingFailure({
+      type: "response.failed",
+      response: {
+        id: "resp_worker_usage",
+        status: "failed",
+        error: {
+          type: "usage_limit_reached",
+          code: "usage_limit_reached",
+          message: "SECRET worker usage provider detail",
+        },
+      },
+    });
+    expect(usage.calls).toBe(1);
+    expect(usage.forwarded).toBe("");
+    const usagePayload = agentRunFailurePayload(usage.error);
+    expect(usagePayload.code).toBe("codex_usage_limit_reached");
+    expect(usagePayload.retryable).toBe(false);
+    expect(JSON.stringify({ rate, usage, usagePayload })).not.toContain("SECRET");
+  });
+
+  test("classifies nested database truth without retrying provider work or exposing SQL", () => {
+    const error = new SessionEventPersistenceError({
+      code: "db_deadlock",
+      sqlState: "40P01",
+      stage: "session_events.append_for_turn_attempt",
+      eventTypes: ["agent.model.usage"],
+      correlationId: "corr-safe",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: {
+        table: "session_events",
+        constraint: "session_events_workspace_session_sequence_idx",
+      },
+    });
+    const payload = agentRunFailurePayload(error);
+    expect(payload).toEqual({
+      error:
+        "Database deadlock while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      code: "db_deadlock",
+      detail: "The idempotent persistence transaction failed after 3 attempts.",
+      correlationId: "corr-safe",
+      stage: "session_events.append_for_turn_attempt",
+      sqlState: "40P01",
+      attempts: 3,
+      retryOutcome: "exhausted",
+      database: {
+        table: "session_events",
+        constraint: "session_events_workspace_session_sequence_idx",
+      },
+    });
+    expect(payload.retryable).toBeUndefined();
+    expect(JSON.stringify(payload)).not.toContain("insert into");
+    expect(JSON.stringify(payload)).not.toContain("parameters");
+  });
+
+  test("keeps no-SQLSTATE persistence failures safe for events, logs, and tracing", async () => {
+    const error = await runIdempotentPersistenceTransaction(
+      {
+        stage: "session_events.append_for_turn_attempt",
+        eventTypes: ["agent.model.usage"],
+        correlationId: "corr-unknown-safe",
+      },
+      async () => {
+        throw Object.assign(new Error("Failed query containing private-token"), {
+          query: "insert into session_events values ($1)",
+          params: ["private-token"],
+          driverError: {
+            table_name: "session_events",
+            detail: "private-token",
+          },
+        });
+      },
+    ).catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(SessionEventPersistenceError);
+    const payload = agentRunFailurePayload(error);
+    expect(payload).toEqual({
+      error:
+        "Database failure while persisting agent.model.usage. The completed provider call and external effects were not retried.",
+      code: "db_failure",
+      detail: "The database rejected the idempotent persistence transaction.",
+      correlationId: "corr-unknown-safe",
+      stage: "session_events.append_for_turn_attempt",
+      sqlState: null,
+      attempts: 1,
+      retryOutcome: "not_retryable",
+      database: { table: "session_events" },
+    });
+    const telemetrySurface = JSON.stringify({
+      payload,
+      name: (error as Error).name,
+      message: (error as Error).message,
+      stack: (error as Error).stack,
+      details: (error as SessionEventPersistenceError).details,
+      cause: (error as Error & { cause?: unknown }).cause,
+    });
+    expect(telemetrySurface).not.toContain("private-token");
+    expect(telemetrySurface).not.toContain("insert into");
+    expect(telemetrySurface).not.toContain("values ($1)");
+  });
+
   test("classifies 5xx status codes as transient (status is authoritative)", () => {
     for (const status of [500, 502, 503, 504, 529]) {
       const err = Object.assign(new Error("Service failure"), { status });
@@ -1216,22 +1868,44 @@ describe("transient provider error classifier", () => {
     expect(payload.error).toBe("Invalid 'input': expected a string");
   });
 
-  test("a 503 with an active goal idles and auto-continues instead of failing (end-to-end routing)", () => {
-    // Classifier → retryable, then the retryable turn-failure branch's recovery
-    // routing → idle + goal_continuation + backpressure delay. This is the exact
-    // path that was missing when ~29 prod sessions hard-failed on provider 5xx.
+  test("only transient provider compaction failures use same-turn recovery", () => {
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({
+          httpStatus: 429,
+          code: "rate_limit_exceeded",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      shouldRecoverCompactionProviderFailure(
+        new CompactionProviderResponseError({
+          httpStatus: 400,
+          code: "context_length_exceeded",
+        }),
+      ),
+    ).toBe(false);
+    expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+  });
+
+  test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {
+    // Classifier → retryable, then the retryable turn-failure branch recovers the
+    // accepted turn itself. No goal lookup or synthetic continuation is involved.
     const failure = agentRunFailurePayload(
       Object.assign(new Error("Our servers are currently overloaded. Please try again later."), {
         status: 503,
       }),
     );
-    expect(failure.retryable).toBe(true); // enters the retryable branch (not the terminal one)
-    expect(providerRetryRecovery(true)).toEqual({
-      recovery: "goal_continuation",
+    expect(failure.retryable).toBe(true); // enters the recovery branch (not the terminal one)
+    expect(providerRecoveryResult()).toEqual({
+      status: "recovering",
       continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
     });
-    // A goal-less session idles too, but waits for the next user message (no auto-continue).
-    expect(providerRetryRecovery(false)).toEqual({ recovery: "user_message" });
   });
 
   test("agentRunFailurePayload keeps a ChatGPT/Codex usage cap non-retryable (429 that won't clear)", () => {

@@ -50,6 +50,7 @@ async function freshWorkspace(): Promise<{
     insert into managed_accounts (name) values ('acct') returning id`;
   const [w] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${a!.id}, 'ws') returning id`;
+  await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
   return { accountId: a!.id, workspaceId: w!.id, groupId: crypto.randomUUID() };
 }
 
@@ -153,7 +154,7 @@ afterAll(async () => {
     /* noop */
   }
   await shared?.release();
-});
+}, 180_000);
 
 describe("P2.1 warm-time metering (real packages/db + RLS)", () => {
   test("(1) the FIRST tick seeds the cursor (no accrual); the SECOND tick accrues warm-seconds", async () => {

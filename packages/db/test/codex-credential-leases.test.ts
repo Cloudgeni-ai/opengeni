@@ -20,6 +20,7 @@ import {
   heartbeatCodexCredentialLeaseUntil,
   listCodexAccountStatuses,
   loadCodexCredentialForRun,
+  mutateSessionControlInTransaction,
   quarantineCodexCredentialForLease,
   recordCodexAccountUsage,
   recordCodexTokenRefresh,
@@ -64,6 +65,7 @@ async function freshAccount(workspaceCount = 1): Promise<Workspace[]> {
     const [workspace] = await admin<{ id: string }[]>`
       insert into workspaces (account_id, name)
       values (${account!.id}, ${`codex-ws-${i}`}) returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
     result.push({ accountId: account!.id, workspaceId: workspace!.id });
   }
   return result;
@@ -93,6 +95,7 @@ async function connectCredential(ws: Workspace, externalId: string): Promise<str
 async function seedTurn(ws: Workspace, position = 1): Promise<string> {
   const sessionId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
+  const attemptId = crypto.randomUUID();
   await admin`
     insert into sessions (
       id, account_id, workspace_id, initial_message, model,
@@ -101,17 +104,35 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
       ${sessionId}, ${ws.accountId}, ${ws.workspaceId}, 'test',
       'codex/gpt-5.6-sol', 'modal', ${sessionId}, 'running'
     )`;
-  await admin`
-    insert into session_turns (
-      id, account_id, workspace_id, session_id, trigger_event_id,
-      temporal_workflow_id, status, position, prompt, model,
-      reasoning_effort, sandbox_backend, active_attempt_id
-    ) values (
-      ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
-      'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', ${turnId}
-    )`;
-  await admin`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
+  await admin.begin(async (transaction) => {
+    await transaction`
+      insert into session_turns (
+        id, account_id, workspace_id, session_id, trigger_event_id,
+        temporal_workflow_id, status, position, prompt, model,
+        reasoning_effort, sandbox_backend, active_attempt_id
+      ) values (
+        ${turnId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${crypto.randomUUID()},
+        'wf', 'running', ${position}, 'test', 'codex/gpt-5.6-sol', 'low', 'modal', ${attemptId}
+      )`;
+    await transaction`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision
+      ) values (
+        ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 0,
+        'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0
+      )`;
+    await transaction`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
+  });
   return turnId;
+}
+
+async function activeAttemptIdForTurn(turnId: string): Promise<string> {
+  const [turn] = await admin<{ active_attempt_id: string | null }[]>`
+    select active_attempt_id from session_turns where id = ${turnId}`;
+  if (!turn?.active_attempt_id) throw new Error(`Turn ${turnId} has no active attempt`);
+  return turn.active_attempt_id;
 }
 
 function selector(context: CodexCredentialLeaseSelectionContext): {
@@ -182,9 +203,9 @@ afterAll(async () => {
   await clientA?.close().catch(() => undefined);
   await clientB?.close().catch(() => undefined);
   await shared?.release();
-});
+}, 180_000);
 
-describe("OPE-21 atomic Codex credential allocation", () => {
+describe("credential allocator atomic Codex credential allocation", () => {
   test("legacy and lease defaults stay off until an explicit settings cutover", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
@@ -301,7 +322,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     const alternateCredential = await connectCredential(ws!, "temporary-alternate");
     expect(await setActiveCodexCredential(dbA, ws!.workspaceId, toggledCredential)).toBe(true);
 
-    // Start a real holder before the future OPE-24 allocator transition. Temporary
+    // Start a real holder before the future account eligibility policy allocator transition. Temporary
     // disable is an eligibility-only state: it must not delete credentials or
     // revoke/terminate a turn that already owns a fenced lease.
     const inFlightTurn = await seedTurn(ws!, 1);
@@ -328,7 +349,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     expect(beforeDisable?.status).toBe("active");
     expect(beforeDisable?.allocator_enabled).toBe(true);
 
-    // OPE-24 owns the eventual OCC/audit write/API. OPE-21 owns only this
+    // account eligibility policy owns the eventual OCC/audit write/API. credential allocator owns only this
     // additive field and allocator behavior; health status remains active.
     await admin`
       update codex_subscription_credentials
@@ -405,7 +426,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
 
     // A redispatch of the same still-live durable turn keeps its exact
     // credential even though the row is no longer available to new turns. The
-    // downstream scope is intentionally private/opaque to OPE-21, and its
+    // downstream scope is intentionally private/opaque to credential allocator, and its
     // candidate filter excludes the live credential. The filter must never run:
     // exact live holder reuse is structurally resolved first.
     await admin`
@@ -522,7 +543,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
         advanceActivePointer: true,
         resolvePolicyScope: resolvePrivateAcceptedScope,
         filterNewAllocationCandidates: ({ accounts, policyScope }) => ({
-          // OPE-32 privately resolves primary then fallbacks; OPE-21 receives
+          // policy filter privately resolves primary then fallbacks; credential allocator receives
           // only the chosen scope's rows and does not understand pool ids.
           accounts: accounts.filter((account) => account.id === alternateCredential),
           unavailableDiagnostics: [
@@ -809,14 +830,18 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     ).toBe(true);
   });
 
-  test("long-turn heartbeat renews the holder; crash expiry is reclaimed; release is idempotent", async () => {
+  test("heartbeat extends the live holder; crash expiry is reclaimed; release is idempotent", async () => {
     if (!available) return;
     const [ws] = await freshAccount();
     await connectCredential(ws!, "long-turn-a");
     await connectCredential(ws!, "long-turn-b");
     const turnA = await seedTurn(ws!, 1);
-    const originalTtlMs = 200;
-    const renewedTtlMs = 2_000;
+    // The contract under test is lease extension, not whether a loaded CI host
+    // can schedule the heartbeat query inside a sub-second test TTL. Keep the
+    // initial holder comfortably live and prove the database-confirmed deadline
+    // moves forward before checking cross-replica exclusion.
+    const originalTtlMs = 30_000;
+    const renewedTtlMs = 120_000;
     const first = await acquire(dbA, ws!, turnA, originalTtlMs);
     expect(first.credentialId).not.toBeNull();
     const renewedUntil = await heartbeatCodexCredentialLeaseUntil(
@@ -842,9 +867,8 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       ),
     ).toBe(true);
 
-    // Cross the ORIGINAL TTL while the renewed holder stays live. A competing
-    // replica must still observe that reservation and use the other credential.
-    await Bun.sleep(originalTtlMs + 100);
+    // A competing replica must observe the renewed reservation and use the
+    // other credential. Crash expiry below remains deterministic and sleep-free.
     const [lease] = await admin<{ leased_until: Date }[]>`
       select leased_until from codex_credential_leases where turn_id = ${turnA}`;
     expect(lease!.leased_until.getTime()).toBeGreaterThan(Date.now());
@@ -952,12 +976,13 @@ describe("OPE-21 atomic Codex credential allocation", () => {
 
     const [session] = await admin<{ session_id: string }[]>`
       select session_id from session_turns where id = ${turnId}`;
+    const attemptId = await activeAttemptIdForTurn(turnId);
     const staleSettlement = await settleCodexCredentialLeaseLoss(dbA, {
       accountId: ws!.accountId,
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -984,6 +1009,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     await connectCredential(ws!, "lease-loss-a");
     const turnId = await seedTurn(ws!, 1);
     const first = await acquire(dbA, ws!, turnId);
+    const attemptId = await activeAttemptIdForTurn(turnId);
     const [session] = await admin<{ session_id: string; trigger_event_id: string }[]>`
       select session_id, trigger_event_id from session_turns where id = ${turnId}`;
     await admin`delete from codex_credential_leases where turn_id = ${turnId}`;
@@ -993,7 +1019,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -1004,16 +1030,22 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     expect(settled.action).toBe("recovering");
     if (settled.action !== "recovering") throw new Error("expected lease-loss requeue");
     const [row] = await admin<
-      { turn_status: string; session_status: string; active_turn_id: string | null }[]
+      {
+        turn_status: string;
+        session_status: string;
+        active_turn_id: string | null;
+        active_attempt_id: string | null;
+      }[]
     >`
       select t.status as turn_status, s.status as session_status,
-             s.active_turn_id
+             s.active_turn_id, t.active_attempt_id
       from session_turns t join sessions s on s.id = t.session_id
       where t.id = ${turnId}`;
     expect(row).toEqual({
       turn_status: "recovering",
       session_status: "recovering",
       active_turn_id: turnId,
+      active_attempt_id: null,
     });
     expect(settled.events.map((event) => event.type)).toEqual([
       "turn.recovery.requested",
@@ -1025,7 +1057,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -1046,6 +1078,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     await connectCredential(ws!, "lease-loss-checkpoint-a");
     const turnId = await seedTurn(ws!, 1);
     const first = await acquire(dbA, ws!, turnId);
+    const attemptId = await activeAttemptIdForTurn(turnId);
     const [session] = await admin<{ session_id: string; trigger_event_id: string }[]>`
       select session_id, trigger_event_id from session_turns where id = ${turnId}`;
     await admin`delete from codex_credential_leases where turn_id = ${turnId}`;
@@ -1055,7 +1088,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -1073,20 +1106,30 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       "session.status.changed",
     ]);
     const [row] = await admin<
-      { turn_status: string; session_status: string; active_turn_id: string | null }[]
+      {
+        turn_status: string;
+        session_status: string;
+        active_turn_id: string | null;
+        active_attempt_id: string | null;
+      }[]
     >`
       select t.status as turn_status, s.status as session_status,
-             s.active_turn_id
+             s.active_turn_id, t.active_attempt_id
       from session_turns t join sessions s on s.id = t.session_id
       where t.id = ${turnId}`;
-    expect(row).toEqual({ turn_status: "failed", session_status: "failed", active_turn_id: null });
+    expect(row).toEqual({
+      turn_status: "failed",
+      session_status: "failed",
+      active_turn_id: null,
+      active_attempt_id: null,
+    });
 
     const duplicate = await settleCodexCredentialLeaseLoss(dbB, {
       accountId: ws!.accountId,
       workspaceId: ws!.workspaceId,
       sessionId: session!.session_id,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -1108,6 +1151,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     await connectCredential(ws!, "expiry-gap-b");
     const turnId = await seedTurn(ws!, 1);
     const first = await acquire(dbA, ws!, turnId);
+    const attemptId = await activeAttemptIdForTurn(turnId);
     const [turn] = await admin<{ session_id: string; trigger_event_id: string }[]>`
       select session_id, trigger_event_id from session_turns where id = ${turnId}`;
 
@@ -1133,7 +1177,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: turn!.session_id,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -1169,12 +1213,25 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     await connectCredential(ws!, "paused-lease-b");
     const turnId = await seedTurn(ws!, 1);
     const lease = await acquire(dbA, ws!, turnId);
+    const attemptId = await activeAttemptIdForTurn(turnId);
     const [turn] = await admin<{ session_id: string }[]>`
       select session_id from session_turns where id = ${turnId}`;
-    await admin`
-      update sessions
-      set control_state = 'paused'
-      where workspace_id = ${ws!.workspaceId} and id = ${turn!.session_id}`;
+    await withRlsContext(
+      dbA,
+      { accountId: ws!.accountId, workspaceId: ws!.workspaceId },
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          await mutateSessionControlInTransaction(tx as unknown as Database, {
+            accountId: ws!.accountId,
+            workspaceId: ws!.workspaceId,
+            sessionId: turn!.session_id,
+            actor: { type: "human", subjectId: "lease-pause-test" },
+            operationKey: crypto.randomUUID(),
+            action: "pause",
+            reason: "lease settlement gate test",
+          });
+        }),
+    );
 
     expect(
       await settleCodexCredentialFailover(dbA, {
@@ -1182,7 +1239,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
         workspaceId: ws!.workspaceId,
         sessionId: turn!.session_id,
         turnId,
-        attemptId: turnId,
+        attemptId,
         holderId: lease.holderId!,
         generation: lease.generation!,
         expectedRedispatches: 0,
@@ -1196,7 +1253,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
         workspaceId: ws!.workspaceId,
         sessionId: turn!.session_id,
         turnId,
-        attemptId: turnId,
+        attemptId,
         holderId: lease.holderId!,
         generation: lease.generation!,
         expectedRedispatches: 0,
@@ -1333,6 +1390,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
     await connectCredential(ws!, "failover-b");
     const turnId = await seedTurn(ws!, 1);
     const first = await acquire(dbA, ws!, turnId);
+    const attemptId = await activeAttemptIdForTurn(turnId);
     expect(first.credentialId).not.toBeNull();
     await setCodexCredentialExhausted(
       dbA,
@@ -1350,7 +1408,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: sessionId!,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,
@@ -1390,7 +1448,7 @@ describe("OPE-21 atomic Codex credential allocation", () => {
       workspaceId: ws!.workspaceId,
       sessionId: sessionId!,
       turnId,
-      attemptId: turnId,
+      attemptId,
       holderId: first.holderId!,
       generation: first.generation!,
       expectedRedispatches: 0,

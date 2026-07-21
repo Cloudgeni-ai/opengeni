@@ -1,39 +1,43 @@
 import {
-  settlePendingSessionControl,
+  settleSessionAttemptInterruptions,
   applySessionTurnSettlement,
-  applySessionTurnWorkerDeath,
-  claimNextSessionExecution as claimNextSessionExecutionDb,
+  recoverSessionDispatch,
+  peekSessionWork as peekSessionWorkDb,
   countQueuedTurns,
   getSessionEvent,
-  getSessionTurn,
+  getSessionTurnForAttempt,
+  markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
 } from "@opengeni/db";
 import { publishDurableSessionEvents } from "@opengeni/events";
-import { notifyParentOfChildTerminal } from "./parent-wake";
+import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./parent-wake";
 import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
   ActivityServices,
-  ClaimNextSessionExecutionInput,
-  SettleSessionControlInput,
+  PeekSessionWorkInput,
+  FailSessionAttemptInput,
+  SettleSessionInterruptionsInput,
   MarkSessionIdleInput,
-  RecoverTurnAfterWorkerDeathInput,
-  RecoverTurnAfterWorkerDeathResult,
-  RunAgentTurnInput,
+  PersistSessionAttemptQuiescenceInput,
+  RecoverDispatchInput,
+  RecoverDispatchResult,
 } from "./types";
 
 export type SessionStateActivityOverrides = Partial<{
-  settlePendingSessionControl: typeof settlePendingSessionControl;
+  settleSessionAttemptInterruptions: typeof settleSessionAttemptInterruptions;
   applySessionTurnSettlement: typeof applySessionTurnSettlement;
-  applySessionTurnWorkerDeath: typeof applySessionTurnWorkerDeath;
-  claimNextSessionExecution: typeof claimNextSessionExecutionDb;
+  recoverSessionDispatch: typeof recoverSessionDispatch;
+  peekSessionWork: typeof peekSessionWorkDb;
   countQueuedTurns: typeof countQueuedTurns;
   getSessionEvent: typeof getSessionEvent;
-  getSessionTurn: typeof getSessionTurn;
+  getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
+  markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
   publishDurableSessionEvents: typeof publishDurableSessionEvents;
-  notifyParentOfChildTerminal: typeof notifyParentOfChildTerminal;
+  deliverFailedChildTurnToParent: typeof deliverFailedChildTurnToParent;
+  notifyParentOfChildIdle: typeof notifyParentOfChildIdle;
   recordTurnsQueuedGauge: typeof recordTurnsQueuedGauge;
 }>;
 
@@ -47,38 +51,45 @@ export function createSessionStateActivities(
   services: () => Promise<ActivityServices>,
   overrides: SessionStateActivityOverrides = {},
 ) {
-  const settlePendingSessionControlFn =
-    overrides.settlePendingSessionControl ?? settlePendingSessionControl;
+  const settleSessionAttemptInterruptionsFn =
+    overrides.settleSessionAttemptInterruptions ?? settleSessionAttemptInterruptions;
   const applySessionTurnSettlementFn =
     overrides.applySessionTurnSettlement ?? applySessionTurnSettlement;
-  const applySessionTurnWorkerDeathFn =
-    overrides.applySessionTurnWorkerDeath ?? applySessionTurnWorkerDeath;
-  const claimNextSessionExecutionFn =
-    overrides.claimNextSessionExecution ?? claimNextSessionExecutionDb;
+  const recoverSessionDispatchFn = overrides.recoverSessionDispatch ?? recoverSessionDispatch;
+  const peekSessionWorkFn = overrides.peekSessionWork ?? peekSessionWorkDb;
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
-  const getSessionTurnFn = overrides.getSessionTurn ?? getSessionTurn;
+  const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
+  const markSessionAttemptQuiescedFn =
+    overrides.markSessionAttemptQuiesced ?? markSessionAttemptQuiesced;
   const publishDurableSessionEventsFn =
     overrides.publishDurableSessionEvents ?? publishDurableSessionEvents;
-  const notifyParentOfChildTerminalFn =
-    overrides.notifyParentOfChildTerminal ?? notifyParentOfChildTerminal;
+  const deliverFailedChildTurnToParentFn =
+    overrides.deliverFailedChildTurnToParent ?? deliverFailedChildTurnToParent;
+  const notifyParentOfChildIdleFn = overrides.notifyParentOfChildIdle ?? notifyParentOfChildIdle;
   const recordTurnsQueuedGaugeFn = overrides.recordTurnsQueuedGauge ?? recordTurnsQueuedGauge;
 
-  async function failSession(input: RunAgentTurnInput & { error?: string }): Promise<void> {
+  async function failSessionAttempt(input: FailSessionAttemptInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const session = await requireSessionFn(db, input.workspaceId, input.sessionId);
     if (session.status === "failed") {
       return;
     }
-    const turnId = input.turnId;
-    const trigger = await getSessionEventFn(db, input.workspaceId, input.triggerEventId);
+    const turn = await getSessionTurnForAttemptFn(
+      db,
+      input.workspaceId,
+      input.sessionId,
+      input.attemptId,
+    );
+    if (!turn) return;
+    const trigger = await getSessionEventFn(db, input.workspaceId, turn.triggerEventId);
     const result = await applySessionTurnSettlementFn(db, input.workspaceId, {
       sessionId: input.sessionId,
-      turnId,
-      triggerEventId: input.triggerEventId,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
       attemptId: input.attemptId,
       turnStatus: "failed",
       sessionStatus: "failed",
@@ -87,7 +98,7 @@ export function createSessionStateActivities(
         {
           type: "turn.failed",
           payload: {
-            triggerEventId: input.triggerEventId,
+            triggerEventId: turn.triggerEventId,
             trigger: trigger?.payload ?? null,
             error: input.error ?? "Agent activity failed before it could report a terminal state.",
           },
@@ -99,26 +110,74 @@ export function createSessionStateActivities(
       return;
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
-    await notifyParentOfChildTerminalFn(
+    await deliverFailedChildTurnToParentFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
       input.sessionId,
-      "failed",
+      turn.id,
     );
   }
 
-  async function settleSessionControl(input: SettleSessionControlInput): Promise<void> {
+  async function settleSessionInterruptions(
+    input: SettleSessionInterruptionsInput,
+  ): Promise<{ action: "paused" | "continue" | "stale" }> {
     const { db, bus, observability } = await services();
-    const applied = await settlePendingSessionControlFn(
+    if (input.phase === "attempt_quiesced") {
+      // Replay compatibility only: v1 histories scheduled this idempotent
+      // fallback after WAIT_CANCELLATION_COMPLETED. Receipt-gated v2 workflows
+      // never call it; runAgentTurn writes immediately after its hard fence.
+      const events = await markSessionAttemptQuiescedFn(db, {
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        temporalWorkflowId: input.workflowId,
+      });
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+      return { action: "stale" };
+    }
+    const applied = await settleSessionAttemptInterruptionsFn(
       db,
       input.workspaceId,
       input.sessionId,
-      input.triggerEventId,
+      input.attemptId,
     );
     if (applied.events.length > 0) {
       await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, applied.events);
     }
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
+    return { action: applied.action };
+  }
+
+  /** Persist an exact activity-owned physical-quiescence proof through the
+   * workflow control-activity retry policy. The DB transaction remains the
+   * sole receipt/wake authority; duplicate signals and activity retries reuse
+   * its attempt-scoped idempotency key. */
+  async function persistSessionAttemptQuiescence(
+    input: PersistSessionAttemptQuiescenceInput,
+  ): Promise<void> {
+    const { db, bus, observability } = await services();
+    const events = await markSessionAttemptQuiescedFn(db, {
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      attemptId: input.attemptId,
+      temporalWorkflowId: input.workflowId,
+      temporalWorkflowRunId: input.workflowRunId,
+      temporalActivityId: input.activityId,
+      allowUninterrupted: true,
+    });
+    try {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, events);
+    } catch (error) {
+      // The receipt and exact workflow wake already committed atomically in
+      // Postgres. NATS is best-effort live fanout and must not keep this
+      // control activity retrying or delay receipt-gated admission.
+      observability.error("session-attempt quiescence event fanout failed", {
+        "opengeni.session_id": input.sessionId,
+        "opengeni.attempt_id": input.attemptId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   /**
@@ -128,51 +187,44 @@ export function createSessionStateActivities(
    * same turn; recovery creates a new fenced attempt, never a prompt-queue row
    * or a synthetic resume message. Repeated worker deaths are bounded per turn.
    */
-  async function recoverTurnAfterWorkerDeath(
-    input: RecoverTurnAfterWorkerDeathInput,
-  ): Promise<RecoverTurnAfterWorkerDeathResult> {
+  async function recoverDispatch(input: RecoverDispatchInput): Promise<RecoverDispatchResult> {
     const { settings, db, bus, observability, wakeSessionWorkflow } = await services();
-    const turn = await getSessionTurnFn(db, input.workspaceId, input.turnId);
-    if (!turn || (turn.status !== "running" && turn.status !== "requires_action")) {
-      return { action: "stale" };
-    }
-    const result = await applySessionTurnWorkerDeathFn(db, input.workspaceId, {
+    const result = await recoverSessionDispatchFn(db, input.workspaceId, {
       sessionId: input.sessionId,
-      turnId: input.turnId,
-      triggerEventId: input.triggerEventId,
       attemptId: input.attemptId,
-      dispatchId: input.dispatchId,
       timeoutType: input.timeoutType,
       maxRedispatches: WORKER_DEATH_MAX_REDISPATCHES,
     });
-    if (result.action === "stale") {
-      return { action: "stale" };
+    if (result.action === "stale" || result.action === "unclaimed") {
+      return { action: result.action };
     }
     await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
     if (result.action === "exceeded") {
-      await notifyParentOfChildTerminalFn(
+      await deliverFailedChildTurnToParentFn(
         { db, bus, settings, observability, wakeSessionWorkflow },
         input.workspaceId,
         input.sessionId,
-        "failed",
-        `turn:${input.turnId}`,
+        result.turnId,
       );
-      return { action: "exceeded", redispatches: result.redispatches };
+      return {
+        action: "exceeded",
+        turnId: result.turnId,
+        redispatches: result.redispatches,
+      };
     }
-    return { action: "recovering", redispatches: result.redispatches };
+    return {
+      action: "recovering",
+      turnId: result.turnId,
+      redispatches: result.redispatches,
+    };
   }
 
-  async function claimNextSessionExecution(input: ClaimNextSessionExecutionInput) {
+  async function peekSessionWork(input: PeekSessionWorkInput) {
     const { db, observability } = await services();
-    const turn = await claimNextSessionExecutionFn(
-      db,
-      input.workspaceId,
-      input.sessionId,
-      input.workflowId,
-    );
+    const peek = await peekSessionWorkFn(db, input.workspaceId, input.sessionId);
     await refreshQueuedTurnsGauge(db, observability, countQueuedTurnsFn, recordTurnsQueuedGaugeFn);
-    return turn;
+    return peek;
   }
 
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
@@ -194,20 +246,20 @@ export function createSessionStateActivities(
     // point for a spawned worker, whatever the cause (goal completed, agent or
     // system paused goal, goalless work finished, idle control settlement). Wake
     // the parent here, deduped per idle episode so the manager is nudged once.
-    await notifyParentOfChildTerminalFn(
+    await notifyParentOfChildIdleFn(
       { db, bus, settings, observability, wakeSessionWorkflow },
       input.workspaceId,
       input.sessionId,
-      "idle",
       settled.episodeKey,
     );
   }
 
   return {
-    failSession,
-    settleSessionControl,
-    recoverTurnAfterWorkerDeath,
-    claimNextSessionExecution,
+    failSessionAttempt,
+    settleSessionInterruptions,
+    persistSessionAttemptQuiescence,
+    recoverDispatch,
+    peekSessionWork,
     markSessionIdle,
   };
 }

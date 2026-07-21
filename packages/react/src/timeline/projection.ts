@@ -393,7 +393,7 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
           tone: "waiting",
           text:
             before && after
-              ? `Context compacted from approximately ${before} to ${after} tokens.`
+              ? `Active conversation history compacted from approximately ${before} to ${after} tokens.`
               : "Context compacted so the turn could continue.",
           occurredAt: event.occurredAt,
         });
@@ -406,50 +406,33 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         items.push({
           kind: "notice",
           id: event.id,
-          tone: "waiting",
+          tone: reason === "summarization_failed" ? "failed" : "waiting",
           text:
             reason === "no_history"
               ? "Context compaction skipped because there is no active history to compact."
               : reason === "replacement_not_smaller"
                 ? "Context compaction skipped because the generated checkpoint would not reduce the context."
-                : "Context compaction was not needed.",
+                : reason === "replacement_unchanged"
+                  ? "Context compaction stopped because it reproduced the same checkpoint without making progress."
+                  : reason === "summarization_failed"
+                    ? "Context compaction failed without replacing the active conversation history. Request it again to retry."
+                    : "Context compaction was not needed.",
           occurredAt: event.occurredAt,
         });
         break;
       }
 
       case "turn.recovery.requested": {
-        closeStreamingTail();
-        const reason =
-          typeof payload.reason === "string" ? payload.reason.replaceAll("_", " ") : null;
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "waiting",
-          text: reason
-            ? `The current turn is recovering after ${reason}. No new prompt was queued.`
-            : "The current turn is recovering. No new prompt was queued.",
-          occurredAt: event.occurredAt,
-        });
+        // Recovery requests are durable control-plane evidence, not a user
+        // message or proof that recovery succeeded. Live state already exposes
+        // a genuinely recovering session; keep the raw event in Debug/audit.
         break;
       }
 
       case "turn.event.rejected_late": {
-        closeStreamingTail();
-        const rejectedType =
-          typeof payload.rejectedType === "string" ? payload.rejectedType : "unknown event";
-        const reason =
-          typeof payload.reason === "string"
-            ? payload.reason.replaceAll("_", " ")
-            : "attempt fence";
-        items.push({
-          kind: "notice",
-          id: event.id,
-          tone: "cancelled",
-          text: `Late ${rejectedType} evidence was rejected by the ${reason} and did not change the current turn.`,
-          details: { label: "Inspect rejected evidence", value: payload },
-          occurredAt: event.occurredAt,
-        });
+        // Attempt-fence rejections prove stale callbacks did not alter current
+        // truth. They are useful diagnostics but never actionable chat content,
+        // regardless of the rejected event type. Debug/audit retains the event.
         break;
       }
 
@@ -729,13 +712,13 @@ function prescanTurnAnchors(events: SessionEvent[]): TurnAnchorPrescan {
       cancelledTurnIds.add(turnId);
     }
 
-    if (turnId && event.type !== "turn.queued" && event.type !== "turn.cancelled") {
+    if (turnId && isTurnExecutionEvidence(event.type)) {
       const previous = fallbackSeqByTurn.get(turnId);
       if (previous === undefined || event.sequence < previous) {
         fallbackSeqByTurn.set(turnId, event.sequence);
       }
     }
-    if (turnId && isAgentActivityEvent(event.type)) {
+    if (turnId && isTurnExecutionEvidence(event.type)) {
       startedTurnIds.add(turnId);
     }
   }
@@ -817,6 +800,28 @@ function pushInsertion(
 
 function isAgentActivityEvent(type: string): boolean {
   return type.startsWith("agent.") || type.startsWith("sandbox.");
+}
+
+/**
+ * Evidence that a queued prompt crossed the execution boundary when an older
+ * or partially recovered ledger is missing its canonical `turn.started`.
+ * Queue/control bookkeeping intentionally does not qualify: moving, editing,
+ * steering, or deleting a waiting row must never make its prompt appear in the
+ * transcript as though inference had begun.
+ */
+function isTurnExecutionEvidence(type: string): boolean {
+  return (
+    isAgentActivityEvent(type) ||
+    type === "turn.completed" ||
+    type === "turn.failed" ||
+    type === "turn.recovery.requested" ||
+    type === "turn.capacity_waiting" ||
+    type === "session.requiresAction" ||
+    type === "tool.auth_needed" ||
+    type.startsWith("rig.setup.") ||
+    type === "codex.capacity.waiting" ||
+    type === "codex.capacity.resumed"
+  );
 }
 
 function turnEndItem(

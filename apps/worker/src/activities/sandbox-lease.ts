@@ -43,6 +43,7 @@ import {
   listMeterableWarmLeases,
   persistDrainSnapshot,
   readLease,
+  reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
   rlsContextForWorkspace,
   type MeterableWarmLease,
@@ -181,10 +182,23 @@ export function createSandboxLeaseActivities(
       observability.warn("system-update outbox reconciliation failed", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return { claimed: 0, delivered: 0, failed: 1, wakeRepairs: 0 };
+      return { claimed: 0, delivered: 0, failed: 1 };
     });
+    const expiredSessionListSnapshots = await reapExpiredSessionListSnapshots(db, 500).catch(
+      (error) => {
+        observability.warn("session-list snapshot reconciliation failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return 0;
+      },
+    );
+    if (expiredSessionListSnapshots > 0) {
+      observability.info("expired session-list snapshots reaped", {
+        deleted: expiredSessionListSnapshots,
+      });
+    }
     if (!settings.sandboxOwnershipEnabled) {
-      if (parentUpdates.claimed > 0 || parentUpdates.wakeRepairs > 0) {
+      if (parentUpdates.claimed > 0) {
         observability.info("system-update outbox reconciled", parentUpdates);
       }
       return {
@@ -633,7 +647,7 @@ export async function terminateProviderBox(
     return true;
   }
 
-  // CRITICAL SAFETY (bring-your-own-compute, dossier §19/§21): NEVER provider-stop
+  // CRITICAL SAFETY (bring-your-own-compute): NEVER provider-stop
   // a selfhosted box. The "box" is a user's PHYSICAL machine — you cannot kill it,
   // and a delete()/kill() reaching the agent would be catastrophic. The reaper
   // DRAINS the lease to cold only (refcount→0 → draining → this returns true so

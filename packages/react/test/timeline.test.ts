@@ -447,6 +447,12 @@ describe("buildTimeline", () => {
         ),
         eventAt(
           18,
+          "session.queue.changed",
+          { operation: "move", targetTurnId: "turn-b", queueVersion: 2 },
+          { turnId: "turn-b" },
+        ),
+        eventAt(
+          19,
           "turn.cancelled",
           { turnId: "turn-b", triggerEventId: "evt-16" },
           { turnId: "turn-b" },
@@ -688,7 +694,7 @@ describe("buildTimeline", () => {
     expect(items[0]).toMatchObject({
       kind: "notice",
       tone: "waiting",
-      text: "Context compacted from approximately 288,000 to 23,091 tokens.",
+      text: "Active conversation history compacted from approximately 288,000 to 23,091 tokens.",
     });
   });
 
@@ -727,34 +733,76 @@ describe("buildTimeline", () => {
     ]);
   });
 
-  test("shows same-turn recovery without pretending it is queued work", () => {
+  test("shows a terminal compaction-summary failure without claiming history changed", () => {
     reset();
-    const items = buildTimeline([event("turn.recovery.requested", { reason: "worker_shutdown" })]);
+    const items = buildTimeline([
+      event("session.context.compaction.skipped", { reason: "summarization_failed" }),
+    ]);
     expect(items).toEqual([
       expect.objectContaining({
         kind: "notice",
-        tone: "waiting",
-        text: "The current turn is recovering after worker shutdown. No new prompt was queued.",
+        tone: "failed",
+        text: "Context compaction failed without replacing the active conversation history. Request it again to retry.",
       }),
     ]);
   });
 
-  test("keeps rejected zombie evidence visible and inspectable", () => {
+  test("hides same-turn recovery control evidence from the user timeline", () => {
     reset();
-    const payload = {
-      rejectedType: "agent.toolCall.output",
-      rejectedPayload: { id: "call-1", output: "finished too late" },
-      reason: "attempt_changed",
-    };
-    const items = buildTimeline([event("turn.event.rejected_late", payload)]);
-    expect(items).toEqual([
-      expect.objectContaining({
-        kind: "notice",
-        tone: "cancelled",
-        text: expect.stringContaining("Late agent.toolCall.output evidence was rejected"),
-        details: { label: "Inspect rejected evidence", value: payload },
+    const items = buildTimeline([event("turn.recovery.requested", { reason: "worker_shutdown" })]);
+    expect(items).toEqual([]);
+  });
+
+  test("hides workspace recovery control evidence from the user timeline", () => {
+    reset();
+    const items = buildTimeline([event("turn.recovery.requested", { reason: "workspace_pause" })]);
+    expect(items).toEqual([]);
+  });
+
+  test("hides all rejected attempt evidence from the user timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.event.rejected_late", {
+        rejectedType: "agent.toolCall.output",
+        rejectedPayload: { id: "call-1", output: "finished too late" },
+        reason: "attempt_changed",
+      }),
+      event("turn.event.rejected_late", {
+        rejectedType: "agent.model.usage",
+        rejectedPayload: { inputTokens: 10, outputTokens: 5 },
+        reason: "session_paused",
       }),
     ]);
+    expect(items).toEqual([]);
+  });
+
+  test("hides rejected workspace revision bookkeeping from the user timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.event.rejected_late", {
+        rejectedType: "workspace.revision.captured",
+        rejectedPayload: { revision: 3 },
+        reason: "active_turn_changed",
+      }),
+      event("turn.event.rejected_late", {
+        rejectedType: "workspace.revision.degraded",
+        rejectedPayload: { revision: 4 },
+        reason: "active_turn_changed",
+      }),
+    ]);
+    expect(items).toEqual([]);
+  });
+
+  test("hides rejected late reasoning fragments from the user timeline", () => {
+    reset();
+    const items = buildTimeline([
+      event("turn.event.rejected_late", {
+        rejectedType: "agent.reasoning.delta",
+        rejectedPayload: { text: "**internal discarded fragment**" },
+        reason: "workspace_paused",
+      }),
+    ]);
+    expect(items).toEqual([]);
   });
 
   test("routine repository-clone operations never render", () => {

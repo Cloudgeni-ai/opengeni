@@ -1,4 +1,4 @@
-// M1 B-suite integration (dossier §12 B1–B7, §14). Drives REAL agent bash turns
+// Workspace-capture integration suite. Drives REAL agent bash turns
 // on the docker sandbox backend through the running dev stack (API :8001 +
 // worker + docker box) via the public SDK seed harness, then inspects the
 // persisted capture: the DB rows (postgres, superuser bypasses RLS) and the
@@ -22,6 +22,7 @@ import {
   createDb,
   dbSql,
   deleteWorkspaceCaptureRows,
+  insertFailedWorkspaceCapture,
   insertWorkspaceCapture,
   planWorkspaceCaptureGc,
 } from "@opengeni/db";
@@ -57,6 +58,7 @@ afterAll(async () => {
 type CaptureRow = {
   id: string;
   revision: number;
+  state: string;
   manifest_key: string | null;
   tree_index_key: string | null;
   blob_keys: string[];
@@ -65,12 +67,13 @@ type CaptureRow = {
   account_id: string;
   workspace_id: string;
   session_id: string;
+  turn_id: string | null;
 };
 
 async function captureRows(sessionId: string): Promise<CaptureRow[]> {
   const rows = await db.execute<CaptureRow>(dbSql`
-    select id, revision::int as revision, manifest_key, tree_index_key, blob_keys,
-           size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id
+    select id, revision::int as revision, state, manifest_key, tree_index_key, blob_keys,
+           size_bytes::int as size_bytes, stats, account_id, workspace_id, session_id, turn_id
     from workspace_captures where session_id = ${sessionId} order by revision`);
   return rows as unknown as CaptureRow[];
 }
@@ -123,6 +126,9 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       const appDiff = rootRepo!.diff.find((d) => d.path === "app.py");
       expect(appDiff).toBeTruthy();
       expect(appDiff!.additions).toBeGreaterThanOrEqual(1);
+      const utilsDiff = rootRepo!.diff.find((d) => d.path === "utils.py");
+      expect(utilsDiff?.status).toBe("untracked");
+      expect(utilsDiff?.hunks[0]?.lines[0]?.text).toBe("fresh file");
       // Both the modified and the untracked file are captured as after-images.
       const appFile = manifest.files.find((f) => f.path === "app.py");
       const utilsFile = manifest.files.find((f) => f.path === "utils.py");
@@ -190,6 +196,7 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       for (const root of ["api", "web"]) {
         const repo = manifest.repos.find((r) => r.root === root)!;
         expect(repo.diff.some((d) => d.path === "app.py")).toBe(true);
+        expect(repo.diff.some((d) => d.path === "utils.py" && d.status === "untracked")).toBe(true);
         expect(manifest.files.some((f) => f.path === `${root}/app.py`)).toBe(true);
         expect(manifest.files.some((f) => f.path === `${root}/utils.py`)).toBe(true);
       }
@@ -328,7 +335,7 @@ describe("workspace capture — B-suite (real docker turns)", () => {
   );
 
   test(
-    "B7: fenced insert writes only under the live lease epoch (supersession → zero rows)",
+    "B7: available and degraded inserts write only under the live lease epoch",
     async () => {
       const workspaceId = await resolveWorkspaceId();
       const session = await seedSessionWithBash(client, workspaceId, {
@@ -339,6 +346,14 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       await Bun.sleep(1500);
       const [seed] = await captureRows(session.id);
       const { account_id, workspace_id, session_id } = seed!;
+      expect(seed!.turn_id).not.toBeNull();
+      const attemptRows = await db.execute<{ id: string }>(dbSql`
+        select id from session_turn_attempts
+        where workspace_id = ${workspace_id} and turn_id = ${seed!.turn_id}
+        order by started_at desc
+        limit 1`);
+      const attemptId = (attemptRows as unknown as Array<{ id: string }>)[0]?.id;
+      expect(attemptId).toBeTruthy();
 
       // The live lease epoch for this session's sandbox group.
       const grpRows = await db.execute<{ sandbox_group_id: string }>(dbSql`
@@ -349,14 +364,15 @@ describe("workspace capture — B-suite (real docker turns)", () => {
       select lease_epoch::int as lease_epoch from sandbox_leases where sandbox_group_id = ${sandboxGroupId} limit 1`);
       const leaseEpoch = (leaseRows as unknown as Array<{ lease_epoch: number }>)[0]!.lease_epoch;
 
-      const nextRevision = seed!.revision + 1;
+      const degradedRevision = seed!.revision + 1;
       const args = {
         accountId: account_id,
         workspaceId: workspace_id,
         sessionId: session_id,
-        turnId: null,
+        turnId: seed!.turn_id!,
+        attemptId: attemptId!,
         sandboxGroupId,
-        revision: nextRevision,
+        revision: degradedRevision,
         manifestKey: "m",
         treeIndexKey: "t",
         blobKeys: [] as string[],
@@ -375,10 +391,43 @@ describe("workspace capture — B-suite (real docker turns)", () => {
           sandboxGroupId: "00000000-0000-0000-0000-000000000000",
         }),
       ).toBeNull();
-      // The correct epoch commits and assigns the revision.
-      const ok = await insertWorkspaceCapture(db, { ...args, expectedEpoch: leaseEpoch });
+
+      // Degraded markers obey the same fence and never create capture blobs.
+      const degradedStats = {
+        degradedReason: "repository_discovery_timed_out",
+        discoveredRepoCount: 0,
+        durationMs: 15_000,
+      };
+      expect(
+        await insertFailedWorkspaceCapture(db, {
+          ...args,
+          expectedEpoch: leaseEpoch + 9999,
+          stats: degradedStats,
+        }),
+      ).toBeNull();
+      const degraded = await insertFailedWorkspaceCapture(db, {
+        ...args,
+        expectedEpoch: leaseEpoch,
+        stats: degradedStats,
+      });
+      expect(degraded).toMatchObject({ revision: degradedRevision });
+      const afterDegraded = await captureRows(session.id);
+      const degradedRow = afterDegraded.at(-1)!;
+      expect(degradedRow.state).toBe("failed");
+      expect(degradedRow.manifest_key).toBeNull();
+      expect(degradedRow.tree_index_key).toBeNull();
+      expect(degradedRow.blob_keys).toEqual([]);
+      expect(degradedRow.stats.degradedReason).toBe("repository_discovery_timed_out");
+
+      // The correct epoch also commits an ordinary available revision after it.
+      const availableRevision = degradedRevision + 1;
+      const ok = await insertWorkspaceCapture(db, {
+        ...args,
+        expectedEpoch: leaseEpoch,
+        revision: availableRevision,
+      });
       expect(ok).not.toBeNull();
-      expect(ok!.revision).toBe(nextRevision);
+      expect(ok!.revision).toBe(availableRevision);
     },
     TURN_TIMEOUT * 2,
   );

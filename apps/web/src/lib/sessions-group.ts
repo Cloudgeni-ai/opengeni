@@ -22,7 +22,13 @@ export const SESSION_GROUP_ORDER: SessionRecencyGroup[] = [
 ];
 
 /** Live states that earn the pinned-to-top, breathing-dot treatment. */
-const RUNNING_STATUSES = new Set<SessionStatus>(["running", "queued", "requires_action"]);
+const RUNNING_STATUSES = new Set<SessionStatus>([
+  "running",
+  "queued",
+  "waiting_capacity",
+  "recovering",
+  "requires_action",
+]);
 
 export function isRunningStatus(status: SessionStatus): boolean {
   return RUNNING_STATUSES.has(status);
@@ -98,7 +104,11 @@ export function groupSessionsForRail(sessions: Session[], now: Date = new Date()
   for (const group of SESSION_GROUP_ORDER) {
     const list = buckets.get(group);
     if (list && list.length > 0) {
-      grouped.push({ group, label: SESSION_GROUP_LABELS[group], sessions: list });
+      grouped.push({
+        group,
+        label: SESSION_GROUP_LABELS[group],
+        sessions: list,
+      });
     }
   }
   return { running, grouped };
@@ -122,14 +132,35 @@ export type SessionTreeNode = {
   hasActiveDescendant: boolean;
 };
 
+/**
+ * Merge two projections of the same session for the rail. Detail/SSE data is
+ * fresher for lifecycle fields, but detail reads intentionally omit treeStats.
+ * An omitted list-only field must not make the selected row forget its loaded
+ * hierarchy summary (and therefore lose its disclosure control).
+ */
+export function mergeSessionForRail(current: Session, incoming: Session): Session {
+  if (incoming.treeStats !== undefined || current.treeStats === undefined) {
+    return incoming;
+  }
+  return { ...incoming, treeStats: current.treeStats };
+}
+
 export type SessionForest = {
   running: SessionTreeNode[];
-  grouped: { group: SessionRecencyGroup; label: string; sessions: SessionTreeNode[] }[];
+  grouped: {
+    group: SessionRecencyGroup;
+    label: string;
+    sessions: SessionTreeNode[];
+  }[];
 };
 
 /** Whether the node's own status, or any descendant, is in a live state. */
 export function nodeIsActive(node: SessionTreeNode): boolean {
-  return isRunningStatus(node.session.status) || node.hasActiveDescendant;
+  const stats = node.session.treeStats;
+  const summarizedActive = Boolean(
+    stats && stats.runningDescendants + stats.queuedDescendants + stats.attentionDescendants > 0,
+  );
+  return isRunningStatus(node.session.status) || node.hasActiveDescendant || summarizedActive;
 }
 
 /**
@@ -203,7 +234,11 @@ export function buildRailForest(sessions: Session[], now: Date = new Date()): Se
   for (const group of SESSION_GROUP_ORDER) {
     const list = buckets.get(group);
     if (list && list.length > 0) {
-      grouped.push({ group, label: SESSION_GROUP_LABELS[group], sessions: list });
+      grouped.push({
+        group,
+        label: SESSION_GROUP_LABELS[group],
+        sessions: list,
+      });
     }
   }
   return { running, grouped };
@@ -258,5 +293,8 @@ export function relativeTimeLabel(value: string, now: Date = new Date()): string
   if (days < 7) {
     return `${days}d`;
   }
-  return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  return new Date(timestamp).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
 }

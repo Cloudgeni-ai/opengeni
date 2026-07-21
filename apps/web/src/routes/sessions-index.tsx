@@ -74,13 +74,14 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const attachments = useDraftAttachments(workspaceId);
+  const { resetSessionView } = context;
   const [message, setMessage] = useState("");
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
 
   useEffect(() => {
-    context.resetSessionView();
-  }, [workspaceId]);
+    resetSessionView();
+  }, [resetSessionView, workspaceId]);
 
   const computeReady = isSessionDraftComputeReady(draft);
 
@@ -102,7 +103,18 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
     pause: async () => {},
     pausing: false,
     resume: async () => {},
+    resumeScope: async () => {},
     resuming: false,
+    draft: null,
+    draftRevision: 0,
+    draftLoading: false,
+    draftSaving: false,
+    draftConflict: null,
+    applyDraft: () => {},
+    reloadDraft: async () => {},
+    resolveDraftConflict: async () => {},
+    restoredResources: [],
+    removeRestoredResource: () => {},
     error: null,
     clearError: () => {},
     send: async () => {
@@ -135,6 +147,12 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
         params: { workspaceId, sessionId: created.id },
       });
       return true;
+    },
+    steer: async () => {
+      const text =
+        message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      if (!text || context.busy || attachments.uploading || !computeReady) return false;
+      return await createComposer.send();
     },
   };
 
@@ -222,7 +240,6 @@ const SESSION_STATUS_TONE: Record<Session["status"], StatusTone> = {
   running: "running",
   recovering: "running",
   waiting_capacity: "waiting",
-  paused: "idle",
   requires_action: "waiting",
   idle: "idle",
   failed: "failed",
