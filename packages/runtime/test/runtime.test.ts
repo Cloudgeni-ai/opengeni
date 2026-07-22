@@ -1092,7 +1092,7 @@ describe("runtime event normalization", () => {
     "You are an OpenGeni workspace agent.",
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-    "Repository resources are mounted under repos/<owner>/<repo>.",
+    "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
@@ -1695,12 +1695,89 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
       type: "git_repo",
       host: "github.com",
       repo: "acme/app",
       ref: "main",
     });
+  });
+
+  test("materializes same-name cross-provider repositories at distinct default paths", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/app",
+        ref: "main",
+      },
+    ]);
+    expect(Object.keys(manifest.entries).sort()).toEqual([
+      "repos/dev.azure.com/acme/project/_git/app",
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+    ]);
+  });
+
+  test("preserves a custom Git HTTPS port in the manifest remote", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://git.example.com:8443/acme/app.git",
+        ref: "main",
+      },
+    ]);
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+      type: "git_repo",
+      host: "git.example.com:8443",
+      repo: "acme/app",
+    });
+  });
+
+  test("fails before sandbox execution on case-folded explicit mount collisions", () => {
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+        mountPath: "repos/Shared/App",
+      },
+      {
+        kind: "repository" as const,
+        uri: "https://gitlab.com/acme/two.git",
+        ref: "main",
+        mountPath: "repos/shared/app",
+      },
+    ];
+    expect(() => buildManifest(testSettings(), resources)).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand(resources)).toThrow(
+      "resource mount path is already attached",
+    );
+  });
+
+  test("fails before sandbox execution on a repeated identical resource", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    expect(() => buildManifest(testSettings(), [resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand([resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
   });
 
   test("keeps GitHub App repository resources out of SDK git repo materialization", () => {
@@ -1713,7 +1790,7 @@ describe("runtime event normalization", () => {
         githubRepositoryId: 456,
       },
     ]);
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1734,7 +1811,7 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1780,7 +1857,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -2293,7 +2370,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -2465,7 +2542,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -2531,7 +2608,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {

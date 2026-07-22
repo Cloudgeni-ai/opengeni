@@ -40,7 +40,9 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       githubRepositoryId: 456,
     },
   ): string {
-    const generated = repositoryCloneCommand([resource]);
+    const generated = repositoryCloneCommand([
+      { ...resource, mountPath: resource.mountPath ?? "repos/test/repository" },
+    ]);
     const withoutInvocations = generated
       .split("\n")
       .filter((line) => !line.startsWith("clone_repository '"))
@@ -102,6 +104,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           kind: "repository",
           uri: "https://github.com/acme/repo.git",
           ref: "main",
+          mountPath: "repos/test/one",
           provider: "github",
           credentialBindingId: "one",
         },
@@ -109,6 +112,7 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           kind: "repository",
           uri: "https://github.com/acme/repo",
           ref: "feature",
+          mountPath: "repos/test/two",
           provider: "github",
           credentialBindingId: "two",
         },

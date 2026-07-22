@@ -2,10 +2,15 @@ import type { Settings } from "@opengeni/config";
 import {
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
+  defaultRepositoryMountPath,
   mergeResourceRefs as mergeContractResourceRefs,
   mergeToolRefs,
+  normalizeRepositorySubpath,
+  normalizeResourceMountPath,
   resourceIdentityKey,
+  resourceMountPathCollisionKey,
   ResourceRefConflictError,
+  ResourceMountPathError,
   stableJson,
   type ResourceRef,
   type ToolRef,
@@ -96,7 +101,10 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         throw new HTTPException(422, { message: "repository URL must include owner and repo" });
       }
       const repo = parts.join("/");
-      const mountPath = normalizeMountPath(resource.mountPath ?? `repos/${repo}`);
+      const normalizedUri = `https://${url.host.toLowerCase()}/${repo}.git`;
+      const mountPath = normalizeMountPath(
+        resource.mountPath ?? defaultRepositoryMountPath(normalizedUri),
+      );
       const credentialProvider = gitCredentialProviderForRepository(resource);
       const credentialBindingId = gitCredentialBindingIdForRepository(resource, credentialProvider);
       if (
@@ -118,10 +126,10 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
       }
       normalized = {
         kind: "repository",
-        uri: `https://${url.host.toLowerCase()}/${repo}.git`,
+        uri: normalizedUri,
         ref: resource.ref.trim(),
         mountPath,
-        ...(resource.subpath ? { subpath: normalizeMountPath(resource.subpath) } : {}),
+        ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
         ...(resource.provider ? { provider: resource.provider } : {}),
         ...(resource.credentialBindingId
           ? { credentialBindingId: resource.credentialBindingId }
@@ -140,14 +148,17 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
       };
     }
     const key = stableJson(normalized);
-    const mounted = normalized.mountPath ? mountPaths.get(normalized.mountPath) : undefined;
+    const mountCollisionKey = normalized.mountPath
+      ? resourceMountPathCollisionKey(normalized.mountPath)
+      : undefined;
+    const mounted = mountCollisionKey ? mountPaths.get(mountCollisionKey) : undefined;
     if (mounted && mounted !== key) {
       throw new HTTPException(422, {
         message: `duplicate resource mount path: ${normalized.mountPath}`,
       });
     }
     if (normalized.mountPath) {
-      mountPaths.set(normalized.mountPath, key);
+      mountPaths.set(mountCollisionKey!, key);
     }
     const identity = resourceIdentityKey(normalized);
     const seenIdentity = identities.get(identity);
@@ -286,11 +297,12 @@ export async function validateFileResources(
 }
 
 function normalizeMountPath(path: string): string {
-  const normalized = path.trim().replace(/^\/+|\/+$/g, "");
-  if (!normalized || normalized.includes("..")) {
+  try {
+    return normalizeResourceMountPath(path);
+  } catch (error) {
+    if (!(error instanceof ResourceMountPathError)) throw error;
     throw new HTTPException(422, { message: `invalid resource mount path: ${path}` });
   }
-  return normalized;
 }
 
 function parseResourceUrl(uri: string): URL {

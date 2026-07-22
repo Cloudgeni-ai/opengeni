@@ -136,6 +136,25 @@ One session may attach any number of repositories across GitHub, GitLab, and
 Azure DevOps, including more than one account/installation for the same
 provider. A host must not use `provider` alone as credential identity.
 
+Repository mounts are resource identity, not host-to-runtime mapping. An embedding
+host may omit `mountPath`; OpenGeni then normalizes and persists
+`repos/<encoded-host>/<owner>/<repo>`, including a non-default Git HTTPS port in
+the encoded host segment. That keeps equal owner/repository names on GitHub,
+GitLab, Azure DevOps, and custom hosts distinct. Explicit paths remain supported,
+but are workspace-relative, separator-normalized, traversal-free, portable to
+case-insensitive filesystems, and collision-checked before sandbox execution.
+The normalized path is returned on the session resource and is the same value
+used by the manifest, clone hook, agent filesystem, and workbench.
+
+When upgrading existing sessions that omitted `mountPath`, the new default
+materializes the repository at the host-aware location. A host that must retain
+an existing warm workspace path should persist the session's former effective
+`repos/<owner>/<repo>` path explicitly before upgrading. Previously accepted
+explicit paths that are non-portable or collide after Unicode normalization and
+case folding must be renamed. A repository whose name cannot itself be
+used as a portable path segment (for example, a Windows-reserved device name)
+can still be attached with a safe explicit `mountPath`.
+
 Every request carries the current `sessionId`, root-session lineage,
 turn/attempt/execution generation, frozen initiator, and immutable initiator
 provenance. A host must authorize that authority against its own session binding
