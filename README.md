@@ -174,6 +174,7 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_DATABASE_URL`
 - `OPENGENI_NATS_URL`
 - `OPENGENI_TEMPORAL_HOST`
+- `OPENGENI_TEMPORAL_API_KEY` when using Temporal Cloud (enables TLS automatically)
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` if dependencies need longer startup windows
 - `OPENGENI_OPENAI_PROVIDER`
 - OpenAI or Azure OpenAI credentials
