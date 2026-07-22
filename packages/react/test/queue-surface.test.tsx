@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { act, type ReactNode } from "react";
 
 import { createQueueSurfaceForTest, QueueSurface } from "../src/components/queue-surface";
+import { queueComposerCheckoutEnabled } from "../src/components/queue-surface-implementation";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -359,6 +360,14 @@ describe("QueueSurface", () => {
     );
     expect(mounted.container.textContent).toContain("first queued prompt");
     expect(mounted.container.textContent).toContain("second queued prompt");
+  });
+
+  test("withholds durable queue checkout from a local-only composer", () => {
+    expect(queueComposerCheckoutEnabled(composer({ draftPersistence: "disabled" }), false)).toBe(
+      false,
+    );
+    expect(queueComposerCheckoutEnabled(composer(), false)).toBe(true);
+    expect(queueComposerCheckoutEnabled(undefined, true)).toBe(false);
   });
 
   test("bounds hostile prompt previews and discloses the exact source only on demand", async () => {

@@ -52,6 +52,7 @@ describe("useComposer embedding policy", () => {
     await flush();
     expect(hook.result.current.draftLoading).toBe(false);
     expect(hook.result.current.draft).toBeNull();
+    expect(hook.result.current.draftPersistence).toBe("disabled");
     await actRun(() => hook.result.current.setValue("host-controlled message"));
     await flush(600);
     expect(await actRun(() => hook.result.current.send())).toBe(true);

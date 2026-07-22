@@ -31,8 +31,10 @@ export type UseComposerOptions = ClientOverride &
      * Opt out of OpenGeni's remote composer-draft reads and writes. Embedded
      * hosts can use this when their human lane permits messages and controls but
      * deliberately withholds draft mutation because model/tool policy is
-     * server-owned. The unsent value remains local React state; send/steer and
-     * queue checkout continue to work without a draft revision fence.
+     * server-owned. The unsent value remains local React state and send/steer
+     * continue to work without a draft revision fence. Queue checkout is hidden
+     * because the current queue-edit contract necessarily creates a durable
+     * composer draft.
      *
      * @default "durable"
      */
@@ -59,6 +61,13 @@ export type ComposerState = {
   draftLoading: boolean;
   draftSaving: boolean;
   draftConflict: Error | null;
+  /**
+   * Whether this controller owns a durable server-side draft. Custom
+   * controllers that omit the field retain the historical durable behavior.
+   * Queue checkout is unavailable when persistence is disabled because the
+   * current queue-edit contract atomically moves the turn into that draft.
+   */
+  draftPersistence?: "durable" | "disabled" | undefined;
   /** Apply an atomic queue Edit checkout without a second read. */
   applyDraft: (draft: ComposerDraft) => void;
   reloadDraft: () => Promise<void>;
@@ -510,6 +519,7 @@ export function useComposer(
     draftLoading,
     draftSaving,
     draftConflict,
+    draftPersistence: durableDrafts ? "durable" : "disabled",
     applyDraft,
     reloadDraft: useCallback(async () => await loadDraft(true), [loadDraft]),
     resolveDraftConflict,
