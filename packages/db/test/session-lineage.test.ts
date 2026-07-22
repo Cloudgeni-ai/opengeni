@@ -5,6 +5,7 @@ import {
   createDb,
   createSession,
   getSessionLineage,
+  getSessionRootId,
   listSessions,
   type Database,
   type DbClient,
@@ -158,6 +159,10 @@ describe("session lineage", () => {
     expect(lineage?.ancestors.map((s) => s.id)).toEqual([root.id]);
     expect(lineage?.children.map((n) => n.session.id)).toEqual([grandchild.id]);
     expect(lineage?.truncated).toBe(false);
+    expect(await getSessionRootId(db, workspaceId, child.id)).toBe(root.id);
+    expect(await getSessionRootId(db, workspaceId, grandchild.id)).toBe(root.id);
+    expect(await getSessionRootId(db, workspaceId, root.id)).toBe(root.id);
+    expect(await getSessionRootId(db, workspaceId, crypto.randomUUID())).toBeNull();
 
     const rootLineage = await getSessionLineage(db, workspaceId, root.id);
     expect(rootLineage?.ancestors).toEqual([]);

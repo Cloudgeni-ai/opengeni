@@ -144,6 +144,7 @@ export type TurnInputOptions = {
   turnId: string;
   recovering?: boolean;
   unavailableSandboxFilesNote?: string;
+  runCredentialsNote?: string;
 };
 
 export async function turnInput(
@@ -173,6 +174,7 @@ export async function turnInput(
       : undefined,
     updateContext,
     options.unavailableSandboxFilesNote,
+    options.runCredentialsNote,
   );
   if (trigger.type === "user.message") {
     const payload = trigger.payload as { text?: unknown; resources?: unknown };

@@ -14,6 +14,9 @@ import {
   type GitCredentials,
   type ResourceRef,
   type SandboxSecrets,
+  type SessionTurn,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
@@ -61,8 +64,36 @@ export type GitHubTokenMintAuthorization = (selection: {
   repositoryIds: number[];
 }) => Promise<void>;
 
+export type GitCredentialAuthority = {
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+};
+
+export function gitCredentialAuthorityForTurn(input: {
+  sessionId: string;
+  rootSessionId: string;
+  attemptId: string;
+  turn: Pick<SessionTurn, "id" | "executionGeneration" | "initiator" | "initiatorContext">;
+}): GitCredentialAuthority {
+  return {
+    sessionId: input.sessionId,
+    rootSessionId: input.rootSessionId,
+    turnId: input.turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: input.turn.executionGeneration,
+    initiator: input.turn.initiator,
+    initiatorContext: input.turn.initiatorContext,
+  };
+}
+
 type RunGitCredentialOptions = {
   scope?: ConnectionScope;
+  authority?: GitCredentialAuthority;
   gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
@@ -302,10 +333,7 @@ export async function mintRunGitToken(
 export async function resolveRunGitIdentity(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  } = {},
+  options: RunGitCredentialOptions = {},
 ): Promise<{ name: string; email: string } | null> {
   const selections = gitCredentialSelections(resources);
   if (selections.length === 0) {
@@ -345,7 +373,12 @@ async function mintRunGitTokensWithIdentity(
       });
     }
     if (options?.gitCredentials && options.scope) {
-      const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
+      const request = gitCredentialsRequestForSelection(
+        options.scope,
+        requireGitCredentialAuthority(options),
+        selection,
+        "token",
+      );
       const minted: GitCredentials = await options.gitCredentials(request);
       // workspace-scope cross-check: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
@@ -411,23 +444,20 @@ function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: st
 async function resolveRunGitIdentityWithSelections(
   settings: Settings,
   selections: GitCredentialSelection[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  },
+  options: RunGitCredentialOptions,
 ): Promise<{ name: string; email: string } | null> {
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     if (options.gitCredentials && options.scope) {
-      const resolved: GitCredentials = await options.gitCredentials(
-        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
-      );
-      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
-      assertGitCredentialBindingEcho(
+      const request = gitCredentialsRequestForSelection(
+        options.scope,
+        requireGitCredentialAuthority(options),
         selection,
-        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
-        resolved,
+        "identity",
       );
+      const resolved: GitCredentials = await options.gitCredentials(request);
+      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
+      assertGitCredentialBindingEcho(selection, request, resolved);
       if (resolved.identity) {
         identity = resolved.identity;
       } else if (selection.provider === "github") {
@@ -453,12 +483,14 @@ type GitCredentialSelection = {
 
 function gitCredentialsRequestForSelection(
   scope: ConnectionScope,
+  authority: GitCredentialAuthority,
   selection: GitCredentialSelection,
   purpose?: "token" | "identity",
 ): Parameters<NonNullable<ConnectionCredentialsPort["gitCredentials"]>>[0] {
   const legacy = {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
+    ...authority,
     ...(purpose ? { purpose } : {}),
     installationId: selection.installationId,
     repositoryIds: selection.repositoryIds,
@@ -483,6 +515,13 @@ function gitCredentialsRequestForSelection(
     provider: selection.provider,
     repositoryRefs: selection.repositoryRefs,
   };
+}
+
+function requireGitCredentialAuthority(options: RunGitCredentialOptions): GitCredentialAuthority {
+  if (!options.authority) {
+    throw new Error("host git credential resolution requires immutable session turn authority");
+  }
+  return options.authority;
 }
 
 function assertGitCredentialBindingEcho(

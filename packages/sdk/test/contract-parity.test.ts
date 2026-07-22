@@ -423,6 +423,7 @@ describe("SDK / contracts parity", () => {
 
   test("SDK-built create-session requests parse under the contracts schema", () => {
     const request: CreateSessionRequest = {
+      requestedSessionId: "00000000-0000-4000-8000-000000000042",
       initialMessage: "Investigate the failing deploy",
       resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
       tools: [{ kind: "mcp", id: "documents" }],

@@ -29,6 +29,8 @@ import {
   createSandboxClientForBackend,
   establishSandboxSessionFromEnvelope,
   isProviderSandboxNotFoundError,
+  materializeRunCredentials,
+  clearRunCredentials,
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
@@ -107,6 +109,136 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
       () => "<missing>",
     );
     expect(marker).toBe("KEYSTONE_P12"); // the tool hit OUR box
+  });
+
+  test("host run credentials are seeded before the first agent command and remain off-manifest", async () => {
+    const settings = localSettings();
+    const client = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (m?: unknown) => Promise<LiveLocalSession>;
+    };
+    const liveSession = await client.create({});
+    liveSessions.push(liveSession);
+    const sessionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const model = new ScriptedModel([
+      {
+        output: [
+          functionCall("exec_command", {
+            cmd: `printf '%s' "$HOST_CLOUD_TOKEN" > /workspace/credential-proof.txt`,
+          }),
+        ],
+      },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model });
+
+    const result = await runAgentStream(agent, "use the connected account", settings, {
+      ownedSandbox: { client, session: liveSession },
+      runCredentialSessionId: sessionId,
+      onRunCredentialSessionReady: async (session) => {
+        await materializeRunCredentials(
+          session,
+          {
+            environment: { HOST_CLOUD_TOKEN: "host-secret-value" },
+            files: [],
+            fileEnvironment: {},
+            expiresAt: null,
+            authNeeded: [],
+            redactions: [{ name: "HOST_CLOUD_TOKEN", value: "host-secret-value" }],
+          },
+          { sessionId, attemptId, executionGeneration: 1 },
+        );
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    const proof = await liveSession.readFile({ path: "/workspace/credential-proof.txt" });
+    expect(Buffer.from(proof).toString()).toBe("host-secret-value");
+    expect(JSON.stringify((liveSession as any).state.manifest)).not.toContain("host-secret-value");
+    await clearRunCredentials(liveSession, sessionId);
+  });
+
+  test("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
+    const settings = localSettings();
+    const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (manifest?: unknown) => Promise<LiveLocalSession>;
+    };
+    let liveSession: LiveLocalSession | null = null;
+    let credentialProof: string | null = null;
+    let manifestSnapshot = "";
+    const retainingClient = {
+      backendId: rawClient.backendId,
+      create: async (manifest?: unknown) => {
+        const created = await rawClient.create(manifest);
+        liveSession = created;
+        liveSessions.push(created);
+        manifestSnapshot = JSON.stringify((created as any).state.manifest);
+        return new Proxy(created, {
+          get(target, property, receiver) {
+            if (property === "exec" || property === "execCommand") {
+              const command = Reflect.get(target, property, target) as (
+                args: unknown,
+              ) => Promise<unknown>;
+              return async (args: unknown) => {
+                const result = await command.call(target, args);
+                credentialProof = await target
+                  .readFile({ path: "/workspace/credential-proof.txt" })
+                  .then((content) => Buffer.from(content).toString())
+                  .catch(() => credentialProof);
+                return result;
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    };
+    const sessionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    let setupCalls = 0;
+    const model = new ScriptedModel([
+      {
+        output: [
+          functionCall("exec_command", {
+            cmd: `printf '%s' "$HOST_CLOUD_TOKEN" > /workspace/credential-proof.txt`,
+          }),
+        ],
+      },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model });
+
+    const result = await runAgentStream(agent, "use the connected account", settings, {
+      sandboxClient: retainingClient as never,
+      runCredentialSessionId: sessionId,
+      onRunCredentialSessionReady: async (session) => {
+        setupCalls += 1;
+        await materializeRunCredentials(
+          session,
+          {
+            environment: { HOST_CLOUD_TOKEN: "legacy-host-secret" },
+            files: [],
+            fileEnvironment: {},
+            expiresAt: null,
+            authNeeded: [],
+            redactions: [{ name: "HOST_CLOUD_TOKEN", value: "legacy-host-secret" }],
+          },
+          { sessionId, attemptId, executionGeneration: 1 },
+        );
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    expect(setupCalls).toBe(1);
+    expect(liveSession).not.toBeNull();
+    expect(credentialProof).toBe("legacy-host-secret");
+    expect(manifestSnapshot).not.toContain("legacy-host-secret");
+    expect(liveSession!.closed).toBe(true);
   });
 
   test("CONTROL: an OWNED (sessionState-resumed) session IS reaped on a normal finish", async () => {
