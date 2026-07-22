@@ -1,4 +1,8 @@
-import type { TurnInitiator, TurnInitiatorContext } from "@opengeni/contracts";
+import {
+  UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
+  type TurnInitiator,
+  type TurnInitiatorContext,
+} from "@opengeni/contracts";
 import { and, eq } from "drizzle-orm";
 import type { Database } from "./index";
 import type { SessionCommandActor } from "./session-control";
@@ -6,7 +10,7 @@ import * as schema from "./schema";
 
 export const UNATTRIBUTED_LEGACY_INITIATOR: TurnInitiator = {
   kind: "service",
-  subjectId: "unattributed-legacy",
+  subjectId: UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID,
 };
 
 export type FrozenTurnInitiator = {
@@ -75,6 +79,16 @@ export async function frozenInitiatorForCommandActor(
   actor: SessionCommandActor,
   subjectLabel?: string,
 ): Promise<FrozenTurnInitiator> {
+  if (actor.type === "service") {
+    return {
+      initiator: {
+        kind: "service",
+        subjectId: actor.subjectId,
+        ...(actor.subjectLabel ? { label: actor.subjectLabel } : {}),
+      },
+      context: { ...(actor.context ?? {}) },
+    };
+  }
   if (actor.type !== "agent_attempt") {
     return {
       initiator: {

@@ -270,6 +270,8 @@ export type {
   SessionStatusChangedPayload,
   SessionStructuredCapabilities,
   SessionTurn,
+  ServiceTurnInitiator,
+  ServiceTurnInitiatorContext,
   SessionTurnSource,
   SessionTurnStatus,
   SubmitHumanInputResponseRequest,

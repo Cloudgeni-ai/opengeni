@@ -33,6 +33,12 @@ reuse the existing row and therefore cannot change authority. Legacy rows use
 `{ kind: "service", subjectId: "unattributed-legacy" }`, which host credential
 ports must reject rather than infer from another identity.
 
+An embedding host may separate authorization from causal service provenance by
+signing a service-only initiator into its delegated grant. The ordinary grant
+subject and permissions still authorize the command; the asserted service is
+only the immutable initiator of the newly created work. It cannot assert a
+human subject or override a worker-signed exact agent attempt.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing

@@ -386,6 +386,12 @@ export type TurnInitiator = {
   label?: string | undefined;
 };
 
+/** A trusted embedding host's causal machine/service principal. */
+export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
+
+/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+export type ServiceTurnInitiatorContext = Record<string, unknown>;
+
 export type IntegrationClientMetadata = {
   client_id: string;
   client_name: "OpenGeni";
@@ -1612,6 +1618,8 @@ export type AccessGrant = {
   subjectLabel?: string | undefined;
   permissions: Permission[];
   metadata?: Record<string, unknown> | undefined;
+  serviceInitiator?: ServiceTurnInitiator | undefined;
+  serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;
 };
 
 export type AccessContext = {

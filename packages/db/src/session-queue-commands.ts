@@ -1165,6 +1165,15 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort: input.reasoningEffort ?? null,
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+    ...(input.actor.type === "service"
+      ? {
+          serviceInitiator: {
+            subjectId: input.actor.subjectId,
+            subjectLabel: input.actor.subjectLabel ?? null,
+            context: input.actor.context ?? {},
+          },
+        }
+      : {}),
   });
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
@@ -1216,7 +1225,14 @@ export async function submitHumanPromptInTransaction(
       input.actor.type === "agent_attempt"
         ? `attempt:${input.actor.attemptId}`
         : input.actor.subjectId,
-    reason: input.delivery === "steer" ? "human_steer" : "human_send",
+    reason:
+      input.actor.type === "service"
+        ? input.delivery === "steer"
+          ? "service_steer"
+          : "service_send"
+        : input.delivery === "steer"
+          ? "human_steer"
+          : "human_send",
     observedControlEtag: input.controlEtag ?? null,
   });
   const session = await lockSession(db, input.workspaceId, input.sessionId);

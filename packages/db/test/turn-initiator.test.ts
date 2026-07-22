@@ -324,6 +324,56 @@ describe("immutable session turn initiators", () => {
     ).toEqual({ kind: "subject", subjectId: editor, label: "Editor" });
   });
 
+  test("freezes a trusted service command separately from its authorizing subject", async () => {
+    const grant = await fixture();
+    const session = await createSession(client.db, sessionInput(grant));
+    const authorizationSubject = "host:automation-gateway";
+
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      grant.workspaceId!,
+      authorizationSubject,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            subjectId: authorizationSubject,
+            actor: {
+              type: "service",
+              subjectId: "external-scheduler",
+              subjectLabel: "External scheduler",
+              context: {
+                occurrenceId: "occurrence-42",
+                trigger: "cron",
+              },
+            },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Run the scheduled check",
+            resources: [],
+            tools: [],
+            reasoningEffortFallback: "low",
+            source: "api",
+          }),
+        ),
+    );
+
+    const turn = await getSessionTurn(client.db, grant.workspaceId!, submitted.turnId);
+    expect(turn?.initiator).toEqual({
+      kind: "service",
+      subjectId: "external-scheduler",
+      label: "External scheduler",
+    });
+    expect(turn?.initiatorContext).toEqual({
+      occurrenceId: "occurrence-42",
+      trigger: "cron",
+      label: "External scheduler",
+    });
+    expect(turn?.initiator.subjectId).not.toBe(authorizationSubject);
+  });
+
   test("the database rejects mutation of a persisted initiator", async () => {
     const grant = await fixture();
     const session = await createSession(client.db, sessionInput(grant));

@@ -2,6 +2,8 @@ import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { configuredAllowedModels, policyProviderIdForModel, type Settings } from "@opengeni/config";
 import {
   CreateSessionRequest,
+  ServiceTurnInitiator,
+  ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
   type AccessGrant,
@@ -95,7 +97,50 @@ type FrozenCreationInitiator = {
   actor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
 };
 
+function serviceInitiatorForGrant(grant: AccessGrant): {
+  initiator: ServiceTurnInitiator;
+  context: ServiceTurnInitiatorContext;
+} | null {
+  if (!grant.serviceInitiator) {
+    if (grant.serviceInitiatorContext) {
+      throw new HTTPException(403, {
+        message: "service initiator context requires a signed service initiator",
+      });
+    }
+    return null;
+  }
+  const initiator = ServiceTurnInitiator.safeParse(grant.serviceInitiator);
+  if (!initiator.success) {
+    throw new HTTPException(403, {
+      message: "a delegated command initiator must be a bounded service principal",
+    });
+  }
+  const context = ServiceTurnInitiatorContext.safeParse(grant.serviceInitiatorContext ?? {});
+  if (!context.success) {
+    throw new HTTPException(403, {
+      message: "delegated service initiator context is invalid or reserved",
+    });
+  }
+  const callerTurnId = grant.metadata?.["turnId"];
+  const callerAttemptId = grant.metadata?.["attemptId"];
+  const callerExecutionGeneration = grant.metadata?.["executionGeneration"];
+  if (
+    callerTurnId !== undefined ||
+    callerAttemptId !== undefined ||
+    callerExecutionGeneration !== undefined
+  ) {
+    throw new HTTPException(403, {
+      message: "a service initiator cannot replace an exact agent-attempt initiator",
+    });
+  }
+  return {
+    initiator: initiator.data,
+    context: context.data,
+  };
+}
+
 function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator {
+  const serviceInitiator = serviceInitiatorForGrant(grant);
   const callerSessionId = grant.metadata?.["sessionId"];
   const callerTurnId = grant.metadata?.["turnId"];
   const callerAttemptId = grant.metadata?.["attemptId"];
@@ -125,6 +170,9 @@ function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator 
     // The DB create transaction validates this exact attempt and derives the
     // inherited subject under the same locks as the child-session insert.
     return { actor };
+  }
+  if (serviceInitiator) {
+    return serviceInitiator;
   }
   return {
     initiator: {
@@ -690,6 +738,7 @@ export async function postUserMessageTurn(input: {
   origin?: "human" | "operator";
   actor?: string;
   actorLabel?: string;
+  commandActor?: SessionCommandActor;
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
@@ -711,7 +760,10 @@ export async function postUserMessageTurn(input: {
           sessionId,
           subjectId: input.actor ?? accountId,
           ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
-          actor: { type: "human", subjectId: input.actor ?? accountId },
+          actor: input.commandActor ?? {
+            type: "human",
+            subjectId: input.actor ?? accountId,
+          },
           operationKey,
           delivery: input.delivery ?? "send",
           controlEtag: input.controlEtag ?? null,
@@ -1299,6 +1351,7 @@ export async function acceptSessionUserMessage(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
+  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const { accepted, turn } = await postUserMessageTurn({
     db,
     bus,
@@ -1314,9 +1367,21 @@ export async function acceptSessionUserMessage(
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
     delivery: input.delivery ?? "send",
-    origin: input.origin ?? "human",
+    origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
     actor: grant.subjectId,
     ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+    ...(delegatedServiceInitiator
+      ? {
+          commandActor: {
+            type: "service" as const,
+            subjectId: delegatedServiceInitiator.initiator.subjectId,
+            ...(delegatedServiceInitiator.initiator.label
+              ? { subjectLabel: delegatedServiceInitiator.initiator.label }
+              : {}),
+            context: delegatedServiceInitiator.context,
+          },
+        }
+      : {}),
     ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
     ...(input.expectedDraftRevision !== undefined
       ? { expectedDraftRevision: input.expectedDraftRevision }
