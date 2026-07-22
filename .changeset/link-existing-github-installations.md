@@ -9,9 +9,9 @@
 "@opengeni/worker-bundle": patch
 ---
 
-Support linking an existing GitHub App installation to multiple OpenGeni workspaces with independent repository allowlists.
+Add workspace-scoped GitHub App installation bindings with independent repository allowlists.
 
-- Discover installations through GitHub App user OAuth, require repository-level administrator permission, and configure the OAuth callback in generated App manifests.
+- Configure the OAuth callback in generated App manifests, but fail closed for all new workspace-installation binding: GitHub setup callback parameters are spoofable, while user installation visibility and repository administrator permission do not prove install/configure authority.
 - Persist workspace-scoped installation bindings and repository selections while retaining legacy `all` bindings for compatibility.
 - Enforce the current binding during repository listing, session admission, MCP token minting, and GitHub-authenticated worker turn startup.
-- Add SDK and web controls to link, rescope, and unlink a workspace without uninstalling the GitHub App or affecting another workspace.
+- Add SDK and web controls to inspect and unlink an existing workspace binding without uninstalling the GitHub App or affecting another workspace.

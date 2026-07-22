@@ -1345,13 +1345,15 @@ export type ConnectionCredentialsPort = {
 // GitHub-API calls host-PROVIDABLE so a BYO-GitHub-App host drives its OWN App
 // credentials (its own JWT-signing key, its own OAuth client) instead of
 // OpenGeni self-minting from `settings`:
-//   - authorizeUser: OAuth code exchange + discovery of every existing
-//     installation/repository the user may link, including permission bits.
-//   - verifyInstallationAccessForUser: the OAuth code→token + installation
-//     lookup retained for compatibility with install-only hosts (today
-//     `verifyGitHubInstallationAccessForUser(settings, …)`).
-//   - getInstallation: a live belongs-to-this-App/suspension check before an
-//     existing installation selection is persisted.
+//   - authorizeUser: OAuth code exchange + user-visible installation and
+//     repository permission discovery. Retained for provider ABI compatibility;
+//     visibility is not proof of installation authority and core does not use
+//     this method for new workspace binding.
+//   - verifyInstallationAccessForUser: OAuth code→token + installation lookup,
+//     also retained for provider ABI compatibility and not used for binding.
+//   - getInstallation: retained in the provider ABI for compatibility. Direct
+//     existing-installation selection is fail-closed and core does not call
+//     this method for binding.
 //   - listRepositories: the installation-scoped repo listing behind
 //     `GET /v1/workspaces/:id/github/repositories` (today
 //     `listGitHubAppRepositories(settings, …)`).

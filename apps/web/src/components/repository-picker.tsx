@@ -103,22 +103,6 @@ export function RepositoryContextPicker(props: {
           </div>
         ) : null}
         <div className="flex flex-wrap items-center gap-1.5">
-          {props.linkUrl ? (
-            <Button asChild type="button" size="sm" className="h-8 text-xs">
-              <a href={props.linkUrl}>
-                <GitPullRequestIcon className="size-3.5" />
-                Link existing
-              </a>
-            </Button>
-          ) : null}
-          {props.installUrl ? (
-            <Button asChild type="button" variant="outline" size="sm" className="h-8 text-xs">
-              <a href={props.installUrl}>
-                <GitPullRequestIcon className="size-3.5" />
-                Install on GitHub
-              </a>
-            </Button>
-          ) : null}
           {!props.configured ? (
             <Button
               type="button"
@@ -198,9 +182,8 @@ export function RepositoryContextPicker(props: {
     </div>
   );
 
-  // The recovery path must stay reachable in EVERY configured state — including
-  // configured-but-zero-repos (the stale-app case), where installUrl may be
-  // absent and the settings form is the only way to reconnect or re-create.
+  // Existing installation bindings can still be inspected and unlinked while
+  // new binding remains fail-closed.
   const settingsDisclosure = (
     <Collapsible open={props.githubAppOpen} onOpenChange={props.onGitHubAppOpenChange}>
       <div className="border-t border-border/60 pt-1">
@@ -305,23 +288,7 @@ export function RepositoryContextPicker(props: {
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="The connected GitHub app isn't sharing any repositories with this workspace — if some are missing, the app may have been removed on GitHub. Reinstall it."
-                    action={
-                      props.installUrl ? (
-                        <Button
-                          asChild
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-8 text-xs"
-                        >
-                          <a href={props.installUrl}>
-                            <GitPullRequestIcon className="size-3.5" />
-                            Reinstall on GitHub
-                          </a>
-                        </Button>
-                      ) : undefined
-                    }
+                    description="The connected GitHub app isn't sharing any repositories with this workspace. Existing bindings can be unlinked, but new installation binding is temporarily disabled."
                   />
                   {settingsDisclosure}
                 </div>
@@ -341,14 +308,6 @@ export function RepositoryContextPicker(props: {
                         </span>
                       ) : null}
                     </div>
-                    {props.linkUrl ? (
-                      <a
-                        href={props.linkUrl}
-                        className="shrink-0 text-2xs text-fg-subtle underline-offset-2 transition-colors hover:text-fg hover:underline"
-                      >
-                        Link another
-                      </a>
-                    ) : null}
                   </div>
 
                   <section className="overflow-hidden rounded-lg border border-border bg-bg/25">

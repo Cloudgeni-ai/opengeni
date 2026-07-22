@@ -59,17 +59,14 @@ import {
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
-  createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
-  stateMaxAgeSeconds,
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
 import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { listWorkspaceGitHubRepositories } from "../github-access";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
@@ -121,9 +118,9 @@ import {
 import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
-  // Origin of the HTTP request that reached the MCP route; last-resort base
-  // for links the server mints (github_connect_link) when neither
-  // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
+  // Origin of the HTTP request that reached the MCP route. Retained in the
+  // options ABI for browser-oriented tools; github_connect_link does not use
+  // it or mint state while new installation binding is disabled.
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
   workspaceMemoryEnabled?: boolean | undefined;
@@ -196,19 +193,20 @@ export function buildOpenGeniMcpServer(
     registerRigTools(server, deps, grant, can, sessionId, json);
   }
 
-  // Orchestration, variableSet, and GitHub-connect tools are permission-gated
+  // Orchestration, variableSet, and GitHub status/token tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
   // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
-  // so agents can spawn/read sessions, manage variable set variables,
-  // and mint GitHub install links out of the box. A user DEMOTES a specific
+  // so agents can spawn/read sessions, manage variable set variables, inspect
+  // GitHub connection availability, and refresh scoped tokens for already-bound
+  // repositories out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, options, json);
+    registerGitHubConnectTool(server, deps, json);
     // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
     // worker-signed sessionId claim so it mints for THIS session's repos), gated on
     // the same github:use capability as github_connect_link.
@@ -1888,22 +1886,15 @@ function registerVariableSetTools(
   }
 }
 
-// GitHub connect link for manager-style agents: mirrors GET .../github/app but
-// returns a browser entry URL (.../github/connect) that plants the CSRF state
-// cookie before forwarding to GitHub, because an MCP-issued link is opened in
-// a browser that never called the API directly.
-function registerGitHubConnectTool(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  options: McpServerOptions,
-  json: JsonResult,
-): void {
+// The tool remains registered for compatibility, but every new installation
+// binding entry point is fail-closed until a provider-supported authority
+// proof stronger than installation visibility is available.
+function registerGitHubConnectTool(server: McpServer, deps: ApiRouteDeps, json: JsonResult): void {
   server.registerTool(
     "github_connect_link",
     {
       description:
-        "Create workspace-bound links for connecting GitHub. linkUrl authorizes and links an existing installation; installUrl installs the app on another GitHub account. Completion requires github:manage through a signed-in browser or configured-token handoff. The links expire.",
+        "Report GitHub App connection availability. New installation binding is disabled until GitHub installation authority can be proven, so installUrl and linkUrl are null.",
       inputSchema: {},
     },
     async () => {
@@ -1919,30 +1910,11 @@ function registerGitHubConnectTool(
           missing,
         });
       }
-      const base = githubBrowserBaseUrl(settings, options.requestOrigin);
-      if (!base) {
-        throw new Error(
-          "github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment",
-        );
-      }
-      const installState = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        intent: "install",
-        ...githubBrowserGrantClaims(settings, grant),
-      });
-      const linkState = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        intent: "link_existing",
-        ...githubBrowserGrantClaims(settings, grant),
-      });
       return json({
         configured: true,
         appSlug: slug,
-        installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(installState)}`,
-        linkUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(linkState)}`,
-        expiresInSeconds: stateMaxAgeSeconds,
+        installUrl: null,
+        linkUrl: null,
         missing: [],
       });
     },
