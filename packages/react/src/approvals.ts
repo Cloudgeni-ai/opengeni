@@ -50,7 +50,9 @@ export function approvalsFromRequiresAction(payload: unknown): PendingApproval[]
         ? (raw.rawItem as Record<string, unknown>)
         : {};
     return {
-      id: String(raw.id ?? raw.callId ?? rawItem.callId ?? index),
+      // Mirror the runtime's canonical interruption identity before retaining
+      // the legacy top-level callId fallback for already-normalized payloads.
+      id: String(rawItem.callId ?? rawItem.id ?? raw.id ?? raw.callId ?? raw.name ?? index),
       name: String(raw.name ?? raw.toolName ?? rawItem.name ?? "approval"),
       arguments: raw.arguments ?? rawItem.arguments,
       raw: approval,

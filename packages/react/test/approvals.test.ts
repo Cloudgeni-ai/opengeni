@@ -32,21 +32,28 @@ const decision = (approvalId: string, decisionType: "approve" | "reject" = "appr
   event("user.approvalDecision", { approvalId, decision: decisionType }, { turnId: null });
 
 describe("approvalsFromRequiresAction", () => {
-  test("maps id/name/arguments and falls back to callId, rawItem.callId, then index", () => {
+  test("maps id/name/arguments and mirrors canonical raw-item identity precedence", () => {
     const approvals = approvalsFromRequiresAction({
       approvals: [
         { id: "appr-1", name: "run_command", arguments: { cmd: "rm -rf /tmp/x" } },
         { callId: "call-2", name: "push_branch" },
         { rawItem: { callId: "raw-3" } },
+        { id: "outer-4", rawItem: { callId: "raw-4" } },
         {},
       ],
     });
-    expect(approvals.map((approval) => approval.id)).toEqual(["appr-1", "call-2", "raw-3", "3"]);
+    expect(approvals.map((approval) => approval.id)).toEqual([
+      "appr-1",
+      "call-2",
+      "raw-3",
+      "raw-4",
+      "4",
+    ]);
     expect(approvals[0]).toMatchObject({
       name: "run_command",
       arguments: { cmd: "rm -rf /tmp/x" },
     });
-    expect(approvals[3]!.name).toBe("approval");
+    expect(approvals[4]!.name).toBe("approval");
   });
 
   test("normalizes the serialized OpenAI Agents tool-approval shape", () => {
@@ -71,6 +78,30 @@ describe("approvalsFromRequiresAction", () => {
       id: "call-123",
       name: "delete_everything",
       arguments: '{"scope":"workspace"}',
+    });
+  });
+
+  test("uses rawItem.id for serialized hosted-tool approvals", () => {
+    const approvals = approvalsFromRequiresAction({
+      approvals: [
+        {
+          type: "tool_approval_item",
+          rawItem: {
+            type: "hosted_tool_call",
+            id: "hosted-42",
+            name: "web_search",
+            arguments: '{"query":"release safety"}',
+          },
+          agent: { name: "reviewer" },
+          toolName: "web_search",
+        },
+      ],
+    });
+
+    expect(approvals[0]).toMatchObject({
+      id: "hosted-42",
+      name: "web_search",
+      arguments: '{"query":"release safety"}',
     });
   });
 
