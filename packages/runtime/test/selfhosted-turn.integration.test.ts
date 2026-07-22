@@ -102,7 +102,12 @@ async function runPinnedToVmTurn(
   const agent = buildOpenGeniAgent(settings, [], {
     model,
     sandboxEnvironment: ENV,
-    ...(opts.toolspaceTokenSeed ? { toolspaceTokenSeed: opts.toolspaceTokenSeed } : {}),
+    ...(opts.toolspaceTokenSeed
+      ? {
+          toolspaceTokenSeed: opts.toolspaceTokenSeed,
+          toolspaceTokenSessionId: "session-selfhosted",
+        }
+      : {}),
     ...(opts.activeSandboxBackend ? { activeSandboxBackend: opts.activeSandboxBackend } : {}),
   });
   const result = await runAgentStream(agent, "run echo on the vm", settings, {

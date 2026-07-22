@@ -144,6 +144,9 @@ import {
   desktopCapableBackend,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenClient,
+  withToolspaceTokenSession,
   withRunCredentialsClient,
   withRunCredentialsSession,
   type RunCredentialSessionReady,
@@ -1264,6 +1267,10 @@ export type BuildAgentOptions = {
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
   toolspaceTokenSeed?: string;
+  // Durable OpenGeni session identity used only to derive the off-manifest,
+  // per-session token file. Required together with toolspaceTokenSeed so two
+  // sessions sharing one box never overwrite the same pointer.
+  toolspaceTokenSessionId?: string;
   // Genesis turn only: inject a one-shot instruction into the FIRST model
   // call telling it to title the session via opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
@@ -1504,6 +1511,7 @@ const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
 const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentToolspaceTokenSeed = new WeakMap<object, string>();
+const agentToolspaceTokenSessionId = new WeakMap<object, string>();
 // A genesis directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
@@ -1572,6 +1580,9 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (Boolean(options.toolspaceTokenSeed) !== Boolean(options.toolspaceTokenSessionId)) {
+    throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  }
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -1738,6 +1749,7 @@ export function buildOpenGeniAgent(
   }
   if (options.toolspaceTokenSeed) {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
+    agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -3451,6 +3463,7 @@ export async function runAgentStream(
   const prepared: PreparedAgentInput =
     typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
+  const toolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
   if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
     throw new Error("runCredentialSessionId is required when run credential setup is enabled");
@@ -3473,18 +3486,24 @@ export async function runAgentStream(
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
-    const agentSession = overrides.runCredentialSessionId
+    const credentialAgentSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
       : (session as SandboxSessionLike);
+    const agentSession = toolspaceTokenFile
+      ? withToolspaceTokenSession(credentialAgentSession, toolspaceTokenFile)
+      : credentialAgentSession;
     const credentialSetupSession = overrides.runCredentialSessionId
       ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
       : setupSession;
+    const decoratedSetupSession = toolspaceTokenFile
+      ? withToolspaceTokenSession(credentialSetupSession, toolspaceTokenFile)
+      : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
     // lazy provisioner. Eager path: runs here, before the run starts (unchanged).
     if (!overrides.ownedSandbox.deferredSetup) {
       await overrides.onRunCredentialSessionReady?.(session as SandboxSessionLike);
-      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, credentialSetupSession, {
+      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, decoratedSetupSession, {
         settings,
         environment,
         preparedInput: prepared,
@@ -3501,7 +3520,7 @@ export async function runAgentStream(
           : {}),
       });
       if (toolspaceTokenSeedForAgent(agent)) {
-        await overrides.onToolspaceTokenSessionReady?.(session as SandboxSessionLike);
+        await overrides.onToolspaceTokenSessionReady?.(agentSession);
       }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
@@ -3550,6 +3569,7 @@ export async function runAgentStream(
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
       ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+      ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
     // Keep both credential seeding and lifecycle decoration as a safety net for
@@ -3562,8 +3582,11 @@ export async function runAgentStream(
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
+    const toolspaceResourceClient = toolspaceTokenFile
+      ? withToolspaceTokenClient(credentialResourceClient, toolspaceTokenFile)
+      : credentialResourceClient;
     const decoratedClient = withSandboxLifecycleHooks(
-      credentialResourceClient,
+      toolspaceResourceClient,
       ownedHooks,
       ownedHookContext,
     );
@@ -3630,15 +3653,19 @@ export async function runAgentStream(
           overrides.onRunCredentialSessionReady,
         )
       : resourceClient;
+  const toolspaceClient =
+    credentialClient && toolspaceTokenFile
+      ? withToolspaceTokenClient(credentialClient, toolspaceTokenFile)
+      : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeeds = gitTokenSeedsForAgent(agent);
   const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = credentialClient
+  const client = toolspaceClient
     ? withSandboxLifecycleHooks(
-        credentialClient,
+        toolspaceClient,
         [
           // M3: same rig-setup-first ordering + credential-hook union as the owned
           // path (this legacy create/resume decoration path is byte-for-byte today
@@ -3662,6 +3689,7 @@ export async function runAgentStream(
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
           ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
           ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
+          ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
         },
       )
@@ -4119,6 +4147,7 @@ export async function runOwnedSandboxSetup(
     opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
   const ownedToolspaceTokenSeed =
     opts.toolspaceTokenSeedOverride ?? toolspaceTokenSeedForAgent(agent);
+  const ownedToolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedHooks = [
     // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -4142,6 +4171,7 @@ export async function runOwnedSandboxSetup(
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
     ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+    ...(ownedToolspaceTokenFile ? { toolspaceTokenFile: ownedToolspaceTokenFile } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -4977,6 +5007,7 @@ export type SandboxLifecycleHookContext = {
   gitTokenSeeds?: GitTokenSeeds;
   gitCredentialBindings?: GitCredentialBindingSeed[];
   toolspaceTokenSeed?: string;
+  toolspaceTokenFile?: string;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -5153,6 +5184,22 @@ function gitCredentialBindingsForAgent(
 
 function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
   return agentToolspaceTokenSeed.get(agent);
+}
+
+function toolspaceTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
+  return agentToolspaceTokenSessionId.get(agent);
+}
+
+function toolspaceTokenFileForAgent(
+  agent: Agent<any, any>,
+  environment: Readonly<Record<string, string>>,
+): string | undefined {
+  if (!toolspaceTokenSeedForAgent(agent)) return undefined;
+  const sessionId = toolspaceTokenSessionIdForAgent(agent);
+  if (!sessionId) {
+    throw new Error("Toolspace token seed is missing its session identity");
+  }
+  return toolspaceTokenFileFromEnvironment(environment, sessionId);
 }
 
 function sandboxToolspaceTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
@@ -5914,17 +5961,27 @@ export function repositoryCloneCommand(
   return commands.join("\n");
 }
 
-export function toolspaceTokenSeedCommand(): string {
+export function toolspaceTokenSeedCommand(
+  options: { tokenFile?: string; legacyTokenFile?: string } = {},
+): string {
   return [
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then',
     '  seed_umask="$(umask)"',
     "  umask 077",
-    '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    options.tokenFile
+      ? `  token_file=${shellQuote(options.tokenFile)}`
+      : '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    options.legacyTokenFile
+      ? `  legacy_token_file=${shellQuote(options.legacyTokenFile)}`
+      : '  legacy_token_file=""',
     '  mkdir -p "$(dirname "$token_file")"',
     '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
     '  mv -f "$token_file.tmp.$$" "$token_file"',
+    '  if [ -n "$legacy_token_file" ] && [ "$legacy_token_file" != "$token_file" ]; then',
+    '    rm -f -- "$legacy_token_file"',
+    "  fi",
     '  umask "$seed_umask"',
     "fi",
   ].join("\n");
@@ -5937,7 +5994,14 @@ export async function runToolspaceTokenSeedHook(
   if (!context.toolspaceTokenSeed) {
     return;
   }
-  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
+  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand(
+    {
+      ...(context.toolspaceTokenFile ? { tokenFile: context.toolspaceTokenFile } : {}),
+      ...(context.toolspaceTokenFile && context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE
+        ? { legacyTokenFile: context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE }
+        : {}),
+    },
+  )}`;
   const result = await runSandboxLifecycleCommand(
     session,
     {
@@ -5955,9 +6019,19 @@ export async function runToolspaceTokenSeedHook(
 export async function refreshToolspaceTokenFile(
   session: ToolspaceTokenWriterSession,
   token: string,
-  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+    tokenFile?: string;
+    legacyTokenFile?: string;
+  } = {},
 ): Promise<void> {
-  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand()}`;
+  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand(
+    {
+      ...(options.tokenFile ? { tokenFile: options.tokenFile } : {}),
+      ...(options.legacyTokenFile ? { legacyTokenFile: options.legacyTokenFile } : {}),
+    },
+  )}`;
   const result = await runSandboxLifecycleCommand(
     session,
     {

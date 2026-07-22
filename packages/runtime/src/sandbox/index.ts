@@ -146,6 +146,18 @@ export {
   type MaterializeRunCredentialsOptions,
 } from "./run-credentials";
 
+// Session-specific Toolspace token routing. The manifest retains one stable
+// legacy pointer for warm-box env parity; every session command selects its own
+// hashed token file off-manifest.
+export {
+  ToolspaceTokenPathError,
+  toolspaceTokenFileForSession,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenEnvironment,
+  withToolspaceTokenSession,
+  withToolspaceTokenClient,
+} from "./toolspace-token";
+
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
 // mints the scoped stream token. Called API-direct on the resumed handle.
