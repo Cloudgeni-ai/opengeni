@@ -97,7 +97,6 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     codexToolSearchEnabled: false,
     codexCredentialLeasingEnabled: false,
     codexProductSku: undefined,
-    codexRotationNearExhaustionPct: 90,
     openaiReasoningEffort: "high",
     openaiAllowedReasoningEfforts: "low,medium,high,xhigh",
     openaiResponsesTransport: "http",

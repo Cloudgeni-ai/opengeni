@@ -304,6 +304,15 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/scheduled-tasks/task-1/runs`)).toBe(
       "/v1/workspaces/:workspaceId/scheduled-tasks/:id/runs",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/github/connect`)).toBe(
+      "/v1/workspaces/:workspaceId/github/connect",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/github/installations`)).toBe(
+      "/v1/workspaces/:workspaceId/github/installations",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/github/installations/123`)).toBe(
+      "/v1/workspaces/:workspaceId/github/installations/:installationId",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/capabilities`)).toBe(
       "/v1/workspaces/:workspaceId/capabilities",
     );

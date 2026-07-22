@@ -55,6 +55,7 @@ import {
   accrueWarmSeconds,
   getMaterializedSandboxFileResources,
   markSandboxFileResourcesMaterialized,
+  areGitHubRepositoriesAllowedForWorkspace,
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
@@ -125,6 +126,7 @@ import {
   settingsWithSessionMcpServersForRun,
 } from "./capabilities";
 import {
+  CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
   chooseRotationActive,
   classifyCodexPin,
@@ -159,9 +161,11 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
+  gitHubTokenMintSelection,
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
   sandboxEnvironmentForRun,
+  type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
 } from "./environment";
 import {
@@ -1368,7 +1372,7 @@ export function acceptsPromptCacheKeyForTurn(
  * The turn hot path never refreshes Codex usage — only the usage API route does — so a
  * window that has actually reset still reads OVER-threshold from the stale cache, which
  * would idle-loop forever. Before idling, refresh LIVE usage for every connected account
- * the cache marks over-threshold (bounded to the account count), which re-writes the
+ * the cache marks exhausted (bounded to the account count), which re-writes the
  * cache columns, then return the re-read rows so the ranker can pick up a genuinely-reset
  * window THIS turn. A refresh/read failure is swallowed (fall back to the pre-refresh rows
  * + the bounded idle). Cooling (429'd) accounts are NOT refreshed: their exhaustedUntil
@@ -1384,11 +1388,11 @@ async function refreshCappedCodexUsageRows(
     wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   },
 ): Promise<CodexAccountStatus[]> {
-  const nearPct = settings.codexRotationNearExhaustionPct;
   const stale = accounts.filter(
     (a) =>
       a.status === "active" &&
-      ((a.primaryUsedPercent ?? 0) >= nearPct || (a.secondaryUsedPercent ?? 0) >= nearPct),
+      ((a.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
+        (a.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT),
   );
   if (stale.length === 0) {
     return accounts;
@@ -2335,7 +2339,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionPinSource,
             sessionLastCredentialId: sessionCodex?.lastCredentialId ?? null,
             continuationCredentialId: continuationCodexCredentialId,
-            nearExhaustionPct: settings.codexRotationNearExhaustionPct,
             now: new Date(),
           });
 
@@ -2545,7 +2548,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (codexLeaseHeld) startCodexLeaseHeartbeat();
 
         const eligibleCount = leased.accounts.filter((account) =>
-          isCodexCredentialEligible(account, settings.codexRotationNearExhaustionPct, new Date()),
+          isCodexCredentialEligible(account, new Date()),
         ).length;
         const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
         observability.incrementCounter({
@@ -2722,7 +2725,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (goalActive && goal) {
             const authoritativeResetAt = authoritativeCodexCapacityResetAt(
               leased.accounts,
-              settings.codexRotationNearExhaustionPct,
               new Date(),
             );
             const armed = await armCodexCapacityWait(db, {
@@ -3372,6 +3374,17 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // provider may supply it; unset still self-mints GitHub from settings.
       // gitToken/gitTokens are undefined on the selfhosted skip path (the machine
       // uses its own git creds).
+      if (activeSandboxBackend !== "selfhosted") {
+        await assertGitHubResourcesRemainAuthorized(db, input.workspaceId, turnResources);
+      }
+      const authorizeGitHubTokenMint: GitHubTokenMintAuthorization = async (selection) => {
+        await assertGitHubTokenMintSelectionAuthorized(
+          db,
+          input.workspaceId,
+          selection.installationId,
+          selection.repositoryIds,
+        );
+      };
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -3391,6 +3404,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
             gitCredentials: connectionCredentials?.gitCredentials,
+            authorizeGitHubTokenMint,
             sessionId: input.sessionId,
             runId: turnId,
           },
@@ -3423,6 +3437,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await mintRunGitCredentials(runSettings, turnResources, {
               scope: connectionScope,
               gitCredentials: connectionCredentials?.gitCredentials,
+              authorizeGitHubTokenMint,
             }),
           write: async (tokens) => {
             const runAs = sandboxRunAs(runSettings);
@@ -3916,6 +3931,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
                     gitCredentials: connectionCredentials?.gitCredentials,
+                    authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const provisioned = await resumeBoxForTurn(
@@ -5242,12 +5258,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   : {}),
               }
             : null;
-          const cooldownUntil = codexCredentialCooldownUntil(
-            codexCredentialFailure,
-            serving,
-            settings.codexRotationNearExhaustionPct,
-            now,
-          );
+          const cooldownUntil = codexCredentialCooldownUntil(codexCredentialFailure, serving, now);
           const statePersisted =
             codexLeaseHolderId && codexLeaseGeneration !== null
               ? await quarantineCodexCredentialForLease(db, {
@@ -5292,7 +5303,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeCredentialId: rotation.activeCredentialId,
                 priorCredentialId: effectiveCodexCredentialId,
                 accounts,
-                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
                 now: new Date(),
                 usedConnectors: serving?.connectorNamespaces ?? [],
               })
@@ -5415,7 +5425,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const until = codexCredentialCooldownUntil(
               { kind: "quota", cooldownSeconds: usageLimit.resetsInSeconds },
               serving,
-              settings.codexRotationNearExhaustionPct,
               new Date(),
             )!;
             // Finding 1a: INSPECT the cooldown-write result. A swallowed best-effort
@@ -5453,7 +5462,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               const newHome = shardCredentialForSession({
                 sessionId: input.sessionId,
                 accounts: fresh,
-                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
                 now: new Date(),
               });
               if (newHome) {
@@ -5502,16 +5510,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               } else {
                 // Every account capped/cooling → idle until the earliest reset across all.
                 rotated = true;
-                allCappedResetAt = earliestCodexReset(
-                  fresh,
-                  settings.codexRotationNearExhaustionPct,
-                  new Date(),
-                );
-                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(
-                  fresh,
-                  settings.codexRotationNearExhaustionPct,
-                  new Date(),
-                );
+                allCappedResetAt = earliestCodexReset(fresh, new Date());
+                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(fresh, new Date());
               }
             } else {
               const decision = chooseRotationActive({
@@ -5519,7 +5519,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeCredentialId: rotation.activeCredentialId,
                 priorCredentialId: effectiveCodexCredentialId,
                 accounts: fresh,
-                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
                 now: new Date(),
                 // P4: the just-capped serving account's connector set is the proxy for
                 // "what this session has access to" — prefer a covering failover target.
@@ -5546,11 +5545,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               } else if (decision.kind === "allCapped") {
                 rotated = true;
                 allCappedResetAt = decision.earliestResetAt;
-                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(
-                  fresh,
-                  settings.codexRotationNearExhaustionPct,
-                  new Date(),
-                );
+                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(fresh, new Date());
               }
               // kind:"none" → fall through to today's single-account idle.
             }
@@ -6241,6 +6236,45 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
   };
 }
 
+async function assertGitHubResourcesRemainAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  resources: import("@opengeni/contracts").ResourceRef[],
+): Promise<void> {
+  // Must check exactly what sandboxEnvironmentForRun would mint a token for,
+  // so the selection is derived from the same extraction as the mint path.
+  const selection = gitHubTokenMintSelection(resources);
+  if (!selection) {
+    return;
+  }
+  await assertGitHubTokenMintSelectionAuthorized(
+    db,
+    workspaceId,
+    selection.installationId,
+    selection.repositoryIds,
+  );
+}
+
+async function assertGitHubTokenMintSelectionAuthorized(
+  db: Parameters<typeof areGitHubRepositoriesAllowedForWorkspace>[0],
+  workspaceId: string,
+  installationId: number,
+  repositoryIds: number[],
+): Promise<void> {
+  if (
+    !(await areGitHubRepositoriesAllowedForWorkspace(
+      db,
+      workspaceId,
+      installationId,
+      repositoryIds,
+    ))
+  ) {
+    throw new Error(
+      "This workspace no longer authorizes one or more GitHub repositories attached to the session",
+    );
+  }
+}
+
 /**
  * True when the error is transient upstream backpressure — a model-provider 5xx,
  * a "server had a bad minute" body, or a dropped/again-able network connection —
@@ -6411,7 +6445,6 @@ export function codexCredentialCooldownUntil(
     CodexAccountStatus,
     "primaryUsedPercent" | "primaryResetAt" | "secondaryUsedPercent" | "secondaryResetAt"
   > | null,
-  nearExhaustionPct: number,
   now: Date,
 ): Date | null {
   if (failure.kind === "auth" || failure.kind === "forbidden") {
@@ -6433,7 +6466,7 @@ export function codexCredentialCooldownUntil(
       ]
         .filter(
           (window): window is { used: number; reset: Date } =>
-            (window.used ?? 0) >= nearExhaustionPct &&
+            (window.used ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT &&
             window.reset instanceof Date &&
             window.reset.getTime() > now.getTime(),
         )

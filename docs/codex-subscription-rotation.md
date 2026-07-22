@@ -61,6 +61,13 @@ The first and third/fourth inputs are server-held. Provider usage headers improv
 capacity ranking but are **never the sole atomic allocator**. Consequently a
 burst sees earlier reservations and spreads before delayed usage headers move.
 
+Usage percentages never create a configurable "near exhaustion" cliff. Accounts
+remain eligible through 99% in either provider window; 90% is presentation-only
+warning state. Cached usage excludes an account only at 100%, while an explicit
+provider refusal installs the authoritative cooldown. Sharded policy pins remain
+sticky throughout 90–99% and are rewritten only after actual exhaustion or another
+definitive health failure.
+
 The workspace active credential is a cursor, not a sticky lease. Pin source is
 load-bearing: a `manual` (or defensively unlabeled) pin is user intent and never
 silently fails over; if it is capped, the turn enters the same durable capacity

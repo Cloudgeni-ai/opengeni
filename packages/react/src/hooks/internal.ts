@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { SessionClientLike } from "../client";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import type { EmbeddedSessionClientLike } from "../client";
 
 export type AsyncListState<T> = {
   data: T | null;
@@ -24,7 +24,9 @@ export function usePolledValue<T>(
   const [error, setError] = useState<Error | null>(null);
   const generation = useRef(0);
   const activeLoadRef = useRef(load);
-  activeLoadRef.current = load;
+  useLayoutEffect(() => {
+    activeLoadRef.current = load;
+  }, [load]);
   const requestAbortRef = useRef<AbortController | null>(null);
   const [stateIdentity, setStateIdentity] = useState<{ load: typeof load }>(() => ({ load }));
 
@@ -123,11 +125,12 @@ export function useMutationRunner(identity: unknown = undefined): MutationState 
   const inFlight = useRef(0);
   const generation = useRef(0);
   const identityRef = useRef(identity);
-  if (!Object.is(identityRef.current, identity)) {
+  useLayoutEffect(() => {
+    if (Object.is(identityRef.current, identity)) return;
     identityRef.current = identity;
     generation.current += 1;
     inFlight.current = 0;
-  }
+  }, [identity]);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -153,7 +156,15 @@ export function useMutationRunner(identity: unknown = undefined): MutationState 
         setMutationError(null);
       }
       try {
-        return await operation();
+        const result = await operation();
+        if (
+          !mounted.current ||
+          generation.current !== ownedGeneration ||
+          !Object.is(identityRef.current, ownedIdentity)
+        ) {
+          return null;
+        }
+        return result;
       } catch (cause) {
         if (
           mounted.current &&
@@ -204,20 +215,25 @@ export type SessionEventFeedOptions = {
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: SessionClientLike,
+  client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,
   onEvent: (event: SessionEvent) => void,
   options: SessionEventFeedOptions = {},
+  reconcileBeforeLive?: (() => void | Promise<void>) | undefined,
 ): void {
   const enabled = options.enabled ?? true;
   const events = options.events;
   const sharedFeed = events !== undefined;
   const matchRef = useRef(match);
-  matchRef.current = match;
   const onEventRef = useRef(onEvent);
-  onEventRef.current = onEvent;
+  const reconcileBeforeLiveRef = useRef(reconcileBeforeLive);
+  useLayoutEffect(() => {
+    matchRef.current = match;
+    onEventRef.current = onEvent;
+    reconcileBeforeLiveRef.current = reconcileBeforeLive;
+  }, [match, onEvent, reconcileBeforeLive]);
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
 
@@ -260,6 +276,7 @@ export function useSessionEventTrigger(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: session.lastSequence,
           signal: controller.signal,
+          beforeLive: async () => await reconcileBeforeLiveRef.current?.(),
         });
         for await (const event of stream) {
           if (matchRef.current(event)) {
@@ -280,7 +297,9 @@ export function useSessionEventTrigger(
 /** Debounce rapid event bursts into one trailing call (default 150ms). */
 export function useDebouncedCallback(callback: () => void, delayMs = 150): () => void {
   const callbackRef = useRef(callback);
-  callbackRef.current = callback;
+  useLayoutEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     return () => {

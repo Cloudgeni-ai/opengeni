@@ -6,8 +6,9 @@
  * checks cannot catch a broken published exports map, missing CSS declaration,
  * cross-tarball declaration drift, or a client-only global reached during SSR.
  * This gate stages release-shaped tarballs, installs them twice (the second time
- * from the frozen Bun lock), typechecks with tsgo, builds through Vite/Tailwind,
- * and server-renders the real SandboxWorkspace export without a DOM.
+ * from the frozen Bun lock), typechecks with tsgo, builds the root and session
+ * subpaths through Vite, verifies the packed runtime skill-library subpath, and
+ * server-renders the real SandboxWorkspace export without a DOM.
  */
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -190,6 +191,7 @@ try {
     scripts: {
       typecheck: "tsgo -p tsconfig.json --noEmit",
       build: "vite build --logLevel warn",
+      "build:session": "vite build --config session.vite.config.ts --logLevel warn",
       ssr: "bun ssr.tsx",
     },
     dependencies: {
@@ -231,7 +233,14 @@ try {
             noEmit: true,
             types: ["node", "vite/client"],
           },
-          include: ["browser.tsx", "runtime-proof.ts", "ssr.tsx", "vite.config.ts"],
+          include: [
+            "browser.tsx",
+            "runtime-proof.ts",
+            "session.ts",
+            "session.vite.config.ts",
+            "ssr.tsx",
+            "vite.config.ts",
+          ],
         },
         null,
         2,
@@ -240,6 +249,10 @@ try {
     writeFile(
       join(consumerRoot, "vite.config.ts"),
       'import tailwindcss from "@tailwindcss/vite";\nimport react from "@vitejs/plugin-react";\nimport { defineConfig } from "vite";\nexport default defineConfig({ plugins: [react(), tailwindcss()] });\n',
+    ),
+    writeFile(
+      join(consumerRoot, "session.vite.config.ts"),
+      'import { defineConfig } from "vite";\nexport default defineConfig({ build: { emptyOutDir: true, lib: { entry: "session.ts", formats: ["es"], fileName: "session-consumer" }, outDir: "session-dist", rollupOptions: { external: ["react", "@opengeni/sdk"] } } });\n',
     ),
     writeFile(
       join(consumerRoot, "index.html"),
@@ -261,6 +274,10 @@ try {
       join(consumerRoot, "runtime-proof.ts"),
       'import { getSkillLibraryEntry, listSkillLibraryEntries } from "@opengeni/runtime/skill-library";\nconst entry = getSkillLibraryEntry("azure-verified-modules", "1.0.0");\nif (!entry) throw new Error("packed runtime skill-library entry was not available");\nif (!listSkillLibraryEntries().some((candidate) => candidate.id === entry.id && candidate.version === entry.version)) throw new Error("packed runtime skill-library list did not include the entry");\nconsole.log(`RUNTIME_SKILL_LIBRARY_OK version=${entry.version} hash=${entry.contentSha256}`);\n',
     ),
+    writeFile(
+      join(consumerRoot, "session.ts"),
+      'import { buildTimeline, type SessionClientLike, useComposer, useSessionControl, useSessionEvents, useTurnQueue } from "@opengeni/react/session";\nconst unused = (..._input: unknown[]): never => { throw new Error("type-only session client fixture"); };\nexport const sessionClient = { getSession: unused, listEvents: unused, streamEvents: unused, getComposerDraft: unused, saveComposerDraft: unused, sendMessage: unused, steerMessage: unused, getQueue: unused, moveQueueItem: unused, editQueueItem: unused, steerQueueItem: unused, deleteQueueItem: unused, pauseSession: unused, resumeSession: unused, sendApprovalDecision: unused } satisfies SessionClientLike;\nexport const sessionSurface = [sessionClient, buildTimeline, useComposer, useSessionControl, useSessionEvents, useTurnQueue];\n',
+    ),
   ]);
 
   process.stdout.write("[publish-consumer] installing release-shaped tarballs\n");
@@ -270,8 +287,27 @@ try {
   await run(["bun", "install", "--frozen-lockfile"], consumerRoot);
   await run(["bun", "run", "typecheck"], consumerRoot);
   await run(["bun", "run", "build"], consumerRoot);
+  await run(["bun", "run", "build:session"], consumerRoot);
   await run(["bun", "run", "ssr"], consumerRoot);
   await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
+
+  const sessionBundle = await readFile(
+    join(consumerRoot, "session-dist", "session-consumer.js"),
+    "utf8",
+  );
+  for (const forbidden of [
+    "function OpenGeniProvider",
+    "streamWorkspaceControlEvents",
+    "OpenGeni updated",
+    "data-opengeni-api-contract-mismatch",
+    "react/jsx-runtime",
+    "@uiw/react-codemirror",
+    "@xterm/",
+  ]) {
+    if (sessionBundle.includes(forbidden)) {
+      throw new Error(`Session-only tarball consumer reached forbidden runtime: ${forbidden}`);
+    }
+  }
 
   const assetRoot = join(consumerRoot, "dist", "assets");
   const cssFiles = (await readdir(assetRoot)).filter((file) => file.endsWith(".css"));
@@ -284,7 +320,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, browser CSS, SSR, and packed skill-library imports are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, session-only bundle, browser CSS, SSR, and packed skill-library imports are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

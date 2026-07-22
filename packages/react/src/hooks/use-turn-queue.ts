@@ -6,8 +6,8 @@ import type {
   SessionQueueSnapshot,
   SessionTurn,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
   useSessionEventTrigger,
@@ -24,9 +24,21 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
-export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
+function queueSnapshotCovers(
+  candidate: SessionQueueSnapshot | null,
+  observed: SessionQueueSnapshot,
+): boolean {
+  return Boolean(
+    candidate &&
+    candidate.version >= observed.version &&
+    candidate.effectiveControl.controlVersion >= observed.effectiveControl.controlVersion,
+  );
+}
 
-export type UseTurnQueueOptions = ClientOverride &
+export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
+const EMPTY_PENDING_BY_TURN: Readonly<Record<string, QueueMutationKind>> = {};
+
+export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
   };
@@ -67,62 +79,92 @@ export function useTurnQueue(
   options: UseTurnQueueOptions = {},
 ): UseTurnQueueResult {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+    useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
+  const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
   const [mutationError, setMutationError] = useState<Error | null>(null);
   const [pendingByTurn, setPendingByTurn] = useState<Record<string, QueueMutationKind>>({});
   const pendingRef = useRef<Record<string, QueueMutationKind>>({});
   const readGeneration = useRef(0);
-  const targetKeyRef = useRef<string | null>(null);
+  const targetKeyRef = useRef(targetKey);
   const snapshotRef = useRef<SessionQueueSnapshot | null>(null);
 
-  const acceptSnapshot = useCallback((next: SessionQueueSnapshot | null): boolean => {
-    const current = snapshotRef.current;
-    if (
-      next &&
-      current &&
-      (next.version < current.version ||
-        next.effectiveControl.controlVersion < current.effectiveControl.controlVersion)
-    ) {
-      return false;
-    }
-    snapshotRef.current = next;
-    setSnapshot(next);
-    return true;
-  }, []);
+  // Revoke the old target only when the new one commits. A concurrent render
+  // may suspend while the previous target remains visible and interactive.
+  useLayoutEffect(() => {
+    if (targetKeyRef.current === targetKey) return;
+    targetKeyRef.current = targetKey;
+    readGeneration.current += 1;
+    snapshotRef.current = null;
+    pendingRef.current = {};
+    setStateTargetKey(targetKey);
+    setSnapshot(null);
+    setLoading(enabled);
+    setError(null);
+    setMutationError(null);
+    setPendingByTurn({});
+  }, [enabled, targetKey]);
 
-  const load = useCallback(async (): Promise<void> => {
-    if (!sessionId) return;
-    const ticket = ++readGeneration.current;
-    try {
-      const fetched = await client.getQueue(workspaceId, sessionId);
-      if (ticket === readGeneration.current) {
-        acceptSnapshot(fetched);
-        setError(null);
-        setLoading(false);
+  const acceptSnapshot = useCallback(
+    (ownedTargetKey: string, next: SessionQueueSnapshot | null): boolean => {
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      const current = snapshotRef.current;
+      if (
+        next &&
+        current &&
+        (next.version < current.version ||
+          next.effectiveControl.controlVersion < current.effectiveControl.controlVersion)
+      ) {
+        return false;
       }
-    } catch (cause) {
-      if (ticket === readGeneration.current) {
-        setError(asError(cause));
-        setLoading(false);
+      snapshotRef.current = next;
+      setStateTargetKey(ownedTargetKey);
+      setSnapshot(next);
+      return true;
+    },
+    [],
+  );
+
+  const load = useCallback(
+    async (rejectOnFailure = false): Promise<void> => {
+      if (!sessionId) return;
+      const ownedTargetKey = `${workspaceId}\u0000${sessionId}`;
+      const ticket = ++readGeneration.current;
+      try {
+        const fetched = await client.getQueue(workspaceId, sessionId);
+        if (targetKeyRef.current !== ownedTargetKey) return;
+        const ownsLatestRead = ticket === readGeneration.current;
+        if (rejectOnFailure) {
+          const committed = acceptSnapshot(ownedTargetKey, fetched);
+          if (!committed && !queueSnapshotCovers(snapshotRef.current, fetched)) {
+            throw new TypeError("Queue reconciliation did not commit authoritative state");
+          }
+          setError(null);
+          if (ownsLatestRead) setLoading(false);
+        } else if (ownsLatestRead) {
+          acceptSnapshot(ownedTargetKey, fetched);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (cause) {
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          (ticket === readGeneration.current || rejectOnFailure)
+        ) {
+          setError(asError(cause));
+          if (ticket === readGeneration.current) setLoading(false);
+        }
+        if (rejectOnFailure) throw cause;
       }
-    }
-  }, [client, workspaceId, sessionId, acceptSnapshot]);
+    },
+    [client, workspaceId, sessionId, acceptSnapshot],
+  );
 
   useEffect(() => {
-    const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
-    if (targetKeyRef.current !== targetKey) {
-      targetKeyRef.current = targetKey;
-      readGeneration.current += 1;
-      acceptSnapshot(null);
-      setError(null);
-      setMutationError(null);
-      setPendingByTurn({});
-      pendingRef.current = {};
-    }
     if (!enabled) {
       setLoading(false);
       return;
@@ -140,7 +182,7 @@ export function useTurnQueue(
       clearInterval(timer);
       readGeneration.current += 1;
     };
-  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, acceptSnapshot]);
+  }, [load, enabled, options.pollIntervalMs]);
 
   useEffect(() => {
     if (enabled && workspaceControlEvent) void load();
@@ -151,10 +193,18 @@ export function useTurnQueue(
   }, [enabled, load, registerSessionReconciler, sessionId]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isTurnQueueEvent, scheduleRefresh, {
-    enabled,
-    ...(options.events !== undefined ? { events: options.events } : {}),
-  });
+  useSessionEventTrigger(
+    client,
+    workspaceId,
+    sessionId,
+    isTurnQueueEvent,
+    scheduleRefresh,
+    {
+      enabled,
+      ...(options.events !== undefined ? { events: options.events } : {}),
+    },
+    async () => await load(true),
+  );
 
   const mutate = useCallback(
     async (
@@ -165,23 +215,30 @@ export function useTurnQueue(
         turn: SessionTurn,
       ) => Promise<SessionQueueMutationResponse>,
     ): Promise<SessionQueueMutationResponse | null> => {
-      if (!sessionId || pendingRef.current[turnId]) return null;
+      const ownedTargetKey = targetKey;
+      if (!sessionId || targetKeyRef.current !== ownedTargetKey || pendingRef.current[turnId]) {
+        return null;
+      }
       const current = snapshotRef.current;
       const turn = current?.items.find((candidate) => candidate.id === turnId);
       if (!current || !turn) return null;
       pendingRef.current = { ...pendingRef.current, [turnId]: kind };
+      setStateTargetKey(ownedTargetKey);
       setPendingByTurn(pendingRef.current);
       setMutationError(null);
       try {
         const result = await command(current, turn);
-        acceptSnapshot(result.snapshot);
+        if (targetKeyRef.current !== ownedTargetKey) return null;
+        acceptSnapshot(ownedTargetKey, result.snapshot);
         return result;
       } catch (cause) {
-        setMutationError(asError(cause));
-        await load();
+        if (targetKeyRef.current === ownedTargetKey) {
+          setMutationError(asError(cause));
+          await load();
+        }
         return null;
       } finally {
-        if (turnId in pendingRef.current) {
+        if (targetKeyRef.current === ownedTargetKey && turnId in pendingRef.current) {
           const next = { ...pendingRef.current };
           delete next[turnId];
           pendingRef.current = next;
@@ -189,7 +246,7 @@ export function useTurnQueue(
         }
       }
     },
-    [acceptSnapshot, load, sessionId],
+    [acceptSnapshot, load, sessionId, targetKey],
   );
 
   const moveTurn = useCallback(
@@ -252,29 +309,37 @@ export function useTurnQueue(
     [client, mutate, sessionId, workspaceId],
   );
 
-  const mutationFor = useCallback(
-    (turnId: string): QueueMutationKind | null => pendingByTurn[turnId] ?? null,
-    [pendingByTurn],
+  const identityMatches = stateTargetKey === targetKey;
+  const visibleSnapshot = identityMatches ? snapshot : null;
+  const visiblePendingByTurn = identityMatches ? pendingByTurn : EMPTY_PENDING_BY_TURN;
+  const mutating = useMemo(
+    () => Object.keys(visiblePendingByTurn).length > 0,
+    [visiblePendingByTurn],
   );
-  const mutating = useMemo(() => Object.keys(pendingByTurn).length > 0, [pendingByTurn]);
+  const mutationFor = useCallback(
+    (turnId: string): QueueMutationKind | null => visiblePendingByTurn[turnId] ?? null,
+    [visiblePendingByTurn],
+  );
 
   return {
-    snapshot,
-    queue: snapshot?.items ?? [],
-    effectiveControl: snapshot?.effectiveControl ?? null,
-    stoppingPreviousAttempt: snapshot?.stoppingPreviousAttempt ?? false,
-    loading,
-    error,
+    snapshot: visibleSnapshot,
+    queue: visibleSnapshot?.items ?? [],
+    effectiveControl: visibleSnapshot?.effectiveControl ?? null,
+    stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
+    loading: identityMatches ? loading : enabled,
+    error: identityMatches ? error : null,
     refresh: load,
     moveTurn,
     editTurn,
     steerTurn,
     removeTurn,
-    pendingByTurn,
+    pendingByTurn: visiblePendingByTurn,
     mutationFor,
     mutating,
-    mutationError,
-    clearMutationError: useCallback(() => setMutationError(null), []),
+    mutationError: identityMatches ? mutationError : null,
+    clearMutationError: useCallback(() => {
+      if (targetKeyRef.current === targetKey) setMutationError(null);
+    }, [targetKey]),
   };
 }
 

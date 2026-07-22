@@ -51,7 +51,7 @@ const PRIVATE_AGENT_DOC = /\.agent\/[A-Z0-9_./-]+\.md\b/gi;
 const PRIVATE_WORKTREE_PATH = /\.claude\/worktrees\//gi;
 const PRIVATE_ISSUE_REFERENCE = /\bcloudgeni\s+#\d+\b/gi;
 const INTERNAL_ISSUE_REFERENCE = new RegExp(
-  ["(?:^|[^A-Za-z0-9])OPE", "(?:[-_ ]?\\d+)(?=[A-Z_a-z-]|\\b)"].join(""),
+  ["(?<![A-Za-z0-9])OPE", "(?:[-_ ]?\\d+)(?=[A-Z_a-z-]|\\b)"].join(""),
   "gi",
 );
 const INTERNAL_WORK_LABEL = /\b(?:SPIKE|BUG|FORK)[-_ ]?\d+(?=[A-Z_a-z-]|\b)/gi;
