@@ -11,6 +11,7 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Every caller of a key-gated deployment (coarse perimeter, not identity) |
 | Product API key | `ogk_…` bearer | Workspace member via `POST /v1/workspaces/:id/api-keys` | Hash lookup (stored hashed, shown once) | Until revoked | A product/backend calling the REST API for one workspace |
 | Delegated access token | `ogd_…` bearer | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
+| Toolspace delegated token | `ogd_…` bearer in `OPENGENI_TOOLSPACE_TOKEN_FILE` | Worker for one running turn attempt | HMAC plus DB fence on workspace/session/turn/attempt/execution generation | One hour maximum; unusable when the exact attempt stops running | Programmatic MCP calls from the turn's managed sandbox or Connected Machine |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Stream token | `ogs_…` (query/header) | API, on viewer/stream mint | HMAC, scope+TTL embedded | Minutes | Browsers attaching to desktop/terminal streams |
 | Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | Stored credential + NATS auth-callout | Until revoked | A self-hosted/connected machine agent |
@@ -40,6 +41,38 @@ Rules that hold across the table:
   env vars. Renewal atomically replaces the same files, so multi-day turns see
   current credentials without model action or manifest mutation. Missing token
   files are clean passthroughs.
+- **Git tokens never cross the model-facing tool surface.** The first-party MCP
+  exposes `github_credential_status`, which reports only typed host-managed
+  renewal, unavailable, connect, or session-rebind truth. The historical
+  `github_token` tool is not registered. Token minting and atomic file updates
+  remain worker/host responsibilities and token values never appear in MCP
+  results, model output, events, or audit text. A durable repository binding is
+  only identity/provenance: by itself it never proves that a broker credential
+  is currently live or renewed. Without an authoritative controller-health
+  result the diagnostic reports `unavailable/unknown/retry`; persistent unknown
+  state directs the caller to reconnect or rebind rather than claiming success.
+- **Toolspace is attenuated and attempt-fenced.** Its delegated token carries
+  only `toolspace:call`; exact session, turn, attempt, and execution-generation
+  claims; and subject `sandbox:<turnId>`. Every Toolspace admission, call-budget
+  reservation, and audit append checks the live DB attempt. Approval-required
+  tools and first-party recursive proxy targets are unavailable, and upstream
+  credentials never enter the compute target. Connected Machines receive this
+  token for parity when Toolspace is enabled, but still receive no platform git
+  or model credential.
+- **Credential use is destination-bound.** The connection broker receives the
+  exact URL of every MCP request before it resolves or refreshes a credential.
+  A stored `mcp_url` must canonically equal that destination; legacy API-key
+  rows without an `mcpUrl` are limited to the provider domain or its subdomains.
+  OAuth resources/scopes must match the connection binding. A mismatch fails
+  before token refresh, usage recording, or header return.
+- **Credential-bearing egress is DNS-pinned and bounded.** MCP and OAuth use the
+  shared `@opengeni/network` transport: resolve once, reject private/special-use
+  answers unless local/test or an operator explicitly allows private integration
+  targets, and make the final request through an Undici Agent pinned to the
+  vetted answer while retaining TLS hostname verification. Redirects are manual
+  and every hop is independently validated; methods, request bodies, and secret
+  headers are never replayed across an unsafe redirect. Response bodies have
+  hard byte ceilings.
 - **The perimeter is not identity.** The deployment access key gates who can
   talk to a deployment at all; workspace identity and permissions always come
   from one of the identity-bearing credentials above it.

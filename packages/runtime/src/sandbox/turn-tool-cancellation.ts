@@ -880,6 +880,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   }
 
   private async identityAlive(state: ActiveShellSession): Promise<boolean> {
+    // Helper commands run with login:false and may use Dash, whose kill builtin
+    // rejects GNU's `--`. The quoted, validated negative PGID is POSIX-safe.
     const script = state.identityValidated
       ? [
           `__opengeni_pgid=${state.identity?.processGroupId ?? 0}`,

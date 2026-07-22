@@ -42,6 +42,7 @@ import {
   stripProviderItemIdsFilter,
   callModelInputFilterForSettings,
   contextRobustnessFilterForSettings,
+  connectMcpServersInBatches,
   prefixedMcpToolName,
   prepareAgentTools,
   runAzureCliLoginHook,
@@ -61,6 +62,7 @@ import {
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
+import { MCP_MAX_TOOL_RESULT_BYTES, McpPayloadTooLargeError } from "../src/mcp-network";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -2499,6 +2501,32 @@ describe("runtime event normalization", () => {
     );
   });
 
+  test("connects in batches of eight and closes every server after a strict later failure", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const closed: string[] = [];
+    const servers = Array.from({ length: 9 }, (_, index) =>
+      fakeLifecycleMcpServer(`server-${index}`, {
+        connect: async () => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          await Bun.sleep(2);
+          active -= 1;
+          if (index === 8) throw new Error("later batch failed");
+        },
+        close: async () => {
+          closed.push(`server-${index}`);
+        },
+      }),
+    );
+
+    await expect(connectMcpServersInBatches(servers, { strict: true })).rejects.toThrow(
+      "later batch failed",
+    );
+    expect(maxActive).toBe(8);
+    expect(new Set(closed)).toEqual(new Set(servers.map((server) => server.name)));
+  });
+
   test("connects to real Streamable HTTP MCP servers with prefixes and allowed tool filtering", async () => {
     const mcp = startTestMcpServer();
     const prepared = await prepareAgentTools(
@@ -2530,6 +2558,51 @@ describe("runtime event normalization", () => {
           id: "doc-1",
         }),
       ).rejects.toThrow("not allowed");
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("rejects an oversized tool definition at the prefixed runtime boundary", async () => {
+    const mcp = startTestMcpServer({ toolDescriptionBytes: 129 * 1024 });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          { id: "oversized-list", url: mcp.url, cacheToolsList: false, timeoutMs: 60_000 },
+        ],
+      }),
+      [{ kind: "mcp", id: "oversized-list" }],
+      { mcpFetchImpl: globalThis.fetch },
+    );
+    try {
+      await expect(prepared.mcpServers[0]!.listTools()).rejects.toBeInstanceOf(
+        McpPayloadTooLargeError,
+      );
+    } finally {
+      await prepared.close();
+      mcp.close();
+    }
+  });
+
+  test("rejects an oversized tool result at the prefixed runtime boundary", async () => {
+    const mcp = startTestMcpServer({ toolResultBytes: MCP_MAX_TOOL_RESULT_BYTES + 1024 });
+    const prepared = await prepareAgentTools(
+      testSettings({
+        mcpServers: [
+          { id: "oversized-result", url: mcp.url, cacheToolsList: false, timeoutMs: 60_000 },
+        ],
+      }),
+      [{ kind: "mcp", id: "oversized-result" }],
+      { mcpFetchImpl: globalThis.fetch },
+    );
+    try {
+      await prepared.mcpServers[0]!.listTools();
+      await expect(
+        prepared.mcpServers[0]!.callTool("oversized-result__search_documents", {
+          query: "large",
+        }),
+      ).rejects.toBeInstanceOf(McpPayloadTooLargeError);
     } finally {
       await prepared.close();
       mcp.close();
@@ -2756,9 +2829,12 @@ describe("runtime event normalization", () => {
       expect(
         resolved.some(
           (input) =>
-            input.connectionRef.connectionId === connectionId && input.serverId === "cap-broker",
+            input.connectionRef.connectionId === connectionId &&
+            input.serverId === "cap-broker" &&
+            input.destinationUrl === mcp.url,
         ),
       ).toBe(true);
+      expect(resolved.every((input) => input.destinationUrl === mcp.url)).toBe(true);
     } finally {
       await prepared.close();
       mcp.close();
@@ -3935,6 +4011,25 @@ function fakeMcpServer(name: string): MCPServer {
     cacheToolsList: false,
     async connect() {},
     async close() {},
+    async listTools() {
+      return [];
+    },
+    async callTool() {
+      return [];
+    },
+    async invalidateToolsCache() {},
+  };
+}
+
+function fakeLifecycleMcpServer(
+  name: string,
+  hooks: { connect: () => Promise<void>; close: () => Promise<void> },
+): MCPServer {
+  return {
+    name,
+    cacheToolsList: false,
+    connect: hooks.connect,
+    close: hooks.close,
     async listTools() {
       return [];
     },

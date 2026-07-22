@@ -54,6 +54,18 @@ export type QueueSurfaceProps =
       readOnly: true;
     };
 
+export function requestQueueDraftEdit(
+  composer: Pick<ComposerState, "hasDraftContent">,
+  confirmReplacement: () => void,
+  editImmediately: () => void,
+): void {
+  if (composer.hasDraftContent()) {
+    confirmReplacement();
+  } else {
+    editImmediately();
+  }
+}
+
 export function QueueSurface({ queue, composer, readOnly = false }: QueueSurfaceProps) {
   const [open, setOpen] = useState(false);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
@@ -192,16 +204,11 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
   const requestEdit = useCallback(
     (turn: SessionTurn) => {
       if (!composer || readOnly) return;
-      const draftDirty =
-        composer.value.length > 0 ||
-        composer.restoredResources.length > 0 ||
-        (composer.draft?.tools.length ?? 0) > 0 ||
-        (composer.draft?.sourceTurnId !== null && composer.draft?.sourceTurnId !== undefined);
-      if (draftDirty) {
-        setReplaceDraftFor(turn.id);
-      } else {
-        void edit(turn, false);
-      }
+      requestQueueDraftEdit(
+        composer,
+        () => setReplaceDraftFor(turn.id),
+        () => void edit(turn, false),
+      );
     },
     [composer, edit, readOnly],
   );

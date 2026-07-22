@@ -496,6 +496,121 @@ describe("connections table and helpers", () => {
 });
 
 describe("buildConnectionTokenResolver", () => {
+  test("refuses to send an OAuth credential to a different MCP destination", async () => {
+    const credential = brokerCredential({
+      kind: "oauth2",
+      providerDomain: "oauth.example.com",
+      credential: {
+        access_token: "AC",
+        token_type: "Bearer",
+        mcp_url: "https://mcp.oauth.example.com/mcp",
+        resource: "https://mcp.oauth.example.com/mcp",
+      },
+      metadata: {
+        mcpUrl: "https://mcp.oauth.example.com/mcp",
+        resource: "https://mcp.oauth.example.com/mcp",
+      },
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => credential });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      destinationUrl: "https://attacker.example/mcp",
+      connectionRef: {
+        connectionId: credential.id,
+        providerDomain: "oauth.example.com",
+        kind: "oauth2",
+        resource: "https://mcp.oauth.example.com/mcp",
+      },
+    });
+    expect(result).toMatchObject({
+      status: "auth_needed",
+      reason: "missing_connection",
+      connectionId: credential.id,
+    });
+    expect(counts.recordUsed).toBe(0);
+    expect(counts.refresh).toBe(0);
+  });
+
+  test("binds legacy API-key headers to the provider host", async () => {
+    const credential = brokerCredential({
+      kind: "api_key",
+      providerDomain: "api.example.com",
+      credential: { headers: { authorization: "Bearer SECRET" } },
+      metadata: {},
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => credential });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+
+    const allowed = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      destinationUrl: "https://mcp.api.example.com/mcp",
+      connectionRef: {
+        connectionId: credential.id,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+      },
+    });
+    expect(allowed).toMatchObject({ status: "ok", connectionId: credential.id });
+
+    const denied = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      destinationUrl: "https://attacker.example/mcp",
+      connectionRef: {
+        connectionId: credential.id,
+        providerDomain: "api.example.com",
+        kind: "api_key",
+      },
+    });
+    expect(denied).toMatchObject({
+      status: "auth_needed",
+      reason: "missing_connection",
+      connectionId: credential.id,
+    });
+    expect(counts.refresh).toBe(0);
+    expect(counts.recordUsed).toBe(1);
+  });
+
+  test("rejects missing destination/resource bindings before an expired token refresh", async () => {
+    const credential = brokerCredential({
+      kind: "oauth2",
+      providerDomain: "oauth.example.com",
+      credential: {
+        access_token: "AC",
+        refresh_token: "RF",
+        token_type: "Bearer",
+      },
+      metadata: {},
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    const { deps, counts } = resolverDeps({ loadCredential: async () => credential });
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "srv_1",
+      destinationUrl: "https://mcp.oauth.example.com/mcp",
+      connectionRef: {
+        connectionId: credential.id,
+        providerDomain: "oauth.example.com",
+        kind: "oauth2",
+        resource: "https://mcp.oauth.example.com/mcp",
+      },
+      forceRefresh: true,
+    });
+
+    expect(result).toMatchObject({
+      status: "auth_needed",
+      reason: "missing_connection",
+      connectionId: credential.id,
+    });
+    expect(counts.refresh).toBe(0);
+    expect(counts.recordRefresh).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("materializes api_key headers and records usage", async () => {
     const { deps, counts } = resolverDeps();
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
@@ -503,6 +618,7 @@ describe("buildConnectionTokenResolver", () => {
       workspaceId: "ws_1",
       subjectId: "subject-a",
       serverId: "srv_1",
+      destinationUrl: "https://api.example.com/mcp",
       connectionRef: { providerDomain: "api.example.com", kind: "api_key", scopes: [] },
     });
     expect(result).toEqual({
@@ -526,6 +642,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://api.example.com/mcp",
       connectionRef: {
         providerDomain: "api.example.com",
         kind: "api_key",
@@ -551,6 +668,7 @@ describe("buildConnectionTokenResolver", () => {
     let loadCalls = 0;
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -583,12 +701,14 @@ describe("buildConnectionTokenResolver", () => {
       resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
         forceRefresh: true,
       }),
       resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
         forceRefresh: true,
       }),
@@ -617,6 +737,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a transient refresh failure (AS 5xx / network) does not poison the connection", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -633,6 +754,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({
@@ -646,6 +768,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a 429 from the token endpoint is transient — no needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -662,6 +785,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
@@ -716,7 +840,7 @@ describe("buildConnectionTokenResolver", () => {
         refresh: async (cred, ref) => {
           counts.refresh += 1;
           try {
-            return await refreshOAuthConnectionCredential(cred, ref);
+            return await refreshOAuthConnectionCredential(cred, ref, settings);
           } catch (error) {
             observedError = error;
             throw error;
@@ -727,6 +851,7 @@ describe("buildConnectionTokenResolver", () => {
       const result = await resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
       });
       expect(result).toMatchObject({
@@ -748,9 +873,8 @@ describe("buildConnectionTokenResolver", () => {
   });
 
   test("public-client refresh sends client_id from the credential bundle", async () => {
-    const originalFetch = globalThis.fetch;
     let capturedBody: URLSearchParams | null = null;
-    globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const fetchImpl = async (_url: string | URL | Request, init?: RequestInit) => {
       capturedBody = new URLSearchParams(String(init?.body));
       return new Response(
         JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }),
@@ -759,34 +883,36 @@ describe("buildConnectionTokenResolver", () => {
           headers: { "content-type": "application/json" },
         },
       );
-    }) as typeof fetch;
-    try {
-      const refreshed = await refreshOAuthConnectionCredential(
-        brokerCredential({
-          kind: "oauth2",
-          credential: {
-            access_token: "AC",
-            refresh_token: "RF",
-            token_type: "Bearer",
-            token_endpoint: "https://as.example.com/token",
-            client_id: "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
-          },
-        }),
-        { providerDomain: "oauth.example.com", kind: "oauth2" },
-      );
-      expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
-      expect(capturedBody!.get("client_id")).toBe(
-        "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
-      );
-      expect(capturedBody!.get("grant_type")).toBe("refresh_token");
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
+    };
+    const refreshed = await refreshOAuthConnectionCredential(
+      brokerCredential({
+        kind: "oauth2",
+        credential: {
+          access_token: "AC",
+          refresh_token: "RF",
+          token_type: "Bearer",
+          token_endpoint: "https://as.example.com/token",
+          client_id: "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
+        },
+      }),
+      { providerDomain: "oauth.example.com", kind: "oauth2" },
+      settings,
+      {
+        fetchImpl,
+        dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+      },
+    );
+    expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
+    expect(capturedBody!.get("client_id")).toBe(
+      "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
+    );
+    expect(capturedBody!.get("grant_type")).toBe("refresh_token");
   });
 
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -803,6 +929,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({

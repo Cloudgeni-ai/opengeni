@@ -17,6 +17,7 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   EnablePackRequest,
+  GitHubCapabilityHealth,
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
@@ -118,6 +119,39 @@ describe("contracts", () => {
     expect(OAuthStartRequest.parse({ resource: "https://mcp.example.com/mcp" }).resource).toBe(
       "https://mcp.example.com/mcp",
     );
+  });
+
+  test("GitHub capability health is secret-safe and pins automatic renewal truth", () => {
+    expect(
+      GitHubCapabilityHealth.parse({
+        state: "ready",
+        reason: null,
+        action: "none",
+        renewal: "automatic",
+      }),
+    ).toEqual({ state: "ready", reason: null, action: "none", renewal: "automatic" });
+    expect(
+      GitHubCapabilityHealth.parse({
+        state: "unavailable",
+        reason: "session_repository_binding_required",
+        action: "rebind",
+        renewal: "inactive",
+      }),
+    ).toEqual({
+      state: "unavailable",
+      reason: "session_repository_binding_required",
+      action: "rebind",
+      renewal: "inactive",
+    });
+    expect(() =>
+      GitHubCapabilityHealth.parse({
+        state: "ready",
+        reason: null,
+        action: "none",
+        renewal: "automatic",
+        token: "must-not-project",
+      }),
+    ).toThrow();
   });
 
   test("accepts repository and file resources on create session", () => {

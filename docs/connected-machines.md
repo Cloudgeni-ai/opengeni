@@ -34,6 +34,14 @@ its own ssh / `gh` / credential helper), repos are **not cloned onto it**, and
 the agent runs under a **per-session working directory** (making its own
 worktrees under that path as it needs them).
 
+When Toolspace is enabled, Connected Machines have the same programmatic tool
+surface as managed sandboxes. This is not an ambient platform credential: the
+runtime writes one narrow `ogd_` bearer to the Toolspace token file for the
+current turn. It carries only `toolspace:call`, is bound to the exact
+workspace/session/turn/attempt/execution generation, expires after one hour,
+and becomes unusable as soon as that attempt is no longer the active running
+attempt. Platform git and model credentials remain excluded.
+
 ## Create a session on a machine
 
 `createSession` grows two fields for a Connected-Machine target:

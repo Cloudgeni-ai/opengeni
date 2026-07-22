@@ -183,6 +183,10 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     );
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
     expect(b.parentSessionId).toBe(a.id);
+    // The parent uses capability-first defaults, but this worker-signed grant
+    // is narrower. Persist the intersection so runtime null-default handling
+    // cannot let the child out-rank its actual creator.
+    expect(b.firstPartyMcpPermissions).toEqual(["sessions:read", "sessions:create"]);
     // Distinct sessions, same group (one box, two conversations).
     expect(b.id).not.toBe(a.id);
   }, 60_000);
@@ -445,6 +449,58 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
       sandbox: { groupId: a.sandboxGroupId },
     });
     expect(b.sandboxGroupId).toBe(a.sandboxGroupId);
+  }, 60_000);
+
+  test("a worker-signed child freezes its narrowed parent's effective first-party permissions", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      {
+        initialMessage: "narrow manager",
+        firstPartyMcpPermissions: ["sessions:create", "sessions:read"],
+      },
+    );
+
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "inherit without widening" },
+    );
+    expect(child.firstPartyMcpPermissions).toEqual(["sessions:create", "sessions:read"]);
+
+    // Even an internally inconsistent grant carrying a wider permission cannot
+    // use the signed parent id to exceed the parent's durable effective grant.
+    await expect(
+      createSessionForRequest(
+        deps(bus),
+        {
+          ...grant(accountId, workspaceId, parent.id),
+          permissions: ["sessions:create", "sessions:read", "sessions:control"],
+        },
+        workspaceId,
+        {
+          initialMessage: "attempted wider child",
+          firstPartyMcpPermissions: ["sessions:create", "sessions:control"],
+        },
+      ),
+    ).rejects.toThrow(/only narrow the parent session grant/);
+  }, 60_000);
+
+  test("top-level omission retains capability-first runtime defaults", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const session = await createSessionForRequest(
+      deps(new MemoryEventBus()),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "top-level defaults" },
+    );
+    expect(session.firstPartyMcpPermissions).toBeNull();
   }, 60_000);
 
   test("cross-workspace {groupId} join ⇒ 404 (the mandatory-workspaceId boundary, stress e)", async () => {

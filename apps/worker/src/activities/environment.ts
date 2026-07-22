@@ -125,7 +125,9 @@ export async function sandboxEnvironmentForRun(
     skipGitHubToken?: boolean;
     deferGitHubToken?: boolean;
     sessionId?: string;
-    runId?: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
   } = {},
 ): Promise<{
   environment: Record<string, string>;
@@ -167,15 +169,20 @@ export async function sandboxEnvironmentForRun(
     settings.delegationSecret &&
     options.scope &&
     options.sessionId &&
-    options.runId
+    options.turnId &&
+    options.attemptId &&
+    options.executionGeneration
   ) {
     toolspaceToken = await signDelegatedAccessToken(settings.delegationSecret, {
       accountId: options.scope.accountId,
       workspaceId: options.scope.workspaceId,
-      subjectId: `sandbox:${options.runId}`,
+      subjectId: `sandbox:${options.turnId}`,
       subjectLabel: "sandbox toolspace",
       permissions: ["toolspace:call"],
       sessionId: options.sessionId,
+      turnId: options.turnId,
+      attemptId: options.attemptId,
+      executionGeneration: options.executionGeneration,
       exp: Math.floor(Date.now() / 1000) + 60 * 60,
     });
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(

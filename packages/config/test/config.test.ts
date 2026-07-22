@@ -205,6 +205,14 @@ describe("sandbox preparation profiles", () => {
     expect(settings.authAllowMetrics).toBe(false);
   });
 
+  test("keeps explicit follow-up tool replacement gated off unless deliberately enabled", () => {
+    expect(withEnv({}, () => getSettings()).sessionTurnToolReplacementEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED: "true" }, () => getSettings())
+        .sessionTurnToolReplacementEnabled,
+    ).toBe(true);
+  });
+
   test("requires an access key when shared-key auth is enabled", () => {
     expect(() =>
       withEnv(

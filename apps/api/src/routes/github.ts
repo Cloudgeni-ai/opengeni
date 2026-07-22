@@ -1,6 +1,7 @@
 import {
   GitHubAppManifestCreate,
   type AccessGrant,
+  type GitHubCapabilityHealth,
   type GitHubUserInstallationAccess,
 } from "@opengeni/contracts";
 import { bindGitHubInstallationRepositories, deleteGitHubInstallationBinding } from "@opengeni/db";
@@ -49,6 +50,10 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "github:use");
     const missing = githubAppMissingSettings(settings);
     const slug = settings.githubAppSlug?.trim() || null;
+    const configured = missing.length === 0;
+    const installations = configured
+      ? await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId)
+      : [];
     const installState = createSignedState(githubStateSecret, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -64,7 +69,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const baseUrl = openGeniBaseUrl(settings, c);
     const connectBase = `${baseUrl}/v1/workspaces/${grant.workspaceId}/github/connect`;
     return c.json({
-      configured: missing.length === 0,
+      configured,
       appId: settings.githubAppId ?? null,
       clientId: settings.githubClientId ?? null,
       appSlug: slug,
@@ -73,8 +78,12 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         missing.length === 0 && slug
           ? `${connectBase}?state=${encodeURIComponent(linkState)}`
           : null,
-      installations: await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId),
+      installations,
       missing,
+      health: githubWorkspaceCapabilityHealth({
+        configured,
+        installationCount: installations.length,
+      }),
     });
   });
 
@@ -134,7 +143,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
+      const repositories = await listWorkspaceGitHubRepositories(deps, workspaceId);
+      return c.json({
+        repositories,
+        health: githubRepositoryCapabilityHealth(repositories.length),
+      });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
         throw new HTTPException(409, {
@@ -151,7 +164,11 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "github:use");
     try {
-      return c.json({ repositories: await listWorkspaceGitHubRepositories(deps, workspaceId) });
+      const repositories = await listWorkspaceGitHubRepositories(deps, workspaceId);
+      return c.json({
+        repositories,
+        health: githubRepositoryCapabilityHealth(repositories.length),
+      });
     } catch (error) {
       if (error instanceof GitHubAppConfigurationError) {
         throw new HTTPException(409, {
@@ -760,6 +777,50 @@ function isSecureRequest(c: Context, deps: ApiRouteDeps): boolean {
   );
 }
 
+/** Deployment configuration + durable workspace binding truth; no provider or secret data. */
+export function githubWorkspaceCapabilityHealth(input: {
+  configured: boolean;
+  installationCount: number;
+}): GitHubCapabilityHealth {
+  if (!input.configured) {
+    return {
+      state: "unavailable",
+      reason: "not_configured",
+      action: "configure",
+      renewal: "inactive",
+    };
+  }
+  if (input.installationCount <= 0) {
+    return {
+      state: "unavailable",
+      reason: "no_repository_binding",
+      action: "connect",
+      renewal: "inactive",
+    };
+  }
+  // Installation rows prove only a durable workspace binding. They can outlive
+  // a suspended/uninstalled App or broken provider credentials, so do not claim
+  // host delivery or automatic renewal until a provider-backed operation has
+  // succeeded. The repository endpoint supplies that live projection.
+  return {
+    state: "unavailable",
+    reason: "unknown",
+    action: "retry",
+    renewal: "inactive",
+  };
+}
+
+/** A successful provider list still distinguishes usable rows from an empty binding. */
+export function githubRepositoryCapabilityHealth(repositoryCount: number): GitHubCapabilityHealth {
+  return repositoryCount > 0
+    ? { state: "ready", reason: null, action: "none", renewal: "automatic" }
+    : {
+        state: "unavailable",
+        reason: "no_repository_binding",
+        action: "reconnect",
+        renewal: "inactive",
+      };
+}
 function githubSuccessHtml(envLines: string[], installUrl: string): string {
   const envText = envLines.join("\n");
   const escaped = escapeHtml(envText);

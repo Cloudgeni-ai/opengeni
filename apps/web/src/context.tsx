@@ -37,6 +37,7 @@ import { LoadingPanel, ProblemPanel } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { githubCapabilityHealthForError } from "@/lib/github-health";
 import { sameSessionForContext } from "@/lib/session-context";
 import {
   applySessionPinProjection,
@@ -45,7 +46,6 @@ import {
 } from "@/lib/session-pins";
 import {
   buildResources,
-  buildTools,
   enabledWorkspaceCapabilityMcpServers,
   groupRepositories,
   initialReasoningEffort,
@@ -53,6 +53,7 @@ import {
   mergeMcpServerOptions,
   selectableMcpServers,
   selectedAvailableCapabilityToolIds,
+  toolsForPolicySelection,
   type IntelligenceEffort,
   type McpServerOption,
   type RepoDraft,
@@ -64,6 +65,7 @@ import type {
   AuthSession,
   ClientConfig,
   CreateWorkspaceRequest,
+  GitHubCapabilityHealth,
   GitHubAppInfo,
   GitHubRepository,
   ResourceRef,
@@ -109,13 +111,15 @@ export type AppContextValue = {
   selectedRepoRefs: Record<number, string>;
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
-  githubStatus: GitHubAppInfo | null;
+  githubStatus: (GitHubAppInfo & { health: GitHubCapabilityHealth }) | null;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
   setGithubOrg: Dispatch<SetStateAction<string>>;
   selectedCapabilityToolIds: Set<string>;
   setSelectedCapabilityToolIds: Dispatch<SetStateAction<Set<string>>>;
+  /** Live picker projection of the server's omitted-tools workspace baseline. */
+  workspaceDefaultToolIds: Set<string>;
   busy: boolean;
   repoBusy: boolean;
   githubAppBusy: boolean;
@@ -234,7 +238,9 @@ export function RootRouteComponent() {
   const [selectedRepoIds, setSelectedRepoIds] = useState<Set<number>>(() => new Set());
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
-  const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
+  const [githubStatus, setGithubStatus] = useState<
+    (GitHubAppInfo & { health: GitHubCapabilityHealth }) | null
+  >(null);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -396,6 +402,14 @@ export function RootRouteComponent() {
     () => mergeMcpServerOptions(selectableMcpServers(clientConfig), workspaceMcpServers),
     [clientConfig, workspaceMcpServers],
   );
+  const workspaceDefaultToolIds = useMemo(() => {
+    const selectable = new Set(toolMcpServers.map((server) => server.id));
+    return new Set(
+      ["opengeni", ...workspaceMcpServers.map((server) => server.id)].filter((id) =>
+        selectable.has(id),
+      ),
+    );
+  }, [toolMcpServers, workspaceMcpServers]);
   const currentResources = useMemo(
     () => buildResources(manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs),
     [manualRepos, githubRepos, selectedRepoIds, selectedRepoRefs],
@@ -407,10 +421,12 @@ export function RootRouteComponent() {
     }
     const availableIds = toolMcpServers.map((server) => server.id);
     setSelectedCapabilityToolIds((current) =>
-      selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current),
+      selectedAvailableCapabilityToolIds(current, availableIds, previousCapabilityToolIds.current, [
+        ...workspaceDefaultToolIds,
+      ]),
     );
     previousCapabilityToolIds.current = new Set(availableIds);
-  }, [clientConfig, toolMcpServers]);
+  }, [clientConfig, toolMcpServers, workspaceDefaultToolIds]);
 
   // Workspace create/rename keep the cached `workspaces` list and the access
   // context (the create grants the caller an owner grant) in sync.
@@ -655,19 +671,62 @@ export function RootRouteComponent() {
         if (signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubStatus(status);
+        const statusHealth =
+          status.health ??
+          (status.configured
+            ? {
+                state: "unavailable" as const,
+                reason: "no_repository_binding" as const,
+                action: "connect" as const,
+                renewal: "inactive" as const,
+              }
+            : {
+                state: "unavailable" as const,
+                reason: "not_configured" as const,
+                action: "configure" as const,
+                renewal: "inactive" as const,
+              });
+        const nextStatus = { ...status, health: statusHealth };
+        setGithubStatus(nextStatus);
         setGithubAppOpen(!status.configured);
         if (status.configured) {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
           // so installations changed after connect show up; passive loads read
           // OpenGeni's cached rows.
-          const { repositories } = options?.sync
-            ? await client.syncGitHubRepositories(workspaceId)
-            : await client.listGitHubRepositories(workspaceId);
-          if (signal?.aborted || githubRefreshId.current !== refreshId) {
-            return;
+          try {
+            const response = options?.sync
+              ? await client.syncGitHubRepositories(workspaceId)
+              : await client.listGitHubRepositories(workspaceId);
+            if (signal?.aborted || githubRefreshId.current !== refreshId) {
+              return;
+            }
+            setGithubRepos(response.repositories);
+            setGithubStatus({
+              ...nextStatus,
+              health:
+                response.health ??
+                (response.repositories.length > 0
+                  ? { state: "ready", reason: null, action: "none", renewal: "automatic" }
+                  : {
+                      state: "unavailable",
+                      reason: "no_repository_binding",
+                      action: "reconnect",
+                      renewal: "inactive",
+                    }),
+            });
+          } catch (error) {
+            if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
+              return;
+            }
+            setGithubRepos([]);
+            setGithubStatus({
+              ...nextStatus,
+              health: githubCapabilityHealthForError(error),
+            });
+            toast.error("GitHub repositories unavailable", {
+              description: "Repository access could not be checked. Retry or reconnect the app.",
+            });
           }
-          setGithubRepos(repositories);
         } else {
           setGithubRepos([]);
         }
@@ -675,7 +734,19 @@ export function RootRouteComponent() {
         if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubStatus(null);
+        setGithubStatus((current) => ({
+          ...(current ?? {
+            configured: false,
+            appId: null,
+            clientId: null,
+            appSlug: null,
+            installUrl: null,
+            linkUrl: null,
+            installations: [],
+            missing: [],
+          }),
+          health: githubCapabilityHealthForError(error),
+        }));
         setGithubRepos([]);
         toast.error("GitHub status unavailable", { description: String(error) });
       } finally {
@@ -715,7 +786,11 @@ export function RootRouteComponent() {
     const idempotencyKey = pendingCreateKey.current ?? crypto.randomUUID();
     pendingCreateKey.current = idempotencyKey;
     try {
-      const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
+      const selectedTools = toolsForPolicySelection({
+        ...(submission.tools ? { existing: submission.tools } : {}),
+        selectedMcpServerIds: selectedCapabilityToolIds,
+        baselineMcpServerIds: workspaceDefaultToolIds,
+      });
       const created = await client.createSession(workspaceId, {
         initialMessage: submission.text,
         // Workspace repo selection is excluded when the create targets a
@@ -725,7 +800,7 @@ export function RootRouteComponent() {
           ...(options?.omitWorkspaceResources ? [] : currentResources),
           ...(submission.resources ?? []),
         ],
-        tools: selectedTools,
+        ...(selectedTools !== undefined ? { tools: selectedTools } : {}),
         model: submission.model ?? model,
         reasoningEffort: submission.reasoningEffort ?? reasoningEffort,
         clientEventId: crypto.randomUUID(),
@@ -975,6 +1050,7 @@ export function RootRouteComponent() {
           setGithubOrg,
           selectedCapabilityToolIds,
           setSelectedCapabilityToolIds,
+          workspaceDefaultToolIds,
           busy,
           repoBusy,
           githubAppBusy,
@@ -1055,6 +1131,7 @@ export function RootRouteComponent() {
     setModelForSession,
     setSession,
     toolMcpServers,
+    workspaceDefaultToolIds,
     workspaces,
   ]);
 

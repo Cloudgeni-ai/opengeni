@@ -52,7 +52,7 @@ import {
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
-import { buildTools } from "@/lib/session-tools";
+import { sessionPolicyPickerIds, toolsForPolicySelection } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
@@ -180,8 +180,9 @@ export function SessionRoute({
   }, [loadError]);
 
   // A reconnect OAuth round-trip lands back here (the reconnect card set
-  // returnPath to this session). The connection is refreshed server-side, so we
-  // just acknowledge it and strip the params — the user retries their message.
+  // returnPath to this session). The connection is refreshed server-side, but
+  // the original tool call was settled as an error and is never replayed. Strip
+  // the params and tell the user to start a new turn.
   const oauthReturnHandled = useRef(false);
   useEffect(() => {
     if (oauthReturnHandled.current) {
@@ -195,8 +196,8 @@ export function SessionRoute({
     oauthReturnHandled.current = true;
     window.history.replaceState(null, "", window.location.pathname);
     if (outcome === "success") {
-      toast.success("Reconnected", {
-        description: "Send your message again to continue.",
+      toast.success("Connection restored", {
+        description: "The earlier tool call wasn't replayed. Send a new message to try again.",
       });
     } else {
       toast.error("Reconnect failed", {
@@ -355,6 +356,7 @@ export function SessionRoute({
 
   const chatPane = (
     <SessionChatPane
+      key={session.id}
       session={session}
       events={events}
       timeline={timeline}
@@ -560,29 +562,60 @@ function SessionChatPane(props: {
   // Workspace-scoped: the provider (mounted on the workspace route) supplies
   // the workspaceId, so the hook needs no positional argument.
   const attachments = useFileAttachments();
-  const { selectedCapabilityToolIds, reasoningEffort } = context;
+  const { reasoningEffort } = context;
+  const selectableToolIds = useMemo(
+    () => context.toolMcpServers.map((server) => server.id),
+    [context.toolMcpServers],
+  );
+  const policyToolIds = useMemo(
+    () => sessionPolicyPickerIds(props.session, selectableToolIds, context.workspaceDefaultToolIds),
+    [context.workspaceDefaultToolIds, props.session, selectableToolIds],
+  );
+  const [selectedSessionToolIds, setSelectedSessionToolIds] = useState<Set<string>>(
+    () => new Set(policyToolIds),
+  );
+  const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   // The model is session-scoped: this session remembers its own pick (falling
   // back to the deployment default), so a switch here doesn't bleed into others.
   const model = context.modelForSession(props.session.id);
-  const { setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds } = context;
+  const { setModelForSession, setReasoningEffort } = context;
+  useEffect(() => {
+    if (!toolSelectionExplicit) {
+      setSelectedSessionToolIds(new Set(policyToolIds));
+    }
+  }, [policyToolIds, toolSelectionExplicit]);
   const applyComposerSettings = useCallback(
     (draft: ComposerDraft) => {
       setModelForSession(props.session.id, draft.model);
       setReasoningEffort(draft.reasoningEffort);
-      setSelectedCapabilityToolIds(new Set(draft.tools.map((tool) => tool.id)));
+      setToolSelectionExplicit(draft.toolsProvided);
+      setSelectedSessionToolIds(
+        draft.toolsProvided
+          ? new Set(
+              draft.tools.map((tool) => tool.id).filter((id) => selectableToolIds.includes(id)),
+            )
+          : new Set(policyToolIds),
+      );
     },
-    [props.session.id, setModelForSession, setReasoningEffort, setSelectedCapabilityToolIds],
+    [policyToolIds, props.session.id, selectableToolIds, setModelForSession, setReasoningEffort],
   );
   const composer = useComposer(props.session.id, {
     events: props.events,
     // Evaluated at send time: attachments and tools picked while the draft was
     // being written ride along with the message.
-    sendExtras: () => ({
-      resources: attachments.readyResources,
-      tools: buildTools(undefined, [...selectedCapabilityToolIds]),
-      model,
-      reasoningEffort,
-    }),
+    sendExtras: () => {
+      const tools = toolsForPolicySelection({
+        selectedMcpServerIds: selectedSessionToolIds,
+        baselineMcpServerIds: policyToolIds,
+        forceExplicit: toolSelectionExplicit,
+      });
+      return {
+        resources: attachments.readyResources,
+        ...(tools !== undefined ? { tools } : {}),
+        model,
+        reasoningEffort,
+      };
+    },
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
     onSent: () => attachments.clear(),
@@ -791,9 +824,12 @@ function SessionChatPane(props: {
                 />
                 <EnabledMcpToolPicker
                   servers={context.toolMcpServers}
-                  selectedIds={context.selectedCapabilityToolIds}
+                  selectedIds={selectedSessionToolIds}
                   disabled={composer.sending || terminal}
-                  onChange={context.setSelectedCapabilityToolIds}
+                  onChange={(next) => {
+                    setToolSelectionExplicit(true);
+                    setSelectedSessionToolIds(next);
+                  }}
                 />
               </div>
             }

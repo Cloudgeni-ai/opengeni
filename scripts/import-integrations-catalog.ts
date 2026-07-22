@@ -85,6 +85,7 @@ export type CatalogIntegrationRow = {
   provenance: string;
   logoSourceUrl: string | null;
   probe?: Record<string, unknown>;
+  authContract?: Record<string, unknown>;
 };
 
 export type NormalizedCatalogSnapshot = {
@@ -98,9 +99,16 @@ export type NormalizedCatalogSnapshot = {
     skippedRows: number;
     quarantinedRows: number;
     duplicateDomainNameRows: number;
+    duplicateEndpointRows: number;
+    unverifiedRows: number;
     controlCharacterFields: number;
   };
 };
+
+const brandedNamesByMcpUrl = new Map([
+  ["https://mcp.linear.app/mcp", "Linear"],
+  ["https://mcp.slack.com/mcp", "Slack"],
+]);
 
 export type LogoStorageResult =
   | { ok: true; path: string; sourceUrl: string; contentType: string; sizeBytes: number }
@@ -152,7 +160,10 @@ export async function writeCleanCatalogSnapshot(
   return normalized;
 }
 
-export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSnapshot {
+export function normalizeCatalogSnapshot(
+  snapshot: unknown,
+  options: { allowUnprobedCandidates?: boolean } = {},
+): NormalizedCatalogSnapshot {
   const controlCharacters = { count: 0 };
   const cleanedSnapshot = stripControlCharacters(snapshot, controlCharacters);
   const root = asRecord(cleanedSnapshot);
@@ -163,10 +174,12 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
   const candidatesByDomainName = new Map<string, CatalogIntegrationRow>();
   const seen = new Set<string>();
   let duplicateDomainNameRows = 0;
+  let duplicateEndpointRows = 0;
+  let unverifiedRows = 0;
 
   for (const candidate of candidates) {
     const domain = normalizeDomain(candidate.domain);
-    const mcpUrl = stringValue(candidate.mcpUrl);
+    const rawMcpUrl = stringValue(candidate.mcpUrl);
     if (!domain) {
       skipped.push({ domain: null, mcpUrl: null, reason: "missing_domain" });
       continue;
@@ -175,11 +188,11 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       skipped.push({ domain, mcpUrl: null, reason: "dead_demo_domain" });
       continue;
     }
-    if (!mcpUrl) {
+    if (!rawMcpUrl) {
       skipped.push({ domain, mcpUrl: null, reason: "missing_url" });
       continue;
     }
-    const rejectionReason = catalogMcpUrlRejection(mcpUrl);
+    const rejectionReason = catalogMcpUrlRejection(rawMcpUrl);
     if (rejectionReason) {
       skipped.push({
         domain,
@@ -188,24 +201,46 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       });
       continue;
     }
+    const mcpUrl = canonicalMcpUrl(rawMcpUrl);
     const transport = normalizeTransport(candidate.transport ?? candidate.transports);
     if (!transport) {
       skipped.push({ domain, mcpUrl: null, reason: "transport_not_streamable_http" });
       continue;
     }
     const key = `${domain}\n${mcpUrl}`;
-    if (seen.has(key)) {
-      skipped.push({ domain, mcpUrl: null, reason: "duplicate_surface" });
+    const provenance = normalizeProvenance(candidate.provenance ?? asRecord(candidate.basis)?.via);
+    const probe = asRecord(candidate.probe);
+    const probeStatus = stringValue(probe?.status);
+    if (probeStatus !== "real") {
+      // Production imports require probe evidence. Tests and offline cleaning
+      // may explicitly opt into preserving pre-probe candidates, but an
+      // observed unverified/junk result is never promoted by that option.
+      if (probeStatus || !options.allowUnprobedCandidates) {
+        unverifiedRows += 1;
+        skipped.push({
+          domain,
+          mcpUrl: null,
+          reason: probeStatus
+            ? `probe_${probeStatus}:${stringValue(probe?.reason) ?? "unknown"}`
+            : "probe_missing",
+        });
+        continue;
+      }
+    }
+    const authKind = normalizeAuthKind(candidate.authKind);
+    if (authKind === "unknown") {
+      skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
       continue;
     }
-    seen.add(key);
-    const provenance = normalizeProvenance(candidate.provenance ?? asRecord(candidate.basis)?.via);
+    const authContract = normalizeAuthContract(
+      candidate.authContract ?? asRecord(candidate.metadata)?.authContract,
+    );
     const row: CatalogIntegrationRow = {
       domain,
-      name: stringValue(candidate.name) ?? domain,
+      name: brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
       mcpUrl,
       transport: "streamable-http",
-      authKind: normalizeAuthKind(candidate.authKind),
+      authKind,
       scopesHint: stringArray(candidate.scopesHint),
       credentialFacts: recordArray(candidate.credentialFacts),
       tier: provenance === "detected" ? "verified" : "community",
@@ -214,12 +249,28 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
         stringValue(candidate.logoAsset) ??
         stringValue(candidate.logoSourceUrl) ??
         `https://integrations.sh/logo/${domain}`,
+      ...(probe ? { probe } : {}),
+      ...(authContract ? { authContract } : {}),
     };
     const suspiciousReason = suspiciousSurfaceUrls.get(key);
     if (suspiciousReason) {
       quarantined.push({ row, reason: suspiciousReason });
       continue;
     }
+    if (authKind === "api_key" && !authContract) {
+      // Credential prose is not a machine-actionable runtime contract. Keep
+      // the row out of the registry rather than exposing a server that cannot
+      // be connected safely.
+      skipped.push({ domain, mcpUrl: null, reason: "api_key_metadata_unactionable" });
+      continue;
+    }
+    // Only accepted rows claim their normalized surface key. A missing or
+    // failed probe must not shadow a later alias carrying usable evidence.
+    if (seen.has(key)) {
+      skipped.push({ domain, mcpUrl: null, reason: "duplicate_surface" });
+      continue;
+    }
+    seen.add(key);
     const domainNameKey = `${row.domain}\n${normalizeNameForDedupe(row.name)}`;
     const existing = candidatesByDomainName.get(domainNameKey);
     if (!existing) {
@@ -233,7 +284,22 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
     skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_domain_name" });
   }
 
-  const rows = [...candidatesByDomainName.values()].sort(
+  const candidatesByEndpoint = new Map<string, CatalogIntegrationRow>();
+  for (const row of candidatesByDomainName.values()) {
+    const endpointKey = canonicalMcpUrl(row.mcpUrl);
+    const existing = candidatesByEndpoint.get(endpointKey);
+    if (!existing) {
+      candidatesByEndpoint.set(endpointKey, row);
+      continue;
+    }
+    duplicateEndpointRows += 1;
+    const winner = bestCatalogRow(existing, row);
+    const loser = winner === existing ? row : existing;
+    candidatesByEndpoint.set(endpointKey, winner);
+    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_endpoint" });
+  }
+
+  const rows = [...candidatesByEndpoint.values()].sort(
     (left, right) =>
       left.domain.localeCompare(right.domain) ||
       left.name.localeCompare(right.name) ||
@@ -251,6 +317,8 @@ export function normalizeCatalogSnapshot(snapshot: unknown): NormalizedCatalogSn
       skippedRows: skipped.length,
       quarantinedRows: quarantined.length,
       duplicateDomainNameRows,
+      duplicateEndpointRows,
+      unverifiedRows,
       controlCharacterFields: controlCharacters.count,
     },
   };
@@ -381,6 +449,7 @@ export function catalogRowToDbInput(
       logoSource: row.logoSourceUrl ? "integrations.sh" : "missing",
       originalLogoUrl: row.logoSourceUrl,
       ...(row.probe ? { mcpProbe: row.probe } : {}),
+      ...(row.authContract ? { authContract: row.authContract } : {}),
     },
   };
 }
@@ -465,12 +534,14 @@ function rawSurfaceRows(root: UnknownRecord | null): UnknownRecord[] {
         continue;
       }
       const credentialFacts = credentialFactsForSurface(surfaceRecord, credentials);
+      const authContract = deriveAuthContract(surfaceRecord);
       rows.push({
         domain,
         name: stringValue(flat?.name) ?? stringValue(surfaceRecord.name) ?? domain,
         mcpUrl: stringValue(surfaceRecord.url),
         transport: surfaceRecord.transports ?? surfaceRecord.transport,
         authKind: deriveAuthKind(surfaceRecord, credentialFacts),
+        ...(authContract ? { authContract } : {}),
         scopesHint: scopesHintForSurface(surfaceRecord),
         credentialFacts,
         provenance: asRecord(surfaceRecord.basis)?.via ?? surfaceRecord.provenance,
@@ -597,6 +668,11 @@ function deriveAuthKind(
   return "unknown";
 }
 
+function deriveAuthContract(surface: UnknownRecord): Record<string, unknown> | null {
+  const auth = asRecord(surface.auth);
+  return normalizeAuthContract(surface.authContract ?? auth?.authContract ?? auth?.headerContract);
+}
+
 export function catalogMcpUrlRejection(value: string | null | undefined): string | null {
   if (!value) {
     return "missing_url";
@@ -639,6 +715,36 @@ function normalizeDomain(value: unknown): string | null {
   return raw || null;
 }
 
+export function canonicalMcpUrl(value: string): string {
+  const url = new URL(value);
+  url.hash = "";
+  url.hostname = url.hostname.toLowerCase();
+  if (
+    (url.protocol === "https:" && url.port === "443") ||
+    (url.protocol === "http:" && url.port === "80")
+  ) {
+    url.port = "";
+  }
+  url.pathname = url.pathname.replace(/\/+$/, "") || "/";
+  return url.toString();
+}
+
+function normalizeAuthContract(value: unknown): Record<string, unknown> | null {
+  const record = asRecord(value);
+  if (!record) {
+    return null;
+  }
+  const headerName = stringValue(record.headerName);
+  const scheme = stringValue(record.scheme);
+  if (!headerName || !/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(headerName) || !scheme) {
+    return null;
+  }
+  return {
+    headerName,
+    scheme,
+  };
+}
+
 function normalizeAuthKind(value: unknown): CatalogAuthKind {
   const raw = stringValue(value);
   return raw === "oauth2" || raw === "api_key" || raw === "none" || raw === "unknown"
@@ -669,6 +775,15 @@ function bestCatalogRow(
 
 function catalogRowQualityScore(row: CatalogIntegrationRow): number {
   let score = 0;
+  try {
+    const endpointHost = new URL(row.mcpUrl).hostname.toLowerCase();
+    if (endpointHost === row.domain || endpointHost.endsWith(`.${row.domain}`)) {
+      score += 8;
+    }
+  } catch {
+    // URL validity was already checked. Keep scoring total if a future caller
+    // constructs a row directly in a test.
+  }
   if (row.logoSourceUrl) {
     score += 4;
   }

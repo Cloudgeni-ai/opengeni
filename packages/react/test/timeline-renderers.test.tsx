@@ -3,8 +3,9 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
-import type { MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
+import type { AuthNeededItem, MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
 import { MessageTimeline } from "../src";
+import { TimelineRow } from "../src/components/message-timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and
@@ -85,6 +86,66 @@ function toolItem(overrides: Partial<ToolCallItem>): ToolCallItem {
     ...overrides,
   };
 }
+
+function authNeededItem(overrides: Partial<AuthNeededItem> = {}): AuthNeededItem {
+  return {
+    kind: "auth-needed",
+    id: "auth-1",
+    turnId: "turn-1",
+    providerDomain: "linear.app",
+    connectionId: null,
+    reason: "missing_connection",
+    scopes: [],
+    resource: null,
+    toolName: null,
+    authorizationUrl: null,
+    occurredAt: new Date(0).toISOString(),
+    ...overrides,
+  };
+}
+
+describe("TimelineRow — connection recovery", () => {
+  test("says a missing connection starts a new-message retry rather than replaying the call", async () => {
+    const r = await renderComponent(<TimelineRow item={authNeededItem()} />);
+    await flush();
+
+    expect(r.container.textContent).toContain("Connect Linear");
+    expect(r.container.textContent).toContain("This tool call wasn't replayed.");
+    expect(r.container.textContent).toContain("send a new message to try again");
+    expect(r.container.textContent).not.toContain("Reconnect Linear");
+
+    await r.unmount();
+  });
+
+  test("pins the authorization-opening state without claiming the turn is resuming", async () => {
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const r = await renderComponent(
+      <TimelineRow
+        item={authNeededItem({ connectionId: "conn-1", reason: "expired" })}
+        onReconnect={() => pending}
+      />,
+    );
+    await flush();
+
+    const button = r.container.querySelector("button");
+    expect(button?.textContent).toContain("Reconnect");
+    await act(async () => {
+      button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flush();
+    expect(button?.textContent).toContain("Opening…");
+    expect(button?.hasAttribute("disabled")).toBe(true);
+    expect(r.container.textContent).toContain("After reconnecting, send a new message");
+    expect(r.container.textContent).not.toContain("Resuming");
+
+    finish();
+    await flush();
+    await r.unmount();
+  });
+});
 
 describe("MessageTimeline — settled turn folding", () => {
   test("settled turn renders one top-level chip, final answer, and folded narration", async () => {

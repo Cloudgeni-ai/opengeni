@@ -13,6 +13,7 @@ import {
 } from "@opengeni/config";
 import {
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   isClearedRunStateBlob,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   sessionEventMediaPreview,
@@ -28,6 +29,18 @@ import {
   type ToolAuthNeededPayload,
   type ToolRef,
 } from "@opengeni/contracts";
+import {
+  MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_TOOL_RESULT_BYTES,
+  McpAggregateToolListBudget,
+  assertMcpPayloadWithinBytes,
+  assertMcpServerSelectionWithinBounds,
+  assertMcpToolListWithinBounds,
+  boundedParallelMap,
+  cancelMcpResponseBody,
+  guardedMcpFetch,
+  undiciFetch,
+} from "./mcp-network";
 import {
   Agent,
   AgentsError,
@@ -276,6 +289,8 @@ export type ResolveConnectionCredentialInput = {
   serverId: string;
   toolName?: string;
   connectionRef: McpServerConnectionRef;
+  /** Exact MCP destination whose request would receive the resolved headers. */
+  destinationUrl: string;
   forceRefresh?: boolean;
 };
 
@@ -2109,7 +2124,72 @@ export type PrepareToolsOptions = {
     input: ResolveConnectionCredentialInput,
   ) => Promise<ResolveConnectionCredentialResult>;
   onAuthNeeded?: (payload: ToolAuthNeededPayload) => Promise<void> | void;
+  /** Injectable final MCP transport for tests and embedded hosts. */
+  mcpFetchImpl?: FetchLike;
 };
+
+type ConnectedMcpServerBatch = Awaited<ReturnType<typeof connectMcpServers>>;
+
+export type ConnectedMcpServerBatches = {
+  active: MCPServer[];
+  failed: MCPServer[];
+  errors: ReadonlyMap<MCPServer, Error>;
+  close: () => Promise<void>;
+};
+
+/**
+ * Connect SDK-managed MCP servers in stable, bounded batches. The SDK cleans a
+ * failing strict batch; this wrapper additionally closes every earlier batch
+ * before rethrowing, so a later-batch failure cannot leak live connections.
+ */
+export async function connectMcpServersInBatches(
+  servers: MCPServer[],
+  options: { strict: boolean },
+): Promise<ConnectedMcpServerBatches> {
+  assertMcpServerSelectionWithinBounds(servers);
+  const batches: ConnectedMcpServerBatch[] = [];
+  try {
+    for (let offset = 0; offset < servers.length; offset += MCP_MAX_CONCURRENT_SERVER_OPERATIONS) {
+      batches.push(
+        await connectMcpServers(
+          servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
+          {
+            connectInParallel: true,
+            strict: options.strict,
+          },
+        ),
+      );
+    }
+  } catch (error) {
+    await closeMcpServerBatches(batches).catch(() => undefined);
+    throw error;
+  }
+
+  const errors = new Map<MCPServer, Error>();
+  for (const batch of batches) {
+    for (const [server, error] of batch.errors) errors.set(server, error);
+  }
+  return {
+    active: batches.flatMap((batch) => batch.active),
+    failed: batches.flatMap((batch) => batch.failed),
+    errors,
+    close: async () => {
+      await closeMcpServerBatches(batches);
+    },
+  };
+}
+
+async function closeMcpServerBatches(batches: ConnectedMcpServerBatch[]): Promise<void> {
+  let firstError: unknown;
+  for (const batch of [...batches].reverse()) {
+    try {
+      await batch.close();
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  if (firstError !== undefined) throw firstError;
+}
 
 export async function prepareAgentTools(
   settings: Settings,
@@ -2120,25 +2200,36 @@ export async function prepareAgentTools(
   // codex_apps sanitizing fetch so every tools/list this turn accumulates the
   // account's connector namespaces. Surfaced on PreparedAgentTools for the worker.
   const codexConnectorNamespaces = new Set<string>();
+  assertMcpServerSelectionWithinBounds(tools);
   if (tools.length === 0) {
     return { mcpServers: [], close: async () => {}, codexConnectorNamespaces };
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
-  const servers = await Promise.all(
-    tools.map(async (tool) => {
+  const aggregateToolBudget = new McpAggregateToolListBudget();
+  const mcpFetchImpl = options.mcpFetchImpl ?? undiciFetch;
+  const servers = await boundedParallelMap(
+    tools,
+    MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+    async (tool, index) => {
       const config = registry.get(tool.id);
       if (!config) {
         throw new Error(`Unknown MCP server id: ${tool.id}`);
       }
       const url = firstPartyMcpServerUrlForRun(settings, config, options.workspaceId) ?? config.url;
+      const firstParty = isFirstPartyMcpServer(settings, config);
       const baseFetch = isCodexAppsMcpServer(config)
-        ? codexAppsSanitizingFetch(globalThis.fetch, codexConnectorNamespaces)
-        : globalThis.fetch;
+        ? codexAppsSanitizingFetch(mcpFetchImpl, codexConnectorNamespaces)
+        : mcpFetchImpl;
+      const guardedFetch = guardedMcpFetch(
+        firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
+        baseFetch,
+        firstParty ? { requireHttpsOutsideLocalTest: false } : {},
+      );
       const fetchImpl = config.connectionRef
-        ? connectionBrokerFetch(baseFetch, config, options)
-        : isFirstPartyMcpServer(settings, config)
-          ? firstPartyAuthFetch(baseFetch, settings, options)
-          : baseFetch;
+        ? connectionBrokerFetch(guardedFetch, config, options)
+        : firstParty
+          ? firstPartyAuthFetch(guardedFetch, settings, options)
+          : guardedFetch;
       // A server is connected BEST-EFFORT (a connect OR tools-list failure drops
       // it — its tools go unavailable for the turn — instead of failing the turn)
       // in two cases:
@@ -2170,7 +2261,7 @@ export async function prepareAgentTools(
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
           // also captures each tool's original connector namespace (P4 Part B.1).
-          ...(fetchImpl !== globalThis.fetch ? { fetch: fetchImpl } : {}),
+          fetch: fetchImpl,
           ...(await mcpServerRequestInit(settings, config)),
           ...(config.timeoutMs
             ? {
@@ -2182,13 +2273,15 @@ export async function prepareAgentTools(
         config.id,
         config.allowedTools,
         bestEffort,
+        aggregateToolBudget,
+        `${config.id}:${index}`,
       );
       return {
         server,
         bestEffort,
         optional,
       };
-    }),
+    },
   );
   const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
   const bestEffortServers = servers
@@ -2200,18 +2293,21 @@ export async function prepareAgentTools(
   const optionalServerNames = new Set(
     servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
   );
-  const connectedRequired = await connectMcpServers(requiredServers, {
-    connectInParallel: true,
-    strict: true,
-  });
-  const connectedBestEffort = bestEffortServers.length
-    ? await connectMcpServers(bestEffortServers, {
-        connectInParallel: true,
-        strict: false,
-      })
-    : null;
+  const connectedRequired = await connectMcpServersInBatches(requiredServers, { strict: true });
+  let connectedBestEffort: ConnectedMcpServerBatches | null = null;
+  try {
+    connectedBestEffort = bestEffortServers.length
+      ? await connectMcpServersInBatches(bestEffortServers, { strict: false })
+      : null;
+  } catch (error) {
+    await connectedRequired.close().catch(() => undefined);
+    throw error;
+  }
   if (connectedBestEffort) {
     for (const failed of connectedBestEffort.failed) {
+      if (failed instanceof PrefixedMcpServer) {
+        failed.releaseAggregateBudget();
+      }
       if (!optionalServerNames.has(failed.name)) {
         continue;
       }
@@ -2225,10 +2321,20 @@ export async function prepareAgentTools(
   return {
     mcpServers: [...connectedRequired.active, ...(connectedBestEffort?.active ?? [])],
     close: async () => {
-      await connectedRequired.close();
+      let firstError: unknown;
       if (connectedBestEffort) {
-        await connectedBestEffort.close();
+        try {
+          await connectedBestEffort.close();
+        } catch (error) {
+          firstError ??= error;
+        }
       }
+      try {
+        await connectedRequired.close();
+      } catch (error) {
+        firstError ??= error;
+      }
+      if (firstError !== undefined) throw firstError;
     },
     codexConnectorNamespaces,
   };
@@ -2245,10 +2351,12 @@ function connectionBrokerFetch(
   }
   return async (input, init) => {
     const request = await mcpRequestInfo(input, init);
+    const destinationUrl = mcpRequestDestinationUrl(input);
     const first = await resolveConnectionForRequest(
       options,
       config.id,
       connectionRef,
+      destinationUrl,
       request.toolName,
       false,
     );
@@ -2260,10 +2368,12 @@ function connectionBrokerFetch(
       withConnectionHeaders(input, init, first.headers),
     );
     if (response.status === 401) {
+      await cancelMcpResponseBody(response);
       const refreshed = await resolveConnectionForRequest(
         options,
         config.id,
         connectionRef,
+        destinationUrl,
         request.toolName,
         true,
       );
@@ -2276,11 +2386,14 @@ function connectionBrokerFetch(
       );
       if (retry.status === 403) {
         const auth = insufficientScopeAuth(retry.headers, connectionRef, refreshed.connectionId);
-        return auth
-          ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef)
-          : retry;
+        if (auth) {
+          await cancelMcpResponseBody(retry);
+          return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+        }
+        return retry;
       }
       if (retry.status === 401) {
+        await cancelMcpResponseBody(retry);
         return await authNeededFetchResponse(
           options,
           config.id,
@@ -2300,9 +2413,11 @@ function connectionBrokerFetch(
     }
     if (response.status === 403) {
       const auth = insufficientScopeAuth(response.headers, connectionRef, first.connectionId);
-      return auth
-        ? await authNeededFetchResponse(options, config.id, request, auth, connectionRef)
-        : response;
+      if (auth) {
+        await cancelMcpResponseBody(response);
+        return await authNeededFetchResponse(options, config.id, request, auth, connectionRef);
+      }
+      return response;
     }
     return response;
   };
@@ -2312,6 +2427,7 @@ async function resolveConnectionForRequest(
   options: PrepareToolsOptions,
   serverId: string,
   connectionRef: McpServerConnectionRef,
+  destinationUrl: string,
   toolName: string | undefined,
   forceRefresh: boolean,
 ): Promise<ResolveConnectionCredentialResult> {
@@ -2329,6 +2445,7 @@ async function resolveConnectionForRequest(
     workspaceId: options.workspaceId,
     serverId,
     connectionRef,
+    destinationUrl,
     forceRefresh,
     ...(toolName ? { toolName } : {}),
     ...(options.subjectId ? { subjectId: options.subjectId } : {}),
@@ -2426,6 +2543,10 @@ type McpRequestInfo = {
   id?: string | number | null;
   toolName?: string;
 };
+
+function mcpRequestDestinationUrl(input: string | URL | Request): string {
+  return new URL(input instanceof Request ? input.url : input.toString()).toString();
+}
 
 async function mcpRequestInfo(
   input: string | URL | Request,
@@ -2655,7 +2776,7 @@ async function signFirstPartyDelegatedBearer(
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
-    permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
+    permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.turnId ? { turnId: options.turnId } : {}),
     ...(options.attemptId ? { attemptId: options.attemptId } : {}),
@@ -2739,22 +2860,6 @@ async function codexAppsMcpRequestInit(
 // level scopes (billing/account/members/api_keys/workspace:admin) are
 // intentionally excluded: they gate no first-party tool and are not agent
 // capabilities. (A finer-grained capability model comes later.)
-const firstPartyMcpPermissions: Permission[] = [
-  "workspace:read",
-  "files:read",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "goals:manage",
-  "sessions:read",
-  "sessions:create",
-  "sessions:control",
-  "variable-sets:use",
-  "variable-sets:manage",
-  "rigs:use",
-  "github:use",
-];
-
 // codex_apps is third-party-by-trust (the external ChatGPT connectors backend)
 // but needs DYNAMIC auth, so it is its own category — deliberately NOT folded
 // into the first-party allowlist, which would wrongly sign an OpenGeni delegated
@@ -2861,6 +2966,8 @@ class PrefixedMcpServer implements MCPServer {
     registryId: string,
     allowedTools?: string[],
     bestEffort = false,
+    private readonly aggregateToolBudget?: McpAggregateToolListBudget,
+    private readonly aggregateSourceId = registryId,
   ) {
     this.name = registryId;
     this.prefix = prefixedMcpToolName(registryId, "");
@@ -2874,13 +2981,27 @@ class PrefixedMcpServer implements MCPServer {
   }
 
   close(): Promise<void> {
+    this.releaseAggregateBudget();
     return this.inner.close();
   }
 
+  releaseAggregateBudget(): void {
+    this.aggregateToolBudget?.remove(this.aggregateSourceId);
+  }
+
   async listTools(): Promise<RuntimeMcpTool[]> {
-    let tools: RuntimeMcpTool[];
     try {
-      tools = await this.inner.listTools();
+      const tools = assertMcpToolListWithinBounds(await this.inner.listTools()) as RuntimeMcpTool[];
+      const exposed = tools
+        .filter((tool) => this.isAllowed(tool.name))
+        .map((tool) => ({
+          ...tool,
+          name: prefixedMcpToolName(this.name, tool.name),
+        }));
+      const bounded = (this.aggregateToolBudget?.replace(this.aggregateSourceId, exposed) ??
+        assertMcpToolListWithinBounds(exposed)) as RuntimeMcpTool[];
+      this.listedToolSchemaTokens = estimateSerializedValueTokens(bounded);
+      return bounded;
     } catch (error) {
       // A REQUIRED server's tools/list failure is fatal (fail-loud default): the
       // caller explicitly requested it, so its absence must fail the turn.
@@ -2909,16 +3030,9 @@ class PrefixedMcpServer implements MCPServer {
           { serverId: this.name, ...safeMcpErrorFields(error) },
         );
       }
+      this.releaseAggregateBudget();
       return [];
     }
-    const exposed = tools
-      .filter((tool) => this.isAllowed(tool.name))
-      .map((tool) => ({
-        ...tool,
-        name: prefixedMcpToolName(this.name, tool.name),
-      }));
-    this.listedToolSchemaTokens = estimateSerializedValueTokens(exposed);
-    return exposed;
   }
 
   /** Latest exact tools/list projection used to build the model request. */
@@ -2936,7 +3050,9 @@ class PrefixedMcpServer implements MCPServer {
       throw new Error(`MCP tool ${unprefixed} is not allowed for server ${this.name}`);
     }
     try {
-      return await this.inner.callTool(unprefixed, args, meta);
+      const output = await this.inner.callTool(unprefixed, args, meta);
+      assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+      return output;
     } catch (error) {
       // The connection broker's auth-needed short-circuit arrives as a thrown
       // JSON-RPC error (an inline isError result would be stripped by the SDK

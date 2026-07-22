@@ -5,6 +5,7 @@ import type { QueueSurfaceProps } from "./queue-surface-implementation";
 import { EmptyQueueStateSurface } from "./queue-surface-state";
 
 export type { QueueSurfaceProps } from "./queue-surface-implementation";
+export { requestQueueDraftEdit } from "./queue-surface-implementation";
 
 const loadQueueSurface = () => import("./queue-surface-implementation");
 type QueueSurfaceModule = { QueueSurface: ComponentType<QueueSurfaceProps> };

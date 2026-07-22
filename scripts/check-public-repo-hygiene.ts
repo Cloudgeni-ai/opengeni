@@ -203,8 +203,14 @@ export function auditCatalogSnapshot(snapshot: unknown): Finding[] {
     }
   });
 
-  const normalized = normalizeCatalogSnapshot({ importRows: root?.importRows ?? [] });
+  // Hygiene audits URL safety and retained output. Probe evidence is a runtime
+  // import-admission concern and older committed snapshots may predate it.
+  const normalized = normalizeCatalogSnapshot(
+    { importRows: root?.importRows ?? [] },
+    { allowUnprobedCandidates: true },
+  );
   for (const rejected of normalized.skipped) {
+    if (catalogAdmissionOnlyReason(rejected.reason)) continue;
     findings.push({ file, reason: `catalog import row rejected for ${rejected.reason}` });
   }
   for (const quarantined of normalized.quarantined) {
@@ -214,6 +220,17 @@ export function auditCatalogSnapshot(snapshot: unknown): Finding[] {
     });
   }
   return findings;
+}
+
+function catalogAdmissionOnlyReason(reason: string): boolean {
+  return (
+    reason === "auth_unknown" ||
+    reason === "api_key_metadata_unactionable" ||
+    reason === "duplicate_surface" ||
+    reason === "duplicate_domain_name" ||
+    reason === "duplicate_endpoint" ||
+    reason.startsWith("probe_")
+  );
 }
 
 export async function auditPublicRepository(): Promise<Finding[]> {

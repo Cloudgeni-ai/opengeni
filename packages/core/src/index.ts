@@ -56,6 +56,7 @@ export * from "./domain/environments";
 export * from "./rigs";
 export * from "./domain/packs";
 export * from "./domain/resources";
+export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
 export * from "./domain/workspace-members";

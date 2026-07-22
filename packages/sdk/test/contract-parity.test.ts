@@ -8,6 +8,7 @@ import {
   ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  GitHubCapabilityHealth as ContractGitHubCapabilityHealth,
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
   KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
@@ -31,9 +32,12 @@ import {
   SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
   SessionEventType as ContractSessionEventType,
+  SessionEffectiveToolPolicy as ContractSessionEffectiveToolPolicy,
+  SessionToolPolicy as ContractSessionToolPolicy,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
+  ToolRef as ContractToolRef,
   ViewerHeartbeatRequest as ContractViewerHeartbeatRequest,
   ViewerHeartbeatResponse as ContractViewerHeartbeatResponse,
   ViewerHolder as ContractViewerHolder,
@@ -75,6 +79,7 @@ import type {
   ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
+  GitHubCapabilityHealth,
   ListWorkspaceMembersResponse,
   MachineState,
   MachineView,
@@ -98,12 +103,15 @@ import type {
   ProposeRigChangeRequest,
   Session,
   SessionCapabilities,
+  SessionEffectiveToolPolicy,
   SessionEvent,
   SessionStatus,
+  SessionToolPolicy,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
   StreamUrlRotatedPayload,
+  ToolRef,
   UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
   ViewerHeartbeatResponse,
@@ -131,6 +139,71 @@ describe("SDK / contracts parity", () => {
     expect(statuses).toEqual(ContractSessionStatus.options);
     expect(backends).toEqual(ContractSandboxBackend.options);
     expect(efforts).toEqual(ContractReasoningEffort.options);
+  });
+
+  test("session tool policy and effective-policy shapes match the contracts", () => {
+    const acceptToolRef = (value: z.infer<typeof ContractToolRef>): ToolRef => value;
+    const acceptPolicy = (value: z.infer<typeof ContractSessionToolPolicy>): SessionToolPolicy =>
+      value;
+    const acceptEffective = (
+      value: z.infer<typeof ContractSessionEffectiveToolPolicy>,
+    ): SessionEffectiveToolPolicy => value;
+
+    const tool: ToolRef = { kind: "mcp", id: "slack", optional: true };
+    const policy: SessionToolPolicy = {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+    };
+    const effective: SessionEffectiveToolPolicy = {
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+      selectedIds: ["slack"],
+      effectiveIds: ["opengeni", "slack"],
+      mandatoryIds: ["opengeni"],
+      lazyRouter: { state: "disabled", deferredIds: [] },
+      configuredIds: ["slack"],
+      droppedIds: [],
+      counts: {
+        selected: 1,
+        effective: 2,
+        mandatory: 1,
+        deferred: 0,
+        configured: 1,
+        dropped: 0,
+      },
+      idsTruncated: false,
+    };
+
+    expect(ContractToolRef.safeParse(tool).success).toBe(true);
+    expect(ContractSessionToolPolicy.safeParse(policy).success).toBe(true);
+    expect(ContractSessionEffectiveToolPolicy.safeParse(effective).success).toBe(true);
+    expect([acceptToolRef(tool), acceptPolicy(policy), acceptEffective(effective)]).toHaveLength(3);
+  });
+
+  test("GitHub capability-health union matches contracts", () => {
+    const acceptContract = (
+      value: z.infer<typeof ContractGitHubCapabilityHealth>,
+    ): GitHubCapabilityHealth => value;
+    const acceptSdk = (value: GitHubCapabilityHealth) =>
+      ContractGitHubCapabilityHealth.parse(value);
+    const ready: GitHubCapabilityHealth = {
+      state: "ready",
+      reason: null,
+      action: "none",
+      renewal: "automatic",
+    };
+    const rebind: GitHubCapabilityHealth = {
+      state: "unavailable",
+      reason: "session_repository_binding_required",
+      action: "rebind",
+      renewal: "inactive",
+    };
+    expect([
+      acceptContract(ready),
+      acceptSdk(ready),
+      acceptContract(rebind),
+      acceptSdk(rebind),
+    ]).toEqual([ready, ready, rebind, rebind]);
   });
 
   test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {

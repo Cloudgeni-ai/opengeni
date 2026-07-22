@@ -20,7 +20,12 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoAsset": "https://integrations.sh/logo/3minapi.com"
+      "logoAsset": "https://integrations.sh/logo/3minapi.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "accessowl.com",
@@ -40,7 +45,12 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoAsset": "https://integrations.sh/logo/accessowl.com"
+      "logoAsset": "https://integrations.sh/logo/accessowl.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "acko.com",
@@ -52,7 +62,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/acko.com"
+      "logoAsset": "https://integrations.sh/logo/acko.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "accessapproval.googleapis.com",
@@ -64,7 +79,12 @@
       "credentialFacts": [],
       "tier": "verified",
       "provenance": "detected",
-      "logoAsset": "https://integrations.sh/logo/accessapproval.googleapis.com"
+      "logoAsset": "https://integrations.sh/logo/accessapproval.googleapis.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "activepieces.com",
@@ -84,7 +104,12 @@
       ],
       "tier": "verified",
       "provenance": "detected",
-      "logoAsset": "https://integrations.sh/logo/activepieces.com"
+      "logoAsset": "https://integrations.sh/logo/activepieces.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "apify.com",
@@ -104,7 +129,12 @@
       ],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/apify.com"
+      "logoAsset": "https://integrations.sh/logo/apify.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "americanexpress.com",
@@ -116,7 +146,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/americanexpress.com"
+      "logoAsset": "https://integrations.sh/logo/americanexpress.com",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "bump.sh",
@@ -128,7 +163,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/bump.sh"
+      "logoAsset": "https://integrations.sh/logo/bump.sh",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "bump.sh",
@@ -140,7 +180,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/bump.sh"
+      "logoAsset": "https://integrations.sh/logo/bump.sh",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "bump.sh",
@@ -152,7 +197,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/bump.sh"
+      "logoAsset": "https://integrations.sh/logo/bump.sh",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "adobe.io",
@@ -164,7 +214,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/adobe.io"
+      "logoAsset": "https://integrations.sh/logo/adobe.io",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     },
     {
       "domain": "adobe.io",
@@ -176,7 +231,12 @@
       "credentialFacts": [],
       "tier": "candidate",
       "provenance": "discovered",
-      "logoAsset": "https://integrations.sh/logo/adobe.io"
+      "logoAsset": "https://integrations.sh/logo/adobe.io",
+      "probe": {
+        "status": "real",
+        "reason": "test_fixture",
+        "httpStatus": 200
+      }
     }
   ]
 }

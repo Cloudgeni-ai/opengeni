@@ -149,6 +149,7 @@ export type {
   FileUploadData,
   GetPackResponse,
   GitHubAppInfo,
+  GitHubCapabilityHealth,
   GitHubInstallationBinding,
   GitHubRepositoriesResponse,
   GitHubRepository,
@@ -205,6 +206,7 @@ export type {
   SessionCapabilities,
   SessionListResponse,
   SessionLineageResponse,
+  SessionEffectiveToolPolicy,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionControlResponse,
@@ -227,6 +229,7 @@ export type {
   SessionMcpCredentialUpdateInput,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
+  SessionToolPolicy,
   // Per-surface capability cell aliases (views of SessionCapabilities).
   FileSystemCapability,
   TerminalCapability,

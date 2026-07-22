@@ -30,6 +30,7 @@ import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
+import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -322,6 +323,15 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    let boundedRequest: Request;
+    try {
+      boundedRequest = await boundedMcpRequest(c.req.raw);
+    } catch (error) {
+      if (error instanceof McpPayloadTooLargeError) {
+        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+      }
+      throw error;
+    }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
     const toolspace = isToolspaceGrant(routeDeps.settings, grant)
       ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
@@ -338,7 +348,7 @@ export function createApp(deps: AppDependencies): Hono {
     });
     try {
       await mcp.connect(transport);
-      return await transport.handleRequest(c.req.raw);
+      return await transport.handleRequest(boundedRequest);
     } finally {
       await toolspace?.close().catch(() => undefined);
     }

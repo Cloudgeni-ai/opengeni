@@ -237,6 +237,7 @@ describe("canonical queue commands", () => {
       text: "prompt 2",
       resources: value.turns[1]!.resources,
       tools: value.turns[1]!.tools,
+      toolsProvided: false,
       model: "model-2",
       reasoningEffort: "high",
       sourceTurnId: value.turns[1]!.id,
@@ -256,6 +257,39 @@ describe("canonical queue commands", () => {
         .where(eq(schema.sessionTurns.id, value.turns[1]!.id)),
     );
     expect(withdrawn).toEqual({ status: "withdrawn_for_edit", reason: "withdrawn_for_edit" });
+  });
+
+  test("Edit preserves an explicit empty turn tool selection in the durable draft", async () => {
+    const value = await fixture(1);
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .update(schema.sessionTurns)
+        .set({ tools: [], toolsProvided: true })
+        .where(eq(schema.sessionTurns.id, value.turns[0]!.id)),
+    );
+
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: value.turns[0]!.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: value.turns[0]!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+
+    expect(edited.draft).toMatchObject({ tools: [], toolsProvided: true });
   });
 
   test("Edit never overwrites a dirty draft without exact replacement consent", async () => {
@@ -678,6 +712,130 @@ describe("canonical queue commands", () => {
       (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
     );
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+  });
+
+  test("Send preserves omitted versus explicit turn tool provenance without mutating a fixed policy", async () => {
+    const value = await fixture(1);
+    const workspaceId = value.grant.workspaceId!;
+    const selected = [{ kind: "mcp" as const, id: "cap-docs" }];
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.sessions)
+        .set({
+          tools: selected,
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        })
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+
+    const submit = async (tools: typeof selected, toolsProvided: boolean) =>
+      await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: toolsProvided ? "explicit tools" : "inherited tools",
+            resources: [],
+            tools,
+            toolsProvided,
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      );
+
+    const omitted = await submit([], false);
+    const explicitEmpty = await submit([], true);
+    const explicitSubset = await submit(selected, true);
+
+    const turns = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({
+          id: schema.sessionTurns.id,
+          tools: schema.sessionTurns.tools,
+          toolsProvided: schema.sessionTurns.toolsProvided,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          inArray(schema.sessionTurns.id, [
+            omitted.turnId,
+            explicitEmpty.turnId,
+            explicitSubset.turnId,
+          ]),
+        ),
+    );
+    expect(turns).toEqual(
+      expect.arrayContaining([
+        { id: omitted.turnId, tools: [], toolsProvided: false },
+        { id: explicitEmpty.turnId, tools: [], toolsProvided: true },
+        { id: explicitSubset.turnId, tools: selected, toolsProvided: true },
+      ]),
+    );
+
+    const events = await storedEvents(workspaceId, [
+      omitted.acceptedEventId,
+      explicitEmpty.acceptedEventId,
+      explicitSubset.acceptedEventId,
+    ]);
+    const omittedPayload = events.find((event) => event.id === omitted.acceptedEventId)!
+      .payload as Record<string, unknown>;
+    const emptyPayload = events.find((event) => event.id === explicitEmpty.acceptedEventId)!
+      .payload as Record<string, unknown>;
+    expect(Object.hasOwn(omittedPayload, "tools")).toBe(false);
+    expect(emptyPayload.tools).toEqual([]);
+
+    const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({ tools: schema.sessions.tools, toolPolicy: schema.sessions.toolPolicy })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(storedSession).toEqual({
+      tools: selected,
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    });
+  });
+
+  test("legacy sessions retain the historical follow-up merge behavior", async () => {
+    const value = await fixture(1);
+    const workspaceId = value.grant.workspaceId!;
+    const selected = [{ kind: "mcp" as const, id: "legacy-added" }];
+    await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "legacy merge",
+          resources: [],
+          tools: selected,
+          toolsProvided: true,
+          model: "scripted-model",
+          reasoningEffort: "low",
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      ),
+    );
+
+    const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({ tools: schema.sessions.tools, toolPolicy: schema.sessions.toolPolicy })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(storedSession).toEqual({ tools: selected, toolPolicy: null });
   });
 
   test("an observing Send loses to an unseen newer Pause without consuming the draft", async () => {

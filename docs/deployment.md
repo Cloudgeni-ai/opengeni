@@ -409,6 +409,38 @@ Sandbox file mount support is also backend-specific:
 | Docker/local in-container sandboxes | rclone mount | rclone mount | signed download materialization | signed download materialization |
 | Modal | SDK cloud bucket mount | signed download materialization | signed download materialization | signed download materialization |
 
+### Existing-session tool replacement rollout
+
+`OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED` defaults to `false`. This is a
+two-phase compatibility gate, not a permanent product default: older workers
+merge an explicit follow-up `tools` array with session tools, while current
+workers treat the accepted turn's `tools` plus `tools_provided` as exact
+provenance. Enabling replacement before old workers are gone can silently widen
+an explicit empty or narrowed turn.
+
+Activate in this order:
+
+1. Roll the provenance-aware API with the flag still `false`, and wait until no
+   old API instance serves traffic. Explicit `tools` on existing-session user
+   messages returns `503`; omitted tools continue to inherit normally.
+2. Let any explicit replacement turns admitted before the gate settle.
+3. Roll provenance-aware workers. Drain or terminate every old poller and prove
+   no old attempt remains active before continuing.
+4. Set `OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED=true` and roll the API
+   configuration. Existing-session explicit replacement is now admitted.
+
+Rollback is the reverse safety fence, not simply a worker image rollback:
+
+1. Disable the flag first so no new explicit replacement turn can be admitted.
+2. Drain every already-admitted replacement turn.
+3. Only then roll workers back.
+
+Initial session creation remains able to accept an explicit tool policy while
+the flag is off. Reusable scheduled runs synthesize inherited internal turns and
+are not separately blocked. Never rewrite or globally reinterpret historical
+`tools_provided=false` rows; their durable meaning remains “the accepted turn
+omitted tools and inherits its session policy.”
+
 ## Terraform Registry MCP Docs
 
 The Helm chart can deploy an optional, cluster-internal HashiCorp Terraform MCP

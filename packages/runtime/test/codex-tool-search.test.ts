@@ -194,6 +194,31 @@ describe("tool_search tool wiring", () => {
     const matched = (Array.isArray(result) ? result : [result]) as Array<{ name: string }>;
     expect(matched[0]!.name).toBe("codex_apps__gmail_send_email");
   });
+
+  test("never discloses an oversized schema and caps aggregate lazy schema bytes", async () => {
+    const oversized = connectorTool(
+      "oversized_calendar",
+      `Create a calendar meeting ${"x".repeat(130 * 1024)}`,
+    );
+    const boundedMatches = Array.from({ length: 20 }, (_, index) =>
+      connectorTool(`calendar_${index}`, `Create a calendar meeting ${"y".repeat(40 * 1024)}`),
+    );
+    const executor = getClientToolSearchExecutor(buildCodexToolSearchTool() as never)!;
+    const result = await executor({
+      agent: {} as never,
+      availableTools: [oversized, ...boundedMatches] as never,
+      loadDefault: (() => []) as never,
+      runContext: {} as never,
+      toolCall: {
+        type: "tool_search_call",
+        arguments: { query: "create calendar meeting", limit: 20 },
+      } as never,
+    });
+    const matched = (Array.isArray(result) ? result : result ? [result] : []) as Tool[];
+    expect(matched).not.toContain(oversized);
+    expect(matched.length).toBeGreaterThan(0);
+    expect(matched.length).toBeLessThan(20);
+  });
 });
 
 describe("clone survival (the SandboxAgent path — the REAL staging path)", () => {

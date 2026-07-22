@@ -253,6 +253,7 @@ describe("useTurnQueue", () => {
           text: second.prompt,
           resources: [],
           tools: [],
+          toolsProvided: false,
           model: second.model,
           reasoningEffort: second.reasoningEffort,
           sourceTurnId: second.id,
@@ -760,12 +761,31 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("reports typed draft content synchronously before React commits the value", async () => {
+    const hook = await renderHook(
+      () => useComposer(null, { client: fakeClient({}), workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    expect(hook.result.current.hasDraftContent()).toBe(false);
+
+    await flushing(() => {
+      const staleRender = hook.result.current;
+      staleRender.setValue("not yet committed");
+      expect(staleRender.value).toBe("");
+      expect(staleRender.hasDraftContent()).toBe(true);
+    });
+
+    expect(hook.result.current.value).toBe("not yet committed");
+    await hook.unmount();
+  });
+
   test("a live queue mutation reloads the authoritative draft in another tab", async () => {
     let current: ComposerDraft = {
       revision: 1,
       text: "first tab state",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -803,6 +823,52 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("a live queue mutation preserves an unsaved local draft", async () => {
+    let current: ComposerDraft = {
+      revision: 1,
+      text: "initial server draft",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return current;
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      noEvents,
+    );
+    await flush();
+
+    await flushing(() => {
+      hook.result.current.setValue("Unsent local draft that must not be overwritten");
+    });
+    current = {
+      ...current,
+      revision: 2,
+      text: "",
+    };
+    await hook.rerender([
+      makeEvent(1, "session.queue.changed", { operation: "edit", queueVersion: 2 }),
+    ]);
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draftRevision).toBe(2);
+    expect(hook.result.current.value).toBe("Unsent local draft that must not be overwritten");
+    await hook.unmount();
+  });
+
   test("hydrates, autosaves with OCC, and sends the acknowledged draft/control revision", async () => {
     const saved: unknown[] = [];
     const sent: unknown[] = [];
@@ -811,6 +877,7 @@ describe("useComposer durable draft and control binding", () => {
       text: "restored text",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,
@@ -852,6 +919,79 @@ describe("useComposer durable draft and control binding", () => {
     await hook.unmount();
   });
 
+  test("preserves an explicit draft tool array when the host does not override it", async () => {
+    const sent: unknown[] = [];
+    const initial: ComposerDraft = {
+      revision: 2,
+      text: "keep this narrowing",
+      resources: [],
+      tools: [{ kind: "mcp", id: "cap-search" }],
+      toolsProvided: true,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      sendMessage: async (_ws, _session, input) => {
+        sent.push(input);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent.at(-1)).toMatchObject({ tools: [{ kind: "mcp", id: "cap-search" }] });
+    await hook.unmount();
+  });
+
+  test("persists and sends an explicit empty tool override", async () => {
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const initial: ComposerDraft = {
+      revision: 1,
+      text: "no optional tools",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, input) => {
+        sent.push(input);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: { tools: [] },
+        }),
+      undefined,
+    );
+    await flush();
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(saved.at(-1)).toMatchObject({ tools: [], toolsProvided: true });
+    expect(sent.at(-1)).toMatchObject({ tools: [] });
+    await hook.unmount();
+  });
+
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} preserves the exact autosaved draft text`, async () => {
       const submitted: string[] = [];
@@ -860,6 +1000,7 @@ describe("useComposer durable draft and control binding", () => {
         text: "",
         resources: [],
         tools: [],
+        toolsProvided: false,
         model: "model-x",
         reasoningEffort: "medium",
         sourceTurnId: null,
@@ -917,6 +1058,7 @@ describe("useComposer durable draft and control binding", () => {
       text: "",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium",
       sourceTurnId: null,
@@ -969,6 +1111,7 @@ describe("useComposer durable draft and control binding", () => {
       text: "remote one",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: "model-x",
       reasoningEffort: "medium" as const,
       sourceTurnId: null,

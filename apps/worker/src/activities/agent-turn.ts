@@ -157,7 +157,8 @@ import {
   type CodexRequestContext,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
-import { mergeResourceRefs, mergeToolRefs } from "./common";
+import { mergeResourceRefs } from "./common";
+import { enabledCapabilityMcpToolRefs, resolveSessionToolPolicy } from "@opengeni/core";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
@@ -3214,9 +3215,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // connector scopes); no-op for every other turn. Its refreshing bearer is
       // resolved at connect time from the codex ALS (see the withCodex-wrapped
       // prepareTools call below).
+      // Resolve the durable policy at the turn boundary. Workspace-default
+      // sessions may discover newly enabled capability MCPs, while explicit,
+      // inherited-fixed, and legacy sessions remain narrowed to their stored
+      // materialized allow-list. `withCodexAppsTool` below keeps the existing
+      // single Codex lazy router/connector overlay; it is not a second policy
+      // or discovery path.
+      const effectivePolicyTools = resolveSessionToolPolicy({
+        ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
+        sessionTools: session.tools,
+        turnTools: turn.tools,
+        ...(turn.toolsProvided !== undefined ? { turnToolsProvided: turn.toolsProvided } : {}),
+        availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
+        defaultMcpServerIds: enabledCapabilityMcpToolRefs(settings, mcpSettings).map(
+          (tool) => tool.id,
+        ),
+      }).toolRefs;
       const turnTools = withCodexAppsTool(
         runSettings,
-        withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)),
+        withFirstPartyTools(runSettings, effectivePolicyTools),
       );
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
@@ -3402,7 +3419,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
             sessionId: input.sessionId,
-            runId: turnId,
+            turnId,
+            attemptId: input.attemptId,
+            executionGeneration,
           },
         ),
         cancellationSignal,

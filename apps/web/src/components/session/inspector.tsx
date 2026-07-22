@@ -52,6 +52,8 @@ export function SessionInspector(props: {
     .filter((event) => !event.type.endsWith(".delta"))
     .sort((a, b) => b.sequence - a.sequence);
   const repositories = props.session.resources.filter((resource) => resource.kind === "repository");
+  const effectiveToolPolicy = props.session.effectiveToolPolicy;
+  const toolPolicyMode = effectiveToolPolicy?.mode ?? props.session.toolPolicy?.mode ?? "legacy";
 
   return (
     <div className="flex h-full min-h-[28rem] w-full min-w-0 flex-col overflow-hidden">
@@ -140,6 +142,43 @@ export function SessionInspector(props: {
                   }
                 />
                 <InfoRow label="Stream" value={props.connectionState} />
+              </InspectorSection>
+
+              <InspectorSection title="Tool policy">
+                <InfoRow label="Mode" value={toolPolicyMode.replaceAll("_", " ")} />
+                <InfoRow
+                  label="Discovery"
+                  value={
+                    effectiveToolPolicy
+                      ? effectiveToolPolicy.lazyRouter.state === "required"
+                        ? "Lazy workspace defaults"
+                        : "Fixed selection"
+                      : "Unavailable (rolling client)"
+                  }
+                />
+                <InfoRow
+                  label="Effective"
+                  value={String(
+                    effectiveToolPolicy?.counts.effective ?? props.session.tools.length,
+                  )}
+                />
+                <InfoRow
+                  label="Configured"
+                  value={
+                    effectiveToolPolicy ? String(effectiveToolPolicy.counts.configured) : "unknown"
+                  }
+                />
+                <InfoRow
+                  label="Unavailable"
+                  value={
+                    effectiveToolPolicy ? String(effectiveToolPolicy.counts.dropped) : "unknown"
+                  }
+                />
+                {effectiveToolPolicy?.idsTruncated ? (
+                  <p className="text-xs text-fg-subtle">
+                    Tool identifiers are truncated in this secret-safe projection; counts are exact.
+                  </p>
+                ) : null}
               </InspectorSection>
 
               <InspectorSection title="Repositories">

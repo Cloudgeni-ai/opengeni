@@ -51,6 +51,7 @@
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
     "@opengeni/github": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",

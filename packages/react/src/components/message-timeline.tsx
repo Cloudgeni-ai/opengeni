@@ -998,12 +998,12 @@ function NoticeRow({ item }: { item: NoticeItem }) {
 }
 
 /**
- * The inline reconnect card: a lapsed connection surfaces as a calm, tappable
- * affordance — provider logo, one human line, one primary Reconnect button —
- * instead of a raw "linear.app needs to be reconnected." string. The `reason`
- * only shapes the helper copy; no domain or enum code is shown as a label.
- * `onReconnect` (from the app, which owns the SDK client) runs the flow; without
- * it, a pre-minted authorization link is offered, or the card stays informative.
+ * The inline connection-recovery card: missing or lapsed access surfaces as a
+ * calm, tappable affordance instead of a raw provider-domain error. The `reason`
+ * only shapes human copy; no domain or enum code is shown as a label.
+ * `onReconnect` (from the app, which owns the SDK client) starts the flow;
+ * without it, a pre-minted authorization link is offered, or the card stays
+ * informative. Recovery never claims to resume/replay the failed tool call.
  */
 function AuthNeededRow({
   item,
@@ -1018,6 +1018,8 @@ function AuthNeededRow({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
+  const missing = item.reason === "missing_connection";
+  const actionLabel = missing ? "Connect" : "Reconnect";
 
   const start = async () => {
     if (!onReconnect || busy) {
@@ -1028,6 +1030,7 @@ function AuthNeededRow({
     try {
       // On success the app redirects to consent (or routes to credential entry),
       // so this row unmounts; a resolve without navigation just relaxes the button.
+      // The callback starts authorization only. It never resumes this tool call.
       await onReconnect(item);
       setBusy(false);
     } catch {
@@ -1045,7 +1048,9 @@ function AuthNeededRow({
             label={provider}
           />
           <div className="min-w-0">
-            <p className="truncate text-og-md font-medium text-og-fg">Reconnect {provider}</p>
+            <p className="truncate text-og-md font-medium text-og-fg">
+              {actionLabel} {provider}
+            </p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
           </div>
         </div>
@@ -1060,7 +1065,7 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
-            {busy ? "Reconnecting…" : "Reconnect"}
+            {busy ? "Opening…" : actionLabel}
           </button>
         ) : item.authorizationUrl ? (
           <a
@@ -1073,13 +1078,17 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className="size-3.5" aria-hidden />
-            Reconnect
+            {actionLabel}
           </a>
         ) : null}
       </div>
+      <p className="px-1 text-og-xs text-og-fg-subtle">
+        This tool call wasn't replayed. After {missing ? "connecting" : "reconnecting"}, send a new
+        message to try again.
+      </p>
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start reconnecting {provider}. Try again.
+          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
         </p>
       ) : null}
     </div>

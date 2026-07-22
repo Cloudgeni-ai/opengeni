@@ -26,6 +26,11 @@
 // all unchanged). Invocation is untouched; only the wire tool-set shrinks.
 
 import { toolSearchTool, type Tool } from "@openai/agents";
+import {
+  MCP_MAX_TOOL_DEFINITION_BYTES,
+  MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
+  mcpSerializedSizeBytes,
+} from "./mcp-network";
 
 /** The prefix OpenGeni's PrefixedMcpServer stamps on codex_apps connector tools. */
 export const CODEX_APPS_TOOL_PREFIX = "codex_apps__";
@@ -239,7 +244,21 @@ function codexToolSearchExecutor(args: {
   const deferred = (args.availableTools ?? []).filter(isCodexAppsFunctionTool);
   if (deferred.length === 0) return [];
   const { query, limit } = parseSearchArgs(args.toolCall?.arguments);
-  return bm25RankTools(deferred, query, limit);
+  const ranked = bm25RankTools(deferred, query, limit);
+  const bounded: Tool[] = [];
+  let disclosedBytes = 0;
+  for (const tool of ranked) {
+    const toolBytes = mcpSerializedSizeBytes(tool);
+    if (toolBytes > MCP_MAX_TOOL_DEFINITION_BYTES) {
+      continue;
+    }
+    if (disclosedBytes + toolBytes > MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES) {
+      break;
+    }
+    disclosedBytes += toolBytes;
+    bounded.push(tool);
+  }
+  return bounded;
 }
 
 const NO_NAMESPACES: ReadonlySet<string> = new Set();

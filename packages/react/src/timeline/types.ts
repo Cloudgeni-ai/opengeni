@@ -167,13 +167,14 @@ export type NoticeItem = {
 };
 
 /**
- * A tool call hit a connection whose credential lapsed — the broker asked the
- * user to reconnect the provider before the turn can continue. Carries the
- * structured `tool.auth_needed` payload so the renderer can draw a clean inline
- * reconnect affordance (provider logo + one human line + a Reconnect button)
- * and the app can start the right recovery flow (OAuth reconnect for the
- * surviving connection, or credential re-entry for an api-key one). The `reason`
- * shapes the human copy but is never shown raw.
+ * A tool call hit a missing or lapsed connection. The broker reports that
+ * condition as a tool error and the turn continues; reconnecting never resumes
+ * or replays the original call. Carries the structured `tool.auth_needed`
+ * payload so the renderer can draw a clean inline recovery affordance (provider
+ * logo + one human line + a Connect/Reconnect button) and the app can start the
+ * right flow (OAuth reconnect for the surviving connection, or credential
+ * re-entry for an api-key one). The `reason` shapes the human copy but is never
+ * shown raw.
  */
 export type AuthNeededItem = {
   kind: "auth-needed";

@@ -37,6 +37,7 @@ export type {
   FileAsset,
   FileDownloadUrlResponse,
   GitHubAppInfo,
+  GitHubCapabilityHealth,
   GitHubInstallationBinding,
   GitHubRepository,
   GoalSpec,

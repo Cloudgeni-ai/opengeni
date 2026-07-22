@@ -22,6 +22,7 @@ function composer(spy: { sends: string[]; pauses: number; resumes: number }): Co
   return {
     value: "next prompt",
     setValue: () => {},
+    hasDraftContent: () => true,
     send: async () => {
       spy.sends.push("send");
       return true;
