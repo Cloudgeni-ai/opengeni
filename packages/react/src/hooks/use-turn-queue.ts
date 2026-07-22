@@ -7,7 +7,7 @@ import type {
   SessionTurn,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
   useSessionEventTrigger,
@@ -24,9 +24,20 @@ export function isTurnQueueEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
+function queueSnapshotCovers(
+  candidate: SessionQueueSnapshot | null,
+  observed: SessionQueueSnapshot,
+): boolean {
+  return Boolean(
+    candidate &&
+    candidate.version >= observed.version &&
+    candidate.effectiveControl.controlVersion >= observed.effectiveControl.controlVersion,
+  );
+}
+
 export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
 
-export type UseTurnQueueOptions = ClientOverride &
+export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     pollIntervalMs?: number | undefined;
   };
@@ -67,7 +78,7 @@ export function useTurnQueue(
   options: UseTurnQueueOptions = {},
 ): UseTurnQueueResult {
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
-    useOpenGeni(options);
+    useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
   const [loading, setLoading] = useState(enabled);
@@ -94,23 +105,40 @@ export function useTurnQueue(
     return true;
   }, []);
 
-  const load = useCallback(async (): Promise<void> => {
-    if (!sessionId) return;
-    const ticket = ++readGeneration.current;
-    try {
-      const fetched = await client.getQueue(workspaceId, sessionId);
-      if (ticket === readGeneration.current) {
-        acceptSnapshot(fetched);
-        setError(null);
-        setLoading(false);
+  const load = useCallback(
+    async (rejectOnFailure = false): Promise<void> => {
+      if (!sessionId) return;
+      const targetKey = `${workspaceId}\u0000${sessionId}`;
+      const ticket = ++readGeneration.current;
+      try {
+        const fetched = await client.getQueue(workspaceId, sessionId);
+        if (targetKeyRef.current !== targetKey) return;
+        const ownsLatestRead = ticket === readGeneration.current;
+        if (rejectOnFailure) {
+          const committed = acceptSnapshot(fetched);
+          if (!committed && !queueSnapshotCovers(snapshotRef.current, fetched)) {
+            throw new TypeError("Queue reconciliation did not commit authoritative state");
+          }
+          setError(null);
+          if (ownsLatestRead) setLoading(false);
+        } else if (ownsLatestRead) {
+          acceptSnapshot(fetched);
+          setError(null);
+          setLoading(false);
+        }
+      } catch (cause) {
+        if (
+          targetKeyRef.current === targetKey &&
+          (ticket === readGeneration.current || rejectOnFailure)
+        ) {
+          setError(asError(cause));
+          if (ticket === readGeneration.current) setLoading(false);
+        }
+        if (rejectOnFailure) throw cause;
       }
-    } catch (cause) {
-      if (ticket === readGeneration.current) {
-        setError(asError(cause));
-        setLoading(false);
-      }
-    }
-  }, [client, workspaceId, sessionId, acceptSnapshot]);
+    },
+    [client, workspaceId, sessionId, acceptSnapshot],
+  );
 
   useEffect(() => {
     const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
@@ -151,10 +179,18 @@ export function useTurnQueue(
   }, [enabled, load, registerSessionReconciler, sessionId]);
 
   const scheduleRefresh = useDebouncedCallback(() => void load());
-  useSessionEventTrigger(client, workspaceId, sessionId, isTurnQueueEvent, scheduleRefresh, {
-    enabled,
-    ...(options.events !== undefined ? { events: options.events } : {}),
-  });
+  useSessionEventTrigger(
+    client,
+    workspaceId,
+    sessionId,
+    isTurnQueueEvent,
+    scheduleRefresh,
+    {
+      enabled,
+      ...(options.events !== undefined ? { events: options.events } : {}),
+    },
+    async () => await load(true),
+  );
 
   const mutate = useCallback(
     async (

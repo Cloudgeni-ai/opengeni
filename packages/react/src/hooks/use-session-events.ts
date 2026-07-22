@@ -1,17 +1,13 @@
 import type { SessionEvent, SessionStatus, StreamConnectionState } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
-import {
-  buildTimeline,
-  groupTimeline,
-  sessionStatusFromEvents,
-  type TimelineItem,
-} from "../timeline";
-import type { SessionClientLike } from "../client";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
+import { buildTimeline, groupTimeline, sessionStatusFromEvents } from "../timeline/projection";
+import type { TimelineItem } from "../timeline/types";
+import type { EmbeddedSessionClientLike } from "../client";
 
 export type SessionEventsConnectionState = StreamConnectionState | "idle" | "ended" | "error";
 
-export type UseSessionEventsOptions = ClientOverride & {
+export type UseSessionEventsOptions = EmbeddedSessionClientOverride & {
   /** Resume after this sequence (exclusive). Nonzero keeps full replay/resume semantics. */
   after?: number | undefined;
   /** Load a bounded tail by default, or opt back into full replay from `after`. */
@@ -105,7 +101,7 @@ export function useSessionEvents(
   sessionId: string | null | undefined,
   options: UseSessionEventsOptions = {},
 ): UseSessionEventsResult {
-  const { client, workspaceId, reconcileSession } = useOpenGeni(options);
+  const { client, workspaceId, reconcileSession } = useEmbeddedSession(options);
   const enabled = options.enabled ?? true;
   const after = options.after ?? 0;
   const replay = options.replay ?? "windowed";
@@ -742,7 +738,7 @@ type LoadedEventWindow = {
 };
 
 async function loadEventWindow(
-  client: SessionClientLike,
+  client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
   options: {
@@ -842,7 +838,7 @@ function findBoundaryIndex(events: SessionEvent[]): number {
 type PreviousPage = SessionEvent[] & { requested: number };
 
 async function loadPreviousPage(
-  client: SessionClientLike,
+  client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string,
   before: number,

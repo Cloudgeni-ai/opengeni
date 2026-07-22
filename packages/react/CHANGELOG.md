@@ -1,5 +1,32 @@
 # @opengeni/react
 
+## 0.17.0
+
+### Minor Changes
+
+- 717a7ef: Add a headless chat-composer controller, compound composer primitives, and typed message overrides while preserving `ChatComposer` as the default preset.
+- dbb6232: Support linking an existing GitHub App installation to multiple OpenGeni workspaces with independent repository allowlists.
+
+  - Discover installations through GitHub App user OAuth, require repository-level administrator permission, and configure the OAuth callback in generated App manifests.
+  - Persist workspace-scoped installation bindings and repository selections while retaining legacy `all` bindings for compatibility.
+  - Enforce the current binding during repository listing, session admission, MCP token minting, and GitHub-authenticated worker turn startup.
+  - Add SDK and web controls to link, rescope, and unlink a workspace without uninstalling the GitHub App or affecting another workspace.
+
+### Patch Changes
+
+- bb09be8: Add a session-only React entrypoint and mirror MCP approval policy in
+  the public SDK type.
+- Bound model-facing tool output, complete input accounting, compact session discovery,
+  event and realtime projections, authorized evidence retrieval, and compaction failure
+  convergence with explicit truncation and loss metadata throughout the output lifecycle.
+  Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+  Updated-order session discovery now uses a transactional workspace activity-revision fence,
+  and the workspace-control bounds migration rewrites only historical cap violations.
+- Updated dependencies [bb09be8]
+- Updated dependencies
+- Updated dependencies [dbb6232]
+  - @opengeni/sdk@0.17.0
+
 ## 0.16.1
 
 ### Patch Changes

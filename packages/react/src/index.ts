@@ -8,8 +8,10 @@
 //   @source "../node_modules/@opengeni/react/src";
 
 export type { SessionClientLike } from "./client";
-export { OpenGeniProvider, useOpenGeni, useOpenGeniClient } from "./provider";
-export type { ClientOverride, OpenGeniContextValue, OpenGeniProviderProps } from "./provider";
+export { OpenGeniProvider } from "./provider";
+export type { OpenGeniProviderProps } from "./provider";
+export { useOpenGeni, useOpenGeniClient } from "./session-context";
+export type { ClientOverride, OpenGeniContextValue } from "./session-context";
 
 // Hooks
 export { useSession, isTitleEvent } from "./hooks/use-session";

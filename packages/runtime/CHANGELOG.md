@@ -1,5 +1,22 @@
 # @opengeni/runtime
 
+## 0.8.2
+
+### Patch Changes
+
+- Bound model-facing tool output, complete input accounting, compact session discovery,
+  event and realtime projections, authorized evidence retrieval, and compaction failure
+  convergence with explicit truncation and loss metadata throughout the output lifecycle.
+  Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+  Updated-order session discovery now uses a transactional workspace activity-revision fence,
+  and the workspace-control bounds migration rewrites only historical cap violations.
+- Updated dependencies
+- Updated dependencies [dbb6232]
+- Updated dependencies [3e65c23]
+  - @opengeni/codex@0.2.5
+  - @opengeni/config@0.5.3
+  - @opengeni/contracts@0.12.0
+
 ## 0.8.1
 
 ### Patch Changes
