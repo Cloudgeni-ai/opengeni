@@ -107,16 +107,17 @@ ENV HOME=/workspace
 ENV OPENGENI_TERMINAL_STREAM_PORT=7681
 
 COPY docker/opengeni-git-askpass /usr/local/bin/opengeni-git-askpass
-COPY docker/ogtool                 /usr/local/bin/ogtool
+COPY packages/ogtool/package.json  /opt/opengeni/ogtool/package.json
+COPY packages/ogtool/bin/ogtool.cjs /opt/opengeni/ogtool/bin/ogtool.cjs
 COPY docker/desktop/opengeni-terminal-up.sh   /usr/local/bin/opengeni-terminal-up
 COPY docker/desktop/opengeni-terminal-down.sh /usr/local/bin/opengeni-terminal-down
 RUN set -eux; \
     chmod 0755 /usr/local/bin/opengeni-git-askpass \
-               /usr/local/bin/ogtool \
                /usr/local/bin/opengeni-terminal-up /usr/local/bin/opengeni-terminal-down; \
-    cp /usr/local/bin/ogtool /tmp/ogtool-check.js; \
-    node --check /tmp/ogtool-check.js; \
-    rm /tmp/ogtool-check.js; \
+    chmod 0755 /opt/opengeni/ogtool/bin/ogtool.cjs; \
+    ln -s /opt/opengeni/ogtool/bin/ogtool.cjs /usr/local/bin/ogtool; \
+    node --check /opt/opengeni/ogtool/bin/ogtool.cjs; \
+    test -n "$(ogtool --version)"; \
     bash -n /usr/local/bin/opengeni-terminal-up; \
     bash -n /usr/local/bin/opengeni-terminal-down
 

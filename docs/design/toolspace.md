@@ -260,10 +260,14 @@ cannot re-enter `/mcp` as a toolspace principal.
 
 ## `ogtool`
 
-The sandbox image carries a small dependency-light CLI, `ogtool`, that reads
-`OPENGENI_TOOLSPACE_TOKEN_FILE` and `OPENGENI_TOOLSPACE_URL` and performs
-`tools/list` and `tools/call` with JSON input/output. It is a convenience shim,
-not a new API surface.
+`@opengeni/ogtool` is a public, dependency-free npm package. Stock sandbox images
+install the exact same canonical CLI file from that package source; custom rigs
+and connected machines can install the version pinned by their deployment BOM.
+It reads `OPENGENI_TOOLSPACE_TOKEN_FILE` and `OPENGENI_TOOLSPACE_URL` and performs
+`tools/list` and `tools/call` with JSON input/output. The protected token is read
+anew for each CLI process, so worker-side renewal remains effective for arbitrarily
+long sessions. `ogtool doctor` reports local configuration without printing the
+token. It is a convenience shim, not a new API or credential surface.
 
 ## Agent Awareness
 
@@ -279,12 +283,17 @@ for loops, polling, and bulk filtering because their results do not consume mode
 context, and that approval-required tools must still be invoked normally (they
 return a typed error programmatically).
 
+Stock images already contain the CLI. If a custom environment does not, the
+directive uses `OPENGENI_OGTOOL_PACKAGE_SPEC` only when the deployment supplied
+an exact stable version and npm is available. It never guesses a version or
+installs `latest`; direct MCP JSON-RPC remains the dependency-free fallback.
+
 The directive is appended **only when a toolspace token was minted for this turn**
 — the exact condition that gates the sandbox mint (feature enabled), surfaced to
 the runtime as the per-turn toolspace token seed. The mint happens on every
 backend including selfhosted, so the directive appears on a connected machine too;
-a turn with no minted token has no `ogtool`/URL in its sandbox, so it never
-advertises a capability that is not there. In the instruction composition order
+a turn with no minted token has no Toolspace URL/token, so it never advertises a
+capability that is not there. In the instruction composition order
 the directive sits **after** the workspace persona + non-bypassable CORE and
 **before** the per-session instructions, so host- and session-specific guidance
 still refines it.
@@ -296,8 +305,5 @@ still refines it.
 - Results by reference: large tool outputs should be able to land in OpenGeni
   storage and return a reference instead of a giant inline JSON-RPC payload;
   investigate without preselecting a design in #536.
-- Distribute and discover `ogtool` independently of the stock sandbox image so
-  custom rigs and connected machines can consume a release-coherent artifact
-  (#537).
 - Restore Toolspace in interactive terminal and graphical stream planes only
   through a session-isolated process/transport contract (#540).

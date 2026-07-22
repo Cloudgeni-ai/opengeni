@@ -190,6 +190,9 @@ jobs:
       - name: Runtime embedding consumer
         run: bun run test:runtime-embedding-consumer
 
+      - name: Portable ogtool package
+        run: bun run test:ogtool-package
+
       - name: Build React demo harness
         run: cd packages/react && bun run demo:build
 

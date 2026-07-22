@@ -176,6 +176,13 @@ const SettingsSchema = z.object({
   streamControlEnabled: EnvBoolean.default(false),
   toolspaceEnabled: EnvBoolean.default(false),
   toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
+  // Optional release-coherent bootstrap hint for custom rigs/connected machines
+  // that do not carry the stock-image ogtool binary. Exact stable versions only:
+  // the agent must never guess a tag or silently install `latest`.
+  ogtoolPackageSpec: z
+    .string()
+    .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
@@ -1027,6 +1034,7 @@ export function getSettings(): Settings {
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
     toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
+    ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
@@ -1796,6 +1804,9 @@ export function stableSandboxEnvironmentForRun(
   }
   if (settings.toolspaceEnabled) {
     environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+    if (settings.ogtoolPackageSpec) {
+      environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
+    }
     if (options.workspaceId) {
       environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
         settings,
