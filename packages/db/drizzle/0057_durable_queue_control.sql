@@ -1,4 +1,4 @@
--- OPE-18/OPE-21/OPE-22: one prompt queue, one current inference, portable
+-- tracking-18/tracking-21/tracking-22: one prompt queue, one current inference, portable
 -- compaction, attempt-fenced publication, coalesced internal updates, and
 -- session/workspace Pause.
 --

@@ -110,6 +110,7 @@ import {
   ilike,
   isNull,
   lt,
+  lte,
   ne,
   notInArray,
   or,
@@ -277,6 +278,13 @@ export type CreateDbOptions = {
   userLookup?: UserLookup;
   /** postgres-js pool size; defaults to today's `10`. */
   max?: number;
+  /**
+   * Connection-local default transaction isolation sent in the postgres-js
+   * startup parameters. This is intentionally not a role/database default:
+   * tests and embedded callers can exercise a different ambient isolation
+   * without mutating a shared PostgreSQL role or affecting other connections.
+   */
+  isolationLevel?: postgres.ConnectionParameters["default_transaction_isolation"];
 };
 
 /**
@@ -340,6 +348,7 @@ export function createDb(databaseUrl: string, options: CreateDbOptions = {}): Db
     connection: {
       application_name: "opengeni",
       ...(options.searchPath ? { search_path: options.searchPath } : {}),
+      ...(options.isolationLevel ? { default_transaction_isolation: options.isolationLevel } : {}),
     },
   });
   const db = drizzle(client, { schema });
@@ -1182,9 +1191,13 @@ export async function removeWorkspaceMember(
   // FORCE RLS permits deleting only that member's personal rows, and make the
   // cleanup + membership removal one transaction.
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
-    // Lock the membership before cleanup so concurrent removals preserve the
-    // previous one-winner/one-no-op behavior while snapshots are still visible
-    // to the subject-scoped FORCE-RLS policy.
+    await lockSessionPersonalStateExclusive(scopedDb, workspaceId, subjectId);
+    // Exclusively lock the membership before cleanup so concurrent removals
+    // preserve the previous one-winner/one-no-op behavior while snapshots are
+    // still visible to the subject-scoped FORCE-RLS policy. Session listing takes
+    // the shared counterpart of this subject fence; pin mutation takes the same
+    // exclusive fence. Removal therefore waits for readers/writers, then cleans
+    // every personal row before deleting the membership.
     const [membership] = await scopedDb
       .select({ id: schema.workspaceMemberships.id })
       .from(schema.workspaceMemberships)
@@ -11220,6 +11233,10 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   subjectId: string;
   cursor?: SessionListCursor | undefined;
   search?: string | undefined;
+  /** Return only the complete personal pin projection; never scan/snapshot ordinary rows. */
+  pinsOnly?: boolean | undefined;
+  /** Materialize a continuation snapshot. Disable for legacy one-page array reads. */
+  materializeSnapshot?: boolean | undefined;
 };
 
 export class SessionPinVersionConflictError extends Error {
@@ -11230,9 +11247,16 @@ export class SessionPinVersionConflictError extends Error {
 }
 
 export class SessionListCursorError extends Error {
-  constructor(message = "session list cursor is invalid or expired") {
+  constructor(message = "session list cursor is invalid") {
     super(message);
     this.name = "SessionListCursorError";
+  }
+}
+
+export class SessionListCursorExpiredError extends Error {
+  constructor(message = "session list cursor snapshot is missing or expired") {
+    super(message);
+    this.name = "SessionListCursorExpiredError";
   }
 }
 
@@ -11240,6 +11264,13 @@ export class SessionListAccessError extends Error {
   constructor(message = "workspace access denied") {
     super(message);
     this.name = "SessionListAccessError";
+  }
+}
+
+export class SessionListSnapshotLimitError extends Error {
+  constructor(message = "session list snapshot capacity exceeded") {
+    super(message);
+    this.name = "SessionListSnapshotLimitError";
   }
 }
 
@@ -11261,6 +11292,30 @@ function isPostgresSerializationFailure(error: unknown): boolean {
     candidate = "cause" in candidate ? (candidate as { cause?: unknown }).cause : undefined;
   }
   return false;
+}
+
+function sessionPersonalStateLockKey(workspaceId: string, subjectId: string): string {
+  return `session-personal-state:${workspaceId}:${subjectId}`;
+}
+
+async function lockSessionPersonalStateShared(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock_shared(hashtextextended(${sessionPersonalStateLockKey(workspaceId, subjectId)}, 0))`,
+  );
+}
+
+async function lockSessionPersonalStateExclusive(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${sessionPersonalStateLockKey(workspaceId, subjectId)}, 0))`,
+  );
 }
 
 type SessionPinRow = Pick<
@@ -11463,6 +11518,10 @@ function sessionFilters(
 }
 
 const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
+const SESSION_LIST_SNAPSHOT_REUSE_MS = 5_000;
+export const SESSION_LIST_SNAPSHOT_MAX_IDS = 5_000;
+export const SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT = 32;
+const SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS = 3;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function sessionParentFilter(parentSessionId: string | null | undefined): string {
@@ -11476,6 +11535,20 @@ function sessionParentFilter(parentSessionId: string | null | undefined): string
 function sessionSearchFilter(search: string | undefined): string | null {
   const trimmed = search?.trim();
   return trimmed ? trimmed : null;
+}
+
+function sessionListSnapshotLockKey(workspaceId: string, subjectId: string): string {
+  return `session-list-snapshot:${workspaceId}:${subjectId}`;
+}
+
+async function lockSessionListSnapshotCreation(
+  db: Database,
+  workspaceId: string,
+  subjectId: string,
+): Promise<void> {
+  await db.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(${sessionListSnapshotLockKey(workspaceId, subjectId)}, 0))`,
+  );
 }
 
 /** Opaque, URL-safe cursor encoding for a server-owned activity snapshot. */
@@ -11552,36 +11625,33 @@ export async function listSessionsForSubject(
   const limit = Number.isFinite(requestedLimit)
     ? Math.min(500, Math.max(1, Math.floor(requestedLimit)))
     : 50;
-  let membershipCheckSerializationFailure = false;
   const listInTransaction = async (): Promise<SessionListResponse> => {
-    membershipCheckSerializationFailure = false;
     return await withWorkspaceSubjectRls(
       db,
       workspaceId,
       options.subjectId,
       async (tx) => {
+        // READ COMMITTED is deliberate: if removal already owns the exclusive
+        // advisory fence, this transaction waits before checking membership and
+        // then observes the committed deletion in a fresh statement snapshot.
+        // The shared fence keeps every personal pin row stable across the page's
+        // ordinary/pinned queries while allowing concurrent list readers.
+        await lockSessionPersonalStateShared(tx, workspaceId, options.subjectId);
         // Authorization is resolved before this helper by the API, but that
-        // grant can be stale by the time this transaction starts. Lock the live
-        // membership before touching snapshots so removal and listing serialize:
-        // listing first lets removal clean its committed snapshot, while removal
-        // first makes listing observe the missing membership and do no writes.
-        let membership: { id: string } | undefined;
-        try {
-          [membership] = await tx
-            .select({ id: schema.workspaceMemberships.id })
-            .from(schema.workspaceMemberships)
-            .where(
-              and(
-                eq(schema.workspaceMemberships.workspaceId, workspaceId),
-                eq(schema.workspaceMemberships.subjectId, options.subjectId),
-              ),
-            )
-            .for("update")
-            .limit(1);
-        } catch (error) {
-          membershipCheckSerializationFailure = isPostgresSerializationFailure(error);
-          throw error;
-        }
+        // grant can be stale by the time this transaction starts. The subject
+        // fence above makes removal and listing deterministic: listing first lets
+        // removal clean its committed snapshot, while removal first makes this
+        // fresh membership read observe the deletion and do no writes.
+        const [membership] = await tx
+          .select({ id: schema.workspaceMemberships.id })
+          .from(schema.workspaceMemberships)
+          .where(
+            and(
+              eq(schema.workspaceMemberships.workspaceId, workspaceId),
+              eq(schema.workspaceMemberships.subjectId, options.subjectId),
+            ),
+          )
+          .limit(1);
         // A missing membership only means "denied" for user subjects — people
         // are authorized exclusively through memberships, so absence here is a
         // removal that the route-level grant hasn't observed yet. Non-user
@@ -11600,9 +11670,18 @@ export async function listSessionsForSubject(
         const searchFilter = sessionSearchFilter(options.search);
         const now = new Date();
 
+        if (options.pinsOnly && options.cursor) {
+          throw new SessionListCursorError("pins-only session lists do not accept a cursor");
+        }
+
         let pageIds: string[];
         let nextCursor: string | null = null;
-        if (options.cursor) {
+        if (options.pinsOnly) {
+          // The rail polls the complete personal pin section independently from
+          // its root page. Do not turn that cheap projection into an O(N)
+          // ordinary-session scan or a throwaway continuation snapshot.
+          pageIds = [];
+        } else if (options.cursor) {
           const cursor = options.cursor;
           if (cursor.parentSessionFilter !== parentFilter || cursor.search !== searchFilter) {
             throw new SessionListCursorError("session list cursor does not match its filters");
@@ -11619,7 +11698,7 @@ export async function listSessionsForSubject(
             )
             .limit(1);
           if (!snapshot || snapshot.expiresAt.getTime() <= now.getTime()) {
-            throw new SessionListCursorError();
+            throw new SessionListCursorExpiredError();
           }
           if (
             snapshot.parentSessionFilter !== parentFilter ||
@@ -11638,7 +11717,7 @@ export async function listSessionsForSubject(
               search: snapshot.search ?? null,
             });
           }
-        } else {
+        } else if (options.materializeSnapshot === false) {
           const ordinaryIdRows = await tx
             .select({ id: schema.sessions.id })
             .from(schema.sessions)
@@ -11656,32 +11735,118 @@ export async function listSessionsForSubject(
                 or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
               ),
             )
-            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id));
-          const ordinaryIds = ordinaryIdRows.map((row) => row.id);
+            .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+            .limit(limit);
+          pageIds = ordinaryIdRows.map((row) => row.id);
+        } else {
+          // Coalesce concurrent first-page requests for this subject before the
+          // expensive ordered-ID read. A short reuse window preserves live-list
+          // behavior while bounding authenticated request amplification. The
+          // separate lock domain does not serialize pin writes or other members.
+          await lockSessionListSnapshotCreation(tx, workspaceId, options.subjectId);
+          await tx
+            .delete(schema.sessionListSnapshots)
+            .where(
+              and(
+                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+                lte(schema.sessionListSnapshots.expiresAt, now),
+              ),
+            );
+          const snapshotSearchFilter = searchFilter
+            ? eq(schema.sessionListSnapshots.search, searchFilter)
+            : isNull(schema.sessionListSnapshots.search);
+          const [reusableSnapshot] = await tx
+            .select()
+            .from(schema.sessionListSnapshots)
+            .where(
+              and(
+                eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+                eq(schema.sessionListSnapshots.parentSessionFilter, parentFilter),
+                snapshotSearchFilter,
+                gt(
+                  schema.sessionListSnapshots.createdAt,
+                  new Date(now.getTime() - SESSION_LIST_SNAPSHOT_REUSE_MS),
+                ),
+              ),
+            )
+            .orderBy(
+              desc(schema.sessionListSnapshots.createdAt),
+              desc(schema.sessionListSnapshots.id),
+            )
+            .limit(1);
+
+          let ordinaryIds = reusableSnapshot?.ordinarySessionIds;
+          if (!ordinaryIds) {
+            const ordinaryIdRows = await tx
+              .select({ id: schema.sessions.id })
+              .from(schema.sessions)
+              .leftJoin(
+                schema.sessionPins,
+                and(
+                  eq(schema.sessionPins.workspaceId, workspaceId),
+                  eq(schema.sessionPins.subjectId, options.subjectId),
+                  eq(schema.sessionPins.sessionId, schema.sessions.id),
+                ),
+              )
+              .where(
+                and(
+                  ...filters,
+                  or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
+                ),
+              )
+              .orderBy(desc(schema.sessions.updatedAt), desc(schema.sessions.id))
+              .limit(SESSION_LIST_SNAPSHOT_MAX_IDS + 1);
+            if (ordinaryIdRows.length > SESSION_LIST_SNAPSHOT_MAX_IDS) {
+              throw new SessionListSnapshotLimitError(
+                `session list exceeds the ${SESSION_LIST_SNAPSHOT_MAX_IDS}-row stable pagination limit`,
+              );
+            }
+            ordinaryIds = ordinaryIdRows.map((row) => row.id);
+          }
           pageIds = ordinaryIds.slice(0, limit);
           if (ordinaryIds.length > limit) {
-            const [workspace] = await tx
-              .select({ accountId: schema.workspaces.accountId })
-              .from(schema.workspaces)
-              .where(eq(schema.workspaces.id, workspaceId))
-              .limit(1);
-            if (!workspace) {
-              throw new SessionListCursorError();
-            }
-            const [snapshot] = await tx
-              .insert(schema.sessionListSnapshots)
-              .values({
-                accountId: workspace.accountId,
-                workspaceId,
-                subjectId: options.subjectId,
-                parentSessionFilter: parentFilter,
-                search: searchFilter,
-                ordinarySessionIds: ordinaryIds,
-                expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
-              })
-              .returning();
+            let snapshot = reusableSnapshot;
             if (!snapshot) {
-              throw new SessionListCursorError();
+              const activeSnapshots = await tx
+                .select({ id: schema.sessionListSnapshots.id })
+                .from(schema.sessionListSnapshots)
+                .where(
+                  and(
+                    eq(schema.sessionListSnapshots.workspaceId, workspaceId),
+                    eq(schema.sessionListSnapshots.subjectId, options.subjectId),
+                  ),
+                )
+                .limit(SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT);
+              if (activeSnapshots.length >= SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT) {
+                throw new SessionListSnapshotLimitError(
+                  "too many active session list snapshots; retry after an existing cursor expires",
+                );
+              }
+              const [workspace] = await tx
+                .select({ accountId: schema.workspaces.accountId })
+                .from(schema.workspaces)
+                .where(eq(schema.workspaces.id, workspaceId))
+                .limit(1);
+              if (!workspace) {
+                throw new Error("session list workspace disappeared while creating a snapshot");
+              }
+              [snapshot] = await tx
+                .insert(schema.sessionListSnapshots)
+                .values({
+                  accountId: workspace.accountId,
+                  workspaceId,
+                  subjectId: options.subjectId,
+                  parentSessionFilter: parentFilter,
+                  search: searchFilter,
+                  ordinarySessionIds: ordinaryIds,
+                  expiresAt: new Date(now.getTime() + SESSION_LIST_SNAPSHOT_TTL_MS),
+                })
+                .returning();
+              if (!snapshot) {
+                throw new Error("session list snapshot was not created");
+              }
             }
             nextCursor = encodeSessionListCursor({
               snapshotId: snapshot.id,
@@ -11771,21 +11936,30 @@ export async function listSessionsForSubject(
           nextCursor,
         };
       },
-      { isolationLevel: "repeatable read" },
+      { isolationLevel: "read committed" },
     );
   };
 
-  try {
-    return await listInTransaction();
-  } catch (error) {
-    if (!membershipCheckSerializationFailure || !isPostgresSerializationFailure(error)) {
-      throw error;
+  for (let attempt = 1; attempt <= SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await listInTransaction();
+    } catch (error) {
+      if (
+        !isPostgresSerializationFailure(error) ||
+        attempt === SESSION_LIST_SERIALIZATION_MAX_ATTEMPTS
+      ) {
+        throw error;
+      }
+      // A 40001 invalidates the complete transaction, not only the statement
+      // that happens to surface it. Every list-side write is part of that
+      // rolled-back transaction, so retry the whole operation after a short
+      // bounded yield without an unbounded request loop or partially committed
+      // snapshot.
+      await new Promise((resolve) => setTimeout(resolve, attempt * 10));
     }
-    // PostgreSQL has already aborted and rolled back the first transaction.
-    // Retry exactly once so the fresh snapshot can observe a membership that
-    // removal committed while the listing was waiting on its row lock.
-    return await listInTransaction();
   }
+
+  throw new Error("unreachable session list retry state");
 }
 
 /** Read a session with the caller subject's personal pin projection. */
@@ -11824,8 +11998,9 @@ export async function getSessionForSubject(
 
 /**
  * Idempotently set a member's pin without mutating the session's lifecycle or
- * activity timestamps. A transaction advisory lock serializes same-subject,
- * same-session actions across API replicas; expectedVersion rejects stale tabs.
+ * activity timestamps. A subject-scoped transaction advisory lock serializes
+ * personal pin mutations across API replicas and fences list projections;
+ * expectedVersion rejects stale tabs.
  */
 export async function setSessionPin(
   db: Database,
@@ -11843,9 +12018,10 @@ export async function setSessionPin(
     input.subjectId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        // Serialize with removeWorkspaceMember(), which locks this row before
-        // cleaning personal state and deleting the membership. A stale API
-        // grant must not be able to recreate a pin after removal commits.
+        // An exclusive subject fence keeps list projections stable and
+        // serializes with member removal before changing personal state. A stale
+        // API grant cannot recreate a pin after removal commits.
+        await lockSessionPersonalStateExclusive(tx, input.workspaceId, input.subjectId);
         const [membership] = await tx
           .select({ id: schema.workspaceMemberships.id })
           .from(schema.workspaceMemberships)
@@ -11855,14 +12031,10 @@ export async function setSessionPin(
               eq(schema.workspaceMemberships.subjectId, input.subjectId),
             ),
           )
-          .for("update")
           .limit(1);
         if (!membership) {
           throw new SessionPinAccessError();
         }
-        await tx.execute(
-          sql`select pg_advisory_xact_lock(hashtextextended(${`session-pin:${input.workspaceId}:${input.subjectId}:${input.sessionId}`}, 0))`,
-        );
         const [session] = await tx
           .select()
           .from(schema.sessions)

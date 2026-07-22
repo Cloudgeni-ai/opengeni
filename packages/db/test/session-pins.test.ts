@@ -13,6 +13,11 @@ import {
   reapExpiredSessionListSnapshots,
   sessionTreeStatsForSessions,
   SessionListAccessError,
+  SessionListCursorError,
+  SessionListCursorExpiredError,
+  SessionListSnapshotLimitError,
+  SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT,
+  SESSION_LIST_SNAPSHOT_MAX_IDS,
   SessionPinAccessError,
   SessionPinVersionConflictError,
   setSessionPin,
@@ -622,6 +627,37 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(sameWorkspaceOtherSubject).toEqual([]);
   }, 60_000);
 
+  test("returns a complete pins-only projection without scanning or snapshotting ordinary rows", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:pins-only";
+    await grantMember(workspace, subjectId);
+    const pinned = await session({ ...workspace, message: "pins-only target" });
+    await session({ ...workspace, message: "pins-only ordinary first" });
+    await session({ ...workspace, message: "pins-only ordinary second" });
+    await setSessionPin(db, {
+      workspaceId: workspace.workspaceId,
+      subjectId,
+      sessionId: pinned.id,
+      pinned: true,
+    });
+
+    const page = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      pinsOnly: true,
+    });
+    expect(page.pinned.map((row) => row.id)).toEqual([pinned.id]);
+    expect(page.sessions).toEqual([]);
+    expect(page.nextCursor).toBeNull();
+    const [count] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_list_snapshots
+      where workspace_id = ${workspace.workspaceId}
+        and subject_id = ${subjectId}`;
+    expect(count?.count).toBe(0);
+  }, 60_000);
+
   test("lists for non-member api_key subjects — workspace-scoped keys have no membership row", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
@@ -704,6 +740,45 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(secondPage.sessions.map((row) => row.id)).toEqual([middle.id]);
     expect(secondPage.sessions.map((row) => row.id)).not.toContain(newest.id);
     expect(secondPage.nextCursor).toBeTruthy();
+  }, 60_000);
+
+  test("distinguishes invalid cursor semantics from missing or expired snapshots", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:cursor-errors";
+    await grantMember(workspace, subjectId);
+    await session({ ...workspace, message: "cursor first" });
+    await session({ ...workspace, message: "cursor second" });
+    const firstPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+    });
+    const cursor = decodeSessionListCursor(firstPage.nextCursor!);
+    expect(cursor).not.toBeNull();
+
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: { ...cursor!, search: "different-filter" },
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: { ...cursor!, offset: Number.MAX_SAFE_INTEGER },
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorError);
+
+    await admin`delete from session_list_snapshots where id = ${cursor!.snapshotId}`;
+    await expect(
+      listSessionsForSubject(db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+        cursor: cursor!,
+      }),
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
   }, 60_000);
 
   test("treats percent, underscore, and backslash as literal search text", async () => {
@@ -1021,7 +1096,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("rejects a paused authorized listing after removal wins the membership lock", async () => {
+  test("rejects a paused authorized listing after removal wins the personal-state fence", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:removal-first";
@@ -1072,18 +1147,17 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
       await waitForAdvisoryWait(admin, barrierClass, removalLock);
 
-      // Start listing while removal owns the membership lock. The query must
-      // reach the row-lock wait before removal commits, establishing the
-      // listing transaction's repeatable-read snapshot first.
+      // Start listing while removal owns the personal-state fence. The list must
+      // wait on its shared counterpart before checking membership.
       listingPromise = listSessionsForSubject(listingClient.db, workspace.workspaceId, {
         subjectId,
         limit: 1,
       });
-      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+      await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock_shared");
 
       // The stale authorization is intentionally held while removal owns the
-      // membership lock. Release the native barrier, wait for removal to
-      // commit, then assert the one bounded retry observes no membership.
+      // personal-state fence. Release the native barrier, wait for removal to
+      // commit, then assert the waiting list observes no membership.
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
       await expect(listingPromise).rejects.toBeInstanceOf(SessionListAccessError);
@@ -1121,7 +1195,213 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("rejects a stale pin mutation after removal wins the membership lock", async () => {
+  test("forces read committed over a connection-local repeatable-read default", async () => {
+    if (!available || !shared) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:explicit-read-committed";
+    await grantMember(workspace, subjectId);
+    await session({ ...workspace, message: "explicit isolation first" });
+    await session({ ...workspace, message: "explicit isolation second" });
+
+    const triggerFunction = "sessionpin_test_read_committed_guard";
+    const triggerName = "sessionpin_test_read_committed_snapshot_guard";
+    let ambientClient: DbClient | null = null;
+    const failures: unknown[] = [];
+    try {
+      await admin.unsafe(`
+        create function ${triggerFunction}() returns trigger
+        language plpgsql as $$
+        begin
+          if current_setting('transaction_isolation') <> 'read committed' then
+            raise exception 'session listing isolation must be read committed, got %',
+              current_setting('transaction_isolation');
+          end if;
+          return new;
+        end
+        $$;
+        create trigger ${triggerName}
+          before insert on session_list_snapshots
+          for each row when (
+            new.workspace_id = '${workspace.workspaceId}'::uuid
+            and new.subject_id = '${subjectId}'
+          ) execute function ${triggerFunction}();
+      `);
+      // The startup parameter applies only to this postgres-js pool. The
+      // direct query proves this connection inherited REPEATABLE READ; the
+      // snapshot trigger then proves listSessionsForSubject overrides it
+      // inside the real transaction without mutating a shared role default.
+      ambientClient = createDb(shared.appUrl, {
+        max: 1,
+        isolationLevel: "repeatable read",
+      });
+      const ambient = await ambientClient.db.execute<{ default_transaction_isolation: string }>(
+        sql`show default_transaction_isolation`,
+      );
+      expect(ambient).toEqual([{ default_transaction_isolation: "repeatable read" }]);
+
+      const page = await listSessionsForSubject(ambientClient.db, workspace.workspaceId, {
+        subjectId,
+        limit: 1,
+      });
+      expect(page.sessions).toHaveLength(1);
+      expect(page.nextCursor).toBeTruthy();
+    } catch (error) {
+      failures.push(error);
+    } finally {
+      await ambientClient?.close().catch(() => undefined);
+      const cleanup = await Promise.allSettled([
+        admin.unsafe(`
+          drop trigger if exists ${triggerName} on session_list_snapshots;
+          drop function if exists ${triggerFunction}();
+        `),
+      ]);
+      for (const result of cleanup) {
+        if (result.status === "rejected") {
+          failures.push(result.reason);
+        }
+      }
+    }
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, "read-committed isolation test or cleanup failed");
+    }
+  }, 60_000);
+
+  test("retries two serialization failures before returning a real list page", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:list-serialization-retry";
+    await grantMember(workspace, subjectId);
+    const target = await session({ ...workspace, message: "serialization retry target" });
+
+    const transaction = db.transaction.bind(db);
+    let attempts = 0;
+    const retryingDb = new Proxy(db, {
+      get(targetDb, property, receiver) {
+        if (property === "transaction") {
+          return async (...args: Parameters<typeof transaction>) => {
+            attempts += 1;
+            if (attempts <= 2) {
+              throw Object.assign(new Error("synthetic PostgreSQL serialization failure"), {
+                code: "40001",
+              });
+            }
+            return await transaction(...args);
+          };
+        }
+        const value = Reflect.get(targetDb, property, receiver) as unknown;
+        return typeof value === "function" ? value.bind(targetDb) : value;
+      },
+    });
+
+    const page = await listSessionsForSubject(retryingDb, workspace.workspaceId, {
+      subjectId,
+      limit: 10,
+    });
+
+    expect(attempts).toBe(3);
+    expect(page.pinned).toEqual([]);
+    expect(page.sessions.map((row) => row.id)).toEqual([target.id]);
+  });
+
+  test("coalesces concurrent first pages to one bounded subject snapshot", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:concurrent-list-readers";
+    await grantMember(workspace, subjectId);
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+      )
+      select generated.id, ${workspace.accountId}, ${workspace.workspaceId},
+        'bounded concurrent session ' || generated.ordinality,
+        'test-model', 'none', generated.id
+      from (
+        select gen_random_uuid() as id, ordinality
+        from generate_series(1, 128) with ordinality
+      ) generated`;
+
+    const pages = await Promise.all(
+      Array.from({ length: 16 }, () =>
+        listSessionsForSubject(db, workspace.workspaceId, {
+          subjectId,
+          limit: 1,
+        }),
+      ),
+    );
+    const cursors = pages.map((page) => decodeSessionListCursor(page.nextCursor!));
+    expect(cursors.every((cursor) => cursor !== null)).toBe(true);
+    expect(new Set(cursors.map((cursor) => cursor!.snapshotId)).size).toBe(1);
+    expect(new Set(pages.map((page) => page.sessions[0]?.id)).size).toBe(1);
+    const [count] = await admin<{ count: number; maxIds: number }[]>`
+      select count(*)::int as count,
+        coalesce(max(cardinality(ordinary_session_ids)), 0)::int as "maxIds"
+      from session_list_snapshots
+      where workspace_id = ${workspace.workspaceId}
+        and subject_id = ${subjectId}`;
+    expect(count).toEqual({ count: 1, maxIds: 128 });
+  }, 60_000);
+
+  test("rejects oversized and over-quota subject snapshots before unbounded storage", async () => {
+    if (!available) return;
+    const oversized = await freshWorkspace();
+    const oversizedSubject = "user:oversized-list";
+    await grantMember(oversized, oversizedSubject);
+    await admin`
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
+      )
+      select generated.id, ${oversized.accountId}, ${oversized.workspaceId},
+        'oversized session ' || generated.ordinality,
+        'test-model', 'none', generated.id
+      from (
+        select gen_random_uuid() as id, ordinality
+        from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_IDS + 1}) with ordinality
+      ) generated`;
+    await expect(
+      listSessionsForSubject(db, oversized.workspaceId, {
+        subjectId: oversizedSubject,
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListSnapshotLimitError);
+    const [oversizedCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_list_snapshots
+      where workspace_id = ${oversized.workspaceId} and subject_id = ${oversizedSubject}`;
+    expect(oversizedCount?.count).toBe(0);
+
+    const quota = await freshWorkspace();
+    const quotaSubject = "user:snapshot-quota";
+    await grantMember(quota, quotaSubject);
+    const first = await session({ ...quota, message: "snapshot quota first" });
+    const second = await session({
+      ...quota,
+      message: "snapshot quota second",
+    });
+    await admin`
+      insert into session_list_snapshots (
+        account_id, workspace_id, subject_id, parent_session_filter,
+        search, ordinary_session_ids, expires_at, created_at
+      )
+      select ${quota.accountId}, ${quota.workspaceId}, ${quotaSubject}, 'all',
+        'occupied-' || series, array[${first.id}::uuid, ${second.id}::uuid],
+        now() + interval '10 minutes', now() - interval '1 minute'
+      from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT}) series`;
+    await expect(
+      listSessionsForSubject(db, quota.workspaceId, {
+        subjectId: quotaSubject,
+        search: "snapshot quota",
+        limit: 1,
+      }),
+    ).rejects.toBeInstanceOf(SessionListSnapshotLimitError);
+    const [quotaCount] = await admin<{ count: number }[]>`
+      select count(*)::int as count from session_list_snapshots
+      where workspace_id = ${quota.workspaceId} and subject_id = ${quotaSubject}`;
+    expect(quotaCount?.count).toBe(SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT);
+  }, 60_000);
+
+  test("rejects a stale pin mutation after removal wins the personal-state fence", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const foreign = await freshWorkspace();
@@ -1184,7 +1464,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
         sessionId: target.id,
         pinned: true,
       });
-      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+      await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock");
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${removalLock})`;
       expect(await removalPromise).toBe(true);
@@ -1237,7 +1517,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     }
   }, 60_000);
 
-  test("lets removal clean a pin committed while it waits on the membership lock", async () => {
+  test("lets removal clean a pin committed while it waits on the personal-state fence", async () => {
     if (!available || !shared) return;
     const workspace = await freshWorkspace();
     const subjectId = "user:pin-mutation-first";
@@ -1282,7 +1562,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       // Pin mutation owns membership first; removal waits, then cleans the
       // committed pin after the insert barrier is released.
       removalPromise = removeWorkspaceMember(removalClient.db, workspace.workspaceId, subjectId);
-      await waitForDatabaseQueryWait(admin, "workspace_memberships");
+      await waitForDatabaseQueryWait(admin, "pg_advisory_xact_lock");
 
       await barrier`select pg_advisory_unlock(${barrierClass}, ${pinInsertLock})`;
       expect(await pinPromise).not.toBeNull();

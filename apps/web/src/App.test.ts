@@ -32,6 +32,7 @@ import {
   visualTreeDepth,
 } from "./lib/session-rail";
 import {
+  buildPinnedRailSections,
   buildRailForest,
   groupSessionsForRail,
   isRunningStatus,
@@ -39,6 +40,7 @@ import {
   recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
+  visibleTreeRows,
 } from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
@@ -267,6 +269,38 @@ describe("rail session grouping", () => {
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
   });
 
+  test("breaks activity ties by descending session id in flat and forest orders", () => {
+    const flat = groupSessionsForRail(
+      [
+        railSession({ id: "session-a", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({ id: "session-z", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      ],
+      NOW,
+    );
+    expect(flat.grouped[0]?.sessions.map((item) => item.id)).toEqual(["session-z", "session-a"]);
+
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({
+          id: "worker-a",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "worker-z",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+    expect(forest.grouped[0]?.sessions[0]?.children.map((node) => node.session.id)).toEqual([
+      "worker-z",
+      "worker-a",
+    ]);
+  });
+
   test("selected-session detail preserves the list-only hierarchy summary", () => {
     const listProjection = railSession({
       id: "selected-manager",
@@ -312,6 +346,99 @@ describe("rail session grouping", () => {
     const expanded = visibleForestRows(forest, new Set(["manager"]));
     expect(expanded.map((row) => row.node.session.id)).toEqual(["manager", "worker"]);
     expect(expanded[1]?.depth).toBe(1);
+  });
+
+  test("promotes every explicit pin globally while a parent pin owns only unpinned children", () => {
+    const sections = buildPinnedRailSections(
+      [
+        railSession({
+          id: "pinned-parent",
+          pinned: true,
+          pinnedAt: "2026-06-19T10:00:00.000Z",
+        }),
+        railSession({
+          id: "ordinary-child",
+          parentSessionId: "pinned-parent",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "nested-pin",
+          parentSessionId: "pinned-parent",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:30:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(sections.pinned.map((node) => node.session.id)).toEqual(["nested-pin", "pinned-parent"]);
+    expect(sections.pinned[1]?.children.map((node) => node.session.id)).toEqual(["ordinary-child"]);
+    const visible = visibleTreeRows(sections.pinned, new Set(["pinned-parent"]));
+    expect(visible.map((row) => row.node.session.id)).toEqual([
+      "nested-pin",
+      "pinned-parent",
+      "ordinary-child",
+    ]);
+    expect(new Set(visible.map((row) => row.node.session.id)).size).toBe(visible.length);
+  });
+
+  test("keeps an unpinned root ordinary while its pinned child owns its unpinned leaf", () => {
+    const sections = buildPinnedRailSections(
+      [
+        railSession({ id: "ordinary-root" }),
+        railSession({
+          id: "pinned-child",
+          parentSessionId: "ordinary-root",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({ id: "owned-leaf", parentSessionId: "pinned-child" }),
+      ],
+      NOW,
+    );
+
+    expect(sections.pinned.map((node) => node.session.id)).toEqual(["pinned-child"]);
+    expect(sections.pinned[0]?.children.map((node) => node.session.id)).toEqual(["owned-leaf"]);
+    const ordinaryRoots = [
+      ...sections.ordinary.running,
+      ...sections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+    ];
+    expect(ordinaryRoots.map((node) => node.session.id)).toEqual(["ordinary-root"]);
+    expect(ordinaryRoots[0]?.children).toEqual([]);
+  });
+
+  test("does not subtract an unloaded pinned intermediary from a manager's lazy summary", () => {
+    const manager = railSession({
+      id: "pinned-manager",
+      pinned: true,
+      pinnedAt: "2026-06-19T10:00:00.000Z",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 3,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const sections = buildPinnedRailSections(
+      [
+        manager,
+        railSession({
+          id: "pinned-descendant",
+          parentSessionId: "unloaded-intermediary",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(
+      sections.pinned.find((node) => node.session.id === manager.id)?.session.treeStats,
+    ).toEqual(manager.treeStats);
   });
 });
 

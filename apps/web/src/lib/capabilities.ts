@@ -322,7 +322,7 @@ export type ConnectionHealth =
  * attention (the row may be null if it was deleted); loaded and active → connected.
  *
  * The `loaded` gate matters because listConnections needs a distinct
- * `connections:read` scope: a grant with catalog access but not that scope 403s,
+ * `connections:read` scope: a grant with catalog access but not that sctracking-403s,
  * and a failed load must not read as "every connection was deleted" and paint
  * healthy integrations amber.
  */

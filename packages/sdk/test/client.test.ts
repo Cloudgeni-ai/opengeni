@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
-import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "../src/errors";
+import {
+  OpenGeniApiContractMismatchError,
+  OpenGeniApiError,
+  OpenGeniSessionListCursorError,
+} from "../src/errors";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
@@ -370,6 +374,7 @@ describe("OpenGeniClient", () => {
       cursor: "opaque-cursor",
       search: "  pinned work  ",
     });
+    await client.listSessionPage(WORKSPACE_ID, { pinsOnly: true });
     await client.getSessionLineage(WORKSPACE_ID, SESSION_ID);
     expect(requests[0]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?limit=5&parentSessionId=null`,
@@ -381,7 +386,80 @@ describe("OpenGeniClient", () => {
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=7&cursor=opaque-cursor&search=pinned+work`,
     );
     expect(requests[3]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&pinsOnly=true`,
+    );
+    expect(requests[4]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/lineage`,
+    );
+  });
+
+  test("listSessionPage falls back to an older server's array endpoint", async () => {
+    const legacy = [
+      { id: SESSION_ID, workspaceId: WORKSPACE_ID },
+    ] as unknown as import("../src/types").Session[];
+    const { client, requests } = makeClient(() => jsonResponse(legacy));
+    await expect(client.listSessionPage(WORKSPACE_ID, { limit: 5 })).resolves.toEqual({
+      pinned: [],
+      sessions: legacy,
+      nextCursor: null,
+    });
+    expect(requests.map((request) => request.url)).toEqual([
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&limit=5`,
+    ]);
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, { cursor: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support stable session-page cursors");
+    await expect(
+      client.listSessionPage(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support session search");
+    await expect(
+      client.listSessions(WORKSPACE_ID, { search: "unsupported-on-legacy" }),
+    ).rejects.toThrow("does not support session search");
+    await expect(client.listSessionPage(WORKSPACE_ID, { pinsOnly: true })).rejects.toThrow(
+      "does not support pins-only session lists",
+    );
+  });
+
+  test("listSessionPage types only an expired snapshot cursor as recoverable", async () => {
+    const expired = makeClient(() => new Response("snapshot expired", { status: 410 })).client;
+    const unavailable = makeClient(
+      () => new Response("temporarily unavailable", { status: 500 }),
+    ).client;
+    const invalid = makeClient(() => new Response("cursor invalid", { status: 400 })).client;
+
+    const expiredError = await expired
+      .listSessionPage(WORKSPACE_ID, { cursor: "expired" })
+      .catch((error: unknown) => error);
+    expect(expiredError).toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(expiredError).toMatchObject({ status: 410, body: "snapshot expired" });
+
+    const invalidError = await invalid
+      .listSessionPage(WORKSPACE_ID, { cursor: "tampered" })
+      .catch((error: unknown) => error);
+    expect(invalidError).toBeInstanceOf(OpenGeniApiError);
+    expect(invalidError).not.toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(invalidError).toMatchObject({ status: 400, body: "cursor invalid" });
+
+    const unavailableError = await unavailable
+      .listSessionPage(WORKSPACE_ID, { cursor: "still-valid" })
+      .catch((error: unknown) => error);
+    expect(unavailableError).toBeInstanceOf(OpenGeniApiError);
+    expect(unavailableError).not.toBeInstanceOf(OpenGeniSessionListCursorError);
+    expect(unavailableError).toMatchObject({ status: 500, body: "temporarily unavailable" });
+  });
+
+  test("listSessions search flattens the pin-aware page without losing section order", async () => {
+    const pinned = { id: "pinned" } as unknown as import("../src/types").Session;
+    const ordinary = { id: "ordinary" } as unknown as import("../src/types").Session;
+    const { client, requests } = makeClient(() =>
+      jsonResponse({ pinned: [pinned], sessions: [ordinary], nextCursor: "next" }),
+    );
+
+    await expect(client.listSessions(WORKSPACE_ID, { search: "  exact match  " })).resolves.toEqual(
+      [pinned, ordinary],
+    );
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions?view=page&search=exact+match`,
     );
   });
 
@@ -429,7 +507,6 @@ describe("OpenGeniClient", () => {
     );
     expect(requests[1]!.url).toBe(requests[0]!.url);
   });
-
   test("streamEvents consumes the SSE endpoint end to end through fetch", async () => {
     const wire = [makeEvent(1), makeEvent(2)].map(sseBlock).join("");
     const { client, requests } = makeClient((request) => {
