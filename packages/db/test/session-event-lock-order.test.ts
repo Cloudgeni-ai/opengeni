@@ -387,6 +387,7 @@ async function sendPublishedAgentMessage(
     {
       accountId: actor.accountId,
       workspaceId: actor.workspaceId,
+      subjectId: `agent-test:${actor.sessionId}`,
       callerSessionId: actor.sessionId,
       callerTurnId: actor.turnId,
       callerAttemptId: actor.attemptId,
@@ -420,6 +421,7 @@ async function steerPublishedAgentSession(
     {
       accountId: actor.accountId,
       workspaceId: actor.workspaceId,
+      subjectId: `agent-test:${actor.sessionId}`,
       callerSessionId: actor.sessionId,
       callerTurnId: actor.turnId,
       callerAttemptId: actor.attemptId,
@@ -1542,6 +1544,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
             {
               accountId: actor.accountId,
               workspaceId: actor.workspaceId,
+              subjectId: `agent-test:${actor.sessionId}`,
               callerSessionId: actor.sessionId,
               callerTurnId: actor.turnId,
               callerAttemptId: actor.attemptId,
@@ -1621,6 +1624,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
             {
               accountId: actor.accountId,
               workspaceId: actor.workspaceId,
+              subjectId: `agent-test:${actor.sessionId}`,
               callerSessionId: actor.sessionId,
               callerTurnId: actor.turnId,
               callerAttemptId: actor.attemptId,

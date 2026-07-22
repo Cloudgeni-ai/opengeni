@@ -2603,6 +2603,157 @@ export const TurnInitiator = z.object({
 });
 export type TurnInitiator = z.infer<typeof TurnInitiator>;
 
+// ============ embedding host session authorization ============
+//
+// Workspace permissions answer whether a principal may use an OpenGeni
+// capability. An embedding host can additionally own per-session visibility
+// (ownership, sharing, nested workspaces, revocation). This port is the one
+// host-neutral boundary for that second decision. Inputs contain OpenGeni ids
+// and immutable, non-secret authority only; host records and policy details
+// never cross the boundary.
+
+export const SessionAuthorizationSurface = z.enum([
+  "http",
+  "core",
+  "stream",
+  "first_party_mcp",
+  "toolspace",
+]);
+export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
+
+export const SessionAuthorizationOperation = z.enum([
+  "session.read",
+  "session.events.read",
+  "session.stream.read",
+  "session.stream.acknowledge",
+  "session.turns.read",
+  "session.append",
+  "session.steer",
+  "session.control",
+  "session.queue.read",
+  "session.queue.control",
+  "session.composer.read",
+  "session.composer.write",
+  "session.lineage.read",
+  "session.capture.read",
+  "session.files.read",
+  "session.files.write",
+  "session.git.read",
+  "session.terminal.read",
+  "session.terminal.control",
+  "session.viewer.read",
+  "session.viewer.control",
+  "session.first_party_mcp.call",
+  "session.toolspace.call",
+  "session.pin.write",
+  "session.codex_account.write",
+  "session.context.write",
+  "session.approval.write",
+  "session.human_input.read",
+  "session.human_input.write",
+  "session.title.write",
+  "session.goal.read",
+  "session.goal.write",
+  "session.child.create",
+]);
+export type SessionAuthorizationOperation = z.infer<typeof SessionAuthorizationOperation>;
+
+export const SessionAuthorizationActor = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("subject"),
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().min(1).optional(),
+  }),
+  z.object({
+    kind: z.literal("agent_attempt"),
+    /** Technical, authenticated first-party caller (not the host authority). */
+    subjectId: z.string().min(1),
+    callerSessionId: z.string().uuid(),
+    callerRootSessionId: z.string().uuid(),
+    turnId: z.string().uuid(),
+    attemptId: z.string().uuid(),
+    executionGeneration: z.number().int().positive(),
+    /** Frozen authority that admitted the calling turn. */
+    initiator: TurnInitiator,
+    initiatorContext: TurnInitiatorContext,
+  }),
+]);
+export type SessionAuthorizationActor = z.infer<typeof SessionAuthorizationActor>;
+
+export const SessionAuthorizationTarget = z.object({
+  sessionId: z.string().uuid(),
+  /** Server-resolved workspace lineage root; never accepted from a caller. */
+  rootSessionId: z.string().uuid(),
+});
+export type SessionAuthorizationTarget = z.infer<typeof SessionAuthorizationTarget>;
+
+export type AuthorizeSessionInput = {
+  accountId: string;
+  workspaceId: string;
+  actor: SessionAuthorizationActor;
+  target: SessionAuthorizationTarget;
+  operation: SessionAuthorizationOperation;
+  surface: SessionAuthorizationSurface;
+};
+
+export const SessionAuthorizationDecision = z.discriminatedUnion("allowed", [
+  z.object({
+    allowed: z.literal(true),
+    /**
+     * Whether related-session metadata may be projected with the target.
+     * `target` is the fail-closed default for exact shares; `root` permits the
+     * target's full lineage tree. This does not authorize a separate operation
+     * against another session, which always requires its own decision.
+     */
+    relatedSessionAccess: z.enum(["target", "root"]).optional(),
+    /** A host may request a tighter stream reauthorization bound. */
+    reauthorizeAfterMs: z.number().int().min(1_000).max(60_000).optional(),
+  }),
+  z.object({
+    allowed: z.literal(false),
+    reason: z.enum(["not_found", "forbidden", "revoked"]),
+  }),
+]);
+export type SessionAuthorizationDecision = z.infer<typeof SessionAuthorizationDecision>;
+
+/**
+ * A database-applicable listing scope. `rootSessionIds` includes every
+ * descendant of those lineage anchors; `sessionIds` authorizes only the exact
+ * sessions. Supplying neither is an explicit empty scope. OpenGeni intersects
+ * every id with the requested workspace and never trusts a host scope as
+ * session existence evidence.
+ */
+export const SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS = 10_000;
+
+export const SessionAuthorizationListScope = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("all") }),
+  z.object({
+    kind: z.literal("scoped"),
+    rootSessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+    sessionIds: z.array(z.string().uuid()).max(SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS),
+  }),
+]);
+export type SessionAuthorizationListScope = z.infer<typeof SessionAuthorizationListScope>;
+
+export type ResolveSessionAuthorizationListScopeInput = {
+  accountId: string;
+  workspaceId: string;
+  actor: SessionAuthorizationActor;
+  surface: SessionAuthorizationSurface;
+};
+
+export type SessionAuthorizationPort = {
+  authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  /**
+   * Return the complete current scope used inside OpenGeni's cursor query.
+   * This is deliberately not a post-filter callback: search, pinning, ordering,
+   * totals, and cursor advancement must all operate on authorized rows.
+   */
+  resolveListScope(
+    input: ResolveSessionAuthorizationListScopeInput,
+  ): Promise<SessionAuthorizationListScope>;
+};
+
 export const SessionTurn = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),

@@ -13,6 +13,7 @@ import {
   type GitHubRepository,
   type Permission,
   type ResourceRef,
+  type SessionAuthorizationOperation,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
@@ -33,6 +34,8 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  projectEffectiveControlForRelatedAccess,
+  projectSessionForRelatedAccess,
   type SessionDiscoveryCursor,
   type SessionDiscoveryOrderBy,
   listRigs,
@@ -49,6 +52,7 @@ import {
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
+  serializeEffectiveSessionControl,
   setSessionGoalStatus,
   setVariableSetVariable,
   updateScheduledTask,
@@ -67,7 +71,12 @@ import {
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
-import { hasPermission } from "@opengeni/core";
+import {
+  hasPermission,
+  requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
+  type ResolvedSessionAuthorization,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
@@ -163,7 +172,8 @@ export function buildOpenGeniMcpServer(
         inputSchema: { title: z4.string().min(1).max(200) },
       },
       async ({ title }) => {
-        const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.title.write");
+        const result = await updateSessionTitle(deps, grant, sessionId, title, "agent");
         return json({
           ok: true,
           updated: result.updated,
@@ -715,6 +725,7 @@ function registerGoalTools(
       },
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const callerTurnId =
         typeof grant.metadata?.["turnId"] === "string"
@@ -759,6 +770,7 @@ function registerGoalTools(
       },
     },
     async ({ text, successCriteria, progressNote }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
@@ -796,6 +808,7 @@ function registerGoalTools(
       inputSchema: { evidence: z4.string().min(1) },
     },
     async ({ evidence }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
@@ -825,6 +838,7 @@ function registerGoalTools(
       inputSchema: { rationale: z4.string().min(1) },
     },
     async ({ rationale }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
@@ -858,6 +872,19 @@ function registerGoalTools(
 type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
 };
+
+async function authorizeFirstPartySession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  operation: SessionAuthorizationOperation,
+): Promise<ResolvedSessionAuthorization | null> {
+  return await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation,
+    surface: "first_party_mcp",
+  });
+}
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
 
@@ -1286,6 +1313,7 @@ function exactAgentCommandContext(
   return {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
     callerSessionId,
     callerTurnId: turnId,
     callerAttemptId: attemptId,
@@ -1317,6 +1345,11 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ limit, cursor, includeLastMessage, orderBy: requestedOrderBy, updatedAfter }) => {
+        const authorizationScope = await requireSessionAuthorizationListScope(
+          deps,
+          grant,
+          "first_party_mcp",
+        );
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const orderBy: SessionDiscoveryOrderBy =
           requestedOrderBy ?? decodedCursor?.orderBy ?? "createdAt";
@@ -1339,6 +1372,7 @@ function registerWorkspaceOrchestrationTools(
           includeLastMessage: includeLastMessage === true,
           orderBy,
           ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
         });
         return json(capSessionDiscoveryPage(page, includeLastMessage === true));
       },
@@ -1352,12 +1386,25 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: { sessionId: z4.string().uuid() },
       },
       async ({ sessionId }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.read",
+        );
         const session = await getSession(deps.db, grant.workspaceId, sessionId);
         if (!session) {
           throw new Error("session not found");
         }
         const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
-        return json(boundSessionDetailMcp(session, queue?.effectiveControl ?? null));
+        const projected = projectSessionForRelatedAccess(
+          {
+            ...session,
+            effectiveControl: queue?.effectiveControl ?? session.effectiveControl,
+          },
+          authorization?.relatedSessionAccess ?? "root",
+        );
+        return json(boundSessionDetailMcp(projected));
       },
     );
 
@@ -1401,6 +1448,7 @@ function registerWorkspaceOrchestrationTools(
         excludeClasses,
         latest,
       }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         await requireSession(deps.db, grant.workspaceId, sessionId);
         if (
           latest &&
@@ -1530,7 +1578,12 @@ function registerWorkspaceOrchestrationTools(
           // arbitrary session's wake channel without sessions:control on it.
         },
       },
-      async (args) => json(await createSessionForRequest(deps, grant, grant.workspaceId, args)),
+      async (args) => {
+        if (callerSessionId !== null) {
+          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+        }
+        return json(await createSessionForRequest(deps, grant, grant.workspaceId, args));
+      },
     );
   }
 
@@ -1550,6 +1603,7 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
+        await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
         if (callerSessionId !== null) {
           if ((mcpCredentialUpdates?.length ?? 0) > 0) {
             throw new Error("internal session updates cannot change MCP credentials");
@@ -1600,6 +1654,12 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.control",
+        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
@@ -1613,27 +1673,37 @@ function registerWorkspaceOrchestrationTools(
           );
           return json({
             receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
+            effectiveControl: projectEffectiveControlForRelatedAccess(
+              serializeEffectiveSessionControl(controlled.control),
+              sessionId,
+              authorization?.relatedSessionAccess ?? "root",
+            ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
           });
         }
-        return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
-            },
-            {
-              action: "pause",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
-            },
-          ),
+        const controlled = await controlHumanSessionWorkstream(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "pause",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
         );
+        return json({
+          ...controlled,
+          effectiveControl: projectEffectiveControlForRelatedAccess(
+            controlled.effectiveControl,
+            sessionId,
+            authorization?.relatedSessionAccess ?? "root",
+          ),
+        });
       },
     );
 
@@ -1649,6 +1719,12 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.control",
+        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
@@ -1662,27 +1738,37 @@ function registerWorkspaceOrchestrationTools(
           );
           return json({
             receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
+            effectiveControl: projectEffectiveControlForRelatedAccess(
+              serializeEffectiveSessionControl(controlled.control),
+              sessionId,
+              authorization?.relatedSessionAccess ?? "root",
+            ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
           });
         }
-        return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
-            },
-            {
-              action: "resume",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
-            },
-          ),
+        const controlled = await controlHumanSessionWorkstream(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "resume",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
         );
+        return json({
+          ...controlled,
+          effectiveControl: projectEffectiveControlForRelatedAccess(
+            controlled.effectiveControl,
+            sessionId,
+            authorization?.relatedSessionAccess ?? "root",
+          ),
+        });
       },
     );
 
@@ -1699,6 +1785,7 @@ function registerWorkspaceOrchestrationTools(
           },
         },
         async ({ sessionId, instruction, idempotencyKey }) => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.steer");
           const result = await steerAgentSession(
             deps,
             exactAgentCommandContext(grant, callerSessionId),
@@ -1726,14 +1813,9 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ session_id, title }) => {
+        await authorizeFirstPartySession(deps, grant, session_id, "session.title.write");
         await requireSession(deps.db, grant.workspaceId, session_id);
-        const result = await updateSessionTitle(
-          deps,
-          grant.workspaceId,
-          session_id,
-          title,
-          "agent",
-        );
+        const result = await updateSessionTitle(deps, grant, session_id, title, "agent");
         return json({
           ok: true,
           updated: result.updated,

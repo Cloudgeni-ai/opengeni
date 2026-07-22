@@ -190,6 +190,38 @@ test("a stalled SSE client is isolated, stops replay, and reconnects without gap
   expect(released).toHaveLength(3);
 });
 
+test("an idle session stream closes promptly when periodic host authorization is revoked", async () => {
+  durableEvents = [];
+  durableReads.length = 0;
+  let released = 0;
+  let reauthorizations = 0;
+  const bus = {
+    subscribe: async () => () => {
+      released += 1;
+    },
+  } as unknown as EventBus;
+  const response = await sseSessionStream(
+    fakeDb as never,
+    bus,
+    WORKSPACE_ID,
+    SESSION_ID,
+    0,
+    new AbortController().signal,
+    {
+      reauthorizeAfterMs: 1_000,
+      reauthorize: async () => {
+        reauthorizations += 1;
+        throw new Error("host revoked the session");
+      },
+    },
+  );
+  const reader = response.body!.getReader();
+  expect(new TextDecoder().decode((await reader.read()).value)).toBe(": connected\n\n");
+  await expect(reader.read()).rejects.toBeInstanceOf(TypeError);
+  expect(reauthorizations).toBe(1);
+  expect(released).toBe(1);
+});
+
 test("workspace-control SSE uses the same one-frame stall bound", async () => {
   durableControlEvents = [controlEvent(1), controlEvent(2)];
   durableControlReads.length = 0;

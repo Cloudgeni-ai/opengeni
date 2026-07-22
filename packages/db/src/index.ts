@@ -45,6 +45,7 @@ import type {
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,
+  SessionAuthorizationListScope,
   SessionListResponse,
   SessionEvent,
   SessionEventPayloadMode,
@@ -89,6 +90,7 @@ import type {
   RigChangeStatus,
   RigCheck,
 } from "@opengeni/contracts";
+import { SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS } from "@opengeni/contracts";
 import {
   approvalIdentifier,
   boundWorkspaceControlEvent,
@@ -11920,6 +11922,7 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   subjectId: string;
   cursor?: SessionListCursor | undefined;
   search?: string | undefined;
+  authorizationScope?: SessionAuthorizationListScope | undefined;
 };
 
 export class SessionPinVersionConflictError extends Error {
@@ -11998,6 +12001,95 @@ const SESSION_TREE_STATS_MAX_DESCENDANTS = 1_000;
 const SESSION_TREE_STATS_MAX_DEPTH = 32;
 const SESSION_TREE_STATS_MAX_ROOTS = 600;
 const SESSION_LIST_MAX_PINNED = 100;
+
+const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
+  directChildren: 0,
+  totalDescendants: 0,
+  runningDescendants: 0,
+  queuedDescendants: 0,
+  attentionDescendants: 0,
+  pausedDescendants: 0,
+  failedDescendants: 0,
+  truncated: false,
+};
+
+/**
+ * Remove control metadata derived from sessions other than the exact target.
+ * Effective state and the opaque OCC etag remain usable without exposing
+ * ancestor ids/titles/actors/reasons or descendant settlement facts.
+ */
+export function projectEffectiveControlForRelatedAccess(
+  control: Session["effectiveControl"],
+  sessionId: string,
+  access: "target" | "root",
+): Session["effectiveControl"] {
+  if (access === "root") return control;
+  const hasHiddenAncestorBlocker = control.blockers.some(
+    (blocker) => blocker.kind === "session" && blocker.sessionId !== sessionId,
+  );
+  const hiddenAncestorBlocker = hasHiddenAncestorBlocker
+    ? {
+        kind: "session" as const,
+        displayName: "An ancestor session",
+        actor: null,
+        reason: null,
+        changedAt: null,
+        revision: 0,
+      }
+    : null;
+  let includedHiddenAncestor = false;
+  const blockers = control.blockers.flatMap((blocker) => {
+    if (blocker.kind !== "session" || blocker.sessionId === sessionId) return [blocker];
+    if (!hiddenAncestorBlocker || includedHiddenAncestor) return [];
+    includedHiddenAncestor = true;
+    return [hiddenAncestorBlocker];
+  });
+  const primary = control.primaryBlocker;
+  const primaryBlocker =
+    primary?.kind === "session" && primary.sessionId !== sessionId
+      ? hiddenAncestorBlocker
+      : primary;
+  return {
+    ...control,
+    primaryBlocker,
+    blockers,
+    additionalBlockerCount: Math.max(0, blockers.length - 1),
+    resumeOptions:
+      control.state === "paused"
+        ? [
+            {
+              scope: "selected",
+              targetId: sessionId,
+              selectedStateAfter: "active",
+              impactCopy: "Resume this session without changing other workstreams.",
+            },
+          ]
+        : [],
+    override: control.override?.rootSessionId === sessionId ? control.override : null,
+    settlement: null,
+  };
+}
+
+/**
+ * Remove metadata derived from sessions other than the exact authorized
+ * target, including parent identity and descendant counts.
+ */
+export function projectSessionForRelatedAccess(
+  session: Session,
+  access: "target" | "root",
+): Session {
+  if (access === "root") return session;
+  return {
+    ...session,
+    parentSessionId: null,
+    treeStats: EMPTY_SESSION_TREE_STATS,
+    effectiveControl: projectEffectiveControlForRelatedAccess(
+      session.effectiveControl,
+      session.id,
+      access,
+    ),
+  };
+}
 
 /**
  * Return bounded descendant aggregates for the bounded set of rows being
@@ -12134,9 +12226,12 @@ export async function sessionTreeStatsForSessions(
 }
 
 function sessionFilters(
-  options: Pick<ListSessionsForSubjectOptions, "parentSessionId" | "search">,
+  options: Pick<ListSessionsForSubjectOptions, "authorizationScope" | "parentSessionId" | "search">,
 ): SQL[] {
   const filters: SQL[] = [];
+  if (options.authorizationScope) {
+    filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+  }
   if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
     const parentSessionId = options.parentSessionId;
     if (parentSessionId === null) {
@@ -12160,6 +12255,75 @@ function sessionFilters(
     );
   }
   return filters;
+}
+
+/**
+ * Convert the embedding host's complete list scope into a workspace-bound SQL
+ * predicate. Root scopes include every descendant through the durable parent
+ * graph; exact ids never imply access to related sessions. `UNION` (rather than
+ * `UNION ALL`) makes legacy cycles terminate without a caller-sized path array.
+ */
+export function sessionAuthorizationScopeFilter(scope: SessionAuthorizationListScope): SQL {
+  if (scope.kind === "all") return sql`true`;
+  if (
+    scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
+    scope.sessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS
+  ) {
+    throw new RangeError(
+      `Session authorization scope exceeds ${SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS} ids per field`,
+    );
+  }
+  const rootIds = [...new Set(scope.rootSessionIds)];
+  const sessionIds = [...new Set(scope.sessionIds)];
+  if (rootIds.length === 0 && sessionIds.length === 0) return sql`false`;
+  const exact = sessionIds.length > 0 ? inArray(schema.sessions.id, sessionIds) : sql`false`;
+  const descendants =
+    rootIds.length > 0
+      ? sql`${schema.sessions.id} in (
+          with recursive authorized_sessions(id) as (
+            select root.id
+            from ${schema.sessions} root
+            where root.workspace_id = ${schema.sessions.workspaceId}
+              and ${inArray(sql`root.id`, rootIds)}
+
+            union
+
+            select child.id
+            from authorized_sessions parent
+            join ${schema.sessions} child
+              on child.workspace_id = ${schema.sessions.workspaceId}
+             and child.parent_session_id = parent.id
+          )
+          select id from authorized_sessions
+        )`
+      : sql`false`;
+  return or(exact, descendants)!;
+}
+
+async function sessionIdsCoveredByAuthorizationRoots(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  scope: SessionAuthorizationListScope | undefined,
+): Promise<Set<string>> {
+  if (sessionIds.length === 0) return new Set();
+  if (!scope || scope.kind === "all") return new Set(sessionIds);
+  if (scope.rootSessionIds.length === 0) return new Set();
+  const rows = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(schema.sessions.id, sessionIds),
+        sessionAuthorizationScopeFilter({
+          kind: "scoped",
+          rootSessionIds: scope.rootSessionIds,
+          sessionIds: [],
+        }),
+      ),
+    );
+  return new Set(rows.map((row) => row.id));
 }
 
 const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
@@ -12328,9 +12492,53 @@ export async function listSessionsForSubject(
           ) {
             throw new SessionListCursorError();
           }
-          pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
-          const nextOffset = cursor.offset + pageIds.length;
-          if (nextOffset < snapshot.ordinarySessionIds.length) {
+          let nextOffset: number | null = null;
+          if (options.authorizationScope) {
+            // A host may revoke rows between pages. Scan the immutable snapshot
+            // in bounded database-filtered batches until this page is full plus
+            // one authorized lookahead; never hydrate a stale broad slice and
+            // return a short/empty page while later authorized rows still exist.
+            const visible: Array<{ id: string; offsetAfter: number }> = [];
+            const scanBatchSize = Math.max(500, Math.min(2_000, limit * 4));
+            let scanOffset = cursor.offset;
+            while (scanOffset < snapshot.ordinarySessionIds.length && visible.length < limit + 1) {
+              const batchEnd = Math.min(
+                snapshot.ordinarySessionIds.length,
+                scanOffset + scanBatchSize,
+              );
+              const candidates = snapshot.ordinarySessionIds.slice(scanOffset, batchEnd);
+              const allowedRows = await tx
+                .select({ id: schema.sessions.id })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, workspaceId),
+                    inArray(schema.sessions.id, candidates),
+                    sessionAuthorizationScopeFilter(options.authorizationScope),
+                  ),
+                );
+              const allowed = new Set(allowedRows.map((row) => row.id));
+              for (let index = 0; index < candidates.length; index += 1) {
+                const id = candidates[index]!;
+                if (allowed.has(id)) {
+                  visible.push({ id, offsetAfter: scanOffset + index + 1 });
+                  if (visible.length >= limit + 1) break;
+                }
+              }
+              scanOffset = batchEnd;
+            }
+            pageIds = visible.slice(0, limit).map((row) => row.id);
+            if (visible.length > limit) {
+              nextOffset = visible[limit - 1]!.offsetAfter;
+            }
+          } else {
+            pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
+            const candidateOffset = cursor.offset + pageIds.length;
+            if (candidateOffset < snapshot.ordinarySessionIds.length) {
+              nextOffset = candidateOffset;
+            }
+          }
+          if (nextOffset !== null) {
             nextCursor = encodeSessionListCursor({
               snapshotId: snapshot.id,
               offset: nextOffset,
@@ -12425,6 +12633,9 @@ export async function listSessionsForSubject(
                   and(
                     eq(schema.sessions.workspaceId, workspaceId),
                     inArray(schema.sessions.id, pageIds),
+                    ...(options.authorizationScope
+                      ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
+                      : []),
                     or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
                   ),
                 );
@@ -12438,31 +12649,31 @@ export async function listSessionsForSubject(
           ...pageRows.map((row) => row.session.id),
         ];
         const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
-        const treeStats = await sessionTreeStatsForSessions(tx, workspaceId, ids);
+        const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
+          tx,
+          workspaceId,
+          ids,
+          options.authorizationScope,
+        );
+        const treeStats = await sessionTreeStatsForSessions(tx, workspaceId, [...rootRelatedIds]);
         const controls = await sessionControlProjections(tx, workspaceId, ids);
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
           const control = controls.get(row.session.id);
           if (!control) throw new Error(`Effective control missing for session ${row.session.id}`);
-          return {
-            ...mapSession(
-              row.session,
-              control,
-              mcpServers.get(row.session.id) ?? [],
-              mapSessionPin(row.pin),
-            ),
-            treeStats: treeStats.get(row.session.id) ?? {
-              directChildren: 0,
-              totalDescendants: 0,
-              runningDescendants: 0,
-              queuedDescendants: 0,
-              attentionDescendants: 0,
-              pausedDescendants: 0,
-              failedDescendants: 0,
-              truncated: false,
+          return projectSessionForRelatedAccess(
+            {
+              ...mapSession(
+                row.session,
+                control,
+                mcpServers.get(row.session.id) ?? [],
+                mapSessionPin(row.pin),
+              ),
+              treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
             },
-          };
+            rootRelatedIds.has(row.session.id) ? "root" : "target",
+          );
         };
         return {
           pinned: pinnedRows.map(mapListSession),
@@ -12494,6 +12705,7 @@ export async function getSessionForSubject(
   workspaceId: string,
   sessionId: string,
   subjectId: string,
+  relatedSessionAccess: "target" | "root" = "root",
 ): Promise<Session | null> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -12513,11 +12725,14 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    return await mapSessionWithControl(
-      scopedDb,
-      row.session,
-      mcpServers.get(sessionId) ?? [],
-      mapSessionPin(row.pin),
+    return projectSessionForRelatedAccess(
+      await mapSessionWithControl(
+        scopedDb,
+        row.session,
+        mcpServers.get(sessionId) ?? [],
+        mapSessionPin(row.pin),
+      ),
+      relatedSessionAccess,
     );
   });
 }
@@ -12747,6 +12962,29 @@ export type SessionDiscoverySummary = {
   sortAt: string;
 };
 
+function projectSessionDiscoveryControlForRelatedAccess(
+  control: SessionDiscoveryControl,
+  sessionId: string,
+  access: "target" | "root",
+): SessionDiscoveryControl {
+  if (
+    access === "root" ||
+    control.primaryBlocker?.kind !== "session" ||
+    control.primaryBlocker.sessionId === sessionId
+  ) {
+    return control;
+  }
+  return {
+    ...control,
+    primaryBlocker: {
+      kind: "session",
+      displayName: "An ancestor session",
+      displayNameOriginalChars: "An ancestor session".length,
+    },
+    additionalBlockerCount: 0,
+  };
+}
+
 const SESSION_ACTIVITY_REVISION_PATTERN = /^(?:0|[1-9]\d*)$/;
 const SESSION_ACTIVITY_REVISION_MAX = 9_223_372_036_854_775_807n;
 
@@ -12804,6 +13042,7 @@ export async function listSessionDiscoverySummaries(
     includeLastMessage?: boolean;
     orderBy?: SessionDiscoveryOrderBy;
     updatedAfter?: string;
+    authorizationScope?: SessionAuthorizationListScope;
   },
 ): Promise<{
   sessions: SessionDiscoverySummary[];
@@ -12900,6 +13139,9 @@ export async function listSessionDiscoverySummaries(
           )
       : undefined;
     const snapshotFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    if (options.authorizationScope) {
+      snapshotFilters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+    }
     snapshotFilters.push(
       orderBy === "updatedAt"
         ? sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`
@@ -12963,8 +13205,14 @@ export async function listSessionDiscoverySummaries(
       };
     }
 
+    const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
+      scopedDb,
+      workspaceId,
+      ids,
+      options.authorizationScope,
+    );
     const controls = await evaluateSessionDiscoveryControls(scopedDb, workspaceId, ids);
-    const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, ids);
+    const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, [...rootRelatedIds]);
     const goals = await scopedDb
       .select({
         sessionId: schema.sessionGoals.sessionId,
@@ -13031,15 +13279,20 @@ export async function listSessionDiscoverySummaries(
     const sessions = page.map((row): SessionDiscoverySummary => {
       const control = controls.get(row.id);
       if (!control) throw new Error(`Effective control missing for session ${row.id}`);
+      const relatedAccess = rootRelatedIds.has(row.id) ? "root" : "target";
       const goal = goalsBySession.get(row.id);
       const latest = latestBySession.get(row.id);
       return {
         id: row.id,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
-        parentSessionId: row.parentSessionId,
+        parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         status: row.status as SessionStatus,
-        effectiveControl: control,
+        effectiveControl: projectSessionDiscoveryControlForRelatedAccess(
+          control,
+          row.id,
+          relatedAccess,
+        ),
         goal: goal
           ? {
               status: goal.status as SessionGoalStatus,
@@ -13048,16 +13301,10 @@ export async function listSessionDiscoverySummaries(
             }
           : null,
         queuedPromptCount: queueBySession.get(row.id) ?? 0,
-        treeStats: treeStats.get(row.id) ?? {
-          directChildren: 0,
-          totalDescendants: 0,
-          runningDescendants: 0,
-          queuedDescendants: 0,
-          attentionDescendants: 0,
-          pausedDescendants: 0,
-          failedDescendants: 0,
-          truncated: false,
-        },
+        treeStats:
+          relatedAccess === "root"
+            ? (treeStats.get(row.id) ?? EMPTY_SESSION_TREE_STATS)
+            : EMPTY_SESSION_TREE_STATS,
         latestMessage: latest
           ? {
               type: latest.type as SessionEventType,
@@ -25308,17 +25555,47 @@ export async function getSessionTurnForAttempt(
 ): Promise<SessionTurn | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
-      .from(schema.sessionTurns)
+      .select({ turn: schema.sessionTurns })
+      .from(schema.sessionTurnAttempts)
+      .innerJoin(
+        schema.sessionTurns,
+        and(
+          eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        ),
+      )
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+        ),
+      )
       .where(
         and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.id, attemptId),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
           eq(schema.sessionTurns.activeAttemptId, attemptId),
+          eq(schema.sessions.activeTurnId, schema.sessionTurns.id),
+          inArray(schema.sessionTurns.status, [
+            "running",
+            "requires_action",
+            "recovering",
+            "waiting_capacity",
+          ]),
+          sql`not exists (
+            select 1
+            from ${schema.sessionAttemptInterruptions} interruption
+            where interruption.workspace_id = ${workspaceId}
+              and interruption.attempt_id = ${attemptId}
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          )`,
         ),
       )
       .limit(1);
-    return row ? mapSessionTurn(row) : null;
+    return row ? mapSessionTurn(row.turn) : null;
   });
 }
 

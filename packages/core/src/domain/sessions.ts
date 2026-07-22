@@ -16,6 +16,7 @@ import {
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
+  type SessionAuthorizationPort,
   type SessionTurn,
   type ToolRef,
   type TurnInitiator,
@@ -68,6 +69,7 @@ import type {
   ApiRouteDeps,
   SessionWorkflowClient,
 } from "../dependencies";
+import { requireSessionAuthorization } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
@@ -924,6 +926,13 @@ export async function createSessionForRequest(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  if (parentSessionId) {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId: parentSessionId,
+      operation: "session.child.create",
+      surface: "core",
+    });
+  }
   const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
   if (parentSessionId && !parentSession) {
     throw new HTTPException(404, {
@@ -1397,6 +1406,11 @@ export async function acceptSessionUserMessage(
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: input.delivery === "steer" ? "session.steer" : "session.append",
+    surface: "core",
+  });
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -1502,13 +1516,27 @@ export async function acceptSessionUserMessage(
  * happened so callers can avoid double work.
  */
 export async function updateSessionTitle(
-  deps: { db: Database; bus: EventBus },
-  workspaceId: string,
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
   sessionId: string,
   title: string,
   source: "user" | "agent",
-): Promise<{ updated: boolean; title: string | null }> {
+): Promise<{
+  updated: boolean;
+  title: string | null;
+  relatedSessionAccess: "target" | "root";
+}> {
   const { db, bus } = deps;
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.title.write",
+    surface: "core",
+  });
+  const workspaceId = grant.workspaceId;
   const result = await updateSessionTitleRow(db, { workspaceId, sessionId, title, source });
   if (result.updated) {
     await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
@@ -1521,11 +1549,30 @@ export async function updateSessionTitle(
       },
     ]);
   }
-  return result;
+  return {
+    ...result,
+    relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
+  };
 }
 
-export async function readSessionLineage(db: Database, workspaceId: string, sessionId: string) {
-  const lineage = await getSessionLineage(db, workspaceId, sessionId);
+export async function readSessionLineage(
+  deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
+  grant: AccessGrant,
+  sessionId: string,
+) {
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.lineage.read",
+    surface: "core",
+  });
+  if (authorization?.relatedSessionAccess === "target") {
+    const session = await getSession(deps.db, grant.workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return { ancestors: [], children: [], truncated: false };
+  }
+  const lineage = await getSessionLineage(deps.db, grant.workspaceId, sessionId);
   if (!lineage) {
     throw new HTTPException(404, { message: "session not found" });
   }
