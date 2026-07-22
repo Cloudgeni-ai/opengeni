@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AccessGrant as ContractAccessGrant,
   AccessContext as ContractAccessContext,
   ApiKey as ContractApiKey,
   BillingBalance as ContractBillingBalance,
@@ -39,6 +40,8 @@ import {
   ScheduledTaskRun as ContractScheduledTaskRun,
   ScheduledTaskRunStatus as ContractScheduledTaskRunStatus,
   ScheduledTaskTriggerType as ContractScheduledTaskTriggerType,
+  ServiceTurnInitiator as ContractServiceTurnInitiator,
+  ServiceTurnInitiatorContext as ContractServiceTurnInitiatorContext,
   SessionGoal as ContractSessionGoal,
   SessionGoalCreatedBy as ContractSessionGoalCreatedBy,
   SessionGoalStatus as ContractSessionGoalStatus,
@@ -56,6 +59,7 @@ import {
 import type { z } from "zod";
 import { KNOWN_PERMISSIONS, KNOWN_USAGE_EVENT_TYPES } from "../src/types";
 import type {
+  AccessGrant,
   AccessContext,
   ApiKey,
   BillingBalance,
@@ -97,6 +101,8 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  ServiceTurnInitiator,
+  ServiceTurnInitiatorContext,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateWorkspaceEnvironmentRequest,
@@ -129,6 +135,28 @@ describe("SDK / contracts parity (full coverage)", () => {
     ): GitHubInstallationBinding => value;
     const acceptInfo = (value: z.infer<typeof ContractGitHubAppInfo>): GitHubAppInfo => value;
     expect([acceptBinding, acceptInfo].every((fn) => typeof fn === "function")).toBe(true);
+  });
+
+  test("delegated service initiator grant fields match the contracts", () => {
+    const serviceInitiator: ServiceTurnInitiator = ContractServiceTurnInitiator.parse({
+      kind: "service",
+      subjectId: "external-scheduler",
+      label: "External scheduler",
+    });
+    const serviceInitiatorContext: ServiceTurnInitiatorContext =
+      ContractServiceTurnInitiatorContext.parse({ occurrenceId: "occurrence-42" });
+    const grant: AccessGrant = {
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      accountId: "00000000-0000-4000-8000-000000000002",
+      subjectId: "host:automation-gateway",
+      permissions: ["sessions:create"],
+      serviceInitiator,
+      serviceInitiatorContext,
+    };
+    expect(ContractAccessGrant.parse(grant)).toMatchObject({
+      serviceInitiator,
+      serviceInitiatorContext,
+    });
   });
 
   test("status/enum literals match the contracts", () => {

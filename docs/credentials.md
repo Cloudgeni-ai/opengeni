@@ -10,7 +10,7 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | --- | --- | --- | --- | --- | --- |
 | Deployment access key | `x-opengeni-access-key` header | Operator (env) | API perimeter middleware | Static | Every caller of a key-gated deployment (coarse perimeter, not identity) |
 | Product API key | `ogk_…` bearer | Workspace member via `POST /v1/workspaces/:id/api-keys` | Hash lookup (stored hashed, shown once) | Until revoked | A product/backend calling the REST API for one workspace |
-| Delegated access token | `ogd_…` bearer | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
+| Delegated access token | `ogd_…` bearer; domain-bound `ogd2_…` when it asserts service provenance | Host with the deployment's delegation secret (HMAC) | HMAC + embedded workspace/account/permissions | Short (embedded expiry) | An embedding host acting as one of its users; also self-minted internally for first-party MCP |
 | Managed web session | Better Auth cookie | Managed auth (email/password) | Better Auth session lookup | Session | Humans in the hosted web console |
 | Stream token | `ogs_…` (query/header) | API, on viewer/stream mint | HMAC, scope+TTL embedded | Minutes | Browsers attaching to desktop/terminal streams |
 | Machine enrollment bearer | `oge_…` | Enrollment flow (click-Grant or device flow) | Stored credential + NATS auth-callout | Until revoked | A self-hosted/connected machine agent |

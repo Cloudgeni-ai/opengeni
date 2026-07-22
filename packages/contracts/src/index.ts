@@ -636,6 +636,78 @@ export const UpdateWorkspaceModelPolicyRequest = z.object({
 });
 export type UpdateWorkspaceModelPolicyRequest = z.infer<typeof UpdateWorkspaceModelPolicyRequest>;
 
+const turnInitiatorIdentityFields = {
+  subjectId: z.string().min(1),
+  /** Immutable display snapshot; never an authorization input. */
+  label: z.string().min(1).optional(),
+} as const;
+
+/** Reserved creator/initiator id used only by legacy-row migration defaults. */
+export const UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID = "unattributed-legacy" as const;
+
+/**
+ * A named machine/service principal asserted by a trusted embedding host. This
+ * deliberately excludes `kind: "subject"`: a delegated service assertion may
+ * describe causal machine work, but it is not a generic human-impersonation
+ * mechanism. The authenticated grant remains the authorization boundary.
+ */
+export const ServiceTurnInitiator = z.object({
+  kind: z.literal("service"),
+  subjectId: z
+    .string()
+    .min(1)
+    .max(1024)
+    .refine((value) => value !== UNATTRIBUTED_LEGACY_INITIATOR_SUBJECT_ID, {
+      message: "unattributed-legacy is reserved for migrated rows",
+    }),
+  /** Immutable display snapshot; never an authorization input. */
+  label: z.string().min(1).max(256).optional(),
+});
+export type ServiceTurnInitiator = z.infer<typeof ServiceTurnInitiator>;
+
+/**
+ * Immutable, non-secret provenance captured with an initiator. This is audit
+ * context (for example an external occurrence id), not a second identity or
+ * authorization surface.
+ */
+export const TurnInitiatorContext = z.record(z.string(), z.unknown());
+export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
+
+const reservedServiceTurnInitiatorContextKeys = new Set([
+  "backfill",
+  "label",
+  "provenanceError",
+  "via",
+  "viaTruncated",
+]);
+
+/** Bounded host provenance that cannot forge OpenGeni-owned lineage fields. */
+export const ServiceTurnInitiatorContext = TurnInitiatorContext.superRefine((value, ctx) => {
+  for (const key of reservedServiceTurnInitiatorContextKeys) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [key],
+        message: `${key} is reserved OpenGeni initiator context`,
+      });
+    }
+  }
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 4096) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "service initiator context exceeds 4096 UTF-8 bytes",
+      });
+    }
+  } catch {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "service initiator context must be JSON-serializable",
+    });
+  }
+});
+export type ServiceTurnInitiatorContext = z.infer<typeof ServiceTurnInitiatorContext>;
+
 export const AccountGrant = z.object({
   accountId: z.string().uuid(),
   subjectId: z.string().min(1),
@@ -653,6 +725,10 @@ export const AccessGrant = z.object({
   subjectLabel: z.string().optional(),
   permissions: z.array(Permission),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  // Optional trusted causal principal for a command submitted by an embedding
+  // host. Authorization still uses subjectId + permissions above.
+  serviceInitiator: ServiceTurnInitiator.optional(),
+  serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
 });
 export type AccessGrant = z.infer<typeof AccessGrant>;
 
@@ -667,38 +743,76 @@ export const AccessContext = z.object({
 });
 export type AccessContext = z.infer<typeof AccessContext>;
 
-export const DelegatedAccessTokenPayload = z.object({
-  accountId: z.string().uuid(),
-  workspaceId: z.string().uuid(),
-  subjectId: z.string().min(1),
-  subjectLabel: z.string().optional(),
-  permissions: z.array(Permission).min(1),
-  // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
-  // agent-controlled); enables session-scoped tools such as goal management.
-  sessionId: z.string().uuid().optional(),
-  // The turn making the call (the caller's identity), HMAC-signed by the worker
-  // at turn setup. Lets a tool classify WHO is calling from the token itself,
-  // instead of racily re-reading the session's live active_turn_id — e.g. the
-  // sacred-pause guard must know if the CALLER is a machine child-notification
-  // turn, and the active pointer can flip to another turn mid-check.
-  turnId: z.string().uuid().optional(),
-  // Exact execution owner. Agent control commands are accepted only while this
-  // attempt still owns the signed turn.
-  attemptId: z.string().uuid().optional(),
-  executionGeneration: z.number().int().positive().optional(),
-  exp: z.number().int().positive(),
-});
+export const DelegatedAccessTokenPayload = z
+  .object({
+    accountId: z.string().uuid(),
+    workspaceId: z.string().uuid(),
+    subjectId: z.string().min(1),
+    subjectLabel: z.string().optional(),
+    permissions: z.array(Permission).min(1),
+    // Trusted embedding hosts can sign a causal service principal separately
+    // from the grant subject that authorizes the request. The claim is consumed
+    // only when a command creates a new session/turn.
+    serviceInitiator: ServiceTurnInitiator.optional(),
+    serviceInitiatorContext: ServiceTurnInitiatorContext.optional(),
+    // Worker-asserted session scope for first-party MCP calls (HMAC-signed, not
+    // agent-controlled); enables session-scoped tools such as goal management.
+    sessionId: z.string().uuid().optional(),
+    // The turn making the call (the caller's identity), HMAC-signed by the worker
+    // at turn setup. Lets a tool classify WHO is calling from the token itself,
+    // instead of racily re-reading the session's live active_turn_id — e.g. the
+    // sacred-pause guard must know if the CALLER is a machine child-notification
+    // turn, and the active pointer can flip to another turn mid-check.
+    turnId: z.string().uuid().optional(),
+    // Exact execution owner. Agent control commands are accepted only while this
+    // attempt still owns the signed turn.
+    attemptId: z.string().uuid().optional(),
+    executionGeneration: z.number().int().positive().optional(),
+    exp: z.number().int().positive(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.serviceInitiatorContext && !payload.serviceInitiator) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["serviceInitiatorContext"],
+        message: "serviceInitiatorContext requires serviceInitiator",
+      });
+    }
+    if (
+      payload.serviceInitiator &&
+      (payload.turnId !== undefined ||
+        payload.attemptId !== undefined ||
+        payload.executionGeneration !== undefined)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["serviceInitiator"],
+        message: "serviceInitiator cannot replace an exact agent-attempt initiator",
+      });
+    }
+  });
 export type DelegatedAccessTokenPayload = z.infer<typeof DelegatedAccessTokenPayload>;
+
+const delegatedAccessTokenPrefix = "ogd_";
+const delegatedServiceAccessTokenPrefix = "ogd2_";
 
 export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
 ): Promise<string> {
-  const encodedPayload = base64UrlEncode(
-    JSON.stringify(DelegatedAccessTokenPayload.parse(payload)),
+  const parsed = DelegatedAccessTokenPayload.parse(payload);
+  const prefix = parsed.serviceInitiator
+    ? delegatedServiceAccessTokenPrefix
+    : delegatedAccessTokenPrefix;
+  const encodedPayload = base64UrlEncode(JSON.stringify(parsed));
+  // The service-capable envelope binds its prefix into the signature. An old
+  // verifier accepts only ogd_ and therefore fails closed during a rolling
+  // deploy; changing ogd2_ to ogd_ cannot turn provenance loss into success.
+  const signature = await hmacSha256Base64Url(
+    secret,
+    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
   );
-  const signature = await hmacSha256Base64Url(secret, encodedPayload);
-  return `ogd_${encodedPayload}.${signature}`;
+  return `${prefix}${encodedPayload}.${signature}`;
 }
 
 export async function verifyDelegatedAccessToken(
@@ -706,24 +820,42 @@ export async function verifyDelegatedAccessToken(
   token: string,
   nowSeconds = Math.floor(Date.now() / 1000),
 ): Promise<DelegatedAccessTokenPayload | null> {
-  if (!token.startsWith("ogd_")) {
+  const prefix = token.startsWith(delegatedServiceAccessTokenPrefix)
+    ? delegatedServiceAccessTokenPrefix
+    : token.startsWith(delegatedAccessTokenPrefix)
+      ? delegatedAccessTokenPrefix
+      : null;
+  if (!prefix) {
     return null;
   }
-  const withoutPrefix = token.slice("ogd_".length);
+  const withoutPrefix = token.slice(prefix.length);
   const dot = withoutPrefix.lastIndexOf(".");
   if (dot <= 0) {
     return null;
   }
   const encodedPayload = withoutPrefix.slice(0, dot);
   const signature = withoutPrefix.slice(dot + 1);
-  const expected = await hmacSha256Base64Url(secret, encodedPayload);
+  const expected = await hmacSha256Base64Url(
+    secret,
+    prefix === delegatedServiceAccessTokenPrefix ? `${prefix}${encodedPayload}` : encodedPayload,
+  );
   if (!constantTimeEqual(signature, expected)) {
     return null;
   }
-  const payload = DelegatedAccessTokenPayload.safeParse(
-    JSON.parse(base64UrlDecode(encodedPayload)),
-  );
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(base64UrlDecode(encodedPayload));
+  } catch {
+    return null;
+  }
+  const payload = DelegatedAccessTokenPayload.safeParse(decoded);
   if (!payload.success || payload.data.exp < nowSeconds) {
+    return null;
+  }
+  if (
+    (prefix === delegatedServiceAccessTokenPrefix) !==
+    (payload.data.serviceInitiator !== undefined)
+  ) {
     return null;
   }
   return payload.data;
@@ -2464,19 +2596,9 @@ export type CompactSessionContextResult = z.infer<typeof CompactSessionContextRe
  */
 export const TurnInitiator = z.object({
   kind: z.enum(["subject", "service"]),
-  subjectId: z.string().min(1),
-  /** Immutable display snapshot; never an authorization input. */
-  label: z.string().min(1).optional(),
+  ...turnInitiatorIdentityFields,
 });
 export type TurnInitiator = z.infer<typeof TurnInitiator>;
-
-/**
- * Immutable, non-secret provenance captured with an initiator. This is audit
- * context (for example an agent caller hop or scheduled occurrence ids), not a
- * second identity or authorization surface.
- */
-export const TurnInitiatorContext = z.record(z.string(), z.unknown());
-export type TurnInitiatorContext = z.infer<typeof TurnInitiatorContext>;
 
 export const SessionTurn = z.object({
   id: z.string().uuid(),

@@ -69,6 +69,23 @@ old-writer rows are explicitly
 resolver must deny that sentinel rather than substitute the session creator,
 API-key owner, sandbox token, or current worker.
 
+A trusted V1 embedding host may also sign `serviceInitiator` plus optional
+`serviceInitiatorContext` into a domain-bound `ogd2_` delegated bearer. OpenGeni continues to
+authorize the request with the bearer's ordinary `subjectId` and permissions,
+but freezes the separately asserted service principal as causal provenance for
+the new session/turn. The claim accepts only `kind: "service"`, cannot coexist
+with exact agent turn/attempt claims, and is consumed only by commands that
+create work; it cannot impersonate a human or change access. V2 core callers
+can provide the same typed fields on their trusted `AccessGrant`. The optional
+display label belongs on `serviceInitiator`, not in its context. Identity fields
+and context are bounded; OpenGeni-owned lineage/backfill keys and the
+`unattributed-legacy` migration sentinel are reserved.
+
+Ordinary delegated and first-party/Toolspace credentials remain `ogd_`. The
+`ogd2_` prefix is included in its HMAC input so a service-provenance token fails
+closed on an older verifier during rolling deployment and cannot be downgraded
+by changing its prefix.
+
 The normal first-party orchestration MCP and Toolspace use deliberately
 different bearer scopes. The worker re-signs the normal first-party bearer for
 every request with the exact current turn, attempt, and execution generation;

@@ -1363,7 +1363,7 @@ export const sessionCommandReceipts = pgTable(
         and ${table.actorAttemptId} is not null
         and ${table.actorSubjectId} is null
       ) or (
-        ${table.actorType} in ('human', 'operator')
+        ${table.actorType} in ('human', 'operator', 'service')
         and ${table.actorSubjectId} is not null
         and ${table.actorAttemptId} is null
       )`,
