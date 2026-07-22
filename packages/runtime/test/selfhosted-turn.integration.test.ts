@@ -50,6 +50,9 @@ async function runPinnedToVmTurn(
     toolspaceTokenSeed?: string;
     responder?: MockAgentResponder;
     activeSandboxBackend?: "selfhosted";
+    onToolspaceTokenSessionReady?: Parameters<
+      typeof runAgentStream
+    >[3]["onToolspaceTokenSessionReady"];
   } = {},
 ): Promise<string> {
   const settings = testSettings({
@@ -104,6 +107,9 @@ async function runPinnedToVmTurn(
   });
   const result = await runAgentStream(agent, "run echo on the vm", settings, {
     ownedSandbox: { client: client as never, session: proxy as never },
+    ...(opts.onToolspaceTokenSessionReady
+      ? { onToolspaceTokenSessionReady: opts.onToolspaceTokenSessionReady }
+      : {}),
   });
   for await (const _ of result.toStream()) {
     void _;
@@ -167,10 +173,14 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
         };
       },
     });
+    let renewalSessionIsRouted = false;
     await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
       toolspaceTokenSeed: "ogd_selfhosted_seed",
       responder,
       activeSandboxBackend: "selfhosted",
+      onToolspaceTokenSessionReady: (session) => {
+        renewalSessionIsRouted = session instanceof RoutingSandboxSession;
+      },
     });
     // The seed hook ran over the machine's exec channel and carried the token value.
     expect(
@@ -181,6 +191,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // But NO platform setup ran against the user's real computer.
     expect(execLog.some((c) => c.includes("git clone"))).toBe(false);
     expect(execLog.some((c) => c.includes("az login") || c.includes("az account"))).toBe(false);
+    expect(renewalSessionIsRouted).toBe(true);
   });
 
   test("NO-TOOLSPACE selfhosted turn seeds nothing (the hook list is empty without a token)", async () => {

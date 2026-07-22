@@ -14,6 +14,9 @@ import {
   type GitCredentials,
   type ResourceRef,
   type SandboxSecrets,
+  type SessionTurn,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
@@ -61,8 +64,66 @@ export type GitHubTokenMintAuthorization = (selection: {
   repositoryIds: number[];
 }) => Promise<void>;
 
+export const TOOLSPACE_TOKEN_TTL_SECONDS = 60 * 60;
+
+export type MintedSandboxToolspaceToken = {
+  token: string;
+  expiresAt: Date;
+};
+
+export async function mintSandboxToolspaceToken(
+  settings: Settings,
+  scope: ConnectionScope,
+  sessionId: string,
+  runId: string,
+  nowMs = Date.now(),
+): Promise<MintedSandboxToolspaceToken | undefined> {
+  if (!settings.toolspaceEnabled || !settings.delegationSecret) {
+    return undefined;
+  }
+  const expiresAtSeconds = Math.floor(nowMs / 1000) + TOOLSPACE_TOKEN_TTL_SECONDS;
+  const token = await signDelegatedAccessToken(settings.delegationSecret, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    subjectId: `sandbox:${runId}`,
+    subjectLabel: "sandbox toolspace",
+    permissions: ["toolspace:call"],
+    sessionId,
+    exp: expiresAtSeconds,
+  });
+  return { token, expiresAt: new Date(expiresAtSeconds * 1000) };
+}
+
+export type GitCredentialAuthority = {
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+};
+
+export function gitCredentialAuthorityForTurn(input: {
+  sessionId: string;
+  rootSessionId: string;
+  attemptId: string;
+  turn: Pick<SessionTurn, "id" | "executionGeneration" | "initiator" | "initiatorContext">;
+}): GitCredentialAuthority {
+  return {
+    sessionId: input.sessionId,
+    rootSessionId: input.rootSessionId,
+    turnId: input.turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: input.turn.executionGeneration,
+    initiator: input.turn.initiator,
+    initiatorContext: input.turn.initiatorContext,
+  };
+}
+
 type RunGitCredentialOptions = {
   scope?: ConnectionScope;
+  authority?: GitCredentialAuthority;
   gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
@@ -146,6 +207,7 @@ export async function sandboxEnvironmentForRun(
   gitTokenExpiresAt?: GitTokenExpiries;
   gitCredentialBindings?: GitCredentialBindingSeed[];
   toolspaceToken?: string;
+  toolspaceTokenExpiresAt?: Date;
 }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
@@ -174,26 +236,15 @@ export async function sandboxEnvironmentForRun(
   // budgeted, approval-tools excluded). Delivery mirrors the docker path: the
   // caller threads it OFF-MANIFEST as the seed the runtime writes to
   // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
-  let toolspaceToken: string | undefined;
-  if (
-    settings.toolspaceEnabled &&
-    settings.delegationSecret &&
-    options.scope &&
-    options.sessionId &&
-    options.runId
-  ) {
-    toolspaceToken = await signDelegatedAccessToken(settings.delegationSecret, {
-      accountId: options.scope.accountId,
-      workspaceId: options.scope.workspaceId,
-      subjectId: `sandbox:${options.runId}`,
-      subjectLabel: "sandbox toolspace",
-      permissions: ["toolspace:call"],
-      sessionId: options.sessionId,
-      exp: Math.floor(Date.now() / 1000) + 60 * 60,
-    });
+  const toolspaceScope = options.scope;
+  const toolspaceToken =
+    toolspaceScope && options.sessionId && options.runId
+      ? await mintSandboxToolspaceToken(settings, toolspaceScope, options.sessionId, options.runId)
+      : undefined;
+  if (toolspaceToken && toolspaceScope) {
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
       settings,
-      options.scope.workspaceId,
+      toolspaceScope.workspaceId,
     );
   }
   const selections = gitCredentialSelections(resources);
@@ -207,14 +258,30 @@ export async function sandboxEnvironmentForRun(
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
   // token under this exact contract — proof a box runs fine without it.
   if (selections.length === 0 || options.skipGitHubToken) {
-    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
+    return {
+      environment,
+      ...(toolspaceToken
+        ? {
+            toolspaceToken: toolspaceToken.token,
+            toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+          }
+        : {}),
+    };
   }
   if (options.deferGitHubToken) {
     applyGitAuthPointerEnvironment(
       environment,
       await resolveRunGitIdentityWithSelections(settings, selections, options),
     );
-    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
+    return {
+      environment,
+      ...(toolspaceToken
+        ? {
+            toolspaceToken: toolspaceToken.token,
+            toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+          }
+        : {}),
+    };
   }
   // Run-scoped sandbox preparation for repository resources. GitHub retains the
   // legacy request shape and standalone self-mint path. Non-GitHub providers are
@@ -238,7 +305,12 @@ export async function sandboxEnvironmentForRun(
     ...(Object.keys(minted.gitTokens).length > 0 ? { gitTokens: minted.gitTokens } : {}),
     ...(Object.keys(minted.expiresAt).length > 0 ? { gitTokenExpiresAt: minted.expiresAt } : {}),
     ...(minted.bindings.length > 0 ? { gitCredentialBindings: minted.bindings } : {}),
-    ...(toolspaceToken ? { toolspaceToken } : {}),
+    ...(toolspaceToken
+      ? {
+          toolspaceToken: toolspaceToken.token,
+          toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+        }
+      : {}),
   };
 }
 
@@ -302,10 +374,7 @@ export async function mintRunGitToken(
 export async function resolveRunGitIdentity(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  } = {},
+  options: RunGitCredentialOptions = {},
 ): Promise<{ name: string; email: string } | null> {
   const selections = gitCredentialSelections(resources);
   if (selections.length === 0) {
@@ -345,7 +414,12 @@ async function mintRunGitTokensWithIdentity(
       });
     }
     if (options?.gitCredentials && options.scope) {
-      const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
+      const request = gitCredentialsRequestForSelection(
+        options.scope,
+        requireGitCredentialAuthority(options),
+        selection,
+        "token",
+      );
       const minted: GitCredentials = await options.gitCredentials(request);
       // workspace-scope cross-check: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
@@ -411,23 +485,20 @@ function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: st
 async function resolveRunGitIdentityWithSelections(
   settings: Settings,
   selections: GitCredentialSelection[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  },
+  options: RunGitCredentialOptions,
 ): Promise<{ name: string; email: string } | null> {
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     if (options.gitCredentials && options.scope) {
-      const resolved: GitCredentials = await options.gitCredentials(
-        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
-      );
-      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
-      assertGitCredentialBindingEcho(
+      const request = gitCredentialsRequestForSelection(
+        options.scope,
+        requireGitCredentialAuthority(options),
         selection,
-        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
-        resolved,
+        "identity",
       );
+      const resolved: GitCredentials = await options.gitCredentials(request);
+      assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
+      assertGitCredentialBindingEcho(selection, request, resolved);
       if (resolved.identity) {
         identity = resolved.identity;
       } else if (selection.provider === "github") {
@@ -453,12 +524,14 @@ type GitCredentialSelection = {
 
 function gitCredentialsRequestForSelection(
   scope: ConnectionScope,
+  authority: GitCredentialAuthority,
   selection: GitCredentialSelection,
   purpose?: "token" | "identity",
 ): Parameters<NonNullable<ConnectionCredentialsPort["gitCredentials"]>>[0] {
   const legacy = {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
+    ...authority,
     ...(purpose ? { purpose } : {}),
     installationId: selection.installationId,
     repositoryIds: selection.repositoryIds,
@@ -483,6 +556,13 @@ function gitCredentialsRequestForSelection(
     provider: selection.provider,
     repositoryRefs: selection.repositoryRefs,
   };
+}
+
+function requireGitCredentialAuthority(options: RunGitCredentialOptions): GitCredentialAuthority {
+  if (!options.authority) {
+    throw new Error("host git credential resolution requires immutable session turn authority");
+  }
+  return options.authority;
 }
 
 function assertGitCredentialBindingEcho(

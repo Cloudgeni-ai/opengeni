@@ -21,6 +21,8 @@ everything else is machinery you receive from OpenGeni rather than choose.
 | Capability MCP headers | Arbitrary headers, encrypted at rest | Workspace admin when configuring a capability | Write-only, worker-side decrypt | Until reconfigured | Third-party MCP servers enabled workspace-wide |
 | Codex subscription tokens | ChatGPT access/refresh/id tokens, encrypted | Device-code login flow | OpenAI; OpenGeni stores encrypted, never returns them | Provider-defined, auto-refreshed | Workspaces using a ChatGPT/Codex subscription as a model provider |
 | Git credential-binding token | GitHub App / GitLab / Azure DevOps token | OpenGeni or embedding host per repository binding | Git provider | Provider-defined, independently renewed during active managed-sandbox turns | Sandbox git operations and provider CLIs (delivered via hashed binding token files + path-aware helper/CLI wrappers, never baked into manifests) |
+| Host run credentials | Provider-neutral environment values and credential files | Embedding host through `ConnectionCredentialsPort.runCredentials` | Upstream cloud/service CLIs and SDKs | Host-defined, proactively renewed during the active attempt | Agent commands and session-scoped Channel-A terminal processes; never the box-global shared `ttyd` process |
+| Sandbox Toolspace bearer | `ogd_…` in `OPENGENI_TOOLSPACE_TOKEN_FILE` | OpenGeni worker from the deployment delegation secret | Toolspace MCP endpoint | One hour per bearer, proactively renewed during the active attempt | `ogtool` and direct MCP JSON-RPC from the session sandbox |
 | Signed storage URLs | Time-limited URL | API via object storage | Storage provider | Minutes | File upload/download without exposing storage credentials |
 
 Rules that hold across the table:
@@ -31,7 +33,12 @@ Rules that hold across the table:
 - **Rotation over longevity.** Rotating credentials are never stored in
   long-lived artifacts such as sandbox manifests. Git provider tokens are
   delivered at setup and proactively re-minted by the worker throughout an
-  active managed-sandbox turn; session MCP bearers are re-delivered per turn.
+  active managed-sandbox turn, independently per binding. Host run credentials are replaced by immutable
+  generations and renewed throughout the exact active attempt. The active and
+  immediately previous host generation are retained for one-rotation process
+  overlap; new processes always source the active pointer. Session MCP bearers
+  are resolved at request time. Sandbox Toolspace bearers are re-signed with the
+  same frozen session/run authority and atomically replace the stable token file.
 - **Sandbox git auth is pointer-based and binding-scoped.** The manifest carries stable paths such
   as `OPENGENI_GIT_CREDENTIALS_DIR` and `OPENGENI_GIT_TOKEN_FILE`, while the
   worker/runtime seed current token values into files inside the sandbox.

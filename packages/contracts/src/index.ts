@@ -1287,6 +1287,14 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
+  /** Immutable authority admitted with the turn requesting this credential. */
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
   // Provider defaults to "github" for the legacy request shape. GitHub-only
   // hosts can keep reading installationId/repositoryIds exactly as before;
   // provider-aware hosts should branch on this and repositoryRefs.
@@ -1358,6 +1366,105 @@ export type SandboxSecrets = {
   description?: string | null;
 };
 
+export type CredentialAuthNeededReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed";
+
+/**
+ * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * directory. Paths are relative POSIX names; the runtime validates traversal,
+ * collisions, bounds, and modes before any content reaches a sandbox.
+ */
+export type RunCredentialFile = {
+  path: string;
+  content: string;
+  mode?: "0400" | "0600";
+};
+
+export type RunCredentialAuthNeeded = {
+  reason: CredentialAuthNeededReason;
+  providerDomain?: string;
+  connectionId?: string;
+  scopes?: string[];
+  resource?: string;
+  authorizationUrl?: string;
+  /** Bounded non-secret guidance. Never place credential material here. */
+  message?: string;
+};
+
+export type RunCredentialRedaction = {
+  /** Bounded diagnostic label used only in the replacement marker. */
+  name: string;
+  /** One atomic secret value that must be removed from streamed/audit output. */
+  value: string;
+};
+
+export type RunCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  parentSessionId: string | null;
+  rootSessionId: string;
+  /** All sessions sharing this sandbox group share one OS/filesystem trust boundary. */
+  sandboxGroupId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  /** Immutable authority admitted with this turn. */
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  effectiveSandboxBackend: SandboxBackend;
+  sandboxOs: SandboxOs;
+  purpose: "provision" | "renewal";
+  forceRefresh: boolean;
+  /** Informational standalone variable-set identity; never gates host resolution. */
+  variableSet: { id: string; name: string } | null;
+};
+
+export type RunCredentialsResolution =
+  | {
+      /**
+       * The frozen target/attempt must not receive host material. Hosts use
+       * this for unsupported OSes/backends and policy-based opt-out; the
+       * decision must remain stable for the attempt.
+       */
+      status: "not_applicable";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+    }
+  | {
+      status: "ok";
+      /** Scope echoes are mandatory and checked before materialization. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      /** Secret environment values. Always delivered off-manifest. */
+      environment: Record<string, string>;
+      files?: RunCredentialFile[];
+      /** Environment name to one returned relative file path. */
+      fileEnvironment?: Record<string, string>;
+      /**
+       * Atomic sensitive values embedded inside credential files or derived
+       * material. Environment values are registered automatically; hosts list
+       * additional file-contained values here so chunked output is redacted.
+       */
+      redactions?: RunCredentialRedaction[];
+      /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
+      expiresAt?: string | null;
+      /** Partial degradation: usable material may coexist with reconnect notices. */
+      authNeeded?: RunCredentialAuthNeeded[];
+    }
+  | {
+      status: "auth_needed";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      authNeeded: RunCredentialAuthNeeded[];
+    };
+
 export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
@@ -1391,11 +1498,7 @@ export type McpCredentialsRequest = {
   forceRefresh: boolean;
 };
 
-export type McpCredentialAuthNeededReason =
-  | "missing_connection"
-  | "expired"
-  | "insufficient_scope"
-  | "refresh_failed";
+export type McpCredentialAuthNeededReason = CredentialAuthNeededReason;
 
 export type McpCredentialResolution =
   | {
@@ -1428,6 +1531,12 @@ export type ConnectionCredentialsPort = {
   // that leg only.
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
+  /**
+   * Resolve host-owned, session-aware sandbox credentials independently of an
+   * OpenGeni variable set. OpenGeni transports and renews the material; the host
+   * remains the sole owner of connection selection and credential policy.
+   */
+  runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
   /**
    * Resolve rotating MCP transport credentials at request time. Embedded hosts
    * use this to keep their provider connection as the sole credential source;
@@ -2586,7 +2695,12 @@ export function boundWorkspaceControlEvent(
     fields,
     fullEvidence: { available: false, reason: "not_retained" },
   };
-  const bounded: WorkspaceControlEvent = { ...event, reason, actor, truncation };
+  const bounded: WorkspaceControlEvent = {
+    ...event,
+    reason,
+    actor,
+    truncation,
+  };
   settleWorkspaceControlDeliveredBytes(bounded, truncation);
   const deliveredBytes = sessionEventJsonBytes(bounded);
   if (deliveredBytes > WORKSPACE_CONTROL_EVENT_MAX_BYTES) {
@@ -3800,6 +3914,7 @@ export const SessionEventType = z.enum([
   "agent.toolCall.output",
   "agent.model.usage",
   "tool.auth_needed",
+  "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
   "rig.setup.completed",
@@ -4013,6 +4128,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.event.envelope_omitted",
     "turn.failed",
     "tool.auth_needed",
+    "credential.auth_needed",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",
@@ -4094,7 +4210,9 @@ export const ToolAuthNeededPayload = z.object({
   serverId: z.string().min(1),
   toolName: z.string().min(1).nullable().optional(),
   providerDomain: z.string().min(1),
-  connectionId: z.string().uuid().nullable().optional(),
+  // Embedded hosts may use an opaque connection identity; never assume an
+  // OpenGeni UUID on the public event wire.
+  connectionId: z.string().min(1).nullable().optional(),
   reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
   scopes: z.array(z.string().min(1)).optional(),
   resource: z.string().min(1).optional(),
@@ -4102,6 +4220,19 @@ export const ToolAuthNeededPayload = z.object({
   subjectId: z.string().min(1).nullable().optional(),
 });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
+
+/** A host-owned non-tool credential needed by the active run. */
+export const CredentialAuthNeededPayload = z.object({
+  credentialClass: z.literal("run"),
+  providerDomain: z.string().min(1).optional(),
+  connectionId: z.string().min(1).optional(),
+  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  scopes: z.array(z.string().min(1)).optional(),
+  resource: z.string().min(1).optional(),
+  authorizationUrl: z.string().url().optional(),
+  message: z.string().min(1).optional(),
+});
+export type CredentialAuthNeededPayload = z.infer<typeof CredentialAuthNeededPayload>;
 
 // Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
 // z.unknown() (NOT a discriminated union) — these are standalone schemas parsed
@@ -5060,7 +5191,11 @@ function sessionEventEnvelopeFieldProjection(
 function sessionEventCustomSerializerProjection(
   event: SessionEvent,
 ): { field: string; originalBytes: null; deliveredBytes: 0 } | null {
-  const projection = { field: "toJSON", originalBytes: null, deliveredBytes: 0 } as const;
+  const projection = {
+    field: "toJSON",
+    originalBytes: null,
+    deliveredBytes: 0,
+  } as const;
   let candidate: object | null = event;
   try {
     for (let depth = 0; depth <= SESSION_EVENT_PROTOTYPE_MAX_DEPTH; depth += 1) {
@@ -5199,7 +5334,11 @@ function sessionEventCanonicalFieldProjections(
     sequence: number;
     occurredAt: string;
   },
-): Array<{ field: string; originalBytes: number | null; deliveredBytes: number }> {
+): Array<{
+  field: string;
+  originalBytes: number | null;
+  deliveredBytes: number;
+}> {
   return (["id", "workspaceId", "sessionId", "sequence", "occurredAt"] as const).flatMap(
     (field) => {
       const original = source[field].readable ? source[field].value : undefined;
@@ -5225,7 +5364,11 @@ function sessionEventOptionalFieldProjections(
     turnAttemptId: string | null;
     duplicateOfEventId: string | null;
   },
-): Array<{ field: string; originalBytes: number | null; deliveredBytes: number }> {
+): Array<{
+  field: string;
+  originalBytes: number | null;
+  deliveredBytes: number;
+}> {
   return (["turnId", "turnGeneration", "turnAttemptId", "duplicateOfEventId"] as const).flatMap(
     (field) => {
       const original = source[field].readable ? source[field].value : undefined;
@@ -5286,6 +5429,13 @@ export const SessionControlResponse = z.object({
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const CreateSessionRequest = withVariableSetIdAlias({
+  /**
+   * Optional UUID preallocated by an embedding host. This lets the host durably
+   * link its own projection before OpenGeni admits the initial turn. Replays
+   * must pair it with the same idempotency key; OpenGeni never derives host
+   * identity or authorization from the UUID.
+   */
+  requestedSessionId: z.string().uuid().optional(),
   initialMessage: z.string().min(1),
   // Per-session agent persona/system instructions (org-visible metadata, NOT a
   // secret). Rides the SAME system-level instructions channel the per-workspace

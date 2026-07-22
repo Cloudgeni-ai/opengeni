@@ -125,6 +125,27 @@ export {
   type EnsureTerminalServerResult,
 } from "./terminal-server";
 
+// Host-owned rotating run credentials. Material lives outside the persisted
+// workspace/manifest and is activated atomically per session generation.
+export {
+  RunCredentialValidationError,
+  normalizeRunCredentialsResolution,
+  runCredentialRoot,
+  runCredentialPointerFile,
+  materializeRunCredentials,
+  clearRunCredentials,
+  clearRunCredentialsForAttempt,
+  withRunCredentialEnvironment,
+  withRunCredentialsSession,
+  withRunCredentialsClient,
+  type RunCredentialExpectedScope,
+  type NormalizedRunCredentialMaterial,
+  type RunCredentialCommandSession,
+  type RunCredentialCommandRunner,
+  type RunCredentialSessionReady,
+  type MaterializeRunCredentialsOptions,
+} from "./run-credentials";
+
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
 // mints the scoped stream token. Called API-direct on the resumed handle.

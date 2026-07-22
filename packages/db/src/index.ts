@@ -10892,6 +10892,14 @@ async function lockWorkspaceForSessionCreate(tx: Database, workspaceId: string):
 
 type AgentSessionCreationActor = Extract<SessionCommandActor, { type: "agent_attempt" }>;
 
+/** A caller-preallocated session UUID is already owned by another session. */
+export class SessionIdConflictError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`Session id is already in use: ${sessionId}`);
+    this.name = "SessionIdConflictError";
+  }
+}
+
 async function frozenSessionCreatorForInsert(
   tx: Database,
   input: {
@@ -10924,6 +10932,7 @@ async function frozenSessionCreatorForInsert(
 export async function createSession(
   db: Database,
   input: {
+    requestedSessionId?: string;
     accountId: string;
     workspaceId: string;
     initialMessage: string;
@@ -10961,7 +10970,7 @@ export async function createSession(
 ): Promise<Session> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
-  const id = crypto.randomUUID();
+  const id = input.requestedSessionId ?? crypto.randomUUID();
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -10993,8 +11002,12 @@ export async function createSession(
             createIdempotencyKey: input.createIdempotencyKey ?? null,
             status: "queued",
           })
+          .onConflictDoNothing({ target: schema.sessions.id })
           .returning();
         if (!row) {
+          if (input.requestedSessionId) {
+            throw new SessionIdConflictError(input.requestedSessionId);
+          }
           throw new Error("Failed to create session");
         }
         const mcpServers = await insertSessionMcpServers(tx as unknown as Database, {
@@ -11021,6 +11034,7 @@ export async function createSession(
 export async function createSessionWithIdempotencyKey(
   db: Database,
   input: {
+    requestedSessionId?: string;
     accountId: string;
     workspaceId: string;
     initialMessage: string;
@@ -11051,7 +11065,7 @@ export async function createSessionWithIdempotencyKey(
 ): Promise<{ session: Session; created: boolean }> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
-  const id = crypto.randomUUID();
+  const id = input.requestedSessionId ?? crypto.randomUUID();
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -11083,10 +11097,10 @@ export async function createSessionWithIdempotencyKey(
             createIdempotencyKey: input.createIdempotencyKey,
             status: "queued",
           })
-          .onConflictDoNothing({
-            target: [schema.sessions.workspaceId, schema.sessions.createIdempotencyKey],
-            where: sql`${schema.sessions.createIdempotencyKey} is not null`,
-          })
+          // No target deliberately handles either the idempotency-key race or a
+          // caller-preallocated primary-key collision. We classify the exact
+          // winner below instead of turning the latter into an opaque 500.
+          .onConflictDoNothing()
           .returning();
         if (inserted) {
           const mcpServers = await insertSessionMcpServers(tx as unknown as Database, {
@@ -11111,10 +11125,21 @@ export async function createSessionWithIdempotencyKey(
           )
           .limit(1);
         if (!existing) {
+          if (input.requestedSessionId) {
+            // The insert did nothing and no row owns this idempotency key. With
+            // a caller-supplied primary key, the only remaining conflict is that
+            // UUID. Do not try to confirm it through workspace RLS: an owner in
+            // another workspace is intentionally invisible but must still map
+            // to the same non-leaking 409.
+            throw new SessionIdConflictError(input.requestedSessionId);
+          }
           // No row inserted and none found: the conflict target did not actually
           // collide (should never happen for a present key) — surface it rather
           // than silently returning a phantom.
           throw new Error("Failed to create session under idempotency key");
+        }
+        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+          throw new SessionIdConflictError(input.requestedSessionId);
         }
         const grouped = await sessionMcpServerMetadataForSessions(
           tx as unknown as Database,
@@ -12466,6 +12491,64 @@ export type SessionLineage = {
   children: LineageNode[];
   truncated: boolean;
 };
+
+/**
+ * Resolve a session tree to its root without materializing the full lineage.
+ * Every recursive hop stays workspace-scoped and invalid/cyclic/deep chains
+ * fail closed instead of returning an ambiguous credential authority.
+ */
+export async function getSessionRootId(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      id: string;
+      parentSessionId: string | null;
+      depth: number;
+      cycle: boolean;
+    }>(sql`
+      with recursive lineage(id, parent_session_id, depth, path, cycle) as (
+        select
+          ${schema.sessions.id},
+          ${schema.sessions.parentSessionId},
+          0,
+          array[${schema.sessions.id}],
+          false
+        from ${schema.sessions}
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.id} = ${sessionId}
+        union all
+        select
+          parent.id,
+          parent.parent_session_id,
+          lineage.depth + 1,
+          lineage.path || parent.id,
+          parent.id = any(lineage.path)
+        from ${schema.sessions} parent
+        join lineage on lineage.parent_session_id = parent.id
+        where parent.workspace_id = ${workspaceId}
+          and not lineage.cycle
+          and lineage.depth < 64
+      )
+      select
+        id,
+        parent_session_id as "parentSessionId",
+        depth,
+        cycle
+      from lineage
+      order by depth desc
+      limit 1
+    `);
+    const root = rows[0];
+    if (!root) return null;
+    if (root.cycle || root.parentSessionId !== null || Number(root.depth) >= 64) {
+      throw new Error(`session lineage for ${sessionId} has no valid workspace root`);
+    }
+    return root.id;
+  });
+}
 
 type LineageIdRow = {
   id: string;

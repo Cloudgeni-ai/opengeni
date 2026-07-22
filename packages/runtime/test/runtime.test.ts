@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
@@ -47,6 +50,7 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  refreshToolspaceTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxFileDownloadsForAgent,
@@ -2156,6 +2160,37 @@ describe("runtime event normalization", () => {
     expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
       cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
     );
+  });
+
+  test("TOOLSPACE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opengeni-toolspace-refresh-"));
+    try {
+      const session = {
+        exec: async (args: { cmd: string }) => {
+          const proc = Bun.spawn(["sh", "-lc", args.cmd], {
+            cwd: home,
+            env: { ...process.env, HOME: home },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+            proc.exited,
+          ]);
+          return { exitCode, stdout, stderr };
+        },
+      };
+
+      await refreshToolspaceTokenFile(session as never, "ogd_renewed");
+      const tokenDir = join(home, ".opengeni");
+      const tokenFile = join(tokenDir, "toolspace-token");
+      expect(readFileSync(tokenFile, "utf8")).toBe("ogd_renewed");
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(readdirSync(tokenDir)).toEqual(["toolspace-token"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("fails repository clone hook when sandbox command is still running", async () => {

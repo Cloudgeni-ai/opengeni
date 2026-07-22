@@ -32,14 +32,51 @@ import {
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  ToolAuthNeededPayload,
+  CredentialAuthNeededPayload,
 } from "../src";
 
 describe("contracts", () => {
+  test("auth-needed events accept opaque embedded-host connection identities", () => {
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        reason: "expired",
+      }).connectionId,
+    ).toBe("host:connection:42");
+    expect(
+      CredentialAuthNeededPayload.parse({
+        credentialClass: "run",
+        providerDomain: "cloud.example",
+        connectionId: "host:cloud:7",
+        reason: "missing_connection",
+      }).connectionId,
+    ).toBe("host:cloud:7");
+  });
+
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+  });
+
+  test("accepts only a UUID as a caller-preallocated session id", () => {
+    const requestedSessionId = "00000000-0000-4000-8000-000000000042";
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        requestedSessionId,
+      }).requestedSessionId,
+    ).toBe(requestedSessionId);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        requestedSessionId: "host-session-42",
+      }),
+    ).toThrow();
   });
 
   test("accepts opaque bounded repository credential bindings and access intent", () => {
