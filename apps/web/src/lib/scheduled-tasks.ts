@@ -2,11 +2,28 @@ import { localDateTimeValue, formatTimestamp } from "@/lib/format";
 import type {
   ReasoningEffort,
   ResourceRef,
+  Session,
   ScheduledTask,
   ScheduledTaskAgentConfig,
   ScheduledTaskRun,
   ScheduledTaskScheduleSpec,
 } from "@/types";
+
+/**
+ * A selected target must stay represented in the native select until the user
+ * explicitly chooses a replacement. In particular, a cancelled target is
+ * filtered out of the normal options, but it is not the same thing as an
+ * empty (task-owned) target.
+ */
+export function selectedTargetUnavailable(
+  sessions: ReadonlyArray<Pick<Session, "id" | "status">>,
+  targetSessionId: string | null,
+): boolean {
+  return (
+    targetSessionId !== null &&
+    !sessions.some((session) => session.id === targetSessionId && session.status !== "cancelled")
+  );
+}
 
 export type ScheduledTaskFormState = {
   name: string;
@@ -18,6 +35,7 @@ export type ScheduledTaskFormState = {
   timeZone: string;
   runMode: ScheduledTask["runMode"];
   overlapPolicy: ScheduledTask["overlapPolicy"];
+  targetSessionId: string | null;
   includeOpenGeniTool: boolean;
   resources: ResourceRef[];
 };
@@ -36,6 +54,7 @@ export function newScheduledTaskFormState(
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
+    targetSessionId: null,
     includeOpenGeniTool,
     resources,
   };
@@ -65,6 +84,7 @@ export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFo
     prompt: task.agentConfig.prompt,
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
+    targetSessionId: task.targetSessionId,
   };
 }
 
@@ -103,6 +123,11 @@ export function agentConfigFromFormState(
     ...(existingTask?.agentConfig.sandboxBackend
       ? { sandboxBackend: existingTask.agentConfig.sandboxBackend }
       : {}),
+    // The form has no goal editor, but unrelated edits must not silently
+    // erase hidden task configuration. Targeted tasks with a goal are rejected
+    // by the contract/domain policy; preserving it here keeps old data honest
+    // and lets the API return that explicit correction instead of clearing it.
+    ...(existingTask?.agentConfig.goal ? { goal: existingTask.agentConfig.goal } : {}),
   };
 }
 

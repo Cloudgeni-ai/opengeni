@@ -1189,6 +1189,8 @@ export type ScheduledTask = {
   overlapPolicy: ScheduledTaskOverlapPolicy;
   agentConfig: ScheduledTaskAgentConfig;
   reusableSessionId: string | null;
+  /** Caller-selected existing session; null for legacy task-owned reuse. */
+  targetSessionId: string | null;
   variableSetId: string | null;
   /** @deprecated use variableSetId */
   environmentId: string | null;
@@ -1889,6 +1891,8 @@ export type CreateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig: ScheduledTaskAgentConfigInput;
   status?: ScheduledTaskStatus | undefined;
+  /** Existing session to receive scheduled prompts; requires reusable_session. */
+  targetSessionId?: string | null | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;
@@ -1904,6 +1908,8 @@ export type UpdateScheduledTaskRequest = {
   overlapPolicy?: ScheduledTaskOverlapPolicy | undefined;
   agentConfig?: ScheduledTaskAgentConfigInput | undefined;
   status?: ScheduledTaskStatus | undefined;
+  /** Existing session to receive scheduled prompts; null clears the target. */
+  targetSessionId?: string | null | undefined;
   variableSetId?: string | null | undefined;
   /** @deprecated use variableSetId */
   environmentId?: string | null | undefined;

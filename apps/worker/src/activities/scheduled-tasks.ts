@@ -9,6 +9,7 @@ import {
   getRig,
   getVariableSet,
   isCodexBilledTurn,
+  lockScheduledTaskForDispatch,
   markScheduledTaskRunFailedIfQueued,
   recordUsageEvent,
   requireScheduledTask,
@@ -23,6 +24,7 @@ import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/e
 import { configuredStaticUsageLimits, type Settings } from "@opengeni/config";
 import {
   assertReusableSessionRevivable,
+  assertScheduledTaskTargetCompatible,
   scheduledUserMessagePayload,
   workflowIdForSession,
 } from "./common";
@@ -40,6 +42,15 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
     ): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus, wakeSessionWorkflow } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
+      // Take the task row lock before quota/run side effects. A concurrent
+      // update that already committed must win over this fire; an update that
+      // starts later is naturally ordered after this fire and applies next
+      // time. Targeted fires take the same snapshot check again while holding
+      // the target session lock below, closing the whole read-to-append gap.
+      await lockScheduledTaskForDispatch(db, input.workspaceId, task.id, task);
+      if (task.targetSessionId && task.status !== "active") {
+        throw new Error("targeted scheduled task is paused; refusing a manual or stale fire");
+      }
       // The scheduled task's model can be codex/<slug>; resolve it here so the
       // admission gate can skip the credit/cost gates for a codex-billed run
       // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
@@ -122,12 +133,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
       let result: DispatchScheduledTaskRunResult;
       try {
         const reasoningEffort = task.agentConfig.reasoningEffort ?? settings.openaiReasoningEffort;
-        const sandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
+        const taskSandboxBackend = task.agentConfig.sandboxBackend ?? settings.sandboxBackend;
         const goalSpec = task.agentConfig.goal ?? null;
         // Every dispatch carries the first-party MCP server (set_session_title,
         // goal tools, and the permission-gated tools), matching the API path.
         const taskTools = withFirstPartyTools(settings, task.agentConfig.tools);
-        if (task.runMode === "new_session_per_run" || !task.reusableSessionId) {
+        const targetSessionId = task.targetSessionId;
+        const reusableSessionId = targetSessionId ?? task.reusableSessionId;
+        if (task.runMode === "new_session_per_run" || !reusableSessionId) {
           // The FK on scheduled_tasks.variable_set_id is ON DELETE RESTRICT, so
           // an attached variableSet must still exist here; fail closed if not.
           const variableSet = task.variableSetId
@@ -165,7 +178,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               scheduledTaskRunId: run.id,
             },
             model,
-            sandboxBackend,
+            sandboxBackend: taskSandboxBackend,
             variableSetId: task.variableSetId ?? null,
             rigId: frozenRigId,
             rigVersionId: frozenRigVersionId,
@@ -270,7 +283,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             workflowWakeRevision: scheduledUpdate.workflowWakeRevision,
           };
         } else {
-          const session = await requireSession(db, task.workspaceId, task.reusableSessionId);
+          const session = await requireSession(db, task.workspaceId, reusableSessionId);
           // A user-cancelled (terminal) reusable session must not be revived and
           // re-billed on the next fire. Early check avoids the pre-lock goal
           // upsert side-effect; the locked-callback check below is the
@@ -279,7 +292,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           // Defensive backstop for the API-level 409: a reusable session keeps
           // its creation-time attachment, so a diverged task attachment must
           // fail the run instead of silently running with the wrong secrets.
-          if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
+          if (targetSessionId) {
+            assertScheduledTaskTargetCompatible(session, task);
+            if (goalSpec) {
+              throw new Error(
+                "scheduled tasks targeting an existing session cannot replace its goal",
+              );
+            }
+          } else if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
             throw new Error(
               "scheduled task variableSet attachment does not match its reusable session",
             );
@@ -356,6 +376,15 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 status: "dispatched",
               });
             },
+            targetSessionId
+              ? {
+                  scheduledTask: { taskId: task.id, expectedTask: task },
+                  validateSession: (locked) => {
+                    assertReusableSessionRevivable(locked.status);
+                    assertScheduledTaskTargetCompatible(locked, task);
+                  },
+                }
+              : undefined,
           );
           if (bundled.reason === "session_cancelled") {
             throw new Error(`scheduled wake was not added: ${bundled.reason}`);

@@ -3,12 +3,15 @@ import type {
   AccessGrant,
   ScheduledTask,
   ScheduledTaskAgentConfig,
+  ScheduledTaskRun,
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
+  Session,
 } from "@opengeni/contracts";
 import {
   createScheduledTask,
   deleteScheduledTask,
+  getSession,
   getRig,
   getScheduledTask,
   updateScheduledTask,
@@ -16,7 +19,7 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { requirePermission } from "../access";
+import { hasPermission, requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
@@ -64,10 +67,25 @@ export async function createValidatedScheduledTask(input: {
   // authorized with variable-sets:use when the pack was enabled.
   variableSetPreauthorized?: boolean;
 }): Promise<ScheduledTask> {
-  const agentConfig = await validateScheduledTaskAgentConfig({
+  let agentConfig = await validateScheduledTaskAgentConfig({
     ...input,
     workspaceId: input.grant.workspaceId,
   });
+  const target = await validateScheduledTaskTarget({
+    db: input.db,
+    grant: input.grant,
+    targetSessionId: input.payload.targetSessionId,
+    runMode: input.payload.runMode,
+    variableSetId: input.payload.variableSetId,
+    rigId: input.payload.rigId,
+    agentConfig,
+  });
+  if (target && agentConfig.sandboxBackend === undefined) {
+    // Old workers route reusable turns from agentConfig.sandboxBackend. Stamp
+    // the target's immutable home route so a mixed rollout cannot enqueue the
+    // target through the deployment default.
+    agentConfig = { ...agentConfig, sandboxBackend: target.sandboxBackend };
+  }
   const id = crypto.randomUUID();
   validateScheduledTaskSchedule(input.payload.schedule);
   if (input.payload.variableSetId) {
@@ -97,10 +115,105 @@ export async function createValidatedScheduledTask(input: {
     runMode: input.payload.runMode,
     overlapPolicy: input.payload.overlapPolicy,
     agentConfig,
+    targetSessionId: input.payload.targetSessionId ?? null,
     variableSetId: input.payload.variableSetId ?? null,
     rigId: input.payload.rigId ?? null,
     metadata: input.payload.metadata,
   });
+}
+
+/**
+ * Validate the immutable session assumptions made by a caller-selected
+ * scheduled target. The target is looked up through the workspace-scoped DB
+ * helper, so a foreign or inaccessible session is indistinguishable from a
+ * missing one. Permission is checked before the lookup to avoid turning a
+ * task-management grant into a session-write oracle.
+ */
+export async function validateScheduledTaskTarget(input: {
+  db: Database;
+  grant: AccessGrant;
+  targetSessionId: string | null | undefined;
+  runMode: ScheduledTask["runMode"];
+  variableSetId: string | null | undefined;
+  rigId: string | null | undefined;
+  agentConfig: ScheduledTaskAgentConfig;
+}): Promise<Session | null> {
+  if (!input.targetSessionId) {
+    return null;
+  }
+  if (input.runMode !== "reusable_session") {
+    throw new HTTPException(422, {
+      message: "targetSessionId requires runMode=reusable_session",
+    });
+  }
+  requirePermission(input.grant, "sessions:control");
+  if (input.agentConfig.goal) {
+    throw new HTTPException(422, {
+      message: "agentConfig.goal cannot be used with targetSessionId; preserve the target goal",
+    });
+  }
+  const session = await getSession(input.db, input.grant.workspaceId, input.targetSessionId);
+  if (!session) {
+    throw new HTTPException(404, { message: "target session not found" });
+  }
+  if (session.status === "cancelled") {
+    throw new HTTPException(409, {
+      message: "target session is cancelled; choose a revivable session",
+    });
+  }
+  if ((session.variableSetId ?? null) !== (input.variableSetId ?? null)) {
+    throw new HTTPException(422, {
+      message: "target session variableSet attachment does not match the scheduled task",
+    });
+  }
+  // A targeted fire always uses the session's frozen rig version. A task rig
+  // may name that same rig as an explicit assertion, but it must never point
+  // at a different rig and silently change the target's setup assumptions.
+  if (input.rigId && input.rigId !== session.rigId) {
+    throw new HTTPException(422, {
+      message: "target session rig does not match the scheduled task",
+    });
+  }
+  if (
+    input.agentConfig.sandboxBackend !== undefined &&
+    input.agentConfig.sandboxBackend !== session.sandboxBackend
+  ) {
+    throw new HTTPException(422, {
+      message: "target session sandbox backend does not match the scheduled task",
+    });
+  }
+  return session;
+}
+
+/**
+ * Target ids are writable only with sessions:control. Task-management/read
+ * callers may still list and manage schedules, but must not receive a raw
+ * existing-session identifier from any scheduled-task response.
+ */
+export function scheduledTaskForGrant(task: ScheduledTask, grant: AccessGrant): ScheduledTask {
+  if (hasPermission(grant.permissions, "sessions:control")) {
+    return task;
+  }
+  if (task.targetSessionId === null) {
+    return task;
+  }
+  return { ...task, targetSessionId: null };
+}
+
+/** Run history can also carry the target session id; redact it under the same
+ * sessions:control boundary used for task list/get responses. */
+export function scheduledTaskRunForGrant(
+  run: ScheduledTaskRun,
+  grant: AccessGrant,
+): ScheduledTaskRun {
+  // Run history outlives target changes and clears. Do not infer whether a
+  // historical session id was a target from the task's current target field;
+  // callers without session control therefore receive no raw session ids at
+  // all, while preserving status/error/run timing for schedule management.
+  if (hasPermission(grant.permissions, "sessions:control")) {
+    return run;
+  }
+  return { ...run, sessionId: null };
 }
 
 // Validate a scheduled task's rig reference: it must name a rig in the
@@ -127,6 +240,27 @@ export async function validatedScheduledTaskUpdate(input: {
   toolsProvided?: boolean;
 }): Promise<UpdateScheduledTaskInput> {
   const update: UpdateScheduledTaskInput = {};
+  const existingTarget = input.existing.targetSessionId;
+  const nextTarget =
+    input.payload.targetSessionId !== undefined ? input.payload.targetSessionId : existingTarget;
+  const targetChanged =
+    input.payload.targetSessionId !== undefined &&
+    (input.payload.targetSessionId ?? null) !== (existingTarget ?? null);
+  if (
+    targetChanged &&
+    nextTarget !== null &&
+    existingTarget === null &&
+    input.existing.reusableSessionId !== null
+  ) {
+    // The legacy reusable pointer is the only durable owner reference for a
+    // task-created session. Replacing it with a caller-selected target would
+    // strand that session and also leave no safe way to restore it after a
+    // target clear, so require a new task instead of silently orphaning it.
+    throw new HTTPException(409, {
+      message:
+        "cannot target an existing session after this task created its reusable session; create a new task",
+    });
+  }
   if (input.payload.name !== undefined) {
     update.name = trimmedScheduledTaskName(input.payload.name);
   }
@@ -203,8 +337,79 @@ export async function validatedScheduledTaskUpdate(input: {
       payload: { agentConfig: input.payload.agentConfig },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
     });
+    // The web editor intentionally has no goal control. Preserve the existing
+    // hidden goal when it sends the same value back, but never allow a target
+    // task to change that goal. A different goal is an explicit replacement
+    // attempt and is rejected below when target compatibility is checked.
+    if (
+      input.existing.agentConfig.goal &&
+      update.agentConfig.goal &&
+      goalsEqual(update.agentConfig.goal, input.existing.agentConfig.goal)
+    ) {
+      update.agentConfig = {
+        ...update.agentConfig,
+        goal: input.existing.agentConfig.goal,
+      };
+    } else if (input.existing.agentConfig.goal && !update.agentConfig.goal) {
+      update.agentConfig = {
+        ...update.agentConfig,
+        goal: input.existing.agentConfig.goal,
+      };
+    }
   }
-  return update;
+  const targetSessionId = nextTarget;
+  const targetCompatibilityChanged =
+    targetChanged ||
+    (input.payload.targetSessionId !== undefined && input.payload.targetSessionId !== null) ||
+    (input.existing.targetSessionId !== null &&
+      (input.payload.runMode !== undefined ||
+        input.payload.variableSetId !== undefined ||
+        input.payload.rigId !== undefined ||
+        input.payload.agentConfig !== undefined));
+  if (targetCompatibilityChanged) {
+    // Clearing a target is still a target mutation, even though the validator
+    // has no non-null id on which to perform its permission check.
+    if (targetChanged && input.payload.targetSessionId === null) {
+      requirePermission(input.grant, "sessions:control");
+    }
+    const targetAgentConfig = update.agentConfig ?? input.existing.agentConfig;
+    const target = await validateScheduledTaskTarget({
+      db: input.db,
+      grant: input.grant,
+      targetSessionId,
+      runMode: update.runMode ?? input.existing.runMode,
+      variableSetId:
+        input.payload.variableSetId !== undefined
+          ? input.payload.variableSetId
+          : input.existing.variableSetId,
+      rigId: input.payload.rigId !== undefined ? input.payload.rigId : input.existing.rigId,
+      agentConfig: targetAgentConfig,
+    });
+    if (target && update.agentConfig?.sandboxBackend === undefined) {
+      update.agentConfig = {
+        ...(update.agentConfig ?? input.existing.agentConfig),
+        sandboxBackend: target.sandboxBackend,
+      };
+    }
+  }
+  if (input.payload.targetSessionId !== undefined) {
+    update.targetSessionId = input.payload.targetSessionId;
+  }
+  // The validator read the task before checking target compatibility. Carry
+  // that snapshot into the DB write so a concurrent target/attachment/run-mode
+  // change fails with a conflict instead of overwriting the state we checked.
+  return { ...update, expectedCurrent: input.existing };
+}
+
+function goalsEqual(
+  left: NonNullable<ScheduledTaskAgentConfig["goal"]>,
+  right: NonNullable<ScheduledTaskAgentConfig["goal"]>,
+): boolean {
+  return (
+    left.text === right.text &&
+    left.successCriteria === right.successCriteria &&
+    left.maxAutoContinuations === right.maxAutoContinuations
+  );
 }
 
 export async function requireScheduledTaskForApi(
@@ -222,6 +427,7 @@ export async function requireScheduledTaskForApi(
 export async function restoreScheduledTask(
   db: Database,
   task: ScheduledTask,
+  expectedCurrent?: ScheduledTask,
 ): Promise<ScheduledTask> {
   return await updateScheduledTask(db, task.workspaceId, task.id, {
     name: task.name,
@@ -230,9 +436,12 @@ export async function restoreScheduledTask(
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
     agentConfig: task.agentConfig,
+    targetSessionId: task.targetSessionId,
     reusableSessionId: task.reusableSessionId,
     variableSetId: task.variableSetId,
+    rigId: task.rigId,
     metadata: task.metadata,
+    ...(expectedCurrent ? { expectedCurrent } : {}),
   });
 }
 
@@ -260,7 +469,10 @@ export async function syncUpdatedScheduledTask(input: {
   try {
     await input.workflowClient.syncScheduledTask({ task: input.task });
   } catch (error) {
-    await restoreScheduledTask(input.db, input.previous).catch(() => undefined);
+    // Do not roll back a newer edit that won the race while Temporal was being
+    // updated. The conditional restore is best-effort just like the old
+    // rollback, but now it fails closed on an intervening task change.
+    await restoreScheduledTask(input.db, input.previous, input.task).catch(() => undefined);
     throw error;
   }
 }

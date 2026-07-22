@@ -296,6 +296,27 @@ OPENGENI_CONFORMANCE_ACCESS_KEY="$OPENGENI_ACCESS_KEY" \
 
 The chart defaults API, worker, and web deployments to zero-surge rolling updates (`maxSurge: 0`, `maxUnavailable: 1`) so one-node smoke clusters do not need spare node capacity during upgrades. Increase surge settings in larger production clusters if you want faster replacement and have capacity headroom.
 
+Scheduled-task target routing is mixed-version safe across this rollout: the
+forward-only migration first backfills `target_session_id` through the legacy
+`reusable_session_id` mirror and installs the database writer fence. Older
+workers can continue reading that mirror and deliver to the chosen existing
+thread, but older API writers cannot change a targeted task's route, goal, or
+attachments. The new API/DB revision sets the transaction-local target-aware
+capability for validated edits. Wait for the migration job to complete before
+considering the release healthy; then allow the normal API/worker rolling
+replacement to drain. A failed migration or a rejected legacy write is a
+fail-closed rollout signal, not permission to remove the fence or fall back to
+task-owned session creation. The cancellation write fence in the following
+migration also makes `cancelled` terminal at the database boundary: legacy
+enqueue/claim order cannot create or revive a live turn, and a cancellation
+that wins drains any already-queued turn before commit. Keep this migration
+applied before allowing old workers to consume targeted tasks.
+
+Migration `0100_scheduled_task_target_deletion_fence.sql` is additive and
+repairs the target-session `ON DELETE RESTRICT` foreign key for installations
+that already recorded the earlier target migrations. It is also safe for
+dedicated schemas where another schema may contain a same-named constraint.
+
 The in-cluster Postgres, Temporal, NATS, and MinIO templates are disposable conformance fixtures for local Kubernetes, CI, and smoke verification. They are not lightweight production alternatives or the production distribution of those systems. Production operators should use managed services, existing customer endpoints, or official upstream charts/operators, and provider-native object storage through the runtime secret.
 
 Production self-hosted platform dependencies should use mature upstream projects rather than OpenGeni-owned replicas of those systems:

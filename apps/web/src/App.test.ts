@@ -61,7 +61,9 @@ import {
 import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
+  newScheduledTaskFormState,
   scheduleFromFormState,
+  selectedTargetUnavailable,
   summarizeLastRun,
 } from "./lib/scheduled-tasks";
 import { entitlementEntries, formatEntitlementValue } from "./lib/format";
@@ -1282,6 +1284,28 @@ describe("capability catalog helpers", () => {
 });
 
 describe("scheduled task form helpers", () => {
+  test("keeps a cancelled or disappeared target distinct from task-owned reuse", () => {
+    const targetSessionId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      selectedTargetUnavailable([{ id: targetSessionId, status: "cancelled" }], targetSessionId),
+    ).toBe(true);
+    expect(selectedTargetUnavailable([], targetSessionId)).toBe(true);
+    expect(
+      selectedTargetUnavailable([{ id: targetSessionId, status: "idle" }], targetSessionId),
+    ).toBe(false);
+    expect(selectedTargetUnavailable([], null)).toBe(false);
+  });
+
+  test("hydrates an existing target and keeps the task-owned default nullable", () => {
+    const targetSessionId = "00000000-0000-4000-8000-000000000001";
+    expect(
+      formStateFromScheduledTask(
+        scheduledTask({ type: "interval", everySeconds: 60 }, { targetSessionId }),
+      ).targetSessionId,
+    ).toBe(targetSessionId);
+    expect(newScheduledTaskFormState(false, []).targetSessionId).toBeNull();
+  });
+
   test("hydrates and serializes once schedules", () => {
     const task = scheduledTask({
       type: "once",
@@ -1381,6 +1405,23 @@ describe("scheduled task form helpers", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       sandboxBackend: "docker",
+    });
+  });
+
+  test("preserves hidden goal configuration during unrelated edits", () => {
+    const task = scheduledTask(
+      { type: "interval", everySeconds: 60 },
+      {
+        targetSessionId: "00000000-0000-4000-8000-000000000001",
+        agentConfig: {
+          ...scheduledTaskAgentConfig(),
+          goal: { text: "Keep the existing objective" },
+        },
+      },
+    );
+    const form = { ...formStateFromScheduledTask(task), prompt: "updated prompt" };
+    expect(agentConfigFromFormState(form, task).goal).toEqual({
+      text: "Keep the existing objective",
     });
   });
 
@@ -1606,6 +1647,7 @@ function scheduledTask(
     overlapPolicy: "allow_concurrent",
     agentConfig: scheduledTaskAgentConfig(),
     reusableSessionId: null,
+    targetSessionId: null,
     rigId: null,
     variableSetId: null,
     environmentId: null,

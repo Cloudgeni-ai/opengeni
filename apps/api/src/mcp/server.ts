@@ -45,6 +45,7 @@ import {
   MEMORY_SEARCH_TOOL_DESCRIPTION,
   requireFile,
   requireScheduledTask,
+  ScheduledTaskConflictError,
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
@@ -88,6 +89,8 @@ import {
   manualScheduledTaskTriggerWorkflowId,
   scheduledTaskToolsProvided,
   scheduledTaskTriggerToken,
+  scheduledTaskForGrant,
+  scheduledTaskRunForGrant,
   syncCreatedScheduledTask,
   syncUpdatedScheduledTask,
   validatedScheduledTaskUpdate,
@@ -392,28 +395,36 @@ export function buildOpenGeniMcpServer(
     server.registerTool(
       "scheduled_tasks_list",
       {
-        description: "List scheduled tasks.",
+        description:
+          "List scheduled tasks. Existing-thread target IDs are shown only with sessions:control; otherwise they are redacted.",
         inputSchema: { limit: z4.number().int().positive().optional() },
       },
       async ({ limit }) =>
         json({
-          tasks: await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100),
+          tasks: (await listScheduledTasks(deps.db, grant.workspaceId, limit ?? 100)).map((task) =>
+            scheduledTaskForGrant(task, grant),
+          ),
         }),
     );
 
     server.registerTool(
       "scheduled_tasks_get",
       {
-        description: "Get one scheduled task.",
+        description:
+          "Get one scheduled task. Existing-thread target IDs are shown only with sessions:control; otherwise they are redacted.",
         inputSchema: { id: z4.string().uuid() },
       },
-      async ({ id }) => json(await requireScheduledTask(deps.db, grant.workspaceId, id)),
+      async ({ id }) =>
+        json(
+          scheduledTaskForGrant(await requireScheduledTask(deps.db, grant.workspaceId, id), grant),
+        ),
     );
 
     server.registerTool(
       "scheduled_tasks_create",
       {
-        description: "Create a scheduled task.",
+        description:
+          "Create a scheduled task. Omit targetSessionId to preserve task-owned reusable-session behavior; set it only with runMode=reusable_session and do not set agentConfig.goal when targeting an existing thread.",
         inputSchema: {
           name: z4.string(),
           schedule: z4.unknown(),
@@ -421,6 +432,12 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown(),
           status: z4.string().optional(),
+          targetSessionId: z4
+            .string()
+            .uuid()
+            .nullable()
+            .optional()
+            .describe("Existing thread to receive prompts; requires sessions:control."),
           variableSetId: z4.string().uuid().optional(),
           // Deprecated alias of variableSetId; declared so MCP validation doesn't
           // strip it before the contract parse maps it (rename back-compat).
@@ -452,14 +469,15 @@ export function buildOpenGeniMcpServer(
           workflowClient: deps.workflowClient,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
     server.registerTool(
       "scheduled_tasks_update",
       {
-        description: "Update a scheduled task.",
+        description:
+          "Update a scheduled task. Clearing an existing-thread target is a real routing change; an already-null target is a no-op. Do not set agentConfig.goal while targeting an existing thread.",
         inputSchema: {
           id: z4.string().uuid(),
           name: z4.string().optional(),
@@ -468,6 +486,12 @@ export function buildOpenGeniMcpServer(
           overlapPolicy: z4.string().optional(),
           agentConfig: z4.unknown().optional(),
           status: z4.string().optional(),
+          targetSessionId: z4
+            .string()
+            .uuid()
+            .nullable()
+            .optional()
+            .describe("Existing thread to receive prompts; null clears the target."),
           variableSetId: z4.string().uuid().nullable().optional(),
           // Deprecated alias of variableSetId (rename back-compat); declared so MCP
           // validation doesn't strip it before the contract parse maps it.
@@ -490,14 +514,22 @@ export function buildOpenGeniMcpServer(
           payload,
           toolsProvided: scheduledTaskToolsProvided(raw),
         });
-        const task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
+        let task;
+        try {
+          task = await updateScheduledTask(deps.db, grant.workspaceId, id, update);
+        } catch (error) {
+          if (error instanceof ScheduledTaskConflictError) {
+            throw new Error(error.message, { cause: error });
+          }
+          throw error;
+        }
         await syncUpdatedScheduledTask({
           db: deps.db,
           workflowClient: deps.workflowClient,
           previous: existing,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -518,7 +550,7 @@ export function buildOpenGeniMcpServer(
           previous: existing,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -539,7 +571,7 @@ export function buildOpenGeniMcpServer(
           previous: existing,
           task,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -585,7 +617,7 @@ export function buildOpenGeniMcpServer(
           sourceResourceId: task.id,
           idempotencyKey: agentRunUsageIdempotencyKey,
         });
-        return json(task);
+        return json(scheduledTaskForGrant(task, grant));
       },
     );
 
@@ -614,10 +646,11 @@ export function buildOpenGeniMcpServer(
           limit: z4.number().int().positive().optional(),
         },
       },
-      async ({ taskId, limit }) =>
-        json({
-          runs: await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100),
-        }),
+      async ({ taskId, limit }) => {
+        await requireScheduledTask(deps.db, grant.workspaceId, taskId);
+        const runs = await listScheduledTaskRuns(deps.db, grant.workspaceId, taskId, limit ?? 100);
+        return json({ runs: runs.map((run) => scheduledTaskRunForGrant(run, grant)) });
+      },
     );
   }
 

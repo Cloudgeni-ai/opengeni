@@ -34,6 +34,7 @@ import {
   listSessionTurns,
   listSessionMcpServersForRun,
   listUsageEvents,
+  ScheduledTaskConflictError,
   recordStripeWebhookEvent,
   recordUsageEvent,
   requireFile,
@@ -2825,6 +2826,323 @@ describe("API component integration", () => {
     expect(
       ((await listed.json()) as Array<{ id: string }>).some((item) => item.id === task.id),
     ).toBe(true);
+  });
+
+  test("creates, updates, and clears an authorized existing-session target", async () => {
+    workflow = new FakeWorkflowClient();
+    const app = createApp({
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: workflow,
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const sessionResponse = await app.request(workspacePath(workspaceId, "/sessions"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ initialMessage: "keep this thread" }),
+    });
+    expect(sessionResponse.status).toBe(202);
+    const targetSessionId = ((await sessionResponse.json()) as { id: string }).id;
+
+    const invalidMode = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "invalid target mode",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "new_session_per_run",
+        targetSessionId,
+        agentConfig: { prompt: "must reject" },
+      }),
+    });
+    expect(invalidMode.status).toBe(422);
+    expect(await invalidMode.text()).toContain("targetSessionId");
+
+    const invalidGoalCreate = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "invalid target goal",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId,
+        agentConfig: { prompt: "must reject", goal: { text: "must not replace" } },
+      }),
+    });
+    expect(invalidGoalCreate.status).toBe(422);
+    expect(await invalidGoalCreate.text()).toContain("agentConfig.goal");
+
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "targeted thread",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId,
+        agentConfig: { prompt: "continue this thread" },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const task = (await created.json()) as {
+      id: string;
+      targetSessionId: string | null;
+      reusableSessionId: string | null;
+    };
+    expect(task.targetSessionId).toBe(targetSessionId);
+    expect(task.reusableSessionId).toBeNull();
+
+    const invalidGoalUpdate = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          targetSessionId,
+          agentConfig: { prompt: "must reject", goal: { text: "must not replace" } },
+        }),
+      },
+    );
+    expect(invalidGoalUpdate.status).toBe(422);
+    expect(await invalidGoalUpdate.text()).toContain("agentConfig.goal");
+
+    const invalidUpdate = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ runMode: "new_session_per_run" }),
+      },
+    );
+    expect(invalidUpdate.status).toBe(422);
+
+    const cleared = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}`), {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ targetSessionId: null }),
+    });
+    expect(cleared.status).toBe(200);
+    expect(
+      ((await cleared.json()) as { targetSessionId: string | null }).targetSessionId,
+    ).toBeNull();
+
+    const retargeted = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetSessionId }),
+      },
+    );
+    expect(retargeted.status).toBe(200);
+    expect(((await retargeted.json()) as { targetSessionId: string | null }).targetSessionId).toBe(
+      targetSessionId,
+    );
+
+    const staleSnapshot = await getScheduledTask(dbClient.db, workspaceId, task.id);
+    expect(staleSnapshot).not.toBeNull();
+    await updateScheduledTask(dbClient.db, workspaceId, task.id, { name: "changed elsewhere" });
+    await expect(
+      updateScheduledTask(dbClient.db, workspaceId, task.id, {
+        targetSessionId: null,
+        expectedCurrent: staleSnapshot!,
+      }),
+    ).rejects.toBeInstanceOf(ScheduledTaskConflictError);
+  });
+
+  test("redacts existing-thread IDs for schedule-only callers across REST and MCP", async () => {
+    const delegationSecret = `scheduled-target-redaction-${crypto.randomUUID()}`;
+    const owner = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:scheduled-target-redaction",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Target redaction account",
+      workspaceExternalSource: "test:scheduled-target-redaction",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Target redaction workspace",
+      subjectId: `test:scheduled-target-redaction:${crypto.randomUUID()}`,
+      accountPermissions: allAccountPermissions,
+      workspacePermissions: allWorkspacePermissions,
+    });
+    const workspaceId = owner.defaultWorkspaceId!;
+    const accountId = owner.defaultAccountId!;
+    const target = await createSession(dbClient.db, {
+      accountId,
+      workspaceId,
+      initialMessage: "private target thread",
+      resources: [],
+      tools: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    const sign = async (permissions: Permission[]) => ({
+      authorization: `Bearer ${await signDelegatedAccessToken(delegationSecret, {
+        accountId,
+        workspaceId,
+        subjectId: owner.subjectId,
+        permissions,
+        exp: Math.floor(Date.now() / 1000) + 3600,
+      })}`,
+    });
+    const adminHeaders = await sign([...allAccountPermissions, ...allWorkspacePermissions]);
+    const manageOnlyHeaders = await sign([
+      "workspace:read",
+      "scheduled_tasks:manage",
+      "scheduled_tasks:run",
+    ]);
+    const app = createApp({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        productAccessMode: "managed",
+        delegationSecret,
+      }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const created = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { ...adminHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "redacted target",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        targetSessionId: target.id,
+        agentConfig: { prompt: "continue" },
+      }),
+    });
+    expect(created.status).toBe(201);
+    const task = (await created.json()) as { id: string };
+
+    for (const response of [
+      await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+        headers: manageOnlyHeaders,
+      }),
+      await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}`), {
+        headers: manageOnlyHeaders,
+      }),
+    ]) {
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).not.toContain(target.id);
+      expect(JSON.parse(body)).toMatchObject({ targetSessionId: null });
+    }
+
+    const renamed = await app.request(workspacePath(workspaceId, `/scheduled-tasks/${task.id}`), {
+      method: "PATCH",
+      headers: { ...manageOnlyHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ name: "renamed without target access" }),
+    });
+    expect(renamed.status).toBe(200);
+    expect((await renamed.json()) as { targetSessionId: string | null }).toMatchObject({
+      targetSessionId: null,
+    });
+
+    const paused = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/pause`),
+      { method: "POST", headers: manageOnlyHeaders },
+    );
+    expect(paused.status).toBe(200);
+    expect(await paused.text()).not.toContain(target.id);
+    const resumed = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/resume`),
+      { method: "POST", headers: manageOnlyHeaders },
+    );
+    expect(resumed.status).toBe(200);
+    expect(await resumed.text()).not.toContain(target.id);
+
+    const triggered = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/trigger`),
+      { method: "POST", headers: manageOnlyHeaders },
+    );
+    expect(triggered.status).toBe(202);
+    expect(await triggered.text()).not.toContain(target.id);
+
+    const runHistory = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}/runs`),
+      { headers: manageOnlyHeaders },
+    );
+    expect(runHistory.status).toBe(200);
+    expect(await runHistory.text()).not.toContain(target.id);
+
+    const forbiddenClear = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${task.id}`),
+      {
+        method: "PATCH",
+        headers: { ...manageOnlyHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ targetSessionId: null }),
+      },
+    );
+    expect(forbiddenClear.status).toBe(403);
+
+    const noTarget = await app.request(workspacePath(workspaceId, "/scheduled-tasks"), {
+      method: "POST",
+      headers: { ...adminHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        name: "already null target",
+        schedule: { type: "interval", everySeconds: 3600 },
+        runMode: "reusable_session",
+        agentConfig: { prompt: "task owned" },
+      }),
+    });
+    const noTargetTask = (await noTarget.json()) as { id: string };
+    const noopClear = await app.request(
+      workspacePath(workspaceId, `/scheduled-tasks/${noTargetTask.id}`),
+      {
+        method: "PATCH",
+        headers: { ...manageOnlyHeaders, "content-type": "application/json" },
+        body: JSON.stringify({ targetSessionId: null }),
+      },
+    );
+    expect(noopClear.status).toBe(200);
+
+    const mcpDeps = {
+      settings: testSettings({ databaseUrl: services.databaseUrl }),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+      objectStorage: null,
+      githubStateSecret: "test-state-secret",
+      documentIndexer: { indexDocument: async () => undefined },
+      getDocumentServices: () => {
+        throw new Error("document services are not used by target redaction MCP tests");
+      },
+      resumeBoxById: fakeResumeBoxById,
+    };
+    const limitedGrant = {
+      ...owner.workspaceGrants[0]!,
+      permissions: [
+        "workspace:read",
+        "scheduled_tasks:manage",
+        "scheduled_tasks:run",
+      ] as Permission[],
+    };
+    const limitedMcp = buildOpenGeniMcpServer(mcpDeps, limitedGrant);
+    const listed = await callMcpTool<{ tasks: Array<{ targetSessionId: string | null }> }>(
+      limitedMcp,
+      "scheduled_tasks_list",
+      {},
+    );
+    expect(listed.tasks.find((candidate) => candidate.targetSessionId === null)).toBeTruthy();
+    const mcpTask = await callMcpTool<{ targetSessionId: string | null }>(
+      limitedMcp,
+      "scheduled_tasks_get",
+      { id: task.id },
+    );
+    expect(mcpTask.targetSessionId).toBeNull();
+    await expect(
+      callMcpTool(limitedMcp, "scheduled_tasks_update", {
+        id: task.id,
+        targetSessionId: null,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    const mcpRuns = await callMcpTool<{ runs: Array<{ sessionId: string | null }> }>(
+      limitedMcp,
+      "scheduled_task_runs_list",
+      { taskId: task.id },
+    );
+    expect(mcpRuns.runs.every((run) => run.sessionId === null)).toBe(true);
   });
 
   test("a retried manual trigger (same triggerId) charges once and starts one run", async () => {

@@ -1,8 +1,8 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-07-14  
-**Project:** OpenGeni  
-**Language:** TypeScript  
+**Date:** 2026-07-14
+**Project:** OpenGeni
+**Language:** TypeScript
 **Manifests:** `package.json`, `packages/runtime/package.json`,
 `packages/testing/package.json`, `apps/worker/package.json`
 
