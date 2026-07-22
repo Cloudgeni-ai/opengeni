@@ -7,6 +7,7 @@ import {
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
   type AccessGrant,
+  type CreateSessionResponse,
   type GoalSpec,
   type Permission,
   type ReasoningEffort,
@@ -42,6 +43,7 @@ import {
   getSessionTurn,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
+  listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
   submitHumanPromptInTransaction,
@@ -487,7 +489,7 @@ export async function createAndStartSession(input: {
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
-}) {
+}): Promise<CreateSessionResponse> {
   const sessionMetadata = {
     ...input.metadata,
     model: input.model,
@@ -602,7 +604,7 @@ async function finishStartSession(
     } | null;
   },
   session: Session,
-): Promise<Session> {
+): Promise<CreateSessionResponse> {
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
   // machine. swapActiveSandbox does
@@ -669,7 +671,12 @@ async function finishStartSession(
       wakeRevision: started.workflowWakeRevision,
     });
   }
-  return await requireSession(input.db, session.workspaceId, session.id);
+  const persisted = await requireSession(input.db, session.workspaceId, session.id);
+  const initialTurnId =
+    started.turn?.id ??
+    (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
+    null;
+  return { ...persisted, initialTurnId };
 }
 
 export function workflowIdForSession(sessionId: string): string {
@@ -1296,7 +1303,7 @@ export async function createSessionForRequest(
     model,
   });
   const creationInitiator = creationInitiatorForGrant(grant);
-  let session: Session;
+  let session: CreateSessionResponse;
   try {
     session = await createAndStartSession({
       ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),

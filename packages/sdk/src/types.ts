@@ -471,6 +471,11 @@ export type Session = {
   updatedAt: string;
 };
 
+/** Additive receipt returned by POST /sessions. */
+export type CreateSessionResponse = Session & {
+  initialTurnId: string | null;
+};
+
 export type SessionSummary = Session;
 
 /** Canonical session-list page; pinned rows are excluded from ordinary pages. */

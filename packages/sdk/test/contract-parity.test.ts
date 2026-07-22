@@ -8,6 +8,7 @@ import {
   ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  CreateSessionResponse as ContractCreateSessionResponse,
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
   KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
@@ -78,6 +79,7 @@ import type {
   ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
+  CreateSessionResponse,
   ListWorkspaceMembersResponse,
   MachineState,
   MachineView,
@@ -168,6 +170,9 @@ describe("SDK / contracts parity", () => {
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
     // Server -> client shapes: anything the contracts produce, the SDK accepts.
     const acceptSession = (value: z.infer<typeof ContractSessionSchema>): Session => value;
+    const acceptCreateResponse = (
+      value: z.infer<typeof ContractCreateSessionResponse>,
+    ): CreateSessionResponse => value;
     const acceptEvent = (value: z.infer<typeof ContractSessionEventSchema>): SessionEvent => value;
     const acceptHumanInputRequest = (
       value: z.infer<typeof ContractSessionHumanInputRequest>,
@@ -202,6 +207,7 @@ describe("SDK / contracts parity", () => {
     };
     const checks = [
       acceptSession,
+      acceptCreateResponse,
       acceptEvent,
       acceptHumanInputRequest,
       acceptTurn,

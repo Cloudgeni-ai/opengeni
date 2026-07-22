@@ -103,7 +103,12 @@ describe("OpenGeniClient", () => {
   });
 
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
-    const session = { id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" };
+    const session = {
+      id: SESSION_ID,
+      workspaceId: WORKSPACE_ID,
+      status: "queued",
+      initialTurnId: "00000000-0000-4000-8000-000000000099",
+    };
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
     const created = await client.createSession(WORKSPACE_ID, {
       initialMessage: "hello",

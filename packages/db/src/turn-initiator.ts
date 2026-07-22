@@ -20,6 +20,19 @@ export type FrozenTurnInitiator = {
 
 const MAX_AGENT_PROVENANCE_HOPS = 32;
 
+/**
+ * Bound agent provenance without discarding its causal authority. Once the
+ * chain exceeds the cap, retain the first hop and the newest hops in order;
+ * consumers can still identify the root attempt while recent diagnostics stay
+ * useful. The omitted middle is signalled separately by `viaTruncated`.
+ */
+export function clipAgentProvenanceHops(
+  hops: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  if (hops.length <= MAX_AGENT_PROVENANCE_HOPS) return hops;
+  return [hops[0]!, ...hops.slice(-(MAX_AGENT_PROVENANCE_HOPS - 1))];
+}
+
 export function initiatorContextForStorage(
   initiator: TurnInitiator,
   context: TurnInitiatorContext = {},
@@ -130,7 +143,7 @@ export async function frozenInitiatorForCommandActor(
       executionGeneration: actor.executionGeneration,
     },
   ];
-  const clipped = hops.slice(-MAX_AGENT_PROVENANCE_HOPS);
+  const clipped = clipAgentProvenanceHops(hops);
   return {
     initiator: initiatorFromStorage(turn.initiatorKind, turn.initiatorSubjectId, storedContext),
     context: {

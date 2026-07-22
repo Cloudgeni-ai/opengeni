@@ -4225,6 +4225,16 @@ export const Session = z.object({
 });
 export type Session = z.infer<typeof Session>;
 
+/**
+ * Additive receipt returned only by session creation. `activeTurnId` remains an
+ * execution pointer and is correctly null while the first turn is queued;
+ * embedders use this immutable identity to correlate their preallocated run.
+ */
+export const CreateSessionResponse = Session.extend({
+  initialTurnId: z.string().uuid().nullable(),
+});
+export type CreateSessionResponse = z.infer<typeof CreateSessionResponse>;
+
 export type SessionSummary = Session;
 
 /**

@@ -46,6 +46,7 @@ import type {
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
+  CreateSessionResponse,
   CreateVariableSetRequest,
   CreateRigRequest,
   CreateWorkspaceRequest,
@@ -241,8 +242,11 @@ export class OpenGeniClient {
 
   // --- Session lifecycle ---------------------------------------------------
 
-  async createSession(workspaceId: string, request: CreateSessionRequest): Promise<Session> {
-    return await this.requestJson<Session>(
+  async createSession(
+    workspaceId: string,
+    request: CreateSessionRequest,
+  ): Promise<CreateSessionResponse> {
+    return await this.requestJson<CreateSessionResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions`,
       request,

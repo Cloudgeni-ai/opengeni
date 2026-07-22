@@ -122,9 +122,13 @@ describe("delegated service initiator API", () => {
       },
     );
     expect(createdResponse.status).toBe(202);
-    const created = (await createdResponse.json()) as { id: string };
+    const created = (await createdResponse.json()) as {
+      id: string;
+      initialTurnId: string | null;
+    };
     const storedSession = await getSession(client.db, grant.workspaceId!, created.id);
     const [initialTurn] = await listSessionTurns(client.db, grant.workspaceId!, created.id);
+    expect(created.initialTurnId).toBe(initialTurn?.id);
     expect(storedSession?.createdBy).toEqual(serviceInitiator);
     expect(initialTurn?.initiator).toEqual(serviceInitiator);
     expect(initialTurn?.initiatorContext).toEqual({

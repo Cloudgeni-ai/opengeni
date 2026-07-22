@@ -164,6 +164,11 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     // Singleton group: sandbox_group_id == the new session's own id.
     expect(session.sandboxGroupId).toBe(session.id);
     expect(session.parentSessionId).toBeNull();
+    expect(session.initialTurnId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    // Queued work is not yet the session's active execution pointer.
+    expect(session.activeTurnId).toBeNull();
   }, 60_000);
 
   test("from-inside-a-session (parent claim) ⇒ default 'shared' (joins the creator's group)", async () => {
