@@ -364,6 +364,57 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(child.sandboxGroupId).toBe(child.id);
   }, 60_000);
 
+  test("explicit child execution-context fields override independently", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      {
+        ...grant(accountId, workspaceId),
+        permissions: ["sessions:create", "sessions:read", "mcp_servers:attach"],
+      },
+      workspaceId,
+      {
+        initialMessage: "manager",
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://dev.azure.com/acme/platform/_git/service.git",
+            ref: "main",
+            provider: "azure_devops",
+            credentialBindingId: "azure-primary",
+          },
+        ],
+        mcpServers: [{ id: "provider-azure", url: "https://mcp.example.test/azure" }],
+        tools: [{ kind: "mcp", id: "provider-azure" }],
+      },
+    );
+
+    const withoutRepositories = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "no repositories", resources: [] },
+    );
+    expect(withoutRepositories.resources).toEqual([]);
+    expect(withoutRepositories.mcpServers).toEqual(parent.mcpServers);
+    expect(withoutRepositories.tools).toEqual(parent.tools);
+
+    const withoutSelectedTools = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "no selected provider tools", tools: [] },
+    );
+    expect(withoutSelectedTools.resources).toEqual(parent.resources);
+    expect(withoutSelectedTools.mcpServers).toEqual(parent.mcpServers);
+    expect(withoutSelectedTools.tools).not.toContainEqual({
+      kind: "mcp",
+      id: "provider-azure",
+    });
+  }, 60_000);
+
   test("a child still needs mcp_servers:attach to replace inheritance with a new endpoint", async () => {
     if (!available) return;
     const { accountId, workspaceId } = await freshWorkspace();
