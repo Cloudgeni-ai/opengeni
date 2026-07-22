@@ -63,15 +63,13 @@ export {
   type HostExportDrainResult,
   type HostExportPump,
   type HostExportPumpOptions,
-} from "./host-export-pump";
-export type {
-  HostEventExport,
-  HostEventExportBatch,
-  HostEventSink,
-  HostUsageExport,
-  HostUsageExportBatch,
-  HostUsageSink,
-} from "@opengeni/contracts";
+  type HostEventExport,
+  type HostEventExportBatch,
+  type HostEventSink,
+  type HostUsageExport,
+  type HostUsageExportBatch,
+  type HostUsageSink,
+} from "./host-export";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
 // create() is idempotent across every worker in the pool: the first worker to

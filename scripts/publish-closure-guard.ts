@@ -214,8 +214,49 @@ function ensureBuilt(pkgDir: string): void {
   }
 }
 
-for (const { dir: pkgDir } of publishable) {
+function compiledTarget(sourceTarget: string, kind: "runtime" | "types"): string | null {
+  if (!sourceTarget.startsWith("./src/") || !/\.tsx?$/.test(sourceTarget)) {
+    return null;
+  }
+  const stem = sourceTarget.slice("./src/".length).replace(/\.tsx?$/, "");
+  return `./dist/${stem}${kind === "types" ? ".d.ts" : ".js"}`;
+}
+
+function assertBuiltExportTargets(pkg: WorkspacePackage): void {
+  const exports = (pkg.packageJson as PackageJson & { exports?: Record<string, unknown> }).exports;
+  if (!exports || typeof exports !== "object") return;
+
+  for (const [subpath, entry] of Object.entries(exports)) {
+    const targets: Array<{ kind: "runtime" | "types"; source: string }> = [];
+    if (typeof entry === "string") {
+      targets.push({ kind: "runtime", source: entry });
+    } else if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      const conditions = entry as { types?: unknown; import?: unknown; default?: unknown };
+      if (typeof conditions.types === "string") {
+        targets.push({ kind: "types", source: conditions.types });
+      }
+      const runtime = conditions.import ?? conditions.default;
+      if (typeof runtime === "string") {
+        targets.push({ kind: "runtime", source: runtime });
+      }
+    }
+
+    for (const target of targets) {
+      const compiled = compiledTarget(target.source, target.kind);
+      if (!compiled) continue;
+      if (!existsSync(join(repoRoot, pkg.dir, compiled))) {
+        failures.push(
+          `${pkg.name} export ${subpath} compiles from ${target.source} but is missing ${compiled}.`,
+        );
+      }
+    }
+  }
+}
+
+for (const pkg of publishable) {
+  const pkgDir = pkg.dir;
   ensureBuilt(pkgDir);
+  assertBuiltExportTargets(pkg);
 }
 
 const workerWorkflowBundlePath = join(repoRoot, "apps/worker/dist/workflow-bundle.js");
