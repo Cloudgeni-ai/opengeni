@@ -20,6 +20,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./host-export": {
+      "types": "./src/host-export.ts",
+      "default": "./src/host-export.ts"
     }
   },
   "publishConfig": {

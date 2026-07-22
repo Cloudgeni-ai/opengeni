@@ -15,7 +15,7 @@ import { defineConfig } from "tsup";
 // + createOpenGeniWorker + the signaler/reaper helpers) type-checks and compiles
 // cleanly for the release package.
 export default defineConfig({
-  entry: ["src/index.ts"],
+  entry: ["src/index.ts", "src/host-export.ts"],
   format: ["esm"],
   target: "es2022",
   dts: true,
