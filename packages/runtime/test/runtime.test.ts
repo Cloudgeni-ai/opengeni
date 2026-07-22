@@ -21,6 +21,7 @@ import {
   azureCliLoginCommand,
   azureOpenAIDefaultQuery,
   buildOpenGeniAgent,
+  HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   composeAgentInstructions,
   coreInstructions,
@@ -50,6 +51,8 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  serializeApprovals,
+  serializeHumanInputRequests,
   refreshToolspaceTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
@@ -99,6 +102,135 @@ const CODEX_APPS_ENTRY = (url: string) => ({
   name: "codex_apps",
   url,
   cacheToolsList: false,
+});
+
+describe("structured human-input runtime boundary", () => {
+  const interruption = {
+    name: HUMAN_INPUT_TOOL_NAME,
+    rawItem: {
+      callId: "human-call-1",
+      name: HUMAN_INPUT_TOOL_NAME,
+      arguments: JSON.stringify({
+        questions: [
+          {
+            id: "choice",
+            kind: "single_select",
+            prompt: "Choose one",
+            options: [{ id: "a", label: "A" }],
+          },
+        ],
+        allowSkip: true,
+        expiresInSeconds: 60,
+      }),
+    },
+  };
+
+  test("partitions human requests out of ordinary approval payloads", () => {
+    const ordinary = {
+      name: "dangerous_tool",
+      rawItem: { callId: "approval-1", name: "dangerous_tool", arguments: "{}" },
+    };
+    expect(serializeApprovals([interruption, ordinary])).toEqual([
+      {
+        id: "approval-1",
+        name: "dangerous_tool",
+        arguments: "{}",
+        raw: ordinary,
+      },
+    ]);
+    expect(serializeHumanInputRequests([ordinary, interruption])).toEqual([
+      {
+        toolCallId: "human-call-1",
+        input: {
+          questions: [
+            {
+              id: "choice",
+              kind: "single_select",
+              prompt: "Choose one",
+              options: [{ id: "a", label: "A" }],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: true,
+          expiresInSeconds: 60,
+        },
+      },
+    ]);
+  });
+
+  test("the built-in tool always interrupts and only returns its injected durable response", async () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const unresolvedAgent = buildOpenGeniAgent(settings, []);
+    const unresolvedTool = unresolvedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    expect(unresolvedTool?.type).toBe("function");
+    if (!unresolvedTool || unresolvedTool.type !== "function") throw new Error("tool missing");
+    expect(unresolvedTool.needsApproval).toBeDefined();
+    await expect(
+      unresolvedTool.invoke(
+        new RunContext(),
+        JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "human-call-1",
+            name: HUMAN_INPUT_TOOL_NAME,
+            arguments: "{}",
+          },
+        },
+      ),
+    ).rejects.toThrow(/without a durable response/i);
+
+    const resumedAgent = buildOpenGeniAgent(settings, [], {
+      humanInputResponse: {
+        requestId: "00000000-0000-4000-8000-000000000001",
+        toolCallId: "human-call-1",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "q", values: ["Because"] }],
+        },
+      },
+    });
+    const resumedTool = resumedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    if (!resumedTool || resumedTool.type !== "function") throw new Error("tool missing");
+    expect(
+      JSON.parse(
+        String(
+          await resumedTool.invoke(
+            new RunContext(),
+            JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+            {
+              toolCall: {
+                type: "function_call",
+                callId: "human-call-1",
+                name: HUMAN_INPUT_TOOL_NAME,
+                arguments: "{}",
+              },
+            },
+          ),
+        ),
+      ),
+    ).toEqual({
+      requestId: "00000000-0000-4000-8000-000000000001",
+      outcome: "answered",
+      answers: [{ questionId: "q", values: ["Because"] }],
+    });
+  });
+
+  test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          ...interruption,
+          rawItem: { ...interruption.rawItem, arguments: "not-json" },
+        },
+      ]),
+    ).toThrow(/invalid JSON/i);
+  });
 });
 
 describe("runtime event normalization", () => {

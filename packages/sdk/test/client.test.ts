@@ -260,6 +260,84 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("lists, reads, and settles structured human-input requests", async () => {
+    const request = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      turnId: "44444444-4444-4444-8444-444444444444",
+      turnGeneration: 1,
+      creationAttemptId: "55555555-5555-4555-8555-555555555555",
+      toolCallId: "human-call-1",
+      status: "pending" as const,
+      questions: [
+        {
+          id: "choice",
+          kind: "single_select" as const,
+          prompt: "Choose",
+          options: [{ id: "staging", label: "Staging" }],
+          required: true,
+          allowOther: false,
+        },
+      ],
+      allowSkip: false,
+      response: null,
+      respondedBy: null,
+      respondedAt: null,
+      expiresAt: null,
+      createdAt: "2026-07-21T00:00:00.000Z",
+      updatedAt: "2026-07-21T00:00:00.000Z",
+    };
+    let call = 0;
+    const accepted = makeEvent(6, "user.humanInputResponse", {
+      requestId: request.id,
+      response: { outcome: "answered", answers: [{ questionId: "choice", values: ["staging"] }] },
+    });
+    const { client, requests } = makeClient(() => {
+      call += 1;
+      if (call === 1) return jsonResponse({ requests: [request] });
+      if (call === 2) return jsonResponse(request);
+      return jsonResponse(accepted, 202);
+    });
+
+    expect(
+      await client.listHumanInputRequests(WORKSPACE_ID, SESSION_ID, { status: "pending" }),
+    ).toEqual([request]);
+    expect(await client.getHumanInputRequest(WORKSPACE_ID, SESSION_ID, request.id)).toEqual(
+      request,
+    );
+    expect(
+      await client.submitHumanInputResponse(
+        WORKSPACE_ID,
+        SESSION_ID,
+        request.id,
+        {
+          outcome: "answered",
+          answers: [{ questionId: "choice", values: ["staging"] }],
+        },
+        { clientEventId: "human-response-1" },
+      ),
+    ).toEqual(accepted);
+
+    expect(requests[0]!.url).toEndWith(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/human-input-requests?status=pending`,
+    );
+    expect(requests[1]!.url).toEndWith(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/human-input-requests/${request.id}`,
+    );
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
+      type: "user.humanInputResponse",
+      clientEventId: "human-response-1",
+      payload: {
+        requestId: request.id,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "choice", values: ["staging"] }],
+        },
+      },
+    });
+  });
+
   test("clearSessionContext posts an explicit confirm to the context/clear route (204, no body)", async () => {
     const { client, requests } = makeClient(() => new Response(null, { status: 204 }));
     await client.clearSessionContext(WORKSPACE_ID, SESSION_ID);

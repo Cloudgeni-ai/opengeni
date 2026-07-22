@@ -222,6 +222,44 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     sequence: input.lastSequence,
     now,
   });
+  const cancelledHumanInputs = await db
+    .update(schema.sessionHumanInputRequests)
+    .set({
+      status: "cancelled",
+      response: { outcome: "cancelled" },
+      respondedBy:
+        input.actor.type === "agent_attempt"
+          ? `attempt:${input.actor.attemptId}`
+          : input.actor.subjectId,
+      respondedAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+        eq(schema.sessionHumanInputRequests.turnId, current.id),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+      ),
+    )
+    .returning({ id: schema.sessionHumanInputRequests.id });
+  let lastSequence = closedTools.sequence;
+  if (cancelledHumanInputs.length > 0) {
+    await db.insert(schema.sessionEvents).values(
+      cancelledHumanInputs.map((request) => ({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sequence: ++lastSequence,
+        type: "user.humanInputResponse",
+        turnId: current.id,
+        turnGeneration: current.executionGeneration,
+        turnAssociation: "current",
+        payload: { requestId: request.id, response: { outcome: "cancelled" } },
+        occurredAt: now,
+      })),
+    );
+  }
   await db
     .update(schema.sessionTurns)
     .set({
@@ -264,7 +302,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     interruptionCount: 0,
     replacedTurn: current,
     liveCurrentTurnId: null,
-    lastSequence: closedTools.sequence,
+    lastSequence,
   };
 }
 
