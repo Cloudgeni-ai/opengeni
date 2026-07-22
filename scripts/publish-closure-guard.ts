@@ -18,6 +18,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { Script } from "node:vm";
 import {
   PUBLISHED_DEP_FIELDS,
   changesetIgnoreSet,
@@ -215,6 +216,28 @@ function ensureBuilt(pkgDir: string): void {
 
 for (const { dir: pkgDir } of publishable) {
   ensureBuilt(pkgDir);
+}
+
+const workerWorkflowBundlePath = join(repoRoot, "apps/worker/dist/workflow-bundle.js");
+if (!existsSync(workerWorkflowBundlePath)) {
+  failures.push(
+    "@opengeni/worker-bundle is missing dist/workflow-bundle.js; installed hosts cannot load workflows",
+  );
+} else {
+  const code = readFileSync(workerWorkflowBundlePath, "utf8");
+  if (Buffer.byteLength(code, "utf8") < 100_000) {
+    failures.push("@opengeni/worker-bundle workflow artifact is unexpectedly small");
+  } else {
+    try {
+      new Script(code, { filename: workerWorkflowBundlePath }).createCachedData();
+    } catch (error) {
+      failures.push(
+        `@opengeni/worker-bundle workflow artifact is not valid JavaScript: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
 }
 
 for (const pkgDir of ["packages/sdk", "packages/react"]) {

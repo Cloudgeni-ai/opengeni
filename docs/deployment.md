@@ -600,7 +600,7 @@ OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not rou
 Service endpoints:
 
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /readyz` checks Postgres, NATS, and Temporal with bounded timeouts.
-- Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness checks the same dependencies.
+- Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
 Useful settings:

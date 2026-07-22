@@ -1,7 +1,7 @@
 {
   "name": "@opengeni/worker-bundle",
   "version": "0.7.7",
-  "description": "OpenGeni worker entry: runOpenGeniWorker/createOpenGeniWorker(deps) + the un-bundled Temporal workflow source tree. An engine-distribution surface — its runtime closure includes engine-internal packages and the workflow bundle ships as on-disk TS source.",
+  "description": "OpenGeni worker entry and reusable embedded lifecycle, shipped with a release-coherent pre-bundled Temporal workflow artifact.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -31,7 +31,7 @@
     "dev:watch": "bun --watch src/index.ts",
     "start": "bun src/index.ts",
     "typecheck": "tsgo --noEmit",
-    "build": "tsup",
+    "build": "tsup && bun scripts/build-workflow-bundle.ts",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
