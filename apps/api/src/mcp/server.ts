@@ -1,5 +1,6 @@
 import {
   CreateScheduledTaskRequest,
+  defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
   SessionEventReadDirection,
@@ -2040,7 +2041,7 @@ function repositoryWithScheduledTaskResource(
       kind: "repository",
       uri,
       ref: repository.defaultBranch,
-      mountPath: repositoryMountPath(uri),
+      mountPath: defaultRepositoryMountPath(uri),
       ...(repository.private
         ? {
             githubInstallationId: repository.installationId,
@@ -2054,12 +2055,7 @@ function repositoryWithScheduledTaskResource(
 function normalizedRepositoryUri(value: string): string {
   const url = new URL(value);
   const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-  return `https://${url.hostname.toLowerCase()}/${path}.git`;
-}
-
-function repositoryMountPath(uri: string): string {
-  const url = new URL(uri);
-  return `repos/${url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`;
+  return `https://${url.host.toLowerCase()}/${path}.git`;
 }
 
 function boundedMcpLimit(limit: number | undefined): number {

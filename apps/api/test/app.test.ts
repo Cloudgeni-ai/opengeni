@@ -67,7 +67,7 @@ describe("API helpers", () => {
       uri: "https://github.com/OpenAI/example.git",
       ref: "main",
       subpath: "infra",
-      mountPath: "repos/OpenAI/example",
+      mountPath: "repos/github.com/OpenAI/example",
     });
   });
 
@@ -81,7 +81,53 @@ describe("API helpers", () => {
           provider: "gitlab",
         },
       ])[0],
-    ).toMatchObject({ uri: "https://git.example.com:8443/acme/repo.git" });
+    ).toMatchObject({
+      uri: "https://git.example.com:8443/acme/repo.git",
+      mountPath: "repos/git.example.com%3A8443/acme/repo",
+    });
+  });
+
+  test("keeps same-name repositories on different providers collision-free", () => {
+    expect(
+      normalizeResources([
+        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/app.git",
+          ref: "main",
+          provider: "gitlab",
+        },
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/project/_git/app",
+          ref: "main",
+          provider: "azure_devops",
+        },
+      ]).map((resource) => resource.mountPath),
+    ).toEqual([
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+      "repos/dev.azure.com/acme/project/_git/app",
+    ]);
+  });
+
+  test("rejects explicit mount collisions under portable case folding", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          mountPath: "repos/Shared/App",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/two.git",
+          ref: "main",
+          mountPath: "repos/shared/app",
+        },
+      ]),
+    ).toThrow("duplicate resource mount path");
   });
 
   test("preserves provider-neutral repository credential metadata while normalizing", () => {
@@ -107,7 +153,7 @@ describe("API helpers", () => {
       connectionId: "conn-1",
       credentialBindingId: "host-binding-1",
       access: "read",
-      mountPath: "repos/OpenAI/example",
+      mountPath: "repos/gitlab.com/OpenAI/example",
     });
   });
 

@@ -1460,7 +1460,7 @@ describe("worker activities integration", () => {
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls).toHaveLength(1);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
-      "clone_repository '/workspace/repos/Futhark-AS/aifilesearch'",
+      "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch'",
     );
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',

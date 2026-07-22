@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
+  assertUniqueResourceMountPaths,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -34,6 +35,10 @@ import {
   isClearedRunStateBlob,
   ToolAuthNeededPayload,
   CredentialAuthNeededPayload,
+  defaultRepositoryMountPath,
+  mergeResourceRefs,
+  normalizeResourceMountPath,
+  resourceMountPathCollisionKey,
 } from "../src";
 
 describe("contracts", () => {
@@ -96,6 +101,97 @@ describe("contracts", () => {
     expect(GitCredentialBindingId.safeParse("x".repeat(256)).success).toBe(true);
     expect(GitCredentialBindingId.safeParse("x".repeat(257)).success).toBe(false);
     expect(GitCredentialBindingId.safeParse("").success).toBe(false);
+  });
+
+  test("derives portable host-aware repository mount paths", () => {
+    expect(defaultRepositoryMountPath("https://github.com/acme/app.git")).toBe(
+      "repos/github.com/acme/app",
+    );
+    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git")).toBe(
+      "repos/gitlab.com/acme/app",
+    );
+    expect(defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app")).toBe(
+      "repos/dev.azure.com/acme/project/_git/app",
+    );
+    expect(defaultRepositoryMountPath("https://git.example.com:8443/acme/app.git")).toBe(
+      "repos/git.example.com%3A8443/acme/app",
+    );
+    expect(() => defaultRepositoryMountPath("ssh://git.example.com/acme/app.git")).toThrow(
+      "invalid repository URI",
+    );
+    expect(normalizeResourceMountPath("repos\\github.com\\acme\\app")).toBe(
+      "repos/github.com/acme/app",
+    );
+    expect(resourceMountPathCollisionKey("repos/GitHub.com/Acme/App")).toBe(
+      "repos/github.com/acme/app",
+    );
+    expect(resourceMountPathCollisionKey("repos/example.com/acme/caf\u00e9")).toBe(
+      resourceMountPathCollisionKey("repos/example.com/acme/cafe\u0301"),
+    );
+    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git")).toThrow(
+      "invalid resource mount path",
+    );
+    expect(normalizeResourceMountPath("repos/github.com/acme/aux-repository")).toBe(
+      "repos/github.com/acme/aux-repository",
+    );
+  });
+
+  test("rejects non-portable and traversal mount paths", () => {
+    for (const path of [
+      "/repos/acme/app",
+      "C:\\repos\\acme\\app",
+      "repos/../secrets",
+      "repos//acme/app",
+      "repos/./acme",
+      "repos/acme/",
+      "repos/acme/NUL",
+      "repos/acme/trailing.",
+      "repos/acme/a:b",
+    ]) {
+      expect(() => normalizeResourceMountPath(path), path).toThrow("invalid resource mount path");
+    }
+  });
+
+  test("resource merges compare effective mount paths case-insensitively", () => {
+    const github = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    const gitlab = {
+      kind: "repository" as const,
+      uri: "https://gitlab.com/acme/app.git",
+      ref: "main",
+    };
+    expect(mergeResourceRefs([github], [gitlab], { rejectConflicts: true })).toHaveLength(2);
+    expect(() =>
+      mergeResourceRefs(
+        [{ ...github, mountPath: "repos/shared/App" }],
+        [{ ...gitlab, mountPath: "repos/SHARED/app" }],
+        { rejectConflicts: true },
+      ),
+    ).toThrow("resource mount path is already attached");
+    expect(() =>
+      mergeResourceRefs(
+        [
+          { ...github, mountPath: "repos/shared/App" },
+          { ...gitlab, mountPath: "repos/SHARED/app" },
+        ],
+        [],
+        { rejectConflicts: true },
+      ),
+    ).toThrow("resource mount path is already attached");
+  });
+
+  test("runtime uniqueness rejects repeated resources before materialization", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    expect(() => assertUniqueResourceMountPaths([resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
   });
 
   test("derives one canonical binding id across legacy provider-id shapes", () => {

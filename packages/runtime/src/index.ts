@@ -13,10 +13,14 @@ import {
 } from "@opengeni/config";
 import {
   CAPABILITY_DESCRIPTORS,
+  assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
   isClearedRunStateBlob,
+  normalizeRepositorySubpath,
+  normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
+  resourceMountPath,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
@@ -4736,6 +4740,7 @@ export function buildManifest(
   environment = collectSandboxEnvironment(settings),
   fileResourceDownloads: SandboxFileDownload[] = [],
 ): Manifest {
+  assertUniqueResourceMountPaths(resources);
   const entries: Record<string, any> = {};
   const downloadsByFileId = new Map(
     normalizeSandboxFileDownloads(fileResourceDownloads).map((download) => [
@@ -4746,9 +4751,9 @@ export function buildManifest(
   for (const resource of resources) {
     if (resource.kind === "repository") {
       const url = new URL(resource.uri);
-      const host = url.hostname.toLowerCase();
+      const host = url.host.toLowerCase();
       const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-      const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
+      const mountPath = resourceMountPath(resource);
       if (repositoryUsesSandboxClone(settings, resource)) {
         entries[mountPath] = dir();
         continue;
@@ -4757,12 +4762,12 @@ export function buildManifest(
         host,
         repo,
         ref: resource.ref,
-        ...(resource.subpath ? { subpath: normalizeManifestPath(resource.subpath) } : {}),
+        ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
       });
       continue;
     }
     if (resource.kind === "file") {
-      const mountPath = normalizeManifestPath(resource.mountPath ?? `files/${resource.fileId}`);
+      const mountPath = resourceMountPath(resource);
       const download = downloadsByFileId.get(resource.fileId);
       entries[mountPath] = download
         ? sandboxDownloadDirectory(download, mountPath)
@@ -4922,11 +4927,7 @@ function parseAzureConnectionString(value: string): Record<string, string> {
 }
 
 function normalizeManifestPath(path: string): string {
-  const normalized = path.replace(/^\/+|\/+$/g, "");
-  if (!normalized || normalized.includes("..")) {
-    throw new Error(`Invalid sandbox resource path: ${path}`);
-  }
-  return normalized;
+  return normalizeResourceMountPath(path);
 }
 
 function normalizeSandboxFileDownloads(downloads: SandboxFileDownload[]): SandboxFileDownload[] {
@@ -5853,6 +5854,7 @@ export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
   bindings: GitCredentialBindingSeed[] = [],
 ): string {
+  assertUniqueResourceMountPaths(resources);
   const commands = [
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
@@ -5945,16 +5947,14 @@ export function repositoryCloneCommand(
     "}",
   ];
   for (const resource of resources) {
-    const url = new URL(resource.uri);
-    const repo = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-    const mountPath = normalizeManifestPath(resource.mountPath ?? `repos/${repo}`);
+    const mountPath = resourceMountPath(resource);
     commands.push(
       [
         "clone_repository",
         shellQuote(posixPath.join("/workspace", mountPath)),
         shellQuote(resource.uri),
         shellQuote(resource.ref),
-        shellQuote(resource.subpath ? normalizeManifestPath(resource.subpath) : ""),
+        shellQuote(resource.subpath ? normalizeRepositorySubpath(resource.subpath) : ""),
       ].join(" "),
     );
   }

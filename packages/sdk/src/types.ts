@@ -229,6 +229,12 @@ export type RepositoryResourceRef = {
   kind: "repository";
   uri: string;
   ref: string;
+  /**
+   * Optional workspace-relative override. When omitted, OpenGeni persists
+   * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
+   * providers do not collide. Explicit paths are portable, traversal-free, and
+   * collision-checked case-insensitively before sandbox execution.
+   */
   mountPath?: string | undefined;
   subpath?: string | undefined;
   provider?: GitCredentialProvider | undefined;
@@ -245,6 +251,7 @@ export type RepositoryResourceRef = {
 export type FileResourceRef = {
   kind: "file";
   fileId: string;
+  /** Optional workspace-relative override; defaults to `files/<file-id>`. */
   mountPath?: string | undefined;
 };
 
