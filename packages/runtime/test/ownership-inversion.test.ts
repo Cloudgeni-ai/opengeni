@@ -160,6 +160,40 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     await clearRunCredentials(liveSession, sessionId);
   });
 
+  test("owned setup registers Toolspace renewal only after the initial token file is seeded", async () => {
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      toolspaceEnabled: true,
+      delegationSecret: "toolspace-secret",
+    });
+    const client = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (manifest?: unknown) => Promise<LiveLocalSession>;
+    };
+    const liveSession = await client.create({});
+    liveSessions.push(liveSession);
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
+      toolspaceTokenSeed: "ogd_initial_owned",
+    });
+    let observedToken: string | null = null;
+
+    const result = await runAgentStream(agent, "answer", settings, {
+      ownedSandbox: { client, session: liveSession },
+      onToolspaceTokenSessionReady: async (session) => {
+        const bytes = await session.readFile?.({
+          path: "/workspace/.opengeni/toolspace-token",
+        });
+        observedToken = bytes ? Buffer.from(bytes).toString() : null;
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    expect(observedToken).toBe("ogd_initial_owned");
+  });
+
   test("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
     const settings = localSettings();
     const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
@@ -239,6 +273,38 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     expect(credentialProof).toBe("legacy-host-secret");
     expect(manifestSnapshot).not.toContain("legacy-host-secret");
     expect(liveSession!.closed).toBe(true);
+  });
+
+  test("legacy SDK-owned creation registers Toolspace renewal after seeding", async () => {
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      toolspaceEnabled: true,
+      delegationSecret: "toolspace-secret",
+    });
+    const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (manifest?: unknown) => Promise<LiveLocalSession>;
+    };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
+      toolspaceTokenSeed: "ogd_initial_legacy",
+    });
+    let observedToken: string | null = null;
+
+    const result = await runAgentStream(agent, "answer", settings, {
+      sandboxClient: rawClient,
+      onToolspaceTokenSessionReady: async (session) => {
+        const bytes = await session.readFile?.({
+          path: "/workspace/.opengeni/toolspace-token",
+        });
+        observedToken = bytes ? Buffer.from(bytes).toString() : null;
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    expect(observedToken).toBe("ogd_initial_legacy");
   });
 
   test("CONTROL: an OWNED (sessionState-resumed) session IS reaped on a normal finish", async () => {

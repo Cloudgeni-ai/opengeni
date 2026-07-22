@@ -94,6 +94,7 @@ import {
   clearRunCredentialsForAttempt,
   withRunCredentialsSession,
   refreshGitCredentialBindingTokenFiles,
+  refreshToolspaceTokenFile,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -110,6 +111,7 @@ import {
   type GitCredentialTokenWriterSession,
   type NormalizedRunCredentialMaterial,
   type RunCredentialCommandSession,
+  type ToolspaceTokenWriterSession,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
@@ -171,6 +173,7 @@ import {
   gitCredentialAuthorityForTurn,
   gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
+  mintSandboxToolspaceToken,
   mintRunGitCredentials,
   mintRunGitCredentialBinding,
   sandboxEnvironmentForRun,
@@ -186,6 +189,11 @@ import {
   startRunCredentialRenewalLoop,
   type RunCredentialRenewalController,
 } from "./run-credential-renewal";
+import {
+  TOOLSPACE_TOKEN_EXPIRY_LEAD_MS,
+  startToolspaceTokenRenewalLoop,
+  type ToolspaceTokenRenewalController,
+} from "./toolspace-token-renewal";
 import {
   bindRunCredentialResolver,
   runCredentialAuthNeededPayloads,
@@ -1673,6 +1681,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     let runCredentialRenewal: RunCredentialRenewalController | null = null;
     let runCredentialRenewalClosed = false;
     let runCredentialSession: RunCredentialCommandSession | null = null;
+    // The delegated Toolspace bearer has a one-hour TTL. Renewal is attempt-
+    // owned and attaches only after the initial token file reached a real
+    // sandbox session; finalization drains an in-flight replacement.
+    let toolspaceTokenRenewal: ToolspaceTokenRenewalController | null = null;
+    let toolspaceTokenRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -3488,6 +3501,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
         gitCredentialBindings: sandboxGitCredentialBindings,
         toolspaceToken: sandboxToolspaceToken,
+        toolspaceTokenExpiresAt: sandboxToolspaceTokenExpiresAt,
       } = await waitForTurnOperation(
         sandboxEnvironmentForRun(
           runSettings,
@@ -3606,6 +3620,72 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           return;
         }
         gitCredentialRenewals = controllers;
+      };
+
+      const attachToolspaceTokenRenewal = async (
+        tokenSession: ToolspaceTokenWriterSession,
+        initialExpiresAt = sandboxToolspaceTokenExpiresAt,
+      ): Promise<void> => {
+        if (!sandboxToolspaceToken || !initialExpiresAt) return;
+        const previous = toolspaceTokenRenewal;
+        toolspaceTokenRenewal = null;
+        await previous?.stop();
+        if (toolspaceTokenRenewalClosed) return;
+
+        const mint = async () =>
+          await mintSandboxToolspaceToken(runSettings, connectionScope, input.sessionId, turn.id);
+        const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
+          const runAs = sandboxRunAs(runSettings);
+          await refreshToolspaceTokenFile(tokenSession, material.token, {
+            ...(runAs ? { runAs } : {}),
+            ...(toolCancellationFenceRef.current
+              ? {
+                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                    toolCancellationFenceRef.current,
+                  ),
+                }
+              : {}),
+          });
+        };
+        let renewalExpiresAt = initialExpiresAt;
+        if (renewalExpiresAt.getTime() <= Date.now() + TOOLSPACE_TOKEN_EXPIRY_LEAD_MS) {
+          const fresh = await mint();
+          if (!fresh) {
+            throw new Error("Toolspace token mint became unavailable during sandbox setup");
+          }
+          await write(fresh);
+          renewalExpiresAt = fresh.expiresAt;
+        }
+        const controller = startToolspaceTokenRenewalLoop({
+          initialExpiresAt: renewalExpiresAt,
+          mint,
+          write,
+          onSuccess: () => {
+            observability.incrementCounter({
+              name: "opengeni_toolspace_token_renewals_total",
+              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              labels: { outcome: "completed" },
+            });
+          },
+          onFailure: ({ retryDelayMs, errorClass }) => {
+            observability.incrementCounter({
+              name: "opengeni_toolspace_token_renewals_total",
+              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              labels: { outcome: "error" },
+            });
+            observability.warn("Sandbox Toolspace token renewal failed; retry scheduled", {
+              sessionId: input.sessionId,
+              turnId,
+              errorClass,
+              retryDelayMs,
+            });
+          },
+        });
+        if (toolspaceTokenRenewalClosed) {
+          await controller.stop();
+          return;
+        }
+        toolspaceTokenRenewal = controller;
       };
 
       const attachRunCredentialRenewal = async (
@@ -4173,6 +4253,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
+            const lazyToolspaceToken = sandboxToolspaceToken
+              ? await mintSandboxToolspaceToken(
+                  runSettings,
+                  connectionScope,
+                  input.sessionId,
+                  turn.id,
+                )
+              : undefined;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -4221,6 +4309,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(lazyGitCredentials?.bindings
                   ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
                   : {}),
+                ...(lazyToolspaceToken
+                  ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
+                  : {}),
                 ...(toolCancellationFenceRef.current
                   ? {
                       commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
@@ -4229,6 +4320,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     }
                   : {}),
               },
+            );
+            await attachToolspaceTokenRenewal(
+              provisioned.established.session as ToolspaceTokenWriterSession,
+              lazyToolspaceToken?.expiresAt,
             );
             await attachGitCredentialRenewal(
               provisioned.established.session as GitCredentialTokenWriterSession,
@@ -4645,6 +4740,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     tokenSession: GitCredentialTokenWriterSession,
                   ) => {
                     await attachGitCredentialRenewal(tokenSession, initialGitCredentials);
+                  },
+                }
+              : {}),
+            ...(sandboxToolspaceToken && sandboxToolspaceTokenExpiresAt && !lazyOwnedSandbox
+              ? {
+                  onToolspaceTokenSessionReady: async (
+                    tokenSession: ToolspaceTokenWriterSession,
+                  ) => {
+                    const renewalSession =
+                      activeSandboxBackend === "selfhosted"
+                        ? tokenSession
+                        : ((setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession);
+                    await attachToolspaceTokenRenewal(renewalSession);
                   },
                 }
               : {}),
@@ -6121,6 +6229,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // construction itself fails closed when a backend is present but no
           // controller was installed.
           physicalToolQuiescenceConfirmed = true;
+        }
+        // Toolspace renewal is attempt-owned. Stop it and drain a physical file
+        // replacement before any successor can be admitted.
+        toolspaceTokenRenewalClosed = true;
+        const toolspaceRenewalToStop =
+          toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
+        toolspaceTokenRenewal = null;
+        if (toolspaceRenewalToStop) {
+          await waitForTurnFinalizerStep(toolspaceRenewalToStop.stop(), finalizerSignal);
         }
         // Run credentials are attempt-owned sandbox state. Stop renewal, drain
         // its last physical write, and remove only this attempt's generations

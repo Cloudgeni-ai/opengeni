@@ -1157,6 +1157,7 @@ export type GitCredentialBindingSeed = {
   providerBindingCount?: number;
 };
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
+export type ToolspaceTokenWriterSession = SandboxSessionLike;
 
 export type BuildAgentOptions = {
   model?: Model;
@@ -3144,6 +3145,9 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
+  // OpenGeni-minted Toolspace token renewal registration. Called only after the
+  // initial token file reached the real sandbox session.
+  onToolspaceTokenSessionReady?: (session: ToolspaceTokenWriterSession) => Promise<void> | void;
   // Host-owned run material is seeded off-manifest before setup and every
   // agent-created process sources the active immutable generation. The worker
   // owns resolution/renewal/fencing; runtime owns sandbox transport.
@@ -3496,6 +3500,9 @@ export async function runAgentStream(
             }
           : {}),
       });
+      if (toolspaceTokenSeedForAgent(agent)) {
+        await overrides.onToolspaceTokenSessionReady?.(session as SandboxSessionLike);
+      }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
@@ -3530,6 +3537,9 @@ export async function runAgentStream(
         rigCredentialHooksForAgent(agent),
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
+      ...toolspaceTokenSessionRegistrationHooks(
+        ownedToolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+      ),
       ...sandboxRepositoryCloneHooksForAgent(agent),
       ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
     ];
@@ -3639,6 +3649,9 @@ export async function runAgentStream(
             rigCredentialHooksForAgent(agent),
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
+          ...toolspaceTokenSessionRegistrationHooks(
+            toolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+          ),
           ...sandboxRepositoryCloneHooksForAgent(agent),
           ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
         ],
@@ -4079,6 +4092,7 @@ export async function runOwnedSandboxSetup(
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
     gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
+    toolspaceTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
@@ -4103,7 +4117,8 @@ export async function runOwnedSandboxSetup(
   } satisfies GitTokenSeeds;
   const ownedGitCredentialBindings =
     opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
-  const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+  const ownedToolspaceTokenSeed =
+    opts.toolspaceTokenSeedOverride ?? toolspaceTokenSeedForAgent(agent);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedHooks = [
     // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -5209,6 +5224,22 @@ function gitCredentialSessionRegistrationHooks(
     : [];
 }
 
+function toolspaceTokenSessionRegistrationHooks(
+  callback: RunAgentStreamOptions["onToolspaceTokenSessionReady"],
+): SandboxLifecycleHook[] {
+  return callback
+    ? [
+        {
+          id: "toolspace-token-renewal-registration",
+          phase: "beforeAgentStart",
+          run: async (session) => {
+            await callback(session);
+          },
+        },
+      ]
+    : [];
+}
+
 function sandboxRepositoryCloneHooks(
   settings: Settings,
   resources: ResourceRef[],
@@ -5919,6 +5950,26 @@ export async function runToolspaceTokenSeedHook(
     context.commandRunner,
   );
   assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
+}
+
+export async function refreshToolspaceTokenFile(
+  session: ToolspaceTokenWriterSession,
+  token: string,
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+): Promise<void> {
+  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand()}`;
+  const result = await runSandboxLifecycleCommand(
+    session,
+    {
+      cmd: command,
+      workdir: "/workspace",
+      ...(options.runAs ? { runAs: options.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    },
+    options.commandRunner,
+  );
+  assertSandboxCommandSucceeded(result, "Toolspace token refresh");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
