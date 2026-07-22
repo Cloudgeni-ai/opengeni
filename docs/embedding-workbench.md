@@ -109,15 +109,36 @@ timeout and repository-count guard. If either guard trips or discovery fails,
 OpenGeni persists and announces an explicit degraded revision instead of an
 authoritative-looking empty capture; consumers keep live files authoritative.
 
+An embedder can expose only the surfaces that belong in its product. For
+example, this mounts review, file, and terminal capabilities without Desktop:
+
+```tsx
+<SandboxWorkspace
+  sessionId={sessionId}
+  events={events}
+  primary={<YourChatPane sessionId={sessionId} />}
+  surfaces={["changes", "files", "terminal"]}
+/>
+```
+
+This is a behavioral allowlist, not just tab filtering. A surface outside the
+list does not attach a stream or viewer, request its data, initiate a warm
+intent, become the source-driven default, or receive cross-surface navigation.
+Omit `surfaces` to retain the full standalone workbench. An empty list is valid
+when a host wants only its own `leadingTabs` or `trailingTabs`; in that mode the
+built-in machine-state chip is also omitted because no workbench capability is
+being observed.
+
 ### Props worth knowing
 
 | Prop | Purpose |
 | --- | --- |
 | `sessionId`, `events` | the session and its live event log (from `useSessionEvents`). |
 | `primary` | the pane shown beside the dock (your chat/timeline). |
+| `surfaces` | built-in surface allowlist: `"changes"`, `"files"`, `"terminal"`, `"desktop"`. Omit for all four. |
 | `onNotify` | host-routed `{ kind: "error" \| "info"; message }` — the package has no toast dependency, so you decide how errors surface. |
 | `leadingTabs` / `trailingTabs` | your own `WorkspaceTab[]` injected before / after the workbench tabs (this is how `apps/web` adds its Run and Debug tabs). |
-| `initialTab` | override the default landing tab. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
+| `initialTab` | override the default landing tab. A built-in tab excluded by `surfaces` is ignored. Omit it and the workbench decides **Changes when the session has changes, else Files** from the authoritative source: instant capture stats while cold/offline, live Git while warm. The choice latches before real content paints, so later edits never steal the current tab. |
 | `collapsed` / `onCollapsedChange` | drive the dock open/closed from your own toolbar. |
 
 The machine-state chip (live / waking… / offline — as of `<time>`) is rendered in
