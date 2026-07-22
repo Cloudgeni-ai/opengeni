@@ -296,7 +296,7 @@ Provision NATS and the relay with your own managed services or upstream charts, 
 
 ## GitHub App Setup
 
-The GitHub App integration is optional, but it is the recommended way to give agents scoped repository access. It lets the UI list installed repositories and lets the worker mint short-lived installation tokens only for repositories selected for a session. A GitHub installation can be linked to any number of OpenGeni workspaces: each workspace owns an independent repository allowlist and can unlink without uninstalling the App from GitHub or affecting another workspace.
+The GitHub App integration is optional, but it is the recommended way to give agents scoped repository access. It lets the UI list installed repositories and lets the worker mint short-lived installation tokens only for repositories selected for a session. Each workspace binding owns an independent repository allowlist and can be unlinked without uninstalling the App from GitHub.
 
 From the web app:
 
@@ -307,11 +307,9 @@ From the web app:
 5. Create the app in GitHub. The callback page prints `OPENGENI_GITHUB_APP_*` lines and includes a copy button.
 6. Copy those lines into `.env`.
 7. Restart the API and worker, or restart everything with `bun run dev`.
-8. Install the app on the repositories the agent should access.
-9. Return to **GitHub app settings**, choose **Link existing**, authorize with GitHub, and select the repositories this workspace may use. Only repositories where the authorizing GitHub user has administrator access are eligible.
-10. Refresh repositories in the picker and select repositories for the session.
+8. Keep the generated credentials available for a future authority-safe connection flow. App registration remains supported, but new workspace-installation binding is temporarily disabled.
 
-For an App that is already installed, skip App creation and choose **Link existing**. GitHub shows every installation of this App accessible to the signed-in user; OpenGeni then records a workspace-local binding for the selected repositories. Repeat the same flow in another workspace to reuse the installation there. Choosing **Unlink** removes only that workspace binding.
+All new installation binding is disabled. `GET /user/installations`, repository administrator permission, and `setup_action=request` do not prove that the current human may bind or manage an installation for an OpenGeni workspace. GitHub's own rules vary by account and organization policy: a personal-account user may install on their account; an organization owner may install for the organization; and a repository administrator may install only when the App's requested permissions and the organization's installation policy allow it. The GitHub App manager role does not itself grant installation authority. GitHub also documents the setup-URL `installation_id` as spoofable and recommends only associating it with the OAuth user, which proves visibility rather than install/configure authority. Consequently, both `installUrl` and `linkUrl` are `null`, legacy install/link states and callbacks return `410`, and an owner-approval request never creates a binding.
 
 For local development, the manifest callback can use the API origin from the running request. If you run behind a tunnel or deployed URL, set:
 
@@ -320,9 +318,9 @@ OPENGENI_GITHUB_APP_MANIFEST_BASE_URL=https://YOUR_DOMAIN
 OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 ```
 
-The generated App requests user authorization during install and configures `<baseUrl>/v1/github/oauth/callback` as its callback URL. For an App created manually, configure that exact callback URL in the GitHub App settings. OpenGeni uses the resulting GitHub App user token only during the callback to discover installations and repository permission bits; it does not persist the user token. Installation and repository choices are carried back to OpenGeni in short-lived signed tickets, and the final bind still requires `github:manage` for the workspace.
+The generated App still configures `<baseUrl>/v1/github/oauth/callback` as its callback URL for compatibility, but OpenGeni does not exchange an OAuth code or persist a workspace binding through that callback while authority proof is disabled. Existing provider adapter methods remain ABI-compatible and are not an authorization grant.
 
-Existing database bindings created before repository allowlists were introduced retain `all` scope for compatibility. Relink an installation through **Link existing** to replace that legacy scope with an explicit selected-repository allowlist. Session creation, first-party GitHub token minting, and GitHub-authenticated worker turn startup all recheck the current workspace binding, so unlinking or narrowing a binding also revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
+Existing database bindings created before repository allowlists were introduced retain `all` scope for compatibility. Migration 0095 and all selected-repository allowlists remain in place; no migration ordinal is reused or reordered. Session creation, first-party GitHub token minting, and GitHub-authenticated worker turn startup all recheck the current workspace binding, so unlinking or narrowing a binding also revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
 
 The generated App does not register GitHub webhooks; repository listing, clone tokens, commits, pushes, and pull requests use installation access tokens.
 
