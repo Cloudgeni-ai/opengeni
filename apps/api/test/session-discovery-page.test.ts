@@ -142,6 +142,9 @@ describe("sessions_list compact discovery projection", () => {
     expect(result.sessions[0]!.title).toContain("chars truncated");
     expect(result.sessions[0]!.goal!.summary).toContain("chars truncated");
     expect(result.sessions[0]!.latestMessage!.preview).toContain("chars truncated");
+    expect(result.latestMessagePreviewBudget!.omittedCount).toBe(
+      result.sessions.filter((session) => session.latestMessage?.previewOmitted === true).length,
+    );
     expect(result.sessions[0]!.pause).toMatchObject({
       state: "paused",
       additionalBlockerCount: 7,
@@ -151,6 +154,106 @@ describe("sessions_list compact discovery projection", () => {
       },
     });
     expect(serialized).not.toContain(huge);
+  });
+
+  test("budgets opt-in previews by deterministic UTF-8 bytes and exposes drill-down metadata", () => {
+    const preview = "é".repeat(600);
+    // Keep this fixture below the page envelope after each omitted preview carries
+    // its complete bounded recovery input; the separate page-cap test covers
+    // pagination when the per-item metadata itself fills the response budget.
+    const sessions = Array.from({ length: 88 }, (_, index) => ({
+      id: uuid(index + 1),
+      title: `session-${index + 1}`,
+      parentSessionId: null,
+      status: "idle",
+      effectiveControl: {
+        state: "active",
+        primaryBlocker: null,
+        additionalBlockerCount: 0,
+      },
+      goal: null,
+      queuedPromptCount: 0,
+      treeStats: {
+        directChildren: 0,
+        totalDescendants: 0,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+      latestMessage: { type: "agent.message.completed", preview },
+      createdAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index)).toISOString(),
+      updatedAt: new Date(Date.UTC(2026, 6, 18, 1, 0, index)).toISOString(),
+      sortRevision: "0",
+      sortAt: new Date(Date.UTC(2026, 6, 18, 0, 0, index))
+        .toISOString()
+        .replace(".000Z", ".123456Z"),
+    }));
+    const page = {
+      sessions,
+      total: sessions.length,
+      hasMore: false,
+      nextCursor: null,
+      orderBy: "createdAt",
+      snapshotAt: "2026-07-18T01:00:00.654321Z",
+      snapshotRevision: "0",
+      updatedThrough: null,
+      updatedAfter: null,
+    } as any;
+
+    const result = capSessionDiscoveryPage(page, true);
+    const serialized = JSON.stringify(result, null, 2);
+    const previewBudget = result.latestMessagePreviewBudget!;
+    expect(previewBudget).toEqual({
+      bytes: 13 * Buffer.byteLength(preview, "utf8"),
+      maxBytes: 16_384,
+      omittedCount: 75,
+      truncated: true,
+      omissionReason: "aggregatePreviewBudget",
+      drillDownTool: "session_events",
+      drillDownInput: {
+        includeTypes: ["user.message", "agent.message.completed"],
+        direction: "before",
+        limit: 1,
+        mode: "monitoring",
+        payloadMode: "summary",
+      },
+    });
+    expect(previewBudget.bytes).toBe(15_600);
+    expect(Math.ceil(previewBudget.bytes / 4)).toBe(3_900);
+    expect(Math.ceil(previewBudget.maxBytes / 4)).toBe(4_096);
+    expect(result.sessions).toHaveLength(88);
+    expect(result.sessions[12]!.latestMessage).toMatchObject({
+      preview,
+      previewTruncated: false,
+    });
+    expect(result.sessions[13]!.latestMessage).toMatchObject({
+      type: "agent.message.completed",
+      preview: null,
+      previewTruncated: false,
+      previewOmitted: true,
+      previewOmissionReason: "aggregatePreviewBudget",
+      previewDrillDownTool: "session_events",
+      previewDrillDownInput: {
+        sessionId: uuid(14),
+        includeTypes: ["agent.message.completed"],
+        direction: "before",
+        limit: 1,
+        mode: "monitoring",
+        payloadMode: "summary",
+      },
+    });
+    expect(result.sessions[13]!.latestMessage).not.toHaveProperty("text");
+    expect(result.responseTruncated).toBeFalse();
+    expect(result.hasMore).toBeFalse();
+    expect(result.bytes).toBe(Buffer.byteLength(serialized, "utf8"));
+    expect(result.bytes).toBeLessThanOrEqual(result.maxBytes);
+
+    const withoutPreview = capSessionDiscoveryPage(page, false);
+    expect(withoutPreview).not.toHaveProperty("latestMessagePreviewBudget");
+    expect(withoutPreview.sessions.every((session) => !session.latestMessage)).toBeTrue();
   });
 
   test("omits latest-message data unless explicitly requested", () => {

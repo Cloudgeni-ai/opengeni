@@ -59,17 +59,14 @@ import {
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
-  createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
-  stateMaxAgeSeconds,
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
 import { hasPermission } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { listWorkspaceGitHubRepositories } from "../github-access";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
@@ -121,9 +118,9 @@ import {
 import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
-  // Origin of the HTTP request that reached the MCP route; last-resort base
-  // for links the server mints (github_connect_link) when neither
-  // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
+  // Origin of the HTTP request that reached the MCP route. Retained in the
+  // options ABI for browser-oriented tools; github_connect_link does not use
+  // it or mint state while new installation binding is disabled.
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
   workspaceMemoryEnabled?: boolean | undefined;
@@ -196,19 +193,20 @@ export function buildOpenGeniMcpServer(
     registerRigTools(server, deps, grant, can, sessionId, json);
   }
 
-  // Orchestration, variableSet, and GitHub-connect tools are permission-gated
+  // Orchestration, variableSet, and GitHub status/token tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
   // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
-  // so agents can spawn/read sessions, manage variable set variables,
-  // and mint GitHub install links out of the box. A user DEMOTES a specific
+  // so agents can spawn/read sessions, manage variable set variables, inspect
+  // GitHub connection availability, and refresh scoped tokens for already-bound
+  // repositories out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, options, json);
+    registerGitHubConnectTool(server, deps, json);
     // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
     // worker-signed sessionId claim so it mints for THIS session's repos), gated on
     // the same github:use capability as github_connect_link.
@@ -1305,8 +1303,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description:
-          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
+        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -1888,22 +1885,15 @@ function registerVariableSetTools(
   }
 }
 
-// GitHub connect link for manager-style agents: mirrors GET .../github/app but
-// returns a browser entry URL (.../github/connect) that plants the CSRF state
-// cookie before forwarding to GitHub, because an MCP-issued link is opened in
-// a browser that never called the API directly.
-function registerGitHubConnectTool(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  options: McpServerOptions,
-  json: JsonResult,
-): void {
+// The tool remains registered for compatibility, but every new installation
+// binding entry point is fail-closed until a provider-supported authority
+// proof stronger than installation visibility is available.
+function registerGitHubConnectTool(server: McpServer, deps: ApiRouteDeps, json: JsonResult): void {
   server.registerTool(
     "github_connect_link",
     {
       description:
-        "Create workspace-bound links for connecting GitHub. linkUrl authorizes and links an existing installation; installUrl installs the app on another GitHub account. Completion requires github:manage through a signed-in browser or configured-token handoff. The links expire.",
+        "Report GitHub App connection availability. New installation binding is disabled until GitHub installation authority can be proven, so installUrl and linkUrl are null.",
       inputSchema: {},
     },
     async () => {
@@ -1919,30 +1909,11 @@ function registerGitHubConnectTool(
           missing,
         });
       }
-      const base = githubBrowserBaseUrl(settings, options.requestOrigin);
-      if (!base) {
-        throw new Error(
-          "github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment",
-        );
-      }
-      const installState = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        intent: "install",
-        ...githubBrowserGrantClaims(settings, grant),
-      });
-      const linkState = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        intent: "link_existing",
-        ...githubBrowserGrantClaims(settings, grant),
-      });
       return json({
         configured: true,
         appSlug: slug,
-        installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(installState)}`,
-        linkUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(linkState)}`,
-        expiresInSeconds: stateMaxAgeSeconds,
+        installUrl: null,
+        linkUrl: null,
         missing: [],
       });
     },
@@ -2082,7 +2053,24 @@ function boundedSessionEventMcpLimit(limit: number | undefined): number {
 const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;
 const SESSION_DISCOVERY_MAX_LIMIT = 100;
 const SESSION_DISCOVERY_TEXT_CHARS = 600;
+const SESSION_DISCOVERY_PREVIEW_MAX_BYTES = 16_384;
+const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as const;
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  direction: "before",
+  limit: 1,
+  mode: "monitoring",
+  payloadMode: "summary",
+} as const;
+
+function sessionDiscoveryPreviewDrillDownInput(sessionId: string, type: SessionEventType) {
+  return {
+    sessionId,
+    includeTypes: [type],
+    ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+  };
+}
 
 function boundedSessionDiscoveryLimit(limit: number | undefined): number {
   if (!limit || !Number.isFinite(limit)) return SESSION_DISCOVERY_DEFAULT_LIMIT;
@@ -2333,8 +2321,58 @@ export function capSessionDiscoveryPage(
     };
   });
 
-  let kept = projected;
+  // The database order is already the useful discovery order. Spend the
+  // separate preview budget in that order so the first page retains previews
+  // for the most relevant rows and later rows remain discoverable by status.
+  let budgetBytes = 0;
+  const budgeted = includeLastMessage
+    ? projected.map((session) => {
+        const latestMessage = session.latestMessage;
+        if (!latestMessage || latestMessage.preview === null) return session;
+        const candidateBytes = Buffer.byteLength(latestMessage.preview, "utf8");
+        if (budgetBytes + candidateBytes <= SESSION_DISCOVERY_PREVIEW_MAX_BYTES) {
+          budgetBytes += candidateBytes;
+          return session;
+        }
+        return {
+          ...session,
+          latestMessage: {
+            ...latestMessage,
+            preview: null,
+            previewOmitted: true,
+            previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+            previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+            previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+              session.id,
+              latestMessage.type,
+            ),
+          },
+        };
+      })
+    : projected;
+
+  let kept = budgeted;
   const build = () => {
+    const previewBytes = includeLastMessage
+      ? kept.reduce(
+          (total, session) =>
+            total +
+            (session.latestMessage?.preview === null || !session.latestMessage
+              ? 0
+              : Buffer.byteLength(session.latestMessage.preview, "utf8")),
+          0,
+        )
+      : 0;
+    const previewOmittedCount = includeLastMessage
+      ? kept.filter((session) => {
+          const latestMessage = session.latestMessage;
+          return (
+            latestMessage != null &&
+            "previewOmitted" in latestMessage &&
+            latestMessage.previewOmitted === true
+          );
+        }).length
+      : 0;
     const lastKept = kept.at(-1);
     const droppedForByteCap = kept.length < projected.length;
     const sourceLast = lastKept
@@ -2365,6 +2403,23 @@ export function capSessionDiscoveryPage(
       snapshotRevision: page.snapshotRevision,
       updatedAfter: page.updatedAfter,
       updatedThrough: page.updatedThrough,
+      ...(includeLastMessage
+        ? {
+            latestMessagePreviewBudget: {
+              bytes: previewBytes,
+              maxBytes: SESSION_DISCOVERY_PREVIEW_MAX_BYTES,
+              omittedCount: previewOmittedCount,
+              truncated: previewOmittedCount > 0,
+              omissionReason:
+                previewOmittedCount > 0 ? SESSION_DISCOVERY_PREVIEW_OMISSION_REASON : null,
+              drillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              drillDownInput: {
+                includeTypes: ["user.message", "agent.message.completed"] as const,
+                ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+              },
+            },
+          }
+        : {}),
       responseTruncated: droppedForByteCap,
       ...(droppedForByteCap
         ? {

@@ -2681,9 +2681,9 @@ export type GitHubAppInfo = {
   appId: string | null;
   clientId: string | null;
   appSlug: string | null;
-  /** Ready-to-open GitHub install URL (carries the signed state), if configured. */
+  /** Reserved compatibility field; null while new installation binding is disabled. */
   installUrl: string | null;
-  /** Ready-to-open OAuth URL for linking an installation that already exists. */
+  /** Reserved compatibility field; null while new installation binding is disabled. */
   linkUrl: string | null;
   /** Installation bindings owned independently by this workspace. */
   installations: GitHubInstallationBinding[];
