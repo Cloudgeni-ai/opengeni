@@ -65,6 +65,7 @@
     "closure-guard": "bun run build:packages && bun scripts/publish-closure-guard.ts",
     "test:publish-consumer": "bun scripts/test-publish-consumer.ts",
     "test:runtime-embedding-consumer": "bun scripts/test-runtime-embedding-consumer.ts",
+    "test:ogtool-package": "bun scripts/test-ogtool-package.ts",
     "changeset:version": "changeset version",
     "release:rewrite-deps": "bun scripts/rewrite-workspace-deps.ts",
     "release:rewrite-entry-points": "bun scripts/rewrite-entry-points.ts",

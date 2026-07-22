@@ -112,6 +112,9 @@ jobs:
       - name: Runtime embedding consumer
         run: bun run test:runtime-embedding-consumer
 
+      - name: Portable ogtool package
+        run: bun run test:ogtool-package
+
       - name: Detect versionable changesets
         id: release_plan
         shell: bash

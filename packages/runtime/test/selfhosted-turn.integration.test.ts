@@ -247,6 +247,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       environment: {
         OPENGENI_TOOLSPACE_URL: "https://app.opengeni.example/v1/workspaces/ws/mcp",
         OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+        OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         HOME: "/workspace",
         GIT_AUTHOR_NAME: "OpenGeni Bot",
       },
@@ -256,6 +257,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       "https://app.opengeni.example/v1/workspaces/ws/mcp",
     );
     expect(capturedEnv.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
+    expect(capturedEnv.OPENGENI_OGTOOL_PACKAGE_SPEC).toBe("@opengeni/ogtool@0.1.0");
     expect(capturedEnv.HOME).toBeUndefined();
     expect(capturedEnv.GIT_AUTHOR_NAME).toBeUndefined();
   });

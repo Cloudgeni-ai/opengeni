@@ -324,6 +324,17 @@
         "typescript": "^6.0.3",
       },
     },
+    "packages/ogtool": {
+      "name": "@opengeni/ogtool",
+      "version": "0.0.0",
+      "bin": {
+        "ogtool": "./bin/ogtool.cjs",
+      },
+      "devDependencies": {
+        "tsup": "^8.5.0",
+        "typescript": "^6.0.3",
+      },
+    },
     "packages/react": {
       "name": "@opengeni/react",
       "version": "0.17.0",
@@ -1030,6 +1041,8 @@
     "@opengeni/github": ["@opengeni/github@workspace:packages/github"],
 
     "@opengeni/observability": ["@opengeni/observability@workspace:packages/observability"],
+
+    "@opengeni/ogtool": ["@opengeni/ogtool@workspace:packages/ogtool"],
 
     "@opengeni/react": ["@opengeni/react@workspace:packages/react"],
 

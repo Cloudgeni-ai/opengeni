@@ -3310,9 +3310,10 @@ function takeGenesisTitleInputFilter(agent: Agent<any, any>): CallModelInputFilt
 // Generic substrate prompting for programmatic tool calling (toolspace). Same
 // text for every host; gated per-turn by appendToolspaceInstructions on the
 // presence of a minted toolspace token, so it only appears when the sandbox
-// actually exposes the ogtool CLI + $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE.
+// exposes $OPENGENI_TOOLSPACE_URL/_TOKEN_FILE. Stock images carry ogtool;
+// custom environments get only an exact deployment-pinned bootstrap hint.
 export const TOOLSPACE_PROGRAMMATIC_DIRECTIVE =
-  "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
+  "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.";
 
 /**
  * callModelInputFilter that removes provider-assigned item ids (rs_/msg_/fc_…)

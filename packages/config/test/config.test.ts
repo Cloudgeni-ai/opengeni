@@ -616,6 +616,7 @@ describe("sandbox preparation profiles", () => {
     const off = withEnv({}, () => getSettings());
     expect(off.toolspaceEnabled).toBe(false);
     expect(off.toolspaceMaxCallsPerTurn).toBe(200);
+    expect(off.ogtoolPackageSpec).toBeUndefined();
     expect(
       stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" })
         .OPENGENI_TOOLSPACE_TOKEN_FILE,
@@ -628,6 +629,7 @@ describe("sandbox preparation profiles", () => {
       {
         OPENGENI_TOOLSPACE_ENABLED: "true",
         OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN: "17",
+        OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         OPENGENI_DELEGATION_SECRET: "delegation-secret",
       },
       () => getSettings(),
@@ -637,7 +639,26 @@ describe("sandbox preparation profiles", () => {
     expect(stableSandboxEnvironmentForRun(on, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
       OPENGENI_TOOLSPACE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/mcp",
+      OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
     });
+  });
+
+  test("rejects floating or malformed ogtool package specs", () => {
+    for (const value of [
+      "@opengeni/ogtool@latest",
+      "@opengeni/ogtool@1",
+      "@opengeni/ogtool@1.2.3-beta.1",
+      "other-package@1.2.3",
+    ]) {
+      expect(() =>
+        withEnv(
+          {
+            OPENGENI_OGTOOL_PACKAGE_SPEC: value,
+          },
+          () => getSettings(),
+        ),
+      ).toThrow();
+    }
   });
 
   test("adds stable git credential pointers and provider CLI wrapper PATH for provisioned sandboxes", () => {
