@@ -24,6 +24,10 @@ import type {
   KnowledgeMemoryStatus,
   KnowledgeSourceRef,
   GitHubRepositoryScope,
+  HostEventExport,
+  HostEventExportBatch,
+  HostUsageExport,
+  HostUsageExportBatch,
   ManagedAccount,
   Permission,
   PackInstallation,
@@ -98,6 +102,12 @@ import {
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionSystemUpdatePayload,
+  HostEventExport as HostEventExportContract,
+  HostEventExportBatch as HostEventExportBatchContract,
+  HostExportConsumerId,
+  HostUsageExport as HostUsageExportContract,
+  HostUsageExportBatch as HostUsageExportBatchContract,
+  OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
   HumanInputQuestion as HumanInputQuestionContract,
   SubmitHumanInputResponseRequest,
 } from "@opengeni/contracts";
@@ -321,19 +331,24 @@ export function rlsStrategyFor(db: Database): RlsStrategy {
  * across drivers whose raw-result shapes differ (postgres-js → row array;
  * node-postgres → `{ rows }`). A side effect is that `db.execute<T>(…)` now
  * resolves to `any`, erasing the per-row element type at the call site. OpenGeni's
- * OWN internal raw queries (sandbox-lease reaping, warm-meter reads, group
- * session-id lists) ALWAYS run over the postgres-js handle `createDb` builds,
- * whose `.execute` returns an array of rows — so this helper re-applies that
- * array-of-`T` typing in ONE documented place instead of scattering casts. It is
- * NOT a cross-driver abstraction: a host on a non-array driver must override the
- * specific helper (today only `userLookup`), not call internal raw queries.
+ * OWN internal raw queries usually run over the postgres-js handle `createDb`
+ * builds (array result), while an embedded host may inject a node-postgres style
+ * driver (`{ rows }`). Normalize those two standard shapes in one place; reject
+ * an unknown driver result rather than silently treating it as an empty query.
  */
 async function rawRows<T extends Record<string, unknown>>(
   executor: Pick<Database, "execute">,
   query: SQL,
 ): Promise<T[]> {
   const result = await executor.execute<T>(query);
-  return result as unknown as T[];
+  if (Array.isArray(result)) {
+    return result as unknown as T[];
+  }
+  const rows = (result as unknown as { rows?: unknown }).rows;
+  if (Array.isArray(rows)) {
+    return rows as T[];
+  }
+  throw new Error("Unsupported database execute() result shape");
 }
 
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
@@ -388,6 +403,453 @@ export function registerDbBinding(
     rlsStrategy: binding.rlsStrategy ?? "force",
     ...(binding.userLookup ? { userLookup: binding.userLookup } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Durable host export
+// ---------------------------------------------------------------------------
+
+export type HostExportKind = "session_event" | "usage_event";
+
+/**
+ * A leased row did not satisfy this consumer build's export contract. Only
+ * bounded schema diagnostics are retained here; the source payload is never
+ * copied into the error. The lease can therefore be failed visibly, or an
+ * operator can re-claim it with a known token and explicitly dead-letter the
+ * reported head cursor.
+ */
+export class HostExportPayloadError extends Error {
+  override readonly name = "HostExportPayloadError";
+
+  constructor(
+    readonly kind: HostExportKind,
+    readonly consumerId: string,
+    readonly leaseToken: string,
+    readonly cursor: string,
+    readonly schemaIssues: string[],
+  ) {
+    super(
+      `Host export ${kind} cursor ${cursor} failed schema validation: ${schemaIssues.join("; ")}`,
+    );
+  }
+}
+
+export type HostExportConsumerStatus = {
+  exportKind: HostExportKind;
+  consumerId: string;
+  checkpoint: string;
+  enabled: boolean;
+  consecutiveFailures: number;
+  nextAttemptAt: string;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  blockedAt: string | null;
+  leaseExpiresAt: string | null;
+  maxCursor: string;
+  pendingCount: string;
+  unassignedCount: string;
+  prunedThrough: string;
+};
+
+type HostExportRow = {
+  consumer_id: string;
+  export_kind: HostExportKind;
+  checkpoint: string | number | bigint;
+  lease_token: string;
+  lease_through: string | number | bigint;
+  export_cursor: string | number | bigint;
+  source_id: string;
+  account_id: string;
+  workspace_id: string;
+  session_id: string | null;
+  turn_id: string | null;
+  turn_generation: number | null;
+  turn_attempt_id: string | null;
+  session_sequence: number | null;
+  client_event_id: string | null;
+  turn_association: string | null;
+  duplicate_of_event_id: string | null;
+  duplicate_reason: string | null;
+  event_type: string;
+  idempotency_key: string;
+  initiator: unknown;
+  initiator_context: unknown;
+  origin: string | null;
+  payload: unknown;
+  occurred_at: Date | string;
+  source_recorded_at: Date | string;
+};
+
+function hostExportCursor(value: string | number | bigint): string {
+  return BigInt(value).toString();
+}
+
+function hostExportTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function validateHostExportKind(kind: HostExportKind): void {
+  if (kind !== "session_event" && kind !== "usage_event") {
+    throw new Error(`Unknown host export kind: ${kind}`);
+  }
+}
+
+function validateHostExportIdentity(kind: HostExportKind, consumerId: string): void {
+  validateHostExportKind(kind);
+  HostExportConsumerId.parse(consumerId);
+}
+
+/**
+ * Enable a named consumer. This call deliberately requires a database handle
+ * authenticated as the separately provisioned host-export role; the ordinary
+ * tenant-scoped app role cannot execute this cross-workspace API.
+ */
+export async function registerHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.register_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+export async function disableHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.disable_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+/**
+ * Permanently remove a quiesced consumer and release its retention floor.
+ * Unlike disable, re-registering this name later starts at the retained floor.
+ */
+export async function retireHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.retire_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: "session_event";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: "usage_event";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostUsageExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const rows = await rawRows<HostExportRow>(
+    db,
+    sql`
+      select * from opengeni_host_export.claim_host_export_batch(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+        ${input.leaseHolderId}, ${input.leaseSeconds ?? 60},
+        ${input.limit ?? 100}, ${input.maxBytes ?? 1_048_576}
+      )
+    `,
+  );
+  if (rows.length === 0) return null;
+  const first = rows[0]!;
+  if (
+    rows.some(
+      (row) =>
+        row.consumer_id !== first.consumer_id ||
+        row.export_kind !== first.export_kind ||
+        row.lease_token !== first.lease_token ||
+        hostExportCursor(row.checkpoint) !== hostExportCursor(first.checkpoint) ||
+        hostExportCursor(row.lease_through) !== hostExportCursor(first.lease_through),
+    )
+  ) {
+    throw new Error("Host export claim returned inconsistent batch metadata");
+  }
+
+  if (input.kind === "session_event") {
+    const events = rows.map((row): HostEventExport => {
+      const parsed = HostEventExportContract.safeParse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        initiator: row.initiator,
+        initiatorContext: row.initiator_context,
+        origin: row.origin,
+        event: {
+          id: row.source_id,
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          sequence: row.session_sequence,
+          type: row.event_type,
+          payload: row.payload,
+          occurredAt: hostExportTimestamp(row.occurred_at),
+          clientEventId: row.client_event_id,
+          turnId: row.turn_id,
+          turnGeneration: row.turn_generation,
+          turnAttemptId: row.turn_attempt_id,
+          turnAssociation: row.turn_association,
+          duplicateOfEventId: row.duplicate_of_event_id,
+          duplicateReason: row.duplicate_reason,
+        },
+      });
+      if (!parsed.success) {
+        throw hostExportPayloadError(input, row, parsed.error.issues);
+      }
+      return parsed.data;
+    });
+    return HostEventExportBatchContract.parse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      consumerId: first.consumer_id,
+      leaseToken: first.lease_token,
+      checkpoint: hostExportCursor(first.checkpoint),
+      throughCursor: hostExportCursor(first.lease_through),
+      events,
+    });
+  }
+
+  const events = rows.map((row): HostUsageExport => {
+    const parsed = HostUsageExportContract.safeParse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      cursor: hostExportCursor(row.export_cursor),
+      accountId: row.account_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      turnId: row.turn_id,
+      turnAttemptId: row.turn_attempt_id,
+      initiator: row.initiator,
+      initiatorContext: row.initiator_context,
+      origin: row.origin,
+      usage: row.payload,
+    });
+    if (!parsed.success) {
+      throw hostExportPayloadError(input, row, parsed.error.issues);
+    }
+    return parsed.data;
+  });
+  return HostUsageExportBatchContract.parse({
+    schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+    consumerId: first.consumer_id,
+    leaseToken: first.lease_token,
+    checkpoint: hostExportCursor(first.checkpoint),
+    throughCursor: hostExportCursor(first.lease_through),
+    events,
+  });
+}
+
+function hostExportPayloadError(
+  input: { kind: HostExportKind; consumerId: string; leaseToken: string },
+  row: HostExportRow,
+  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>,
+): HostExportPayloadError {
+  const schemaIssues = issues.slice(0, 8).map((issue) => {
+    const path = issue.path.map(String).join(".") || "envelope";
+    return `${path}: ${issue.message}`.slice(0, 240);
+  });
+  return new HostExportPayloadError(
+    input.kind,
+    input.consumerId,
+    input.leaseToken,
+    hostExportCursor(row.export_cursor),
+    schemaIssues.length > 0 ? schemaIssues : ["invalid envelope"],
+  );
+}
+
+export async function acknowledgeHostExportBatch(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string; leaseToken: string },
+): Promise<string> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const [row] = await rawRows<{ checkpoint: string | number | bigint }>(
+    db,
+    sql`
+      select opengeni_host_export.ack_host_export_batch(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+      ) as checkpoint
+    `,
+  );
+  if (!row) throw new Error("Host export acknowledgement returned no checkpoint");
+  return hostExportCursor(row.checkpoint);
+}
+
+export async function failHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    error: string;
+    maxFailures?: number;
+  },
+): Promise<number> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const [row] = await rawRows<{ failures: number }>(
+    db,
+    sql`
+      select opengeni_host_export.fail_host_export_batch(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+        ${input.error}, ${input.maxFailures ?? 20}
+      ) as failures
+    `,
+  );
+  if (!row) throw new Error("Host export failure settlement returned no result");
+  return Number(row.failures);
+}
+
+export async function deadLetterHostExportHead(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    cursor: string;
+    reason: string;
+  },
+): Promise<string> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const cursor = hostExportCursor(input.cursor);
+  const [row] = await rawRows<{ checkpoint: string | number | bigint }>(
+    db,
+    sql`
+      select opengeni_host_export.dead_letter_host_export_head(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+        ${cursor}::bigint, ${input.reason}
+      ) as checkpoint
+    `,
+  );
+  if (!row) throw new Error("Host export dead-letter settlement returned no checkpoint");
+  return hostExportCursor(row.checkpoint);
+}
+
+export async function resumeHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.resume_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+export async function rewindHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string; checkpoint: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const checkpoint = hostExportCursor(input.checkpoint);
+  await db.execute(sql`
+    select opengeni_host_export.rewind_host_export_consumer(
+      ${input.kind}, ${input.consumerId}, ${checkpoint}::bigint
+    )
+  `);
+}
+
+export async function pruneHostExportOutbox(
+  db: Database,
+  input: { kind: HostExportKind; graceSeconds?: number; limit?: number },
+): Promise<number> {
+  validateHostExportKind(input.kind);
+  const [row] = await rawRows<{ deleted: number }>(
+    db,
+    sql`
+      select opengeni_host_export.prune_host_export_outbox(
+        ${input.kind}, ${input.graceSeconds ?? 3600}, ${input.limit ?? 1000}
+      ) as deleted
+    `,
+  );
+  return Number(row?.deleted ?? 0);
+}
+
+export async function getHostExportConsumerStatus(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<HostExportConsumerStatus | null> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const [row] = await rawRows<{
+    export_kind: HostExportKind;
+    consumer_id: string;
+    checkpoint: string | number | bigint;
+    enabled: boolean;
+    consecutive_failures: number;
+    next_attempt_at: Date | string;
+    last_error: string | null;
+    last_error_at: Date | string | null;
+    blocked_at: Date | string | null;
+    lease_expires_at: Date | string | null;
+    max_cursor: string | number | bigint;
+    pending_count: string | number | bigint;
+    unassigned_count: string | number | bigint;
+    pruned_through: string | number | bigint;
+  }>(
+    db,
+    sql`
+      select * from opengeni_host_export.host_export_consumer_status(
+        ${input.kind}, ${input.consumerId}
+      )
+    `,
+  );
+  if (!row) return null;
+  const optionalTimestamp = (value: Date | string | null): string | null =>
+    value === null ? null : hostExportTimestamp(value);
+  return {
+    exportKind: row.export_kind,
+    consumerId: row.consumer_id,
+    checkpoint: hostExportCursor(row.checkpoint),
+    enabled: row.enabled,
+    consecutiveFailures: Number(row.consecutive_failures),
+    nextAttemptAt: hostExportTimestamp(row.next_attempt_at),
+    lastError: row.last_error,
+    lastErrorAt: optionalTimestamp(row.last_error_at),
+    blockedAt: optionalTimestamp(row.blocked_at),
+    leaseExpiresAt: optionalTimestamp(row.lease_expires_at),
+    maxCursor: hostExportCursor(row.max_cursor),
+    pendingCount: hostExportCursor(row.pending_count),
+    unassignedCount: hostExportCursor(row.unassigned_count),
+    prunedThrough: hostExportCursor(row.pruned_through),
+  };
 }
 
 export async function setRlsContext(db: Database, context: RlsContext): Promise<void> {
@@ -1632,7 +2094,9 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
       return true;
     }
     const allowed = await scopedDb
-      .select({ repositoryId: schema.githubInstallationRepositories.repositoryId })
+      .select({
+        repositoryId: schema.githubInstallationRepositories.repositoryId,
+      })
       .from(schema.githubInstallationRepositories)
       .where(
         and(
@@ -1678,10 +2142,35 @@ export async function recordUsageEvent(
     unit: string;
     sourceResourceType?: string | null;
     sourceResourceId?: string | null;
+    sessionId?: string | null;
+    turnId?: string | null;
+    turnAttemptId?: string | null;
+    initiator?: TurnInitiator | null;
+    initiatorContext?: TurnInitiatorContext;
+    origin?: SessionTurnSource | null;
     idempotencyKey: string;
     occurredAt?: Date;
   },
 ): Promise<UsageEvent> {
+  if (input.turnId && !input.sessionId) {
+    throw new Error("recordUsageEvent: turnId requires sessionId");
+  }
+  if (input.turnAttemptId && !input.turnId) {
+    throw new Error("recordUsageEvent: turnAttemptId requires turnId");
+  }
+  if (input.initiatorContext && !input.initiator) {
+    throw new Error("recordUsageEvent: initiatorContext requires initiator");
+  }
+  const attribution = input.initiator
+    ? initiatorColumns({
+        initiator: input.initiator,
+        context: input.initiatorContext ?? {},
+      })
+    : {
+        initiatorKind: null,
+        initiatorSubjectId: null,
+        initiatorContext: {},
+      };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -1697,23 +2186,54 @@ export async function recordUsageEvent(
           unit: input.unit,
           sourceResourceType: input.sourceResourceType ?? null,
           sourceResourceId: input.sourceResourceId ?? null,
+          sessionId: input.sessionId ?? null,
+          turnId: input.turnId ?? null,
+          turnAttemptId: input.turnAttemptId ?? null,
+          ...attribution,
+          origin: input.origin ?? null,
           idempotencyKey: input.idempotencyKey,
           occurredAt: input.occurredAt ?? new Date(),
         })
-        .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey })
+        .onConflictDoUpdate({
+          target: schema.usageEvents.idempotencyKey,
+          set: {
+            sessionId: sql`coalesce(${schema.usageEvents.sessionId}, excluded.session_id)`,
+            turnId: sql`coalesce(${schema.usageEvents.turnId}, excluded.turn_id)`,
+            turnAttemptId: sql`coalesce(${schema.usageEvents.turnAttemptId}, excluded.turn_attempt_id)`,
+            initiatorKind: sql`coalesce(${schema.usageEvents.initiatorKind}, excluded.initiator_kind)`,
+            initiatorSubjectId: sql`coalesce(${schema.usageEvents.initiatorSubjectId}, excluded.initiator_subject_id)`,
+            initiatorContext: sql`case
+              when ${schema.usageEvents.initiatorKind} is null then excluded.initiator_context
+              else ${schema.usageEvents.initiatorContext}
+            end`,
+            origin: sql`coalesce(${schema.usageEvents.origin}, excluded.origin)`,
+          },
+        })
         .returning();
       if (row) {
+        const expectedContext = [
+          ["sessionId", input.sessionId, row.sessionId],
+          ["turnId", input.turnId, row.turnId],
+          ["turnAttemptId", input.turnAttemptId, row.turnAttemptId],
+        ] as const;
+        for (const [field, expected, actual] of expectedContext) {
+          if (expected && actual !== expected) {
+            throw new Error(`recordUsageEvent: idempotency key resolved to a different ${field}`);
+          }
+        }
+        if (
+          input.initiator &&
+          (row.initiatorKind !== input.initiator.kind ||
+            row.initiatorSubjectId !== input.initiator.subjectId)
+        ) {
+          throw new Error("recordUsageEvent: idempotency key resolved to a different initiator");
+        }
+        if (input.origin && row.origin !== input.origin) {
+          throw new Error("recordUsageEvent: idempotency key resolved to a different origin");
+        }
         return mapUsageEvent(row);
       }
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.usageEvents)
-        .where(eq(schema.usageEvents.idempotencyKey, input.idempotencyKey))
-        .limit(1);
-      if (!existing) {
-        throw new Error("Failed to record usage event");
-      }
-      return mapUsageEvent(existing);
+      throw new Error("Failed to record usage event");
     },
   );
 }
@@ -6882,7 +7402,11 @@ export async function listRigVersionMonitoringSummaries(
   workspaceId: string,
   rigId: string,
   limit = 20,
-): Promise<{ versions: RigVersionMonitoringSummary[]; hasMore: boolean; total: number }> {
+): Promise<{
+  versions: RigVersionMonitoringSummary[];
+  hasMore: boolean;
+  total: number;
+}> {
   const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -7137,7 +7661,11 @@ export async function listRigChangeMonitoringSummaries(
   workspaceId: string,
   rigId: string,
   limit = 20,
-): Promise<{ changes: RigChangeMonitoringSummary[]; hasMore: boolean; total: number }> {
+): Promise<{
+  changes: RigChangeMonitoringSummary[];
+  hasMore: boolean;
+  total: number;
+}> {
   const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -9631,6 +10159,11 @@ export async function reconcileCodexCapacityWait<
             unit: "run",
             sourceResourceType: "session_system_update",
             sourceResourceId: update.id,
+            sessionId: input.sessionId,
+            initiatorKind: "service",
+            initiatorSubjectId: "goal-continuation",
+            initiatorContext: { goalId: goal.id, reason: "codex_capacity" },
+            origin: "goal",
             idempotencyKey: `agent_run.created:codex-capacity:${input.workspaceId}:${update.id}`,
             occurredAt: now,
           })
@@ -12125,7 +12658,11 @@ export type SessionDiscoverySummary = {
   parentSessionId: string | null;
   status: SessionStatus;
   effectiveControl: SessionDiscoveryControl;
-  goal: { status: SessionGoalStatus; text: string; textOriginalChars: number } | null;
+  goal: {
+    status: SessionGoalStatus;
+    text: string;
+    textOriginalChars: number;
+  } | null;
   queuedPromptCount: number;
   treeStats: NonNullable<Session["treeStats"]>;
   latestMessage: {
@@ -16962,7 +17499,12 @@ export async function persistWarmSnapshot(
         interruption ||
         !attemptMayPersistWorkspace
       ) {
-        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: true,
+          priorArchiveForGc: null,
+        };
       }
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
@@ -22524,7 +23066,10 @@ export async function peekSessionWork(
       latestInterruption.quiescedAt === null &&
       ["settled", "rejected_stale"].includes(latestInterruption.interruptionState)
     ) {
-      return { kind: "cancellation-wait", attemptId: latestInterruption.attemptId };
+      return {
+        kind: "cancellation-wait",
+        attemptId: latestInterruption.attemptId,
+      };
     }
 
     const [capacityWait] = await scopedDb
@@ -22712,7 +23257,10 @@ async function lockChildLifecycleOutboxWriteRowsTx(
     sessionIds: [],
   });
   const [preview] = await tx
-    .select({ id: schema.sessions.id, parentSessionId: schema.sessions.parentSessionId })
+    .select({
+      id: schema.sessions.id,
+      parentSessionId: schema.sessions.parentSessionId,
+    })
     .from(schema.sessions)
     .where(
       and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, input.sessionId)),
@@ -25222,7 +25770,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     eventTypes: ["child_terminal_result"],
     maxAttempts: 3,
   };
-  const context = { accountId: input.accountId, workspaceId: input.workspaceId };
+  const context = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+  };
   return await retryRlsPersistence(db, context, persistence, async (scopedDb) => {
     const locks = await lockSessionEventWriteRows(scopedDb, {
       workspaceId: input.workspaceId,

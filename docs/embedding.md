@@ -363,6 +363,84 @@ lifecycle endpoints itself, or provide distinct per-process settings/ports.
 host-owned `db` and broker-backed `bus` so readiness and resource ownership are
 unambiguous; the lower-level factory retains standalone defaults.
 
+### Durable host event and usage export
+
+Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
+`packages/contracts/src/index.ts`, the host-export repository API in
+`packages/db/src/index.ts`, migration `0097_host_export_outbox.sql`, and
+`createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
+
+An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
+its own business store without polling tenant routes or treating NATS as a durable log. This surface
+is optional. With no registered consumer, both export gates default to false and source transactions
+write zero outbox rows, preserving standalone behavior.
+
+Provision the projection identity **after migrations**. It is deliberately not the normal
+`opengeni_app` role: an exporter reads a cross-workspace stream, while the app role is tenant-scoped.
+Run role provisioning again after any later migration that adds host-export functions; grants cover
+the functions present when provisioning runs. One OpenGeni installation per database is supported:
+dedicated data schemas do not make the shared private/export function schemas multi-installation-safe.
+
+```ts
+await provisionRoles(adminDatabaseUrl, {
+  targetSchema: "opengeni",
+  rlsStrategy: "force",
+  appPassword,
+  hostExportRole: "opengeni_host_exporter",
+  hostExportPassword,
+});
+
+const exporter = createDb(hostExportDatabaseUrl, { max: 2 });
+const pump = createHostExportPump({
+  db: exporter.db,
+  eventSink: {
+    consumerId: "host-business-events",
+    deliverEvents: async (batch) => hostStore.applyEvents(batch),
+  },
+  usageSink: {
+    consumerId: "host-business-usage",
+    deliverUsage: async (batch) => hostStore.applyUsage(batch),
+  },
+});
+await pump.start();
+```
+
+The exporter role receives `USAGE` and function `EXECUTE` on the isolated
+`opengeni_host_export` schema and no table privileges. The normal app role cannot register, claim,
+rewind, prune, or inspect a host consumer. Each sink has a named checkpoint and one renewable batch
+lease. Cursors are decimal strings so they remain exact past JavaScript's safe-integer range.
+
+Delivery is **at least once**. If a process dies after the sink commits but before OpenGeni advances
+the checkpoint, the identical idempotency keys are delivered again. A sink must transactionally
+deduplicate those keys. Session ordering is authoritative by `event.sequence`; cursor order is
+stable across sessions but deliberately not claimed to be causal. High-volume raw delta event types
+are excluded from the host stream; their completed semantic events remain. Event types are bounded
+but forward-tolerant so an older consumer can carry a newer writer's event during a rolling upgrade.
+Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
+Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
+new fact fails its source transaction instead of committing a poison export row, while standalone
+mode retains its prior input behavior.
+
+Transient sink failures release the lease with exponential backoff and eventually block the named
+consumer visibly instead of dropping rows. `resumeHostExportConsumer` is explicit. A genuinely
+poisonous head record can be moved with `deadLetterHostExportHead`; only the exact leased head can be
+disposed, so a bad record cannot skip an unseen prefix. Schema failures are counted and block like
+sink failures; `HostExportPayloadError` reports the bounded head cursor needed for an explicit
+operator disposition without copying its payload into logs. `rewindHostExportConsumer` rejects
+pruned or future cursors. The pump runs bounded retention housekeeping after successful checkpoints;
+`pruneHostExportOutbox` deletes only below every named consumer checkpoint and keeps the configured
+grace window available for replay. A disabled consumer deliberately keeps that retention floor;
+after quiescing it, `retireHostExportConsumer` (or `pump.retire(kind)` after `pump.stop()`) permanently
+removes the checkpoint so the remaining consumers can advance retention. Re-registering a retired
+name starts at the then-retained floor, not its former checkpoint; calling `pump.start()` again after
+`pump.retire(kind)` performs exactly that explicit re-registration.
+
+`pump.stop()` only drains the current sink call and stops polling; it intentionally keeps capture
+enabled across deploy restarts. `pump.disable(kind)` retains that consumer and its checkpoint (so it
+continues to hold the pruning floor); when it disables the last consumer of a kind, capture stops and
+events in that interval are deliberately not recoverable. Normal deploys must use `stop()`, not
+`disable()`.
+
 ### EventBus
 
 Canonical sources: `EventBus` / `createNatsEventBus` in `packages/events/src/index.ts`, SSE in `apps/api/src/http/sse.ts`.

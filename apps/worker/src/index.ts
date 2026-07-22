@@ -58,6 +58,21 @@ import {
   type WorkerServiceLifecycle,
 } from "./worker-service-lifecycle";
 
+export {
+  createHostExportPump,
+  type HostExportDrainResult,
+  type HostExportPump,
+  type HostExportPumpOptions,
+} from "./host-export-pump";
+export type {
+  HostEventExport,
+  HostEventExportBatch,
+  HostEventSink,
+  HostUsageExport,
+  HostUsageExportBatch,
+  HostUsageSink,
+} from "@opengeni/contracts";
+
 // The deterministic id of the ONE global reaper Schedule. A single id means
 // create() is idempotent across every worker in the pool: the first worker to
 // boot creates it, all others collide on this id (ScheduleAlreadyRunning) and

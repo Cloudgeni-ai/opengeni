@@ -1,5 +1,11 @@
 import { configuredStaticUsageLimits } from "@opengeni/config";
-import type { LimitAction, LimitDecision } from "@opengeni/contracts";
+import type {
+  LimitAction,
+  LimitDecision,
+  SessionTurnSource,
+  TurnInitiator,
+  TurnInitiatorContext,
+} from "@opengeni/contracts";
 import {
   countActiveApiKeysForWorkspace,
   countScheduledTasksForWorkspace,
@@ -213,6 +219,12 @@ export async function recordWorkspaceUsage(
     unit: string;
     sourceResourceType: string;
     sourceResourceId: string;
+    sessionId?: string | null;
+    turnId?: string | null;
+    turnAttemptId?: string | null;
+    initiator?: TurnInitiator | null;
+    initiatorContext?: TurnInitiatorContext;
+    origin?: SessionTurnSource | null;
     idempotencyKey: string;
   },
 ): Promise<void> {
@@ -225,6 +237,13 @@ export async function recordWorkspaceUsage(
     unit: input.unit,
     sourceResourceType: input.sourceResourceType,
     sourceResourceId: input.sourceResourceId,
+    sessionId: input.sessionId ?? null,
+    turnId: input.turnId ?? null,
+    turnAttemptId: input.turnAttemptId ?? null,
+    initiator:
+      input.initiator ?? (input.subjectId ? { kind: "subject", subjectId: input.subjectId } : null),
+    ...(input.initiatorContext ? { initiatorContext: input.initiatorContext } : {}),
+    origin: input.origin ?? null,
     idempotencyKey: input.idempotencyKey,
   });
 }

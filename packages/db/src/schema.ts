@@ -2871,6 +2871,20 @@ export const usageEvents = pgTable(
     unit: text("unit").notNull(),
     sourceResourceType: text("source_resource_type"),
     sourceResourceId: text("source_resource_id"),
+    // Exact execution source for host usage export. These are deliberately
+    // validated soft references rather than cascading foreign keys: usage is
+    // an immutable billing/audit fact and must retain its source identity after
+    // a session or turn is deleted.
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    turnAttemptId: uuid("turn_attempt_id"),
+    initiatorKind: text("initiator_kind"),
+    initiatorSubjectId: text("initiator_subject_id"),
+    initiatorContext: jsonb("initiator_context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    origin: text("origin"),
     idempotencyKey: text("idempotency_key").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
     recordedAt: timestamp("recorded_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2890,6 +2904,207 @@ export const usageEvents = pgTable(
       table.accountId,
       table.eventType,
       table.occurredAt,
+    ),
+    workspaceSession: index("usage_events_workspace_session_idx").on(
+      table.workspaceId,
+      table.sessionId,
+      table.occurredAt,
+    ),
+    contextHierarchy: check(
+      "usage_events_context_hierarchy_check",
+      sql`(${table.turnId} is null or ${table.sessionId} is not null)
+        and (${table.turnAttemptId} is null or ${table.turnId} is not null)`,
+    ),
+    initiatorConsistent: check(
+      "usage_events_initiator_check",
+      sql`(${table.initiatorKind} is null and ${table.initiatorSubjectId} is null)
+        or (${table.initiatorKind} in ('subject', 'service')
+          and ${table.initiatorSubjectId} is not null
+          and octet_length(${table.initiatorSubjectId}) between 1 and 1024)`,
+    ),
+    attributionContextBytes: check(
+      "usage_events_initiator_context_bytes_check",
+      sql`octet_length(${table.initiatorContext}::text) <= 4096`,
+    ),
+    originValid: check(
+      "usage_events_origin_check",
+      sql`${table.origin} is null or ${table.origin} in (
+        'user', 'scheduled_task', 'api', 'goal', 'system', 'compaction'
+      )`,
+    ),
+  }),
+);
+
+/** Singleton, migration-installed gate. Standalone defaults keep both off. */
+export const hostExportConfig = pgTable(
+  "host_export_config",
+  {
+    id: integer("id").primaryKey().default(1),
+    sessionEventsEnabled: boolean("session_events_enabled").notNull().default(false),
+    usageEventsEnabled: boolean("usage_events_enabled").notNull().default(false),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singleton: check("host_export_config_singleton_check", sql`${table.id} = 1`),
+  }),
+);
+
+/**
+ * Transactional delivery buffer. It intentionally has no tenant/source FKs:
+ * a workspace deletion must not erase an already-committed, unacknowledged
+ * host fact. Payloads are sanitized/bounded before they reach this table.
+ */
+export const hostExportOutbox = pgTable(
+  "host_export_outbox",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    exportKind: text("export_kind").notNull(),
+    exportCursor: bigint("export_cursor", { mode: "bigint" }),
+    sourceId: uuid("source_id").notNull(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id"),
+    turnId: uuid("turn_id"),
+    turnGeneration: integer("turn_generation"),
+    turnAttemptId: uuid("turn_attempt_id"),
+    sessionSequence: integer("session_sequence"),
+    clientEventId: text("client_event_id"),
+    turnAssociation: text("turn_association"),
+    duplicateOfEventId: uuid("duplicate_of_event_id"),
+    duplicateReason: text("duplicate_reason"),
+    eventType: text("event_type").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    initiator: jsonb("initiator").$type<Record<string, unknown> | null>(),
+    initiatorContext: jsonb("initiator_context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    origin: text("origin"),
+    payload: jsonb("payload").$type<unknown>().notNull(),
+    envelopeBytes: integer("envelope_bytes").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    sourceRecordedAt: timestamp("source_recorded_at", { withTimezone: true }).notNull(),
+    enqueuedAt: timestamp("enqueued_at", { withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    kindValid: check(
+      "host_export_outbox_kind_check",
+      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+    ),
+    sourceUnique: uniqueIndex("host_export_outbox_source_uq").on(table.exportKind, table.sourceId),
+    cursorUnique: uniqueIndex("host_export_outbox_cursor_uq")
+      .on(table.exportKind, table.exportCursor)
+      .where(sql`${table.exportCursor} is not null`),
+    unassigned: index("host_export_outbox_unassigned_idx")
+      .on(table.exportKind, table.enqueuedAt, table.id)
+      .where(sql`${table.exportCursor} is null`),
+    unassignedSession: index("host_export_outbox_unassigned_session_idx")
+      .on(table.exportKind, table.sessionId, table.sessionSequence)
+      .where(sql`${table.exportCursor} is null and ${table.sessionId} is not null`),
+    contextBytes: check(
+      "host_export_outbox_context_bytes_check",
+      sql`octet_length(${table.initiatorContext}::text) <= 4096`,
+    ),
+    originValid: check(
+      "host_export_outbox_origin_check",
+      sql`${table.origin} is null or ${table.origin} in (
+        'user', 'scheduled_task', 'api', 'goal', 'system', 'compaction'
+      )`,
+    ),
+  }),
+);
+
+export const hostExportCursorState = pgTable(
+  "host_export_cursor_state",
+  {
+    exportKind: text("export_kind").primaryKey(),
+    nextCursor: bigint("next_cursor", { mode: "bigint" }).notNull().default(1n),
+    prunedThrough: bigint("pruned_through", { mode: "bigint" }).notNull().default(0n),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    kindValid: check(
+      "host_export_cursor_state_kind_check",
+      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+    ),
+    cursorValid: check(
+      "host_export_cursor_state_next_check",
+      sql`${table.nextCursor} > 0 and ${table.prunedThrough} >= 0
+        and ${table.prunedThrough} < ${table.nextCursor}`,
+    ),
+  }),
+);
+
+/** Named at-least-once consumer checkpoint and one-batch lease. */
+export const hostExportConsumers = pgTable(
+  "host_export_consumers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    consumerId: text("consumer_id").notNull(),
+    exportKind: text("export_kind").notNull(),
+    checkpoint: bigint("checkpoint", { mode: "bigint" }).notNull().default(0n),
+    enabled: boolean("enabled").notNull().default(true),
+    leaseToken: uuid("lease_token"),
+    leaseHolderId: text("lease_holder_id"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    leaseFrom: bigint("lease_from", { mode: "bigint" }),
+    leaseThrough: bigint("lease_through", { mode: "bigint" }),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).notNull().defaultNow(),
+    lastError: text("last_error"),
+    lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+    blockedAt: timestamp("blocked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    consumerKind: uniqueIndex("host_export_consumers_kind_id_uq").on(
+      table.exportKind,
+      table.consumerId,
+    ),
+    kindValid: check(
+      "host_export_consumers_kind_check",
+      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+    ),
+    checkpointValid: check("host_export_consumers_checkpoint_check", sql`${table.checkpoint} >= 0`),
+    due: index("host_export_consumers_due_idx").on(
+      table.enabled,
+      table.blockedAt,
+      table.nextAttemptAt,
+    ),
+  }),
+);
+
+/** Explicit poison-row disposition; transient failures never write here. */
+export const hostExportDeadLetters = pgTable(
+  "host_export_dead_letters",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    consumerId: text("consumer_id").notNull(),
+    exportKind: text("export_kind").notNull(),
+    exportCursor: bigint("export_cursor", { mode: "bigint" }).notNull(),
+    sourceId: uuid("source_id").notNull(),
+    reason: text("reason").notNull(),
+    envelope: jsonb("envelope").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    consumerCursor: uniqueIndex("host_export_dead_letters_consumer_cursor_uq").on(
+      table.exportKind,
+      table.consumerId,
+      table.exportCursor,
+    ),
+    kindValid: check(
+      "host_export_dead_letters_kind_check",
+      sql`${table.exportKind} in ('session_event', 'usage_event')`,
+    ),
+    reasonValid: check(
+      "host_export_dead_letters_reason_check",
+      sql`length(${table.reason}) between 1 and 500`,
+    ),
+    envelopeBytes: check(
+      "host_export_dead_letters_envelope_bytes_check",
+      sql`pg_column_size(${table.envelope}) <= 114688`,
     ),
   }),
 );
