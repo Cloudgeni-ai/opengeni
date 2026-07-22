@@ -15,6 +15,7 @@ export function connectionTokenResolverForTurn(input: {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  rootSessionId: string;
   attemptId: string;
   turn: SessionTurn;
 }): (request: ResolveConnectionCredentialInput) => Promise<ResolveConnectionCredentialResult> {
@@ -26,6 +27,7 @@ export function connectionTokenResolverForTurn(input: {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
+    rootSessionId: input.rootSessionId,
     turnId: input.turn.id,
     attemptId: input.attemptId,
     executionGeneration: input.turn.executionGeneration,

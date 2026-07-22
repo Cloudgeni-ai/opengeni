@@ -219,6 +219,11 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
       expect(recoveredIndex?.definition).toContain("workspace_id, session_id, occurred_at");
     } finally {
       if (roleCreated) {
+        await sql
+          .unsafe(
+            `ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_host_export REVOKE EXECUTE ON FUNCTIONS FROM "${hostExportRole}"`,
+          )
+          .catch(() => undefined);
         await sql.unsafe(`DROP OWNED BY "${hostExportRole}"`).catch(() => undefined);
         await sql.unsafe(`DROP ROLE IF EXISTS "${hostExportRole}"`).catch(() => undefined);
       }

@@ -31,7 +31,10 @@ export type ProvisionRolesOptions = {
   /**
    * Optional cross-workspace projection role. It receives schema USAGE and
    * EXECUTE only on the host-export API; it receives no table privileges.
-   * Provision it after migrations so the function grants are present.
+   * Provision it after the first migration run so the schema exists. The
+   * provisioner also registers same-owner default privileges for future
+   * host-export functions; shipped migrations preserve existing exporter ACLs
+   * when a migration-only upgrade adds a function.
    */
   hostExportRole?: string;
   hostExportPassword?: string;
@@ -144,6 +147,7 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_host_export') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_host_export TO %I', ${literal(role)});
     EXECUTE format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_host_export TO %I', ${literal(role)});
+    EXECUTE format('ALTER DEFAULT PRIVILEGES IN SCHEMA opengeni_host_export GRANT EXECUTE ON FUNCTIONS TO %I', ${literal(role)});
   END IF;
 END $$;
 `);

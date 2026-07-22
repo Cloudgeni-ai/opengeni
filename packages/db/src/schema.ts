@@ -2964,6 +2964,7 @@ export const hostExportOutbox = pgTable(
     accountId: uuid("account_id").notNull(),
     workspaceId: uuid("workspace_id").notNull(),
     sessionId: uuid("session_id"),
+    rootSessionId: uuid("root_session_id"),
     turnId: uuid("turn_id"),
     turnGeneration: integer("turn_generation"),
     turnAttemptId: uuid("turn_attempt_id"),

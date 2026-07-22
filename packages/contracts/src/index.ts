@@ -1613,7 +1613,10 @@ export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 export type McpCredentialsRequest = {
   accountId: string;
   workspaceId: string;
+  /** Immediate session whose model or Toolspace call needs the credential. */
   sessionId: string;
+  /** Workspace-scoped lineage root for host authorization and binding lookup. */
+  rootSessionId: string;
   turnId: string;
   /** Null only while a durable turn exists without a currently executing attempt. */
   attemptId: string | null;
@@ -5265,6 +5268,11 @@ export const HostEventExport = z.object({
   idempotencyKey: z.string().min(1).max(2048),
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
+  /**
+   * Immutable root of event.sessionId's session lineage at capture time. Null
+   * only for an unresolved pre-lineage/legacy export row.
+   */
+  rootSessionId: z.string().uuid().nullable(),
   ...HostExportAttribution,
   event: HostSessionEvent,
 });
@@ -5277,6 +5285,8 @@ export const HostUsageExport = z.object({
   accountId: z.string().uuid(),
   workspaceId: z.string().uuid(),
   sessionId: z.string().uuid().nullable(),
+  /** Null when sessionId is null or an unresolved pre-lineage legacy row. */
+  rootSessionId: z.string().uuid().nullable(),
   turnId: z.string().uuid().nullable(),
   turnAttemptId: z.string().uuid().nullable(),
   ...HostExportAttribution,
@@ -5925,7 +5935,11 @@ export const HumanInputQuestion = z
   .superRefine((question, ctx) => {
     const optionIds = new Set(question.options.map((option) => option.id));
     if (optionIds.size !== question.options.length) {
-      ctx.addIssue({ code: "custom", path: ["options"], message: "option ids must be unique" });
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "option ids must be unique",
+      });
     }
     if (question.kind === "text") {
       if (question.options.length > 0) {
@@ -6005,7 +6019,10 @@ export const HumanInputAnswer = z.object({
 export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
 
 export const HumanInputResponse = z.discriminatedUnion("outcome", [
-  z.object({ outcome: z.literal("answered"), answers: z.array(HumanInputAnswer).max(20) }),
+  z.object({
+    outcome: z.literal("answered"),
+    answers: z.array(HumanInputAnswer).max(20),
+  }),
   z.object({ outcome: z.literal("skipped") }),
   z.object({ outcome: z.literal("expired") }),
   z.object({ outcome: z.literal("cancelled") }),
@@ -6013,7 +6030,10 @@ export const HumanInputResponse = z.discriminatedUnion("outcome", [
 export type HumanInputResponse = z.infer<typeof HumanInputResponse>;
 
 export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
-  z.object({ outcome: z.literal("answered"), answers: z.array(HumanInputAnswer).max(20) }),
+  z.object({
+    outcome: z.literal("answered"),
+    answers: z.array(HumanInputAnswer).max(20),
+  }),
   z.object({ outcome: z.literal("skipped") }),
 ]);
 export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;

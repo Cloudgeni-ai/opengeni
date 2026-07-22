@@ -19,6 +19,7 @@ describe("connectionTokenResolverForTurn", () => {
       accountId: "account-1",
       workspaceId: "workspace-1",
       sessionId: "session-1",
+      rootSessionId: "session-root",
       attemptId: "attempt-1",
       turn,
       connectionCredentials: {
@@ -52,6 +53,7 @@ describe("connectionTokenResolverForTurn", () => {
       accountId: "account-1",
       workspaceId: "workspace-1",
       sessionId: "session-1",
+      rootSessionId: "session-root",
       turnId: "turn-1",
       attemptId: "attempt-1",
       executionGeneration: 8,

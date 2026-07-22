@@ -463,6 +463,7 @@ type HostExportRow = {
   account_id: string;
   workspace_id: string;
   session_id: string | null;
+  root_session_id: string | null;
   turn_id: string | null;
   turn_generation: number | null;
   turn_attempt_id: string | null;
@@ -480,6 +481,8 @@ type HostExportRow = {
   occurred_at: Date | string;
   source_recorded_at: Date | string;
 };
+
+type HostExportClaimRow = Omit<HostExportRow, "root_session_id">;
 
 function hostExportCursor(value: string | number | bigint): string {
   return BigInt(value).toString();
@@ -582,7 +585,7 @@ export async function claimHostExportBatch(
   },
 ): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
   validateHostExportIdentity(input.kind, input.consumerId);
-  const rows = await rawRows<HostExportRow>(
+  const claimedRows = await rawRows<HostExportClaimRow>(
     db,
     sql`
       select * from opengeni_host_export.claim_host_export_batch(
@@ -592,20 +595,43 @@ export async function claimHostExportBatch(
       )
     `,
   );
-  if (rows.length === 0) return null;
-  const first = rows[0]!;
+  if (claimedRows.length === 0) return null;
+  const claimedFirst = claimedRows[0]!;
   if (
-    rows.some(
+    claimedRows.some(
       (row) =>
-        row.consumer_id !== first.consumer_id ||
-        row.export_kind !== first.export_kind ||
-        row.lease_token !== first.lease_token ||
-        hostExportCursor(row.checkpoint) !== hostExportCursor(first.checkpoint) ||
-        hostExportCursor(row.lease_through) !== hostExportCursor(first.lease_through),
+        row.consumer_id !== claimedFirst.consumer_id ||
+        row.export_kind !== claimedFirst.export_kind ||
+        row.lease_token !== claimedFirst.lease_token ||
+        hostExportCursor(row.checkpoint) !== hostExportCursor(claimedFirst.checkpoint) ||
+        hostExportCursor(row.lease_through) !== hostExportCursor(claimedFirst.lease_through),
     )
   ) {
     throw new Error("Host export claim returned inconsistent batch metadata");
   }
+
+  const roots = await rawRows<{
+    export_cursor: string | number | bigint;
+    root_session_id: string | null;
+  }>(
+    db,
+    sql`
+      select * from opengeni_host_export.host_export_cursor_roots(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+      )
+    `,
+  );
+  const rootByExportCursor = new Map(
+    roots.map((row) => [hostExportCursor(row.export_cursor), row.root_session_id]),
+  );
+  const rows = claimedRows.map((row): HostExportRow => {
+    const cursor = hostExportCursor(row.export_cursor);
+    if (!rootByExportCursor.has(cursor)) {
+      throw new Error(`Host export root lookup omitted leased cursor ${cursor}`);
+    }
+    return { ...row, root_session_id: rootByExportCursor.get(cursor) ?? null };
+  });
+  const first = rows[0]!;
 
   if (input.kind === "session_event") {
     const events = rows.map((row): HostEventExport => {
@@ -615,6 +641,7 @@ export async function claimHostExportBatch(
         idempotencyKey: row.idempotency_key,
         accountId: row.account_id,
         workspaceId: row.workspace_id,
+        rootSessionId: row.root_session_id,
         initiator: row.initiator,
         initiatorContext: row.initiator_context,
         origin: row.origin,
@@ -657,6 +684,7 @@ export async function claimHostExportBatch(
       accountId: row.account_id,
       workspaceId: row.workspace_id,
       sessionId: row.session_id,
+      rootSessionId: row.root_session_id,
       turnId: row.turn_id,
       turnAttemptId: row.turn_attempt_id,
       initiator: row.initiator,
@@ -23191,7 +23219,10 @@ export async function peekSessionWork(
           .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
           .limit(1);
         if (actionResponse) {
-          return { kind: "approval-pending", triggerEventId: actionResponse.id };
+          return {
+            kind: "approval-pending",
+            triggerEventId: actionResponse.id,
+          };
         }
         const [expiringHumanInput] = await scopedDb
           .select({
@@ -24153,7 +24184,10 @@ export async function applySessionTurnSettlement(
       const terminalHumanInputEvents: AppendEventInput[] = terminalHumanInputRows.map(
         (request) => ({
           type: "user.humanInputResponse",
-          payload: { requestId: request.id, response: { outcome: "cancelled" } },
+          payload: {
+            requestId: request.id,
+            response: { outcome: "cancelled" },
+          },
         }),
       );
       const settlementEvents = [

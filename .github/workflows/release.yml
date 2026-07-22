@@ -109,6 +109,9 @@ jobs:
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
 
+      - name: Runtime embedding consumer
+        run: bun run test:runtime-embedding-consumer
+
       - name: Detect versionable changesets
         id: release_plan
         shell: bash
@@ -273,6 +276,9 @@ jobs:
 
       - name: Publish closure guard
         run: bun scripts/publish-closure-guard.ts
+
+      - name: Runtime embedding consumer
+        run: bun run test:runtime-embedding-consumer
 
       - name: Plan exact package publication
         id: package-plan

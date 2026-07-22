@@ -17,6 +17,7 @@ import {
 import {
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
+  getSessionRootId,
   getSessionTurn,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
@@ -98,6 +99,14 @@ export async function prepareToolspaceMcpSurface(input: {
   }
   const sessionId = grant.metadata!.sessionId as string;
   const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+  let rootSessionId = sessionId;
+  if (deps.connectionCredentials?.mcpCredentials) {
+    const resolvedRootSessionId = await getSessionRootId(deps.db, grant.workspaceId, sessionId);
+    if (!resolvedRootSessionId) {
+      throw new Error(`cannot resolve host MCP credentials for missing session ${sessionId}`);
+    }
+    rootSessionId = resolvedRootSessionId;
+  }
   const selectedIds = selectedMcpServerIds(
     session.tools,
     session.mcpServers.map((server) => server.id),
@@ -121,12 +130,13 @@ export async function prepareToolspaceMcpSurface(input: {
     deps,
     grant,
     sessionId,
+    rootSessionId,
     proxyableIds,
     activeTurnId: session.activeTurnId ?? null,
     getRegistry,
   });
   const tools = listing.map((entry) =>
-    toolspaceToolFor({ deps, grant, sessionId, entry, getRegistry }),
+    toolspaceToolFor({ deps, grant, sessionId, rootSessionId, entry, getRegistry }),
   );
 
   return {
@@ -171,11 +181,12 @@ async function resolveToolListing(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   sessionId: string;
+  rootSessionId: string;
   proxyableIds: string[];
   activeTurnId: string | null;
   getRegistry: () => Promise<Map<string, McpServerConfig>>;
 }): Promise<ToolListingEntry[]> {
-  const { deps, grant, sessionId, proxyableIds, activeTurnId, getRegistry } = input;
+  const { deps, grant, sessionId, rootSessionId, proxyableIds, activeTurnId, getRegistry } = input;
   if (!activeTurnId) {
     return [];
   }
@@ -208,6 +219,7 @@ async function resolveToolListing(input: {
       grant,
       config,
       sessionId,
+      rootSessionId,
       turn: activeTurn,
     }).catch(() => null);
     if (!connection) {
@@ -334,6 +346,7 @@ async function connectToolspaceServer(input: {
   grant: AccessGrant;
   config: McpServerConfig;
   sessionId: string;
+  rootSessionId: string;
   turn: SessionTurn;
 }): Promise<ConnectedToolspaceServer> {
   const baseFetch: FetchLike = input.config.connectionRef
@@ -363,10 +376,11 @@ function toolspaceToolFor(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   sessionId: string;
+  rootSessionId: string;
   entry: ToolListingEntry;
   getRegistry: () => Promise<Map<string, McpServerConfig>>;
 }): ToolspaceRegisteredTool {
-  const { deps, grant, sessionId, entry, getRegistry } = input;
+  const { deps, grant, sessionId, rootSessionId, entry, getRegistry } = input;
   const { serverId, tool } = entry;
   const name = prefixedMcpToolName(serverId, tool.name);
   const approvalRequired = mcpToolRequiresApproval(entry.requireApproval, tool.name);
@@ -407,6 +421,7 @@ function toolspaceToolFor(input: {
         grant,
         config,
         sessionId,
+        rootSessionId,
         turn: reservation.turn,
       }).catch(() => null);
       if (!connection) {
@@ -591,6 +606,7 @@ function connectionBrokerFetch(
     grant: AccessGrant;
     config: McpServerConfig;
     sessionId: string;
+    rootSessionId: string;
     turn: SessionTurn;
   },
 ): FetchLike {
@@ -603,6 +619,7 @@ function connectionBrokerFetch(
         accountId: input.grant.accountId,
         workspaceId: input.grant.workspaceId,
         sessionId: input.sessionId,
+        rootSessionId: input.rootSessionId,
         turnId: input.turn.id,
         attemptId: input.turn.activeAttemptId,
         executionGeneration: input.turn.executionGeneration,

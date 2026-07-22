@@ -94,16 +94,33 @@ function makeDeps(maxCallsPerTurn: number): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-async function seedSession(input: { selects: string[]; withActiveTurn: boolean }): Promise<{
+async function seedSession(input: {
+  selects: string[];
+  withActiveTurn: boolean;
+  child?: boolean;
+}): Promise<{
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  rootSessionId: string;
 }> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name) values (${account!.id}, 'ws') returning id`;
   await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
+  const root = input.child
+    ? await createSession(db, {
+        accountId: account!.id,
+        workspaceId: workspace!.id,
+        initialMessage: "root",
+        resources: [],
+        tools: [],
+        metadata: {},
+        model: "gpt-5.6-sol",
+        sandboxBackend: "none",
+      })
+    : null;
   const session = await createSession(db, {
     accountId: account!.id,
     workspaceId: workspace!.id,
@@ -113,6 +130,7 @@ async function seedSession(input: { selects: string[]; withActiveTurn: boolean }
     metadata: {},
     model: "gpt-5.6-sol",
     sandboxBackend: "none",
+    parentSessionId: root?.id ?? null,
   });
   if (input.withActiveTurn) {
     const [turn] = await admin<{ id: string }[]>`
@@ -127,7 +145,12 @@ async function seedSession(input: { selects: string[]; withActiveTurn: boolean }
       returning id`;
     await admin`update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
   }
-  return { accountId: account!.id, workspaceId: workspace!.id, sessionId: session.id };
+  return {
+    accountId: account!.id,
+    workspaceId: workspace!.id,
+    sessionId: session.id,
+    rootSessionId: root?.id ?? session.id,
+  };
 }
 
 function grantFor(
@@ -170,7 +193,11 @@ describe("prepareToolspaceMcpSurface", () => {
       environmentsEncryptionKey: undefined,
       mcpServers: [],
     });
-    const seeded = await seedSession({ selects: ["host-github"], withActiveTurn: true });
+    const seeded = await seedSession({
+      selects: ["host-github"],
+      withActiveTurn: true,
+      child: true,
+    });
     await createSessionMcpServers(db, {
       accountId: seeded.accountId,
       workspaceId: seeded.workspaceId,
@@ -222,6 +249,7 @@ describe("prepareToolspaceMcpSurface", () => {
     expect(requests.every((request) => request.accountId === seeded.accountId)).toBe(true);
     expect(requests.every((request) => request.workspaceId === seeded.workspaceId)).toBe(true);
     expect(requests.every((request) => request.sessionId === seeded.sessionId)).toBe(true);
+    expect(requests.every((request) => request.rootSessionId === seeded.rootSessionId)).toBe(true);
     expect(requests.every((request) => request.executionGeneration === 3)).toBe(true);
     expect(requests.every((request) => request.attemptId === null)).toBe(true);
     expect(requests.every((request) => request.callerSubjectId === "sandbox:run-1")).toBe(true);
