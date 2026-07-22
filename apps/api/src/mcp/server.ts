@@ -1490,7 +1490,12 @@ function registerWorkspaceOrchestrationTools(
           idempotencyKey: z4.string().min(1).max(200).optional(),
           // First-party MCP token permissions for the spawned session; every
           // permission must be held by this grant (validated in the domain).
-          firstPartyMcpPermissions: z4.array(z4.string()).optional(),
+          firstPartyMcpPermissions: z4
+            .array(z4.string())
+            .optional()
+            .describe(
+              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session.",
+            ),
           // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
           // creator's box — one filesystem/repo/desktop, N independent conversations;
           // this is the SAFE DEFAULT. Pass "new" for a fresh isolated box (a different

@@ -119,6 +119,15 @@ check.
 
 Unset legs fall back independently to standalone self-mint/decrypt. This port does **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with `signDelegatedAccessToken(settings.delegationSecret, ...)`.
 
+An embedded host can narrow a root session with
+`CreateSessionRequest.firstPartyMcpPermissions`. Agent-created descendants
+inherit the creating session's effective first-party permission set when
+`session_create` omits an override; an explicit override must still be a subset
+of the creating grant. This preserves a host's capability boundary across the
+session tree while top-level omissions continue to use the deployment's normal
+standalone worker defaults. The inherited set is frozen on the child at
+creation; later deployment-default changes do not rewrite existing sessions.
+
 ### Persistence
 
 Canonical sources: `packages/db/src/index.ts`, `packages/db/src/migrate.ts`, `packages/db/src/provision-roles.ts`, and `dbSearchPath` in `packages/config/src/index.ts`.

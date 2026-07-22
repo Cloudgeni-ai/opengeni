@@ -366,7 +366,7 @@ Critical route discipline (canonical: `routes/sessions.ts`):
 - `requireAccessGrant` **before** any Zod parse; explicit `HTTPException(400)` on parse failure (never a raw `ZodError` → 500); `HTTPException(409)` on an epoch fence.
 - The desktop-stream **consent gate** must match exactly between the `GET /stream-capabilities` read path and the `POST /viewers` attach path — drift is an un-redacted-pixel-plane bypass.
 - `parentSessionId` comes only from the worker-signed grant claim, never caller-supplied (cross-session write escalation otherwise).
-- `firstPartyMcpPermissions` can never out-rank the creating grant.
+- `firstPartyMcpPermissions` can never out-rank the creating grant. A child omission inherits that grant; it never re-expands to the deployment's standalone worker defaults.
 
 ### 7.2 `apps/worker` — orchestration + execution
 

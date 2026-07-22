@@ -5165,10 +5165,10 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // creation of a brand-new session. Absent means no create-dedup (each call
   // is an independent create).
   idempotencyKey: z.string().min(1).max(200).optional(),
-  // Permissions the session's first-party MCP token should carry instead of
-  // the fixed worker default — how an operator hands a manager-style session
-  // the orchestration/variableSet/github tools. Capped at creation: every
-  // requested permission must be held by the creating grant (no escalation).
+  // Permissions the session's first-party MCP token should carry. A top-level
+  // omission uses the deployment's worker default; a child omission inherits
+  // the creating session's effective grant. An explicit set is capped at
+  // creation: every requested permission must be held by the creating grant.
   firstPartyMcpPermissions: z.array(Permission).optional(),
   // Third-party MCP servers attached only to this session. Credential headers are
   // write-only: create responses and events expose only SessionMcpServerMetadata.

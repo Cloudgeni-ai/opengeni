@@ -110,7 +110,8 @@ The invariant that sandboxed agents cannot reach workspace secrets is unchanged:
 
 ### Manager sessions: per-session first-party MCP permissions
 
-`CreateSessionRequest.firstPartyMcpPermissions` (REST `POST /sessions` and the MCP `session_create` tool) lets an operator create a session whose first-party MCP token carries a **non-default permission set** — this is how a manager-style session sees the orchestration (`sessions:*`), variable set, and `github:use` tools. Two rules keep this safe:
+`CreateSessionRequest.firstPartyMcpPermissions` (REST `POST /sessions` and the MCP `session_create` tool) lets an operator create a session whose first-party MCP token carries a **non-default permission set** — this is how a manager-style session sees the orchestration (`sessions:*`), variable set, and `github:use` tools. Three rules keep this safe:
 
 1. **Capped at creation.** Every requested permission must be held by the creating grant (`workspace:admin` covers all); otherwise the request is rejected with 403. A session can never out-rank its creator, and a manager spawning workers via `session_create` can only delegate a subset of what it was itself granted.
-2. **Fixed for the session's lifetime.** Like variable set attachment, the permission set is fixed at creation; there is no way for a running agent to widen its own token.
+2. **Inherited by default for children.** A top-level omission uses the deployment's normal worker defaults. A child created from a worker-signed session claim instead inherits a creation-time snapshot of the creator's effective set, so omission cannot widen a narrowed manager into the standalone defaults or drift when deployment defaults change later.
+3. **Fixed for the session's lifetime.** Like variable set attachment, the permission set is fixed at creation; there is no way for a running agent to widen its own token.

@@ -813,11 +813,23 @@ export async function createSessionForRequest(
   );
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  // Parent linkage comes only from the worker-signed session claim. Resolve it
+  // before first-party permissions because a child with no explicit override
+  // inherits the creating session's effective grant instead of silently
+  // expanding to the standalone worker defaults.
+  const parentSessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
   // A session's first-party MCP token can carry a non-default permission set
   // (how an operator hands a manager-style session the orchestration tools),
   // but never one out-ranking its creator: every requested permission must be
-  // held by the creating grant.
-  let firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
+  // held by the creating grant. A top-level omission keeps the deployment's
+  // normal worker defaults. A child omission inherits its creator's exact
+  // effective grant, preserving a host/operator's narrowed capability boundary
+  // through the whole session tree.
+  let firstPartyMcpPermissions =
+    payload.firstPartyMcpPermissions ?? (parentSessionId ? [...new Set(grant.permissions)] : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -860,10 +872,6 @@ export async function createSessionForRequest(
   // its completion wake injects a user.message + queued turn into that session
   // without holding sessions:control on it (a cross-session write escalation).
   // The claim is the only trustworthy parent source.
-  const parentSessionId =
-    typeof grant.metadata?.["sessionId"] === "string"
-      ? (grant.metadata["sessionId"] as string)
-      : null;
   // Shared-sandbox placement (addendum 05 §D.2/§D.3, decision I10/OD-S1).
   //
   // The DEFAULT rule is context-dependent and resolved server-side from the

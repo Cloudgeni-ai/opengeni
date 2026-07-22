@@ -7041,6 +7041,28 @@ describe("API component integration", () => {
     expect(spawned.firstPartyMcpPermissions).toEqual(["sessions:read"]);
     expect(spawned.sandboxBackend).toBe("none");
 
+    // A worker-signed parent claim makes this a child create. Omitting the
+    // override must inherit the manager's effective grant instead of widening
+    // the child to OpenGeni's full standalone worker defaults.
+    const childMcp = buildOpenGeniMcpServer(mcpDeps, {
+      ...managerGrant,
+      // Delegated permission arrays are semantically sets. Inheritance stores
+      // one canonical copy even if an issuer supplied a duplicate.
+      permissions: [...managerGrant.permissions, "sessions:read"],
+      metadata: { sessionId: managerSession.id },
+    });
+    const inheritedChild = await callMcpTool<{
+      id: string;
+      parentSessionId: string | null;
+      firstPartyMcpPermissions: string[] | null;
+    }>(childMcp, "session_create", {
+      initialMessage: "inherit the manager boundary",
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(inheritedChild.parentSessionId).toBe(managerSession.id);
+    expect(inheritedChild.firstPartyMcpPermissions).toEqual(managerGrant.permissions);
+
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager
     // tool visibility end to end; the default set stays worker-shaped.
