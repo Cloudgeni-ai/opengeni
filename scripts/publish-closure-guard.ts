@@ -12,12 +12,20 @@
  *       the SDK remains zero-runtime-dep, and React only depends on SDK among
  *       @opengeni/* packages.
  *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
+ *   (e) a package's built runtime, shipped source, or emitted declarations
+ *       reference an @opengeni/* package that its published manifest does not
+ *       declare.
  *
  * Wired into the release gate and safe to run locally without publishing.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import {
+  declarationModuleSpecifiers,
+  runtimeModuleSpecifiers,
+  type RuntimeLoader,
+} from "./publish-closure-imports";
 import {
   PUBLISHED_DEP_FIELDS,
   changesetIgnoreSet,
@@ -225,6 +233,64 @@ function builtContractFiles(dir: string): string[] {
     else if (entry.name.endsWith(".js") || entry.name.endsWith(".d.ts")) files.push(path);
   }
   return files;
+}
+
+function shippedSourceFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...shippedSourceFiles(path));
+    else if (/\.(?:js|jsx|ts|tsx)$/u.test(entry.name)) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
+// Workspace hoisting can make an undeclared direct dependency appear healthy
+// in this monorepo while the published tarball fails under strict/isolated
+// resolution. Inspect the built runtime and declaration graphs plus the shipped
+// source graph (the worker gives Temporal its workflow source), and require
+// every external @opengeni/* specifier to be present in a published dependency
+// map. Runtime discovery includes ESM, dynamic import, and CommonJS require;
+// declaration discovery includes type-only imports/exports and reference types.
+for (const pkg of publishable) {
+  const distDir = join(repoRoot, pkg.dir, "dist");
+  const sourceDir = join(repoRoot, pkg.dir, "src");
+  const declaredRuntimePackages = new Set(workspaceDependencyNames(pkg, PUBLISHED_DEP_FIELDS));
+  const importSurfaces = [
+    ...(existsSync(distDir) ? builtContractFiles(distDir) : []),
+    ...(existsSync(sourceDir) ? shippedSourceFiles(sourceDir) : []),
+  ];
+  for (const path of importSurfaces) {
+    const text = readFileSync(path, "utf8");
+    const moduleSpecifiers = path.endsWith(".d.ts")
+      ? declarationModuleSpecifiers(text, path)
+      : await runtimeModuleSpecifiers(
+          text,
+          (path.endsWith(".tsx")
+            ? "tsx"
+            : path.endsWith(".ts")
+              ? "ts"
+              : path.endsWith(".jsx")
+                ? "jsx"
+                : "js") satisfies RuntimeLoader,
+        );
+    for (const imported of moduleSpecifiers) {
+      const match = imported.match(/^(@opengeni\/[^/]+)(?:\/|$)/u);
+      const importedPackage = match?.[1];
+      if (
+        importedPackage &&
+        importedPackage !== pkg.name &&
+        !declaredRuntimePackages.has(importedPackage)
+      ) {
+        failures.push(
+          `${path.slice(repoRoot.length + 1)} imports undeclared runtime workspace package ${importedPackage}. ` +
+            `${pkg.name} must declare every externalized direct import in dependencies, peerDependencies, or optionalDependencies.`,
+        );
+      }
+    }
+  }
 }
 
 for (const pkgDir of ["packages/sdk", "packages/react"]) {
