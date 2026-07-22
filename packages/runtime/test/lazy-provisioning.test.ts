@@ -122,6 +122,7 @@ describe("lazy provisioning synthetic manifest", () => {
       model: new ScriptedModel([]),
       sandboxEnvironment: environment,
       toolspaceTokenSeed: "ogd_turn_start",
+      toolspaceTokenSessionId: "session-lazy",
     });
     const commands: string[] = [];
     const backend = {

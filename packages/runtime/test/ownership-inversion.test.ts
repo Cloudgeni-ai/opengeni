@@ -31,6 +31,7 @@ import {
   isProviderSandboxNotFoundError,
   materializeRunCredentials,
   clearRunCredentials,
+  toolspaceTokenFileForSession,
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
@@ -173,9 +174,15 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
     };
     const liveSession = await client.create({});
     liveSessions.push(liveSession);
+    const toolspaceSessionId = crypto.randomUUID();
+    const tokenFile = toolspaceTokenFileForSession(
+      "/workspace/.opengeni/toolspace-token",
+      toolspaceSessionId,
+    );
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
       toolspaceTokenSeed: "ogd_initial_owned",
+      toolspaceTokenSessionId: toolspaceSessionId,
     });
     let observedToken: string | null = null;
 
@@ -183,7 +190,7 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
       ownedSandbox: { client, session: liveSession },
       onToolspaceTokenSessionReady: async (session) => {
         const bytes = await session.readFile?.({
-          path: "/workspace/.opengeni/toolspace-token",
+          path: tokenFile,
         });
         observedToken = bytes ? Buffer.from(bytes).toString() : null;
       },
@@ -286,9 +293,15 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
       backendId: string;
       create: (manifest?: unknown) => Promise<LiveLocalSession>;
     };
+    const toolspaceSessionId = crypto.randomUUID();
+    const tokenFile = toolspaceTokenFileForSession(
+      "/workspace/.opengeni/toolspace-token",
+      toolspaceSessionId,
+    );
     const agent = buildOpenGeniAgent(settings, [], {
       model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
       toolspaceTokenSeed: "ogd_initial_legacy",
+      toolspaceTokenSessionId: toolspaceSessionId,
     });
     let observedToken: string | null = null;
 
@@ -296,7 +309,7 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
       sandboxClient: rawClient,
       onToolspaceTokenSessionReady: async (session) => {
         const bytes = await session.readFile?.({
-          path: "/workspace/.opengeni/toolspace-token",
+          path: tokenFile,
         });
         observedToken = bytes ? Buffer.from(bytes).toString() : null;
       },

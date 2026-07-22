@@ -95,6 +95,7 @@ import {
   withRunCredentialsSession,
   refreshGitCredentialBindingTokenFiles,
   refreshToolspaceTokenFile,
+  toolspaceTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -3524,6 +3525,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
+      const sandboxToolspaceTokenFile = sandboxToolspaceToken
+        ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
+        : undefined;
 
       const initialGitCredentials: MintedRunGitCredentials | undefined =
         sandboxGitCredentialBindings
@@ -3638,6 +3642,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           const runAs = sandboxRunAs(runSettings);
           await refreshToolspaceTokenFile(tokenSession, material.token, {
             ...(runAs ? { runAs } : {}),
+            ...(sandboxToolspaceTokenFile
+              ? {
+                  tokenFile: sandboxToolspaceTokenFile,
+                  legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
+                }
+              : {}),
             ...(toolCancellationFenceRef.current
               ? {
                   commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
@@ -4126,7 +4136,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // than toolspace:call for its own session (own-session-bound, turn TTL,
         // budgeted, approval-tools excluded). The runtime seeds it to the box's
         // token file over the same exec channel, off-manifest, on every backend.
-        ...(sandboxToolspaceToken ? { toolspaceTokenSeed: sandboxToolspaceToken } : {}),
+        ...(sandboxToolspaceToken
+          ? {
+              toolspaceTokenSeed: sandboxToolspaceToken,
+              toolspaceTokenSessionId: input.sessionId,
+            }
+          : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,

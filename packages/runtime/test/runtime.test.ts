@@ -1296,6 +1296,7 @@ describe("runtime event normalization", () => {
   test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     // Default (feature off, no seed) never carries it — the historical preamble.
@@ -1310,6 +1311,7 @@ describe("runtime event normalization", () => {
       [],
       {
         toolspaceTokenSeed: "ogd_seed",
+        toolspaceTokenSessionId: "session-instructions",
       },
     );
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
@@ -1327,12 +1329,21 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
+  test("a Toolspace bearer cannot be built without its durable session identity", () => {
+    expect(() =>
+      buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+        toolspaceTokenSeed: "ogd_unscoped",
+      }),
+    ).toThrow("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  });
+
   test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       instructionsTemplate: template,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     // Exact ordering: workspace persona + CORE, then the toolspace directive,
     // then the session slice last (host/session specificity wins).
@@ -1352,6 +1363,7 @@ describe("runtime event normalization", () => {
       workspaceMemory,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
 
     expect(agent.instructions).toBe(
@@ -1370,6 +1382,7 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
@@ -2150,6 +2163,8 @@ describe("runtime event normalization", () => {
         },
         runAs: "sandbox",
         toolspaceTokenSeed: "ogd_toolspace_live",
+        toolspaceTokenFile:
+          "/workspace/.opengeni/toolspace-tokens/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       } as any,
     );
 

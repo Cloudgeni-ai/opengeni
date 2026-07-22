@@ -1,9 +1,18 @@
 import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { dirname, resolve as resolvePath } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { MintedSandboxToolspaceToken } from "../src/activities/environment";
 import {
   TOOLSPACE_TOKEN_DEFAULT_REFRESH_MS,
   startToolspaceTokenRenewalLoop,
 } from "../src/activities/toolspace-token-renewal";
+
+const here = dirname(fileURLToPath(import.meta.url));
+const agentTurnSource = readFileSync(
+  resolvePath(here, "..", "src", "activities", "agent-turn.ts"),
+  "utf8",
+);
 
 function material(token: string, expiresAt = new Date(Date.now() + 60 * 60_000)) {
   return { token, expiresAt } satisfies MintedSandboxToolspaceToken;
@@ -25,6 +34,21 @@ function fakeScheduler() {
 }
 
 describe("sandbox Toolspace token renewal", () => {
+  test("the activity renews only the current session file and clears the legacy pointer", () => {
+    const deriveAt = agentTurnSource.indexOf(
+      "toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)",
+    );
+    const refreshAt = agentTurnSource.indexOf("refreshToolspaceTokenFile(", deriveAt);
+    const refreshCall = agentTurnSource.slice(refreshAt, refreshAt + 1_200);
+
+    expect(deriveAt).toBeGreaterThanOrEqual(0);
+    expect(refreshAt).toBeGreaterThan(deriveAt);
+    expect(refreshCall).toContain("tokenFile: sandboxToolspaceTokenFile");
+    expect(refreshCall).toContain(
+      "legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!",
+    );
+  });
+
   test("uses the bounded cadence for a fresh one-hour token", async () => {
     const scheduler = fakeScheduler();
     const now = Date.parse("2026-07-21T10:00:00.000Z");
