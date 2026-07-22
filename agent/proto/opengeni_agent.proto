@@ -202,7 +202,7 @@ message DeviceAuthStartResponse {
   string user_code = 1;
   // The opaque device code the agent polls with.
   string device_code = 2;
-  // Where the user goes to authorize (e.g. https://get.opengeni.ai/device).
+  // Where the user goes to authorize (e.g. https://app.opengeni.ai/device).
   string verification_uri = 3;
   // A pre-filled convenience URL embedding the user_code.
   string verification_uri_complete = 4;

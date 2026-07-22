@@ -22,6 +22,11 @@ use thiserror::Error;
 /// non-interactive CI harness and tests so they never touch the real user dir).
 const CONFIG_DIR_ENV: &str = "OPENGENI_CONFIG_DIR";
 
+/// The hosted public origin. The hosted API and download endpoints are served
+/// from this origin; callers can still select a deployment with `--api-url` or
+/// `$OPENGENI_API_URL`.
+pub const DEFAULT_PUBLIC_ORIGIN: &str = "https://app.opengeni.ai";
+
 /// Errors from loading/persisting agent state.
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -99,6 +104,10 @@ const CREDENTIALS_FILE: &str = "credentials.json";
 /// connection and which never appears in install scripts or logs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredCredentials {
+    /// The deployment that issued this enrollment. Keeping it makes lifecycle
+    /// requests continue to target a private/custom deployment after install.
+    #[serde(default = "default_api_base_url")]
+    pub api_base_url: String,
     /// This agent's stable id within the workspace.
     pub agent_id: String,
     /// The workspace this agent is scoped to.
@@ -149,13 +158,22 @@ fn default_channel() -> String {
     "stable".to_string()
 }
 
+fn default_api_base_url() -> String {
+    DEFAULT_PUBLIC_ORIGIN.to_string()
+}
+
 impl StoredCredentials {
     /// Folds a proto [`EnrollmentCredentials`] (just received from the device
     /// flow) plus the selected `update_channel` into the persisted shape. The
     /// resume token starts empty and is filled by the first connect.
     #[must_use]
-    pub fn from_proto(proto: EnrollmentCredentials, update_channel: impl Into<String>) -> Self {
+    pub fn from_proto(
+        proto: EnrollmentCredentials,
+        update_channel: impl Into<String>,
+        api_base_url: impl Into<String>,
+    ) -> Self {
         Self {
+            api_base_url: api_base_url.into(),
             agent_id: proto.agent_id,
             workspace_id: proto.workspace_id,
             // The proto `nats_credentials` field now carries the connect bearer.
@@ -295,6 +313,7 @@ mod tests {
 
     fn sample() -> StoredCredentials {
         StoredCredentials {
+            api_base_url: DEFAULT_PUBLIC_ORIGIN.to_string(),
             agent_id: "agent-123".to_string(),
             workspace_id: "ws-abc".to_string(),
             nats_bearer: "oge_example.bearer".to_string(),
@@ -393,8 +412,9 @@ mod tests {
             consented_whole_machine: true,
             consented_screen_control: true,
         };
-        let stored = StoredCredentials::from_proto(proto, "beta");
+        let stored = StoredCredentials::from_proto(proto, "beta", "https://private.example");
         assert_eq!(stored.update_channel, "beta");
+        assert_eq!(stored.api_base_url, "https://private.example");
         assert!(stored.resume_token.is_empty());
         assert!(stored.consented_screen_control);
         // The proto relay producer token now threads straight through (M8b).

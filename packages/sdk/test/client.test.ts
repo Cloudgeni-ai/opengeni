@@ -142,6 +142,19 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("revokeEnrollment posts to the permanent connected-machine lifecycle route", async () => {
+    const enrollmentId = "22222222-2222-4222-8222-222222222222";
+    const { client, requests } = makeClient(() => jsonResponse({ revoked: false }));
+    const result = await client.revokeEnrollment(WORKSPACE_ID, enrollmentId);
+    expect(result).toEqual({ revoked: false });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("POST");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/enrollments/${enrollmentId}/revoke`,
+    );
+    expect(requests[0]!.body).toBeNull();
+  });
+
   test("listEventPage round-trips monitoring filters and exact page headers", async () => {
     const event = makeEvent(42, "turn.completed", { result: "authoritative" });
     const body = JSON.stringify([event]);

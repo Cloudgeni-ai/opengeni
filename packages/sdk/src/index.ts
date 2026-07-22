@@ -386,6 +386,7 @@ export type {
   DeviceEnrollmentDenyResponse,
   MintEnrollTokenRequest,
   MintEnrollTokenResponse,
+  RevokeEnrollmentResponse,
   EnrollmentCredentials,
   EnrollTokenExchangeRequest,
   EnrollTokenExchangeResponse,

@@ -8,6 +8,7 @@ import {
 } from "@opengeni/testing";
 import {
   signDelegatedAccessToken,
+  signEnrollmentBearer,
   verifyEnrollmentBearer,
   type Permission,
 } from "@opengeni/contracts";
@@ -228,6 +229,7 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect(verified).not.toBeNull();
     expect(verified!.workspaceId).toBe(workspaceId);
     expect(verified!.agentId).toBe(approve.enrollmentId);
+    expect(verified!.credentialGeneration).toBe(1);
     expect(verified!.subjectPrefix).toBe(creds.subjectPrefix);
   }, 90_000);
 
@@ -269,6 +271,167 @@ describe("M5 device-flow happy path: start -> approve -> poll -> EnrollmentCrede
     expect(poll.credentials!.consentedWholeMachine).toBe(true);
     expect(poll.credentials!.consentedScreenControl).toBe(false);
   }, 90_000);
+});
+
+describe("public-origin and self-revoke contracts", () => {
+  test("device start uses configured public web origin instead of the API request origin", async () => {
+    if (!available) return;
+    const { workspaceId } = await freshWorkspace();
+    const app = appFor({
+      settings: { ...settings, publicBaseUrl: "https://console.example.test///" },
+    });
+    const res = await app.request("https://api.internal.test/v1/enrollments/device/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ publicKey: "ed25519:PUBLIC-ORIGIN", workspaceId }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { verificationUri: string; verificationUriComplete: string };
+    expect(body.verificationUri).toBe("https://console.example.test/device");
+    expect(body.verificationUriComplete).toStartWith(
+      "https://console.example.test/device?user_code=",
+    );
+  }, 60_000);
+
+  test("self-revoke is same-generation idempotent and an old bearer cannot revoke a re-enrollment", async () => {
+    if (!available) return;
+    const a = await freshWorkspace();
+    const b = await freshWorkspace();
+    const app = appFor();
+    const manageBearer = `Bearer ${await bearer(a.accountId, a.workspaceId, ["enrollments:manage"])}`;
+    const start = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:SELF-REVOKE", workspaceId: a.workspaceId }),
+      })
+    ).json()) as { userCode: string; deviceCode: string };
+    const approved = (await (
+      await app.request(`/v1/workspaces/${a.workspaceId}/enrollments/device/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: manageBearer },
+        body: JSON.stringify({ userCode: start.userCode, allowScreenControl: false }),
+      })
+    ).json()) as { enrollmentId: string };
+    const poll = (await (
+      await app.request("/v1/enrollments/device/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode: start.deviceCode }),
+      })
+    ).json()) as { credentials: { bearer: string } };
+    const enrollmentBearer = poll.credentials.bearer;
+
+    expect((await app.request("/v1/enrollments/self/revoke", { method: "POST" })).status).toBe(401);
+    expect(
+      (
+        await app.request("/v1/enrollments/self/revoke", {
+          method: "POST",
+          headers: { authorization: "Bearer oge_forged" },
+        })
+      ).status,
+    ).toBe(401);
+    const forged = await signEnrollmentBearer(SIGNING_SECRET, {
+      workspaceId: b.workspaceId,
+      agentId: approved.enrollmentId,
+      enrollmentId: approved.enrollmentId,
+      credentialGeneration: 1,
+      subjectPrefix: `agent.${b.workspaceId}.${approved.enrollmentId}`,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+    expect(
+      (
+        await app.request("/v1/enrollments/self/revoke", {
+          method: "POST",
+          headers: { authorization: `Bearer ${forged}` },
+        })
+      ).status,
+    ).toBe(401);
+    const expired = await signEnrollmentBearer(SIGNING_SECRET, {
+      workspaceId: a.workspaceId,
+      agentId: approved.enrollmentId,
+      enrollmentId: approved.enrollmentId,
+      credentialGeneration: 1,
+      subjectPrefix: `agent.${a.workspaceId}.${approved.enrollmentId}`,
+      exp: Math.floor(Date.now() / 1000) - 1,
+    });
+    expect(
+      (
+        await app.request("/v1/enrollments/self/revoke", {
+          method: "POST",
+          headers: { authorization: `Bearer ${expired}` },
+        })
+      ).status,
+    ).toBe(401);
+
+    const revoke = await app.request("/v1/enrollments/self/revoke", {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrollmentBearer}` },
+    });
+    expect(revoke.status).toBe(200);
+    expect((await revoke.json()) as { revoked: boolean }).toEqual({ revoked: true });
+    // Recover a lost successful response: the same verified identity gets the
+    // DB's idempotent no-op result, while auth-callout still denies revoked rows.
+    const retry = await app.request("/v1/enrollments/self/revoke", {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrollmentBearer}` },
+    });
+    expect(retry.status).toBe(200);
+    expect((await retry.json()) as { revoked: boolean }).toEqual({ revoked: false });
+
+    // A fresh device flow for the SAME pubkey is a real re-enrollment: same row id,
+    // next credential generation, and a newly signed bearer.
+    const start2 = (await (
+      await app.request("/v1/enrollments/device/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ publicKey: "ed25519:SELF-REVOKE", workspaceId: a.workspaceId }),
+      })
+    ).json()) as { userCode: string; deviceCode: string };
+    const approved2 = (await (
+      await app.request(`/v1/workspaces/${a.workspaceId}/enrollments/device/approve`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: manageBearer },
+        body: JSON.stringify({ userCode: start2.userCode, allowScreenControl: false }),
+      })
+    ).json()) as { enrollmentId: string };
+    expect(approved2.enrollmentId).toBe(approved.enrollmentId);
+    const poll2 = (await (
+      await app.request("/v1/enrollments/device/poll", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ deviceCode: start2.deviceCode }),
+      })
+    ).json()) as { credentials: { bearer: string } };
+    const newBearer = poll2.credentials.bearer;
+    expect(
+      (await verifyEnrollmentBearer(SIGNING_SECRET, enrollmentBearer))?.credentialGeneration,
+    ).toBe(1);
+    expect((await verifyEnrollmentBearer(SIGNING_SECRET, newBearer))?.credentialGeneration).toBe(2);
+
+    // The old bearer is still cryptographically well-formed, but its generation no
+    // longer matches the row and therefore cannot revoke the new active family.
+    const staleRevoke = await app.request("/v1/enrollments/self/revoke", {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrollmentBearer}` },
+    });
+    expect(staleRevoke.status).toBe(401);
+
+    // The newly returned generation is valid and retains same-generation retry
+    // semantics after a lost successful response.
+    const newRevoke = await app.request("/v1/enrollments/self/revoke", {
+      method: "POST",
+      headers: { authorization: `Bearer ${newBearer}` },
+    });
+    expect(newRevoke.status).toBe(200);
+    expect((await newRevoke.json()) as { revoked: boolean }).toEqual({ revoked: true });
+    const newRetry = await app.request("/v1/enrollments/self/revoke", {
+      method: "POST",
+      headers: { authorization: `Bearer ${newBearer}` },
+    });
+    expect(newRetry.status).toBe(200);
+    expect((await newRetry.json()) as { revoked: boolean }).toEqual({ revoked: false });
+  }, 120_000);
 });
 
 describe("M5 authz: unauthenticated + cross-workspace approve are rejected", () => {
@@ -734,6 +897,7 @@ describe("design-11 A2 headless: mint enroll token -> exchange -> identical cred
     expect(verified).not.toBeNull();
     expect(verified!.workspaceId).toBe(workspaceId);
     expect(verified!.agentId).toBe(creds.agentId);
+    expect(verified!.credentialGeneration).toBe(1);
 
     // The exchange landed a real machine (the SAME finalize as approve).
     const list = (await (

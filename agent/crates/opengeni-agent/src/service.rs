@@ -5,29 +5,40 @@
 //! [`opengeni_agent_platform::service`] (one trait, cargo-unit-tested); this module
 //! is the thin binary-side glue that resolves the installed binary path, writes the
 //! rendered unit/plist, and drives the platform service tool (`systemctl` /
-//! `launchctl` / `sc.exe`). Linux is the concrete, live path; macOS/Windows write
-//! the definition + print the activation commands (structured + compiling, finished
-//! on their native runners).
+//! `launchctl`). Linux is the concrete live path and macOS uses a user LaunchAgent.
+//! Windows deliberately returns unsupported for every action: the foreground
+//! `run` process is not an SCM service host, and registering it would be false.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use opengeni_agent_platform::service::{self, ServiceBackend, ServiceScope, ServiceSpec};
-use tracing::{info, warn};
+use tracing::info;
 
-use crate::cli::{ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceScopeArgs};
+use crate::cli::{
+    ServiceAction, ServiceArgs, ServiceInstallArgs, ServiceLogsArgs, ServiceScopeArgs,
+};
 
 /// Dispatches a `service` subcommand. Returns a human-facing result string on
 /// success or an error message on failure.
 pub fn run(args: &ServiceArgs) -> Result<(), String> {
     info!(action = args.action.label(), "service subcommand");
+    ensure_supported_service_backend(ServiceSpec::backend())?;
     match &args.action {
         ServiceAction::Install(a) => install(a),
         ServiceAction::Uninstall(a) => uninstall(scope(a)),
         ServiceAction::Start(a) => lifecycle("start", scope(a)),
         ServiceAction::Stop(a) => lifecycle("stop", scope(a)),
         ServiceAction::Status(a) => status(scope(a)),
+        ServiceAction::Logs(a) => logs(a),
     }
+}
+
+fn ensure_supported_service_backend(backend: ServiceBackend) -> Result<(), String> {
+    if backend == ServiceBackend::WindowsScm {
+        return Err(windows_service_error());
+    }
+    Ok(())
 }
 
 fn scope(a: &ServiceScopeArgs) -> ServiceScope {
@@ -55,10 +66,12 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn spec_for(install_scope: ServiceScope) -> Result<ServiceSpec, String> {
+    let home = home()?;
     Ok(ServiceSpec {
         binary_path: binary_path()?,
         args: vec!["run".to_string()],
         scope: install_scope,
+        log_dir: Some(service::launchd_log_dir(&home)),
     })
 }
 
@@ -70,6 +83,11 @@ fn install(args: &ServiceInstallArgs) -> Result<(), String> {
     } else {
         ServiceScope::User
     };
+    // Do this before `--print` too: dry-run output must never normalize a
+    // forbidden LaunchDaemon/system-scope configuration as supported.
+    if ServiceSpec::backend() == ServiceBackend::Launchd {
+        require_launchagent_scope(install_scope)?;
+    }
     let spec = spec_for(install_scope)?;
 
     if args.print {
@@ -121,6 +139,7 @@ fn install_systemd(spec: &ServiceSpec) -> Result<(), String> {
 
 /// macOS: write the LaunchAgent plist and bootstrap it into the user's GUI session.
 fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
+    require_launchagent_scope(spec.scope)?;
     let plist_path = service::launchd_plist_path(&home()?);
     let body = service::render_launchd_plist(spec);
     if let Some(parent) = plist_path.parent() {
@@ -130,17 +149,18 @@ fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
         .map_err(|e| format!("write {}: {e}", plist_path.display()))?;
     info!(path = %plist_path.display(), "wrote LaunchAgent plist");
 
-    // `launchctl bootstrap gui/$(id -u)` (modern) loads it into the GUI session so
-    // desktop/computer-use sees the screen. A non-fatal warning if launchctl is
-    // absent (the plist is written either way; the user can load it manually).
+    let log_dir = spec
+        .log_dir
+        .as_ref()
+        .expect("launchd log dir is configured");
+    std::fs::create_dir_all(log_dir).map_err(|e| format!("mkdir {}: {e}", log_dir.display()))?;
+    // Idempotent reinstall: unload a prior instance if present. A not-loaded
+    // target is harmless; the following bootstrap is strict and must succeed.
     let uid = unsafe_uid();
-    let domain = format!("gui/{uid}");
-    if let Err(e) = run_tool(
-        "launchctl",
-        &["bootstrap", &domain, &plist_path.to_string_lossy()],
-    ) {
-        warn!(error = %e, "launchctl bootstrap failed; the plist is written — load it with `launchctl load`");
-    }
+    let bootout = service::launchctl_bootout_args(&uid, &plist_path);
+    let _ = run_tool_owned("launchctl", &bootout);
+    let bootstrap = service::launchctl_bootstrap_args(&uid, &plist_path);
+    run_tool_owned("launchctl", &bootstrap)?;
     println!(
         "installed the opengeni-agent LaunchAgent at {}.",
         plist_path.display()
@@ -148,45 +168,11 @@ fn install_launchd(spec: &ServiceSpec) -> Result<(), String> {
     Ok(())
 }
 
-/// Windows: register the SCM service + set restart-on-failure recovery. The binary
-/// hosts the SCM service via the windows-service crate on its native build. The
-/// `Result` return is uniform with the other backends (it only ever fails on the
-/// Windows build, where `sc.exe` can error).
-#[cfg_attr(not(windows), allow(clippy::unnecessary_wraps))]
-fn install_windows(spec: &ServiceSpec) -> Result<(), String> {
-    // We invoke sc.exe with the rendered argument vectors. On non-Windows builds
-    // this code is still compiled (so the surface never rots) but only runs on
-    // Windows; the commands are exactly what `--print` shows.
-    println!("{}", service::windows_create_command(spec));
-    println!("{}", service::windows_recovery_command());
-    #[cfg(windows)]
-    {
-        run_tool(
-            "sc.exe",
-            &[
-                "create",
-                service::ids::WINDOWS_SERVICE,
-                "binPath=",
-                &format!("\"{}\" run", spec.binary_path.to_string_lossy()),
-                "start=",
-                "delayed-auto",
-            ],
-        )?;
-        run_tool(
-            "sc.exe",
-            &[
-                "failure",
-                service::ids::WINDOWS_SERVICE,
-                "reset=",
-                "0",
-                "actions=",
-                "restart/5000/restart/5000/restart/5000",
-            ],
-        )?;
-        run_tool("sc.exe", &["start", service::ids::WINDOWS_SERVICE])?;
-    }
-    println!("registered the OpengeniAgent Windows Service.");
-    Ok(())
+/// Windows service hosting is absent. This pure, portable contract lets Linux CI
+/// prove the Windows branch fails before `sc.exe` could be spawned; a native
+/// Windows compile proves compatibility, not live SCM service behavior.
+fn install_windows(_spec: &ServiceSpec) -> Result<(), String> {
+    Err(windows_service_error())
 }
 
 fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
@@ -211,28 +197,16 @@ fn uninstall(install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Launchd => {
+            require_launchagent_scope(install_scope)?;
             let plist_path = service::launchd_plist_path(&home()?);
             let uid = unsafe_uid();
-            let _ = run_tool(
-                "launchctl",
-                &[
-                    "bootout",
-                    &format!("gui/{uid}/{}", service::ids::LAUNCHD_LABEL),
-                ],
-            );
+            let args = service::launchctl_bootout_args(&uid, &plist_path);
+            let _ = run_tool_owned("launchctl", &args);
             let _ = std::fs::remove_file(&plist_path);
             println!("uninstalled the opengeni-agent LaunchAgent.");
             Ok(())
         }
-        ServiceBackend::WindowsScm => {
-            #[cfg(windows)]
-            {
-                let _ = run_tool("sc.exe", &["stop", service::ids::WINDOWS_SERVICE]);
-                let _ = run_tool("sc.exe", &["delete", service::ids::WINDOWS_SERVICE]);
-            }
-            println!("uninstalled the OpengeniAgent Windows Service.");
-            Ok(())
-        }
+        ServiceBackend::WindowsScm => Err(windows_service_error()),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
 }
@@ -249,25 +223,18 @@ fn lifecycle(action: &str, install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Launchd => {
+            require_launchagent_scope(install_scope)?;
             let uid = unsafe_uid();
-            let target = format!("gui/{uid}/{}", service::ids::LAUNCHD_LABEL);
-            let lc_action = if action == "start" {
-                "kickstart"
+            let args = if action == "start" {
+                service::launchctl_kickstart_args(&uid)
             } else {
-                "kill"
+                service::launchctl_kill_args(&uid)
             };
-            let _ = run_tool("launchctl", &[lc_action, "-k", &target]);
+            run_tool_owned("launchctl", &args)?;
             println!("{action}ed the opengeni-agent LaunchAgent.");
             Ok(())
         }
-        ServiceBackend::WindowsScm => {
-            #[cfg(windows)]
-            {
-                run_tool("sc.exe", &[action, service::ids::WINDOWS_SERVICE])?;
-            }
-            println!("{action}ed the OpengeniAgent Windows Service.");
-            Ok(())
-        }
+        ServiceBackend::WindowsScm => Err(windows_service_error()),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
 }
@@ -287,30 +254,52 @@ fn status(install_scope: ServiceScope) -> Result<(), String> {
             Ok(())
         }
         ServiceBackend::Launchd => {
-            let out = capture("launchctl", &["list", service::ids::LAUNCHD_LABEL]);
+            require_launchagent_scope(install_scope)?;
+            let args = service::launchctl_print_args(&unsafe_uid());
+            let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+            let out = capture("launchctl", &refs);
             match out {
                 Ok(_) => println!("opengeni-agent LaunchAgent: loaded"),
                 Err(_) => println!("opengeni-agent LaunchAgent: not loaded"),
             }
             Ok(())
         }
-        ServiceBackend::WindowsScm => {
-            #[cfg(windows)]
-            {
-                let out = capture("sc.exe", &["query", service::ids::WINDOWS_SERVICE]);
-                match out {
-                    Ok(s) => println!("{s}"),
-                    Err(_) => println!("OpengeniAgent Windows Service: not installed"),
-                }
-            }
-            #[cfg(not(windows))]
-            {
-                println!("OpengeniAgent Windows Service: (status available on Windows)");
-            }
-            Ok(())
-        }
+        ServiceBackend::WindowsScm => Err(windows_service_error()),
         ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
     }
+}
+
+fn logs(args: &ServiceLogsArgs) -> Result<(), String> {
+    let install_scope = scope(&args.scope);
+    match ServiceSpec::backend() {
+        ServiceBackend::Systemd => {
+            let command = service::journalctl_args(install_scope, args.lines, args.follow);
+            run_tool_owned("journalctl", &command)
+        }
+        ServiceBackend::Launchd => {
+            require_launchagent_scope(install_scope)?;
+            let command = service::launchd_tail_args(
+                &service::launchd_log_dir(&home()?),
+                args.lines,
+                args.follow,
+            );
+            run_tool_owned("tail", &command)
+        }
+        ServiceBackend::WindowsScm => Err(windows_service_error()),
+        ServiceBackend::Unsupported => Err(service::unsupported_backend().to_string()),
+    }
+}
+
+fn require_launchagent_scope(scope: ServiceScope) -> Result<(), String> {
+    if scope == ServiceScope::System {
+        Err("macOS supports only the logged-in user's Aqua LaunchAgent; --system/LaunchDaemon scope is intentionally unsupported".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn windows_service_error() -> String {
+    service::windows_service_unsupported().to_string()
 }
 
 fn scope_label(s: ServiceScope) -> &'static str {
@@ -336,6 +325,11 @@ fn run_tool(tool: &str, args: &[&str]) -> Result<(), String> {
     } else {
         Err(format!("{tool} {args:?} exited with {status}"))
     }
+}
+
+fn run_tool_owned(tool: &str, args: &[String]) -> Result<(), String> {
+    let refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_tool(tool, &refs)
 }
 
 /// Runs an external tool and captures its stdout.
@@ -386,5 +380,36 @@ mod tests {
     fn scope_label_is_human_readable() {
         assert_eq!(scope_label(ServiceScope::User), "user");
         assert_eq!(scope_label(ServiceScope::System), "system");
+    }
+
+    #[test]
+    fn launchagent_system_scope_error_is_explicit() {
+        let error = require_launchagent_scope(ServiceScope::System).expect_err("system scope");
+        assert!(error.contains("Aqua LaunchAgent"));
+        assert!(error.contains("LaunchDaemon"));
+    }
+
+    #[test]
+    fn windows_service_install_is_an_exact_side_effect_free_rejection() {
+        let spec = ServiceSpec {
+            binary_path: PathBuf::from(r"C:\Program Files\OpenGeni\opengeni-agent.exe"),
+            args: vec!["run".to_string()],
+            scope: ServiceScope::User,
+            log_dir: None,
+        };
+        let error = install_windows(&spec).expect_err("Windows service must stay unsupported");
+        assert_eq!(error, windows_service_error());
+        assert!(error.contains("no service was registered or changed"));
+        assert!(error.contains("opengeni-agent run"));
+        assert!(!error.contains("sc.exe create"));
+    }
+
+    #[test]
+    fn windows_service_dispatch_rejects_every_action_before_handler_work() {
+        let error = ensure_supported_service_backend(ServiceBackend::WindowsScm)
+            .expect_err("Windows service dispatch must fail before action handling");
+        assert_eq!(error, windows_service_error());
+        assert!(ensure_supported_service_backend(ServiceBackend::Systemd).is_ok());
+        assert!(ensure_supported_service_backend(ServiceBackend::Launchd).is_ok());
     }
 }

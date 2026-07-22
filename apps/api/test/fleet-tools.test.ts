@@ -364,8 +364,15 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     const self = await provisionSandbox(services, ctx, { kind: "selfhosted" });
     expect(self.kind).toBe("selfhosted");
     if (self.kind === "selfhosted") {
-      expect(self.installCommandUnix).toContain("install.sh");
-      expect(self.verificationUri).toContain("/device");
+      expect(self.installCommandUnix).toBe(
+        `curl -fsSL 'https://app.example/install.sh' | OPENGENI_API_URL='https://app.example' OPENGENI_WORKSPACE_ID='${ctx.workspaceId}' sh`,
+      );
+      expect(self.installCommandWindows).toBe(
+        `$env:OPENGENI_API_URL = 'https://app.example'; $env:OPENGENI_WORKSPACE_ID = '${ctx.workspaceId}'; irm 'https://app.example/install.ps1' | iex`,
+      );
+      expect(self.verificationUri).toBe("https://app.example/device");
+      expect(self.instructions).toContain("human operator");
+      expect(self.note).toContain("cannot self-consent");
     }
 
     const modal = await provisionSandbox(services, ctx, { kind: "modal", name: "extra-box" });
@@ -419,4 +426,18 @@ describe("M7 fleet service — list / attach / swap / run_on / provision", () =>
     expect(r.swapped).toBe(false);
     expect(r.code).toBe("offline_enrollment");
   }, 60_000);
+
+  test("selfhosted provisioning uses the hosted app origin fallback", async () => {
+    if (!available) return;
+    const { ctx, services } = await seedFleet();
+    services.settings = { ...services.settings, publicBaseUrl: undefined };
+    const self = await provisionSandbox(services, ctx, { kind: "selfhosted" });
+    expect(self.kind).toBe("selfhosted");
+    if (self.kind === "selfhosted") {
+      expect(self.installCommandUnix).toStartWith(
+        "curl -fsSL 'https://app.opengeni.ai/install.sh'",
+      );
+      expect(self.verificationUri).toBe("https://app.opengeni.ai/device");
+    }
+  });
 });

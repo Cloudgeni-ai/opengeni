@@ -953,7 +953,7 @@ export interface DeviceAuthStartResponse {
   userCode: string;
   /** The opaque device code the agent polls with. */
   deviceCode: string;
-  /** Where the user goes to authorize (e.g. https://get.opengeni.ai/device). */
+  /** Where the user goes to authorize (e.g. https://app.opengeni.ai/device). */
   verificationUri: string;
   /** A pre-filled convenience URL embedding the user_code. */
   verificationUriComplete: string;

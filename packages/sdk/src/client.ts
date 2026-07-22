@@ -55,6 +55,7 @@ import type {
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
   MintEnrollTokenResponse,
+  RevokeEnrollmentResponse,
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
@@ -459,6 +460,22 @@ export class OpenGeniClient {
       "POST",
       `/v1/workspaces/${workspaceId}/enrollments/token`,
       { allowScreenControl: request.allowScreenControl ?? false },
+    );
+  }
+
+  /**
+   * Permanently revoke one connected-machine enrollment. The machine's stored
+   * bearer stops authenticating immediately; enrolling it again requires an
+   * explicit `opengeni-agent enroll --force`. A successful `{ revoked: false }`
+   * is the idempotent already-revoked outcome.
+   */
+  async revokeEnrollment(
+    workspaceId: string,
+    enrollmentId: string,
+  ): Promise<RevokeEnrollmentResponse> {
+    return await this.requestJson<RevokeEnrollmentResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/enrollments/${enrollmentId}/revoke`,
     );
   }
 

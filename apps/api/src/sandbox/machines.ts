@@ -215,7 +215,9 @@ export async function listMachines(
   // onto the machines (no N+1). Each machine is probed for liveness.
   const [sandboxes, enrollments, metricsByEnrollment] = await Promise.all([
     listSandboxes(db, workspaceId),
-    listEnrollments(db, workspaceId),
+    // Revoked rows remain durable for audit/re-enrollment, but they are no
+    // longer attachable machines and must disappear from the live fleet.
+    listEnrollments(db, workspaceId, { status: "active" }),
     readMachineMetricsLatestForWorkspace(db, workspaceId),
   ]);
   const enrollmentById = new Map(enrollments.map((e) => [e.id, e]));

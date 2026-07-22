@@ -5,15 +5,18 @@
 //!
 //!   1. write the verified new bytes to a temp file ON THE SAME FILESYSTEM as the
 //!      install path (so the later rename is atomic, not a cross-device copy);
-//!   2. move the current binary aside to a `.bak` (Linux/macOS) / `.old`
+//!   2. move the current binary aside to a `.bak` (Linux) / `.old`
 //!      (Windows) BACKUP — kept until the new version proves healthy;
 //!   3. rename the verified-new temp into the canonical path.
 //!
-//! On Linux/macOS the running ELF/Mach-O is held by its inode, so the on-disk path
-//! can be replaced while running (the next exec picks up the new binary). On
-//! Windows the loader holds an exclusive lock, so step 2 IS the rename-self-aside
-//! that makes step 3 legal. We delegate the genuinely-hard running-exe replace to
-//! the `self-replace` crate ([`replace_running_exe`]); the lower-level
+//! On Linux the running ELF is held by its inode, so the on-disk path can be
+//! replaced while running. On Windows the loader holds an exclusive lock, so step
+//! 2 is the rename-self-aside that makes step 3 legal. macOS is intentionally
+//! different: replacing only a signed `.app`'s `Contents/MacOS/opengeni-agent`
+//! invalidates the bundle signature and TCC identity. Running-executable apply
+//! fails before any write and requires a complete bundle reinstall. We delegate
+//! supported running-exe replacement to the `self-replace` crate
+//! ([`replace_running_exe`]); the lower-level
 //! [`swap_binary`] does the same rename dance on an ARBITRARY path so the
 //! swap/rollback logic is unit-testable without being the live process.
 //!
@@ -128,10 +131,13 @@ pub fn promote(install_path: &Path) -> UpdateResult<()> {
     Ok(())
 }
 
-/// Replaces the CURRENTLY-RUNNING executable with `new_bytes`, delegating the
-/// platform-honest atomic replace (incl. the Windows rename-self-aside) to the
-/// `self-replace` crate. Keeps the backup the same way [`swap_binary`] does so the
-/// boot health-gate can roll back.
+/// Replaces the CURRENTLY-RUNNING executable with `new_bytes` on Linux/Windows,
+/// delegating the platform-honest atomic replace (incl. the Windows
+/// rename-self-aside) to the `self-replace` crate. Keeps the backup the same way
+/// [`swap_binary`] does so the boot health-gate can roll back.
+///
+/// On macOS this returns [`UpdateError::BundleReinstallRequired`] before creating a
+/// temp file or backup. A signed `.app` must be updated as one verified bundle.
 ///
 /// Use this in the live agent; tests drive [`swap_binary`] on a temp path instead.
 ///
@@ -141,6 +147,7 @@ pub fn promote(install_path: &Path) -> UpdateResult<()> {
 /// fails.
 pub fn replace_running_exe(new_bytes: &[u8]) -> UpdateResult<PathBuf> {
     let exe = std::env::current_exe().map_err(|e| UpdateError::io("current_exe".to_string(), e))?;
+    ensure_running_update_supported(std::env::consts::OS, &exe)?;
 
     // Write the verified bytes to a same-dir temp, keep a backup, then let
     // self-replace atomically swap the temp over the live exe (handling the
@@ -156,6 +163,18 @@ pub fn replace_running_exe(new_bytes: &[u8]) -> UpdateResult<PathBuf> {
     self_replace::self_replace(&tmp).map_err(|e| UpdateError::io(exe.display().to_string(), e))?;
     let _ = std::fs::remove_file(&tmp);
     Ok(backup)
+}
+
+/// Rejects running-executable mutation on macOS before the caller creates any
+/// sibling temp/backup file. `target_os` is explicit so the policy is portable-
+/// unit-testable from Linux; production always passes [`std::env::consts::OS`].
+fn ensure_running_update_supported(target_os: &str, exe: &Path) -> UpdateResult<()> {
+    if target_os == "macos" {
+        return Err(UpdateError::BundleReinstallRequired {
+            path: exe.display().to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// A temp file name sibling to `path` on the same directory/filesystem.
@@ -274,5 +293,29 @@ mod tests {
         let backup = swap_binary(&bin, b"FIRST").expect("swap");
         assert_eq!(read(&bin), b"FIRST");
         assert!(!backup.exists(), "no backup when there was no prior binary");
+    }
+
+    #[test]
+    fn macos_running_update_requires_bundle_reinstall_before_any_write() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let app_exe = dir
+            .path()
+            .join("OpenGeni Agent.app/Contents/MacOS/opengeni-agent");
+        let error = ensure_running_update_supported("macos", &app_exe)
+            .expect_err("macOS apply must fail closed");
+        assert!(matches!(error, UpdateError::BundleReinstallRequired { .. }));
+        assert!(error.to_string().contains("no files were changed"));
+        assert!(error
+            .to_string()
+            .contains("complete signed OpenGeni Agent.app bundle"));
+        assert!(!temp_sibling(&app_exe).exists());
+        assert!(!backup_path(&app_exe).exists());
+    }
+
+    #[test]
+    fn linux_and_windows_running_update_policy_remains_enabled() {
+        let exe = Path::new("/opt/opengeni-agent");
+        assert!(ensure_running_update_supported("linux", exe).is_ok());
+        assert!(ensure_running_update_supported("windows", exe).is_ok());
     }
 }

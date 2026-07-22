@@ -6,7 +6,16 @@
 // how have they moved over the chosen window. Built entirely on the existing
 // `og-*` token system — no new visual language, just the missing depth.
 // ----------------------------------------------------------------------------
-import { ArrowLeftIcon, CpuIcon, LaptopIcon, RadioIcon, ServerIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  CpuIcon,
+  LaptopIcon,
+  Loader2Icon,
+  RadioIcon,
+  ServerIcon,
+  UnplugIcon,
+} from "lucide-react";
+import type { Ref } from "react";
 import { cn } from "../../lib/cn";
 import { formatRelativeTime } from "../../lib/format";
 import type { MachineView, MetricSample } from "../../types/machines";
@@ -23,6 +32,10 @@ export type MachineDetailProps = {
   onWindowChange: (w: MetricWindow) => void;
   loadingSeries?: boolean | undefined;
   onBack?: (() => void) | undefined;
+  /** Request permanent revocation of this connected-machine enrollment. */
+  onRevoke?: (() => void) | undefined;
+  revokeButtonRef?: Ref<HTMLButtonElement> | undefined;
+  revoking?: boolean | undefined;
   now?: number | undefined;
   className?: string | undefined;
 };
@@ -40,6 +53,9 @@ export function MachineDetail({
   onWindowChange,
   loadingSeries,
   onBack,
+  onRevoke,
+  revokeButtonRef,
+  revoking,
   now = Date.now(),
   className,
 }: MachineDetailProps) {
@@ -59,7 +75,7 @@ export function MachineDetail({
   return (
     <div className={cn("og-root mx-auto flex w-full max-w-5xl flex-col gap-5", className)}>
       {/* ── top bar ─────────────────────────────────────────────────────── */}
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex min-w-0 items-center gap-2.5">
           {onBack && (
             <button
@@ -78,24 +94,43 @@ export function MachineDetail({
           </span>
         </div>
 
-        {/* range selector */}
-        <div className="flex shrink-0 items-center gap-0.5 rounded-og-md border border-og-border bg-og-surface-1 p-0.5">
-          {METRIC_WINDOWS.map((w) => (
+        <div className="flex shrink-0 items-center justify-between gap-2 sm:justify-end">
+          {onRevoke ? (
             <button
-              key={w}
               type="button"
-              onClick={() => onWindowChange(w)}
-              data-active={w === window}
-              className={cn(
-                "rounded-og-sm px-2 py-1 font-og-mono text-og-xs transition-colors",
-                w === window
-                  ? "bg-og-surface-3 text-og-fg shadow-og-sm"
-                  : "text-og-fg-subtle hover:text-og-fg-muted",
-              )}
+              ref={revokeButtonRef}
+              data-revoke-machine
+              disabled={revoking}
+              onClick={onRevoke}
+              className="inline-flex min-h-7 items-center gap-1.5 rounded-og-sm border border-og-status-failed/30 px-2 py-1 text-og-xs font-medium text-og-status-failed transition-colors hover:bg-og-status-failed/10 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-10"
             >
-              {w}
+              {revoking ? (
+                <Loader2Icon className="size-3 animate-og-spin" aria-hidden />
+              ) : (
+                <UnplugIcon className="size-3" aria-hidden />
+              )}
+              {revoking ? "Unenrolling…" : "Unenroll"}
             </button>
-          ))}
+          ) : null}
+          {/* range selector */}
+          <div className="flex items-center gap-0.5 rounded-og-md border border-og-border bg-og-surface-1 p-0.5">
+            {METRIC_WINDOWS.map((w) => (
+              <button
+                key={w}
+                type="button"
+                onClick={() => onWindowChange(w)}
+                data-active={w === window}
+                className={cn(
+                  "rounded-og-sm px-2 py-1 font-og-mono text-og-xs transition-colors",
+                  w === window
+                    ? "bg-og-surface-3 text-og-fg shadow-og-sm"
+                    : "text-og-fg-subtle hover:text-og-fg-muted",
+                )}
+              >
+                {w}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 

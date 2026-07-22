@@ -867,6 +867,7 @@ impl<P: Platform + 'static> Supervisor<P> {
             // The computer-use input consent gate reads the SAME enrollment grant
             // the relay pump's `allow_input` uses.
             consented_screen_control: link.creds.consented_screen_control,
+            consented_whole_machine: link.creds.consented_whole_machine,
             max_reply_bytes,
         }
     }
@@ -1498,7 +1499,7 @@ mod tests {
         use opengeni_agent_proto::v1::AgentEvent;
         use prost::Message as _;
 
-        use crate::config::StoredCredentials;
+        use crate::config::{StoredCredentials, DEFAULT_PUBLIC_ORIGIN};
 
         /// Locates a `nats-server` binary on `$PATH`, else scans `/nix/store`
         /// (this project's dev/CI hosts are NixOS). `None` → the caller skips.
@@ -1597,6 +1598,7 @@ mod tests {
         /// Throwaway credentials pointing at the local server.
         pub fn test_credentials(url: &str) -> StoredCredentials {
             StoredCredentials {
+                api_base_url: DEFAULT_PUBLIC_ORIGIN.to_string(),
                 agent_id: "hx-test-agent".to_string(),
                 workspace_id: "hx-test-ws".to_string(),
                 nats_bearer: "test-bearer".to_string(),

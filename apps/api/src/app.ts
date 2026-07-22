@@ -813,6 +813,8 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     pattern: /^\/v1\/enrollments\/device\/poll$/,
     label: "/v1/enrollments/device/poll",
   },
+  { pattern: /^\/v1\/enrollments\/token\/exchange$/, label: "/v1/enrollments/token/exchange" },
+  { pattern: /^\/v1\/enrollments\/self\/revoke$/, label: "/v1/enrollments/self/revoke" },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/enrollments\/device\/approve$/,
     label: "/v1/workspaces/:workspaceId/enrollments/device/approve",

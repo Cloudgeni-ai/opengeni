@@ -10,6 +10,7 @@ import { registerDom, renderComponent, flush } from "./render-hook";
 import { MachineCard } from "../src/components/machine-card";
 import { MachinesDashboard } from "../src/components/machines-dashboard";
 import { MachineMetrics } from "../src/components/machine-metrics";
+import { MachineDetail } from "../src/components/machines/machine-detail";
 import { ConnectionStatusPill, MachineStatusPill } from "../src/components/machine-status-pill";
 import { MachineDockBar, SharedMachineDisclosure } from "../src/components/machine-dock-bar";
 import { EnrollmentConsent } from "../src/components/enrollment-consent";
@@ -256,6 +257,40 @@ describe("MachinesDashboard", () => {
   });
 });
 
+describe("MachineDetail — enrollment lifecycle", () => {
+  test("renders an accessible unenroll action only when the host wires it", async () => {
+    let requested = false;
+    const m = machine({ sandboxId: "sh-revoke", enrollmentId: "enr-revoke", state: "online" });
+    const withAction = await renderComponent(
+      <MachineDetail
+        machine={m}
+        series={[]}
+        window="1h"
+        onWindowChange={() => {}}
+        onRevoke={() => {
+          requested = true;
+        }}
+      />,
+    );
+    await flush();
+    const button = withAction.container.querySelector(
+      "[data-revoke-machine]",
+    ) as HTMLButtonElement | null;
+    expect(button?.textContent).toContain("Unenroll");
+    button!.click();
+    await flush();
+    expect(requested).toBe(true);
+    await withAction.unmount();
+
+    const readOnly = await renderComponent(
+      <MachineDetail machine={m} series={[]} window="1h" onWindowChange={() => {}} />,
+    );
+    await flush();
+    expect(readOnly.container.querySelector("[data-revoke-machine]")).toBeNull();
+    await readOnly.unmount();
+  });
+});
+
 describe("MachineDockBar + SharedMachineDisclosure (dock parity)", () => {
   test("the dock bar surfaces the active machine + connection pill", async () => {
     const r = await renderComponent(
@@ -360,15 +395,15 @@ describe("EnrollmentDeviceFlow", () => {
     const r = await renderComponent(
       <EnrollmentDeviceFlow
         userCode="WXYZ-4821"
-        verificationUri="https://get.opengeni.ai/device"
-        installCommand="curl -fsSL https://get.opengeni.ai/install.sh | sh"
+        verificationUri="https://app.opengeni.ai/device"
+        installCommand="curl -fsSL https://app.opengeni.ai/install.sh | sh"
         onCopyCode={() => (copied = true)}
       />,
     );
     await flush();
     expect(r.container.querySelector("[data-enrollment-device-flow]")).not.toBeNull();
     expect(r.container.querySelector("[data-user-code]")?.textContent).toContain("WXYZ-4821");
-    expect(r.container.textContent).toContain("get.opengeni.ai/device");
+    expect(r.container.textContent).toContain("app.opengeni.ai/device");
     (r.container.querySelector("[data-copy-code]") as HTMLButtonElement).click();
     await flush();
     expect(copied).toBe(true);

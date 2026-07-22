@@ -7,27 +7,36 @@
 //!   this runs and offline when it stops.
 //! * [`Command::Enroll`] — the device-flow enrollment only (print a user-code +
 //!   URL, poll to completion, persist credentials `0600`), then exit.
+//! * [`Command::Status`] — report local enrollment identity and prove that its
+//!   stored bearer can reach the control plane; fail non-zero when it cannot.
 //! * [`Command::Service`] — the opt-in always-on daemon path (systemd-user /
-//!   LaunchAgent / Windows Service). The default supported model is FOREGROUND
-//!   `run`; this is the explicit opt-in for a dedicated machine.
+//!   LaunchAgent). Windows service actions are explicitly unsupported until the
+//!   binary is a real SCM host; foreground `run` remains supported everywhere.
 //! * [`Command::Update`] — check for and apply a signed self-update (minisign +
-//!   sha256 verify, atomic swap, rollback on a failed health gate).
-//! * [`Command::Uninstall`] — stop any service, remove the binary, and (with
-//!   `--purge`) delete credentials + deactivate the enrollment.
+//!   sha256 verify, atomic swap, retained manual rollback copy).
+//! * [`Command::Uninstall`] — stop any service and (with `--purge`) delete
+//!   credentials + deactivate the enrollment. A direct invocation retains its
+//!   currently running executable; the installer uninstaller removes that file.
 
 use clap::{Parser, Subcommand};
 
 /// The OpenGeni self-hosted agent: run your own machine as a first-class OpenGeni
 /// sandbox.
 #[derive(Debug, Parser)]
-#[command(name = "opengeni-agent", version, about, long_about = None)]
+#[command(
+    name = "opengeni-agent",
+    version,
+    about,
+    long_about = None,
+    after_help = "Canonical executable: opengeni-agent. It is not a subcommand of another OpenGeni CLI."
+)]
 pub struct Cli {
     /// The subcommand to run. Defaults to `run` when omitted.
     #[command(subcommand)]
     pub command: Option<Command>,
 
     /// The control-plane API base URL used for enrollment (e.g.
-    /// `https://api.opengeni.ai`). Falls back to `$OPENGENI_API_URL`.
+    /// `https://app.opengeni.ai`). Falls back to `$OPENGENI_API_URL`.
     #[arg(long, global = true, env = "OPENGENI_API_URL")]
     pub api_url: Option<String>,
 }
@@ -40,17 +49,22 @@ pub enum Command {
     Run(RunArgs),
     /// Run the device-flow enrollment only and persist credentials, then exit.
     Enroll(EnrollArgs),
-    /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status).
+    /// Report local enrollment and authenticated control-plane reachability.
+    Status(StatusArgs),
+    /// Manage the OPT-IN always-on service (install/uninstall/start/stop/status/logs).
     ///
     /// The default, supported run model is FOREGROUND `opengeni-agent run`. A
-    /// service (systemd user unit / macOS LaunchAgent / Windows Service) is for a
-    /// genuinely dedicated machine (a build box, a CI Mac mini) — install it only
-    /// if you want the agent to start on boot and run unattended.
+    /// service (systemd user unit / macOS LaunchAgent) is for a genuinely dedicated
+    /// machine. Windows service actions fail explicitly because this binary is not
+    /// an SCM service host; use foreground `opengeni-agent run` there.
     Service(ServiceArgs),
     /// Check for and apply a signed self-update for this channel + target.
+    #[command(visible_alias = "upgrade")]
     Update(UpdateArgs),
-    /// Remove the agent: stop any service, delete the binary, and (with `--purge`)
-    /// remove credentials + deactivate the enrollment.
+    /// Attempt service cleanup. With `--purge`, remove local credentials after a
+    /// confirmed revoke (or explicit `--local-only` override). The running
+    /// executable is retained; use the installer uninstaller (or remove it after
+    /// this process exits) to delete it.
     Uninstall(UninstallArgs),
 }
 
@@ -124,6 +138,14 @@ pub struct EnrollArgs {
     pub non_interactive: bool,
 }
 
+/// Arguments for the top-level `status` command.
+#[derive(Debug, clap::Args)]
+pub struct StatusArgs {
+    /// Maximum seconds to wait for an authenticated control-plane round trip.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+    pub timeout_seconds: u64,
+}
+
 /// Arguments for the `service` subcommand (the opt-in always-on daemon).
 #[derive(Debug, clap::Args)]
 pub struct ServiceArgs {
@@ -146,6 +168,8 @@ pub enum ServiceAction {
     Stop(ServiceScopeArgs),
     /// Report the service status.
     Status(ServiceScopeArgs),
+    /// Print service logs (compact recent output by default; `--follow` tails).
+    Logs(ServiceLogsArgs),
 }
 
 /// Arguments for `service install`.
@@ -156,9 +180,9 @@ pub struct ServiceInstallArgs {
     #[arg(long)]
     pub system: bool,
 
-    /// Print the generated service definition (systemd unit / launchd plist /
-    /// Windows registration commands) and exit WITHOUT touching the system — a
-    /// dry-run so you can review exactly what would be installed.
+    /// Print the generated service definition (systemd unit / launchd plist) and
+    /// exit WITHOUT touching the system. Windows returns the same explicit
+    /// unsupported error as every other service action.
     #[arg(long)]
     pub print: bool,
 }
@@ -171,16 +195,31 @@ pub struct ServiceScopeArgs {
     pub system: bool,
 }
 
+/// Arguments for `service logs`.
+#[derive(Debug, clap::Args)]
+pub struct ServiceLogsArgs {
+    /// Follow new log output until interrupted.
+    #[arg(long)]
+    pub follow: bool,
+
+    /// Number of recent lines to print (1 through 10,000; default 100).
+    #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=10_000))]
+    pub lines: u16,
+
+    #[command(flatten)]
+    pub scope: ServiceScopeArgs,
+}
+
 /// Arguments for the `update` subcommand.
 #[derive(Debug, Default, clap::Args)]
 pub struct UpdateArgs {
-    /// Only CHECK whether a newer build is available (verify the manifest), do not
-    /// download or apply.
+    /// Only CHECK whether a newer build is available and fully verify its manifest
+    /// and artifact; do not apply it.
     #[arg(long)]
     pub check: bool,
 
     /// Override the release base URL (defaults to the enrolled value /
-    /// `https://get.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
+    /// `https://app.opengeni.ai`). Honors `$OPENGENI_INSTALL_BASE_URL`.
     #[arg(long, env = "OPENGENI_INSTALL_BASE_URL")]
     pub base_url: Option<String>,
 
@@ -197,6 +236,12 @@ pub struct UninstallArgs {
     /// the credentials are kept so a re-install reconnects.
     #[arg(long)]
     pub purge: bool,
+
+    /// With `--purge`, delete local state without contacting the control plane.
+    /// The dashboard enrollment may remain active; use only when remote revoke
+    /// cannot be retried.
+    #[arg(long, requires = "purge")]
+    pub local_only: bool,
 }
 
 impl ServiceAction {
@@ -209,6 +254,7 @@ impl ServiceAction {
             Self::Start(_) => "start",
             Self::Stop(_) => "stop",
             Self::Status(_) => "status",
+            Self::Logs(_) => "logs",
         }
     }
 }
@@ -217,6 +263,8 @@ impl ServiceAction {
 mod tests {
     use super::*;
     use clap::CommandFactory as _;
+
+    const AGENT_CARGO_TOML: &str = include_str!("../Cargo.toml");
 
     #[test]
     fn cli_definition_is_valid() {
@@ -229,6 +277,39 @@ mod tests {
         let cli = Cli::parse_from(["opengeni-agent"]);
         assert!(cli.command.is_none());
         assert!(matches!(Command::default(), Command::Run(_)));
+    }
+
+    #[test]
+    fn canonical_command_inventory_has_no_phantom_wrapper_or_plural_alias() {
+        // This is a command/help golden: the installed binary is exactly the
+        // Cargo [[bin]] target, and its CLI has only the actual agent commands.
+        // Do not add an `opengeni` wrapper or invent spaced/plural spellings.
+        assert_eq!(Cli::command().get_name(), "opengeni-agent");
+        assert_eq!(
+            Cli::command()
+                .get_subcommands()
+                .map(clap::Command::get_name)
+                .collect::<Vec<_>>(),
+            ["run", "enroll", "status", "service", "update", "uninstall"]
+        );
+        assert_eq!(AGENT_CARGO_TOML.matches("[[bin]]").count(), 1);
+        assert!(AGENT_CARGO_TOML.contains("name = \"opengeni-agent\""));
+        assert!(!AGENT_CARGO_TOML.contains("name = \"opengeni\""));
+
+        for phantom in [
+            ["opengeni-agent", "agent", "run"],
+            ["opengeni-agent", "agents", "run"],
+            ["opengeni", "agent", "run"],
+            ["opengeni", "agents", "run"],
+        ] {
+            assert!(
+                Cli::try_parse_from(phantom).is_err(),
+                "phantom command must remain rejected: {phantom:?}"
+            );
+        }
+
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("Canonical executable: opengeni-agent."));
     }
 
     #[test]
@@ -300,6 +381,24 @@ mod tests {
     }
 
     #[test]
+    fn service_command_inventory_is_exact_and_documents_windows_boundary() {
+        let mut root = Cli::command();
+        let service = root
+            .find_subcommand_mut("service")
+            .expect("service command");
+        assert_eq!(
+            service
+                .get_subcommands()
+                .map(clap::Command::get_name)
+                .collect::<Vec<_>>(),
+            ["install", "uninstall", "start", "stop", "status", "logs"]
+        );
+        let help = service.render_long_help().to_string();
+        assert!(help.contains("Windows service actions fail explicitly"));
+        assert!(help.contains("opengeni-agent run"));
+    }
+
+    #[test]
     fn service_install_parses_print_and_system() {
         let cli = Cli::parse_from([
             "opengeni-agent",
@@ -330,12 +429,66 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_is_a_visible_alias_for_the_signed_update_path() {
+        let cli = Cli::parse_from(["opengeni-agent", "upgrade", "--check"]);
+        match cli.command {
+            Some(Command::Update(args)) => assert!(args.check),
+            other => panic!("expected update through upgrade alias, got {other:?}"),
+        }
+        let help = Cli::command().render_long_help().to_string();
+        assert!(help.contains("upgrade"));
+    }
+
+    #[test]
+    fn status_parses_bounded_timeout() {
+        let cli = Cli::parse_from(["opengeni-agent", "status", "--timeout-seconds", "9"]);
+        match cli.command {
+            Some(Command::Status(args)) => assert_eq!(args.timeout_seconds, 9),
+            other => panic!("expected status, got {other:?}"),
+        }
+        assert!(
+            Cli::try_parse_from(["opengeni-agent", "status", "--timeout-seconds", "0"]).is_err()
+        );
+    }
+
+    #[test]
     fn uninstall_parses_purge() {
         let cli = Cli::parse_from(["opengeni-agent", "uninstall", "--purge"]);
         match cli.command {
             Some(Command::Uninstall(args)) => assert!(args.purge),
             other => panic!("expected uninstall, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn uninstall_local_only_requires_purge() {
+        assert!(Cli::try_parse_from(["opengeni-agent", "uninstall", "--local-only"]).is_err());
+        let cli = Cli::parse_from(["opengeni-agent", "uninstall", "--purge", "--local-only"]);
+        match cli.command {
+            Some(Command::Uninstall(args)) => assert!(args.local_only),
+            other => panic!("expected uninstall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lifecycle_help_exposes_logs_and_retry_safe_purge_escape_hatch() {
+        let mut root = Cli::command();
+        let help = root.render_long_help().to_string();
+        assert!(help.contains("uninstall"));
+        assert!(help.contains("status"));
+
+        let service = root
+            .find_subcommand_mut("service")
+            .expect("service command");
+        assert!(service.render_long_help().to_string().contains("logs"));
+
+        let uninstall = root
+            .find_subcommand_mut("uninstall")
+            .expect("uninstall command");
+        let uninstall_help = uninstall.render_long_help().to_string();
+        assert!(uninstall_help.contains("--purge"));
+        assert!(uninstall_help.contains("--local-only"));
+        assert!(uninstall_help.contains("running executable is retained"));
     }
 
     #[test]

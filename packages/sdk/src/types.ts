@@ -2979,6 +2979,12 @@ export type MintEnrollTokenResponse = {
   expiresInSeconds: number;
 };
 
+/** POST /v1/workspaces/:ws/enrollments/:enrollmentId/revoke response. `false`
+ *  is the idempotent already-revoked result, not a failed request. */
+export type RevokeEnrollmentResponse = {
+  revoked: boolean;
+};
+
 /** The credential payload the headless exchange returns (a subset of the agent's
  *  EnrollmentCredentials — IDENTICAL to the device-flow poll authorized branch). */
 export type EnrollmentCredentials = {

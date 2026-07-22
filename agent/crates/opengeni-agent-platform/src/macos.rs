@@ -6,18 +6,18 @@
 //! `cfg(target_os = "macos")`-gated so it compiles only on macOS, but the
 //! cross-platform CI matrix builds + tests it there.
 //!
-//! # Desktop (structured, live-deferred to native desktop milestone)
+//! # Desktop (experimental; stable release disabled)
 //!
 //! macOS computer-use is **CGEvent** (synthetic input) + **ScreenCaptureKit**
 //! (capture), both **TCC-gated** (Screen Recording + Accessibility grants that
 //! cannot be auto-clicked on an ephemeral CI runner). The
-//! backend is therefore a compile-only structured seam: it has the exact
-//! [`DesktopBackend`] shape so the dispatch + capability path are identical to
-//! Linux, but `probe`/`capture`/`inject` report a typed `Unsupported`/no-display
-//! until the native code lands and is verified on the user's real Mac (native desktop milestone). The
-//! ScreenCaptureKit/CGEvent calls require Apple FFI; when they are wired they will
-//! go through a safe binding crate (e.g. `core-graphics`) or a narrowly-scoped
-//! `allow(unsafe_code)` module with a justification — NOT a blanket relaxation.
+//! source contains a ScreenCaptureKit/CGEvent implementation behind the
+//! `macos-desktop` feature and confines Apple FFI to a dedicated leaf crate. Stable
+//! release artifacts deliberately leave that feature off and use the honest stub:
+//! `probe` returns no display and capture/input return typed `Unsupported`. Native
+//! compilation is compatibility evidence only; the feature cannot ship until a
+//! signed bundle on a logged-in, consenting Mac passes the live TCC/capture/input
+//! and complete-bundle replacement gates.
 
 use async_trait::async_trait;
 

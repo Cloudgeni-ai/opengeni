@@ -676,10 +676,7 @@ ingress:
             pathType: Exact
             service: api
           # Release-asset redirects the installer follows (302 → GitHub Releases).
-          - path: /agent/latest
-            pathType: Prefix
-            service: api
-          - path: /agent/v
+          - path: /agent
             pathType: Prefix
             service: api
           # Device-flow enrollment BOOTSTRAP endpoints a not-yet-credentialed
@@ -689,6 +686,14 @@ ingress:
             pathType: Exact
             service: api
           - path: /v1/enrollments/device/poll
+            pathType: Exact
+            service: api
+          - path: /v1/enrollments/token/exchange
+            pathType: Exact
+            service: api
+          # An enrolled agent can revoke only itself with its `oge_` bearer. This
+          # exact route has no user/deployment key and must reach the API directly.
+          - path: /v1/enrollments/self/revoke
             pathType: Exact
             service: api
     tls: []

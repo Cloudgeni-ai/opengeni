@@ -31,6 +31,8 @@ export type MachinesClientLike = {
     enrollmentId: string,
     options?: { window?: "15m" | "1h" | "6h" | "24h" },
   ) => Promise<MetricSample[]>;
+  /** POST .../enrollments/:enrollmentId/revoke — permanently unenroll a machine. */
+  revokeEnrollment?: (workspaceId: string, enrollmentId: string) => Promise<{ revoked: boolean }>;
   /**
    * POST .../sessions/:sessionId/active-sandbox — swap the session's active
    * sandbox to a machine. The default swap path; the real SDK client provides it.
@@ -76,9 +78,15 @@ export type UseMachinesResult = {
     enrollmentId: string,
     window?: "15m" | "1h" | "6h" | "24h",
   ) => Promise<MetricSample[]>;
+  /** Permanently revoke one connected-machine enrollment and refresh fleet truth. */
+  revoke: (enrollmentId: string) => Promise<boolean>;
+  /** Whether the client exposes the authenticated enrollment-management route. */
+  canRevoke: boolean;
   attaching: boolean;
   /** The sandbox id of the in-flight attach (for per-card spinner gating). */
   attachingSandboxId: string | null;
+  /** The enrollment id currently being revoked. */
+  revokingEnrollmentId: string | null;
   mutationError: Error | null;
   clearMutationError: () => void;
 };
@@ -128,6 +136,12 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     sandboxId: string | null;
   }>(() => ({ identity: identityKey, sandboxId: null }));
   const attachingSandboxId = attachState.identity === identityKey ? attachState.sandboxId : null;
+  const [revokeState, setRevokeState] = useState<{
+    identity: string;
+    enrollmentId: string | null;
+  }>(() => ({ identity: identityKey, enrollmentId: null }));
+  const revokingEnrollmentId =
+    revokeState.identity === identityKey ? revokeState.enrollmentId : null;
 
   const data = loadedData ?? EMPTY;
   // The swap is session-scoped: a host adapter (`attachMachine`) wins; otherwise
@@ -173,6 +187,27 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     [machinesClient, workspaceId],
   );
 
+  const canRevoke = typeof machinesClient.revokeEnrollment === "function";
+  const revoke = useCallback(
+    async (enrollmentId: string): Promise<boolean> => {
+      if (!machinesClient.revokeEnrollment) return false;
+      const ownedIdentity = identityKey;
+      setRevokeState({ identity: ownedIdentity, enrollmentId });
+      const result = await run(async () => {
+        // A 2xx `{ revoked: false }` is the route's retry-safe, already-revoked
+        // outcome. Either value means the enrollment is terminal.
+        await machinesClient.revokeEnrollment!(workspaceId, enrollmentId);
+        return true;
+      });
+      if (identityRef.current === ownedIdentity) {
+        setRevokeState({ identity: ownedIdentity, enrollmentId: null });
+        if (result) await refresh();
+      }
+      return result === true;
+    },
+    [machinesClient, workspaceId, identityKey, run, refresh],
+  );
+
   return {
     machines: data.machines,
     activeSandboxId: data.activeSandboxId,
@@ -183,8 +218,13 @@ export function useMachines(options: UseMachinesOptions = {}): UseMachinesResult
     attach,
     canAttach,
     fetchSeries,
-    attaching: mutating,
+    revoke,
+    canRevoke,
+    // The shared mutation runner also guards revocation. Keep this legacy flag
+    // truthful: consumers must not render an attach spinner for an unenroll.
+    attaching: mutating && attachingSandboxId !== null,
     attachingSandboxId,
+    revokingEnrollmentId,
     mutationError,
     clearMutationError,
   };
