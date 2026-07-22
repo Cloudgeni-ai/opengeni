@@ -826,10 +826,48 @@ describe("useSessionControl", () => {
     expect(sent).toEqual([
       { kind: "pause", reason: "stop now" },
       { kind: "resume", reason: "continue" },
-      { kind: "decision", approvalId: "ap-1", decision: "approve", message: "looks safe" },
-      { kind: "decision", approvalId: "ap-2", decision: "reject" },
+      {
+        kind: "decision",
+        approvalId: "ap-1",
+        decision: "approve",
+        message: "looks safe",
+        clientEventId: expect.any(String),
+      },
+      {
+        kind: "decision",
+        approvalId: "ap-2",
+        decision: "reject",
+        clientEventId: expect.any(String),
+      },
     ]);
     expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("reuses an approval idempotency key after a lost response", async () => {
+    const clientEventIds: string[] = [];
+    let attempts = 0;
+    const client = fakeClient({
+      sendApprovalDecision: async (_ws, _session, decision) => {
+        clientEventIds.push(decision.clientEventId ?? "");
+        attempts += 1;
+        if (attempts === 1) throw new Error("response lost");
+        return makeEvent(3, "user.approvalDecision");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionControl(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.approve("ap-1", "looks safe")).toBeNull();
+      expect(await hook.result.current.approve("ap-1", "looks safe")).not.toBeNull();
+    });
+
+    expect(clientEventIds).toHaveLength(2);
+    expect(clientEventIds[0]).not.toBe("");
+    expect(clientEventIds[1]).toBe(clientEventIds[0]);
     await hook.unmount();
   });
 });
