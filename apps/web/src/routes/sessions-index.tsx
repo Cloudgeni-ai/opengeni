@@ -169,6 +169,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
 
         <div className="mt-8">
           <ConsoleComposer
+            workspaceId={workspaceId}
             composer={createComposer}
             attachments={attachments}
             autoFocus

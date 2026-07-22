@@ -25,6 +25,7 @@ import { toast } from "sonner";
 
 import { CodexSubscriptionsCard } from "@/components/codex-connection";
 import { LoadErrorState, PageHeader } from "@/components/common";
+import { TranscriptionSettingsSection } from "@/components/transcription-settings";
 import { PermissionGroupPicker } from "@/components/permission-picker";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
@@ -317,6 +318,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
 
         {/* Workspace memory (long-lived agent memory) */}
         <MemorySettingsSection workspaceId={workspaceId} canManage={canRename} />
+
+        {/* Provider-agnostic composer transcription policy */}
+        <TranscriptionSettingsSection workspaceId={workspaceId} canManage={canRename} />
 
         {/* Codex (ChatGPT) subscriptions (multi-account) */}
         <CodexSubscriptionsCard workspaceId={workspaceId} canManage={canDeleteWorkspace} />

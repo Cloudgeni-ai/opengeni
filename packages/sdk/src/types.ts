@@ -1,3 +1,5 @@
+import type { WorkspaceTranscriptionPolicy } from "./transcription";
+
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // The SDK keeps zero runtime dependencies so it stays framework-agnostic and
 // publishable on its own; `test/contract-parity.test.ts` pins these types to
@@ -1554,11 +1556,13 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
   [key: string]: unknown;
 };
 
