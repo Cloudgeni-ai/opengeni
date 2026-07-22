@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
-import { mintRunGitCredentials, sandboxEnvironmentForRun } from "../src/activities/environment";
+import {
+  mintRunGitCredentialBinding,
+  mintRunGitCredentials,
+  sandboxEnvironmentForRun,
+} from "../src/activities/environment";
 import type { GitCredentialsRequest, ResourceRef } from "@opengeni/contracts";
 
 const scope = {
@@ -244,5 +248,193 @@ describe("sandbox git credentials", () => {
     );
     expect(Object.values(result.environment)).not.toContain("gitlab-token");
     expect(Object.values(result.environment)).not.toContain("azure_devops-token");
+  });
+
+  test("mints multiple GitHub installations as strict independent bindings", async () => {
+    const calls: GitCredentialsRequest[] = [];
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+        provider: "github",
+        githubInstallationId: 111,
+        githubRepositoryId: 1,
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/two.git",
+        ref: "main",
+        provider: "github",
+        githubInstallationId: 222,
+        githubRepositoryId: 2,
+      },
+    ];
+    const result = await sandboxEnvironmentForRun(
+      provisionedSettings(),
+      resources,
+      {},
+      {
+        scope,
+        authorizeGitHubTokenMint: async () => undefined,
+        gitCredentials: async (input) => {
+          calls.push(input);
+          return {
+            token: `token-${input.credentialBindingId}`,
+            workspaceId: input.workspaceId,
+            credentialBindingId: input.credentialBindingId,
+            provider: input.provider,
+            providerHost: input.providerHost,
+          };
+        },
+      },
+    );
+
+    expect(calls.map((call) => call.credentialBindingId)).toEqual([
+      "github-installation:111",
+      "github-installation:222",
+    ]);
+    expect(calls.every((call) => call.provider === "github")).toBe(true);
+    expect(calls.every((call) => call.providerHost === "github.com")).toBe(true);
+    expect(result.gitTokens).toBeUndefined();
+    expect(result.gitToken).toBeUndefined();
+    expect(result.gitCredentialBindings).toEqual([
+      {
+        credentialBindingId: "github-installation:111",
+        provider: "github",
+        token: "token-github-installation:111",
+        providerBindingCount: 2,
+      },
+      {
+        credentialBindingId: "github-installation:222",
+        provider: "github",
+        token: "token-github-installation:222",
+        providerBindingCount: 2,
+      },
+    ]);
+  });
+
+  test("rejects a wrong binding echo before returning any credential seed", async () => {
+    await expect(
+      mintRunGitCredentials(
+        provisionedSettings(),
+        [
+          {
+            kind: "repository",
+            uri: "https://gitlab.com/acme/one.git",
+            ref: "main",
+            provider: "gitlab",
+            credentialBindingId: "gitlab-primary",
+            access: "read",
+          },
+        ],
+        {
+          scope,
+          gitCredentials: async (input) => ({
+            token: "wrong-token",
+            workspaceId: input.workspaceId,
+            credentialBindingId: "a-different-binding",
+            provider: "gitlab",
+            providerHost: "gitlab.com",
+          }),
+        },
+      ),
+    ).rejects.toThrow("wrong credential binding");
+  });
+
+  test("omits providerHost when one explicit binding spans multiple hosts", async () => {
+    const calls: GitCredentialsRequest[] = [];
+    await mintRunGitCredentials(
+      provisionedSettings(),
+      [
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/one.git",
+          ref: "main",
+          provider: "gitlab",
+          credentialBindingId: "shared-gitlab-connection",
+        },
+        {
+          kind: "repository",
+          uri: "https://git.company.example/acme/two.git",
+          ref: "main",
+          provider: "gitlab",
+          credentialBindingId: "shared-gitlab-connection",
+        },
+      ],
+      {
+        scope,
+        gitCredentials: async (input) => {
+          calls.push(input);
+          return {
+            token: "shared-token",
+            workspaceId: input.workspaceId,
+            credentialBindingId: input.credentialBindingId,
+            provider: input.provider,
+          };
+        },
+      },
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.providerHost).toBeUndefined();
+    expect(calls[0]?.repositoryRefs).toHaveLength(2);
+  });
+
+  test("targeted renewal mints only the requested same-provider binding and forwards access", async () => {
+    const calls: GitCredentialsRequest[] = [];
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/read.git",
+        ref: "main",
+        provider: "gitlab",
+        credentialBindingId: "read-connection",
+        access: "read",
+      },
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/write.git",
+        ref: "main",
+        provider: "gitlab",
+        credentialBindingId: "write-connection",
+        access: "write",
+      },
+    ];
+    const binding = await mintRunGitCredentialBinding(
+      provisionedSettings(),
+      resources,
+      "gitlab",
+      "write-connection",
+      {
+        scope,
+        gitCredentials: async (input) => {
+          calls.push(input);
+          return {
+            token: "write-token",
+            workspaceId: input.workspaceId,
+            credentialBindingId: input.credentialBindingId,
+            provider: input.provider,
+            providerHost: input.providerHost,
+          };
+        },
+      },
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.repositoryRefs).toEqual([
+      {
+        provider: "gitlab",
+        credentialBindingId: "write-connection",
+        access: "write",
+        uri: "https://gitlab.com/acme/write.git",
+        ref: "main",
+      },
+    ]);
+    expect(binding).toEqual({
+      credentialBindingId: "write-connection",
+      provider: "gitlab",
+      token: "write-token",
+      providerBindingCount: 2,
+    });
   });
 });

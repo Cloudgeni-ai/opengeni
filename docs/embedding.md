@@ -121,29 +121,40 @@ type ConnectionCredentialsPort = {
 };
 ```
 
-`gitCredentials` is provider-aware and remains GitHub-backward-compatible:
-GitHub repository resources still arrive as the legacy shape
-`{ accountId, workspaceId, installationId, repositoryIds }`, with omitted
-`provider` meaning `"github"`. Non-GitHub resources arrive with
-`provider: "gitlab" | "azure_devops"` plus `repositoryRefs`. Provider-neutral
-repository refs can carry `provider`, `repositoryId`, `installationId`,
-`projectId`, and `connectionId`; `RepositoryResourceRef` accepts the same
-optional fields while retaining the existing `githubInstallationId` and
-`githubRepositoryId` aliases. `GitCredentials` may also return an ISO-8601
-`expiresAt`; when absent OpenGeni uses a conservative bounded refresh cadence.
-The returned token plus scoped `workspaceId` is checked by the workspace-scope cross-check
-workspace-echo assert before the worker injects anything. A mismatch hard-fails
-before tenant B's credential can land in tenant A's run.
+`gitCredentials` is provider-aware and remains GitHub-backward-compatible.
+`RepositoryResourceRef.credentialBindingId` names one independently mintable,
+host-owned credential; it is opaque, bounded to 256 characters, and never used
+raw in sandbox paths. `access: "read" | "write"` tells the host what token scope
+the repository needs (omitted retains the historical write-capable behavior).
+One session may attach any number of repositories across GitHub, GitLab, and
+Azure DevOps, including more than one account/installation for the same
+provider. A host must not use `provider` alone as credential identity.
+
+Legacy sessions with one binding for a provider retain the old request shape:
+GitHub receives `{ accountId, workspaceId, installationId, repositoryIds }`
+with omitted `provider`; non-GitHub requests receive `provider` plus
+`repositoryRefs`. An explicit binding, or multiple bindings for one provider,
+adds `credentialBindingId`, `provider`, and (for a single canonical host)
+`providerHost`. The host must echo those fields exactly in `GitCredentials`.
+OpenGeni validates those echoes together with `workspaceId` before accepting a
+token. Provider-neutral repository refs carry the same binding/access fields
+plus `provider`, `repositoryId`, `installationId`, `projectId`, and
+`connectionId`; GitHub aliases remain accepted. `expiresAt` is per binding;
+without it OpenGeni uses a conservative bounded refresh cadence.
 
 The worker never writes token values into the sandbox manifest or attach-time
-environment delta. It passes current provider tokens to the runtime as
-off-manifest seeds; the sandbox setup writes them to
-`OPENGENI_GIT_CREDENTIALS_DIR/<provider>-token`, keeps
-`OPENGENI_GIT_TOKEN_FILE` as the GitHub alias, and provisions `gh`, `glab`, and
-`az` wrappers that read the current token file before each CLI invocation. For
-the lifetime of an active managed-sandbox turn, the worker proactively calls
-the same provider for every selected Git host and atomically replaces the token
-files. This renewal requires no model/MCP call and never mutates the manifest.
+environment delta. The runtime stores each token at
+`OPENGENI_GIT_CREDENTIALS_DIR/<sha256(binding-id)>-token`, installs a Git
+credential helper that selects by protocol + host + path with
+`credential.useHttpPath`, and resets broader helpers so an unbound remote cannot
+fall through to a sibling credential. Provider aliases (including
+`OPENGENI_GIT_TOKEN_FILE`) are written only while that provider has exactly one
+binding; they are removed when a second appears. `gh`, `glab`, and `az` select
+an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then
+a sole provider binding, and fail closed if selection remains ambiguous. Each
+binding renews independently, so one failed connection cannot block or replace
+a healthy sibling token. Renewal requires no model/MCP call and never mutates
+the manifest.
 `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
 check before values are applied.
