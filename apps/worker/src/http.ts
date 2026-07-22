@@ -8,45 +8,81 @@ export type ReadinessChecks = Record<ReadinessCheckName, () => Promise<void> | v
 
 export type ReadinessResult = {
   ok: boolean;
+  state?: WorkerLifecycleState;
   checks: Record<ReadinessCheckName, { ok: boolean; error?: string }>;
 };
 
-export function startWorkerHttpServer(input: {
+export type WorkerLifecycleState = "starting" | "ready" | "draining" | "stopped" | "failed";
+
+export type WorkerHttpLifecycle = {
+  role: "control" | "turn";
+  state: () => WorkerLifecycleState;
+};
+
+export type WorkerHttpServerInput = {
   settings: Settings;
   observability: Observability;
   checks: ReadinessChecks;
   timeoutMs?: number;
-}): ReturnType<typeof Bun.serve> {
-  const { settings, observability, checks } = input;
+  lifecycle?: WorkerHttpLifecycle;
+};
+
+export function createWorkerHttpHandler(
+  input: WorkerHttpServerInput,
+): (request: Request) => Promise<Response> {
+  const { settings, observability, checks, lifecycle } = input;
   const timeoutMs = input.timeoutMs ?? 2_000;
-  return Bun.serve({
-    hostname: "0.0.0.0",
-    port: settings.workerHttpPort,
-    async fetch(request) {
-      const url = new URL(request.url);
-      if (request.method !== "GET") {
-        return Response.json({ error: "method_not_allowed" }, { status: 405 });
-      }
-      if (url.pathname === "/healthz") {
-        return Response.json({
+  return async (request) => {
+    const url = new URL(request.url);
+    if (request.method !== "GET") {
+      return Response.json({ error: "method_not_allowed" }, { status: 405 });
+    }
+    if (url.pathname === "/healthz") {
+      const state = lifecycle?.state();
+      const ok = state !== "failed" && state !== "stopped";
+      return Response.json(
+        {
           service: settings.serviceName,
           environment: settings.environment,
           deploymentRevision: settings.deploymentRevision,
-          ok: true,
-        });
-      }
-      if (url.pathname === "/metrics") {
-        return new Response(await observability.prometheusMetrics(), {
-          status: 200,
-          headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
-        });
-      }
-      if (url.pathname === "/readyz") {
-        const result = await runReadinessChecks(checks, timeoutMs);
-        return Response.json(result, { status: result.ok ? 200 : 503 });
-      }
-      return Response.json({ error: "not_found" }, { status: 404 });
-    },
+          ...(lifecycle ? { role: lifecycle.role, state } : {}),
+          ok,
+        },
+        { status: ok ? 200 : 503 },
+      );
+    }
+    if (url.pathname === "/metrics") {
+      return new Response(await observability.prometheusMetrics(), {
+        status: 200,
+        headers: { "content-type": "text/plain; version=0.0.4; charset=utf-8" },
+      });
+    }
+    if (url.pathname === "/readyz") {
+      const state = lifecycle?.state();
+      const result =
+        state && state !== "ready"
+          ? {
+              ok: false,
+              state,
+              checks: Object.fromEntries(
+                (Object.keys(checks) as ReadinessCheckName[]).map((name) => [
+                  name,
+                  { ok: false, error: `worker is ${state}` },
+                ]),
+              ) as ReadinessResult["checks"],
+            }
+          : { ...(await runReadinessChecks(checks, timeoutMs)), ...(state ? { state } : {}) };
+      return Response.json(result, { status: result.ok ? 200 : 503 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+}
+
+export function startWorkerHttpServer(input: WorkerHttpServerInput): ReturnType<typeof Bun.serve> {
+  return Bun.serve({
+    hostname: "0.0.0.0",
+    port: input.settings.workerHttpPort,
+    fetch: createWorkerHttpHandler(input),
   });
 }
 
@@ -87,6 +123,19 @@ export function natsReadyCheck(bus: EventBus): () => void {
     if (bus.isConnected && !bus.isConnected()) {
       throw new Error("NATS is not connected");
     }
+  };
+}
+
+export function temporalReadyCheck(
+  connection: Pick<
+    import("@temporalio/worker").NativeConnection,
+    "workflowService" | "withDeadline"
+  >,
+): () => Promise<void> {
+  return async () => {
+    await connection.withDeadline(Date.now() + 2_000, () =>
+      connection.workflowService.getSystemInfo({}),
+    );
   };
 }
 
