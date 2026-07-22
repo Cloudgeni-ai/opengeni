@@ -31,6 +31,10 @@
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
     },
+    "./transcription/openai-realtime": {
+      "types": "./src/transcription/openai-realtime.ts",
+      "default": "./src/transcription/openai-realtime.ts"
+    },
     "./styles.css": {
       "types": "./styles/index.d.ts",
       "default": "./styles/index.css"

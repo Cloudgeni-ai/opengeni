@@ -64,6 +64,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     openaiProvider: "openai",
     openaiApiKey: "test-openai-key",
     openaiBaseUrl: undefined,
+    openaiProjectId: "test-openai-project",
     openaiModel: "scripted-model",
     openaiAllowedModels: "scripted-model,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna",
     modelPricingJson: JSON.stringify({

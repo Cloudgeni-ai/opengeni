@@ -783,6 +783,47 @@ describe("sandbox preparation profiles", () => {
     });
   });
 
+  test("parses transcription static caps as positive integers", () => {
+    const limits = parseStaticUsageLimitsJson(
+      JSON.stringify({
+        maxActiveTranscriptionGrantsPerWorkspace: 2,
+        maxTranscriptionIssuancesPerMinutePerSubject: 3,
+        maxMonthlyTranscriptionSecondsPerWorkspace: 600,
+        maxMonthlyTranscriptionCostMicrosPerAccount: 100_000,
+        maxMonthlyCostMicrosPerAccount: 200_000,
+      }),
+    );
+    expect(limits).toEqual({
+      maxActiveTranscriptionGrantsPerWorkspace: 2,
+      maxTranscriptionIssuancesPerMinutePerSubject: 3,
+      maxMonthlyTranscriptionSecondsPerWorkspace: 600,
+      maxMonthlyTranscriptionCostMicrosPerAccount: 100_000,
+      maxMonthlyCostMicrosPerAccount: 200_000,
+    });
+    expect(() =>
+      parseStaticUsageLimitsJson('{"maxActiveTranscriptionGrantsPerWorkspace":0}'),
+    ).toThrow();
+    expect(() =>
+      parseStaticUsageLimitsJson('{"maxMonthlyTranscriptionCostMicrosPerAccount":1.5}'),
+    ).toThrow();
+  });
+
+  test("loads the approved OpenAI project with OpenGeni-first fallback precedence", () => {
+    expect(withEnv({}, () => getSettings()).openaiProjectId).toBeUndefined();
+    expect(
+      withEnv({ OPENAI_PROJECT_ID: "fallback-project" }, () => getSettings()).openaiProjectId,
+    ).toBe("fallback-project");
+    expect(
+      withEnv(
+        {
+          OPENGENI_OPENAI_PROJECT_ID: "opengeni-project",
+          OPENAI_PROJECT_ID: "fallback-project",
+        },
+        () => getSettings(),
+      ).openaiProjectId,
+    ).toBe("opengeni-project");
+  });
+
   test("parses static and managed entitlement overlays", () => {
     expect(parseStaticEntitlementsJson('{"github":true,"models":["gpt-5.6-sol"]}')).toEqual({
       github: true,

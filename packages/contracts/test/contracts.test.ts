@@ -23,14 +23,120 @@ import {
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
   ResourceRef,
+  resolveWorkspaceTranscriptionPolicy,
   SessionBusMessage,
   SessionMcpServerMetadata,
+  UpdateWorkspaceSettingsRequest,
+  WorkspaceSettingsSchema,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
 } from "../src";
 
+const validTranscriptionPolicy = {
+  enabled: true as const,
+  provider: "openai" as const,
+  providerProjectId: "approved-openai-project",
+  endpoint: "https://api.openai.com/v1/realtime" as const,
+  privacy: {
+    retainAudio: false as const,
+    retainTranscript: false as const,
+    trainingAllowed: false as const,
+    zeroDataRetentionEligible: true as const,
+    processingRegion: "us",
+    dataResidency: "United States",
+    eligibilityVerifiedBy: "security@example.test",
+    eligibilityVerifiedAt: "2026-07-19T00:00:00.000Z",
+  },
+  approvals: {
+    security: {
+      approved: true as const,
+      approvedBy: "security@example.test",
+      approvedAt: "2026-07-19T00:00:00.000Z",
+    },
+    finance: {
+      approved: true as const,
+      approvedBy: "finance@example.test",
+      approvedAt: "2026-07-19T00:00:00.000Z",
+    },
+  },
+  limits: {
+    maxActiveGrantsPerWorkspace: 2,
+    maxActiveGrantsPerSubject: 1,
+    maxIssuancesPerMinutePerSubject: 3,
+    maxSessionDurationSeconds: 60,
+    maxMonthlyDurationSeconds: 600,
+    maxMonthlyCostMicros: 100_000,
+    reservationCostMicros: 10_000,
+  },
+};
+
 describe("contracts", () => {
+  test("keeps workspace transcription default-off and fails closed on malformed policy", () => {
+    expect(resolveWorkspaceTranscriptionPolicy(undefined)).toBeNull();
+    expect(resolveWorkspaceTranscriptionPolicy({})).toBeNull();
+    expect(resolveWorkspaceTranscriptionPolicy({ transcription: { enabled: false } })).toBeNull();
+    expect(
+      resolveWorkspaceTranscriptionPolicy({
+        transcription: { enabled: true, provider: "openai" },
+      }),
+    ).toBeNull();
+    expect(WorkspaceSettingsSchema.parse({})).toEqual({});
+  });
+
+  test("accepts only a complete approved workspace transcription policy", () => {
+    const settings = { transcription: validTranscriptionPolicy, futureSetting: "preserved" };
+    expect(resolveWorkspaceTranscriptionPolicy(settings)).toEqual(validTranscriptionPolicy);
+    expect(WorkspaceSettingsSchema.parse(settings)).toEqual(settings);
+    expect(UpdateWorkspaceSettingsRequest.parse(settings)).toEqual(settings);
+  });
+
+  test("rejects transcription provider, endpoint, privacy, approval, and limit mismatches", () => {
+    const invalidPolicies = [
+      { ...validTranscriptionPolicy, provider: "azure" },
+      { ...validTranscriptionPolicy, providerProjectId: " " },
+      { ...validTranscriptionPolicy, endpoint: "https://proxy.example.test/realtime" },
+      {
+        ...validTranscriptionPolicy,
+        privacy: { ...validTranscriptionPolicy.privacy, retainAudio: true },
+      },
+      {
+        ...validTranscriptionPolicy,
+        privacy: { ...validTranscriptionPolicy.privacy, zeroDataRetentionEligible: false },
+      },
+      {
+        ...validTranscriptionPolicy,
+        privacy: { ...validTranscriptionPolicy.privacy, processingRegion: " " },
+      },
+      {
+        ...validTranscriptionPolicy,
+        approvals: {
+          ...validTranscriptionPolicy.approvals,
+          security: { ...validTranscriptionPolicy.approvals.security, approved: false },
+        },
+      },
+      {
+        ...validTranscriptionPolicy,
+        limits: { ...validTranscriptionPolicy.limits, maxActiveGrantsPerSubject: 0 },
+      },
+      {
+        ...validTranscriptionPolicy,
+        limits: { ...validTranscriptionPolicy.limits, maxSessionDurationSeconds: 3_601 },
+      },
+      {
+        ...validTranscriptionPolicy,
+        limits: { ...validTranscriptionPolicy.limits, reservationCostMicros: 0 },
+      },
+    ];
+
+    for (const transcription of invalidPolicies) {
+      const settings = { transcription };
+      expect(WorkspaceSettingsSchema.safeParse(settings).success).toBe(false);
+      expect(resolveWorkspaceTranscriptionPolicy(settings)).toBeNull();
+      expect(UpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(false);
+    }
+  });
+
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);

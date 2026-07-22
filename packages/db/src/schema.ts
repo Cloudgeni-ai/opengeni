@@ -2784,6 +2784,86 @@ export const usageEvents = pgTable(
   }),
 );
 
+// Durable admission/reconciliation ledger for browser-direct transcription.
+// No platform/provider secret, audio, transcript, or raw provider payload is
+// stored here. A conservative reservation remains billable even when a client
+// disappears, so usage admission never trusts a browser-side refund.
+export const transcriptionGrants = pgTable(
+  "transcription_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    sessionId: uuid("session_id")
+      .notNull()
+      .references(() => sessions.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    requestId: text("request_id").notNull(),
+    provider: text("provider").notNull(),
+    providerProjectId: text("provider_project_id").notNull(),
+    endpoint: text("endpoint").notNull(),
+    providerSessionId: text("provider_session_id"),
+    status: text("status").notNull().default("reserved"),
+    reservedDurationSeconds: bigint("reserved_duration_seconds", { mode: "number" }).notNull(),
+    reservedCostMicros: bigint("reserved_cost_micros", { mode: "number" }).notNull(),
+    reportedDurationSeconds: bigint("reported_duration_seconds", { mode: "number" })
+      .notNull()
+      .default(0),
+    reportedCostMicros: bigint("reported_cost_micros", { mode: "number" }).notNull().default(0),
+    clientSecretExpiresAt: timestamp("client_secret_expires_at", { withTimezone: true }),
+    activeExpiresAt: timestamp("active_expires_at", { withTimezone: true }).notNull(),
+    issuedAt: timestamp("issued_at", { withTimezone: true }),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "transcription_grants_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "transcription_grants_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    request: uniqueIndex("transcription_grants_request_uq").on(
+      table.workspaceId,
+      table.subjectId,
+      table.requestId,
+    ),
+    oneActiveSession: uniqueIndex("transcription_grants_one_active_session_uq")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.status} in ('reserved','active')`),
+    workspaceStatus: index("transcription_grants_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.activeExpiresAt,
+    ),
+    subjectCreated: index("transcription_grants_subject_created_idx").on(
+      table.workspaceId,
+      table.subjectId,
+      table.createdAt,
+    ),
+    statusValid: check(
+      "transcription_grants_status_check",
+      sql`${table.status} in ('reserved','active','completed','cancelled','error','provider_closed','replaced','expired','provider_rejected')`,
+    ),
+    reservationValid: check(
+      "transcription_grants_reservation_check",
+      sql`${table.reservedDurationSeconds} > 0
+        and ${table.reservedCostMicros} > 0
+        and ${table.reportedDurationSeconds} >= 0
+        and ${table.reportedCostMicros} >= 0`,
+    ),
+  }),
+);
+
 export const creditLedgerEntries = pgTable(
   "credit_ledger_entries",
   {

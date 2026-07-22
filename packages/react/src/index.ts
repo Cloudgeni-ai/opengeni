@@ -43,6 +43,25 @@ export type {
   UseFileAttachmentsOptions,
   UseFileAttachmentsResult,
 } from "./hooks/use-file-attachments";
+export { useTranscription, appendFinalTranscript } from "./hooks/use-transcription";
+export type { UseTranscriptionOptions, UseTranscriptionResult } from "./hooks/use-transcription";
+export { initialTranscriptionState, transcriptionReducer } from "./transcription/reducer";
+export type {
+  TranscriptionCommit,
+  TranscriptionError,
+  TranscriptionEvent,
+  TranscriptionEventSink,
+  TranscriptionPartial,
+  TranscriptionPhase,
+  TranscriptionPrivacyRequest,
+  TranscriptionProvider,
+  TranscriptionReducerAction,
+  TranscriptionSession,
+  TranscriptionSessionRequest,
+  TranscriptionState,
+  TranscriptionUsage,
+  TranscriptionWord,
+} from "./transcription/types";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
@@ -296,6 +315,8 @@ export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { defaultChatComposerMessages } from "./components/composer";
 export type { ChatComposerMessages } from "./components/composer";
+export { VoiceDictationControl } from "./components/voice-dictation-control";
+export type { VoiceDictationControlProps } from "./components/voice-dictation-control";
 export { ModelPicker } from "./components/model-picker";
 export type { ModelPickerProps } from "./components/model-picker";
 export { MessageTimeline, TimelineRow } from "./components/message-timeline";

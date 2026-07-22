@@ -1,6 +1,12 @@
-// The console's only bespoke HTTP surface: client config bootstrap and the
-// Better Auth (managed session) endpoints, which sit outside the public API
-// the SDK covers. Everything else goes through `@opengeni/sdk`.
+// The console's bespoke HTTP surface: client config bootstrap, short-lived
+// transcription credentials, and Better Auth (managed session) endpoints.
+// Everything covered by the public SDK still goes through `@opengeni/sdk`.
+import type {
+  OpenAIClientSecret,
+  OpenAIClientSecretRequest,
+  OpenAIGrantSettlement,
+  OpenAIGrantUsageReport,
+} from "@opengeni/react/transcription/openai-realtime";
 import {
   OpenGeniApiError,
   OpenGeniClient,
@@ -196,6 +202,58 @@ export async function fetchClientConfig(): Promise<ClientConfig> {
   reloadIfStaleDeployment(config);
   configureClientAuth(config.auth);
   return config;
+}
+
+export async function mintOpenAITranscriptionClientSecret(
+  workspaceId: string,
+  input: OpenAIClientSecretRequest,
+  signal?: AbortSignal,
+): Promise<OpenAIClientSecret> {
+  return await request<OpenAIClientSecret>(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/transcription/client-secret`,
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+      signal,
+    },
+  );
+}
+
+export async function reportOpenAITranscriptionUsage(
+  workspaceId: string,
+  input: OpenAIGrantUsageReport,
+): Promise<void> {
+  await request(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/transcription/grants/${encodeURIComponent(input.grantId)}/usage`,
+    {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: input.sessionId,
+        providerSessionId: input.providerSessionId,
+        providerEventId: input.providerEventId,
+        durationSeconds: input.durationSeconds,
+      }),
+    },
+  );
+}
+
+export async function settleOpenAITranscriptionGrant(
+  workspaceId: string,
+  input: OpenAIGrantSettlement,
+  signal?: AbortSignal,
+): Promise<void> {
+  await request(
+    `/v1/workspaces/${encodeURIComponent(workspaceId)}/transcription/grants/${encodeURIComponent(input.grantId)}/settle`,
+    {
+      method: "POST",
+      signal,
+      body: JSON.stringify({
+        sessionId: input.sessionId,
+        providerSessionId: input.providerSessionId,
+        status: input.status,
+      }),
+    },
+  );
 }
 
 export function shouldReloadForApiContractRevision(

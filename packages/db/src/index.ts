@@ -78,6 +78,7 @@ import type {
   RigChangeKind,
   RigChangeStatus,
   RigCheck,
+  EnabledWorkspaceTranscriptionPolicy,
 } from "@opengeni/contracts";
 import {
   boundWorkspaceControlEvent,
@@ -90,6 +91,7 @@ import {
   resolveSessionEventTypeFilters,
   reasoningEffortForMetadata,
   resolveWorkspaceMemoryEnabled,
+  resolveWorkspaceTranscriptionPolicy,
   RigChange as RigChangeContract,
   SessionSystemUpdatePayload,
 } from "@opengeni/contracts";
@@ -1735,6 +1737,7 @@ export async function sumUsageQuantity(
     accountId?: string;
     workspaceId?: string;
     eventType: string;
+    subjectId?: string;
     since?: Date;
   },
 ): Promise<number> {
@@ -1751,6 +1754,7 @@ export async function sumUsageQuantity(
       eq(schema.usageEvents.eventType, input.eventType),
       ...(input.accountId ? [eq(schema.usageEvents.accountId, input.accountId)] : []),
       ...(input.workspaceId ? [eq(schema.usageEvents.workspaceId, input.workspaceId)] : []),
+      ...(input.subjectId ? [eq(schema.usageEvents.subjectId, input.subjectId)] : []),
       ...(input.since ? [gt(schema.usageEvents.occurredAt, input.since)] : []),
     ];
     const [{ total } = { total: 0 }] = await scopedDb
@@ -1761,6 +1765,715 @@ export async function sumUsageQuantity(
       .where(and(...clauses));
     return Number(total);
   });
+}
+
+export type TranscriptionGrantStatus =
+  | "reserved"
+  | "active"
+  | "completed"
+  | "cancelled"
+  | "error"
+  | "provider_closed"
+  | "replaced"
+  | "expired"
+  | "provider_rejected";
+
+export type TranscriptionGrant = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  subjectId: string;
+  requestId: string;
+  provider: string;
+  providerProjectId: string;
+  endpoint: string;
+  providerSessionId: string | null;
+  status: TranscriptionGrantStatus;
+  reservedDurationSeconds: number;
+  reservedCostMicros: number;
+  reportedDurationSeconds: number;
+  reportedCostMicros: number;
+  clientSecretExpiresAt: string | null;
+  activeExpiresAt: string;
+  issuedAt: string | null;
+  settledAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type TranscriptionAdmissionDecision =
+  | {
+      allowed: true;
+      grant: TranscriptionGrant;
+      policy: EnabledWorkspaceTranscriptionPolicy;
+    }
+  | { allowed: false; code: string; message: string };
+
+/**
+ * Serialize transcription admission on the account + workspace rows, reconcile
+ * abandoned grants, re-read the authoritative workspace policy under the lock,
+ * and reserve conservative duration/cost before any provider call is possible.
+ */
+export async function reserveTranscriptionGrant(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    requestId: string;
+    provider: "openai";
+    providerProjectId: string;
+    endpoint: string;
+    platformLimits?: {
+      maxActiveGrantsPerWorkspace?: number;
+      maxIssuancesPerMinutePerSubject?: number;
+      maxMonthlyDurationSecondsPerWorkspace?: number;
+      maxMonthlyTranscriptionCostMicrosPerAccount?: number;
+      maxMonthlyCostMicrosPerAccount?: number;
+    };
+  },
+): Promise<TranscriptionAdmissionDecision> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      await scopedDb.execute(
+        sql`select id from managed_accounts where id = ${input.accountId} for update`,
+      );
+      const workspaceRows = await scopedDb.execute<{ settingsJson: string }>(sql`
+        select settings #>> '{}' as "settingsJson" from workspaces
+        where id = ${input.workspaceId} and account_id = ${input.accountId}
+        for update
+      `);
+      const workspace = workspaceRows[0];
+      if (!workspace) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "workspace_not_found",
+          "workspace not found",
+        );
+      }
+      const policy = resolveWorkspaceTranscriptionPolicy(JSON.parse(workspace.settingsJson));
+      if (!policy) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_policy_disabled",
+          "workspace transcription is not enabled",
+        );
+      }
+      if (
+        policy.provider !== input.provider ||
+        policy.providerProjectId !== input.providerProjectId ||
+        policy.endpoint !== input.endpoint
+      ) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_policy_changed",
+          "workspace transcription policy changed; retry with current settings",
+        );
+      }
+
+      const sessionRows = await scopedDb.execute<{ id: string }>(sql`
+        select id from sessions
+        where workspace_id = ${input.workspaceId} and id = ${input.sessionId}
+        for key share
+      `);
+      if (!sessionRows[0]) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_session_not_found",
+          "transcription requires an existing workspace session",
+        );
+      }
+
+      const expired = await scopedDb
+        .update(schema.transcriptionGrants)
+        .set({ status: "expired", settledAt: new Date(), updatedAt: new Date() })
+        .where(
+          and(
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            inArray(schema.transcriptionGrants.status, ["reserved", "active"]),
+            lt(schema.transcriptionGrants.activeExpiresAt, new Date()),
+          ),
+        )
+        .returning({
+          id: schema.transcriptionGrants.id,
+          sessionId: schema.transcriptionGrants.sessionId,
+        });
+      for (const grant of expired) {
+        await insertTranscriptionAudit(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          subjectId: "system:transcription-reconciler",
+          action: "transcription.grant.expired",
+          grantId: grant.id,
+          sessionId: grant.sessionId,
+        });
+      }
+
+      const [existingRequest] = await scopedDb
+        .select({ id: schema.transcriptionGrants.id })
+        .from(schema.transcriptionGrants)
+        .where(
+          and(
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            eq(schema.transcriptionGrants.subjectId, input.subjectId),
+            eq(schema.transcriptionGrants.requestId, input.requestId),
+          ),
+        )
+        .limit(1);
+      if (existingRequest) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_request_already_used",
+          "transcription admission request was already consumed",
+        );
+      }
+
+      const [existingSessionGrant] = await scopedDb
+        .select({ id: schema.transcriptionGrants.id })
+        .from(schema.transcriptionGrants)
+        .where(
+          and(
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            eq(schema.transcriptionGrants.sessionId, input.sessionId),
+            inArray(schema.transcriptionGrants.status, ["reserved", "active"]),
+          ),
+        )
+        .limit(1);
+      if (existingSessionGrant) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_session_active",
+          "workspace session already has an active transcription grant",
+        );
+      }
+
+      const [counts] = await scopedDb
+        .select({
+          workspace: sql<number>`count(*)::int`,
+          subject: sql<number>`count(*) filter (where ${schema.transcriptionGrants.subjectId} = ${input.subjectId})::int`,
+        })
+        .from(schema.transcriptionGrants)
+        .where(
+          and(
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            inArray(schema.transcriptionGrants.status, ["reserved", "active"]),
+          ),
+        );
+      const workspaceConcurrencyLimit = Math.min(
+        policy.limits.maxActiveGrantsPerWorkspace,
+        input.platformLimits?.maxActiveGrantsPerWorkspace ?? Number.POSITIVE_INFINITY,
+      );
+      if (Number(counts?.workspace ?? 0) >= workspaceConcurrencyLimit) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_workspace_concurrency",
+          "workspace transcription concurrency limit reached",
+        );
+      }
+      if (Number(counts?.subject ?? 0) >= policy.limits.maxActiveGrantsPerSubject) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_subject_concurrency",
+          "subject transcription concurrency limit reached",
+        );
+      }
+
+      const [{ count: recentCount } = { count: 0 }] = await scopedDb
+        .select({ count: sql<number>`count(*)::int` })
+        .from(schema.transcriptionGrants)
+        .where(
+          and(
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            eq(schema.transcriptionGrants.subjectId, input.subjectId),
+            gt(schema.transcriptionGrants.createdAt, new Date(Date.now() - 60_000)),
+          ),
+        );
+      const subjectRateLimit = Math.min(
+        policy.limits.maxIssuancesPerMinutePerSubject,
+        input.platformLimits?.maxIssuancesPerMinutePerSubject ?? Number.POSITIVE_INFINITY,
+      );
+      if (Number(recentCount) >= subjectRateLimit) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_subject_rate",
+          "subject transcription issuance rate limit reached",
+        );
+      }
+
+      const monthStart = startOfUtcMonthForDate(new Date());
+      const [workspaceUsage] = await scopedDb
+        .select({
+          seconds: sql<number>`coalesce(sum(${schema.usageEvents.quantity}) filter (where ${schema.usageEvents.eventType} = 'transcription.reserved_seconds'), 0)`,
+          cost: sql<number>`coalesce(sum(${schema.usageEvents.quantity}) filter (where ${schema.usageEvents.eventType} = 'transcription.reserved_cost'), 0)`,
+        })
+        .from(schema.usageEvents)
+        .where(
+          and(
+            eq(schema.usageEvents.workspaceId, input.workspaceId),
+            gte(schema.usageEvents.occurredAt, monthStart),
+          ),
+        );
+      let accountUsage: { transcriptionCost: number; totalCost: number } | undefined;
+      if (
+        input.platformLimits?.maxMonthlyTranscriptionCostMicrosPerAccount !== undefined ||
+        input.platformLimits?.maxMonthlyCostMicrosPerAccount !== undefined
+      ) {
+        // The transaction already owns the account row lock. Temporarily widen
+        // the RLS workspace GUC to this account (never beyond it) so account-wide
+        // caps include sibling workspaces, then restore the exact workspace before
+        // any grant/audit insert.
+        await setRlsContext(scopedDb, { accountId: input.accountId, workspaceId: null });
+        [accountUsage] = await scopedDb
+          .select({
+            transcriptionCost: sql<number>`coalesce(sum(${schema.usageEvents.quantity}) filter (where ${schema.usageEvents.eventType} = 'transcription.reserved_cost'), 0)`,
+            totalCost: sql<number>`coalesce(sum(${schema.usageEvents.quantity}) filter (where ${schema.usageEvents.eventType} in ('model.cost', 'transcription.reserved_cost')), 0)`,
+          })
+          .from(schema.usageEvents)
+          .where(
+            and(
+              eq(schema.usageEvents.accountId, input.accountId),
+              gte(schema.usageEvents.occurredAt, monthStart),
+            ),
+          );
+        await setRlsContext(scopedDb, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+        });
+      }
+      const reservedSeconds = policy.limits.maxSessionDurationSeconds;
+      const reservedCostMicros = policy.limits.reservationCostMicros;
+      const workspaceDurationLimit = Math.min(
+        policy.limits.maxMonthlyDurationSeconds,
+        input.platformLimits?.maxMonthlyDurationSecondsPerWorkspace ?? Number.POSITIVE_INFINITY,
+      );
+      if (Number(workspaceUsage?.seconds ?? 0) + reservedSeconds > workspaceDurationLimit) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_monthly_duration",
+          "workspace monthly transcription duration limit reached",
+        );
+      }
+      if (
+        Number(workspaceUsage?.cost ?? 0) + reservedCostMicros >
+        policy.limits.maxMonthlyCostMicros
+      ) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_monthly_cost",
+          "workspace monthly transcription cost limit reached",
+        );
+      }
+      if (
+        input.platformLimits?.maxMonthlyTranscriptionCostMicrosPerAccount !== undefined &&
+        Number(accountUsage?.transcriptionCost ?? 0) + reservedCostMicros >
+          input.platformLimits.maxMonthlyTranscriptionCostMicrosPerAccount
+      ) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_platform_monthly_cost",
+          "account monthly transcription cost limit reached",
+        );
+      }
+      if (
+        input.platformLimits?.maxMonthlyCostMicrosPerAccount !== undefined &&
+        Number(accountUsage?.totalCost ?? 0) + reservedCostMicros >
+          input.platformLimits.maxMonthlyCostMicrosPerAccount
+      ) {
+        return await denyTranscriptionAdmission(
+          scopedDb,
+          input,
+          "transcription_platform_total_monthly_cost",
+          "account monthly cost limit reached",
+        );
+      }
+
+      const now = new Date();
+      const [row] = await scopedDb
+        .insert(schema.transcriptionGrants)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          subjectId: input.subjectId,
+          requestId: input.requestId,
+          provider: input.provider,
+          providerProjectId: input.providerProjectId,
+          endpoint: input.endpoint,
+          reservedDurationSeconds: reservedSeconds,
+          reservedCostMicros,
+          activeExpiresAt: new Date(now.getTime() + reservedSeconds * 1_000),
+        })
+        .returning();
+      if (!row) throw new Error("Failed to reserve transcription grant");
+
+      await scopedDb
+        .insert(schema.usageEvents)
+        .values([
+          transcriptionUsageValue(input, row.id, "transcription.grant_reserved", 1, "grant"),
+          transcriptionUsageValue(
+            input,
+            row.id,
+            "transcription.reserved_seconds",
+            reservedSeconds,
+            "seconds",
+          ),
+          transcriptionUsageValue(
+            input,
+            row.id,
+            "transcription.reserved_cost",
+            reservedCostMicros,
+            "usd_micros",
+          ),
+        ])
+        .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+      await insertTranscriptionAudit(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "transcription.grant.reserved",
+        grantId: row.id,
+        sessionId: input.sessionId,
+        metadata: { reservedSeconds, reservedCostMicros, provider: input.provider },
+      });
+      return { allowed: true, grant: mapTranscriptionGrant(row), policy };
+    },
+  );
+}
+
+export async function activateTranscriptionGrant(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    grantId: string;
+    sessionId: string;
+    subjectId: string;
+    providerSessionId: string;
+    clientSecretExpiresAt: Date;
+  },
+): Promise<TranscriptionGrant> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const now = new Date();
+      const [row] = await scopedDb
+        .update(schema.transcriptionGrants)
+        .set({
+          status: "active",
+          providerSessionId: input.providerSessionId,
+          clientSecretExpiresAt: input.clientSecretExpiresAt,
+          issuedAt: now,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(schema.transcriptionGrants.id, input.grantId),
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            eq(schema.transcriptionGrants.sessionId, input.sessionId),
+            eq(schema.transcriptionGrants.subjectId, input.subjectId),
+            eq(schema.transcriptionGrants.status, "reserved"),
+          ),
+        )
+        .returning();
+      if (!row) throw new Error("Transcription grant is no longer reservable");
+      await scopedDb
+        .insert(schema.usageEvents)
+        .values(transcriptionUsageValue(input, row.id, "transcription.secret_issued", 1, "secret"))
+        .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey });
+      await insertTranscriptionAudit(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: "transcription.grant.issued",
+        grantId: row.id,
+        sessionId: input.sessionId,
+        metadata: { providerSessionId: input.providerSessionId },
+      });
+      return mapTranscriptionGrant(row);
+    },
+  );
+}
+
+export async function reportTranscriptionGrantUsage(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    grantId: string;
+    sessionId: string;
+    subjectId: string;
+    providerSessionId: string;
+    providerEventId: string;
+    durationSeconds?: number;
+    costMicros?: number;
+  },
+): Promise<{ recorded: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [grant] = await scopedDb
+        .select()
+        .from(schema.transcriptionGrants)
+        .where(
+          and(
+            eq(schema.transcriptionGrants.id, input.grantId),
+            eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+            eq(schema.transcriptionGrants.sessionId, input.sessionId),
+            eq(schema.transcriptionGrants.subjectId, input.subjectId),
+            eq(schema.transcriptionGrants.providerSessionId, input.providerSessionId),
+          ),
+        )
+        .limit(1);
+      if (!grant) throw new Error("Transcription grant not found");
+      let recorded = false;
+      const durationSeconds = Math.ceil(input.durationSeconds ?? 0);
+      const costMicros = Math.ceil(input.costMicros ?? 0);
+      if (durationSeconds > 0) {
+        const [usage] = await scopedDb
+          .insert(schema.usageEvents)
+          .values({
+            ...transcriptionUsageValue(
+              input,
+              grant.id,
+              "transcription.reported_seconds",
+              durationSeconds,
+              "seconds",
+            ),
+            idempotencyKey: `transcription:${grant.id}:provider:${input.providerEventId}:seconds`,
+          })
+          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey })
+          .returning({ id: schema.usageEvents.id });
+        if (usage) {
+          recorded = true;
+          await scopedDb
+            .update(schema.transcriptionGrants)
+            .set({
+              reportedDurationSeconds: sql`${schema.transcriptionGrants.reportedDurationSeconds} + ${durationSeconds}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.transcriptionGrants.id, grant.id));
+        }
+      }
+      if (costMicros > 0) {
+        const [usage] = await scopedDb
+          .insert(schema.usageEvents)
+          .values({
+            ...transcriptionUsageValue(
+              input,
+              grant.id,
+              "transcription.reported_cost",
+              costMicros,
+              "usd_micros",
+            ),
+            idempotencyKey: `transcription:${grant.id}:provider:${input.providerEventId}:cost`,
+          })
+          .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey })
+          .returning({ id: schema.usageEvents.id });
+        if (usage) {
+          recorded = true;
+          await scopedDb
+            .update(schema.transcriptionGrants)
+            .set({
+              reportedCostMicros: sql`${schema.transcriptionGrants.reportedCostMicros} + ${costMicros}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.transcriptionGrants.id, grant.id));
+        }
+      }
+      return { recorded };
+    },
+  );
+}
+
+export async function settleTranscriptionGrant(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    grantId: string;
+    sessionId: string;
+    subjectId: string;
+    status: Exclude<TranscriptionGrantStatus, "reserved" | "active" | "expired">;
+    providerSessionId?: string;
+  },
+): Promise<TranscriptionGrant> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const clauses = [
+        eq(schema.transcriptionGrants.id, input.grantId),
+        eq(schema.transcriptionGrants.workspaceId, input.workspaceId),
+        eq(schema.transcriptionGrants.sessionId, input.sessionId),
+        eq(schema.transcriptionGrants.subjectId, input.subjectId),
+        ...(input.providerSessionId
+          ? [eq(schema.transcriptionGrants.providerSessionId, input.providerSessionId)]
+          : []),
+      ];
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.transcriptionGrants)
+        .where(and(...clauses))
+        .limit(1);
+      if (!existing) throw new Error("Transcription grant not found");
+      if (existing.status === input.status) return mapTranscriptionGrant(existing);
+      if (existing.status !== "reserved" && existing.status !== "active") {
+        throw new Error("Transcription grant is already terminal");
+      }
+      const now = new Date();
+      const [row] = await scopedDb
+        .update(schema.transcriptionGrants)
+        .set({ status: input.status, settledAt: now, updatedAt: now })
+        .where(and(...clauses, inArray(schema.transcriptionGrants.status, ["reserved", "active"])))
+        .returning();
+      if (!row) throw new Error("Failed to settle transcription grant");
+      await insertTranscriptionAudit(scopedDb, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        subjectId: input.subjectId,
+        action: `transcription.grant.${input.status}`,
+        grantId: row.id,
+        sessionId: input.sessionId,
+      });
+      return mapTranscriptionGrant(row);
+    },
+  );
+}
+
+export async function countActiveTranscriptionGrantsForWorkspace(
+  db: Database,
+  workspaceId: string,
+): Promise<number> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [{ count } = { count: 0 }] = await scopedDb
+      .select({ count: sql<number>`count(*)::int` })
+      .from(schema.transcriptionGrants)
+      .where(
+        and(
+          eq(schema.transcriptionGrants.workspaceId, workspaceId),
+          inArray(schema.transcriptionGrants.status, ["reserved", "active"]),
+          gt(schema.transcriptionGrants.activeExpiresAt, new Date()),
+        ),
+      );
+    return Number(count);
+  });
+}
+
+async function denyTranscriptionAdmission(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    subjectId: string;
+    requestId: string;
+  },
+  code: string,
+  message: string,
+): Promise<TranscriptionAdmissionDecision> {
+  await insertTranscriptionAudit(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    action: "transcription.grant.denied",
+    sessionId: input.sessionId,
+    metadata: { code, requestId: input.requestId },
+  });
+  return { allowed: false, code, message };
+}
+
+async function insertTranscriptionAudit(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    subjectId: string;
+    action: string;
+    sessionId: string;
+    grantId?: string;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  await db.insert(schema.auditEvents).values({
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    action: input.action,
+    targetType: "transcription_grant",
+    targetId: input.grantId ?? input.sessionId,
+    metadata: { sessionId: input.sessionId, ...input.metadata },
+  });
+}
+
+function transcriptionUsageValue(
+  input: { accountId: string; workspaceId: string; subjectId: string },
+  grantId: string,
+  eventType: string,
+  quantity: number,
+  unit: string,
+) {
+  return {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    subjectId: input.subjectId,
+    eventType,
+    quantity,
+    unit,
+    sourceResourceType: "transcription_grant",
+    sourceResourceId: grantId,
+    idempotencyKey: `transcription:${grantId}:${eventType}`,
+    occurredAt: new Date(),
+  };
+}
+
+function mapTranscriptionGrant(
+  row: typeof schema.transcriptionGrants.$inferSelect,
+): TranscriptionGrant {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    subjectId: row.subjectId,
+    requestId: row.requestId,
+    provider: row.provider,
+    providerProjectId: row.providerProjectId,
+    endpoint: row.endpoint,
+    providerSessionId: row.providerSessionId,
+    status: row.status as TranscriptionGrantStatus,
+    reservedDurationSeconds: row.reservedDurationSeconds,
+    reservedCostMicros: row.reservedCostMicros,
+    reportedDurationSeconds: row.reportedDurationSeconds,
+    reportedCostMicros: row.reportedCostMicros,
+    clientSecretExpiresAt: row.clientSecretExpiresAt?.toISOString() ?? null,
+    activeExpiresAt: row.activeExpiresAt.toISOString(),
+    issuedAt: row.issuedAt?.toISOString() ?? null,
+    settledAt: row.settledAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function startOfUtcMonthForDate(now: Date): Date {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }
 
 export async function applyCreditLedgerEntry(
@@ -12618,7 +13331,7 @@ type SessionEventProjectionRow = {
  * Read one direction-aware session-event page without transferring legacy raw
  * payloads or malformed free-form envelope strings out of PostgreSQL.
  *
- * Migration 0067 deliberately leaves historical rows untouched. This query
+ * Migration 0095 deliberately leaves historical rows untouched. This query
  * invokes its immutable payload projector in SQL and mirrors the rolling
  * envelope guard in SQL, then accumulates small batches under one RLS
  * transaction. `bytes` is the exact UTF-8 size of `JSON.stringify(events)`;

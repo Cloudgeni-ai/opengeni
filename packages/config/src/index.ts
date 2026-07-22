@@ -232,6 +232,9 @@ const SettingsSchema = z.object({
   openaiProvider: z.enum(["openai", "azure"]).default("openai"),
   openaiApiKey: z.string().optional(),
   openaiBaseUrl: z.string().optional(),
+  // Required for workspace transcription policy eligibility. The broker sends
+  // the exact project header and rejects a policy for any other project.
+  openaiProjectId: z.string().optional(),
   openaiModel: z.string().default("gpt-5.6-sol"),
   openaiAllowedModels: z.string().default("gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna"),
   modelPricingJson: z.string().default("{}"),
@@ -1027,6 +1030,7 @@ export function getSettings(): Settings {
     openaiProvider: optional("OPENGENI_OPENAI_PROVIDER"),
     openaiApiKey: optional("OPENGENI_OPENAI_API_KEY") ?? optional("OPENAI_API_KEY"),
     openaiBaseUrl: optional("OPENGENI_OPENAI_BASE_URL") ?? optional("OPENAI_BASE_URL"),
+    openaiProjectId: optional("OPENGENI_OPENAI_PROJECT_ID") ?? optional("OPENAI_PROJECT_ID"),
     openaiModel: optional("OPENGENI_OPENAI_MODEL"),
     openaiAllowedModels: optional("OPENGENI_OPENAI_ALLOWED_MODELS"),
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),

@@ -2,6 +2,7 @@ import { configuredStaticUsageLimits } from "@opengeni/config";
 import type { LimitAction, LimitDecision } from "@opengeni/contracts";
 import {
   countActiveApiKeysForWorkspace,
+  countActiveTranscriptionGrantsForWorkspace,
   countScheduledTasksForWorkspace,
   countWorkspacesForAccount,
   getBillingBalance,
@@ -19,6 +20,8 @@ export type LimitCheckInput = {
   workspaceId?: string;
   action: LimitAction;
   quantity?: number;
+  subjectId?: string;
+  costMicros?: number;
   // The turn's model id, when the action represents an agent turn. When this is a
   // Codex-billed turn (codex/<slug> + feature enabled + active workspace
   // credential) the turn is paid by the user's ChatGPT/Codex plan and consumes
@@ -88,15 +91,25 @@ async function checkStaticCaps(
 ): Promise<LimitDecision> {
   const limits = configuredStaticUsageLimits(deps.settings);
   if (limits.maxMonthlyCostMicrosPerAccount && isCostlyAction(input.action) && !codexBilled) {
-    const used = await sumUsageQuantity(deps.db, {
-      accountId: input.accountId,
-      eventType: "model.cost",
-      since: startOfUtcMonth(),
-    });
-    if (used >= limits.maxMonthlyCostMicrosPerAccount) {
+    const [modelCost, transcriptionCost] = await Promise.all([
+      sumUsageQuantity(deps.db, {
+        accountId: input.accountId,
+        eventType: "model.cost",
+        since: startOfUtcMonth(),
+      }),
+      sumUsageQuantity(deps.db, {
+        accountId: input.accountId,
+        eventType: "transcription.reserved_cost",
+        since: startOfUtcMonth(),
+      }),
+    ]);
+    if (
+      modelCost + transcriptionCost + (input.costMicros ?? 0) >
+      limits.maxMonthlyCostMicrosPerAccount
+    ) {
       return blocked(
         "max_monthly_cost_micros_per_account",
-        `monthly model cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
+        `monthly cost limit reached (${limits.maxMonthlyCostMicrosPerAccount} micros)`,
       );
     }
   }
@@ -199,6 +212,64 @@ async function checkStaticCaps(
             `monthly document indexing limit reached (${limits.maxDocumentIndexedChunksPerWorkspace} chunks)`,
           );
     }
+    case "transcription:issue": {
+      if (!input.workspaceId || !input.subjectId) {
+        return blocked(
+          "transcription_scope_required",
+          "transcription admission requires workspace and subject scope",
+        );
+      }
+      if (limits.maxActiveTranscriptionGrantsPerWorkspace) {
+        const active = await countActiveTranscriptionGrantsForWorkspace(deps.db, input.workspaceId);
+        if (active >= limits.maxActiveTranscriptionGrantsPerWorkspace) {
+          return blocked(
+            "max_active_transcription_grants_per_workspace",
+            `active transcription grant limit reached (${limits.maxActiveTranscriptionGrantsPerWorkspace})`,
+          );
+        }
+      }
+      if (limits.maxTranscriptionIssuancesPerMinutePerSubject) {
+        const recent = await sumUsageQuantity(deps.db, {
+          workspaceId: input.workspaceId,
+          subjectId: input.subjectId,
+          eventType: "transcription.grant_reserved",
+          since: new Date(Date.now() - 60_000),
+        });
+        if (recent >= limits.maxTranscriptionIssuancesPerMinutePerSubject) {
+          return blocked(
+            "max_transcription_issuances_per_minute_per_subject",
+            `transcription issuance rate limit reached (${limits.maxTranscriptionIssuancesPerMinutePerSubject}/minute)`,
+          );
+        }
+      }
+      if (limits.maxMonthlyTranscriptionSecondsPerWorkspace) {
+        const used = await sumUsageQuantity(deps.db, {
+          workspaceId: input.workspaceId,
+          eventType: "transcription.reserved_seconds",
+          since: startOfUtcMonth(),
+        });
+        if (used + (input.quantity ?? 0) > limits.maxMonthlyTranscriptionSecondsPerWorkspace) {
+          return blocked(
+            "max_monthly_transcription_seconds_per_workspace",
+            `monthly transcription duration limit reached (${limits.maxMonthlyTranscriptionSecondsPerWorkspace} seconds)`,
+          );
+        }
+      }
+      if (limits.maxMonthlyTranscriptionCostMicrosPerAccount) {
+        const used = await sumUsageQuantity(deps.db, {
+          accountId: input.accountId,
+          eventType: "transcription.reserved_cost",
+          since: startOfUtcMonth(),
+        });
+        if (used + (input.costMicros ?? 0) > limits.maxMonthlyTranscriptionCostMicrosPerAccount) {
+          return blocked(
+            "max_monthly_transcription_cost_micros_per_account",
+            `monthly transcription cost limit reached (${limits.maxMonthlyTranscriptionCostMicrosPerAccount} micros)`,
+          );
+        }
+      }
+      return { allowed: true };
+    }
   }
 }
 
@@ -208,7 +279,17 @@ export async function recordWorkspaceUsage(
     accountId: string;
     workspaceId: string;
     subjectId?: string | null;
-    eventType: "agent_run.created" | "file.uploaded" | "document.indexed" | "scheduled_task.fired";
+    eventType:
+      | "agent_run.created"
+      | "file.uploaded"
+      | "document.indexed"
+      | "scheduled_task.fired"
+      | "transcription.grant_reserved"
+      | "transcription.secret_issued"
+      | "transcription.reserved_seconds"
+      | "transcription.reserved_cost"
+      | "transcription.reported_seconds"
+      | "transcription.reported_cost";
     quantity: number;
     unit: string;
     sourceResourceType: string;
@@ -235,7 +316,10 @@ function usesCreditLimits(deps: LimitDependencies): boolean {
 
 function isCostlyAction(action: LimitAction): boolean {
   return (
-    action === "agent_run:create" || action === "tokens:consume" || action === "document:index"
+    action === "agent_run:create" ||
+    action === "tokens:consume" ||
+    action === "document:index" ||
+    action === "transcription:issue"
   );
 }
 
