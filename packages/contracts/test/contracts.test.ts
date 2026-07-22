@@ -17,11 +17,15 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   EnablePackRequest,
+  GitCredentialBindingId,
+  gitCredentialBindingIdForRepository,
+  gitCredentialProviderForRepository,
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  RepositoryResourceRef,
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
@@ -73,6 +77,53 @@ describe("contracts", () => {
         requestedSessionId: "host-session-42",
       }),
     ).toThrow();
+  });
+
+  test("accepts opaque bounded repository credential bindings and access intent", () => {
+    expect(
+      ResourceRef.parse({
+        kind: "repository",
+        uri: "https://gitlab.example/acme/repo.git",
+        ref: "main",
+        provider: "gitlab",
+        credentialBindingId: "host/opaque binding:1",
+        access: "read",
+      }),
+    ).toMatchObject({
+      credentialBindingId: "host/opaque binding:1",
+      access: "read",
+    });
+    expect(GitCredentialBindingId.safeParse("x".repeat(256)).success).toBe(true);
+    expect(GitCredentialBindingId.safeParse("x".repeat(257)).success).toBe(false);
+    expect(GitCredentialBindingId.safeParse("").success).toBe(false);
+  });
+
+  test("derives one canonical binding id across legacy provider-id shapes", () => {
+    const nonNumericGitHub = RepositoryResourceRef.parse({
+      kind: "repository",
+      uri: "https://github.com/acme/repo.git",
+      ref: "main",
+      provider: "github",
+      installationId: "external-installation",
+    });
+    expect(gitCredentialProviderForRepository(nonNumericGitHub)).toBe("github");
+    expect(gitCredentialBindingIdForRepository(nonNumericGitHub)).toBe("github");
+
+    const numericGitHub = RepositoryResourceRef.parse({
+      ...nonNumericGitHub,
+      installationId: "123",
+    });
+    expect(gitCredentialBindingIdForRepository(numericGitHub)).toBe("github-installation:123");
+
+    const gitlabWithStrayLegacyAlias = RepositoryResourceRef.parse({
+      kind: "repository",
+      uri: "https://gitlab.example/acme/repo.git",
+      ref: "main",
+      provider: "gitlab",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    });
+    expect(gitCredentialBindingIdForRepository(gitlabWithStrayLegacyAlias)).toBe("gitlab");
   });
 
   test("accepts MCP tool refs on create session", () => {

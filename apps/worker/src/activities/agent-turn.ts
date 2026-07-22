@@ -93,7 +93,7 @@ import {
   clearRunCredentials,
   clearRunCredentialsForAttempt,
   withRunCredentialsSession,
-  refreshGitProviderTokenFiles,
+  refreshGitCredentialBindingTokenFiles,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -169,9 +169,10 @@ import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
   gitCredentialAuthorityForTurn,
-  gitHubTokenMintSelection,
+  gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
+  mintRunGitCredentialBinding,
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
@@ -261,7 +262,6 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
-  type GitCredentialProvider,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
@@ -1666,7 +1666,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
     // the initial seed reached a real cloud box and is drained before capture.
-    let gitCredentialRenewal: GitCredentialRenewalController | null = null;
+    let gitCredentialRenewals: GitCredentialRenewalController[] = [];
     let gitCredentialRenewalClosed = false;
     // Generic host-owned run material has its own attempt-scoped renewal and
     // write handle. It is always drained and wiped before workspace capture.
@@ -3486,6 +3486,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         gitToken: sandboxGitToken,
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
+        gitCredentialBindings: sandboxGitCredentialBindings,
         toolspaceToken: sandboxToolspaceToken,
       } = await waitForTurnOperation(
         sandboxEnvironmentForRun(
@@ -3510,77 +3511,101 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         undefined,
       );
 
-      const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
-        ? {
-            gitTokens: sandboxGitTokens,
-            expiresAt: sandboxGitTokenExpiresAt ?? {},
-          }
-        : undefined;
+      const initialGitCredentials: MintedRunGitCredentials | undefined =
+        sandboxGitCredentialBindings
+          ? {
+              bindings: sandboxGitCredentialBindings,
+              gitTokens: sandboxGitTokens ?? {},
+              expiresAt: sandboxGitTokenExpiresAt ?? {},
+            }
+          : undefined;
       const attachGitCredentialRenewal = async (
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
       ): Promise<void> => {
-        if (!initial || Object.keys(initial.gitTokens).length === 0) return;
-        const previous = gitCredentialRenewal;
-        gitCredentialRenewal = null;
-        await previous?.stop();
+        if (!initial || initial.bindings.length === 0) return;
+        const previous = gitCredentialRenewals;
+        gitCredentialRenewals = [];
+        await Promise.all(previous.map(async (controller) => await controller.stop()));
         if (gitCredentialRenewalClosed) return;
 
-        const providers = Object.keys(initial.gitTokens) as GitCredentialProvider[];
-        const controller = startGitCredentialRenewalLoop({
-          expectedProviders: providers,
-          initialExpiresAt: initial.expiresAt,
-          mint: async () =>
-            await mintRunGitCredentials(runSettings, turnResources, {
-              scope: connectionScope,
-              ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
-              gitCredentials: connectionCredentials?.gitCredentials,
-              authorizeGitHubTokenMint,
-            }),
-          write: async (tokens) => {
-            const runAs = sandboxRunAs(runSettings);
-            await refreshGitProviderTokenFiles(tokenSession, tokens, {
-              ...(runAs ? { runAs } : {}),
-              ...(toolCancellationFenceRef.current
+        const controllers = initial.bindings.map((initialBinding) => {
+          let pendingBinding: typeof initialBinding | undefined;
+          return startGitCredentialRenewalLoop({
+            expectedProviders: [initialBinding.provider],
+            initialExpiresAt: initialBinding.expiresAt
+              ? { [initialBinding.provider]: initialBinding.expiresAt }
+              : {},
+            mint: async () => {
+              const binding = await mintRunGitCredentialBinding(
+                runSettings,
+                turnResources,
+                initialBinding.provider,
+                initialBinding.credentialBindingId,
+                {
+                  scope: connectionScope,
+                  ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+                  gitCredentials: connectionCredentials?.gitCredentials,
+                  authorizeGitHubTokenMint,
+                },
+              );
+              pendingBinding = binding;
+              return binding
                 ? {
-                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      toolCancellationFenceRef.current,
-                    ),
+                    bindings: [binding],
+                    gitTokens: { [binding.provider]: binding.token },
+                    expiresAt: binding.expiresAt ? { [binding.provider]: binding.expiresAt } : {},
                   }
-                : {}),
-            });
-          },
-          onSuccess: ({ providers: renewedProviders }) => {
-            for (const provider of renewedProviders) {
-              observability.incrementCounter({
-                name: "opengeni_git_credential_renewals_total",
-                help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                labels: { provider, outcome: "completed" },
+                : undefined;
+            },
+            write: async () => {
+              if (!pendingBinding) {
+                throw new Error("credential renewal produced no binding token");
+              }
+              const runAs = sandboxRunAs(runSettings);
+              await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding], {
+                ...(runAs ? { runAs } : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
               });
-            }
-          },
-          onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
-            for (const provider of failedProviders) {
-              observability.incrementCounter({
-                name: "opengeni_git_credential_renewals_total",
-                help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                labels: { provider, outcome: "error" },
+            },
+            onSuccess: ({ providers: renewedProviders }) => {
+              for (const provider of renewedProviders) {
+                observability.incrementCounter({
+                  name: "opengeni_git_credential_renewals_total",
+                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                  labels: { provider, outcome: "completed" },
+                });
+              }
+            },
+            onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
+              for (const provider of failedProviders) {
+                observability.incrementCounter({
+                  name: "opengeni_git_credential_renewals_total",
+                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                  labels: { provider, outcome: "error" },
+                });
+              }
+              observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+                sessionId: input.sessionId,
+                turnId,
+                providers: failedProviders.join(","),
+                errorClass,
+                retryDelayMs,
               });
-            }
-            observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
-              sessionId: input.sessionId,
-              turnId,
-              providers: failedProviders.join(","),
-              errorClass,
-              retryDelayMs,
-            });
-          },
+            },
+          });
         });
         if (gitCredentialRenewalClosed) {
-          await controller.stop();
+          await Promise.all(controllers.map(async (controller) => await controller.stop()));
           return;
         }
-        gitCredentialRenewal = controller;
+        gitCredentialRenewals = controllers;
       };
 
       const attachRunCredentialRenewal = async (
@@ -4008,6 +4033,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && sandboxGitTokens
           ? { gitTokenSeeds: sandboxGitTokens }
           : {}),
+        ...(activeSandboxBackend !== "selfhosted" && sandboxGitCredentialBindings
+          ? { gitCredentialBindings: sandboxGitCredentialBindings }
+          : {}),
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
@@ -4190,6 +4218,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
                 ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(lazyGitCredentials?.bindings
+                  ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
+                  : {}),
                 ...(toolCancellationFenceRef.current
                   ? {
                       commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
@@ -6200,10 +6231,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
         gitCredentialRenewalClosed = true;
-        const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
-        gitCredentialRenewal = null;
-        if (renewalToStop) {
-          await waitForTurnFinalizerStep(renewalToStop.stop(), finalizerSignal);
+        const renewalsToStop = gitCredentialRenewals;
+        gitCredentialRenewals = [];
+        for (const renewal of renewalsToStop) {
+          await waitForTurnFinalizerStep(renewal.stop(), finalizerSignal);
         }
         // Drain the buffered Connected Machine op events (infra failures + healed
         // recoveries) to durable session events — awaited, best-effort, never blocking
@@ -6522,16 +6553,14 @@ async function assertGitHubResourcesRemainAuthorized(
 ): Promise<void> {
   // Must check exactly what sandboxEnvironmentForRun would mint a token for,
   // so the selection is derived from the same extraction as the mint path.
-  const selection = gitHubTokenMintSelection(resources);
-  if (!selection) {
-    return;
+  for (const selection of gitHubTokenMintSelections(resources)) {
+    await assertGitHubTokenMintSelectionAuthorized(
+      db,
+      workspaceId,
+      selection.installationId,
+      selection.repositoryIds,
+    );
   }
-  await assertGitHubTokenMintSelectionAuthorized(
-    db,
-    workspaceId,
-    selection.installationId,
-    selection.repositoryIds,
-  );
 }
 
 async function assertGitHubTokenMintSelectionAuthorized(

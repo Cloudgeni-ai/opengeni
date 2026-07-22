@@ -222,6 +222,8 @@ export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
+export type GitCredentialBindingId = string;
+export type GitRepositoryAccess = "read" | "write";
 
 export type RepositoryResourceRef = {
   kind: "repository";
@@ -230,6 +232,8 @@ export type RepositoryResourceRef = {
   mountPath?: string | undefined;
   subpath?: string | undefined;
   provider?: GitCredentialProvider | undefined;
+  credentialBindingId?: GitCredentialBindingId | undefined;
+  access?: GitRepositoryAccess | undefined;
   repositoryId?: number | string | undefined;
   installationId?: number | string | undefined;
   projectId?: number | string | undefined;

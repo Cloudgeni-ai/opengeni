@@ -1233,10 +1233,21 @@ export type EntitlementsPort = {
 export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
 export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
 
+// Host-opaque identity for one independently mintable Git credential. It is
+// deliberately NOT constrained to a filesystem-safe alphabet: runtimes hash it
+// before using it in paths, command text, or environment variable names.
+export const GitCredentialBindingId = z.string().min(1).max(256);
+export type GitCredentialBindingId = z.infer<typeof GitCredentialBindingId>;
+
+export const GitRepositoryAccess = z.enum(["read", "write"]);
+export type GitRepositoryAccess = z.infer<typeof GitRepositoryAccess>;
+
 const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
 
 export const GitCredentialRepositoryRef = z.object({
   provider: GitCredentialProvider.optional(),
+  credentialBindingId: GitCredentialBindingId.optional(),
+  access: GitRepositoryAccess.optional(),
   uri: z.string().min(1),
   ref: z.string().min(1),
   repositoryId: GitProviderRepositoryId.optional(),
@@ -1288,6 +1299,14 @@ export type GitCredentialsRequest = {
   // hosts can keep reading installationId/repositoryIds exactly as before;
   // provider-aware hosts should branch on this and repositoryRefs.
   provider?: GitCredentialProvider;
+  // Present when the host supplied an explicit binding or when more than one
+  // independently mintable credential exists for this provider. A host must
+  // mint only this binding; OpenGeni never treats provider identity as enough
+  // to select among multiple accounts/installations.
+  credentialBindingId?: GitCredentialBindingId;
+  // Canonical lower-case host shared by this binding's repository refs when
+  // there is exactly one. Binding-aware providers echo it when present.
+  providerHost?: string;
   // Token requests are the existing behavior. Identity requests let lazy
   // sandbox provisioning resolve stable git author/committer identity before
   // the box exists while deferring the rotating token value to first provision.
@@ -1308,6 +1327,13 @@ export type GitCredentials = {
   // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
+  // Strict request echoes for binding-aware requests. OpenGeni validates these
+  // before accepting a token, preventing a host routing bug from returning a
+  // sibling connection's credential. They remain optional for legacy single-
+  // binding/provider hosts.
+  credentialBindingId?: GitCredentialBindingId;
+  provider?: GitCredentialProvider;
+  providerHost?: string;
   // Optional provider expiry for host-managed proactive renewal. ISO-8601;
   // null/omitted means the host does not expose a deadline and OpenGeni uses
   // its conservative bounded refresh cadence instead.
@@ -1612,6 +1638,8 @@ export const RepositoryResourceRef = z.object({
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
+  credentialBindingId: GitCredentialBindingId.optional(),
+  access: GitRepositoryAccess.optional(),
   repositoryId: GitProviderRepositoryId.optional(),
   installationId: GitProviderRepositoryId.optional(),
   projectId: GitProviderRepositoryId.optional(),
@@ -1620,6 +1648,53 @@ export const RepositoryResourceRef = z.object({
   githubRepositoryId: z.number().int().positive().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
+
+function positiveGitProviderInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0) {
+    return Number(value);
+  }
+  return null;
+}
+
+/**
+ * Resolve whether a repository participates in platform-brokered Git auth.
+ * Provider-less public repositories return null; legacy GitHub aliases infer
+ * GitHub only when both positive installation and repository ids are present.
+ */
+export function gitCredentialProviderForRepository(
+  resource: RepositoryResourceRef,
+): GitCredentialProvider | null {
+  if (resource.provider) return resource.provider;
+  if (
+    positiveGitProviderInteger(resource.githubInstallationId) &&
+    positiveGitProviderInteger(resource.githubRepositoryId)
+  ) {
+    return "github";
+  }
+  return null;
+}
+
+/**
+ * Derive the one canonical runtime/broker identity for a repository credential.
+ * Every consumer must use this helper so mint grouping, token filenames, and
+ * credential-helper routing cannot diverge on legacy provider ids.
+ */
+export function gitCredentialBindingIdForRepository(
+  resource: RepositoryResourceRef,
+  provider: GitCredentialProvider | null = gitCredentialProviderForRepository(resource),
+): GitCredentialBindingId | null {
+  if (!provider) return null;
+  const installationId =
+    provider === "github"
+      ? positiveGitProviderInteger(resource.githubInstallationId ?? resource.installationId)
+      : null;
+  return (
+    resource.credentialBindingId ??
+    resource.connectionId ??
+    (installationId ? `github-installation:${installationId}` : provider)
+  );
+}
 
 export const FileResourceRef = z.object({
   kind: z.literal("file"),
