@@ -39,6 +39,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@opengeni/agent-proto": "workspace:*",
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
@@ -46,6 +47,7 @@
     "@opengeni/db": "workspace:*",
     "@opengeni/documents": "workspace:*",
     "@opengeni/events": "workspace:*",
+    "@opengeni/github": "workspace:*",
     "@opengeni/observability": "workspace:*",
     "@opengeni/runtime": "workspace:*",
     "@opengeni/storage": "workspace:*",
