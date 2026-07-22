@@ -1276,6 +1276,14 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
+  /** Immutable authority admitted with the turn requesting this credential. */
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
   // Provider defaults to "github" for the legacy request shape. GitHub-only
   // hosts can keep reading installationId/repositoryIds exactly as before;
   // provider-aware hosts should branch on this and repositoryRefs.

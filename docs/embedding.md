@@ -128,9 +128,15 @@ type ConnectionCredentialsPort = {
 ```
 
 `gitCredentials` is provider-aware and remains GitHub-backward-compatible:
-GitHub repository resources still arrive as the legacy shape
-`{ accountId, workspaceId, installationId, repositoryIds }`, with omitted
-`provider` meaning `"github"`. Non-GitHub resources arrive with
+GitHub repository resources retain `installationId` and `repositoryIds`, with
+omitted `provider` meaning `"github"`. Every request also carries the current
+`sessionId`, root-session lineage, turn/attempt/execution generation, frozen
+initiator, and immutable initiator provenance. A host must authorize that
+authority against its own session binding and selected repositories immediately
+before minting either a token or stable Git identity. OpenGeni reuses the same
+frozen authority for initial provisioning, deferred identity resolution, lazy
+provisioning, and proactive renewal; it fails closed before calling a bound host
+broker when the authority is unavailable. Non-GitHub resources arrive with
 `provider: "gitlab" | "azure_devops"` plus `repositoryRefs`. Provider-neutral
 repository refs can carry `provider`, `repositoryId`, `installationId`,
 `projectId`, and `connectionId`; `RepositoryResourceRef` accepts the same

@@ -11,6 +11,7 @@ import {
   setActiveSandbox,
   requireFile,
   getSessionEvent,
+  getSessionRootId,
   getSessionGoal,
   getLatestRunState,
   isCodexBilledTurn,
@@ -167,6 +168,7 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
+  gitCredentialAuthorityForTurn,
   gitHubTokenMintSelection,
   loadWorkspaceEnvironmentForRunWithCredentials,
   mintRunGitCredentials,
@@ -3463,6 +3465,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           selection.repositoryIds,
         );
       };
+      const gitCredentialRootSessionId = connectionCredentials?.gitCredentials
+        ? await getSessionRootId(db, input.workspaceId, input.sessionId)
+        : null;
+      if (connectionCredentials?.gitCredentials && !gitCredentialRootSessionId) {
+        throw new Error(
+          `cannot resolve host git credentials for missing session ${input.sessionId}`,
+        );
+      }
+      const gitCredentialAuthority = gitCredentialRootSessionId
+        ? gitCredentialAuthorityForTurn({
+            sessionId: input.sessionId,
+            rootSessionId: gitCredentialRootSessionId,
+            attemptId: input.attemptId,
+            turn,
+          })
+        : undefined;
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -3481,6 +3499,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
+            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
             sessionId: input.sessionId,
@@ -3514,6 +3533,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           mint: async () =>
             await mintRunGitCredentials(runSettings, turnResources, {
               scope: connectionScope,
+              ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
               gitCredentials: connectionCredentials?.gitCredentials,
               authorizeGitHubTokenMint,
             }),
@@ -4120,6 +4140,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? undefined
                 : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
+                    ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
                     gitCredentials: connectionCredentials?.gitCredentials,
                     authorizeGitHubTokenMint,
                   });
