@@ -56,6 +56,15 @@ describe("release package evidence", () => {
     expect(result.packages).toEqual([
       { ...react, state: "pending", gitHead: null, integrity: null },
     ]);
+    expect(result.bomPackages).toEqual([
+      { ...react, state: "pending", gitHead: null, integrity: null },
+      {
+        ...sdk,
+        state: "published",
+        gitHead: "b".repeat(40),
+        integrity: "sha512-release-integrity",
+      },
+    ]);
   });
 
   test("fails before publish when an unlisted package would escape", () => {
@@ -109,6 +118,23 @@ describe("release package evidence", () => {
     expect(result.needsPublish).toBe(false);
     expect(result.releaseReady).toBe(true);
     expect(result.packages[0]).toMatchObject({ ...react, state: "published", gitHead: sha });
+    expect(result.bomPackages).toHaveLength(2);
+    expect(result.bomPackages.every((pkg) => pkg.state === "published")).toBe(true);
+  });
+
+  test("fails closed when an unchanged BOM member lacks immutable registry identity", () => {
+    expect(() =>
+      reconcileReleasePackages({
+        sourceSha: sha,
+        phase: "plan",
+        publishable: [react, sdk],
+        expected: [react],
+        registry: new Map([
+          [react.name, null],
+          [sdk.name, { ...sdk, gitHead: null, integrity: "sha512-release-integrity" }],
+        ]),
+      }),
+    ).toThrow("registry gitHead is missing or invalid");
   });
 
   test("verify fails closed while an expected package is still missing", () => {

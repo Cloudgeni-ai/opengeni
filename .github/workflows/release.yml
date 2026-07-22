@@ -158,6 +158,7 @@ jobs:
     outputs:
       releaseReady: ${{ steps.registry.outputs.release_ready }}
       verifiedPackages: ${{ steps.registry.outputs.verified_packages }}
+      bomPackages: ${{ steps.registry.outputs.bom_packages }}
       sourceSha: ${{ steps.preflight.outputs.source_sha }}
     steps:
       - name: Check out evidence-bound source
@@ -366,6 +367,7 @@ jobs:
       - name: Write verified release receipt
         env:
           VERIFIED_PACKAGES: ${{ steps.registry.outputs.verified_packages }}
+          BOM_PACKAGES: ${{ steps.registry.outputs.bom_packages }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
           PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
@@ -377,6 +379,8 @@ jobs:
           mkdir -p evidence
           jq -e 'type == "array" and length > 0 and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
             <<<"$VERIFIED_PACKAGES" >/dev/null
+          jq -e 'type == "array" and length > 0 and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
+            <<<"$BOM_PACKAGES" >/dev/null
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
             --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
@@ -385,6 +389,7 @@ jobs:
             --arg acceptanceBundleUrl "$ACCEPTANCE_BUNDLE_URL" \
             --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
             --argjson publishedPackages "$VERIFIED_PACKAGES" \
+            --argjson bomPackages "$BOM_PACKAGES" \
             '{
               schemaVersion: 1,
               sourceSha: $sourceSha,
@@ -396,7 +401,8 @@ jobs:
                 bundleSha256: $acceptanceBundleSha256,
                 zeroKnownDefectsAndGapsConfirmed: true
               },
-              publishedPackages: $publishedPackages
+              publishedPackages: $publishedPackages,
+              bomPackages: $bomPackages
             }' > evidence/verified-release.json
 
       - name: Upload verified release receipt
@@ -426,6 +432,11 @@ jobs:
         with:
           ref: ${{ needs.publish.outputs.sourceSha }}
           persist-credentials: false
+
+      - name: Set up Bun for release evidence
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
 
       - name: Resolve image version
         id: meta
@@ -495,6 +506,7 @@ jobs:
         run: scripts/bake-agent.sh
 
       - name: Build and push API image
+        id: build-api
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -510,6 +522,7 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-api:latest
 
       - name: Build and push worker image
+        id: build-worker
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -525,6 +538,7 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-worker:latest
 
       - name: Build and push web image
+        id: build-web
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -563,3 +577,40 @@ jobs:
         env:
           RELAY_IMAGE_DIGEST: ${{ steps.build-relay.outputs.digest }}
         run: echo "relay image digest = $RELAY_IMAGE_DIGEST"
+
+      - name: Write complete release BOM
+        id: release-bom
+        env:
+          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          BOM_PACKAGES: ${{ needs.publish.outputs.bomPackages }}
+          API_IMAGE_DIGEST: ${{ steps.build-api.outputs.digest }}
+          WORKER_IMAGE_DIGEST: ${{ steps.build-worker.outputs.digest }}
+          WEB_IMAGE_DIGEST: ${{ steps.build-web.outputs.digest }}
+          RELAY_IMAGE_DIGEST: ${{ steps.build-relay.outputs.digest }}
+        run: |
+          set -euo pipefail
+          images="$(jq -cn \
+            --arg api "$API_IMAGE_DIGEST" \
+            --arg worker "$WORKER_IMAGE_DIGEST" \
+            --arg web "$WEB_IMAGE_DIGEST" \
+            --arg relay "$RELAY_IMAGE_DIGEST" \
+            '[
+              {name:"ghcr.io/cloudgeni-ai/opengeni-api",digest:$api},
+              {name:"ghcr.io/cloudgeni-ai/opengeni-worker",digest:$worker},
+              {name:"ghcr.io/cloudgeni-ai/opengeni-web",digest:$web},
+              {name:"ghcr.io/cloudgeni-ai/opengeni-relay",digest:$relay}
+            ]')"
+          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
+          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
+          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
+          OPENGENI_RELEASE_BOM_IMAGES="$images" \
+          bun scripts/release-bom.ts
+
+      - name: Upload complete release BOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-bom-${{ needs.publish.outputs.sourceSha }}
+          path: evidence/release-bom.json
+          if-no-files-found: error
+          retention-days: 90

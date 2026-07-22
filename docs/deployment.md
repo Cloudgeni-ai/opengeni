@@ -188,8 +188,14 @@ entry to bind the accepted source through `gitHead` and a SHA-512 integrity
 value before release images can build. That reconciliation also makes an
 interrupted post-publication run safely resumable. The final
 `verified-release-receipt-<sha>` binds the source, acceptance evidence, bundle
-digest, and exact registry package identities. Ordinary pushes to `main` can
-open/update the Version PR but cannot publish.
+digest, changed-package registry identities, and the complete publishable package
+inventory. After the API, worker, web, and relay images are pushed, the workflow
+emits `release-bom-<sha>` containing one deterministic `release-bom.json`: exact
+source SHA, release version, every publishable package version plus npm `gitHead`
+and SHA-512 integrity, and every release image's immutable SHA-256 digest. Hosts
+should consume this BOM as one unit and reject missing, extra, mutable-tag-only, or
+version-mismatched components. Ordinary pushes to `main` can open/update the
+Version PR but cannot publish.
 
 The sandbox image remains separate:
 
