@@ -9,7 +9,9 @@ import {
 import postgres from "postgres";
 import {
   buildConnectionTokenResolver,
+  buildHostConnectionTokenResolver,
   ConnectionRefreshHttpError,
+  HostMcpCredentialScopeError,
   normalizeBearerScheme,
   createConnection,
   createDb,
@@ -492,6 +494,149 @@ describe("connections table and helpers", () => {
       now,
     });
     expect(afterCleanup).toBe(true);
+  });
+});
+
+describe("buildHostConnectionTokenResolver", () => {
+  const context = {
+    accountId: "acct_1",
+    workspaceId: "ws_1",
+    sessionId: "session_1",
+    turnId: "turn_1",
+    attemptId: "attempt_1",
+    executionGeneration: 4,
+    initiator: { kind: "subject" as const, subjectId: "host:user:42", label: "Ada" },
+    initiatorContext: { source: "host", via: [{ kind: "agent" }] },
+    surface: "model" as const,
+  };
+
+  test("forwards frozen turn authority and returns a scope-checked header snapshot", async () => {
+    let received: unknown;
+    const headers = { Authorization: "Bearer host-token" };
+    const resolver = buildHostConnectionTokenResolver(async (request) => {
+      received = request;
+      return {
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers,
+        connectionId: "host-connection-7",
+        expiresAt: "2026-07-21T23:00:00.000Z",
+      };
+    }, context);
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      subjectId: "worker:first-party-mcp",
+      serverId: "github",
+      toolName: "create_pull_request",
+      connectionRef: {
+        providerDomain: "github.com",
+        kind: "app_install",
+        connectionId: "host-connection-7",
+        scopes: ["repo"],
+      },
+      forceRefresh: true,
+    });
+
+    expect(received).toEqual({
+      ...context,
+      callerSubjectId: "worker:first-party-mcp",
+      serverId: "github",
+      toolName: "create_pull_request",
+      connectionRef: {
+        providerDomain: "github.com",
+        kind: "app_install",
+        connectionId: "host-connection-7",
+        scopes: ["repo"],
+      },
+      forceRefresh: true,
+    });
+    expect(result).toEqual({
+      status: "ok",
+      headers: { Authorization: "Bearer host-token" },
+      connectionId: "host-connection-7",
+      expiresAt: new Date("2026-07-21T23:00:00.000Z"),
+    });
+    headers.Authorization = "Bearer mutated-after-return";
+    expect(result).toMatchObject({ headers: { Authorization: "Bearer host-token" } });
+  });
+
+  test("rejects a mismatched host scope before returning credential material", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async () => ({
+        status: "ok",
+        accountId: "acct_1",
+        workspaceId: "other-workspace",
+        sessionId: "session_1",
+        headers: { Authorization: "Bearer wrong-tenant" },
+        connectionId: "host-connection-7",
+      }),
+      context,
+    );
+
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        connectionRef: { providerDomain: "github.com" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
+  });
+
+  test("passes through reconnect metadata without credential headers", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "auth_needed",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        reason: "expired",
+        providerDomain: "gitlab.com",
+        connectionId: "gitlab-connection",
+        scopes: ["api"],
+        authorizationUrl: "https://host.example/reconnect/gitlab-connection",
+      }),
+      { ...context, surface: "toolspace" },
+    );
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "gitlab",
+      connectionRef: { providerDomain: "gitlab.com" },
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "expired",
+      providerDomain: "gitlab.com",
+      connectionId: "gitlab-connection",
+      scopes: ["api"],
+      authorizationUrl: "https://host.example/reconnect/gitlab-connection",
+    });
+    expect(JSON.stringify(result)).not.toContain("Bearer");
+  });
+
+  test("rejects insecure non-loopback reconnect URLs", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "auth_needed",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        reason: "expired",
+        providerDomain: "gitlab.com",
+        authorizationUrl: "http://host.example/reconnect",
+      }),
+      context,
+    );
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "gitlab",
+        connectionRef: { providerDomain: "gitlab.com" },
+      }),
+    ).rejects.toThrow("invalid authorizationUrl");
   });
 });
 

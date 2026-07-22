@@ -31,6 +31,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
+  SessionIdConflictError,
   getSessionByCreateIdempotencyKey,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -184,6 +185,7 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
     ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
     cacheToolsList: server.cacheToolsList ?? false,
     ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -195,6 +197,7 @@ function mcpServerConfigFromMetadata(
     ...(server.name ? { name: server.name } : {}),
     url: server.url,
     cacheToolsList: false,
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -228,7 +231,9 @@ function validateSessionMcpServersForCreate(
     return { runtimeServers: [], dbServers: [], metadata: [] };
   }
   requirePermission(grant, "mcp_servers:attach");
-  const encryptionKey = requireVariableSetEncryption(settings);
+  const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
+    ? requireVariableSetEncryption(settings)
+    : null;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const runtimeServers: Settings["mcpServers"] = [];
@@ -246,7 +251,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey, value),
+        encryptVariableSetValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -258,6 +263,7 @@ function validateSessionMcpServersForCreate(
       timeoutMs: server.timeoutMs ?? null,
       cacheToolsList: server.cacheToolsList ?? false,
       requireApproval: server.requireApproval ?? null,
+      connectionRef: server.connectionRef ?? null,
       headersEncrypted,
     });
     metadata.push({
@@ -266,6 +272,7 @@ function validateSessionMcpServersForCreate(
       url: server.url,
       headerNames: Object.keys(headersEncrypted).sort(),
       credentialVersion: 1,
+      connectionRef: server.connectionRef ?? null,
     });
   }
   return { runtimeServers, dbServers, metadata };
@@ -309,6 +316,7 @@ function validateSessionMcpCredentialUpdates(input: {
 }
 
 export async function createAndStartSession(input: {
+  requestedSessionId?: string;
   db: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
@@ -386,6 +394,9 @@ export async function createAndStartSession(input: {
       input.createIdempotencyKey,
     );
     if (existing) {
+      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+        throw new SessionIdConflictError(input.requestedSessionId);
+      }
       return await finishStartSession(
         existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
         existing,
@@ -398,6 +409,7 @@ export async function createAndStartSession(input: {
     // advances the coalesced wake revision so an in-flight stale delivery can
     // never acknowledge work committed by the other caller.
     const { session: keyed, created } = await createSessionWithIdempotencyKey(input.db, {
+      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
@@ -429,6 +441,7 @@ export async function createAndStartSession(input: {
     return await finishStartSession(input, keyed);
   }
   const session = await createSession(input.db, {
+    ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: input.initialMessage,
@@ -1140,6 +1153,7 @@ export async function createSessionForRequest(
   let session: Session;
   try {
     session = await createAndStartSession({
+      ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
       db,
       bus,
       workflowClient,
@@ -1192,6 +1206,11 @@ export async function createSessionForRequest(
   } catch (error) {
     if (error instanceof AgentCommandAuthorityError) {
       throw new HTTPException(403, { message: error.message });
+    }
+    if (error instanceof SessionIdConflictError) {
+      throw new HTTPException(409, {
+        message: "requested session id is already in use",
+      });
     }
     throw error;
   }

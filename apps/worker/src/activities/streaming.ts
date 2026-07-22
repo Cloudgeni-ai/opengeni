@@ -53,6 +53,7 @@ export function createRuntimeBatcher(
     "agent.toolCall.output",
     "agent.message.completed",
     "tool.auth_needed",
+    "credential.auth_needed",
     "session.requiresAction",
     "turn.completed",
     "turn.failed",

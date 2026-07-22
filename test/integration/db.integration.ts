@@ -330,6 +330,7 @@ describe("DB integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        connectionRef: null,
       },
     ]);
     expect(await listSessionMcpServerMetadata(dbClient.db, grant.workspaceId, session.id)).toEqual(
@@ -366,6 +367,7 @@ describe("DB integration", () => {
         headerNames: ["Authorization"],
         headers: { Authorization: "Bearer create-secret" },
         credentialVersion: 1,
+        connectionRef: null,
       },
     ]);
 
@@ -390,6 +392,7 @@ describe("DB integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization", "X-Session"],
         credentialVersion: 2,
+        connectionRef: null,
       },
     ]);
 

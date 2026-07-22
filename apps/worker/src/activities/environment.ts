@@ -5,6 +5,8 @@ import {
   type Settings,
 } from "@opengeni/config";
 import {
+  gitCredentialBindingIdForRepository,
+  gitCredentialProviderForRepository,
   signDelegatedAccessToken,
   type ConnectionCredentialsPort,
   type GitCredentialProvider,
@@ -12,6 +14,9 @@ import {
   type GitCredentials,
   type ResourceRef,
   type SandboxSecrets,
+  type SessionTurn,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   loadVariableSetForRun as loadWorkspaceEnvironmentForRunFromDb,
@@ -39,7 +44,17 @@ export type ConnectionScope = {
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
 export type GitTokenExpiries = Partial<Record<GitCredentialProvider, string>>;
+export type GitCredentialBindingSeed = {
+  credentialBindingId: string;
+  provider: GitCredentialProvider;
+  token: string;
+  expiresAt?: string;
+  providerBindingCount?: number;
+};
 export type MintedRunGitCredentials = {
+  bindings: GitCredentialBindingSeed[];
+  // Compatibility views exist only when a provider has exactly one binding.
+  // A multi-binding provider intentionally has no provider-level alias.
   gitTokens: GitTokenSeeds;
   expiresAt: GitTokenExpiries;
 };
@@ -49,8 +64,66 @@ export type GitHubTokenMintAuthorization = (selection: {
   repositoryIds: number[];
 }) => Promise<void>;
 
+export const TOOLSPACE_TOKEN_TTL_SECONDS = 60 * 60;
+
+export type MintedSandboxToolspaceToken = {
+  token: string;
+  expiresAt: Date;
+};
+
+export async function mintSandboxToolspaceToken(
+  settings: Settings,
+  scope: ConnectionScope,
+  sessionId: string,
+  runId: string,
+  nowMs = Date.now(),
+): Promise<MintedSandboxToolspaceToken | undefined> {
+  if (!settings.toolspaceEnabled || !settings.delegationSecret) {
+    return undefined;
+  }
+  const expiresAtSeconds = Math.floor(nowMs / 1000) + TOOLSPACE_TOKEN_TTL_SECONDS;
+  const token = await signDelegatedAccessToken(settings.delegationSecret, {
+    accountId: scope.accountId,
+    workspaceId: scope.workspaceId,
+    subjectId: `sandbox:${runId}`,
+    subjectLabel: "sandbox toolspace",
+    permissions: ["toolspace:call"],
+    sessionId,
+    exp: expiresAtSeconds,
+  });
+  return { token, expiresAt: new Date(expiresAtSeconds * 1000) };
+}
+
+export type GitCredentialAuthority = {
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+};
+
+export function gitCredentialAuthorityForTurn(input: {
+  sessionId: string;
+  rootSessionId: string;
+  attemptId: string;
+  turn: Pick<SessionTurn, "id" | "executionGeneration" | "initiator" | "initiatorContext">;
+}): GitCredentialAuthority {
+  return {
+    sessionId: input.sessionId,
+    rootSessionId: input.rootSessionId,
+    turnId: input.turn.id,
+    attemptId: input.attemptId,
+    executionGeneration: input.turn.executionGeneration,
+    initiator: input.turn.initiator,
+    initiatorContext: input.turn.initiatorContext,
+  };
+}
+
 type RunGitCredentialOptions = {
   scope?: ConnectionScope;
+  authority?: GitCredentialAuthority;
   gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
   authorizeGitHubTokenMint?: GitHubTokenMintAuthorization;
 };
@@ -132,7 +205,9 @@ export async function sandboxEnvironmentForRun(
   gitToken?: string;
   gitTokens?: GitTokenSeeds;
   gitTokenExpiresAt?: GitTokenExpiries;
+  gitCredentialBindings?: GitCredentialBindingSeed[];
   toolspaceToken?: string;
+  toolspaceTokenExpiresAt?: Date;
 }> {
   // Precedence: deployment allowlist < git identity < workspace environment
   // < backend-aware HOME (the STABLE base, shared with the API-direct attach
@@ -161,26 +236,15 @@ export async function sandboxEnvironmentForRun(
   // budgeted, approval-tools excluded). Delivery mirrors the docker path: the
   // caller threads it OFF-MANIFEST as the seed the runtime writes to
   // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
-  let toolspaceToken: string | undefined;
-  if (
-    settings.toolspaceEnabled &&
-    settings.delegationSecret &&
-    options.scope &&
-    options.sessionId &&
-    options.runId
-  ) {
-    toolspaceToken = await signDelegatedAccessToken(settings.delegationSecret, {
-      accountId: options.scope.accountId,
-      workspaceId: options.scope.workspaceId,
-      subjectId: `sandbox:${options.runId}`,
-      subjectLabel: "sandbox toolspace",
-      permissions: ["toolspace:call"],
-      sessionId: options.sessionId,
-      exp: Math.floor(Date.now() / 1000) + 60 * 60,
-    });
+  const toolspaceScope = options.scope;
+  const toolspaceToken =
+    toolspaceScope && options.sessionId && options.runId
+      ? await mintSandboxToolspaceToken(settings, toolspaceScope, options.sessionId, options.runId)
+      : undefined;
+  if (toolspaceToken && toolspaceScope) {
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
       settings,
-      options.scope.workspaceId,
+      toolspaceScope.workspaceId,
     );
   }
   const selections = gitCredentialSelections(resources);
@@ -194,14 +258,30 @@ export async function sandboxEnvironmentForRun(
   // (validateNoEnvironmentDelta). The API-direct viewer attach path already drops the
   // token under this exact contract — proof a box runs fine without it.
   if (selections.length === 0 || options.skipGitHubToken) {
-    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
+    return {
+      environment,
+      ...(toolspaceToken
+        ? {
+            toolspaceToken: toolspaceToken.token,
+            toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+          }
+        : {}),
+    };
   }
   if (options.deferGitHubToken) {
     applyGitAuthPointerEnvironment(
       environment,
       await resolveRunGitIdentityWithSelections(settings, selections, options),
     );
-    return { environment, ...(toolspaceToken ? { toolspaceToken } : {}) };
+    return {
+      environment,
+      ...(toolspaceToken
+        ? {
+            toolspaceToken: toolspaceToken.token,
+            toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+          }
+        : {}),
+    };
   }
   // Run-scoped sandbox preparation for repository resources. GitHub retains the
   // legacy request shape and standalone self-mint path. Non-GitHub providers are
@@ -224,7 +304,13 @@ export async function sandboxEnvironmentForRun(
     ...(minted.gitTokens.github ? { gitToken: minted.gitTokens.github } : {}),
     ...(Object.keys(minted.gitTokens).length > 0 ? { gitTokens: minted.gitTokens } : {}),
     ...(Object.keys(minted.expiresAt).length > 0 ? { gitTokenExpiresAt: minted.expiresAt } : {}),
-    ...(toolspaceToken ? { toolspaceToken } : {}),
+    ...(minted.bindings.length > 0 ? { gitCredentialBindings: minted.bindings } : {}),
+    ...(toolspaceToken
+      ? {
+          toolspaceToken: toolspaceToken.token,
+          toolspaceTokenExpiresAt: toolspaceToken.expiresAt,
+        }
+      : {}),
   };
 }
 
@@ -238,9 +324,34 @@ export async function mintRunGitCredentials(
     return undefined;
   }
   const minted = await mintRunGitTokensWithIdentity(settings, selections, options);
-  return Object.keys(minted.gitTokens).length > 0
-    ? { gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
+  return minted.bindings.length > 0
+    ? { bindings: minted.bindings, gitTokens: minted.gitTokens, expiresAt: minted.expiresAt }
     : undefined;
+}
+
+export async function mintRunGitCredentialBinding(
+  settings: Settings,
+  resources: ResourceRef[],
+  provider: GitCredentialProvider,
+  credentialBindingId: string,
+  options: RunGitCredentialOptions = {},
+): Promise<GitCredentialBindingSeed | undefined> {
+  const selections = gitCredentialSelections(resources);
+  const selection = selections.find(
+    (candidate) =>
+      candidate.provider === provider && candidate.credentialBindingId === credentialBindingId,
+  );
+  if (!selection) {
+    return undefined;
+  }
+  const minted = await mintRunGitTokensWithIdentity(settings, [selection], options);
+  const binding = minted.bindings[0];
+  if (binding) {
+    binding.providerBindingCount = selections.filter(
+      (candidate) => candidate.provider === selection.provider,
+    ).length;
+  }
+  return binding;
 }
 
 export async function mintRunGitTokens(
@@ -248,7 +359,8 @@ export async function mintRunGitTokens(
   resources: ResourceRef[],
   options: RunGitCredentialOptions = {},
 ): Promise<GitTokenSeeds | undefined> {
-  return (await mintRunGitCredentials(settings, resources, options))?.gitTokens;
+  const tokens = (await mintRunGitCredentials(settings, resources, options))?.gitTokens;
+  return tokens && Object.keys(tokens).length > 0 ? tokens : undefined;
 }
 
 export async function mintRunGitToken(
@@ -262,10 +374,7 @@ export async function mintRunGitToken(
 export async function resolveRunGitIdentity(
   settings: Settings,
   resources: ResourceRef[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  } = {},
+  options: RunGitCredentialOptions = {},
 ): Promise<{ name: string; email: string } | null> {
   const selections = gitCredentialSelections(resources);
   if (selections.length === 0) {
@@ -279,15 +388,16 @@ async function mintRunGitTokensWithIdentity(
   selections: GitCredentialSelection[],
   options: RunGitCredentialOptions,
 ): Promise<{
+  bindings: GitCredentialBindingSeed[];
   gitTokens: GitTokenSeeds;
   expiresAt: GitTokenExpiries;
   identity: { name: string; email: string } | null;
 }> {
-  const gitTokens: GitTokenSeeds = {};
-  const expiresAt: GitTokenExpiries = {};
+  const bindings: GitCredentialBindingSeed[] = [];
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     let token: string | null = null;
+    let tokenExpiresAt: string | undefined;
     if (
       selection.provider === "github" &&
       selection.installationId > 0 &&
@@ -304,23 +414,26 @@ async function mintRunGitTokensWithIdentity(
       });
     }
     if (options?.gitCredentials && options.scope) {
-      const request = gitCredentialsRequestForSelection(options.scope, selection, "token");
+      const request = gitCredentialsRequestForSelection(
+        options.scope,
+        requireGitCredentialAuthority(options),
+        selection,
+        "token",
+      );
       const minted: GitCredentials = await options.gitCredentials(request);
       // workspace-scope cross-check: assert the provider scoped the token to THIS run's workspace
       // before accepting the token for clone seeding.
       assertWorkspaceEcho("gitCredentials", options.scope, minted.workspaceId);
+      assertGitCredentialBindingEcho(selection, request, minted);
       if (!minted.token) {
         throw new Error(
           "connection-credential provider (gitCredentials) did not return a token for a token request",
         );
       }
       token = minted.token;
-      if (minted.expiresAt) {
-        expiresAt[selection.provider] = validatedGitCredentialExpiry(
-          selection.provider,
-          minted.expiresAt,
-        );
-      }
+      tokenExpiresAt = minted.expiresAt
+        ? validatedGitCredentialExpiry(selection.provider, minted.expiresAt)
+        : undefined;
       if (minted.identity) {
         identity = minted.identity;
       } else if (selection.provider === "github") {
@@ -332,16 +445,33 @@ async function mintRunGitTokensWithIdentity(
         repositoryIds: selection.repositoryIds,
       });
       token = minted.token;
-      if (minted.expiresAt) {
-        expiresAt.github = validatedGitCredentialExpiry("github", minted.expiresAt);
-      }
+      tokenExpiresAt = minted.expiresAt
+        ? validatedGitCredentialExpiry("github", minted.expiresAt)
+        : undefined;
       identity = githubAppBotIdentity(settings);
     }
     if (token) {
-      gitTokens[selection.provider] = token;
+      bindings.push({
+        credentialBindingId: selection.credentialBindingId,
+        provider: selection.provider,
+        token,
+        ...(tokenExpiresAt ? { expiresAt: tokenExpiresAt } : {}),
+      });
     }
   }
-  return { gitTokens, expiresAt, identity };
+  const gitTokens: GitTokenSeeds = {};
+  const expiresAt: GitTokenExpiries = {};
+  const counts = new Map<GitCredentialProvider, number>();
+  for (const binding of bindings) {
+    counts.set(binding.provider, (counts.get(binding.provider) ?? 0) + 1);
+  }
+  for (const binding of bindings) {
+    binding.providerBindingCount = counts.get(binding.provider) ?? 1;
+    if (counts.get(binding.provider) !== 1) continue;
+    gitTokens[binding.provider] = binding.token;
+    if (binding.expiresAt) expiresAt[binding.provider] = binding.expiresAt;
+  }
+  return { bindings, gitTokens, expiresAt, identity };
 }
 
 function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: string): string {
@@ -355,18 +485,20 @@ function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: st
 async function resolveRunGitIdentityWithSelections(
   settings: Settings,
   selections: GitCredentialSelection[],
-  options: {
-    scope?: ConnectionScope;
-    gitCredentials?: ConnectionCredentialsPort["gitCredentials"];
-  },
+  options: RunGitCredentialOptions,
 ): Promise<{ name: string; email: string } | null> {
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     if (options.gitCredentials && options.scope) {
-      const resolved: GitCredentials = await options.gitCredentials(
-        gitCredentialsRequestForSelection(options.scope, selection, "identity"),
+      const request = gitCredentialsRequestForSelection(
+        options.scope,
+        requireGitCredentialAuthority(options),
+        selection,
+        "identity",
       );
+      const resolved: GitCredentials = await options.gitCredentials(request);
       assertWorkspaceEcho("gitCredentials", options.scope, resolved.workspaceId);
+      assertGitCredentialBindingEcho(selection, request, resolved);
       if (resolved.identity) {
         identity = resolved.identity;
       } else if (selection.provider === "github") {
@@ -381,6 +513,10 @@ async function resolveRunGitIdentityWithSelections(
 
 type GitCredentialSelection = {
   provider: GitCredentialProvider;
+  credentialBindingId: string;
+  explicitCredentialBinding: boolean;
+  requireBindingEcho: boolean;
+  providerHost?: string;
   installationId: number;
   repositoryIds: number[];
   repositoryRefs: GitCredentialRepositoryRef[];
@@ -388,27 +524,68 @@ type GitCredentialSelection = {
 
 function gitCredentialsRequestForSelection(
   scope: ConnectionScope,
+  authority: GitCredentialAuthority,
   selection: GitCredentialSelection,
   purpose?: "token" | "identity",
 ): Parameters<NonNullable<ConnectionCredentialsPort["gitCredentials"]>>[0] {
   const legacy = {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
+    ...authority,
     ...(purpose ? { purpose } : {}),
     installationId: selection.installationId,
     repositoryIds: selection.repositoryIds,
   };
+  const bindingEcho = selection.requireBindingEcho
+    ? {
+        credentialBindingId: selection.credentialBindingId,
+        provider: selection.provider,
+        ...(selection.providerHost ? { providerHost: selection.providerHost } : {}),
+      }
+    : {};
   if (selection.provider === "github") {
     return {
       ...legacy,
+      ...bindingEcho,
       repositoryRefs: selection.repositoryRefs,
     };
   }
   return {
     ...legacy,
+    ...bindingEcho,
     provider: selection.provider,
     repositoryRefs: selection.repositoryRefs,
   };
+}
+
+function requireGitCredentialAuthority(options: RunGitCredentialOptions): GitCredentialAuthority {
+  if (!options.authority) {
+    throw new Error("host git credential resolution requires immutable session turn authority");
+  }
+  return options.authority;
+}
+
+function assertGitCredentialBindingEcho(
+  selection: GitCredentialSelection,
+  request: Parameters<NonNullable<ConnectionCredentialsPort["gitCredentials"]>>[0],
+  minted: GitCredentials,
+): void {
+  if (!selection.requireBindingEcho) return;
+  if (minted.credentialBindingId !== request.credentialBindingId) {
+    throw new Error(
+      `connection-credential provider (${selection.provider}) returned the wrong credential binding`,
+    );
+  }
+  if (minted.provider !== selection.provider) {
+    throw new Error(
+      `connection-credential provider (${selection.provider}) returned the wrong provider echo`,
+    );
+  }
+  if (request.providerHost && minted.providerHost !== request.providerHost) {
+    throw new Error(
+      `connection-credential provider (${selection.provider}) returned the wrong provider host echo`,
+    );
+  }
 }
 
 /**
@@ -419,20 +596,34 @@ function gitCredentialsRequestForSelection(
  * including legacy string-typed installationId/repositoryId refs, which the
  * mint path coerces via positiveInteger.
  */
+export function gitHubTokenMintSelections(
+  resources: ResourceRef[],
+): Array<{ installationId: number; repositoryIds: number[] }> {
+  return gitCredentialSelections(resources)
+    .filter(
+      (candidate) =>
+        candidate.provider === "github" &&
+        candidate.installationId > 0 &&
+        candidate.repositoryIds.length > 0,
+    )
+    .map(({ installationId, repositoryIds }) => ({ installationId, repositoryIds }));
+}
+
+/** @deprecated Use gitHubTokenMintSelections for multi-installation sessions. */
 export function gitHubTokenMintSelection(
   resources: ResourceRef[],
 ): { installationId: number; repositoryIds: number[] } | null {
-  const selection = gitCredentialSelections(resources).find(
-    (candidate) => candidate.provider === "github",
-  );
-  if (!selection || selection.installationId <= 0 || selection.repositoryIds.length === 0) {
-    return null;
+  const selections = gitHubTokenMintSelections(resources);
+  if (selections.length > 1) {
+    throw new Error("GitHub resources span multiple credential bindings");
   }
-  return { installationId: selection.installationId, repositoryIds: selection.repositoryIds };
+  return selections[0] ?? null;
 }
 
 function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelection[] {
-  const byProvider = new Map<GitCredentialProvider, GitCredentialSelection>();
+  const byBinding = new Map<string, GitCredentialSelection>();
+  const remoteBindings = new Map<string, string>();
+  const bindingProviders = new Map<string, GitCredentialProvider>();
   for (const resource of resources) {
     if (resource.kind !== "repository") {
       continue;
@@ -441,45 +632,95 @@ function gitCredentialSelections(resources: ResourceRef[]): GitCredentialSelecti
     if (!provider) {
       continue;
     }
-    const entry = byProvider.get(provider) ?? {
+    const installationId =
+      provider === "github"
+        ? (positiveInteger(resource.githubInstallationId ?? resource.installationId) ?? 0)
+        : 0;
+    const credentialBindingId = gitCredentialBindingIdForRepository(resource, provider)!;
+    const bindingKey = `${provider}\u0000${credentialBindingId}`;
+    const boundProvider = bindingProviders.get(credentialBindingId);
+    if (boundProvider && boundProvider !== provider) {
+      throw new Error(
+        `credential binding ${credentialBindingId} is assigned to multiple Git providers`,
+      );
+    }
+    bindingProviders.set(credentialBindingId, provider);
+    const normalizedRemote = normalizedGitRemote(resource.uri);
+    const claimedBinding = remoteBindings.get(normalizedRemote);
+    if (claimedBinding && claimedBinding !== bindingKey) {
+      throw new Error(
+        `repository remote ${resource.uri} is claimed by multiple credential bindings`,
+      );
+    }
+    remoteBindings.set(normalizedRemote, bindingKey);
+    const entry = byBinding.get(bindingKey) ?? {
       provider,
+      credentialBindingId,
+      explicitCredentialBinding: Boolean(resource.credentialBindingId),
+      requireBindingEcho: false,
       installationId: 0,
       repositoryIds: [],
       repositoryRefs: [],
     };
+    entry.explicitCredentialBinding ||= Boolean(resource.credentialBindingId);
     const ref = gitCredentialRepositoryRef(resource, provider);
     entry.repositoryRefs.push(ref);
     if (provider === "github") {
-      const installationId = positiveInteger(
-        resource.githubInstallationId ?? resource.installationId,
-      );
       const repositoryId = positiveInteger(resource.githubRepositoryId ?? resource.repositoryId);
       if (installationId && repositoryId) {
         if (entry.installationId > 0 && entry.installationId !== installationId) {
-          throw new Error("GitHub App repository resources must belong to one installation");
+          throw new Error(
+            `GitHub credential binding ${credentialBindingId} spans multiple installations`,
+          );
         }
         entry.installationId = installationId;
         entry.repositoryIds.push(repositoryId);
       }
     }
-    byProvider.set(provider, entry);
+    byBinding.set(bindingKey, entry);
   }
-  return [...byProvider.values()];
+  const selections = [...byBinding.values()];
+  const providerCounts = new Map<GitCredentialProvider, number>();
+  for (const selection of selections) {
+    providerCounts.set(selection.provider, (providerCounts.get(selection.provider) ?? 0) + 1);
+    const hosts = new Set(
+      selection.repositoryRefs.map((ref) => normalizedGitHost(ref.uri)).filter(Boolean),
+    );
+    const [providerHost] = hosts;
+    if (hosts.size === 1 && providerHost) selection.providerHost = providerHost;
+  }
+  for (const selection of selections) {
+    selection.requireBindingEcho =
+      selection.explicitCredentialBinding || (providerCounts.get(selection.provider) ?? 0) > 1;
+  }
+  return selections;
+}
+
+function normalizedGitHost(uri: string): string {
+  try {
+    return new URL(uri).host.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+function normalizedGitRemote(uri: string): string {
+  try {
+    const url = new URL(uri);
+    return `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, "").replace(/\.git$/, "")}`;
+  } catch {
+    return uri
+      .trim()
+      .replace(/\/+$/, "")
+      .replace(/\.git$/, "")
+      .toLowerCase();
+  }
 }
 
 function repositoryCredentialProvider(
   resource: Extract<ResourceRef, { kind: "repository" }>,
 ): GitCredentialProvider | null {
-  if (resource.provider) {
-    return resource.provider;
-  }
-  if (
-    positiveInteger(resource.githubInstallationId) &&
-    positiveInteger(resource.githubRepositoryId)
-  ) {
-    return "github";
-  }
-  return null;
+  return gitCredentialProviderForRepository(resource);
 }
 
 function gitCredentialRepositoryRef(
@@ -488,6 +729,8 @@ function gitCredentialRepositoryRef(
 ): GitCredentialRepositoryRef {
   return {
     provider,
+    ...(resource.credentialBindingId ? { credentialBindingId: resource.credentialBindingId } : {}),
+    ...(resource.access ? { access: resource.access } : {}),
     uri: resource.uri,
     ref: resource.ref,
     ...(resource.repositoryId !== undefined

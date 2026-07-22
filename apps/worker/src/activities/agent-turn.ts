@@ -11,6 +11,7 @@ import {
   setActiveSandbox,
   requireFile,
   getSessionEvent,
+  getSessionRootId,
   getSessionGoal,
   getLatestRunState,
   getHumanInputResumeForEvent,
@@ -60,7 +61,6 @@ import {
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
-  buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
   markSessionAttemptQuiesced,
@@ -91,7 +91,13 @@ import {
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
-  refreshGitProviderTokenFiles,
+  materializeRunCredentials,
+  clearRunCredentials,
+  clearRunCredentialsForAttempt,
+  withRunCredentialsSession,
+  refreshGitCredentialBindingTokenFiles,
+  refreshToolspaceTokenFile,
+  toolspaceTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -106,9 +112,13 @@ import {
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
   type GitCredentialTokenWriterSession,
+  type NormalizedRunCredentialMaterial,
+  type RunCredentialCommandSession,
+  type ToolspaceTokenWriterSession,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
+import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
   builtinProviderId,
   calculateModelUsageCostMicros,
@@ -163,9 +173,12 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
-  gitHubTokenMintSelection,
+  gitCredentialAuthorityForTurn,
+  gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
+  mintSandboxToolspaceToken,
   mintRunGitCredentials,
+  mintRunGitCredentialBinding,
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
@@ -174,6 +187,21 @@ import {
   startGitCredentialRenewalLoop,
   type GitCredentialRenewalController,
 } from "./git-credential-renewal";
+import {
+  RUN_CREDENTIAL_EXPIRY_LEAD_MS,
+  startRunCredentialRenewalLoop,
+  type RunCredentialRenewalController,
+} from "./run-credential-renewal";
+import {
+  TOOLSPACE_TOKEN_EXPIRY_LEAD_MS,
+  startToolspaceTokenRenewalLoop,
+  type ToolspaceTokenRenewalController,
+} from "./toolspace-token-renewal";
+import {
+  bindRunCredentialResolver,
+  runCredentialAuthNeededPayloads,
+  runCredentialModelNote,
+} from "./run-credentials";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
@@ -183,7 +211,7 @@ import {
   settingsWithRigImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
-import { createSecretRedactor, identityRedactor } from "./redaction";
+import { createSecretRedactor, identityRedactor, type SecretForRedaction } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -245,7 +273,6 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
-  type GitCredentialProvider,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
@@ -1464,7 +1491,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const noteCancellationRequested = (): void => {
       cancellationRequestedAt ??= performance.now();
     };
-    cancellationSignal?.addEventListener("abort", noteCancellationRequested, { once: true });
+    cancellationSignal?.addEventListener("abort", noteCancellationRequested, {
+      once: true,
+    });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
@@ -1663,8 +1692,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
     // the initial seed reached a real cloud box and is drained before capture.
-    let gitCredentialRenewal: GitCredentialRenewalController | null = null;
+    let gitCredentialRenewals: GitCredentialRenewalController[] = [];
     let gitCredentialRenewalClosed = false;
+    // Generic host-owned run material has its own attempt-scoped renewal and
+    // write handle. It is always drained and wiped before workspace capture.
+    let runCredentialRenewal: RunCredentialRenewalController | null = null;
+    let runCredentialRenewalClosed = false;
+    let runCredentialSession: RunCredentialCommandSession | null = null;
+    // The delegated Toolspace bearer has a one-hour TTL. Renewal is attempt-
+    // owned and attaches only after the initial token file reached a real
+    // sandbox session; finalization drains an in-flight replacement.
+    let toolspaceTokenRenewal: ToolspaceTokenRenewalController | null = null;
+    let toolspaceTokenRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -1714,7 +1753,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    const toolCancellationFenceRef: { current: TurnToolCancellationFence | null } = {
+    const toolCancellationFenceRef: {
+      current: TurnToolCancellationFence | null;
+    } = {
       current: null,
     };
     let publish: TurnEventPublisher | null = null;
@@ -2032,6 +2073,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Reassigned after the variable set loads; the publish closure is
     // created (and used for turn.started) before the variableSet is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
+    const secretRedactions = new Map<string, string>();
+    const publishedRunCredentialNotices = new Set<string>();
+    const registerSecretRedactions = (secrets: SecretForRedaction[]): void => {
+      for (const secret of secrets) {
+        if (!secretRedactions.has(secret.value)) secretRedactions.set(secret.value, secret.name);
+      }
+      redact = createSecretRedactor(
+        [...secretRedactions].map(([value, name]) => ({ name, value })),
+      );
+    };
     let variableSetId = "";
     // Rig telemetry (M3): set once the session loads; empty string for a rig-less
     // turn (mirrors variableSetId). Read by the activity span's finally block.
@@ -3178,7 +3229,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       compacted: false,
                     },
                   },
-                  { type: "session.status.changed", payload: { status: "idle" } },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
                 ],
                 turnStatus: "failed",
                 sessionStatus: "idle",
@@ -3293,7 +3347,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       // Redact EVERY exported secret value (rig defaults + session set) from turn
       // output, not just the session set's.
-      redact = createSecretRedactor(
+      registerSecretRedactions(
         Object.entries(sandboxWorkspaceEnvironmentValues).map(([name, value]) => ({ name, value })),
       );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
@@ -3366,6 +3420,50 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
           : runSettings.sandboxBackend;
+      const effectiveRunCredentialBackend = activeSandboxBackend ?? groupBoxBackend;
+      const runCredentialResolver =
+        effectiveRunCredentialBackend === "none"
+          ? null
+          : await waitForTurnOperation(
+              bindRunCredentialResolver({
+                db,
+                connectionCredentials: connectionCredentials ?? null,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                session,
+                turn,
+                attemptId: input.attemptId,
+                effectiveSandboxBackend: effectiveRunCredentialBackend,
+                variableSet: workspaceVariableSet
+                  ? {
+                      id: workspaceVariableSet.id,
+                      name: workspaceVariableSet.name,
+                    }
+                  : null,
+              }),
+              cancellationSignal,
+              undefined,
+            );
+      const initialRunCredentialMaterial = runCredentialResolver
+        ? await waitForTurnOperation(
+            runCredentialResolver.resolve({
+              purpose: "provision",
+              forceRefresh: false,
+            }),
+            cancellationSignal,
+            undefined,
+          )
+        : null;
+      if (initialRunCredentialMaterial) {
+        registerSecretRedactions(initialRunCredentialMaterial.redactions);
+        for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
+          publishedRunCredentialNotices.add(JSON.stringify(payload));
+          await publish!([{ type: "credential.auth_needed", payload }], true);
+        }
+      }
+      const runCredentialsNote = initialRunCredentialMaterial
+        ? runCredentialModelNote(initialRunCredentialMaterial)
+        : undefined;
       throwIfTurnOperationCancelled(cancellationSignal);
       await waitForTurnOperation(
         ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
@@ -3406,12 +3504,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           selection.repositoryIds,
         );
       };
+      const gitCredentialRootSessionId = connectionCredentials?.gitCredentials
+        ? await getSessionRootId(db, input.workspaceId, input.sessionId)
+        : null;
+      if (connectionCredentials?.gitCredentials && !gitCredentialRootSessionId) {
+        throw new Error(
+          `cannot resolve host git credentials for missing session ${input.sessionId}`,
+        );
+      }
+      const gitCredentialAuthority = gitCredentialRootSessionId
+        ? gitCredentialAuthorityForTurn({
+            sessionId: input.sessionId,
+            rootSessionId: gitCredentialRootSessionId,
+            attemptId: input.attemptId,
+            turn,
+          })
+        : undefined;
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
+        gitCredentialBindings: sandboxGitCredentialBindings,
         toolspaceToken: sandboxToolspaceToken,
+        toolspaceTokenExpiresAt: sandboxToolspaceTokenExpiresAt,
       } = await waitForTurnOperation(
         sandboxEnvironmentForRun(
           runSettings,
@@ -3424,6 +3540,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
+            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
             sessionId: input.sessionId,
@@ -3433,77 +3550,286 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
-
-      const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
-        ? {
-            gitTokens: sandboxGitTokens,
-            expiresAt: sandboxGitTokenExpiresAt ?? {},
-          }
+      const sandboxToolspaceTokenFile = sandboxToolspaceToken
+        ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
         : undefined;
+
+      const initialGitCredentials: MintedRunGitCredentials | undefined =
+        sandboxGitCredentialBindings
+          ? {
+              bindings: sandboxGitCredentialBindings,
+              gitTokens: sandboxGitTokens ?? {},
+              expiresAt: sandboxGitTokenExpiresAt ?? {},
+            }
+          : undefined;
       const attachGitCredentialRenewal = async (
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
       ): Promise<void> => {
-        if (!initial || Object.keys(initial.gitTokens).length === 0) return;
-        const previous = gitCredentialRenewal;
-        gitCredentialRenewal = null;
-        await previous?.stop();
+        if (!initial || initial.bindings.length === 0) return;
+        const previous = gitCredentialRenewals;
+        gitCredentialRenewals = [];
+        await Promise.all(previous.map(async (controller) => await controller.stop()));
         if (gitCredentialRenewalClosed) return;
 
-        const providers = Object.keys(initial.gitTokens) as GitCredentialProvider[];
-        const controller = startGitCredentialRenewalLoop({
-          expectedProviders: providers,
-          initialExpiresAt: initial.expiresAt,
-          mint: async () =>
-            await mintRunGitCredentials(runSettings, turnResources, {
-              scope: connectionScope,
-              gitCredentials: connectionCredentials?.gitCredentials,
-              authorizeGitHubTokenMint,
-            }),
-          write: async (tokens) => {
-            const runAs = sandboxRunAs(runSettings);
-            await refreshGitProviderTokenFiles(tokenSession, tokens, {
-              ...(runAs ? { runAs } : {}),
-              ...(toolCancellationFenceRef.current
+        const controllers = initial.bindings.map((initialBinding) => {
+          let pendingBinding: typeof initialBinding | undefined;
+          return startGitCredentialRenewalLoop({
+            expectedProviders: [initialBinding.provider],
+            initialExpiresAt: initialBinding.expiresAt
+              ? { [initialBinding.provider]: initialBinding.expiresAt }
+              : {},
+            mint: async () => {
+              const binding = await mintRunGitCredentialBinding(
+                runSettings,
+                turnResources,
+                initialBinding.provider,
+                initialBinding.credentialBindingId,
+                {
+                  scope: connectionScope,
+                  ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+                  gitCredentials: connectionCredentials?.gitCredentials,
+                  authorizeGitHubTokenMint,
+                },
+              );
+              pendingBinding = binding;
+              return binding
                 ? {
-                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      toolCancellationFenceRef.current,
-                    ),
+                    bindings: [binding],
+                    gitTokens: { [binding.provider]: binding.token },
+                    expiresAt: binding.expiresAt ? { [binding.provider]: binding.expiresAt } : {},
                   }
-                : {}),
+                : undefined;
+            },
+            write: async () => {
+              if (!pendingBinding) {
+                throw new Error("credential renewal produced no binding token");
+              }
+              const runAs = sandboxRunAs(runSettings);
+              await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding], {
+                ...(runAs ? { runAs } : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
+              });
+            },
+            onSuccess: ({ providers: renewedProviders }) => {
+              for (const provider of renewedProviders) {
+                observability.incrementCounter({
+                  name: "opengeni_git_credential_renewals_total",
+                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                  labels: { provider, outcome: "completed" },
+                });
+              }
+            },
+            onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
+              for (const provider of failedProviders) {
+                observability.incrementCounter({
+                  name: "opengeni_git_credential_renewals_total",
+                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                  labels: { provider, outcome: "error" },
+                });
+              }
+              observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+                sessionId: input.sessionId,
+                turnId,
+                providers: failedProviders.join(","),
+                errorClass,
+                retryDelayMs,
+              });
+            },
+          });
+        });
+        if (gitCredentialRenewalClosed) {
+          await Promise.all(controllers.map(async (controller) => await controller.stop()));
+          return;
+        }
+        gitCredentialRenewals = controllers;
+      };
+
+      const attachToolspaceTokenRenewal = async (
+        tokenSession: ToolspaceTokenWriterSession,
+        initialExpiresAt = sandboxToolspaceTokenExpiresAt,
+      ): Promise<void> => {
+        if (!sandboxToolspaceToken || !initialExpiresAt) return;
+        const previous = toolspaceTokenRenewal;
+        toolspaceTokenRenewal = null;
+        await previous?.stop();
+        if (toolspaceTokenRenewalClosed) return;
+
+        const mint = async () =>
+          await mintSandboxToolspaceToken(runSettings, connectionScope, input.sessionId, turn.id);
+        const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
+          const runAs = sandboxRunAs(runSettings);
+          await refreshToolspaceTokenFile(tokenSession, material.token, {
+            ...(runAs ? { runAs } : {}),
+            ...(sandboxToolspaceTokenFile
+              ? {
+                  tokenFile: sandboxToolspaceTokenFile,
+                  legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
+                }
+              : {}),
+            ...(toolCancellationFenceRef.current
+              ? {
+                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                    toolCancellationFenceRef.current,
+                  ),
+                }
+              : {}),
+          });
+        };
+        let renewalExpiresAt = initialExpiresAt;
+        if (renewalExpiresAt.getTime() <= Date.now() + TOOLSPACE_TOKEN_EXPIRY_LEAD_MS) {
+          const fresh = await mint();
+          if (!fresh) {
+            throw new Error("Toolspace token mint became unavailable during sandbox setup");
+          }
+          await write(fresh);
+          renewalExpiresAt = fresh.expiresAt;
+        }
+        const controller = startToolspaceTokenRenewalLoop({
+          initialExpiresAt: renewalExpiresAt,
+          mint,
+          write,
+          onSuccess: () => {
+            observability.incrementCounter({
+              name: "opengeni_toolspace_token_renewals_total",
+              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              labels: { outcome: "completed" },
             });
           },
-          onSuccess: ({ providers: renewedProviders }) => {
-            for (const provider of renewedProviders) {
-              observability.incrementCounter({
-                name: "opengeni_git_credential_renewals_total",
-                help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                labels: { provider, outcome: "completed" },
-              });
-            }
-          },
-          onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
-            for (const provider of failedProviders) {
-              observability.incrementCounter({
-                name: "opengeni_git_credential_renewals_total",
-                help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                labels: { provider, outcome: "error" },
-              });
-            }
-            observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+          onFailure: ({ retryDelayMs, errorClass }) => {
+            observability.incrementCounter({
+              name: "opengeni_toolspace_token_renewals_total",
+              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              labels: { outcome: "error" },
+            });
+            observability.warn("Sandbox Toolspace token renewal failed; retry scheduled", {
               sessionId: input.sessionId,
               turnId,
-              providers: failedProviders.join(","),
               errorClass,
               retryDelayMs,
             });
           },
         });
-        if (gitCredentialRenewalClosed) {
+        if (toolspaceTokenRenewalClosed) {
           await controller.stop();
           return;
         }
-        gitCredentialRenewal = controller;
+        toolspaceTokenRenewal = controller;
+      };
+
+      const attachRunCredentialRenewal = async (
+        credentialSession: RunCredentialCommandSession,
+      ): Promise<void> => {
+        if (!runCredentialResolver) return;
+        const previous = runCredentialRenewal;
+        runCredentialRenewal = null;
+        await previous?.stop();
+        if (runCredentialRenewalClosed) return;
+        runCredentialSession = credentialSession;
+
+        if (!initialRunCredentialMaterial) {
+          await clearRunCredentials(
+            credentialSession,
+            input.sessionId,
+            toolCancellationFenceRef.current
+              ? toolCancellationFenceRef.current.runSandboxCommand.bind(
+                  toolCancellationFenceRef.current,
+                )
+              : undefined,
+          );
+          return;
+        }
+
+        const write = async (
+          material: NormalizedRunCredentialMaterial | null,
+          pruneOtherAttempts = false,
+        ): Promise<void> => {
+          if (!material) {
+            await clearRunCredentialsForAttempt(credentialSession, {
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration,
+            });
+            return;
+          }
+          registerSecretRedactions(material.redactions);
+          await materializeRunCredentials(credentialSession, material, {
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            executionGeneration,
+            ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
+            ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
+            ...(material.authNeeded.length > 0 &&
+            Object.keys(material.environment).length === 0 &&
+            material.files.length === 0
+              ? { prunePreviousGenerations: true }
+              : {}),
+            ...(toolCancellationFenceRef.current
+              ? {
+                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                    toolCancellationFenceRef.current,
+                  ),
+                }
+              : {}),
+          });
+          for (const payload of runCredentialAuthNeededPayloads(material)) {
+            const key = JSON.stringify(payload);
+            if (publishedRunCredentialNotices.has(key)) continue;
+            publishedRunCredentialNotices.add(key);
+            await publish!([{ type: "credential.auth_needed", payload }], true);
+          }
+        };
+
+        const initialExpiryMs = initialRunCredentialMaterial.expiresAt?.getTime() ?? null;
+        const seed =
+          initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
+            ? await runCredentialResolver.resolve({
+                purpose: "provision",
+                forceRefresh: true,
+              })
+            : initialRunCredentialMaterial;
+        await write(seed, true);
+        if (runCredentialRenewalClosed) return;
+        const controller = startRunCredentialRenewalLoop({
+          initialExpiresAt: seed?.expiresAt ?? null,
+          resolve: async () =>
+            await runCredentialResolver.resolve({
+              purpose: "renewal",
+              forceRefresh: true,
+            }),
+          write: async (material) => await write(material),
+          onSuccess: ({ authNeeded }) => {
+            observability.incrementCounter({
+              name: "opengeni_run_credential_renewals_total",
+              help: "Host-managed run credential renewal attempts by outcome.",
+              labels: { outcome: authNeeded ? "auth_needed" : "completed" },
+            });
+          },
+          onFailure: ({ retryDelayMs, errorClass }) => {
+            observability.incrementCounter({
+              name: "opengeni_run_credential_renewals_total",
+              help: "Host-managed run credential renewal attempts by outcome.",
+              labels: { outcome: "error" },
+            });
+            observability.warn("Host run credential renewal failed; retry scheduled", {
+              sessionId: input.sessionId,
+              turnId,
+              errorClass,
+              retryDelayMs,
+            });
+          },
+        });
+        if (runCredentialRenewalClosed) {
+          await controller.stop();
+          return;
+        }
+        runCredentialRenewal = controller;
       };
 
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
@@ -3727,7 +4053,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
-      const resolveCredential = buildConnectionTokenResolver(db, runSettings);
+      const resolveCredential = connectionTokenResolverForTurn({
+        db,
+        settings: runSettings,
+        connectionCredentials: connectionCredentials ?? null,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        turn,
+      });
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
@@ -3814,6 +4149,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && sandboxGitTokens
           ? { gitTokenSeeds: sandboxGitTokens }
           : {}),
+        ...(activeSandboxBackend !== "selfhosted" && sandboxGitCredentialBindings
+          ? { gitCredentialBindings: sandboxGitCredentialBindings }
+          : {}),
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
@@ -3824,7 +4162,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // than toolspace:call for its own session (own-session-bound, turn TTL,
         // budgeted, approval-tools excluded). The runtime seeds it to the box's
         // token file over the same exec channel, off-manifest, on every backend.
-        ...(sandboxToolspaceToken ? { toolspaceTokenSeed: sandboxToolspaceToken } : {}),
+        ...(sandboxToolspaceToken
+          ? {
+              toolspaceTokenSeed: sandboxToolspaceToken,
+              toolspaceTokenSessionId: input.sessionId,
+            }
+          : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
@@ -3946,10 +4289,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? undefined
                 : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
+                    ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
                     gitCredentials: connectionCredentials?.gitCredentials,
                     authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
+            const lazyToolspaceToken = sandboxToolspaceToken
+              ? await mintSandboxToolspaceToken(
+                  runSettings,
+                  connectionScope,
+                  input.sessionId,
+                  turn.id,
+                )
+              : undefined;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -3975,10 +4327,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               lazyHolderId,
             );
             await publishSandboxLifecycleEvents(provisioned);
+            await attachRunCredentialRenewal(
+              provisioned.established.session as RunCredentialCommandSession,
+            );
+            const provisionedSetupSession = initialRunCredentialMaterial
+              ? withRunCredentialsSession(
+                  provisioned.established.session as object,
+                  input.sessionId,
+                )
+              : provisioned.established.session;
             await runOwnedSandboxSetup(
               agent,
               provisioned.established.session as never,
-              provisioned.established.session as never,
+              provisionedSetupSession as never,
               {
                 settings: runSettings,
                 environment: sandboxEnvironment,
@@ -3986,6 +4347,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
                 ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(lazyGitCredentials?.bindings
+                  ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
+                  : {}),
+                ...(lazyToolspaceToken
+                  ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
+                  : {}),
                 ...(toolCancellationFenceRef.current
                   ? {
                       commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
@@ -3994,6 +4361,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     }
                   : {}),
               },
+            );
+            await attachToolspaceTokenRenewal(
+              provisioned.established.session as ToolspaceTokenWriterSession,
+              lazyToolspaceToken?.expiresAt,
             );
             await attachGitCredentialRenewal(
               provisioned.established.session as GitCredentialTokenWriterSession,
@@ -4261,6 +4632,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId: activeTurnId,
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
+            ...(runCredentialsNote ? { runCredentialsNote } : {}),
           },
         );
         runInput = prepared.input;
@@ -4410,6 +4782,36 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   ) => {
                     await attachGitCredentialRenewal(tokenSession, initialGitCredentials);
                   },
+                }
+              : {}),
+            ...(sandboxToolspaceToken && sandboxToolspaceTokenExpiresAt && !lazyOwnedSandbox
+              ? {
+                  onToolspaceTokenSessionReady: async (
+                    tokenSession: ToolspaceTokenWriterSession,
+                  ) => {
+                    const renewalSession =
+                      activeSandboxBackend === "selfhosted"
+                        ? tokenSession
+                        : ((setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession);
+                    await attachToolspaceTokenRenewal(renewalSession);
+                  },
+                }
+              : {}),
+            ...(runCredentialResolver
+              ? {
+                  runCredentialSessionId: input.sessionId,
+                  ...(!lazyOwnedSandbox
+                    ? {
+                        onRunCredentialSessionReady: async (
+                          credentialSession: RunCredentialCommandSession,
+                        ) => {
+                          const pinnedCredentialSession = setupBoxSession
+                            ? (setupBoxSession as RunCredentialCommandSession)
+                            : credentialSession;
+                          await attachRunCredentialRenewal(pinnedCredentialSession);
+                        },
+                      }
+                    : {}),
                 }
               : {}),
             contextCompactionSignal: () =>
@@ -5913,6 +6315,54 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // controller was installed.
           physicalToolQuiescenceConfirmed = true;
         }
+        // Toolspace renewal is attempt-owned. Stop it and drain a physical file
+        // replacement before any successor can be admitted.
+        toolspaceTokenRenewalClosed = true;
+        const toolspaceRenewalToStop =
+          toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
+        toolspaceTokenRenewal = null;
+        if (toolspaceRenewalToStop) {
+          await waitForTurnFinalizerStep(toolspaceRenewalToStop.stop(), finalizerSignal);
+        }
+        // Run credentials are attempt-owned sandbox state. Stop renewal, drain
+        // its last physical write, and remove only this attempt's generations
+        // BEFORE publishing quiescence (which can admit a successor). Cleanup
+        // deliberately bypasses the now-cancelled tool fence. Pointer mutation
+        // is serialized with activation, and the attempt-qualified check cannot
+        // erase a successor generation. Cleanup failure is recorded but must not
+        // skip the remaining finalizer chain or its quiescence proof.
+        runCredentialRenewalClosed = true;
+        const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
+        runCredentialRenewal = null;
+        if (runRenewalToStop) {
+          await waitForTurnFinalizerStep(runRenewalToStop.stop(), finalizerSignal);
+        }
+        const credentialSessionToClear = runCredentialSession;
+        runCredentialSession = null;
+        if (credentialSessionToClear) {
+          const cleanup = clearRunCredentialsForAttempt(credentialSessionToClear, {
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            executionGeneration,
+          }).catch((error: unknown) => {
+            try {
+              observability.incrementCounter({
+                name: "opengeni_run_credential_cleanup_total",
+                help: "Attempt-owned run credential cleanup outcomes.",
+                labels: { outcome: "error" },
+              });
+              observability.warn("Attempt-owned run credential cleanup failed", {
+                sessionId: input.sessionId,
+                turnId,
+                attemptId: input.attemptId,
+                errorClass: error instanceof Error ? error.name : "UnknownError",
+              });
+            } catch {
+              // Cleanup observability must not own finalizer liveness.
+            }
+          });
+          await waitForTurnFinalizerStep(cleanup, finalizerSignal);
+        }
         if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
           // This receipt is part of the hard cancellation boundary, not
           // housekeeping. Persist it immediately after the sandbox/tool fence
@@ -5983,10 +6433,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           }
         }
         gitCredentialRenewalClosed = true;
-        const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
-        gitCredentialRenewal = null;
-        if (renewalToStop) {
-          await waitForTurnFinalizerStep(renewalToStop.stop(), finalizerSignal);
+        const renewalsToStop = gitCredentialRenewals;
+        gitCredentialRenewals = [];
+        for (const renewal of renewalsToStop) {
+          await waitForTurnFinalizerStep(renewal.stop(), finalizerSignal);
         }
         // Drain the buffered Connected Machine op events (infra failures + healed
         // recoveries) to durable session events — awaited, best-effort, never blocking
@@ -6239,7 +6689,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         observability.observeHistogram({
           name: "opengeni_turn_finalization_duration_seconds",
           help: "Agent turn finalization duration, including workspace housekeeping and lease release.",
-          labels: { cancellation_requested: String(cancellationRequestedAt !== null) },
+          labels: {
+            cancellation_requested: String(cancellationRequestedAt !== null),
+          },
           value: finalizationDurationSeconds,
         });
         if (cancellationRequestedAt !== null) {
@@ -6303,16 +6755,14 @@ async function assertGitHubResourcesRemainAuthorized(
 ): Promise<void> {
   // Must check exactly what sandboxEnvironmentForRun would mint a token for,
   // so the selection is derived from the same extraction as the mint path.
-  const selection = gitHubTokenMintSelection(resources);
-  if (!selection) {
-    return;
+  for (const selection of gitHubTokenMintSelections(resources)) {
+    await assertGitHubTokenMintSelectionAuthorized(
+      db,
+      workspaceId,
+      selection.installationId,
+      selection.repositoryIds,
+    );
   }
-  await assertGitHubTokenMintSelectionAuthorized(
-    db,
-    workspaceId,
-    selection.installationId,
-    selection.repositoryIds,
-  );
 }
 
 async function assertGitHubTokenMintSelectionAuthorized(

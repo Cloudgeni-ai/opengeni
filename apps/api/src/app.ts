@@ -65,6 +65,7 @@ export {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateGitHubRepositorySelectionShape,
+  validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";

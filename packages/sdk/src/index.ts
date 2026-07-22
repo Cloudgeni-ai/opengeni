@@ -170,6 +170,8 @@ export type {
   KnowledgeSourceKind,
   KnowledgeSourceRef,
   GitCredentialProvider,
+  GitCredentialBindingId,
+  GitRepositoryAccess,
   ListApiKeysResponse,
   ListConnectionsResponse,
   ListPacksResponse,
