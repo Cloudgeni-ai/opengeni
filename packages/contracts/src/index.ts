@@ -5062,6 +5062,141 @@ export const SessionEvent = z.object({
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
 
+// --- Durable host export ------------------------------------------------------
+
+/** Wire revision for the durable host event/usage export stream. */
+export const OPENGENI_HOST_EXPORT_SCHEMA_REVISION = "2026-07-host-export-v1" as const;
+
+/**
+ * Decimal string rather than a JavaScript number: export cursors are PostgreSQL
+ * bigint values and must remain exact beyond Number.MAX_SAFE_INTEGER.
+ */
+export const HostExportCursor = z.string().regex(/^(0|[1-9][0-9]*)$/);
+export type HostExportCursor = z.infer<typeof HostExportCursor>;
+
+export const HostExportConsumerId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+export type HostExportConsumerId = z.infer<typeof HostExportConsumerId>;
+
+export const HostExportInitiator = TurnInitiator.extend({
+  subjectId: z.string().min(1).max(1024),
+  label: z.string().min(1).max(256).optional(),
+});
+export type HostExportInitiator = z.infer<typeof HostExportInitiator>;
+
+export const HostExportInitiatorContext = TurnInitiatorContext.refine(
+  (value) => {
+    try {
+      return new TextEncoder().encode(JSON.stringify(value)).byteLength <= 4096;
+    } catch {
+      return false;
+    }
+  },
+  { message: "Host export initiator context exceeds 4096 UTF-8 bytes" },
+);
+export type HostExportInitiatorContext = z.infer<typeof HostExportInitiatorContext>;
+
+const HostExportAttribution = {
+  initiator: HostExportInitiator.nullable(),
+  initiatorContext: HostExportInitiatorContext,
+  origin: SessionTurnSource.nullable(),
+} as const;
+
+/**
+ * Host streams are deliberately forward-tolerant across rolling upgrades.
+ * OpenGeni's application contract enumerates the event types known to this
+ * build, while the durable export may be read by an older host consumer after
+ * a newer writer has committed a bounded type. The database remains the
+ * authority for the byte bounds on these persisted strings.
+ */
+export const HostSessionEvent = SessionEvent.extend({
+  type: z.string().min(1).max(256),
+  clientEventId: z.string().max(1024).nullable().optional(),
+  turnAssociation: z.string().min(1).max(64).nullable().optional(),
+  duplicateReason: z.string().max(4096).nullable().optional(),
+});
+export type HostSessionEvent = z.infer<typeof HostSessionEvent>;
+
+/** Export-bounded usage fact; custom bounded metric names remain supported. */
+export const HostUsageEvent = UsageEvent.extend({
+  subjectId: z.string().max(1024).nullable(),
+  eventType: z.string().min(1).max(256),
+  unit: z.string().min(1).max(128),
+  sourceResourceType: z.string().max(256).nullable(),
+  sourceResourceId: z.string().max(2048).nullable(),
+  idempotencyKey: z.string().min(1).max(2048),
+  billingProviderEventId: z.string().max(2048).nullable(),
+});
+export type HostUsageEvent = z.infer<typeof HostUsageEvent>;
+
+/**
+ * One immutable, bounded session-event snapshot from the transactional host
+ * outbox. Cross-session cursor order is stable but deliberately non-causal;
+ * within a session, `event.sequence` remains authoritative and monotonic.
+ */
+export const HostEventExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  idempotencyKey: z.string().min(1).max(2048),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  ...HostExportAttribution,
+  event: HostSessionEvent,
+});
+export type HostEventExport = z.infer<typeof HostEventExport>;
+
+/** One exact, idempotency-keyed usage fact from the same ordered outbox. */
+export const HostUsageExport = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  cursor: HostExportCursor,
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid().nullable(),
+  turnId: z.string().uuid().nullable(),
+  turnAttemptId: z.string().uuid().nullable(),
+  ...HostExportAttribution,
+  usage: HostUsageEvent,
+});
+export type HostUsageExport = z.infer<typeof HostUsageExport>;
+
+export const HostEventExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostEventExport).min(1).max(256),
+});
+export type HostEventExportBatch = z.infer<typeof HostEventExportBatch>;
+
+export const HostUsageExportBatch = z.object({
+  schemaRevision: z.literal(OPENGENI_HOST_EXPORT_SCHEMA_REVISION),
+  consumerId: HostExportConsumerId,
+  leaseToken: z.string().uuid(),
+  checkpoint: HostExportCursor,
+  throughCursor: HostExportCursor,
+  events: z.array(HostUsageExport).min(1).max(256),
+});
+export type HostUsageExportBatch = z.infer<typeof HostUsageExportBatch>;
+
+/**
+ * Optional embedded-host sinks. Delivery is at least once: the same batch may
+ * be repeated after a process dies between sink success and checkpoint commit,
+ * so sinks must deduplicate by event/usage idempotency key.
+ */
+export type HostEventSink = {
+  consumerId: HostExportConsumerId;
+  deliverEvents: (batch: HostEventExportBatch) => Promise<void>;
+};
+
+export type HostUsageSink = {
+  consumerId: HostExportConsumerId;
+  deliverUsage: (batch: HostUsageExportBatch) => Promise<void>;
+};
+
 export const SESSION_EVENT_TYPE_MAX_BYTES = 256;
 export const SESSION_EVENT_CLIENT_EVENT_ID_MAX_BYTES = SESSION_OPERATION_KEY_MAX_CHARS * 4;
 export const SESSION_EVENT_TURN_ASSOCIATION_MAX_BYTES = 64;

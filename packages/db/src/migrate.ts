@@ -5,6 +5,8 @@ import postgres from "postgres";
 
 const DEFAULT_DATABASE_URL = "postgres://opengeni:opengeni@127.0.0.1:5432/opengeni";
 const concurrentIndexDirective = /^-- opengeni:concurrent-index lock-timeout=(\d+(?:ms|s|min))$/;
+const concurrentIndexStatement =
+  /^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\s+IF\s+NOT\s+EXISTS\s+(?:"((?:[^"]|"")+)"|([A-Za-z_][A-Za-z0-9_]*))\s+ON\b/is;
 
 /** A bare Postgres identifier (schema/role name) safe to interpolate into DDL. */
 function assertIdentifier(name: string, value: string): string {
@@ -20,12 +22,13 @@ function assertIdentifier(name: string, value: string): string {
  * into one narrowly validated transactionless statement with:
  *
  *   -- opengeni:concurrent-index lock-timeout=5s
- *   CREATE [UNIQUE] INDEX CONCURRENTLY ...;
+ *   CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS ...;
  *
  * The directive is deliberately not a generic "no transaction" escape hatch:
- * only one concurrent-index statement is accepted, and lock acquisition is
- * always bounded. This keeps additive large-table indexes online without making
- * arbitrary partially-applied migration scripts possible.
+ * only one idempotent concurrent-index statement is accepted, lock acquisition
+ * is always bounded, and an invalid artifact left by a failed concurrent build
+ * is removed before retry. This keeps additive large-table indexes online
+ * without making arbitrary partially-applied migration scripts possible.
  */
 async function executeMigrationFile(
   sql: postgres.Sql,
@@ -54,17 +57,27 @@ async function executeMigrationFile(
   const withoutTrailingSemicolon = statement.endsWith(";")
     ? statement.slice(0, -1).trimEnd()
     : statement;
-  if (
-    !/^CREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/is.test(withoutTrailingSemicolon) ||
-    withoutTrailingSemicolon.includes(";")
-  ) {
+  const parsedStatement = concurrentIndexStatement.exec(withoutTrailingSemicolon);
+  if (!parsedStatement || withoutTrailingSemicolon.includes(";")) {
     throw new Error(
-      `${file}: opengeni:concurrent-index requires exactly one CREATE [UNIQUE] INDEX CONCURRENTLY statement`,
+      `${file}: opengeni:concurrent-index requires exactly one CREATE [UNIQUE] INDEX CONCURRENTLY IF NOT EXISTS statement with an unqualified index name`,
     );
   }
+  const indexName = (parsedStatement[1] ?? parsedStatement[2]!).replaceAll('""', '"');
 
   await sql`select set_config('lock_timeout', ${lockTimeout}, false)`;
   try {
+    const [existing] = await sql<Array<{ valid: boolean; ready: boolean }>>`
+      select i.indisvalid as valid, i.indisready as ready
+      from pg_catalog.pg_class c
+      join pg_catalog.pg_namespace n on n.oid = c.relnamespace
+      join pg_catalog.pg_index i on i.indexrelid = c.oid
+      where n.nspname = current_schema() and c.relname = ${indexName}
+    `;
+    if (existing && (!existing.valid || !existing.ready)) {
+      const quotedIndexName = `"${indexName.replaceAll('"', '""')}"`;
+      await sql.unsafe(`DROP INDEX CONCURRENTLY ${quotedIndexName}`);
+    }
     await sql.unsafe(statement);
   } finally {
     await sql`select set_config('lock_timeout', '0', false)`;

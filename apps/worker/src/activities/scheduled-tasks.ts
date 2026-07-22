@@ -77,6 +77,9 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         unit: "run",
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+        origin: "scheduled_task",
         idempotencyKey: `usage:scheduled_task.fired:${run.id}`,
       });
       if (run.status === "dispatched" && run.sessionId && run.triggerEventId) {
@@ -88,6 +91,10 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           unit: "run",
           sourceResourceType: "scheduled_task_run",
           sourceResourceId: run.id,
+          sessionId: run.sessionId,
+          initiator: { kind: "service", subjectId: "scheduler" },
+          initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+          origin: "scheduled_task",
           idempotencyKey:
             input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
         });
@@ -400,6 +407,10 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         unit: "run",
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
+        sessionId: result.sessionId,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+        origin: "scheduled_task",
         idempotencyKey:
           input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
       });

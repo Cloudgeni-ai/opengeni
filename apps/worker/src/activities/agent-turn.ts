@@ -3112,6 +3112,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               workspaceId: input.workspaceId,
               sessionId: input.sessionId,
               turnId: turn.id,
+              turnAttemptId: input.attemptId,
               model: resolvedModel?.configured.id ?? turn.model,
               isCodexTurn,
               usage: usage.usage,
@@ -4884,6 +4885,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     workspaceId: input.workspaceId,
                     sessionId: input.sessionId,
                     turnId: activeTurnId,
+                    turnAttemptId: input.attemptId,
                     model: turn.model,
                     isCodexTurn,
                     usage: responseUsage.usage,
@@ -5110,6 +5112,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 turnId: activeTurnId,
+                turnAttemptId: input.attemptId,
                 model: turn.model,
                 isCodexTurn,
                 usage: aggregateUsage,
@@ -5261,6 +5264,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           unit: "run",
           sourceResourceType: "session_turn",
           sourceResourceId: activeTurnId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          turnAttemptId: input.attemptId,
           idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
         });
         activityStatus = "idle";
@@ -5555,6 +5561,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           unit: "run",
           sourceResourceType: "session_turn",
           sourceResourceId: turnId,
+          sessionId: input.sessionId,
+          turnId,
+          turnAttemptId: input.attemptId,
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
@@ -6182,6 +6191,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           unit: "run",
           sourceResourceType: "session_turn",
           sourceResourceId: turnId,
+          sessionId: input.sessionId,
+          turnId,
+          turnAttemptId: input.attemptId,
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
@@ -7269,6 +7281,7 @@ export async function recordModelUsageAndDebitCredits(
     workspaceId: string;
     sessionId: string;
     turnId: string;
+    turnAttemptId: string;
     model: string;
     isCodexTurn: boolean;
     usage?: ModelUsageInput | null;
@@ -7300,6 +7313,9 @@ export async function recordModelUsageAndDebitCredits(
       unit: "usd_micros",
       sourceResourceType: "model_response",
       sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
     });
     return;
@@ -7313,6 +7329,9 @@ export async function recordModelUsageAndDebitCredits(
       unit: "tokens",
       sourceResourceType: "model_response",
       sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
     });
   }
@@ -7332,6 +7351,9 @@ export async function recordModelUsageAndDebitCredits(
     unit: "usd_micros",
     sourceResourceType: "model_response",
     sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
     idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
   });
   if (costMicros > 0) {
