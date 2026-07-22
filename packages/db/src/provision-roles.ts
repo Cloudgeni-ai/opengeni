@@ -167,6 +167,18 @@ BEGIN
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = ${literal(schema)}) THEN
     EXECUTE format('GRANT USAGE ON SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
+    IF to_regclass(format('%I.nested_agent_depth_configuration', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE INSERT, UPDATE, DELETE ON %I.nested_agent_depth_configuration FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT SELECT ON %I.nested_agent_depth_configuration TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regprocedure(format('%I.lock_nested_agent_depth_configuration()', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE ALL ON FUNCTION %I.lock_nested_agent_depth_configuration() FROM PUBLIC', ${literal(schema)});
+      EXECUTE format('GRANT EXECUTE ON FUNCTION %I.lock_nested_agent_depth_configuration() TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
+    IF to_regclass(format('%I.session_spawn_denials', ${literal(schema)})) IS NOT NULL THEN
+      EXECUTE format('REVOKE UPDATE, DELETE ON %I.session_spawn_denials FROM %I', ${literal(schema)}, ${literal(role)});
+      EXECUTE format('GRANT SELECT, INSERT ON %I.session_spawn_denials TO %I', ${literal(schema)}, ${literal(role)});
+    END IF;
   END IF;
   IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'opengeni_private') THEN
     EXECUTE format('GRANT USAGE ON SCHEMA opengeni_private TO %I', ${literal(role)});

@@ -118,6 +118,8 @@ import {
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
   updateSessionTitle,
   workflowIdForSession,
@@ -132,8 +134,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
-    return c.json(session, 202);
+    try {
+      const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
+      return c.json(session, 202);
+    } catch (error) {
+      if (error instanceof SessionSpawnDeniedError) {
+        return c.json(
+          sessionSpawnDenialEnvelope(error),
+          error.denial.code === "nested_agent_depth_override_forbidden" ? 403 : 409,
+        );
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {

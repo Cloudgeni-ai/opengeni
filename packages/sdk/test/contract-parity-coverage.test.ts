@@ -302,7 +302,11 @@ describe("SDK / contracts parity (full coverage)", () => {
     const task: CreateScheduledTaskRequest = {
       name: "drift check",
       schedule: { type: "calendar", timeZone: "UTC", hour: 9, minute: 0 },
-      agentConfig: { prompt: "Check for infrastructure drift", goal: { text: "stay drift-free" } },
+      agentConfig: {
+        prompt: "Check for infrastructure drift",
+        goal: { text: "stay drift-free" },
+        maxNestedAgentDepth: 2,
+      },
     };
     expect(ContractCreateScheduledTaskRequest.safeParse(task).success).toBe(true);
 

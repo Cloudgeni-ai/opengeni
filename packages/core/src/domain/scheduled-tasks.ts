@@ -11,12 +11,13 @@ import {
   deleteScheduledTask,
   getRig,
   getScheduledTask,
+  requireWorkspace,
   updateScheduledTask,
   type Database,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { requirePermission } from "../access";
+import { hasPermission, requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
@@ -199,6 +200,7 @@ export async function validatedScheduledTaskUpdate(input: {
       settings: input.settings,
       db: input.db,
       objectStorage: input.objectStorage,
+      grant: input.grant,
       workspaceId: input.existing.workspaceId,
       payload: { agentConfig: input.payload.agentConfig },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
@@ -318,6 +320,7 @@ async function validateScheduledTaskAgentConfig(input: {
   settings: Settings;
   db: Database;
   objectStorage: ObjectStorageDependency;
+  grant: AccessGrant;
   payload: { agentConfig: ScheduledTaskAgentConfig };
   workspaceId: string;
   toolsProvided?: boolean;
@@ -361,6 +364,23 @@ async function validateScheduledTaskAgentConfig(input: {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(input.db, input.workspaceId, resources);
+  const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
+  if (requestedMaxDepth !== undefined) {
+    const workspace = await requireWorkspace(input.db, input.workspaceId);
+    const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
+    const inheritedMaxDepth =
+      typeof workspaceMaxDepth === "number"
+        ? workspaceMaxDepth
+        : (input.settings.maxNestedAgentDepth ?? 3);
+    if (
+      requestedMaxDepth > inheritedMaxDepth &&
+      !hasPermission(input.grant.permissions, "workspace:admin")
+    ) {
+      throw new HTTPException(403, {
+        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; workspace:admin is required to increase it`,
+      });
+    }
+  }
   return {
     ...input.payload.agentConfig,
     prompt,

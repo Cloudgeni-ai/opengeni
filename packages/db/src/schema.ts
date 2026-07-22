@@ -78,6 +78,35 @@ export const workspaces = pgTable(
   }),
 );
 
+// One non-secret, target-schema-local deployment fallback. migrate.ts seeds
+// and reconciles this row from OPENGENI_MAX_NESTED_AGENT_DEPTH; session creates
+// lock/read it through a narrow SECURITY DEFINER function so mixed old/new
+// binaries and the DB trigger resolve exactly the same policy. The application
+// role has SELECT only on the table and cannot mutate the persisted fallback.
+export const nestedAgentDepthConfiguration = pgTable(
+  "nested_agent_depth_configuration",
+  {
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    maxNestedAgentDepth: integer("max_nested_agent_depth").notNull(),
+    policySource: text("policy_source").$type<"deployment" | "default">().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonOnly: check(
+      "nested_agent_depth_configuration_singleton_check",
+      sql`${table.singleton}`,
+    ),
+    nonNegative: check(
+      "nested_agent_depth_configuration_max_check",
+      sql`${table.maxNestedAgentDepth} >= 0`,
+    ),
+    sourceValid: check(
+      "nested_agent_depth_configuration_source_check",
+      sql`${table.policySource} in ('deployment', 'default')`,
+    ),
+  }),
+);
+
 // One mandatory workspace-wide admission barrier. Every inference-admitting
 // transaction locks this row before it touches a session; Pause/Resume and
 // foreground Send/Steer advance its monotonic revision under FOR UPDATE.
@@ -633,6 +662,15 @@ export const sessions = pgTable(
     // workspace to a single session row — the dedup that closes the
     // double-submit/double-dispatch stuck-queued bug.
     createIdempotencyKey: text("create_idempotency_key"),
+    // Immutable creation-time hierarchy/policy snapshot. These columns are
+    // populated by the DB create boundary (migration 0065); they are not a
+    // live projection of the workspace setting.
+    rootSessionId: uuid("root_session_id").notNull(),
+    nestedAgentDepth: integer("nested_agent_depth").notNull(),
+    maxNestedAgentDepthOverride: integer("max_nested_agent_depth_override"),
+    effectiveMaxNestedAgentDepth: integer("effective_max_nested_agent_depth").notNull(),
+    nestedAgentDepthPolicySource: text("nested_agent_depth_policy_source").notNull(),
+    nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
     // Actual input tokens reported for the last model call of the most recent
@@ -721,6 +759,56 @@ export const sessions = pgTable(
     createIdempotency: uniqueIndex("sessions_workspace_create_idempotency_idx")
       .on(table.workspaceId, table.createIdempotencyKey)
       .where(sql`${table.createIdempotencyKey} is not null`),
+  }),
+);
+
+// A denied session-create is an auditable, workspace-idempotent outcome rather
+// than an exception with no durable explanation. The table is deliberately
+// separate from audit_events: its FORCE-RLS policy and unique key are part of
+// the creation boundary, and a denial must never be confused with a generic
+// human/operator audit event.
+export const sessionSpawnDenials = pgTable(
+  "session_spawn_denials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    parentSessionId: uuid("parent_session_id"),
+    // A rejected top-level create has no persisted root session yet.
+    rootSessionId: uuid("root_session_id"),
+    currentDepth: integer("current_depth").notNull(),
+    attemptedDepth: bigint("attempted_depth", { mode: "number" }).notNull(),
+    effectiveMaxNestedAgentDepth: integer("effective_max_nested_agent_depth").notNull(),
+    requestedMaxNestedAgentDepthOverride: integer("requested_max_nested_agent_depth_override"),
+    policySource: text("policy_source").notNull(),
+    policySessionId: uuid("policy_session_id"),
+    subjectId: text("subject_id"),
+    code: text("code").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceIdentity: uniqueIndex("session_spawn_denials_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceCreated: index("session_spawn_denials_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+    parent: index("session_spawn_denials_parent_idx").on(
+      table.workspaceId,
+      table.parentSessionId,
+      table.createdAt,
+    ),
+    idempotency: uniqueIndex("session_spawn_denials_workspace_idempotency_idx")
+      .on(table.workspaceId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
+    workspaceAccount: foreignKey({
+      name: "session_spawn_denials_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   }),
 );
 

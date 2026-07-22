@@ -30,6 +30,37 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Nested-agent depth
+
+Session-tree depth is enforced by the server for every creation path. Roots are
+depth `0`; the inclusive default limit `3` permits depths `0..3`. A create may
+set an absolute `maxNestedAgentDepth`; reducing the inherited limit is allowed,
+while increasing it requires `workspace:admin`.
+
+```ts
+import { SessionSpawnDeniedError } from "@opengeni/sdk";
+
+try {
+  await client.createSession(workspaceId, {
+    initialMessage: "Run the bounded subtask",
+    maxNestedAgentDepth: 2,
+    idempotencyKey: "stable-create-key",
+  });
+} catch (error) {
+  if (error instanceof SessionSpawnDeniedError) {
+    console.error(
+      error.denial.currentDepth,
+      error.denial.attemptedDepth,
+      error.denial.effectiveMaxNestedAgentDepth,
+    );
+  }
+}
+```
+
+Denied idempotent retries return the same durable denial evidence and create no
+session/run artifacts. Full precedence and operational semantics:
+[`docs/nested-agent-depth.md`](../../docs/nested-agent-depth.md).
+
 ## Streaming guarantees
 
 `client.streamEvents(...)` (and the underlying `streamSessionEvents`) delivers

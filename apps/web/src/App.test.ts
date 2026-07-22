@@ -1363,6 +1363,7 @@ describe("scheduled task form helpers", () => {
           model: "gpt-5.6-sol",
           reasoningEffort: "high",
           sandboxBackend: "docker",
+          maxNestedAgentDepth: 2,
         },
       },
     );
@@ -1381,6 +1382,7 @@ describe("scheduled task form helpers", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "high",
       sandboxBackend: "docker",
+      maxNestedAgentDepth: 2,
     });
   });
 
@@ -1572,6 +1574,12 @@ function session(patch: Partial<Session> = {}): Session {
     createdAt: "2026-05-07T00:00:00.000Z",
     updatedAt: "2026-05-07T00:00:00.000Z",
     ...patch,
+    rootSessionId: patch.rootSessionId ?? patch.id ?? "session-1",
+    nestedAgentDepth: patch.nestedAgentDepth ?? 0,
+    maxNestedAgentDepthOverride: patch.maxNestedAgentDepthOverride ?? null,
+    effectiveMaxNestedAgentDepth: patch.effectiveMaxNestedAgentDepth ?? 3,
+    nestedAgentDepthPolicySource: patch.nestedAgentDepthPolicySource ?? "default",
+    nestedAgentDepthPolicySessionId: patch.nestedAgentDepthPolicySessionId ?? null,
     queueVersion: patch.queueVersion ?? 0,
     queueHeadPosition: patch.queueHeadPosition ?? 0,
     queueTailPosition: patch.queueTailPosition ?? 0,

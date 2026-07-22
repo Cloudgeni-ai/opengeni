@@ -53,6 +53,20 @@ describe(".env.example", () => {
 });
 
 describe("sandbox preparation profiles", () => {
+  test("nested-agent depth is omitted-to-default-3 at the DB boundary and accepts deployment overrides", () => {
+    expect(withEnv({}, () => getSettings()).maxNestedAgentDepth).toBeUndefined();
+    expect(
+      withEnv({ OPENGENI_MAX_NESTED_AGENT_DEPTH: "0" }, () => getSettings()).maxNestedAgentDepth,
+    ).toBe(0);
+    expect(
+      withEnv({ OPENGENI_MAX_NESTED_AGENT_DEPTH: "7" }, () => getSettings()).maxNestedAgentDepth,
+    ).toBe(7);
+    expect(() => withEnv({ OPENGENI_MAX_NESTED_AGENT_DEPTH: "-1" }, () => getSettings())).toThrow();
+    expect(() =>
+      withEnv({ OPENGENI_MAX_NESTED_AGENT_DEPTH: "2147483648" }, () => getSettings()),
+    ).toThrow();
+  });
+
   test("defaults to no sandbox environment exposure or lifecycle hooks", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.sandboxPreparationProfiles).toBe("none");

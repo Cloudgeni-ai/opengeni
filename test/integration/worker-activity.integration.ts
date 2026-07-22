@@ -65,6 +65,7 @@ import {
   sandboxEnvironmentForRun,
 } from "../../apps/worker/src/activities/environment";
 import { settingsWithSessionMcpServersForRun } from "../../apps/worker/src/activities/capabilities";
+import { migrate } from "@opengeni/db/migrate";
 import {
   ScriptedModel,
   functionCall,
@@ -2165,83 +2166,109 @@ describe("worker activities integration", () => {
   });
 
   test("dispatches scheduled tasks into new sessions as typed internal updates", async () => {
-    const grant = await testGrant(dbClient.db);
-    const workflowWakes: unknown[] = [];
-    const task = await createOwnedScheduledTask(dbClient.db, grant, {
-      name: "scheduled-new-session",
-      status: "active",
-      schedule: { type: "interval", everySeconds: 3600 },
-      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
-      runMode: "new_session_per_run",
-      overlapPolicy: "allow_concurrent",
-      agentConfig: {
-        prompt: "inspect nightly",
-        resources: [],
-        tools: [{ kind: "mcp", id: "docs" }],
-        metadata: { source: "test" },
-      },
-      metadata: {},
-    });
-    const activities = createWorkerActivities({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        natsUrl: services.natsUrl,
-        mcpServers: [{ id: "docs", url: "http://127.0.0.1:1/mcp", name: "Docs" }],
-      }),
-      db: dbClient.db,
-      bus,
-      wakeSessionWorkflow: async (input) => {
-        workflowWakes.push(input);
-      },
-      runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
-    });
+    await migrate(services.databaseUrl, undefined, { maxNestedAgentDepth: 7 });
+    try {
+      const grant = await testGrant(dbClient.db);
+      const workflowWakes: unknown[] = [];
+      const task = await createOwnedScheduledTask(dbClient.db, grant, {
+        name: "scheduled-new-session",
+        status: "active",
+        schedule: { type: "interval", everySeconds: 3600 },
+        temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+        runMode: "new_session_per_run",
+        overlapPolicy: "allow_concurrent",
+        agentConfig: {
+          prompt: "inspect nightly",
+          resources: [],
+          tools: [{ kind: "mcp", id: "docs" }],
+          metadata: { source: "test" },
+          maxNestedAgentDepth: 9,
+        },
+        metadata: {},
+      });
+      const activities = createWorkerActivities({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          natsUrl: services.natsUrl,
+          maxNestedAgentDepth: 7,
+          mcpServers: [{ id: "docs", url: "http://127.0.0.1:1/mcp", name: "Docs" }],
+        }),
+        db: dbClient.db,
+        bus,
+        wakeSessionWorkflow: async (input) => {
+          workflowWakes.push(input);
+        },
+        runtime: createProductionAgentRuntime({ model: new ScriptedModel([{ outputText: "ok" }]) }),
+      });
 
-    const result = await activities.dispatchScheduledTaskRun({
-      workspaceId: grant.workspaceId,
-      taskId: task.id,
-      triggerType: "scheduled",
-    });
-
-    expect(result.action).toBe("start");
-    expect(result.workflowId).toBe(`session-${result.sessionId}`);
-    expect(workflowWakes).toEqual([
-      {
-        accountId: grant.accountId,
+      const result = await activities.dispatchScheduledTaskRun({
         workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      });
+
+      expect(result.action).toBe("start");
+      expect(result.workflowId).toBe(`session-${result.sessionId}`);
+      expect(workflowWakes).toEqual([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId: result.sessionId,
+          workflowId: result.workflowId,
+          wakeRevision: result.workflowWakeRevision,
+        },
+      ]);
+      const session = await getSession(dbClient.db, grant.workspaceId, result.sessionId);
+      expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
+      expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+      expect(session).toMatchObject({
+        parentSessionId: null,
+        rootSessionId: result.sessionId,
+        nestedAgentDepth: 0,
+        maxNestedAgentDepthOverride: 9,
+        effectiveMaxNestedAgentDepth: 9,
+        nestedAgentDepthPolicySource: "session",
+        nestedAgentDepthPolicySessionId: result.sessionId,
+      });
+      const events = await listSessionEvents(
+        dbClient.db,
+        grant.workspaceId,
+        result.sessionId,
+        0,
+        10,
+      );
+      expect(events.map((event) => event.type)).toEqual([
+        "session.created",
+        "session.status.changed",
+        "system.update.pending",
+      ]);
+      const pendingUpdates = await listOutstandingSessionSystemUpdates(
+        dbClient.db,
+        grant.workspaceId,
+        result.sessionId,
+      );
+      expect(pendingUpdates).toHaveLength(1);
+      expect(pendingUpdates[0]).toMatchObject({
+        kind: "scheduled_occurrence",
+        summary: "inspect nightly",
+        payload: {
+          type: "scheduled_occurrence",
+          text: "inspect nightly",
+          scheduledTaskId: task.id,
+        },
+      });
+      expect(await listSessionTurns(dbClient.db, grant.workspaceId, result.sessionId)).toHaveLength(
+        0,
+      );
+      const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+      expect(run).toMatchObject({
+        status: "dispatched",
         sessionId: result.sessionId,
-        workflowId: result.workflowId,
-        wakeRevision: result.workflowWakeRevision,
-      },
-    ]);
-    const session = await getSession(dbClient.db, grant.workspaceId, result.sessionId);
-    expect(session?.metadata).toMatchObject({ scheduledTaskId: task.id, source: "test" });
-    expect(session?.tools).toEqual([{ kind: "mcp", id: "docs" }]);
-    const events = await listSessionEvents(dbClient.db, grant.workspaceId, result.sessionId, 0, 10);
-    expect(events.map((event) => event.type)).toEqual([
-      "session.created",
-      "session.status.changed",
-      "system.update.pending",
-    ]);
-    const pendingUpdates = await listOutstandingSessionSystemUpdates(
-      dbClient.db,
-      grant.workspaceId,
-      result.sessionId,
-    );
-    expect(pendingUpdates).toHaveLength(1);
-    expect(pendingUpdates[0]).toMatchObject({
-      kind: "scheduled_occurrence",
-      summary: "inspect nightly",
-      payload: { type: "scheduled_occurrence", text: "inspect nightly", scheduledTaskId: task.id },
-    });
-    expect(await listSessionTurns(dbClient.db, grant.workspaceId, result.sessionId)).toHaveLength(
-      0,
-    );
-    const [run] = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
-    expect(run).toMatchObject({
-      status: "dispatched",
-      sessionId: result.sessionId,
-      triggerEventId: result.triggerEventId,
-    });
+        triggerEventId: result.triggerEventId,
+      });
+    } finally {
+      await migrate(services.databaseUrl, undefined, {});
+    }
   });
 
   test("scheduled dispatch and its retry remain inert while the workspace is paused", async () => {

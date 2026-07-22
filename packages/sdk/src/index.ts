@@ -254,6 +254,7 @@ export type {
   SessionEventReadDirection,
   SessionEventReadMode,
   SessionEventSemanticClass,
+  SessionSpawnDenial,
   SessionEventType,
   SessionGoal,
   SessionGoalCreatedBy,

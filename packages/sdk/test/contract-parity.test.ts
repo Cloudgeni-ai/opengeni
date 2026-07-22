@@ -349,10 +349,20 @@ describe("SDK / contracts parity", () => {
       pinned: true,
     };
     const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
-    const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
+    const settings: UpdateWorkspaceSettingsRequest = {
+      memoryEnabled: true,
+      maxNestedAgentDepth: 2,
+    };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    expect(
+      ContractUpdateWorkspaceSettingsRequest.safeParse({ maxNestedAgentDepth: null }).success,
+    ).toBe(true);
+    expect(
+      ContractUpdateWorkspaceSettingsRequest.safeParse({ maxNestedAgentDepth: 2_147_483_648 })
+        .success,
+    ).toBe(false);
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.
@@ -442,8 +452,15 @@ describe("SDK / contracts parity", () => {
       sandboxBackend: "none",
       reasoningEffort: "low",
       goal: { text: "Keep deploys green" },
+      maxNestedAgentDepth: 2,
     };
     expect(ContractCreateSessionRequest.safeParse(request).success).toBe(true);
+    expect(
+      ContractCreateSessionRequest.safeParse({
+        initialMessage: "too large",
+        maxNestedAgentDepth: 2_147_483_648,
+      }).success,
+    ).toBe(false);
   });
 
   test("every sandbox backend has a capability descriptor row keyed by itself", () => {

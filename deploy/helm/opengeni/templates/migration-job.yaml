@@ -34,8 +34,14 @@ spec:
                 name: {{ include "opengeni.migrationSecretName" . }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
-          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
+          # A pre-upgrade hook runs before Helm updates ordinary release
+          # resources, so envFrom can still expose the previous ConfigMap.
+          # Pin the new release's policy directly; explicit env wins over
+          # envFrom and keeps migration/API policy provenance aligned.
           env:
+            - name: OPENGENI_MAX_NESTED_AGENT_DEPTH
+              value: {{ index .Values.config "OPENGENI_MAX_NESTED_AGENT_DEPTH" | quote }}
+          {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
           {{- end }}
           resources:
