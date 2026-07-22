@@ -249,14 +249,30 @@ export async function sseSessionStream(
   sessionId: string,
   after: number,
   signal: AbortSignal,
-  options: SseDeliveryOptions = {},
+  options: SessionSseDeliveryOptions = {},
 ): Promise<Response> {
+  if (
+    options.reauthorize &&
+    options.reauthorizeAfterMs !== undefined &&
+    (!Number.isSafeInteger(options.reauthorizeAfterMs) ||
+      options.reauthorizeAfterMs < 1_000 ||
+      options.reauthorizeAfterMs > 60_000)
+  ) {
+    throw new RangeError("session stream reauthorization must be between 1000 and 60000ms");
+  }
   let lastSent = after;
   let bootstrapping = true;
   let newestBuffered: SessionEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<SessionEvent> | null = null;
+  let reauthorizationTimer: ReturnType<typeof setTimeout> | null = null;
+  let detachAbortListener = () => {};
   const stopUpstream = () => {
+    detachAbortListener();
+    if (reauthorizationTimer) {
+      clearTimeout(reauthorizationTimer);
+      reauthorizationTimer = null;
+    }
     delivery?.stop();
     const release = unsubscribe;
     unsubscribe = null;
@@ -272,6 +288,17 @@ export async function sseSessionStream(
   const fail = (error: unknown) => {
     channel.fail(retryableSseFailure("session event stream delivery failed", error));
   };
+  const scheduleReauthorization = () => {
+    if (!options.reauthorize || channel.stopped()) return;
+    const interval = options.reauthorizeAfterMs ?? 15_000;
+    reauthorizationTimer = setTimeout(() => {
+      reauthorizationTimer = null;
+      void options.reauthorize!()
+        .then(scheduleReauthorization)
+        .catch((error) => fail(error));
+    }, interval);
+  };
+  scheduleReauthorization();
   const writeFrame = async (frame: string) => {
     if (!(await channel.write(frame))) {
       throw new SseStreamStoppedError();
@@ -347,7 +374,10 @@ export async function sseSessionStream(
     channel.close();
   };
   if (signal.aborted) abort();
-  else signal.addEventListener("abort", abort, { once: true });
+  else {
+    signal.addEventListener("abort", abort, { once: true });
+    detachAbortListener = () => signal.removeEventListener("abort", abort);
+  }
 
   return new Response(channel.stream, {
     headers: {
@@ -400,7 +430,9 @@ export async function sseWorkspaceControlStream(
   let newestBuffered: WorkspaceControlEvent | null = null;
   let unsubscribe: (() => void) | null = null;
   let delivery: LatestWinsDelivery<WorkspaceControlEvent> | null = null;
+  let detachAbortListener = () => {};
   const stopUpstream = () => {
+    detachAbortListener();
     delivery?.stop();
     const release = unsubscribe;
     unsubscribe = null;
@@ -485,7 +517,10 @@ export async function sseWorkspaceControlStream(
     channel.close();
   };
   if (signal.aborted) abort();
-  else signal.addEventListener("abort", abort, { once: true });
+  else {
+    signal.addEventListener("abort", abort, { once: true });
+    detachAbortListener = () => signal.removeEventListener("abort", abort);
+  }
 
   return new Response(channel.stream, {
     headers: {
@@ -528,6 +563,12 @@ export type SseDeliveryOptions = {
   stallTimeoutMs?: number;
   observability?: Observability | undefined;
   onObservation?: ((observation: SseDeliveryBoundObservation) => void) | undefined;
+};
+
+export type SessionSseDeliveryOptions = SseDeliveryOptions & {
+  /** Host ACL re-check, run even while the event stream is otherwise idle. */
+  reauthorize?: (() => Promise<void>) | undefined;
+  reauthorizeAfterMs?: number | undefined;
 };
 
 function sseObservationReporter(

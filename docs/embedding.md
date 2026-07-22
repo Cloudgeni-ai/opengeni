@@ -16,7 +16,7 @@ behavior is not appropriate. The proxy does not need billing, rigs, files,
 terminal, workbench, or workspace-administration methods; workspace-level
 Resume is optional.
 
-**V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes the worker's loopback MCP URL wrong, set `OPENGENI_MCP_URL` / `settings.opengeniMcpUrl`; `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` is the canonical rule.
+**V1: mount the router.** Import `createApp(deps)` from `@opengeni/api-router/app` (`apps/api/src/app.ts`) and mount the returned Hono app under the host's route prefix. The dependency bag is `AppDependencies` from `@opengeni/core` (`packages/core/src/dependencies.ts`): `settings`, `db`, `bus`, and `workflowClient` are required; `documentIndexer`, `documentServices`, `observability`, `managedAuth`, `sessionAuthorization`, `sandboxClient`, and `resumeBoxById` are optional host bindings. The routes remain `/v1/...` inside the mounted app. If the mount prefix makes the worker's loopback MCP URL wrong, set `OPENGENI_MCP_URL` / `settings.opengeniMcpUrl`; `firstPartyMcpBaseUrl` in `packages/config/src/index.ts` is the canonical rule.
 
 **V2: call core directly.** Import from `@opengeni/core` and call domain helpers without HTTP. The main session surface is:
 
@@ -113,6 +113,61 @@ transaction. The sandbox Toolspace bearer is renewable and session-bound so
 long-running work does not lose Code Mode after one hour, but Toolspace excludes
 the first-party OpenGeni orchestration server and cannot use that broader
 lifetime to call `session_create` or other first-party tools recursively.
+
+### Session Authorization
+
+Canonical sources: `SessionAuthorizationPort` in
+`packages/contracts/src/index.ts`, the enforcement helpers in
+`packages/core/src/session-authorization.ts`, and the mounted HTTP/MCP/SSE
+surfaces in `apps/api/src/`.
+
+Workspace permissions answer whether a principal may use a capability at all.
+An embedding host may additionally own per-session ownership, sharing, and
+revocation by binding `AppDependencies.sessionAuthorization`:
+
+```ts
+type SessionAuthorizationPort = {
+  authorizeSession(input: AuthorizeSessionInput): Promise<SessionAuthorizationDecision>;
+  resolveListScope(
+    input: ResolveSessionAuthorizationListScopeInput,
+  ): Promise<SessionAuthorizationListScope>;
+};
+```
+
+`authorizeSession` receives the account/workspace, requested operation and
+surface, the immediate target plus its server-resolved lineage root, and either
+the authenticated subject or a live exact agent attempt. Agent authority is
+reconstructed from durable attempt ownership and includes the caller session,
+caller root, turn, attempt, execution generation, and frozen initiator; caller
+input cannot nominate those fields. A settled, superseded, interrupted, or
+otherwise stale attempt is rejected before the host is called.
+
+An allowed decision may set `relatedSessionAccess: "root"` when the principal
+may see the target's full tree. The fail-closed default is `"target"`: detail,
+lineage, control, parent, and tree-stat projections remove information derived
+from other sessions. This projection choice never authorizes an operation on a
+second session; that target always receives its own authorization decision.
+
+`resolveListScope` returns either `all` or a bounded database-applicable scope:
+`rootSessionIds` include their descendants while `sessionIds` authorize exact
+rows only. OpenGeni applies the scope inside search, pin, ordering, totals,
+snapshot continuation, and MCP discovery queries. It does not hydrate a broad
+page and filter afterward. Revocation between cursor pages skips newly hidden
+rows and continues scanning to fill the next authorized page.
+
+Once the port is bound, unknown session-addressed HTTP routes fail closed. The
+same policy is enforced by shared core mutation entrypoints, cross-session
+first-party MCP tools, every session-bound first-party MCP transport request,
+and Toolspace. SSE performs an initial decision and reauthorizes even while
+idle; hosts may request a 1–60 second interval and the default is 15 seconds.
+Denied targets are externally indistinguishable from missing sessions; invalid
+responses or an unavailable host return a retryable unavailable failure. All
+ports unset preserves standalone behavior without the added lookups.
+
+This port authorizes OpenGeni sessions; it does not replace OpenGeni's internal
+delegated/MCP/stream credentials. The host still mints its ordinary user-facing
+delegated token, while OpenGeni continues minting technical first-party tokens
+and then consults this port with their durable caller authority.
 
 ### Tenancy / Bootstrap Workspace
 
