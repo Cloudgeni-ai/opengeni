@@ -19024,6 +19024,7 @@ export async function clearSessionGoal(
       await scopedDb.transaction(async (tx) => {
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
+          controlLock: "share",
           sessionIds: [sessionId],
         });
         const session = locks.sessions[0];
@@ -19958,6 +19959,7 @@ export async function initializeSessionStartAtomically(
         }
         await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
+          controlLock: "already_locked",
           workspaceLock: "already_locked",
           turnIds: [turn.id],
         });
@@ -20418,6 +20420,7 @@ export async function claimSessionWorkForAttempt(
             .limit(1);
           const activeLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
             workspaceId,
+            controlLock: "already_locked",
             workspaceLock: "already_locked",
             turnIds: [session.activeTurnId],
             attemptIds: activeTurnPreview?.activeAttemptId
@@ -20609,6 +20612,7 @@ export async function claimSessionWorkForAttempt(
         const detachedLocks = detachedLiveAttemptPreview
           ? await lockSessionEventWriteRows(tx as unknown as Database, {
               workspaceId,
+              controlLock: "already_locked",
               workspaceLock: "already_locked",
               turnIds: [detachedLiveAttemptPreview.turnId],
               attemptIds: [detachedLiveAttemptPreview.id],
@@ -20672,6 +20676,7 @@ export async function claimSessionWorkForAttempt(
         const queuedLocks = queuedTurnPreview
           ? await lockSessionEventWriteRows(tx as unknown as Database, {
               workspaceId,
+              controlLock: "already_locked",
               workspaceLock: "already_locked",
               turnIds: [queuedTurnPreview.id],
             })
@@ -21370,6 +21375,7 @@ export async function settleSessionAttemptInterruptions(
       }
       const exact = await lockSessionEventWriteRows(tx as unknown as Database, {
         workspaceId,
+        controlLock: "already_locked",
         workspaceLock: "already_locked",
         turnIds: [attemptPreview.turnId],
         attemptIds: [attemptId],
@@ -24241,6 +24247,7 @@ export async function getOrCreateSessionSystemUpdateOutbox(
   return await retryRlsPersistence(db, context, persistence, async (scopedDb) => {
     const locks = await lockSessionEventWriteRows(scopedDb, {
       workspaceId: input.workspaceId,
+      controlLock: "share",
       sessionIds: [input.sourceSessionId, input.targetSessionId],
     });
     const expectedSessionIds = new Set([input.sourceSessionId, input.targetSessionId]);
@@ -24711,6 +24718,7 @@ export async function appendSessionEvents(
         .filter((id): id is string => typeof id === "string");
       const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
         workspaceId,
+        controlLock: "share",
         sessionIds: [sessionId],
         turnIds,
         attemptIds,
@@ -24784,6 +24792,7 @@ export async function acceptSessionApprovalDecision(
       await scopedDb.transaction(async (tx) => {
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId: input.workspaceId,
+          controlLock: "share",
           sessionIds: [input.sessionId],
         });
         const session = locks.sessions[0];
@@ -24839,6 +24848,7 @@ export async function acceptSessionApprovalDecision(
           ? (
               await lockSessionEventWriteRows(tx as unknown as Database, {
                 workspaceId: input.workspaceId,
+                controlLock: "already_locked",
                 workspaceLock: "already_locked",
                 turnIds: [turnPreview.id],
               })
@@ -25095,6 +25105,7 @@ export async function appendSessionEventToSandboxGroup(
       await scopedDb.transaction(async (tx) => {
         await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
+          controlLock: "share",
         });
         const sessionIds = await tx
           .select({ id: schema.sessions.id })
@@ -25108,6 +25119,7 @@ export async function appendSessionEventToSandboxGroup(
           .orderBy(asc(schema.sessions.id));
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
+          controlLock: "already_locked",
           workspaceLock: "already_locked",
           sessionIds: sessionIds.map((row) => row.id),
           turnIds: input.turnId ? [input.turnId] : [],
@@ -25187,6 +25199,7 @@ export async function appendSessionEventsAndUpdateSession(
           .filter((id): id is string => typeof id === "string");
         const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
+          controlLock: "share",
           sessionIds: [sessionId],
           turnIds,
           attemptIds,
@@ -25310,6 +25323,7 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         }
         await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
+          controlLock: "already_locked",
           workspaceLock: "already_locked",
           turnIds: built.events
             .map((input) => input.turnId)
