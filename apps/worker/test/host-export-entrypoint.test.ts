@@ -2,6 +2,9 @@ import { describe, expect, test } from "bun:test";
 
 describe("host-export package entrypoint", () => {
   test("does not import Temporal's native worker graph", async () => {
+    const entrypoint = await import("@opengeni/worker-bundle/host-export");
+    expect(typeof entrypoint.createHostExportPump).toBe("function");
+
     const result = await Bun.build({
       entrypoints: [new URL("../src/host-export.ts", import.meta.url).pathname],
       target: "bun",
