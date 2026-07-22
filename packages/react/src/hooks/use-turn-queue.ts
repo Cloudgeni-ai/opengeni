@@ -6,7 +6,7 @@ import type {
   SessionQueueSnapshot,
   SessionTurn,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
@@ -36,6 +36,7 @@ function queueSnapshotCovers(
 }
 
 export type QueueMutationKind = "move" | "edit" | "steer" | "delete";
+const EMPTY_PENDING_BY_TURN: Readonly<Record<string, QueueMutationKind>> = {};
 
 export type UseTurnQueueOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
@@ -80,55 +81,78 @@ export function useTurnQueue(
   const { client, workspaceId, workspaceControlEvent, registerSessionReconciler } =
     useEmbeddedSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
+  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
   const [snapshot, setSnapshot] = useState<SessionQueueSnapshot | null>(null);
+  const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
   const [mutationError, setMutationError] = useState<Error | null>(null);
   const [pendingByTurn, setPendingByTurn] = useState<Record<string, QueueMutationKind>>({});
   const pendingRef = useRef<Record<string, QueueMutationKind>>({});
   const readGeneration = useRef(0);
-  const targetKeyRef = useRef<string | null>(null);
+  const targetKeyRef = useRef(targetKey);
   const snapshotRef = useRef<SessionQueueSnapshot | null>(null);
 
-  const acceptSnapshot = useCallback((next: SessionQueueSnapshot | null): boolean => {
-    const current = snapshotRef.current;
-    if (
-      next &&
-      current &&
-      (next.version < current.version ||
-        next.effectiveControl.controlVersion < current.effectiveControl.controlVersion)
-    ) {
-      return false;
-    }
-    snapshotRef.current = next;
-    setSnapshot(next);
-    return true;
-  }, []);
+  // Revoke the old target only when the new one commits. A concurrent render
+  // may suspend while the previous target remains visible and interactive.
+  useLayoutEffect(() => {
+    if (targetKeyRef.current === targetKey) return;
+    targetKeyRef.current = targetKey;
+    readGeneration.current += 1;
+    snapshotRef.current = null;
+    pendingRef.current = {};
+    setStateTargetKey(targetKey);
+    setSnapshot(null);
+    setLoading(enabled);
+    setError(null);
+    setMutationError(null);
+    setPendingByTurn({});
+  }, [enabled, targetKey]);
+
+  const acceptSnapshot = useCallback(
+    (ownedTargetKey: string, next: SessionQueueSnapshot | null): boolean => {
+      if (targetKeyRef.current !== ownedTargetKey) return false;
+      const current = snapshotRef.current;
+      if (
+        next &&
+        current &&
+        (next.version < current.version ||
+          next.effectiveControl.controlVersion < current.effectiveControl.controlVersion)
+      ) {
+        return false;
+      }
+      snapshotRef.current = next;
+      setStateTargetKey(ownedTargetKey);
+      setSnapshot(next);
+      return true;
+    },
+    [],
+  );
 
   const load = useCallback(
     async (rejectOnFailure = false): Promise<void> => {
       if (!sessionId) return;
-      const targetKey = `${workspaceId}\u0000${sessionId}`;
+      const ownedTargetKey = `${workspaceId}\u0000${sessionId}`;
       const ticket = ++readGeneration.current;
       try {
         const fetched = await client.getQueue(workspaceId, sessionId);
-        if (targetKeyRef.current !== targetKey) return;
+        if (targetKeyRef.current !== ownedTargetKey) return;
         const ownsLatestRead = ticket === readGeneration.current;
         if (rejectOnFailure) {
-          const committed = acceptSnapshot(fetched);
+          const committed = acceptSnapshot(ownedTargetKey, fetched);
           if (!committed && !queueSnapshotCovers(snapshotRef.current, fetched)) {
             throw new TypeError("Queue reconciliation did not commit authoritative state");
           }
           setError(null);
           if (ownsLatestRead) setLoading(false);
         } else if (ownsLatestRead) {
-          acceptSnapshot(fetched);
+          acceptSnapshot(ownedTargetKey, fetched);
           setError(null);
           setLoading(false);
         }
       } catch (cause) {
         if (
-          targetKeyRef.current === targetKey &&
+          targetKeyRef.current === ownedTargetKey &&
           (ticket === readGeneration.current || rejectOnFailure)
         ) {
           setError(asError(cause));
@@ -141,16 +165,6 @@ export function useTurnQueue(
   );
 
   useEffect(() => {
-    const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
-    if (targetKeyRef.current !== targetKey) {
-      targetKeyRef.current = targetKey;
-      readGeneration.current += 1;
-      acceptSnapshot(null);
-      setError(null);
-      setMutationError(null);
-      setPendingByTurn({});
-      pendingRef.current = {};
-    }
     if (!enabled) {
       setLoading(false);
       return;
@@ -168,7 +182,7 @@ export function useTurnQueue(
       clearInterval(timer);
       readGeneration.current += 1;
     };
-  }, [load, enabled, workspaceId, sessionId, options.pollIntervalMs, acceptSnapshot]);
+  }, [load, enabled, options.pollIntervalMs]);
 
   useEffect(() => {
     if (enabled && workspaceControlEvent) void load();
@@ -201,23 +215,30 @@ export function useTurnQueue(
         turn: SessionTurn,
       ) => Promise<SessionQueueMutationResponse>,
     ): Promise<SessionQueueMutationResponse | null> => {
-      if (!sessionId || pendingRef.current[turnId]) return null;
+      const ownedTargetKey = targetKey;
+      if (!sessionId || targetKeyRef.current !== ownedTargetKey || pendingRef.current[turnId]) {
+        return null;
+      }
       const current = snapshotRef.current;
       const turn = current?.items.find((candidate) => candidate.id === turnId);
       if (!current || !turn) return null;
       pendingRef.current = { ...pendingRef.current, [turnId]: kind };
+      setStateTargetKey(ownedTargetKey);
       setPendingByTurn(pendingRef.current);
       setMutationError(null);
       try {
         const result = await command(current, turn);
-        acceptSnapshot(result.snapshot);
+        if (targetKeyRef.current !== ownedTargetKey) return null;
+        acceptSnapshot(ownedTargetKey, result.snapshot);
         return result;
       } catch (cause) {
-        setMutationError(asError(cause));
-        await load();
+        if (targetKeyRef.current === ownedTargetKey) {
+          setMutationError(asError(cause));
+          await load();
+        }
         return null;
       } finally {
-        if (turnId in pendingRef.current) {
+        if (targetKeyRef.current === ownedTargetKey && turnId in pendingRef.current) {
           const next = { ...pendingRef.current };
           delete next[turnId];
           pendingRef.current = next;
@@ -225,7 +246,7 @@ export function useTurnQueue(
         }
       }
     },
-    [acceptSnapshot, load, sessionId],
+    [acceptSnapshot, load, sessionId, targetKey],
   );
 
   const moveTurn = useCallback(
@@ -288,29 +309,37 @@ export function useTurnQueue(
     [client, mutate, sessionId, workspaceId],
   );
 
-  const mutationFor = useCallback(
-    (turnId: string): QueueMutationKind | null => pendingByTurn[turnId] ?? null,
-    [pendingByTurn],
+  const identityMatches = stateTargetKey === targetKey;
+  const visibleSnapshot = identityMatches ? snapshot : null;
+  const visiblePendingByTurn = identityMatches ? pendingByTurn : EMPTY_PENDING_BY_TURN;
+  const mutating = useMemo(
+    () => Object.keys(visiblePendingByTurn).length > 0,
+    [visiblePendingByTurn],
   );
-  const mutating = useMemo(() => Object.keys(pendingByTurn).length > 0, [pendingByTurn]);
+  const mutationFor = useCallback(
+    (turnId: string): QueueMutationKind | null => visiblePendingByTurn[turnId] ?? null,
+    [visiblePendingByTurn],
+  );
 
   return {
-    snapshot,
-    queue: snapshot?.items ?? [],
-    effectiveControl: snapshot?.effectiveControl ?? null,
-    stoppingPreviousAttempt: snapshot?.stoppingPreviousAttempt ?? false,
-    loading,
-    error,
+    snapshot: visibleSnapshot,
+    queue: visibleSnapshot?.items ?? [],
+    effectiveControl: visibleSnapshot?.effectiveControl ?? null,
+    stoppingPreviousAttempt: visibleSnapshot?.stoppingPreviousAttempt ?? false,
+    loading: identityMatches ? loading : enabled,
+    error: identityMatches ? error : null,
     refresh: load,
     moveTurn,
     editTurn,
     steerTurn,
     removeTurn,
-    pendingByTurn,
+    pendingByTurn: visiblePendingByTurn,
     mutationFor,
     mutating,
-    mutationError,
-    clearMutationError: useCallback(() => setMutationError(null), []),
+    mutationError: identityMatches ? mutationError : null,
+    clearMutationError: useCallback(() => {
+      if (targetKeyRef.current === targetKey) setMutationError(null);
+    }, [targetKey]),
   };
 }
 

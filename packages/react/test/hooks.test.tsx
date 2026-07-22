@@ -5,9 +5,13 @@
    needs them and restored afterwards.
    -------------------------------------------------------------------------- */
 import { describe, expect, test } from "bun:test";
+import { startTransition, Suspense, useState } from "react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import type {
   ComposerDraft,
   SessionEvent,
+  SessionControlResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
   SessionTurn,
@@ -522,6 +526,67 @@ describe("useTurnQueue", () => {
     expect(hook.result.current.queue.map((turn) => turn.id)).toEqual([queued.id]);
     await hook.unmount();
   });
+
+  test("a session switch hides the old queue and drops its delayed mutation settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const turnA = fakeTurn({ id: "aaaaaaaa-0000-4000-8000-000000000001", prompt: "A PRIVATE" });
+    const turnB = fakeTurn({ id: "bbbbbbbb-0000-4000-8000-000000000001", prompt: "B PRIVATE" });
+    let resolveBRead!: (snapshot: SessionQueueSnapshot) => void;
+    let resolveAMutation!: (result: SessionQueueMutationResponse) => void;
+    const client = fakeClient({
+      getQueue: async (_workspaceId, sessionId) => {
+        if (sessionId === sessionA) return queueSnapshot([turnA]);
+        return await new Promise<SessionQueueSnapshot>((resolve) => {
+          resolveBRead = resolve;
+        });
+      },
+      deleteQueueItem: async () =>
+        await new Promise<SessionQueueMutationResponse>((resolve) => {
+          resolveAMutation = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useTurnQueue(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      sessionA,
+    );
+    await flush();
+    expect(hook.result.current.queue.map((turn) => turn.prompt)).toEqual(["A PRIVATE"]);
+
+    let staleMutation!: Promise<boolean>;
+    await flushing(() => {
+      staleMutation = hook.result.current.removeTurn(turnA.id);
+    });
+    await hook.rerender(sessionB);
+    expect(hook.result.current.queue).toEqual([]);
+    expect(hook.result.current.loading).toBe(true);
+
+    await flushing(() => resolveBRead(queueSnapshot([turnB])));
+    expect(hook.result.current.queue.map((turn) => turn.prompt)).toEqual(["B PRIVATE"]);
+
+    await flushing(async () => {
+      resolveAMutation({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "queue.delete",
+          operationKey: "stale-a-delete",
+          targetSessionId: sessionA,
+          targetTurnId: turnA.id,
+          appliedControlRevision: null,
+          appliedQueueVersion: 2,
+          appliedTurnVersion: 2,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        snapshot: queueSnapshot([], { version: 2 }),
+      });
+      expect(await staleMutation).toBe(false);
+    });
+    expect(hook.result.current.queue.map((turn) => turn.prompt)).toEqual(["B PRIVATE"]);
+    expect(hook.result.current.mutationError).toBeNull();
+    await hook.unmount();
+  });
 });
 
 describe("useSessionLineage", () => {
@@ -868,6 +933,88 @@ describe("useSessionControl", () => {
     expect(clientEventIds).toHaveLength(2);
     expect(clientEventIds[0]).not.toBe("");
     expect(clientEventIds[1]).toBe(clientEventIds[0]);
+    await hook.unmount();
+  });
+
+  test("a session switch drops stale control loading and error settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let rejectPause!: (cause: Error) => void;
+    const client = fakeClient({
+      pauseSession: async () =>
+        await new Promise((_resolve, reject) => {
+          rejectPause = reject;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useSessionControl(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+
+    let stalePause!: Promise<unknown>;
+    await flushing(() => {
+      stalePause = hook.result.current.pause();
+    });
+    expect(hook.result.current.controlling).toBe(true);
+    await hook.rerender(sessionB);
+    expect(hook.result.current.controlling).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+
+    await flushing(async () => {
+      rejectPause(new Error("A PRIVATE CONTROL ERROR"));
+      expect(await stalePause).toBeNull();
+    });
+    expect(hook.result.current.controlling).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch returns null for a successful stale control settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let resolvePause!: (response: SessionControlResponse) => void;
+    const client = fakeClient({
+      pauseSession: async () =>
+        await new Promise<SessionControlResponse>((resolve) => {
+          resolvePause = resolve;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useSessionControl(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+
+    let stalePause!: Promise<SessionControlResponse | null>;
+    await flushing(() => {
+      stalePause = hook.result.current.pause();
+    });
+    await hook.rerender(sessionB);
+    await flushing(async () => {
+      resolvePause({
+        receipt: {
+          id: crypto.randomUUID(),
+          action: "session.paused",
+          operationKey: crypto.randomUUID(),
+          targetSessionId: sessionA,
+          targetTurnId: null,
+          appliedControlRevision: 1,
+          appliedQueueVersion: null,
+          appliedTurnVersion: null,
+          appliedDraftRevision: null,
+          createdAt: new Date().toISOString(),
+        },
+        effectiveControl: {
+          ...queueSnapshot([]).effectiveControl,
+          state: "paused",
+          directState: "paused",
+        },
+        interruptionCount: 1,
+        wakeCount: 0,
+      });
+      expect(await stalePause).toBeNull();
+    });
+    expect(hook.result.current.controlling).toBe(false);
+    expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
 });
@@ -1310,6 +1457,250 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.draftConflict?.message).toContain("409");
     await hook.unmount();
   });
+
+  test("a session switch hides the old draft and drops its delayed autosave settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const makeDraft = (text: string): ComposerDraft => ({
+      revision: 1,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let resolveBRead!: (value: ComposerDraft) => void;
+    let resolveASave!: (value: ComposerDraft) => void;
+    let savedARequest: { text: string } | null = null;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        if (sessionId === sessionA) return makeDraft("A PRIVATE");
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveBRead = resolve;
+        });
+      },
+      saveComposerDraft: async (_workspaceId, sessionId, request) => {
+        if (sessionId !== sessionA) throw new Error("unexpected B autosave");
+        savedARequest = request;
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveASave = resolve;
+        });
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+    expect(hook.result.current.value).toBe("A PRIVATE");
+
+    await flushing(() => hook.result.current.setValue("A PRIVATE EDIT"));
+    await flush(600);
+    expect(savedARequest).toMatchObject({ text: "A PRIVATE EDIT" });
+
+    await hook.rerender(sessionB);
+    expect(hook.result.current.value).toBe("");
+    expect(hook.result.current.draft).toBeNull();
+    await flushing(() => resolveBRead(makeDraft("B PRIVATE")));
+    expect(hook.result.current.value).toBe("B PRIVATE");
+
+    await flushing(() =>
+      resolveASave({
+        ...makeDraft("A PRIVATE EDIT"),
+        revision: 2,
+      }),
+    );
+    expect(hook.result.current.value).toBe("B PRIVATE");
+    expect(hook.result.current.draft?.text).toBe("B PRIVATE");
+    expect(hook.result.current.draftConflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch drops stale composer control settlement", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    let rejectPause!: (cause: Error) => void;
+    const client = fakeClient({
+      pauseSession: async () =>
+        await new Promise((_resolve, reject) => {
+          rejectPause = reject;
+        }),
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    let stalePause!: Promise<void>;
+    await flushing(() => {
+      stalePause = hook.result.current.pause();
+    });
+    expect(hook.result.current.pausing).toBe(true);
+    await hook.rerender(sessionB);
+    expect(hook.result.current.pausing).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+
+    await flushing(async () => {
+      rejectPause(new Error("A PRIVATE CONTROL ERROR"));
+      await stalePause;
+    });
+    expect(hook.result.current.pausing).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("a session switch stops a stale scoped resume before its follow-up write", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const scopedSession: string = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    let resolveScopedQueue!: (value: SessionQueueSnapshot) => void;
+    const resumedSessions: string[] = [];
+    const client = fakeClient({
+      getQueue: async (_workspaceId, sessionId) => {
+        if (sessionId !== scopedSession) return queueSnapshot([]);
+        return await new Promise<SessionQueueSnapshot>((resolve) => {
+          resolveScopedQueue = resolve;
+        });
+      },
+      resumeSession: async (_workspaceId, sessionId) => {
+        resumedSessions.push(sessionId);
+        throw new Error("unexpected stale resume");
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    let staleResume!: Promise<void>;
+    await flushing(() => {
+      staleResume = hook.result.current.resumeScope({
+        scope: "session",
+        targetId: scopedSession,
+        selectedStateAfter: "active",
+        impactCopy: "Resume scoped session",
+      });
+    });
+    await hook.rerender(sessionB);
+    expect(hook.result.current.resuming).toBe(false);
+
+    await flushing(async () => {
+      resolveScopedQueue(queueSnapshot([]));
+      await staleResume;
+    });
+    expect(resumedSessions).toEqual([]);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+});
+
+describe("session hook concurrent target ownership", () => {
+  test("a suspended target transition leaves the committed session fully interactive", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const turn = fakeTurn({
+      id: "aaaaaaaa-0000-4000-8000-000000000001",
+      prompt: "A queue item",
+    });
+    const draft: ComposerDraft = {
+      revision: 1,
+      text: "A draft",
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let deleteCalls = 0;
+    let pauseCalls = 0;
+    const client = fakeClient({
+      getQueue: async () => queueSnapshot([turn]),
+      getComposerDraft: async () => draft,
+      deleteQueueItem: async () => {
+        deleteCalls += 1;
+        throw new Error("expected test rollback");
+      },
+      pauseSession: async () => {
+        pauseCalls += 1;
+        throw new Error("expected test rollback");
+      },
+    });
+    let setTarget!: (target: string) => void;
+    let renderedSessionB = false;
+    let committed:
+      | {
+          queue: ReturnType<typeof useTurnQueue>;
+          composer: ReturnType<typeof useComposer>;
+          control: ReturnType<typeof useSessionControl>;
+        }
+      | undefined;
+    const suspended = new Promise<never>(() => {});
+
+    function Harness() {
+      const [target, setTargetState] = useState(sessionA);
+      setTarget = setTargetState;
+      const queue = useTurnQueue(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+      });
+      const composer = useComposer(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+      });
+      const control = useSessionControl(target, { client, workspaceId: WORKSPACE_ID });
+      if (target === sessionB) {
+        renderedSessionB = true;
+        throw suspended;
+      }
+      committed = { queue, composer, control };
+      return <div>{`${composer.value}|${queue.queue.map((item) => item.prompt).join(",")}`}</div>;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        root.render(
+          <Suspense fallback={<div>Loading B</div>}>
+            <Harness />
+          </Suspense>,
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(committed?.composer.value).toBe("A draft");
+      expect(committed?.queue.queue.map((item) => item.prompt)).toEqual(["A queue item"]);
+
+      startTransition(() => setTarget(sessionB));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderedSessionB).toBe(true);
+      expect(container.textContent).toBe("A draft|A queue item");
+
+      committed?.composer.setValue("A edited while B waits");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await committed?.queue.removeTurn(turn.id);
+      await committed?.control.pause();
+
+      expect(committed?.composer.value).toBe("A edited while B waits");
+      expect(deleteCalls).toBe(1);
+      expect(pauseCalls).toBe(1);
+    } finally {
+      flushSync(() => root.unmount());
+      container.remove();
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+  });
 });
 
 describe("useComposer file-only send", () => {
@@ -1327,6 +1718,27 @@ describe("useComposer file-only send", () => {
     // Empty draft, but a resource is attached → sendable.
     expect(hook.result.current.value).toBe("");
     expect(hook.result.current.canSend).toBe(true);
+    await hook.unmount();
+  });
+
+  test("canSend follows attachment additions and removals in the same session render", async () => {
+    const client = fakeClient({});
+    const hook = await renderHook(
+      (attached: boolean) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({
+            resources: attached ? [{ kind: "file", fileId: "file-1" }] : [],
+          }),
+        }),
+      false as boolean,
+    );
+    expect(hook.result.current.canSend).toBe(false);
+    await hook.rerender(true);
+    expect(hook.result.current.canSend).toBe(true);
+    await hook.rerender(false);
+    expect(hook.result.current.canSend).toBe(false);
     await hook.unmount();
   });
 
