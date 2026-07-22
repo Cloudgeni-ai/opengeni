@@ -111,3 +111,33 @@ export type SessionClientLike = Pick<
   | "terminalPtyResize"
   | "terminalPtyClose"
 >;
+
+/**
+ * Tenant-safe client surface required by the session-only React entry.
+ *
+ * A host proxy can implement only these session-scoped operations instead of
+ * stubbing OpenGeni's workbench, billing, rig, file-system, and workspace
+ * administration APIs. Workspace-level resume is deliberately optional: a
+ * host that does not expose that authority still supports every session-local
+ * composer/control path.
+ */
+export type EmbeddedSessionClientLike = Pick<
+  OpenGeniClient,
+  | "getSession"
+  | "listEvents"
+  | "streamEvents"
+  | "getComposerDraft"
+  | "saveComposerDraft"
+  | "sendMessage"
+  | "steerMessage"
+  | "getQueue"
+  | "moveQueueItem"
+  | "editQueueItem"
+  | "steerQueueItem"
+  | "deleteQueueItem"
+  | "pauseSession"
+  | "resumeSession"
+  | "sendApprovalDecision"
+> & {
+  setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+};

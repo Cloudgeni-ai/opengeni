@@ -8,12 +8,12 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
 
-export type UseComposerOptions = ClientOverride &
+export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     /** Called with the accepted text after a successful send. */
     onSent?: ((text: string) => void) | undefined;
@@ -88,7 +88,7 @@ export function useComposer(
   sessionId: string | null | undefined,
   options: UseComposerOptions = {},
 ): ComposerState {
-  const { client, workspaceId, registerSessionReconciler } = useOpenGeni(options);
+  const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const durableDrafts = options.draftPersistence !== "disabled";
   const [value, setValue] = useState("");
   const [sending, setSending] = useState(false);
@@ -102,6 +102,8 @@ export function useComposer(
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
   const pendingClientEventId = useRef<string | null>(null);
   const draftRef = useRef<ComposerDraft | null>(null);
+  const draftLoadErrorRef = useRef<Error | null>(null);
+  const draftReadGeneration = useRef(0);
   const localEditRevision = useRef(0);
   const targetGeneration = useRef(0);
   const lastSavedSignature = useRef<string | null>(null);
@@ -124,7 +126,9 @@ export function useComposer(
       targetGeneration.current += 1;
       pendingClientEventId.current = null;
       localEditRevision.current = 0;
+      draftReadGeneration.current += 1;
       draftRef.current = null;
+      draftLoadErrorRef.current = null;
       lastSavedSignature.current = null;
       setValue("");
       setError(null);
@@ -161,30 +165,56 @@ export function useComposer(
   );
 
   const loadDraft = useCallback(
-    async (replaceLocal: boolean): Promise<void> => {
+    async (replaceLocal: boolean, rejectOnFailure = false): Promise<void> => {
       if (!sessionId || !durableDrafts) {
         setDraftLoading(false);
         return;
       }
       const generation = targetGeneration.current;
+      const readTicket = ++draftReadGeneration.current;
       const localAtStart = localEditRevision.current;
       setDraftLoading(true);
       try {
         const fetched = await client.getComposerDraft(workspaceId, sessionId);
         if (generation !== targetGeneration.current) return;
-        draftRef.current = fetched;
-        setDraft(fetched);
-        setDraftConflict(null);
-        if (replaceLocal || localAtStart === localEditRevision.current) {
-          lastSavedSignature.current = draftSignature(draftPayload(fetched));
-          setValue(fetched.text);
-          setRestoredResources(fetched.resources);
-          onDraftApplied?.(fetched);
+        const ownsLatestRead = readTicket === draftReadGeneration.current;
+        const currentRevision = draftRef.current?.revision ?? -1;
+        if ((ownsLatestRead || rejectOnFailure) && fetched.revision >= currentRevision) {
+          draftRef.current = fetched;
+          setDraft(fetched);
+          setDraftConflict(null);
+          if (replaceLocal || localAtStart === localEditRevision.current) {
+            lastSavedSignature.current = draftSignature(draftPayload(fetched));
+            setValue(fetched.text);
+            setRestoredResources(fetched.resources);
+            onDraftApplied?.(fetched);
+          }
+        }
+        const authoritativeRevision = draftRef.current?.revision ?? -1;
+        if (rejectOnFailure && authoritativeRevision < fetched.revision) {
+          throw new TypeError("Composer draft reconciliation did not commit authoritative state");
+        }
+        if (ownsLatestRead || rejectOnFailure) {
+          const recoveredError = draftLoadErrorRef.current;
+          draftLoadErrorRef.current = null;
+          if (recoveredError) {
+            setError((current) => (current === recoveredError ? null : current));
+          }
         }
       } catch (cause) {
-        if (generation === targetGeneration.current) setError(asError(cause));
+        if (
+          generation === targetGeneration.current &&
+          (readTicket === draftReadGeneration.current || rejectOnFailure)
+        ) {
+          const failure = asError(cause);
+          draftLoadErrorRef.current = failure;
+          setError(failure);
+        }
+        if (rejectOnFailure) throw cause;
       } finally {
-        if (generation === targetGeneration.current) setDraftLoading(false);
+        if (generation === targetGeneration.current && readTicket === draftReadGeneration.current) {
+          setDraftLoading(false);
+        }
       }
     },
     [client, durableDrafts, onDraftApplied, sessionId, workspaceId],
@@ -211,6 +241,7 @@ export function useComposer(
       enabled: Boolean(sessionId) && durableDrafts,
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
+    async () => await loadDraft(false, true),
   );
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
@@ -437,6 +468,9 @@ export function useComposer(
       setError(null);
       try {
         if (option.scope === "workspace") {
+          if (!client.setWorkspaceInferenceState) {
+            throw new Error("Workspace-level resume is not available through this client");
+          }
           const workspaceBlocker = options.effectiveControl?.blockers.find(
             (blocker) => blocker.kind === "workspace",
           );

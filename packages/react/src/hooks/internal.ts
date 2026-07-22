@@ -1,6 +1,6 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { SessionClientLike } from "../client";
+import type { EmbeddedSessionClientLike } from "../client";
 
 export type AsyncListState<T> = {
   data: T | null;
@@ -204,12 +204,13 @@ export type SessionEventFeedOptions = {
  * `events` log or tails the stream directly (reconnect handled by the SDK).
  */
 export function useSessionEventTrigger(
-  client: SessionClientLike,
+  client: EmbeddedSessionClientLike,
   workspaceId: string,
   sessionId: string | null | undefined,
   match: (event: SessionEvent) => boolean,
   onEvent: (event: SessionEvent) => void,
   options: SessionEventFeedOptions = {},
+  reconcileBeforeLive?: (() => void | Promise<void>) | undefined,
 ): void {
   const enabled = options.enabled ?? true;
   const events = options.events;
@@ -218,6 +219,8 @@ export function useSessionEventTrigger(
   matchRef.current = match;
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
+  const reconcileBeforeLiveRef = useRef(reconcileBeforeLive);
+  reconcileBeforeLiveRef.current = reconcileBeforeLive;
   const consumedRef = useRef(0);
   const feedKeyRef = useRef<string | null>(null);
 
@@ -260,6 +263,7 @@ export function useSessionEventTrigger(
         const stream = client.streamEvents(workspaceId, sessionId, {
           after: session.lastSequence,
           signal: controller.signal,
+          beforeLive: async () => await reconcileBeforeLiveRef.current?.(),
         });
         for await (const event of stream) {
           if (matchRef.current(event)) {

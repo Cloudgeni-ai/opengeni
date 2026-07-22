@@ -1,9 +1,9 @@
 import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
-import { useCallback } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useCallback, useRef } from "react";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 
-export type UseSessionControlOptions = ClientOverride;
+export type UseSessionControlOptions = EmbeddedSessionClientOverride;
 
 export type UseSessionControlResult = {
   pause: (reason?: string) => Promise<SessionControlResponse | null>;
@@ -28,7 +28,16 @@ export function useSessionControl(
   sessionId: string | null | undefined,
   options: UseSessionControlOptions = {},
 ): UseSessionControlResult {
-  const { client, workspaceId } = useOpenGeni(options);
+  const { client, workspaceId } = useEmbeddedSession(options);
+  const approvalTargetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const pendingApproval = useRef<{
+    targetKey: string;
+    decisionKey: string;
+    clientEventId: string;
+  } | null>(null);
+  if (pendingApproval.current?.targetKey !== approvalTargetKey) {
+    pendingApproval.current = null;
+  }
   const {
     run: runControl,
     mutating: controlling,
@@ -73,15 +82,33 @@ export function useSessionControl(
       if (!sessionId) {
         return null;
       }
-      return await runApproval(() =>
+      const decisionKey = JSON.stringify([approvalId, decision, message ?? null]);
+      if (pendingApproval.current?.decisionKey !== decisionKey) {
+        pendingApproval.current = {
+          targetKey: approvalTargetKey,
+          decisionKey,
+          clientEventId: crypto.randomUUID(),
+        };
+      }
+      const clientEventId = pendingApproval.current.clientEventId;
+      const accepted = await runApproval(() =>
         client.sendApprovalDecision(workspaceId, sessionId, {
           approvalId,
           decision,
           ...(message !== undefined ? { message } : {}),
+          clientEventId,
         }),
       );
+      if (
+        accepted !== null &&
+        pendingApproval.current?.targetKey === approvalTargetKey &&
+        pendingApproval.current.clientEventId === clientEventId
+      ) {
+        pendingApproval.current = null;
+      }
+      return accepted;
     },
-    [client, workspaceId, sessionId, runApproval],
+    [approvalTargetKey, client, workspaceId, sessionId, runApproval],
   );
 
   const approve = useCallback(
