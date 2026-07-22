@@ -64,8 +64,8 @@ describe("session-specific Toolspace token pointers", () => {
     expect(() => toolspaceTokenFileForSession(manifestFile, " session-a")).toThrow(
       "session id is invalid",
     );
-    expect(toolspaceTokenFileFromEnvironment({ HOME: "/home/agent" }, "session-a")).toBe(
-      toolspaceTokenFileForSession("/home/agent/.opengeni/toolspace-token", "session-a"),
+    expect(toolspaceTokenFileFromEnvironment({ HOME: "/home/user" }, "session-a")).toBe(
+      toolspaceTokenFileForSession("/home/user/.opengeni/toolspace-token", "session-a"),
     );
     expect(toolspaceTokenFileFromEnvironment({}, "session-a")).toBe(
       toolspaceTokenFileForSession("/workspace/.opengeni/toolspace-token", "session-a"),
