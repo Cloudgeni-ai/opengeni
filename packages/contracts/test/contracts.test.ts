@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
+  approvalIdentifier,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -31,6 +32,15 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("extracts approval identity from every serialized interruption shape", () => {
+    expect(approvalIdentifier({ id: "approval-direct" })).toBe("approval-direct");
+    expect(approvalIdentifier({ rawItem: { callId: "approval-call" } })).toBe("approval-call");
+    expect(approvalIdentifier({ rawItem: { id: 42 } })).toBe("42");
+    expect(approvalIdentifier({ name: "approval-name" })).toBe("approval-name");
+    expect(approvalIdentifier({ approvalId: "unsupported-shape" })).toBeNull();
+    expect(approvalIdentifier(null)).toBeNull();
+  });
+
   test("accepts create session defaults", () => {
     const payload = CreateSessionRequest.parse({ initialMessage: "inspect repo" });
     expect(payload.resources).toEqual([]);

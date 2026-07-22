@@ -1,5 +1,5 @@
 import type { SessionControlResponse, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useMutationRunner } from "./internal";
 
@@ -35,21 +35,23 @@ export function useSessionControl(
     decisionKey: string;
     clientEventId: string;
   } | null>(null);
-  if (pendingApproval.current?.targetKey !== approvalTargetKey) {
-    pendingApproval.current = null;
-  }
+  useLayoutEffect(() => {
+    if (pendingApproval.current?.targetKey !== approvalTargetKey) {
+      pendingApproval.current = null;
+    }
+  }, [approvalTargetKey]);
   const {
     run: runControl,
     mutating: controlling,
     mutationError: controlError,
     clearMutationError: clearControlError,
-  } = useMutationRunner();
+  } = useMutationRunner(approvalTargetKey);
   const {
     run: runApproval,
     mutating: responding,
     mutationError: approvalError,
     clearMutationError: clearApprovalError,
-  } = useMutationRunner();
+  } = useMutationRunner(approvalTargetKey);
 
   const pause = useCallback(
     async (reason?: string): Promise<SessionControlResponse | null> => {

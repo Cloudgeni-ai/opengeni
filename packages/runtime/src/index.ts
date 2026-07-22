@@ -12,6 +12,7 @@ import {
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
 import {
+  approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
   isClearedRunStateBlob,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
@@ -4613,7 +4614,7 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
       return item.toJSON();
     }
     return {
-      id: approvalIdentifier(item),
+      id: approvalIdentifier(item) ?? "approval",
       name: item?.name ?? item?.rawItem?.name ?? "tool",
       arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
       raw: item,
@@ -6208,8 +6209,4 @@ function sortJson(value: unknown): unknown {
     );
   }
   return value;
-}
-
-function approvalIdentifier(item: any): string {
-  return String(item?.rawItem?.callId ?? item?.rawItem?.id ?? item?.id ?? item?.name ?? "approval");
 }
