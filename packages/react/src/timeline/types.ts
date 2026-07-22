@@ -169,7 +169,7 @@ export type NoticeItem = {
 /**
  * A tool call hit a connection whose credential lapsed — the broker asked the
  * user to reconnect the provider before the turn can continue. Carries the
- * structured `tool.auth_needed` payload so the renderer can draw a clean inline
+ * structured `tool.auth_needed` or `credential.auth_needed` payload so the renderer can draw a clean inline
  * reconnect affordance (provider logo + one human line + a Reconnect button)
  * and the app can start the right recovery flow (OAuth reconnect for the
  * surviving connection, or credential re-entry for an api-key one). The `reason`

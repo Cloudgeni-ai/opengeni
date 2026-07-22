@@ -1884,6 +1884,7 @@ describe("API component integration", () => {
       text: "search docs",
       tools: [{ kind: "mcp", id: "docs" }],
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
       { kind: "mcp", id: "docs" },
@@ -2025,6 +2026,7 @@ describe("API component integration", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
@@ -4150,12 +4152,12 @@ describe("API component integration", () => {
     ]);
 
     const clampedMax = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=1000000000`),
     );
     expect(clampedMax.status).toBe(200);
     expect((await clampedMax.json()) as SessionEvent[]).toHaveLength(2000);
     const clampedMin = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=0`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=0`),
     );
     expect(clampedMin.status).toBe(200);
     expect((await clampedMin.json()) as SessionEvent[]).toHaveLength(1);
@@ -7204,6 +7206,11 @@ describe("API component integration", () => {
         url: string;
         headerNames: string[];
         credentialVersion: number;
+        connectionRef: {
+          connectionId?: string;
+          providerDomain: string;
+          kind?: string;
+        } | null;
         headers?: unknown;
       }>;
     };
@@ -7215,6 +7222,7 @@ describe("API component integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        connectionRef: null,
       },
     ]);
     expect(session.mcpServers[0]?.headers).toBeUndefined();
@@ -7413,6 +7421,55 @@ describe("API component integration", () => {
     });
     expect(missingKey.status).toBe(503);
     expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+
+    const hostConnectionRef = {
+      connectionId: "cloud-connection:github:1",
+      providerDomain: "github.com",
+      kind: "app_install",
+    } as const;
+    const hostBacked = await appWithoutKey.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "use the host connection",
+        model: "scripted-model",
+        tools: [{ kind: "mcp", id: "host_github" }],
+        mcpServers: [
+          {
+            id: "host_github",
+            url: "https://host-github.example/mcp",
+            connectionRef: hostConnectionRef,
+          },
+        ],
+      }),
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
+    });
+    expect(hostBacked.status).toBe(202);
+    const hostSession = (await hostBacked.json()) as {
+      id: string;
+      mcpServers: Array<{
+        headerNames: string[];
+        credentialVersion: number;
+        connectionRef: typeof hostConnectionRef | null;
+      }>;
+    };
+    expect(hostSession.mcpServers[0]).toMatchObject({
+      headerNames: [],
+      credentialVersion: 1,
+      connectionRef: hostConnectionRef,
+    });
+    const hostRunServers = await listSessionMcpServersForRun(
+      dbClient.db,
+      grant.workspaceId,
+      hostSession.id,
+      null,
+    );
+    expect(hostRunServers[0]).toMatchObject({
+      headers: {},
+      connectionRef: hostConnectionRef,
+    });
   });
 
   test("toolspace bearer expands to selected session MCP servers, proxies calls, and cannot escalate", async () => {

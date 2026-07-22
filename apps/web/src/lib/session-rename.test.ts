@@ -29,6 +29,8 @@ function session(patch: Partial<Session> = {}): Session {
     resources: [],
     tools: [],
     metadata: {},
+    createdBy: { kind: "subject", subjectId: "user:test" },
+    createdByContext: {},
     model: "scripted-model",
     sandboxBackend: "none",
     sandboxOs: "linux",

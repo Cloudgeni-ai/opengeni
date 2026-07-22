@@ -1845,6 +1845,10 @@ function runtimeEnvFileValue(value: string | undefined): string {
   return (value ?? "").replace(/\r\n/g, "\\n").replace(/\n/g, "\\n").replace(/\r/g, "\\n");
 }
 
+function compactBase64Env(value: string | undefined): string | undefined {
+  return value?.replace(/\s/g, "");
+}
+
 function check(id: PreflightCheckId, required: boolean, description: string): PreflightCheck {
   return { id, required, description };
 }
@@ -1971,6 +1975,21 @@ function runtimeEnvValues(
     valueEnv(
       "OPENGENI_TEMPORAL_TASK_QUEUE",
       terraformOutputString(terraformOutputs, "temporal_task_queue") ?? contract.temporal.taskQueue,
+    ),
+    valueEnv("OPENGENI_TEMPORAL_TLS_ENABLED", env.OPENGENI_TEMPORAL_TLS_ENABLED ?? "false"),
+    valueEnv("OPENGENI_TEMPORAL_API_KEY", env.OPENGENI_TEMPORAL_API_KEY),
+    valueEnv("OPENGENI_TEMPORAL_TLS_SERVER_NAME", env.OPENGENI_TEMPORAL_TLS_SERVER_NAME),
+    valueEnv(
+      "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
+      compactBase64Env(env.OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64),
+    ),
+    valueEnv(
+      "OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64",
+      compactBase64Env(env.OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64),
+    ),
+    valueEnv(
+      "OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64",
+      compactBase64Env(env.OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64),
     ),
     envOrRequiredRuntime(
       "OPENGENI_NATS_URL",

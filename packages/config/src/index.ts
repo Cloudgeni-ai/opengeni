@@ -90,7 +90,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "You are an OpenGeni workspace agent.",
   "Follow the user's task and any enabled pack or skill instructions for the current role.",
   "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-  "Repository resources are mounted under repos/<owner>/<repo>.",
+  "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
   "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
@@ -103,7 +103,8 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
 
 export const McpServerConnectionRefSchema = z
   .object({
-    connectionId: z.string().uuid().optional(),
+    // Standalone ids are UUIDs; embedded hosts may use any stable opaque id.
+    connectionId: z.string().min(1).optional(),
     providerDomain: z.string().min(1),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     scopes: z.array(z.string().min(1)).optional(),
@@ -135,6 +136,12 @@ const SettingsSchema = z.object({
   temporalHost: z.string().default("127.0.0.1:7233"),
   temporalNamespace: z.string().default("default"),
   temporalTaskQueue: z.string().default("opengeni-runs-ts"),
+  temporalTlsEnabled: EnvBoolean.default(false),
+  temporalApiKey: z.string().optional(),
+  temporalTlsServerName: z.string().optional(),
+  temporalTlsRootCaCertificateBase64: z.string().optional(),
+  temporalTlsClientCertificateBase64: z.string().optional(),
+  temporalTlsClientPrivateKeyBase64: z.string().optional(),
   startupDependencyRetryAttempts: z.coerce.number().int().positive().default(30),
   startupDependencyRetryInitialDelayMs: z.coerce.number().int().positive().default(1000),
   startupDependencyRetryMaxDelayMs: z.coerce.number().int().positive().default(5000),
@@ -701,6 +708,19 @@ const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
+export type TemporalTlsConnectionConfig = {
+  serverNameOverride?: string;
+  serverRootCACertificate?: Uint8Array;
+  clientCertPair?: {
+    crt: Uint8Array;
+    key: Uint8Array;
+  };
+};
+export type TemporalConnectionOptions = {
+  address: string;
+  tls?: true | TemporalTlsConnectionConfig;
+  apiKey?: string;
+};
 export type ModelPricing = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
@@ -975,6 +995,14 @@ export function getSettings(): Settings {
     temporalHost: optional("OPENGENI_TEMPORAL_HOST"),
     temporalNamespace: optional("OPENGENI_TEMPORAL_NAMESPACE"),
     temporalTaskQueue: optional("OPENGENI_TEMPORAL_TASK_QUEUE"),
+    temporalTlsEnabled: optional("OPENGENI_TEMPORAL_TLS_ENABLED"),
+    temporalApiKey: optional("OPENGENI_TEMPORAL_API_KEY"),
+    temporalTlsServerName: optional("OPENGENI_TEMPORAL_TLS_SERVER_NAME"),
+    temporalTlsRootCaCertificateBase64: optional(
+      "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
+    ),
+    temporalTlsClientCertificateBase64: optional("OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64"),
+    temporalTlsClientPrivateKeyBase64: optional("OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64"),
     startupDependencyRetryAttempts: optional("OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS"),
     startupDependencyRetryInitialDelayMs: optional(
       "OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS",
@@ -1583,6 +1611,77 @@ export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array |
     throw new Error(
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be base64 for exactly 32 bytes (generate with: openssl rand -base64 32)",
     );
+  }
+  return new Uint8Array(decoded);
+}
+
+/**
+ * Build one structurally compatible connection policy for both
+ * `@temporalio/client` and `@temporalio/worker`. An API key or any custom TLS
+ * material enables TLS automatically; the explicit flag covers server-auth TLS
+ * without credentials. Secret values are never included in validation errors.
+ */
+export function temporalConnectionOptions(settings: Settings): TemporalConnectionOptions {
+  const apiKey = settings.temporalApiKey?.trim() || undefined;
+  const serverNameOverride = settings.temporalTlsServerName?.trim() || undefined;
+  const rootCa = decodeTemporalTlsMaterial(
+    settings.temporalTlsRootCaCertificateBase64,
+    "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
+  );
+  const clientCertificate = decodeTemporalTlsMaterial(
+    settings.temporalTlsClientCertificateBase64,
+    "OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64",
+  );
+  const clientPrivateKey = decodeTemporalTlsMaterial(
+    settings.temporalTlsClientPrivateKeyBase64,
+    "OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64",
+  );
+
+  if (Boolean(clientCertificate) !== Boolean(clientPrivateKey)) {
+    throw new Error(
+      "OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64 and " +
+        "OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64 must both be set or both omitted",
+    );
+  }
+
+  const tls: TemporalTlsConnectionConfig = {};
+  if (serverNameOverride) {
+    tls.serverNameOverride = serverNameOverride;
+  }
+  if (rootCa) {
+    tls.serverRootCACertificate = rootCa;
+  }
+  if (clientCertificate && clientPrivateKey) {
+    tls.clientCertPair = { crt: clientCertificate, key: clientPrivateKey };
+  }
+  const hasCustomTls = Object.keys(tls).length > 0;
+  const tlsEnabled = settings.temporalTlsEnabled || Boolean(apiKey) || hasCustomTls;
+
+  return {
+    address: settings.temporalHost,
+    ...(tlsEnabled ? { tls: hasCustomTls ? tls : true } : {}),
+    ...(apiKey ? { apiKey } : {}),
+  };
+}
+
+function decodeTemporalTlsMaterial(
+  value: string | undefined,
+  settingName: string,
+): Uint8Array | undefined {
+  // RFC 2045 base64 commonly arrives wrapped at 76 columns. Kubernetes
+  // stringData and external secret stores preserve those line breaks, so
+  // normalize whitespace before applying the strict alphabet/canonical check.
+  const encoded = value?.replace(/\s/g, "");
+  if (!encoded) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) {
+    throw new Error(`${settingName} must contain valid base64`);
+  }
+  const decoded = Buffer.from(encoded, "base64");
+  const canonical = decoded.toString("base64").replace(/=+$/, "");
+  if (decoded.length === 0 || canonical !== encoded.replace(/=+$/, "")) {
+    throw new Error(`${settingName} must contain valid base64`);
   }
   return new Uint8Array(decoded);
 }
@@ -2210,6 +2309,7 @@ function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
 }
 
 function validateSettings(settings: Settings): void {
+  temporalConnectionOptions(settings);
   if (settings.toolspaceEnabled && !settings.delegationSecret) {
     throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   }

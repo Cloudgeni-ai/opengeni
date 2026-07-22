@@ -2,6 +2,8 @@ import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { configuredAllowedModels, policyProviderIdForModel, type Settings } from "@opengeni/config";
 import {
   CreateSessionRequest,
+  ServiceTurnInitiator,
+  ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
   type AccessGrant,
@@ -16,6 +18,8 @@ import {
   type SessionMcpServerMetadata,
   type SessionTurn,
   type ToolRef,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   createSession,
@@ -29,6 +33,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
+  SessionIdConflictError,
   getSessionByCreateIdempotencyKey,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -44,7 +49,9 @@ import {
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
+  AgentCommandAuthorityError,
   SessionControlConflictError,
+  type SessionCommandActor,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -83,6 +90,99 @@ type ValidatedSessionMcpServers = {
   dbServers: CreateSessionMcpServerInput[];
   metadata: SessionMcpServerMetadata[];
 };
+
+type FrozenCreationInitiator = {
+  initiator?: TurnInitiator;
+  context?: TurnInitiatorContext;
+  actor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+};
+
+function serviceInitiatorForGrant(grant: AccessGrant): {
+  initiator: ServiceTurnInitiator;
+  context: ServiceTurnInitiatorContext;
+} | null {
+  if (!grant.serviceInitiator) {
+    if (grant.serviceInitiatorContext) {
+      throw new HTTPException(403, {
+        message: "service initiator context requires a signed service initiator",
+      });
+    }
+    return null;
+  }
+  const initiator = ServiceTurnInitiator.safeParse(grant.serviceInitiator);
+  if (!initiator.success) {
+    throw new HTTPException(403, {
+      message: "a delegated command initiator must be a bounded service principal",
+    });
+  }
+  const context = ServiceTurnInitiatorContext.safeParse(grant.serviceInitiatorContext ?? {});
+  if (!context.success) {
+    throw new HTTPException(403, {
+      message: "delegated service initiator context is invalid or reserved",
+    });
+  }
+  const callerTurnId = grant.metadata?.["turnId"];
+  const callerAttemptId = grant.metadata?.["attemptId"];
+  const callerExecutionGeneration = grant.metadata?.["executionGeneration"];
+  if (
+    callerTurnId !== undefined ||
+    callerAttemptId !== undefined ||
+    callerExecutionGeneration !== undefined
+  ) {
+    throw new HTTPException(403, {
+      message: "a service initiator cannot replace an exact agent-attempt initiator",
+    });
+  }
+  return {
+    initiator: initiator.data,
+    context: context.data,
+  };
+}
+
+function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator {
+  const serviceInitiator = serviceInitiatorForGrant(grant);
+  const callerSessionId = grant.metadata?.["sessionId"];
+  const callerTurnId = grant.metadata?.["turnId"];
+  const callerAttemptId = grant.metadata?.["attemptId"];
+  const callerExecutionGeneration = grant.metadata?.["executionGeneration"];
+  const hasCallerTurnClaim =
+    callerTurnId !== undefined ||
+    callerAttemptId !== undefined ||
+    callerExecutionGeneration !== undefined;
+  if (hasCallerTurnClaim) {
+    if (
+      typeof callerSessionId !== "string" ||
+      typeof callerTurnId !== "string" ||
+      typeof callerAttemptId !== "string" ||
+      typeof callerExecutionGeneration !== "number" ||
+      !Number.isSafeInteger(callerExecutionGeneration) ||
+      callerExecutionGeneration < 1
+    ) {
+      throw new HTTPException(403, { message: "caller attempt claims are incomplete" });
+    }
+    const actor = {
+      type: "agent_attempt",
+      sessionId: callerSessionId,
+      turnId: callerTurnId,
+      attemptId: callerAttemptId,
+      executionGeneration: callerExecutionGeneration,
+    } as const;
+    // The DB create transaction validates this exact attempt and derives the
+    // inherited subject under the same locks as the child-session insert.
+    return { actor };
+  }
+  if (serviceInitiator) {
+    return serviceInitiator;
+  }
+  return {
+    initiator: {
+      kind: "subject",
+      subjectId: grant.subjectId,
+      ...(grant.subjectLabel ? { label: grant.subjectLabel } : {}),
+    },
+    context: {},
+  };
+}
 
 function normalizedSessionMcpCredentialHeaders(
   headers: Record<string, string> | undefined,
@@ -133,6 +233,7 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
     ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
     cacheToolsList: server.cacheToolsList ?? false,
     ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -144,6 +245,7 @@ function mcpServerConfigFromMetadata(
     ...(server.name ? { name: server.name } : {}),
     url: server.url,
     cacheToolsList: false,
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -177,7 +279,9 @@ function validateSessionMcpServersForCreate(
     return { runtimeServers: [], dbServers: [], metadata: [] };
   }
   requirePermission(grant, "mcp_servers:attach");
-  const encryptionKey = requireVariableSetEncryption(settings);
+  const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
+    ? requireVariableSetEncryption(settings)
+    : null;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const runtimeServers: Settings["mcpServers"] = [];
@@ -195,7 +299,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey, value),
+        encryptVariableSetValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -207,6 +311,7 @@ function validateSessionMcpServersForCreate(
       timeoutMs: server.timeoutMs ?? null,
       cacheToolsList: server.cacheToolsList ?? false,
       requireApproval: server.requireApproval ?? null,
+      connectionRef: server.connectionRef ?? null,
       headersEncrypted,
     });
     metadata.push({
@@ -215,6 +320,7 @@ function validateSessionMcpServersForCreate(
       url: server.url,
       headerNames: Object.keys(headersEncrypted).sort(),
       credentialVersion: 1,
+      connectionRef: server.connectionRef ?? null,
     });
   }
   return { runtimeServers, dbServers, metadata };
@@ -258,6 +364,7 @@ function validateSessionMcpCredentialUpdates(input: {
 }
 
 export async function createAndStartSession(input: {
+  requestedSessionId?: string;
   db: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
@@ -271,6 +378,9 @@ export async function createAndStartSession(input: {
   reasoningEffort: Settings["openaiReasoningEffort"];
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
+  createdBy?: TurnInitiator;
+  createdByContext?: TurnInitiatorContext;
+  createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
   // Names/ids only; the session.created payload never carries variable values.
   variableSet?: { id: string; name: string } | null;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
@@ -332,6 +442,9 @@ export async function createAndStartSession(input: {
       input.createIdempotencyKey,
     );
     if (existing) {
+      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+        throw new SessionIdConflictError(input.requestedSessionId);
+      }
       return await finishStartSession(
         existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
         existing,
@@ -344,12 +457,16 @@ export async function createAndStartSession(input: {
     // advances the coalesced wake revision so an in-flight stale delivery can
     // never acknowledge work committed by the other caller.
     const { session: keyed, created } = await createSessionWithIdempotencyKey(input.db, {
+      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
       resources: input.resources,
       tools: input.tools,
       metadata: sessionMetadata,
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+      createdByActor: input.createdByActor ?? null,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
       variableSetId: input.variableSet?.id ?? null,
@@ -372,12 +489,16 @@ export async function createAndStartSession(input: {
     return await finishStartSession(input, keyed);
   }
   const session = await createSession(input.db, {
+    ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: input.initialMessage,
     resources: input.resources,
     tools: input.tools,
     metadata: sessionMetadata,
+    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+    ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+    createdByActor: input.createdByActor ?? null,
     model: input.model,
     sandboxBackend: input.sandboxBackend,
     variableSetId: input.variableSet?.id ?? null,
@@ -616,6 +737,8 @@ export async function postUserMessageTurn(input: {
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
+  actorLabel?: string;
+  commandActor?: SessionCommandActor;
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
@@ -636,7 +759,11 @@ export async function postUserMessageTurn(input: {
           workspaceId,
           sessionId,
           subjectId: input.actor ?? accountId,
-          actor: { type: "human", subjectId: input.actor ?? accountId },
+          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
+          actor: input.commandActor ?? {
+            type: "human",
+            subjectId: input.actor ?? accountId,
+          },
           operationKey,
           delivery: input.delivery ?? "send",
           controlEtag: input.controlEtag ?? null,
@@ -1082,53 +1209,71 @@ export async function createSessionForRequest(
     quantity: 1,
     model,
   });
-  const session = await createAndStartSession({
-    db,
-    bus,
-    workflowClient,
-    accountId: grant.accountId,
-    workspaceId,
-    initialMessage: payload.initialMessage,
-    resources,
-    tools,
-    ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-    model,
-    reasoningEffort,
-    // A shared spawn inherits the box's backend; a caller-supplied
-    // sandboxBackend on a shared spawn is ignored (it is the same box). A
-    // machine-targeted top-level create labels the home "selfhosted"
-    // (machineHomeBackend), overriding the caller/deployment default so the row
-    // matches where the session actually runs.
-    sandboxBackend:
-      inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
-    // Mirror the backend relabel on the OS axis: only a machine-targeted
-    // top-level create carries a derived OS; everything else is omitted and the
-    // "linux" default holds (shared spawns keep the parent-box behavior).
-    ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
-    sandboxGroupId,
-    metadata: payload.metadata,
-    variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
-    // Frozen rig binding (M3): both null for a rig-less session (today's path).
-    rigId: frozenRigId,
-    rigVersionId: frozenRigVersionId,
-    goal: payload.goal ?? null,
-    // Per-session persona instructions (already trimmed/validated by the
-    // contracts schema). Persisted on the row; composed system-level at turn
-    // time. Not surfaced as an event.
-    instructions: payload.instructions ?? null,
-    firstPartyMcpPermissions,
-    mcpServers: sessionMcpServers.dbServers,
-    sessionMcpServers: sessionMcpServers.metadata,
-    parentSessionId,
-    createIdempotencyKey: payload.idempotencyKey ?? null,
-    // Create-time machine targeting (A-2a): when a target sandbox is named, the
-    // active-sandbox pointer is seeded race-free inside createAndStartSession
-    // (after the row exists, before the first turn dispatches). Validation
-    // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
-    seedTargetSandbox: payload.targetSandboxId
-      ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
-      : null,
-  });
+  const creationInitiator = creationInitiatorForGrant(grant);
+  let session: Session;
+  try {
+    session = await createAndStartSession({
+      ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
+      db,
+      bus,
+      workflowClient,
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: payload.initialMessage,
+      resources,
+      tools,
+      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      model,
+      reasoningEffort,
+      // A shared spawn inherits the box's backend; a caller-supplied
+      // sandboxBackend on a shared spawn is ignored (it is the same box). A
+      // machine-targeted top-level create labels the home "selfhosted"
+      // (machineHomeBackend), overriding the caller/deployment default so the row
+      // matches where the session actually runs.
+      sandboxBackend:
+        inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+      // Mirror the backend relabel on the OS axis: only a machine-targeted
+      // top-level create carries a derived OS; everything else is omitted and the
+      // "linux" default holds (shared spawns keep the parent-box behavior).
+      ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
+      sandboxGroupId,
+      metadata: payload.metadata,
+      ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
+      ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
+      createdByActor: creationInitiator.actor ?? null,
+      variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
+      // Frozen rig binding (M3): both null for a rig-less session (today's path).
+      rigId: frozenRigId,
+      rigVersionId: frozenRigVersionId,
+      goal: payload.goal ?? null,
+      // Per-session persona instructions (already trimmed/validated by the
+      // contracts schema). Persisted on the row; composed system-level at turn
+      // time. Not surfaced as an event.
+      instructions: payload.instructions ?? null,
+      firstPartyMcpPermissions,
+      mcpServers: sessionMcpServers.dbServers,
+      sessionMcpServers: sessionMcpServers.metadata,
+      parentSessionId,
+      createIdempotencyKey: payload.idempotencyKey ?? null,
+      // Create-time machine targeting (A-2a): when a target sandbox is named, the
+      // active-sandbox pointer is seeded race-free inside createAndStartSession
+      // (after the row exists, before the first turn dispatches). Validation
+      // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
+      seedTargetSandbox: payload.targetSandboxId
+        ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
+        : null,
+    });
+  } catch (error) {
+    if (error instanceof AgentCommandAuthorityError) {
+      throw new HTTPException(403, { message: error.message });
+    }
+    if (error instanceof SessionIdConflictError) {
+      throw new HTTPException(409, {
+        message: "requested session id is already in use",
+      });
+    }
+    throw error;
+  }
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -1138,6 +1283,10 @@ export async function createSessionForRequest(
     unit: "run",
     sourceResourceType: "session",
     sourceResourceId: session.id,
+    sessionId: session.id,
+    initiator: session.createdBy,
+    initiatorContext: session.createdByContext,
+    origin: creationInitiator.actor ? "system" : "user",
     idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
   });
   return session;
@@ -1210,6 +1359,7 @@ export async function acceptSessionUserMessage(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
+  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const { accepted, turn } = await postUserMessageTurn({
     db,
     bus,
@@ -1225,8 +1375,21 @@ export async function acceptSessionUserMessage(
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
     delivery: input.delivery ?? "send",
-    origin: input.origin ?? "human",
+    origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
     actor: grant.subjectId,
+    ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+    ...(delegatedServiceInitiator
+      ? {
+          commandActor: {
+            type: "service" as const,
+            subjectId: delegatedServiceInitiator.initiator.subjectId,
+            ...(delegatedServiceInitiator.initiator.label
+              ? { subjectLabel: delegatedServiceInitiator.initiator.label }
+              : {}),
+            context: delegatedServiceInitiator.context,
+          },
+        }
+      : {}),
     ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
     ...(input.expectedDraftRevision !== undefined
       ? { expectedDraftRevision: input.expectedDraftRevision }
@@ -1242,6 +1405,11 @@ export async function acceptSessionUserMessage(
     unit: "run",
     sourceResourceType: "session_turn",
     sourceResourceId: turn.id,
+    sessionId,
+    turnId: turn.id,
+    initiator: turn.initiator,
+    initiatorContext: turn.initiatorContext,
+    origin: turn.source,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
   return { accepted, turn };

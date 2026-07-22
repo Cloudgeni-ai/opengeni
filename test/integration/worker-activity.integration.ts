@@ -203,6 +203,52 @@ describe("worker activities integration", () => {
     });
   });
 
+  test("overlays host-backed session MCP refs without a local encryption key", async () => {
+    const grant = await testGrant(dbClient.db);
+    const connectionRef = {
+      connectionId: "cloud-connection:gitlab:9",
+      providerDomain: "gitlab.example",
+      kind: "oauth2" as const,
+    };
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "use host gitlab mcp",
+      resources: [],
+      tools: [{ kind: "mcp", id: "host_gitlab" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      mcpServers: [
+        {
+          id: "host_gitlab",
+          name: "Host GitLab",
+          url: "https://host-gitlab.example/mcp",
+          cacheToolsList: false,
+          connectionRef,
+          headersEncrypted: {},
+        },
+      ],
+    });
+
+    const runSettings = await settingsWithSessionMcpServersForRun(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        environmentsEncryptionKey: undefined,
+      }),
+    );
+
+    expect(runSettings.mcpServers.find((server) => server.id === "host_gitlab")).toEqual({
+      id: "host_gitlab",
+      name: "Host GitLab",
+      url: "https://host-gitlab.example/mcp",
+      cacheToolsList: false,
+      connectionRef,
+      headers: {},
+    });
+  });
+
   test("a requireApproval session MCP tool pauses for approval and resumes on approve", async () => {
     // End-to-end through the GENERIC interruption loop: a session MCP server with
     // requireApproval:true makes its tool raise a run interruption, which the
@@ -1414,7 +1460,7 @@ describe("worker activities integration", () => {
     expect(result.status).toBe("failed");
     expect(sandboxExecCalls).toHaveLength(1);
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
-      "clone_repository '/workspace/repos/Futhark-AS/aifilesearch'",
+      "clone_repository '/workspace/repos/github.com/Futhark-AS/aifilesearch'",
     );
     expect(String(sandboxExecCalls[0]?.cmd)).toContain(
       'git -C "$tmp" fetch --depth 1 --no-tags --filter=blob:none origin "$ref"',

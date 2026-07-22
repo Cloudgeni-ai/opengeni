@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
+import { McpServerConnectionRef as ContractMcpServerConnectionRef } from "@opengeni/contracts";
 import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
@@ -14,6 +15,7 @@ import {
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
+  McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
   resolveStreamTokenSecret,
   retryStartupDependency,
@@ -23,6 +25,7 @@ import {
   stableSandboxEnvironmentForRun,
   startupRetryOptions,
   streamTokenDegraded,
+  temporalConnectionOptions,
 } from "../src";
 
 describe(".env.example", () => {
@@ -49,6 +52,89 @@ describe(".env.example", () => {
     }
 
     expect(() => withEnv(sourcedEnv, () => getSettings())).not.toThrow();
+  });
+});
+
+describe("Temporal connection security", () => {
+  test("keeps the local default plaintext and enables TLS for an API key", () => {
+    expect(temporalConnectionOptions(withEnv({}, () => getSettings()))).toEqual({
+      address: "127.0.0.1:7233",
+    });
+
+    expect(
+      temporalConnectionOptions(
+        withEnv({ OPENGENI_TEMPORAL_TLS_ENABLED: "true" }, () => getSettings()),
+      ),
+    ).toEqual({
+      address: "127.0.0.1:7233",
+      tls: true,
+    });
+
+    const secured = withEnv(
+      {
+        OPENGENI_TEMPORAL_HOST: "namespace.account.tmprl.cloud:7233",
+        OPENGENI_TEMPORAL_API_KEY: "temporal-test-key",
+      },
+      () => getSettings(),
+    );
+    expect(temporalConnectionOptions(secured)).toEqual({
+      address: "namespace.account.tmprl.cloud:7233",
+      tls: true,
+      apiKey: "temporal-test-key",
+    });
+  });
+
+  test("supports server-auth TLS, custom roots, SNI override, and mTLS", () => {
+    const rootCa = Buffer.from("root-ca".repeat(20));
+    const clientCertificate = Buffer.from("client-certificate");
+    const clientPrivateKey = Buffer.from("client-private-key");
+    const settings = withEnv(
+      {
+        OPENGENI_TEMPORAL_TLS_ENABLED: "true",
+        OPENGENI_TEMPORAL_TLS_SERVER_NAME: "temporal.internal",
+        OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: rootCa
+          .toString("base64")
+          .match(/.{1,76}/g)
+          ?.join("\n"),
+        OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64: clientCertificate.toString("base64"),
+        OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64: clientPrivateKey.toString("base64"),
+      },
+      () => getSettings(),
+    );
+
+    expect(temporalConnectionOptions(settings)).toEqual({
+      address: "127.0.0.1:7233",
+      tls: {
+        serverNameOverride: "temporal.internal",
+        serverRootCACertificate: new Uint8Array(rootCa),
+        clientCertPair: {
+          crt: new Uint8Array(clientCertificate),
+          key: new Uint8Array(clientPrivateKey),
+        },
+      },
+    });
+  });
+
+  test("rejects incomplete or malformed mTLS material without echoing it", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64:
+            Buffer.from("client-certificate").toString("base64"),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must both be set or both omitted");
+
+    const malformed = "not-a-secret!";
+    expect(() =>
+      withEnv({ OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: malformed }, () => getSettings()),
+    ).toThrow("OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64 must contain valid base64");
+    try {
+      withEnv({ OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: malformed }, () => getSettings());
+    } catch (error) {
+      expect(String(error)).not.toContain(malformed);
+    }
   });
 });
 
@@ -453,6 +539,27 @@ describe("sandbox preparation profiles", () => {
     };
     expect(settings.mcpServers[0]?.id).toBe("docs");
     expect(settings.mcpServers[0]?.allowedTools).toEqual(["search_documents"]);
+  });
+
+  test("keeps config and wire connection-ref schemas in lockstep", () => {
+    const cases: unknown[] = [
+      {
+        connectionId: "cloud-connection:github:42",
+        providerDomain: "github.com",
+        kind: "app_install",
+        scopes: ["repo"],
+        subjectScope: "subject",
+      },
+      { providerDomain: "gitlab.example" },
+      { connectionId: "opaque", providerDomain: "" },
+      { providerDomain: "github.com", unexpected: true },
+      null,
+    ];
+    for (const candidate of cases) {
+      expect(McpServerConnectionRefSchema.safeParse(candidate).success).toBe(
+        ContractMcpServerConnectionRef.safeParse(candidate).success,
+      );
+    }
   });
 
   test("registers built-in MCP profiles by default", () => {
