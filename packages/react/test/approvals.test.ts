@@ -49,6 +49,31 @@ describe("approvalsFromRequiresAction", () => {
     expect(approvals[3]!.name).toBe("approval");
   });
 
+  test("normalizes the serialized OpenAI Agents tool-approval shape", () => {
+    const approvals = approvalsFromRequiresAction({
+      approvals: [
+        {
+          type: "tool_approval_item",
+          rawItem: {
+            type: "function_call",
+            callId: "call-123",
+            name: "delete_everything",
+            arguments: '{"scope":"workspace"}',
+          },
+          agent: { name: "reviewer" },
+          toolName: "delete_everything",
+        },
+      ],
+    });
+
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0]).toMatchObject({
+      id: "call-123",
+      name: "delete_everything",
+      arguments: '{"scope":"workspace"}',
+    });
+  });
+
   test("tolerates malformed payloads", () => {
     expect(approvalsFromRequiresAction(null)).toEqual([]);
     expect(approvalsFromRequiresAction("nope")).toEqual([]);

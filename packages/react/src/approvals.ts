@@ -51,8 +51,8 @@ export function approvalsFromRequiresAction(payload: unknown): PendingApproval[]
         : {};
     return {
       id: String(raw.id ?? raw.callId ?? rawItem.callId ?? index),
-      name: String(raw.name ?? "approval"),
-      arguments: raw.arguments,
+      name: String(raw.name ?? raw.toolName ?? rawItem.name ?? "approval"),
+      arguments: raw.arguments ?? rawItem.arguments,
       raw: approval,
     };
   });
