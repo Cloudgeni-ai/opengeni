@@ -114,8 +114,12 @@ short-lived `ogd_` token during environment preparation:
 }
 ```
 
-The TTL follows the turn-appropriate token policy used for the platform git
-token path. Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
+Each bearer has a one-hour TTL. After the initial seed reaches a real sandbox
+session, the worker proactively re-signs the same account/workspace/session/run
+authority and atomically replaces the file on a bounded cadence. Renewal is
+single-flight, retries transient write failures, and is stopped and drained at
+attempt finalization so a settled attempt cannot land a late replacement.
+Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
 written into a sandbox file and the environment exposes only
 `OPENGENI_TOOLSPACE_TOKEN_FILE` plus `OPENGENI_TOOLSPACE_URL`. The token value
 must not appear in the sandbox manifest, env delta, event log, run state, or
@@ -155,6 +159,13 @@ reach.
 When the flag is off, behavior is byte-identical to the current tree: no
 permission is minted, no file path appears, no URL appears, and no toolspace
 surface is added.
+
+The current pointer is box-global. Sessions that intentionally share one
+sandbox group therefore also share this token-file trust boundary and can
+overwrite the pointer with the most recently seeded session-bound bearer. A
+per-session pointer that remains compatible with existing warm manifests is a
+separate follow-up; renewal writes through the declared pointer and does not
+silently change manifest identity.
 
 ## Audit And Budgets
 
@@ -251,4 +262,11 @@ still refines it.
 - Approval v2: block on a durable human approval and resume the direct call after
   the decision.
 - Results by reference: large tool outputs should be able to land in OpenGeni
-  storage and return a reference instead of a giant inline JSON-RPC payload.
+  storage and return a reference instead of a giant inline JSON-RPC payload;
+  investigate without preselecting a design in #536.
+- Per-session Toolspace token pointers for shared sandbox groups, with a
+  warm-manifest-compatible migration instead of changing an existing box's
+  stable environment in place (#535).
+- Distribute and discover `ogtool` independently of the stock sandbox image so
+  custom rigs and connected machines can consume a release-coherent artifact
+  (#537).

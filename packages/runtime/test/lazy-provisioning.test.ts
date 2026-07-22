@@ -110,6 +110,41 @@ describe("lazy provisioning synthetic manifest", () => {
     );
   });
 
+  test("lazy setup seeds the provisioning-time Toolspace bearer instead of the turn-start bearer", async () => {
+    const settings = testSettings({
+      sandboxBackend: "modal",
+      webSearchEnabled: false,
+      toolspaceEnabled: true,
+      delegationSecret: "toolspace-secret",
+    });
+    const environment = { HOME: "/workspace" };
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([]),
+      sandboxEnvironment: environment,
+      toolspaceTokenSeed: "ogd_turn_start",
+    });
+    const commands: string[] = [];
+    const backend = {
+      state: { manifest: buildManifest(settings, [], environment) },
+      exec: async (args: { cmd: string }) => {
+        commands.push(args.cmd);
+        return { exitCode: 0, output: "" };
+      },
+    };
+
+    await runOwnedSandboxSetup(agent, backend as never, backend as never, {
+      settings,
+      environment,
+      toolspaceTokenSeedOverride: "ogd_provisioning_time",
+    });
+
+    const seedCommand = commands.find((command) =>
+      command.includes("OPENGENI_TOOLSPACE_TOKEN_SEED"),
+    );
+    expect(seedCommand).toContain("ogd_provisioning_time");
+    expect(seedCommand).not.toContain("ogd_turn_start");
+  });
+
   // REGRESSION: runOwnedSandboxSetup is the LIVE owned-path hook execution (the
   // provided session skips the client create/resume decoration). A rig-bound turn
   // MUST run its frozen setup script here — a merge with the #315 lazy-provisioning
