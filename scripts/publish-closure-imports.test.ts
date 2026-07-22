@@ -2,16 +2,18 @@ import { describe, expect, test } from "bun:test";
 import { declarationModuleSpecifiers, runtimeModuleSpecifiers } from "./publish-closure-imports";
 
 describe("publish closure import discovery", () => {
-  test("finds static, dynamic, and CommonJS runtime imports", () => {
+  test("finds static, dynamic, and CommonJS runtime imports", async () => {
     const source = `
       import "@opengeni/static";
       const commonjs = require("@opengeni/commonjs");
+      const resolved = require.resolve("@opengeni/resolved");
       const dynamic = import("@opengeni/dynamic");
     `;
 
-    expect(runtimeModuleSpecifiers(source, "ts").sort()).toEqual([
+    expect((await runtimeModuleSpecifiers(source, "ts")).sort()).toEqual([
       "@opengeni/commonjs",
       "@opengeni/dynamic",
+      "@opengeni/resolved",
       "@opengeni/static",
     ]);
   });

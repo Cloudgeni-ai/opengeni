@@ -2,8 +2,14 @@ import ts from "typescript";
 
 export type RuntimeLoader = "js" | "jsx" | "ts" | "tsx";
 
-export function runtimeModuleSpecifiers(source: string, loader: RuntimeLoader): string[] {
-  return new Bun.Transpiler({ loader }).scanImports(source).map((entry) => entry.path);
+export async function runtimeModuleSpecifiers(
+  source: string,
+  loader: RuntimeLoader,
+): Promise<string[]> {
+  const transpiler = new Bun.Transpiler({ loader });
+  const imports = transpiler.scanImports(source);
+  const scan = await transpiler.scan(source);
+  return [...new Set([...scan.imports, ...imports].map((entry) => entry.path))];
 }
 
 export function declarationModuleSpecifiers(source: string, fileName: string): string[] {

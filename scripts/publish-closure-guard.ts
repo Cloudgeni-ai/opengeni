@@ -266,7 +266,7 @@ for (const pkg of publishable) {
     const text = readFileSync(path, "utf8");
     const moduleSpecifiers = path.endsWith(".d.ts")
       ? declarationModuleSpecifiers(text, path)
-      : runtimeModuleSpecifiers(
+      : await runtimeModuleSpecifiers(
           text,
           (path.endsWith(".tsx")
             ? "tsx"
