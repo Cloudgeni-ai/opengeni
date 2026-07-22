@@ -190,6 +190,7 @@ describe("useTurnQueue", () => {
       streamEvents: (_ws, _session, options) => {
         streamedAfter.value = options?.after ?? null;
         return (async function* () {
+          await options?.beforeLive?.();
           while (true) {
             const event = await new Promise<SessionEvent | null>((resolve) => {
               push = resolve;
@@ -208,13 +209,135 @@ describe("useTurnQueue", () => {
       undefined,
     );
     await flush();
-    expect(listCalls).toBe(1);
+    // The authoritative queue is loaded once for first paint, then once more
+    // after the SSE connection opens. An update included in lastSequence but
+    // missed by the first GET therefore cannot leave providerless hooks stale.
+    expect(listCalls).toBe(2);
     expect(streamedAfter.value).toBe(41);
+    expect(hook.result.current.queue[0]?.id).toBe("turn-2");
     await flushing(async () => {
       push!(makeEvent(42, "turn.queued"));
     });
     await flush(250);
-    expect(listCalls).toBe(2);
+    expect(listCalls).toBe(3);
+    await hook.unmount();
+  });
+
+  test("a failed queue handoff rejects live, surfaces the error, then recovers", async () => {
+    let reads = 0;
+    let handoffRejections = 0;
+    let releaseRetry = (): void => undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 2) throw new TypeError("queue handoff unavailable");
+        return queueSnapshot([fakeTurn({ id: reads === 1 ? "stale" : "recovered" })]);
+      },
+      getSession: async () => ({ lastSequence: 41 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          try {
+            await options?.beforeLive?.();
+          } catch {
+            handoffRejections += 1;
+            await retryGate;
+            await options?.beforeLive?.();
+          }
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(handoffRejections).toBe(1);
+    expect(hook.result.current.queue[0]?.id).toBe("stale");
+    expect(hook.result.current.error?.message).toContain("queue handoff unavailable");
+
+    releaseRetry();
+    await flush();
+    expect(reads).toBe(3);
+    expect(hook.result.current.queue[0]?.id).toBe("recovered");
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("the queue handoff commits before a superseding ordinary read can fail", async () => {
+    let reads = 0;
+    let resolveHandoffRead: ((snapshot: SessionQueueSnapshot) => void) | null = null;
+    let rejectSupersedingRead: ((cause: Error) => void) | null = null;
+    let markHandoffComplete: (() => void) | null = null;
+    const handoffRead = new Promise<SessionQueueSnapshot>((resolve) => {
+      resolveHandoffRead = resolve;
+    });
+    const supersedingRead = new Promise<SessionQueueSnapshot>((_resolve, reject) => {
+      rejectSupersedingRead = reject;
+    });
+    const handoffComplete = new Promise<void>((resolve) => {
+      markHandoffComplete = resolve;
+    });
+    const client = fakeClient({
+      getQueue: async () => {
+        reads += 1;
+        if (reads === 1) return queueSnapshot([fakeTurn({ id: "stale" })], { version: 1 });
+        if (reads === 2) return await handoffRead;
+        return await supersedingRead;
+      },
+      getSession: async () => ({ lastSequence: 41 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          markHandoffComplete?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(2);
+    expect(hook.result.current.queue[0]?.id).toBe("stale");
+
+    let laterRefresh: Promise<void> | null = null;
+    await flushing(() => {
+      laterRefresh = hook.result.current.refresh();
+    });
+    expect(reads).toBe(3);
+
+    await flushing(async () => {
+      resolveHandoffRead?.(
+        queueSnapshot([fakeTurn({ id: "handoff" })], {
+          version: 2,
+          effectiveControl: {
+            ...queueSnapshot([]).effectiveControl,
+            controlVersion: 4,
+          },
+        }),
+      );
+      await handoffComplete;
+    });
+    expect(hook.result.current.queue[0]?.id).toBe("handoff");
+    expect(hook.result.current.snapshot?.version).toBe(2);
+
+    await flushing(async () => {
+      rejectSupersedingRead?.(new TypeError("later ordinary read failed"));
+      await laterRefresh;
+    });
+    expect(hook.result.current.error?.message).toContain("later ordinary read failed");
+    expect(hook.result.current.queue[0]?.id).toBe("handoff");
+    expect(hook.result.current.snapshot?.version).toBe(2);
     await hook.unmount();
   });
 
@@ -703,10 +826,48 @@ describe("useSessionControl", () => {
     expect(sent).toEqual([
       { kind: "pause", reason: "stop now" },
       { kind: "resume", reason: "continue" },
-      { kind: "decision", approvalId: "ap-1", decision: "approve", message: "looks safe" },
-      { kind: "decision", approvalId: "ap-2", decision: "reject" },
+      {
+        kind: "decision",
+        approvalId: "ap-1",
+        decision: "approve",
+        message: "looks safe",
+        clientEventId: expect.any(String),
+      },
+      {
+        kind: "decision",
+        approvalId: "ap-2",
+        decision: "reject",
+        clientEventId: expect.any(String),
+      },
     ]);
     expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("reuses an approval idempotency key after a lost response", async () => {
+    const clientEventIds: string[] = [];
+    let attempts = 0;
+    const client = fakeClient({
+      sendApprovalDecision: async (_ws, _session, decision) => {
+        clientEventIds.push(decision.clientEventId ?? "");
+        attempts += 1;
+        if (attempts === 1) throw new Error("response lost");
+        return makeEvent(3, "user.approvalDecision");
+      },
+    });
+    const hook = await renderHook(
+      () => useSessionControl(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(async () => {
+      expect(await hook.result.current.approve("ap-1", "looks safe")).toBeNull();
+      expect(await hook.result.current.approve("ap-1", "looks safe")).not.toBeNull();
+    });
+
+    expect(clientEventIds).toHaveLength(2);
+    expect(clientEventIds[0]).not.toBe("");
+    expect(clientEventIds[1]).toBe(clientEventIds[0]);
     await hook.unmount();
   });
 });
@@ -760,6 +921,163 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("providerless stream handoff reconciles a draft update already covered by lastSequence", async () => {
+    const draft = (revision: number, text: string): ComposerDraft => ({
+      revision,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let current = draft(1, "stale first read");
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return current;
+      },
+      getSession: async () => {
+        current = draft(2, "authoritative handoff state");
+        return { lastSequence: 42 } as never;
+      },
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.value).toBe("authoritative handoff state");
+    await hook.unmount();
+  });
+
+  test("a delayed initial draft read cannot overwrite the newer handoff revision", async () => {
+    const draft = (revision: number, text: string): ComposerDraft => ({
+      revision,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let reads = 0;
+    let resolveInitialRead: ((value: ComposerDraft) => void) | null = null;
+    let markHandoffComplete: (() => void) | null = null;
+    const initialRead = new Promise<ComposerDraft>((resolve) => {
+      resolveInitialRead = resolve;
+    });
+    const handoffComplete = new Promise<void>((resolve) => {
+      markHandoffComplete = resolve;
+    });
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        return reads === 1 ? await initialRead : draft(2, "authoritative handoff");
+      },
+      getSession: async () => ({ lastSequence: 42 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          await options?.beforeLive?.();
+          markHandoffComplete?.();
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flushing(async () => await handoffComplete);
+
+    expect(reads).toBe(2);
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.value).toBe("authoritative handoff");
+
+    await flushing(() => resolveInitialRead?.(draft(1, "obsolete initial read")));
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.value).toBe("authoritative handoff");
+    await hook.unmount();
+  });
+
+  test("a failed draft handoff rejects live, surfaces the error, then recovers", async () => {
+    const draft = (revision: number, text: string): ComposerDraft => ({
+      revision,
+      text,
+      resources: [],
+      tools: [],
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    });
+    let reads = 0;
+    let handoffRejections = 0;
+    let releaseRetry = (): void => undefined;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 2) throw new TypeError("draft handoff unavailable");
+        return reads === 1 ? draft(1, "stale") : draft(2, "recovered");
+      },
+      getSession: async () => ({ lastSequence: 42 }) as never,
+      streamEvents: (_workspaceId, _sessionId, options) =>
+        (async function* () {
+          try {
+            await options?.beforeLive?.();
+          } catch {
+            handoffRejections += 1;
+            await retryGate;
+            await options?.beforeLive?.();
+          }
+          const event = await new Promise<SessionEvent | null>((resolve) => {
+            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+          });
+          if (event) yield event;
+        })(),
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+
+    expect(handoffRejections).toBe(1);
+    expect(hook.result.current.value).toBe("stale");
+    expect(hook.result.current.error?.message).toContain("draft handoff unavailable");
+
+    releaseRetry();
+    await flush();
+    expect(reads).toBe(3);
+    expect(hook.result.current.value).toBe("recovered");
+    expect(hook.result.current.draft?.revision).toBe(2);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("a live queue mutation reloads the authoritative draft in another tab", async () => {
     let current: ComposerDraft = {
       revision: 1,
