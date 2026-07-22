@@ -144,7 +144,7 @@ async function freezeRequest(options: { expiresAt?: Date | null; parallel?: bool
     activeTurnId: turn.id,
     runState: {
       serializedRunState: JSON.stringify({ version: 1, interrupted: true }),
-      pendingApprovals: [],
+      pendingApprovals: [{ id: "ordinary-call" }],
       humanInputRequests,
     },
     events: [
