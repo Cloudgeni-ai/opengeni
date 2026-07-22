@@ -2232,15 +2232,14 @@ export class OpenGeniClient {
 
   // --- GitHub ----------------------------------------------------------------------------------
 
-  /** GitHub App configuration status + a signed install URL when configured. */
+  /** GitHub App configuration status; install/link URLs are null while new binding is disabled. */
   async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
     return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
   }
 
   /**
-   * Browser entry point that plants the CSRF cookie and forwards to GitHub's
-   * install page. Open this in a browser (it redirects); `state` comes from
-   * `getGitHubApp().installUrl` or a github_connect_link tool.
+   * Compatibility URL for previously issued state. New installation binding is
+   * disabled, so the endpoint validates state and terminates with HTTP 410.
    */
   githubConnectUrl(workspaceId: string, state: string): string {
     return this.url(`/v1/workspaces/${workspaceId}/github/connect`, { state });
