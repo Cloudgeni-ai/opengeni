@@ -246,6 +246,7 @@ describe("SDK / contracts parity", () => {
     const append: ProposeRigChangeRequest = {
       kind: "setup_append",
       payload: { command: "apt-get install -y jq", note: "needed jq" },
+      idempotencyKey: "sdk-rig-proposal-1",
     };
     const edit: ProposeRigChangeRequest = {
       kind: "definition_edit",

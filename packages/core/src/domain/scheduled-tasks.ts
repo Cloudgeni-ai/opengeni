@@ -16,11 +16,14 @@ import {
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { requirePermission } from "../access";
+import { hasPermission, requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
-import { validateVariableSetAttachment } from "./environments";
+import {
+  validateRigDefaultVariableSetAttachments,
+  validateVariableSetAttachment,
+} from "./environments";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "./sessions";
 import {
   normalizeResources,
@@ -83,8 +86,23 @@ export async function createValidatedScheduledTask(input: {
   // (at dispatch), so validate only that the id names a rig in the workspace —
   // NOT that it has an active version now (that is a fire-time concern). RLS
   // makes a cross-workspace id indistinguishable from missing → both 422.
+  let rigDefaultVariableSetsAuthorized = false;
   if (input.payload.rigId) {
-    await requireScheduledTaskRig(input.db, input.grant.workspaceId, input.payload.rigId);
+    const rig = await requireScheduledTaskRig(
+      input.db,
+      input.grant.workspaceId,
+      input.payload.rigId,
+    );
+    await validateRigDefaultVariableSetAttachments(
+      { settings: input.settings, db: input.db },
+      input.grant,
+      input.grant.workspaceId,
+      rig.activeVersion?.defaultVariableSetIds ?? [],
+      { preauthorized: input.variableSetPreauthorized ?? false },
+    );
+    rigDefaultVariableSetsAuthorized =
+      input.variableSetPreauthorized === true ||
+      hasPermission(input.grant.permissions, "variable-sets:use");
   }
   return await createScheduledTask(input.db, {
     id,
@@ -99,6 +117,7 @@ export async function createValidatedScheduledTask(input: {
     agentConfig,
     variableSetId: input.payload.variableSetId ?? null,
     rigId: input.payload.rigId ?? null,
+    rigDefaultVariableSetsAuthorized,
     metadata: input.payload.metadata,
   });
 }
@@ -109,11 +128,12 @@ async function requireScheduledTaskRig(
   db: Database,
   workspaceId: string,
   rigId: string,
-): Promise<void> {
+): Promise<NonNullable<Awaited<ReturnType<typeof getRig>>>> {
   const rig = await getRig(db, workspaceId, rigId);
   if (!rig) {
     throw new HTTPException(422, { message: `unknown rigId: ${rigId}` });
   }
+  return rig;
 }
 
 export async function validatedScheduledTaskUpdate(input: {
@@ -176,13 +196,39 @@ export async function validatedScheduledTaskUpdate(input: {
     }
   }
   if (input.payload.rigId !== undefined) {
-    // The rig binds fresh per fire, so changing it on a reusable-session task is
-    // harmless for the LIVE session (which keeps its own frozen version) and
-    // only affects subsequent new-session fires — no live-session guard needed.
-    if (input.payload.rigId !== null) {
-      await requireScheduledTaskRig(input.db, input.existing.workspaceId, input.payload.rigId);
+    const nextRigId = input.payload.rigId;
+    const hasReusableSession =
+      input.existing.runMode === "reusable_session" && Boolean(input.existing.reusableSessionId);
+    if (hasReusableSession && (input.existing.rigId ?? null) !== (nextRigId ?? null)) {
+      // A reusable session keeps its frozen rig version and authorization
+      // provenance. Letting the task detach/swap the rig would make a later
+      // agentConfig-only edit appear secret-free while the reused session still
+      // decrypts the original rig defaults.
+      throw new HTTPException(409, {
+        message: "cannot change rig of a task with a live reusable session; recreate the task",
+      });
     }
-    update.rigId = input.payload.rigId;
+    if (hasReusableSession) {
+      // A same-id no-op must preserve the provenance frozen onto the reusable
+      // session; do not recalculate it from a newer active rig version.
+    } else if (nextRigId !== null) {
+      const rig = await requireScheduledTaskRig(input.db, input.existing.workspaceId, nextRigId);
+      await validateRigDefaultVariableSetAttachments(
+        { settings: input.settings, db: input.db },
+        input.grant,
+        input.existing.workspaceId,
+        rig.activeVersion?.defaultVariableSetIds ?? [],
+      );
+      update.rigDefaultVariableSetsAuthorized = hasPermission(
+        input.grant.permissions,
+        "variable-sets:use",
+      );
+    } else {
+      update.rigDefaultVariableSetsAuthorized = false;
+    }
+    if (!hasReusableSession) {
+      update.rigId = nextRigId;
+    }
   }
   if (input.payload.agentConfig !== undefined) {
     // Editing the instructions of a task that injects workspace secrets is
@@ -193,6 +239,17 @@ export async function validatedScheduledTaskUpdate(input: {
         ? input.payload.variableSetId !== null
         : Boolean(input.existing.variableSetId);
     if (willHaveVariableSet) {
+      requirePermission(input.grant, "variable-sets:use");
+    }
+    // Editing instructions/tools on a task authorized to inject rig defaults
+    // changes how those secrets can be used, exactly like an attached variable
+    // set, so require the permission again.
+    const effectiveRigId = update.rigId !== undefined ? update.rigId : input.existing.rigId;
+    const effectiveRigDefaultsAuthorized =
+      update.rigDefaultVariableSetsAuthorized !== undefined
+        ? update.rigDefaultVariableSetsAuthorized
+        : input.existing.rigDefaultVariableSetsAuthorized === true;
+    if (effectiveRigId !== null && effectiveRigDefaultsAuthorized) {
       requirePermission(input.grant, "variable-sets:use");
     }
     update.agentConfig = await validateScheduledTaskAgentConfig({
@@ -232,6 +289,8 @@ export async function restoreScheduledTask(
     agentConfig: task.agentConfig,
     reusableSessionId: task.reusableSessionId,
     variableSetId: task.variableSetId,
+    rigId: task.rigId,
+    rigDefaultVariableSetsAuthorized: task.rigDefaultVariableSetsAuthorized === true,
     metadata: task.metadata,
   });
 }

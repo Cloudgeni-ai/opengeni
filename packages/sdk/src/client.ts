@@ -1597,7 +1597,7 @@ export class OpenGeniClient {
 
   // --- Rigs ------------------------------------------------------------------
   // Workspace-scoped, versioned sandbox machine definitions. rigs:use gates read
-  // + proposeRigChange; rigs:manage gates create / update / delete / activate.
+  // + propose/verify; rigs:manage gates every create/update/delete/activation.
 
   async listRigs(workspaceId: string): Promise<Rig[]> {
     return await this.requestJson<Rig[]>("GET", `/v1/workspaces/${workspaceId}/rigs`);
@@ -1682,9 +1682,8 @@ export class OpenGeniClient {
   }
 
   /**
-   * Promote a verified `definition_edit` change into a new active rig version
-   * (rigs:manage). Only valid once the change's verification passed; returns the
-   * newly minted version.
+   * Promote either verified change kind into a new active rig version
+   * (rigs:manage). Retries return the version already minted for this change.
    */
   async promoteRigChange(
     workspaceId: string,

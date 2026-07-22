@@ -118,6 +118,7 @@ import {
 } from "drizzle-orm";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
+import { isDeepStrictEqual } from "node:util";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
@@ -2045,6 +2046,7 @@ export type CreateScheduledTaskInput = {
   variableSetId?: string | null;
   // The rig each run binds to (M3); active version resolved per fire at dispatch.
   rigId?: string | null;
+  rigDefaultVariableSetsAuthorized?: boolean;
   metadata: Record<string, unknown>;
 };
 
@@ -2058,6 +2060,7 @@ export type UpdateScheduledTaskInput = Partial<{
   reusableSessionId: string | null;
   variableSetId: string | null;
   rigId: string | null;
+  rigDefaultVariableSetsAuthorized: boolean;
   metadata: Record<string, unknown>;
 }>;
 
@@ -5487,6 +5490,11 @@ export async function updateScheduledTask(
           : {}),
         ...(input.variableSetId !== undefined ? { variableSetId: input.variableSetId } : {}),
         ...(input.rigId !== undefined ? { rigId: input.rigId } : {}),
+        ...(input.rigDefaultVariableSetsAuthorized !== undefined
+          ? {
+              rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized,
+            }
+          : {}),
         ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
         updatedAt: new Date(),
       })
@@ -6086,15 +6094,15 @@ export async function deleteVariableSetVariable(
 // boolean. Every function runs through withWorkspaceRls / withRlsContext.
 // ---------------------------------------------------------------------------
 
-// Thrown when a rig_change status transition is illegal (merged/rejected are
-// terminal). The domain/route layer maps this to a 409.
+// Thrown when a rig_change status transition is illegal. The domain/route layer
+// maps this to a 409.
 export class RigChangeTransitionError extends Error {
   constructor(
     public readonly changeId: string,
     public readonly fromStatus: string,
     public readonly toStatus: string,
   ) {
-    super(`Rig change ${changeId} is ${fromStatus} (terminal); cannot transition to ${toStatus}`);
+    super(`Rig change ${changeId} is ${fromStatus}; cannot transition to ${toStatus}`);
     this.name = "RigChangeTransitionError";
   }
 }
@@ -6116,6 +6124,27 @@ export class RigChangeAlreadyVerifyingError extends Error {
   constructor(public readonly changeId: string) {
     super(`Rig change ${changeId} is already verifying`);
     this.name = "RigChangeAlreadyVerifyingError";
+  }
+}
+
+export class RigChangeIdempotencyConflictError extends Error {
+  constructor(public readonly idempotencyKey: string) {
+    super("Rig change idempotency key was already used with different proposal content");
+    this.name = "RigChangeIdempotencyConflictError";
+  }
+}
+
+export class RigVerificationAttemptChangedError extends Error {
+  constructor(
+    public readonly changeId: string,
+    public readonly expectedAttempt: number,
+    public readonly actualAttempt: number | null,
+    public readonly actualStatus: string,
+  ) {
+    super(
+      `Rig change ${changeId} verification attempt moved: expected ${expectedAttempt}, current ${actualAttempt ?? "none"} (${actualStatus})`,
+    );
+    this.name = "RigVerificationAttemptChangedError";
   }
 }
 
@@ -6147,7 +6176,12 @@ function mapRigVersion(row: typeof schema.rigVersions.$inferSelect): RigVersion 
 }
 
 function unknownRigHealth(activeVersion: RigVersion | null): RigVerificationHealth | null {
-  return activeVersion ? { checkHealth: "unknown", lastVerifiedAt: null } : null;
+  return activeVersion
+    ? {
+        checkHealth: activeVersion.checks.length === 0 ? "not_configured" : "unknown",
+        lastVerifiedAt: null,
+      }
+    : null;
 }
 
 function mapRig(
@@ -6180,6 +6214,7 @@ function mapRigChange(row: typeof schema.rigChanges.$inferSelect): RigChange {
     payload: RigChangeContract.shape.payload.parse(row.payload),
     status: row.status as RigChangeStatus,
     proposedBy: row.proposedBy,
+    idempotencyKey: row.idempotencyKey ?? null,
     verification: (row.verification ?? null) as RigChange["verification"],
     resultVersionId: row.resultVersionId,
     createdAt: row.createdAt.toISOString(),
@@ -6249,8 +6284,9 @@ async function loadRigHealthByActiveVersion(
   activeVersions: RigVersion[],
 ): Promise<Map<string, RigVerificationHealth>> {
   const versionIds = activeVersions.map((version) => version.id);
+  const versionById = new Map(activeVersions.map((version) => [version.id, version]));
   const healthByVersion: Map<string, RigVerificationHealth> = new Map(
-    versionIds.map((versionId) => [versionId, { checkHealth: "unknown", lastVerifiedAt: null }]),
+    activeVersions.map((version) => [version.id, unknownRigHealth(version)!]),
   );
   if (versionIds.length === 0) {
     return healthByVersion;
@@ -6332,7 +6368,13 @@ async function loadRigHealthByActiveVersion(
   }
 
   for (const versionId of versionIds) {
-    healthByVersion.set(versionId, latestRigHealth(candidatesByVersion.get(versionId) ?? []));
+    const version = versionById.get(versionId)!;
+    healthByVersion.set(
+      versionId,
+      version.checks.length === 0
+        ? { checkHealth: "not_configured", lastVerifiedAt: null }
+        : latestRigHealth(candidatesByVersion.get(versionId) ?? []),
+    );
   }
   return healthByVersion;
 }
@@ -6702,7 +6744,7 @@ export async function createRigVersionForChangePromotion(
   input: RigVersionContentInput & {
     expectedActiveVersionId: string;
   },
-): Promise<{ version: RigVersion; change: RigChange }> {
+): Promise<{ version: RigVersion; change: RigChange; promoted: boolean }> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [rig] = await scopedDb
       .select({ id: schema.rigs.id, accountId: schema.rigs.accountId })
@@ -6728,7 +6770,35 @@ export async function createRigVersionForChangePromotion(
     if (!currentChange) {
       throw new Error(`Rig change not found: ${changeId}`);
     }
-    if (currentChange.status === "merged" || currentChange.status === "rejected") {
+    if (currentChange.status === "merged") {
+      if (!currentChange.resultVersionId) {
+        throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+      }
+      const [existingVersion] = await scopedDb
+        .select()
+        .from(schema.rigVersions)
+        .where(
+          and(
+            eq(schema.rigVersions.workspaceId, workspaceId),
+            eq(schema.rigVersions.rigId, rigId),
+            eq(schema.rigVersions.id, currentChange.resultVersionId),
+          ),
+        )
+        .limit(1);
+      if (!existingVersion) {
+        throw new Error(`Promoted rig version not found: ${currentChange.resultVersionId}`);
+      }
+      return {
+        version: mapRigVersion(existingVersion),
+        change: mapRigChange(currentChange),
+        promoted: false,
+      };
+    }
+    if (currentChange.status === "rejected") {
+      throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
+    }
+    const verification = (currentChange.verification ?? null) as Record<string, unknown> | null;
+    if (currentChange.status !== "proposed" || verification?.passed !== true) {
       throw new RigChangeTransitionError(changeId, currentChange.status, "merged");
     }
     if (currentChange.baseVersionId !== input.expectedActiveVersionId) {
@@ -6816,6 +6886,7 @@ export async function createRigVersionForChangePromotion(
     return {
       version: mapRigVersion(versionRow),
       change: mapRigChange(changeRow),
+      promoted: true,
     };
   });
 }
@@ -7070,6 +7141,77 @@ export async function createRigChange(
   );
 }
 
+/**
+ * Idempotent proposal insert. The key is unique per workspace; a retry with the
+ * exact same rig/base/kind/payload/actor returns the existing row, while key
+ * reuse for different content fails closed instead of silently aliasing two
+ * proposals.
+ */
+export async function createRigChangeWithIdempotencyKey(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    rigId: string;
+    baseVersionId?: string | null;
+    kind: RigChangeKind;
+    payload: Record<string, unknown>;
+    proposedBy?: string | null;
+    idempotencyKey: string;
+  },
+): Promise<{ change: RigChange; created: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [inserted] = await scopedDb
+        .insert(schema.rigChanges)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          rigId: input.rigId,
+          baseVersionId: input.baseVersionId ?? null,
+          kind: input.kind,
+          payload: input.payload,
+          status: "proposed",
+          proposedBy: input.proposedBy ?? null,
+          idempotencyKey: input.idempotencyKey,
+        })
+        .onConflictDoNothing({
+          target: [schema.rigChanges.workspaceId, schema.rigChanges.idempotencyKey],
+          where: sql`${schema.rigChanges.idempotencyKey} is not null`,
+        })
+        .returning();
+      if (inserted) {
+        return { change: mapRigChange(inserted), created: true };
+      }
+      const [existing] = await scopedDb
+        .select()
+        .from(schema.rigChanges)
+        .where(
+          and(
+            eq(schema.rigChanges.workspaceId, input.workspaceId),
+            eq(schema.rigChanges.idempotencyKey, input.idempotencyKey),
+          ),
+        )
+        .limit(1);
+      if (!existing) {
+        throw new Error("Failed to create rig change under idempotency key");
+      }
+      const sameProposal =
+        existing.rigId === input.rigId &&
+        existing.baseVersionId === (input.baseVersionId ?? null) &&
+        existing.kind === input.kind &&
+        existing.proposedBy === (input.proposedBy ?? null) &&
+        isDeepStrictEqual(existing.payload, input.payload);
+      if (!sameProposal) {
+        throw new RigChangeIdempotencyConflictError(input.idempotencyKey);
+      }
+      return { change: mapRigChange(existing), created: false };
+    },
+  );
+}
+
 export async function listRigChanges(
   db: Database,
   workspaceId: string,
@@ -7250,6 +7392,62 @@ export async function updateRigChangeStatus(
   });
 }
 
+/**
+ * Attempt-fenced verification settlement. A cancelled/lost workflow may race a
+ * late activity completion; only the still-current `verifying` attempt may
+ * write its terminal outcome, so a zombie can never overwrite recovery.
+ */
+export async function settleRigChangeVerificationAttempt(
+  db: Database,
+  workspaceId: string,
+  changeId: string,
+  expectedAttempt: number,
+  input: {
+    status: "proposed" | "rejected" | "failed";
+    verification: Record<string, unknown>;
+  },
+): Promise<RigChange> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [current] = await scopedDb
+      .select()
+      .from(schema.rigChanges)
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
+      )
+      .for("update")
+      .limit(1);
+    if (!current) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    const currentVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const actualAttempt =
+      typeof currentVerification.attempt === "number" ? currentVerification.attempt : null;
+    if (current.status !== "verifying" || actualAttempt !== expectedAttempt) {
+      throw new RigVerificationAttemptChangedError(
+        changeId,
+        expectedAttempt,
+        actualAttempt,
+        current.status,
+      );
+    }
+    const [row] = await scopedDb
+      .update(schema.rigChanges)
+      .set({
+        status: input.status,
+        verification: { ...currentVerification, ...input.verification },
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(schema.rigChanges.workspaceId, workspaceId), eq(schema.rigChanges.id, changeId)),
+      )
+      .returning();
+    if (!row) {
+      throw new Error(`Rig change not found: ${changeId}`);
+    }
+    return mapRigChange(row);
+  });
+}
+
 export async function beginRigChangeVerificationAttempt(
   db: Database,
   workspaceId: string,
@@ -7271,18 +7469,27 @@ export async function beginRigChangeVerificationAttempt(
     if (!current) {
       throw new Error(`Rig change not found: ${changeId}`);
     }
+    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
+    const previousAttempt =
+      typeof previousVerification.attempt === "number" &&
+      Number.isInteger(previousVerification.attempt) &&
+      previousVerification.attempt > 0
+        ? previousVerification.attempt
+        : 0;
     if (current.status === "verifying") {
-      if (input.allowAlreadyVerifying) {
+      if (input.allowAlreadyVerifying && previousAttempt > 0) {
         return mapRigChange(current);
       }
-      throw new RigChangeAlreadyVerifyingError(changeId);
+      if (!input.allowAlreadyVerifying) {
+        throw new RigChangeAlreadyVerifyingError(changeId);
+      }
+      // A historical/pre-attempt row may have committed `verifying` before its
+      // Temporal start was lost. Adopt it under attempt 1 while holding the row
+      // lock so retries converge on one deterministic workflow id.
     }
     if (current.status === "merged") {
       throw new RigChangeTransitionError(changeId, current.status, "verifying");
     }
-    const previousVerification = (current.verification as Record<string, unknown> | null) ?? {};
-    const previousAttempt =
-      typeof previousVerification.attempt === "number" ? previousVerification.attempt : 0;
     const [row] = await scopedDb
       .update(schema.rigChanges)
       .set({
@@ -10885,6 +11092,7 @@ export async function createSession(
     // ⇒ a rig-less session (byte-for-byte today's behavior).
     rigId?: string | null;
     rigVersionId?: string | null;
+    rigDefaultVariableSetsAuthorized?: boolean;
     firstPartyMcpPermissions?: Permission[] | null;
     // Per-session agent persona/system instructions (org-visible, not a secret).
     // Null/omitted ⇒ the session carries none (composed instructions unchanged).
@@ -10925,6 +11133,7 @@ export async function createSession(
             variableSetId: input.variableSetId ?? null,
             rigId: input.rigId ?? null,
             rigVersionId: input.rigVersionId ?? null,
+            rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized ?? false,
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             instructions: input.instructions ?? null,
             parentSessionId: input.parentSessionId ?? null,
@@ -10972,6 +11181,7 @@ export async function createSessionWithIdempotencyKey(
     // ⇒ a rig-less session (byte-for-byte today's behavior).
     rigId?: string | null;
     rigVersionId?: string | null;
+    rigDefaultVariableSetsAuthorized?: boolean;
     firstPartyMcpPermissions?: Permission[] | null;
     // Per-session agent persona/system instructions (org-visible, not a secret).
     instructions?: string | null;
@@ -11010,6 +11220,7 @@ export async function createSessionWithIdempotencyKey(
             variableSetId: input.variableSetId ?? null,
             rigId: input.rigId ?? null,
             rigVersionId: input.rigVersionId ?? null,
+            rigDefaultVariableSetsAuthorized: input.rigDefaultVariableSetsAuthorized ?? false,
             firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
             instructions: input.instructions ?? null,
             parentSessionId: input.parentSessionId ?? null,
@@ -25425,6 +25636,7 @@ function mapSession(
     // rig-less session; frozen at create so a later promote never moves them.
     rigId: row.rigId ?? null,
     rigVersionId: row.rigVersionId ?? null,
+    rigDefaultVariableSetsAuthorized: row.rigDefaultVariableSetsAuthorized,
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
@@ -25585,6 +25797,7 @@ function mapScheduledTask(row: typeof schema.scheduledTasks.$inferSelect): Sched
     variableSetId: row.variableSetId,
     environmentId: row.variableSetId,
     rigId: row.rigId ?? null,
+    rigDefaultVariableSetsAuthorized: row.rigDefaultVariableSetsAuthorized,
     metadata: row.metadata,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),

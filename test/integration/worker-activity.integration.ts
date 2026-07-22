@@ -18,6 +18,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createFileUpload,
+  createRig,
   createScheduledTask,
   createSession,
   createSessionGoal,
@@ -2707,6 +2708,56 @@ describe("worker activities integration", () => {
     expect(JSON.stringify(failed?.payload)).not.toContain("required-secret-123456");
   });
 
+  test("worker refuses unauthorized rig-default decryption on a legacy session row", async () => {
+    const grant = await testGrant(dbClient.db);
+    const variableSet = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      LEGACY_RIG_TOKEN: "legacy-rig-secret-123456",
+    });
+    const rig = await createRig(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: `legacy-session-rig-${crypto.randomUUID()}`,
+      initialVersion: { defaultVariableSetIds: [variableSet.id] },
+    });
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "run",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      rigId: rig.id,
+      rigVersionId: rig.activeVersion!.id,
+    });
+    await appendOwnedEvents(dbClient.db, grant, session.id, [
+      { type: "user.message", payload: { text: "run" } },
+    ]);
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: workerEnvironmentsKey,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "never" }]),
+      }),
+    });
+    const result = await activities.runAgentTurn({
+      attemptId: crypto.randomUUID(),
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      trigger: { kind: "next" },
+      workflowId: "workflow-unauthorized-rig-defaults",
+      workflowRunId: crypto.randomUUID(),
+    });
+    expect(result.status).toBe("failed");
+    const events = await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 50);
+    expect(JSON.stringify(events)).toContain("not authorized with variable-sets:use");
+    expect(JSON.stringify(events)).not.toContain("legacy-rig-secret-123456");
+  });
+
   test("propagates scheduled task environment attachments into dispatched sessions", async () => {
     const grant = await testGrant(dbClient.db);
     const environment = await seedWorkspaceEnvironment(dbClient.db, grant, {
@@ -2754,6 +2805,54 @@ describe("worker activities integration", () => {
       variableSetName: environment.name,
     });
     expect(JSON.stringify(events)).not.toContain("task-secret-123456");
+  });
+
+  test("fails a legacy scheduled rig binding before decrypting unauthorized defaults", async () => {
+    const grant = await testGrant(dbClient.db);
+    const variableSet = await seedWorkspaceEnvironment(dbClient.db, grant, {
+      RIG_TASK_TOKEN: "rig-task-secret-123456",
+    });
+    const rig = await createRig(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      name: `unauthorized-task-rig-${crypto.randomUUID()}`,
+      initialVersion: { defaultVariableSetIds: [variableSet.id] },
+    });
+    // Simulate a pre-0066 task row: it has a rig reference but no persisted
+    // authorization provenance (the column default is false).
+    const task = await createOwnedScheduledTask(dbClient.db, grant, {
+      name: "legacy unauthorized rig",
+      status: "active",
+      schedule: { type: "interval", everySeconds: 3600 },
+      temporalScheduleId: `scheduled-task-${crypto.randomUUID()}`,
+      runMode: "new_session_per_run",
+      overlapPolicy: "allow_concurrent",
+      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+      rigId: rig.id,
+      metadata: {},
+    });
+    const activities = createWorkerActivities({
+      settings: testSettings({
+        databaseUrl: services.databaseUrl,
+        natsUrl: services.natsUrl,
+        environmentsEncryptionKey: workerEnvironmentsKey,
+      }),
+      db: dbClient.db,
+      bus,
+      runtime: createProductionAgentRuntime({
+        model: new ScriptedModel([{ outputText: "never" }]),
+      }),
+    });
+    await expect(
+      activities.dispatchScheduledTaskRun({
+        workspaceId: grant.workspaceId,
+        taskId: task.id,
+        triggerType: "scheduled",
+      }),
+    ).rejects.toThrow(/not authorized with variable-sets:use/);
+    const runs = await listScheduledTaskRuns(dbClient.db, grant.workspaceId, task.id);
+    expect(runs[0]?.status).toBe("failed");
+    expect(JSON.stringify(runs)).not.toContain("rig-task-secret-123456");
   });
 
   test("fails reusable dispatch when the task attachment diverges from its session", async () => {

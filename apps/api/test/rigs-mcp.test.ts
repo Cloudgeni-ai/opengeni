@@ -106,6 +106,7 @@ describe("rig MCP tools", () => {
       rigId: rig.id,
       command: "touch /opt/mcp/tool",
       note: "mcp proposal",
+      idempotencyKey: "mcp-rig-proposal-1",
     });
     expect(proposed.change.status).toBe("verifying");
     expect(proposed.verificationStarted).toBe(true);
@@ -113,12 +114,14 @@ describe("rig MCP tools", () => {
       {
         workspaceId,
         changeId: proposed.change.id,
+        attempt: 1,
         workflowId: `rig-verification-change-${proposed.change.id}-attempt-1`,
       },
     ]);
     const stored = await getRigChange(client.db, workspaceId, proposed.change.id);
     expect(stored?.kind).toBe("setup_append");
     expect(stored?.proposedBy).toBe(`session:${sessionId}`);
+    expect(stored?.idempotencyKey).toBe("mcp-rig-proposal-1");
   });
 
   test("rig_get keeps one bounded active definition and summary-only history", async () => {
@@ -225,9 +228,11 @@ describe("rig MCP tools", () => {
     expect(got.projection.fields.activeSetupScript.originalBytes).toBeGreaterThan(100_000);
   });
 
-  test("rig_promote is absent without rigs:manage", async () => {
-    if (!available) return;
-    const server = buildOpenGeniMcpServer(deps(new FakeWorkflowClient()), grant(["rigs:use"]));
+  test("rig_promote is not agent-visible even with rigs:manage", async () => {
+    const server = buildOpenGeniMcpServer(
+      deps(new FakeWorkflowClient()),
+      grant(["rigs:use", "rigs:manage"]),
+    );
     expect(toolNames(server)).not.toContain("rig_promote");
     await expect(
       callMcpTool(server, "rig_promote", {
@@ -238,10 +243,13 @@ describe("rig MCP tools", () => {
   });
 });
 
-function deps(workflowClient: SessionWorkflowClient): ApiRouteDeps {
+function deps(
+  workflowClient: SessionWorkflowClient,
+  db = client?.db ?? ({} as never),
+): ApiRouteDeps {
   return {
     settings: testSettings({}),
-    db: client.db,
+    db,
     bus: new MemoryEventBus(),
     workflowClient,
     objectStorage: null,

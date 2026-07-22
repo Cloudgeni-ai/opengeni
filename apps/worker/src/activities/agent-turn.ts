@@ -3247,6 +3247,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // across the session's turns (the same guarantee the session's own variable
       // set already relies on), keeping validateNoEnvironmentDelta empty.
       const rigDefaultEnvironmentValues: Record<string, string> = {};
+      if (
+        (rigVersion?.defaultVariableSetIds.length ?? 0) > 0 &&
+        session.rigDefaultVariableSetsAuthorized !== true
+      ) {
+        throw new Error(
+          "rig default variable sets were not authorized with variable-sets:use; refusing decryption",
+        );
+      }
       for (const rigDefaultVariableSetId of rigVersion?.defaultVariableSetIds ?? []) {
         const rigDefaultSet = await waitForTurnOperation(
           loadWorkspaceEnvironmentForRunWithCredentials(

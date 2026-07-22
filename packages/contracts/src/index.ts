@@ -526,10 +526,9 @@ export const Permission = z.enum([
   "enrollments:read",
   "enrollments:manage",
   // Rigs (workspace-scoped, versioned sandbox machine definitions). rigs:use is
-  // read + propose-change (the agent-native, additive path a sandboxed session
-  // is trusted with); rigs:manage is create/edit/activate/promote/delete (the
-  // admin-shaped path that mints or rolls versions). workspace:admin is the
-  // super-wildcard over both.
+  // read + propose + clean verification; rigs:manage is every durable version
+  // mint/activation/promotion/delete. A verified agent proposal never activates
+  // by itself. workspace:admin is the super-wildcard over both.
   "rigs:use",
   "rigs:manage",
 ]);
@@ -2657,7 +2656,7 @@ export const RigVersion = z.object({
 export type RigVersion = z.infer<typeof RigVersion>;
 
 export const RigVerificationHealth = z.object({
-  checkHealth: z.enum(["passing", "failing", "unknown"]),
+  checkHealth: z.enum(["passing", "failing", "unknown", "not_configured"]),
   lastVerifiedAt: z.string().nullable(),
 });
 export type RigVerificationHealth = z.infer<typeof RigVerificationHealth>;
@@ -2687,14 +2686,33 @@ export type RigChangeKind = z.infer<typeof RigChangeKind>;
 export const RigChangeStatus = z.enum(["proposed", "verifying", "merged", "rejected", "failed"]);
 export type RigChangeStatus = z.infer<typeof RigChangeStatus>;
 
-// A single check's outcome inside a verification run (populated in M4).
+export const RigVerificationStepStatus = z.enum(["passed", "failed", "skipped"]);
+export type RigVerificationStepStatus = z.infer<typeof RigVerificationStepStatus>;
+
+// A single setup/check outcome inside a verification run. New writers always
+// populate status + durationMs; both stay optional so historical verification
+// JSON remains readable.
 export const RigCheckResult = z.object({
   name: z.string(),
   command: z.string(),
   exitCode: z.number().int().nullable(),
   output: z.string().optional(),
+  status: RigVerificationStepStatus.optional(),
+  durationMs: z.number().int().nonnegative().optional(),
+  timedOut: z.boolean().optional(),
+  skippedReason: z.string().optional(),
 });
 export type RigCheckResult = z.infer<typeof RigCheckResult>;
+
+export const RigSetupResult = z.object({
+  exitCode: z.number().int().nullable(),
+  output: z.string().optional(),
+  status: RigVerificationStepStatus,
+  durationMs: z.number().int().nonnegative(),
+  timedOut: z.boolean().optional(),
+  skippedReason: z.string().optional(),
+});
+export type RigSetupResult = z.infer<typeof RigSetupResult>;
 
 // The verification record a rig-CI run writes onto a change (M4). Open-ended
 // (passthrough) so M4 can enrich it without a contracts break.
@@ -2704,6 +2722,11 @@ export const RigChangeVerification = z
     finishedAt: z.string().optional(),
     log: z.string().optional(),
     checkResults: z.array(RigCheckResult).optional(),
+    setupResult: RigSetupResult.optional(),
+    checksConfigured: z.boolean().optional(),
+    passed: z.boolean().nullable().optional(),
+    attempt: z.number().int().positive().optional(),
+    error: z.string().nullable().optional(),
   })
   .passthrough();
 export type RigChangeVerification = z.infer<typeof RigChangeVerification>;
@@ -2716,6 +2739,8 @@ export const RigChange = z.object({
   payload: z.record(z.string(), z.unknown()),
   status: RigChangeStatus,
   proposedBy: z.string().nullable(),
+  // Workspace-scoped client retry key. Nullable on historical/keyless rows.
+  idempotencyKey: z.string().nullable().default(null),
   verification: RigChangeVerification.nullable(),
   resultVersionId: z.string().uuid().nullable(),
   createdAt: z.string(),
@@ -2761,10 +2786,15 @@ export const RigDefinitionEditPayload = z.object({
 export type RigDefinitionEditPayload = z.infer<typeof RigDefinitionEditPayload>;
 
 export const ProposeRigChangeRequest = z.discriminatedUnion("kind", [
-  z.object({ kind: z.literal("setup_append"), payload: RigSetupAppendPayload }),
+  z.object({
+    kind: z.literal("setup_append"),
+    payload: RigSetupAppendPayload,
+    idempotencyKey: z.string().min(1).max(200).optional(),
+  }),
   z.object({
     kind: z.literal("definition_edit"),
     payload: RigDefinitionEditPayload,
+    idempotencyKey: z.string().min(1).max(200).optional(),
   }),
 ]);
 export type ProposeRigChangeRequest = z.infer<typeof ProposeRigChangeRequest>;
@@ -2840,6 +2870,9 @@ export const ScheduledTask = z.object({
   // resolved PER FIRE (at dispatch), so a task always runs the rig's current
   // version rather than one frozen at task-create time. Null ⇒ rig-less runs.
   rigId: z.string().uuid().nullable().default(null),
+  // Persisted proof that this mutable rig binding was authorized with
+  // variable-sets:use. Legacy rows are false and fail closed if defaults exist.
+  rigDefaultVariableSetsAuthorized: z.boolean().optional(),
   metadata: z.record(z.string(), z.unknown()),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -3502,6 +3535,9 @@ export const Session = z.object({
   // Both null ⇒ a rig-less session (byte-for-byte today's behavior).
   rigId: z.string().uuid().nullable().default(null),
   rigVersionId: z.string().uuid().nullable().default(null),
+  // Persisted proof that the create path authorized rig-default secret use.
+  // The worker treats missing/false as unauthorized when defaults exist.
+  rigDefaultVariableSetsAuthorized: z.boolean().optional(),
   // Non-default first-party MCP token permissions (manager-style sessions);
   // null means the fixed worker default set.
   firstPartyMcpPermissions: z.array(Permission).nullable(),

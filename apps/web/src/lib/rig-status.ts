@@ -3,7 +3,13 @@
 // single boundary that translates them into sentence-case labels and maps them
 // onto the shared StatusDot tone language. No rig surface renders a raw slug.
 import type { StatusTone } from "@/components/ui/status-dot";
-import type { RigChange, RigChangeKind, RigVersion } from "@/types";
+import type {
+  RigChange,
+  RigChangeKind,
+  RigChangeVerification,
+  RigCheckResult,
+  RigVersion,
+} from "@/types";
 
 /** Did this change's verification run pass? (The `passed` flag rides the
  *  open-ended verification record written by rig CI.) */
@@ -11,14 +17,10 @@ export function changeVerificationPassed(change: RigChange): boolean {
   return change.verification?.passed === true;
 }
 
-/** A verified `definition_edit` still sitting in `proposed` is awaiting a
- *  human promote (setup_append auto-merges, so it never lingers here). */
+/** Every verified change remains proposed until a rigs:manage holder promotes
+ *  it. Verification never activates durable machine state. */
 export function changeIsPromotable(change: RigChange): boolean {
-  return (
-    change.kind === "definition_edit" &&
-    change.status === "proposed" &&
-    changeVerificationPassed(change)
-  );
+  return change.status === "proposed" && changeVerificationPassed(change);
 }
 
 export function rigChangeKindLabel(kind: RigChangeKind): string {
@@ -71,9 +73,10 @@ export function rigChangeStatusView(change: RigChange): RigStatusView {
       return changeVerificationPassed(change)
         ? {
             tone: "idle",
-            label: "Verified",
+            label: "Verified · awaiting manager",
             pulse: false,
-            description: "Passed verification — ready to promote into a new version.",
+            description:
+              "Passed clean verification. A Rigs manager must promote it before anything activates.",
           }
         : {
             tone: "queued",
@@ -86,7 +89,7 @@ export function rigChangeStatusView(change: RigChange): RigStatusView {
 
 /** The overall health of a rig version's most recent check run, for the list
  *  card + overview dot. `unknown` = never verified. */
-export type RigCheckHealth = "passing" | "failing" | "unknown";
+export type RigCheckHealth = "passing" | "failing" | "unknown" | "not_configured";
 
 export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
   switch (health) {
@@ -100,9 +103,10 @@ export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
     case "failing":
       return {
         tone: "failed",
-        label: "Check failing",
+        label: "Verification failed",
         pulse: false,
-        description: "A declared check exited non-zero on the last run.",
+        description:
+          "One or more checks failed, timed out, or could not be run reliably on the last run.",
       };
     case "unknown":
       return {
@@ -111,7 +115,35 @@ export function rigCheckHealthView(health: RigCheckHealth): RigStatusView {
         pulse: false,
         description: "This version's checks have not been run yet.",
       };
+    case "not_configured":
+      return {
+        tone: "queued",
+        label: "No checks configured",
+        pulse: false,
+        description: "This version declares no checks, so it has no health signal.",
+      };
   }
+}
+
+/** Compact, truthful terminal evidence for one declared check. Historical rows
+ * without a structured status retain their old exit-code interpretation. */
+export function rigCheckResultSummary(result: RigCheckResult): string {
+  const status = result.status ?? (result.exitCode === 0 ? "passed" : "failed");
+  if (status === "skipped") {
+    return result.skippedReason ?? "Skipped";
+  }
+  if (result.timedOut) {
+    return "Timed out";
+  }
+  return result.exitCode === null ? "No exit code" : `Exit ${result.exitCode}`;
+}
+
+/** New verification records carry a bounded, redacted infrastructure error.
+ * Historical records omit it, so the UI simply renders no error callout. */
+export function rigVerificationErrorMessage(verification: RigChangeVerification): string | null {
+  return typeof verification.error === "string" && verification.error.trim()
+    ? verification.error
+    : null;
 }
 
 /** Attribution string → a short human label. Domain stores `user:<subject>`,

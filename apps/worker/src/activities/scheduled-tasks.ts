@@ -148,6 +148,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             if (!rig || !rig.activeVersion) {
               throw new Error(`rig has no active version to bind: ${task.rigId}`);
             }
+            if (
+              rig.activeVersion.defaultVariableSetIds.length > 0 &&
+              task.rigDefaultVariableSetsAuthorized !== true
+            ) {
+              throw new Error(
+                "scheduled task rig default variable sets were not authorized with variable-sets:use",
+              );
+            }
             frozenRigId = rig.id;
             frozenRigVersionId = rig.activeVersion.id;
           }
@@ -169,6 +177,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             variableSetId: task.variableSetId ?? null,
             rigId: frozenRigId,
             rigVersionId: frozenRigVersionId,
+            rigDefaultVariableSetsAuthorized: task.rigDefaultVariableSetsAuthorized === true,
           });
           const goal = goalSpec
             ? await createSessionGoal(db, {

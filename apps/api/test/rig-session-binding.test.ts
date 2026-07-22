@@ -14,8 +14,8 @@ import {
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import type { AccessGrant } from "@opengeni/contracts";
-import { createSessionForRequest } from "@opengeni/core";
+import type { AccessGrant, Permission } from "@opengeni/contracts";
+import { createSessionForRequest, createValidatedScheduledTask } from "@opengeni/core";
 import type { ApiRouteDeps, SessionWorkflowClient } from "@opengeni/core";
 
 // M3 rig session binding, driven through the REAL createSessionForRequest
@@ -54,13 +54,14 @@ async function seedRig(
   accountId: string,
   workspaceId: string,
   name: string,
+  defaultVariableSetIds: string[] = [],
 ): Promise<{ rigId: string; activeVersionId: string }> {
   const rig = await createRig(db, {
     accountId,
     workspaceId,
     name,
     createdBy: "user:test",
-    initialVersion: { changelog: "v1" },
+    initialVersion: { changelog: "v1", defaultVariableSetIds },
   });
   return { rigId: rig.id, activeVersionId: rig.activeVersion!.id };
 }
@@ -95,12 +96,17 @@ function deps(bus: MemoryEventBus): ApiRouteDeps {
   } as unknown as ApiRouteDeps;
 }
 
-function grant(accountId: string, workspaceId: string, fromSessionId?: string): AccessGrant {
+function grant(
+  accountId: string,
+  workspaceId: string,
+  fromSessionId?: string,
+  extraPermissions: Permission[] = [],
+): AccessGrant {
   return {
     accountId,
     workspaceId,
     subjectId: "subject",
-    permissions: ["sessions:create", "sessions:read"],
+    permissions: ["sessions:create", "sessions:read", ...extraPermissions],
     ...(fromSessionId ? { metadata: { sessionId: fromSessionId } } : {}),
   } as AccessGrant;
 }
@@ -238,6 +244,74 @@ describe("M3 rig binding: freeze at create", () => {
         rigId: r!.id,
       }),
     ).rejects.toThrow(/no active version/);
+  }, 60_000);
+
+  test("explicit and workspace-default rig secrets require variable-sets:use", async () => {
+    if (!available) return;
+    const bus = new MemoryEventBus();
+    const { accountId, workspaceId } = await freshWorkspace();
+    const [variableSet] = await admin<{ id: string }[]>`
+      insert into workspace_variable_sets (account_id, workspace_id, name)
+      values (${accountId}, ${workspaceId}, 'rig-secrets') returning id`;
+    const rig = await seedRig(accountId, workspaceId, "secret-rig", [variableSet!.id]);
+
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "explicit",
+        rigId: rig.rigId,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    await admin`update workspaces set default_rig_id = ${rig.rigId} where id = ${workspaceId}`;
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId), workspaceId, {
+        initialMessage: "default",
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+
+    const authorized = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, undefined, ["variable-sets:use"]),
+      workspaceId,
+      { initialMessage: "authorized", rigId: rig.rigId },
+    );
+    expect(authorized.rigDefaultVariableSetsAuthorized).toBe(true);
+  }, 60_000);
+
+  test("scheduled rig bindings persist variable-set authorization provenance", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const [variableSet] = await admin<{ id: string }[]>`
+      insert into workspace_variable_sets (account_id, workspace_id, name)
+      values (${accountId}, ${workspaceId}, 'scheduled-rig-secrets') returning id`;
+    const rig = await seedRig(accountId, workspaceId, "scheduled-secret-rig", [variableSet!.id]);
+    const payload = {
+      name: "secret task",
+      status: "paused" as const,
+      schedule: { type: "interval" as const, everySeconds: 3600 },
+      runMode: "new_session_per_run" as const,
+      overlapPolicy: "skip" as const,
+      agentConfig: { prompt: "run", resources: [], tools: [], metadata: {} },
+      rigId: rig.rigId,
+      metadata: {},
+    };
+    await expect(
+      createValidatedScheduledTask({
+        settings,
+        db,
+        objectStorage: null,
+        grant: grant(accountId, workspaceId),
+        payload,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    const authorized = await createValidatedScheduledTask({
+      settings,
+      db,
+      objectStorage: null,
+      grant: grant(accountId, workspaceId, undefined, ["variable-sets:use"]),
+      payload,
+    });
+    expect(authorized.rigDefaultVariableSetsAuthorized).toBe(true);
   }, 60_000);
 });
 

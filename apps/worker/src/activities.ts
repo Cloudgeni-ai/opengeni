@@ -172,3 +172,4 @@ export const reapExpiredFileUploads = defaultControlActivities.reapExpiredFileUp
 export const dispatchSessionWorkflowWakes = defaultControlActivities.dispatchSessionWorkflowWakes;
 export const verifyRigChange = defaultControlActivities.verifyRigChange;
 export const verifyRigVersion = defaultControlActivities.verifyRigVersion;
+export const failRigChangeVerification = defaultControlActivities.failRigChangeVerification;
