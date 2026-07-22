@@ -7,7 +7,7 @@ import { freePort, runCommand, startProcess, type StartedProcess } from "@openge
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const evidenceDir =
-  process.env.OPENGENI_TRANSCRIPTION_EVIDENCE_DIR ?? "/tmp/ope11-transcription-evidence";
+  process.env.OPENGENI_TRANSCRIPTION_EVIDENCE_DIR ?? "/tmp/opengeni-transcription-evidence";
 const viewports = [
   { width: 360, height: 800 },
   { width: 375, height: 812 },

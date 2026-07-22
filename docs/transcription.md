@@ -50,7 +50,7 @@ Changing any accepted policy field revokes the active session; a new session mus
 acceptance ID.
 
 This authorization is intentionally separate from workspace turn-model policy and from the model
-chosen for an agent turn. A transcription target cannot inherit OPE-35/model-routing permission,
+chosen for an agent turn. A transcription target cannot inherit agent model-routing permission,
 and no audio is routed through coding-model inference. A Codex-subscription transcription adapter
 is not included because no stable authorized audio-transcription entitlement has been established.
 
