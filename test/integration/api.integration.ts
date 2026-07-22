@@ -4482,9 +4482,21 @@ describe("API component integration", () => {
       ).toBe(400);
     }
 
+    const [encodedValidState, validStateSignature] = validStates[1]!.split(".", 2);
+    expect(encodedValidState).toBeDefined();
+    expect(validStateSignature).toBeDefined();
+    const validStatePayload = JSON.parse(
+      Buffer.from(encodedValidState!, "base64url").toString("utf8"),
+    ) as Record<string, unknown>;
+    const crossAccountState = `${Buffer.from(
+      JSON.stringify({ ...validStatePayload, accountId: crypto.randomUUID() }),
+    ).toString("base64url")}.${validStateSignature!}`;
+    const chooserStatuses: number[] = [];
     for (const [targetWorkspaceId, body] of [
+      [workspaceId, `oauth_state=${encodeURIComponent(validStates[1]!)}`],
       [workspaceId, ""],
-      [workspaceId, "oauth_state=malformed&installation_ticket=stale"],
+      [workspaceId, `oauth_state=${encodeURIComponent(crossAccountState)}`],
+      [workspaceId, `oauth_state=${encodeURIComponent(staleState)}`],
       [
         secondWorkspace.id,
         `oauth_state=${encodeURIComponent(validStates[1]!)}&installation_ticket=cross-workspace&repository_ticket=3001`,
@@ -4498,8 +4510,19 @@ describe("API component integration", () => {
           body,
         },
       );
-      expect(response.status).toBe(410);
+      chooserStatuses.push(response.status);
+      expect(response.headers.get("set-cookie")).toBeNull();
     }
+    expect(chooserStatuses).toEqual([410, 400, 400, 400, 400]);
+    expect(
+      (
+        await app.request(workspacePath(workspaceId, "/github/installations"), {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: "oauth_state=malformed&installation_ticket=stale",
+        })
+      ).status,
+    ).toBe(400);
 
     expect(authorizeUserCalls).toBe(0);
     expect(verifyInstallationCalls).toBe(0);

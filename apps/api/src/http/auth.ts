@@ -66,7 +66,8 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
     return true;
   }
   // Compatibility endpoint for stale chooser submissions. It remains public
-  // only so already-rendered forms terminate with 410; it does not parse a
+  // only so already-rendered forms can authenticate their signed account and
+  // workspace state locally before terminating with 410; it does not parse a
   // ticket, resolve browser authority, or write an installation binding.
   if (c.req.method === "POST" && githubInstallationLinkPathPattern.test(path)) {
     return true;

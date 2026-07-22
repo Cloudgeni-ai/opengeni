@@ -274,7 +274,7 @@ export function RepositoryContextPicker(props: {
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="Connect the GitHub app so the sandbox can clone your repositories, push branches, and open pull requests."
+                    description="App registration does not connect repositories. New installation binding is disabled; existing bindings can still be managed or unlinked."
                   />
                   <div className="px-1 pt-1">{setupForm}</div>
                 </div>
@@ -627,7 +627,8 @@ export function ScheduledTaskRepositoryPicker(props: {
 
       {!props.configured ? (
         <div className="p-3 text-xs leading-5 text-fg-muted">
-          Configure the GitHub App to select repositories for scheduled runs.
+          App registration does not connect repositories. New installation binding is disabled;
+          existing bindings can still be managed or unlinked.
         </div>
       ) : props.repoBusy ? (
         <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">

@@ -204,7 +204,22 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     throw installationBindingDisabled();
   });
 
-  app.post("/v1/workspaces/:workspaceId/github/installations", () => {
+  app.post("/v1/workspaces/:workspaceId/github/installations", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const form = new URLSearchParams(await c.req.text());
+    const state = form.get("oauth_state");
+    if (!state) {
+      throw new HTTPException(400, { message: "missing GitHub OAuth state" });
+    }
+    const statePayload = readSignedState(state, githubStateSecret);
+    if (
+      !statePayload ||
+      typeof statePayload.accountId !== "string" ||
+      statePayload.accountId.length === 0 ||
+      statePayload.workspaceId !== workspaceId
+    ) {
+      throw new HTTPException(400, { message: "invalid or expired GitHub OAuth state" });
+    }
     throw installationBindingDisabled();
   });
 }
