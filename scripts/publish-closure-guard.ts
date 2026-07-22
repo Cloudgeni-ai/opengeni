@@ -229,18 +229,37 @@ function builtContractFiles(dir: string): string[] {
   return files;
 }
 
+function shippedSourceFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...shippedSourceFiles(path));
+    else if (/\.(?:js|jsx|ts|tsx)$/u.test(entry.name) && !entry.name.endsWith(".d.ts")) {
+      files.push(path);
+    }
+  }
+  return files;
+}
+
 // Workspace hoisting can make an undeclared direct dependency appear healthy
 // in this monorepo while the published tarball fails under strict/isolated
-// resolution. Inspect the actual built import graph and require every external
+// resolution. Inspect both the built import graph and the shipped source graph
+// (the worker gives Temporal its workflow source) and require every external
 // @opengeni/* specifier to be present in a published dependency map.
-const builtImportScanner = new Bun.Transpiler({ loader: "js" });
 for (const pkg of publishable) {
   const distDir = join(repoRoot, pkg.dir, "dist");
-  if (!existsSync(distDir)) continue;
+  const sourceDir = join(repoRoot, pkg.dir, "src");
   const declaredRuntimePackages = new Set(workspaceDependencyNames(pkg, PUBLISHED_DEP_FIELDS));
-  for (const path of builtContractFiles(distDir).filter((file) => file.endsWith(".js"))) {
+  const importSurfaces = [
+    ...(existsSync(distDir)
+      ? builtContractFiles(distDir).filter((file) => file.endsWith(".js"))
+      : []),
+    ...(existsSync(sourceDir) ? shippedSourceFiles(sourceDir) : []),
+  ];
+  for (const path of importSurfaces) {
     const text = readFileSync(path, "utf8");
-    const scan = await builtImportScanner.scan(text);
+    const loader = path.endsWith(".tsx") ? "tsx" : path.endsWith(".ts") ? "ts" : "js";
+    const scan = await new Bun.Transpiler({ loader }).scan(text);
     for (const imported of scan.imports) {
       const match = imported.path.match(/^(@opengeni\/[^/]+)(?:\/|$)/u);
       const importedPackage = match?.[1];
