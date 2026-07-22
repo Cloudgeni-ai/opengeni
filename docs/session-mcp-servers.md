@@ -43,6 +43,15 @@ composition. The worker's default first-party MCP permission set deliberately
 does not include `mcp_servers:attach`, so a sandboxed agent cannot attach a new
 credentialed server to itself.
 
+An agent-created child is the bounded exception for an already-authorized
+server snapshot. If `mcpServers` is omitted, the child copies its trusted
+immediate parent's server definitions, policy, connection refs, and encrypted
+headers without requiring `mcp_servers:attach`; the parent comes only from the
+worker-signed grant and cannot be supplied in the request body. Explicit
+`mcpServers`, including an explicit empty array, never inherit and go through the
+ordinary attach permission check when non-empty. This delegates existing tool
+context without letting a child invent an endpoint or plaintext credential.
+
 ## Storage and rotation
 
 Credential headers are encrypted in `session_mcp_servers.headers_encrypted` with
@@ -79,6 +88,12 @@ successful rotation replaces the encrypted header map and increments
 The connection ref is likewise immutable for the session server. To switch an
 endpoint to a different host connection, create a new session attachment rather
 than treating credential rotation as a connection-rebinding operation.
+
+Child inheritance is a create-time snapshot, not a live credential link. A
+static encrypted header map is copied as ciphertext and starts at credential
+version 1 on the child; future parent and child rotations are independent. A
+copied `connectionRef` continues to resolve fresh request-time credentials and
+is therefore the preferred embedding-host path for rotating provider access.
 
 Rotation is effective on the next turn: the API validates updates up front, then
 applies credential updates only after the session has accepted the `user.message`

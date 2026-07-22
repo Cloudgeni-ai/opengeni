@@ -335,6 +335,43 @@ session tree while top-level omissions continue to use the deployment's normal
 standalone worker defaults. The inherited set is frozen on the child at
 creation; later deployment-default changes do not rewrite existing sessions.
 
+### Child execution context
+
+An agent-created child normally needs the same working context as its manager,
+even when the two conversations are separate. When the creating grant carries
+the worker-signed parent `sessionId`, `createSessionForRequest` treats omitted
+`resources`, `tools`, and `mcpServers` as inheritance from that trusted immediate
+parent. The snapshot preserves mixed GitHub, GitLab, and Azure DevOps repository
+resources, multiple credential bindings for one provider, selected MCP tool
+refs, full per-session MCP policy, connection refs, and static credential
+headers. Static header values move only as encrypted database ciphertext and
+never enter a response, event, or core plaintext value.
+
+The parent's session attachment keeps its existing overlay precedence if a
+deployment or workspace capability with the same server ID was enabled after
+the parent was created. Inheritance therefore does not silently switch the
+child to a different endpoint merely because workspace configuration changed.
+
+Each field remains independently caller-controlled. Supplying an explicit
+array—including `[]`—replaces that field instead of inheriting it. If an explicit
+MCP-server replacement makes an inherited strict tool ref invalid, the create
+fails validation; replace `tools` in the same request rather than silently
+dropping a strict tool. A top-level create has no parent snapshot: omitted
+resources and MCP servers remain empty, while omitted tools continue to receive
+workspace-default capability MCP refs. Variable sets, rigs, model selection,
+persona instructions, goals, and sandbox placement retain their own existing
+resolution rules and are not part of this context snapshot.
+
+There is deliberately no caller-supplied `parentSessionId`. Parent identity
+comes only from the signed grant, is loaded inside the same workspace boundary,
+and later receives the normal exact-attempt ownership check. Explicitly attaching
+or replacing MCP servers still requires `mcp_servers:attach`; omission can copy
+the parent's already-authorized servers without granting the child authority to
+invent a new endpoint. Header-based credentials are snapshot values, so later
+rotations on parent and child are independent. A `connectionRef` remains the
+preferred host integration because normal model MCP and Toolspace resolve fresh
+transport credentials at request time.
+
 ### Persistence
 
 Canonical sources: `packages/db/src/index.ts`, `packages/db/src/migrate.ts`, `packages/db/src/provision-roles.ts`, and `dbSearchPath` in `packages/config/src/index.ts`.

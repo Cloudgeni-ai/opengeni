@@ -16,6 +16,7 @@ import {
   createDb,
   createSession,
   getSession,
+  listSessionMcpServersForRun,
   listSessionTurns,
   reapStaleLeaseHolders,
   readLease,
@@ -187,6 +188,198 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.parentSessionId).toBe(a.id);
     // Distinct sessions, same group (one box, two conversations).
     expect(b.id).not.toBe(a.id);
+  }, 60_000);
+
+  test("a child inherits omitted mixed-provider repositories, tools, and encrypted MCP context", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parentGrant: AccessGrant = {
+      ...grant(accountId, workspaceId),
+      permissions: ["sessions:create", "sessions:read", "mcp_servers:attach"],
+    };
+    const parent = await createSessionForRequest(deps(bus), parentGrant, workspaceId, {
+      initialMessage: "manager with provider context",
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/frontend.git",
+          ref: "main",
+          provider: "github",
+          credentialBindingId: "github-primary",
+          access: "write",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/backend.git",
+          ref: "main",
+          provider: "gitlab",
+          credentialBindingId: "gitlab-primary",
+          access: "write",
+        },
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/platform/_git/infra.git",
+          ref: "main",
+          provider: "azure_devops",
+          credentialBindingId: "azure-primary",
+          access: "read",
+        },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/docs.git",
+          ref: "release",
+          provider: "github",
+          credentialBindingId: "github-secondary",
+          access: "read",
+        },
+      ],
+      mcpServers: [
+        {
+          id: "provider-github",
+          name: "Host GitHub",
+          url: "https://mcp.example.test/github",
+          allowedTools: ["get_pull_request", "create_comment"],
+          timeoutMs: 17_000,
+          cacheToolsList: true,
+          requireApproval: ["create_comment"],
+          connectionRef: {
+            connectionId: "github-primary",
+            providerDomain: "github.com",
+            kind: "app_install",
+          },
+        },
+        {
+          id: "private-api",
+          url: "https://mcp.example.test/private",
+          headers: { Authorization: "Bearer inherited-secret" },
+        },
+      ],
+      tools: [
+        { kind: "mcp", id: "provider-github" },
+        { kind: "mcp", id: "private-api" },
+      ],
+    });
+
+    // The child grant deliberately lacks mcp_servers:attach. Omission delegates
+    // only the parent's already-authorized snapshot; it cannot attach a new MCP.
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      { initialMessage: "worker using the manager context" },
+    );
+
+    expect(child.parentSessionId).toBe(parent.id);
+    expect(child.resources).toEqual(parent.resources);
+    expect(child.tools).toEqual(parent.tools);
+    expect([...child.mcpServers].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      {
+        id: "private-api",
+        name: null,
+        url: "https://mcp.example.test/private",
+        headerNames: ["Authorization"],
+        credentialVersion: 1,
+        connectionRef: null,
+      },
+      {
+        id: "provider-github",
+        name: "Host GitHub",
+        url: "https://mcp.example.test/github",
+        headerNames: [],
+        credentialVersion: 1,
+        connectionRef: {
+          connectionId: "github-primary",
+          providerDomain: "github.com",
+          kind: "app_install",
+        },
+      },
+    ]);
+    const inheritedForRun = await listSessionMcpServersForRun(
+      db,
+      workspaceId,
+      child.id,
+      Buffer.alloc(32, 7),
+    );
+    expect([...inheritedForRun].sort((a, b) => a.id.localeCompare(b.id))).toEqual([
+      expect.objectContaining({
+        id: "private-api",
+        headers: { Authorization: "Bearer inherited-secret" },
+      }),
+      expect.objectContaining({
+        id: "provider-github",
+        allowedTools: ["get_pull_request", "create_comment"],
+        timeoutMs: 17_000,
+        cacheToolsList: true,
+        requireApproval: ["create_comment"],
+        headers: {},
+      }),
+    ]);
+  }, 60_000);
+
+  test("explicit empty child execution-context arrays opt out of inheritance", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      {
+        ...grant(accountId, workspaceId),
+        permissions: ["sessions:create", "sessions:read", "mcp_servers:attach"],
+      },
+      workspaceId,
+      {
+        initialMessage: "manager",
+        resources: [
+          {
+            kind: "repository",
+            uri: "https://gitlab.com/acme/service.git",
+            ref: "main",
+            provider: "gitlab",
+            credentialBindingId: "gitlab-primary",
+          },
+        ],
+        mcpServers: [{ id: "provider-gitlab", url: "https://mcp.example.test/gitlab" }],
+        tools: [{ kind: "mcp", id: "provider-gitlab" }],
+      },
+    );
+    const child = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId, parent.id),
+      workspaceId,
+      {
+        initialMessage: "isolated worker",
+        resources: [],
+        tools: [],
+        mcpServers: [],
+        sandbox: "new",
+      },
+    );
+    expect(child.resources).toEqual([]);
+    expect(child.mcpServers).toEqual([]);
+    expect(child.tools).not.toContainEqual({
+      kind: "mcp",
+      id: "provider-gitlab",
+    });
+    expect(child.sandboxGroupId).toBe(child.id);
+  }, 60_000);
+
+  test("a child still needs mcp_servers:attach to replace inheritance with a new endpoint", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const parent = await createSessionForRequest(
+      deps(bus),
+      grant(accountId, workspaceId),
+      workspaceId,
+      { initialMessage: "manager" },
+    );
+    await expect(
+      createSessionForRequest(deps(bus), grant(accountId, workspaceId, parent.id), workspaceId, {
+        initialMessage: "worker",
+        mcpServers: [{ id: "invented", url: "https://mcp.example.test/invented" }],
+      }),
+    ).rejects.toMatchObject({ status: 403 });
   }, 60_000);
 
   test("an exact worker-signed caller inherits the frozen initiating subject", async () => {

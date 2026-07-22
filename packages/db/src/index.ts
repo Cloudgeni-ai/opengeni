@@ -11321,6 +11321,46 @@ export async function listSessionMcpServerMetadata(
   });
 }
 
+/**
+ * Returns the complete stored server configuration needed to snapshot an
+ * immediate parent's MCP context onto a child session. Credential values stay
+ * encrypted throughout this path: the core can copy the ciphertext into the
+ * child's rows, but it never receives plaintext headers.
+ *
+ * This is intentionally distinct from `listSessionMcpServersForRun`, whose
+ * worker-only responsibility is decrypting credentials at the execution
+ * boundary.
+ */
+export async function listSessionMcpServersForChildInheritance(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<CreateSessionMcpServerInput[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionMcpServers)
+      .where(
+        and(
+          eq(schema.sessionMcpServers.workspaceId, workspaceId),
+          eq(schema.sessionMcpServers.sessionId, sessionId),
+        ),
+      )
+      .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
+    return rows.map((row) => ({
+      id: row.serverId,
+      name: row.name ?? null,
+      url: row.url,
+      allowedTools: row.allowedTools ?? null,
+      timeoutMs: row.timeoutMs ?? null,
+      cacheToolsList: row.cacheToolsList,
+      requireApproval: row.requireApproval ?? null,
+      connectionRef: row.connectionRef ?? null,
+      headersEncrypted: { ...(row.headersEncrypted ?? {}) },
+    }));
+  });
+}
+
 export async function updateSessionMcpServerCredentials(
   db: Database,
   input: {

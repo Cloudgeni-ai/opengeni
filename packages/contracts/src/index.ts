@@ -5811,7 +5811,14 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // matches the codebase's largest free-form string convention (workspace
   // variable set variable values). Absent ⇒ byte-identical to today.
   instructions: z.string().trim().min(1).max(32768).optional(),
+  // For an agent-created child, omission inherits the trusted immediate
+  // parent's repository/file context. An explicit array, including [], is
+  // authoritative. Top-level omission remains []. Presence is resolved from
+  // the raw request because this Zod default erases absent-vs-empty.
   resources: z.array(ResourceRef).default([]),
+  // The same child omission rule applies to selected MCP tool refs. Top-level
+  // omission still applies workspace-default capability MCP tools; explicit []
+  // suppresses those defaults (the first-party OpenGeni server remains added).
   tools: z.array(ToolRef).default([]),
   metadata: z.record(z.string(), z.unknown()).default({}),
   model: z.string().min(1).optional(),
@@ -5851,8 +5858,12 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // the creating session's effective grant. An explicit set is capped at
   // creation: every requested permission must be held by the creating grant.
   firstPartyMcpPermissions: z.array(Permission).optional(),
-  // Third-party MCP servers attached only to this session. Credential headers are
-  // write-only: create responses and events expose only SessionMcpServerMetadata.
+  // Third-party MCP servers attached only to this session. For an agent-created
+  // child, omission snapshots its trusted immediate parent's server definitions,
+  // policies, connection refs, and encrypted credentials. Explicit arrays,
+  // including [], are authoritative; non-empty explicit arrays require attach
+  // permission. Credential headers are write-only: create responses and events
+  // expose only SessionMcpServerMetadata.
   mcpServers: z.array(SessionMcpServerInput).default([]),
   // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
   // today's behavior (a context-dependent default resolved server-side: from

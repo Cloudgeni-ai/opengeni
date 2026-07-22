@@ -41,6 +41,7 @@ import {
   getSessionTurn,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
+  listSessionMcpServersForChildInheritance,
   requireSession,
   submitHumanPromptInTransaction,
   updateSessionTitle as updateSessionTitleRow,
@@ -237,6 +238,21 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
   };
 }
 
+function mcpServerConfigFromStoredInput(
+  server: CreateSessionMcpServerInput,
+): Settings["mcpServers"][number] {
+  return {
+    id: server.id,
+    ...(server.name ? { name: server.name } : {}),
+    url: server.url,
+    ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
+    ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+    cacheToolsList: server.cacheToolsList ?? false,
+    ...(server.requireApproval != null ? { requireApproval: server.requireApproval } : {}),
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
+  };
+}
+
 function mcpServerConfigFromMetadata(
   server: SessionMcpServerMetadata,
 ): Settings["mcpServers"][number] {
@@ -324,6 +340,48 @@ function validateSessionMcpServersForCreate(
     });
   }
   return { runtimeServers, dbServers, metadata };
+}
+
+function validateInheritedSessionMcpServersForCreate(
+  servers: CreateSessionMcpServerInput[],
+): ValidatedSessionMcpServers {
+  if (servers.length === 0) {
+    return { runtimeServers: [], dbServers: [], metadata: [] };
+  }
+  const seenIds = new Set<string>();
+  for (const server of servers) {
+    if (seenIds.has(server.id)) {
+      throw new HTTPException(422, {
+        message: `duplicate inherited session MCP server id: ${server.id}`,
+      });
+    }
+    seenIds.add(server.id);
+    if (reservedSessionMcpServerIds.has(server.id)) {
+      throw new HTTPException(422, {
+        message: `reserved inherited session MCP server id: ${server.id}`,
+      });
+    }
+  }
+  // A newly enabled deployment/workspace capability may now reuse an id that
+  // belonged to this parent attachment first. Preserve the parent's existing
+  // session-overlay precedence instead of making child creation depend on a
+  // later workspace setting; settingsWithSessionMcpServerConfigs performs that
+  // same overlay for ordinary parent turns.
+  return {
+    runtimeServers: servers.map(mcpServerConfigFromStoredInput),
+    dbServers: servers.map((server) => ({
+      ...server,
+      headersEncrypted: { ...(server.headersEncrypted ?? {}) },
+    })),
+    metadata: servers.map((server) => ({
+      id: server.id,
+      name: server.name ?? null,
+      url: server.url,
+      headerNames: Object.keys(server.headersEncrypted ?? {}).sort(),
+      credentialVersion: 1,
+      connectionRef: server.connectionRef ?? null,
+    })),
+  };
 }
 
 function validateSessionMcpCredentialUpdates(input: {
@@ -845,8 +903,10 @@ export async function postUserMessageTurn(input: {
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
  * `session_create` tool: payload validation, resource/tool/variableSet
  * checks, usage limits, session start, and usage recording. `rawPayload` is
- * the unparsed request body so absent-vs-empty `tools` keeps its meaning
- * (absent applies the workspace's default capability MCP tools).
+ * the unparsed request body so absent-vs-empty execution-context fields keep
+ * their meaning: a child inherits omitted resources/tools/mcpServers from its
+ * trusted immediate parent, while explicit arrays (including []) win. A
+ * top-level create with omitted tools applies workspace-default capability MCPs.
  */
 export async function createSessionForRequest(
   deps: ApiRouteDeps,
@@ -856,25 +916,49 @@ export async function createSessionForRequest(
 ): Promise<Session> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
+  // Parent linkage and execution-context inheritance come ONLY from the
+  // worker-signed sessionId claim. A caller cannot nominate a parent in the
+  // payload, so inheriting an existing repository/tool/credential snapshot does
+  // not turn sessions:create into arbitrary cross-session read authority.
+  const parentSessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
+  const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
+  if (parentSessionId && !parentSession) {
+    throw new HTTPException(404, {
+      message: `parent session not found in workspace: ${parentSessionId}`,
+    });
+  }
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
     settings,
   );
-  const sessionMcpServers = validateSessionMcpServersForCreate(
-    capabilityRuntimeSettings,
-    grant,
-    payload.mcpServers,
-  );
+  const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
+    ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
+    : parentSession
+      ? validateInheritedSessionMcpServersForCreate(
+          await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
+        )
+      : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
   const runtimeSettings = settingsWithSessionMcpServerConfigs(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
   );
-  const resources = normalizeResources(payload.resources);
-  const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
-  const defaultedTools = hasOwnProperty(rawPayload, "tools")
-    ? requestedTools
-    : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
+  const resources = normalizeResources(
+    hasOwnProperty(rawPayload, "resources")
+      ? payload.resources
+      : (parentSession?.resources ?? payload.resources),
+  );
+  const requestedTools = validateToolRefs(
+    hasOwnProperty(rawPayload, "tools") ? payload.tools : (parentSession?.tools ?? payload.tools),
+    runtimeSettings,
+  );
+  const defaultedTools =
+    hasOwnProperty(rawPayload, "tools") || parentSession
+      ? requestedTools
+      : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
   // The first-party MCP server is attached to EVERY session. It hosts the
   // session's own metadata tool (set_session_title) + goal tools, and — only
   // when the grant carries the permission — the orchestration/variableSet/
@@ -940,14 +1024,9 @@ export async function createSessionForRequest(
   );
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
-  // Parent linkage comes only from the worker-signed session claim. Resolve it
-  // before first-party permissions because a child with no explicit override
-  // inherits the creating session's effective grant instead of silently
-  // expanding to the standalone worker defaults.
-  const parentSessionId =
-    typeof grant.metadata?.["sessionId"] === "string"
-      ? (grant.metadata["sessionId"] as string)
-      : null;
+  // Parent linkage was resolved above, before context validation. A child with
+  // no explicit permission override inherits the creating session's effective
+  // grant instead of silently expanding to standalone worker defaults.
   // A session's first-party MCP token can carry a non-default permission set
   // (how an operator hands a manager-style session the orchestration tools),
   // but never one out-ranking its creator: every requested permission must be
@@ -1056,12 +1135,10 @@ export async function createSessionForRequest(
           "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create.",
       });
     }
-    const parent = await getSession(db, workspaceId, parentSessionId);
-    if (!parent) {
-      throw new HTTPException(404, {
-        message: `parent session not found in workspace: ${parentSessionId}`,
-      });
+    if (!parentSession) {
+      throw new Error("trusted parent session was not resolved");
     }
+    const parent = parentSession;
     const parentBoxed = parent.sandboxBackend !== "none";
     const variableSetMismatch =
       parentBoxed && !variableSetMatchesGroup(parent.variableSetId ?? null);
