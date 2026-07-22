@@ -4,6 +4,7 @@ import {
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
   startupRetryOptions,
+  temporalConnectionOptions,
   type Settings,
 } from "@opengeni/config";
 import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
@@ -145,7 +146,7 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
     () =>
       retryStartupDependency(
         "Temporal",
-        () => NativeConnection.connect({ address: settings.temporalHost }),
+        () => NativeConnection.connect(temporalConnectionOptions(settings)),
         {
           ...startupRetryOptions(settings),
           onRetry: (event) => logStartupDependencyRetry(observability, event),
@@ -219,7 +220,7 @@ export async function createWorkerWorkflowSignaler(
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   return {
     wakeSessionWorkflow: async ({
@@ -324,7 +325,7 @@ export async function registerSandboxReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
     await temporal.schedule.create({
@@ -389,7 +390,7 @@ export async function registerFileUploadReaperSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
     await temporal.schedule.create({
@@ -433,7 +434,7 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
   settings: Settings,
   observability: Observability,
 ): Promise<{ registered: boolean; close: () => Promise<void> }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({ connection, namespace: settings.temporalNamespace });
   try {
     await temporal.schedule.create({

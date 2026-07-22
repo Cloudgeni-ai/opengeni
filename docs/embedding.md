@@ -363,6 +363,28 @@ lifecycle endpoints itself, or provide distinct per-process settings/ports.
 host-owned `db` and broker-backed `bus` so readiness and resource ownership are
 unambiguous; the lower-level factory retains standalone defaults.
 
+### Temporal transport
+
+Canonical source: `temporalConnectionOptions(settings)` in
+`packages/config/src/index.ts`. The API workflow client, worker native
+connection, workflow signaler, and engine schedule clients all use this one
+policy.
+
+`OPENGENI_TEMPORAL_HOST`, `OPENGENI_TEMPORAL_NAMESPACE`, and
+`OPENGENI_TEMPORAL_TASK_QUEUE` select the endpoint and logical queues. Set
+`OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; an API key enables TLS
+automatically. Set `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS
+without an API key. Custom deployments may additionally provide
+`OPENGENI_TEMPORAL_TLS_SERVER_NAME`, a base64 root CA through
+`OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64`, or the paired base64 mTLS
+certificate/private-key variables. Any custom TLS material also enables TLS,
+and an incomplete or malformed pair fails startup before a client connects.
+
+These are deployment credentials, not host-user integration credentials. Keep
+the API key and private key in the runtime secret consumed by both API and
+worker processes; do not route them through `ConnectionCredentialsPort` or
+write them into a sandbox.
+
 ### Durable host event and usage export
 
 Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
