@@ -7,7 +7,7 @@ import type {
   SendMessageInput,
   SessionEvent,
 } from "@opengeni/sdk";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
@@ -90,7 +90,9 @@ export function useComposer(
 ): ComposerState {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const durableDrafts = options.draftPersistence !== "disabled";
+  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const [value, setValue] = useState("");
+  const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [sending, setSending] = useState(false);
   const [pausing, setPausing] = useState(false);
   const [resuming, setResuming] = useState(false);
@@ -113,33 +115,46 @@ export function useComposer(
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
-  sendExtrasRef.current = options.sendExtras;
-  const liveExtrasVersion = JSON.stringify(resolveSendExtras(options.sendExtras));
+  useLayoutEffect(() => {
+    sendExtrasRef.current = options.sendExtras;
+  }, [options.sendExtras]);
+  const liveExtras = resolveSendExtras(options.sendExtras);
+  const liveExtrasVersion = JSON.stringify(liveExtras);
 
   // A composer is bound to one session: switching targets must not leak the
-  // previous session's draft, error, or retry idempotency key.
-  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
+  // previous session's draft, error, or retry idempotency key. Revoke the old
+  // target only when the new render commits: a suspended transition must leave
+  // the still-visible composer fully interactive.
   const targetKeyRef = useRef(targetKey);
-  useEffect(() => {
-    if (targetKeyRef.current !== targetKey) {
-      targetKeyRef.current = targetKey;
-      targetGeneration.current += 1;
-      pendingClientEventId.current = null;
-      localEditRevision.current = 0;
-      draftReadGeneration.current += 1;
-      draftRef.current = null;
-      draftLoadErrorRef.current = null;
-      lastSavedSignature.current = null;
-      setValue("");
-      setError(null);
-      setDraft(null);
-      setDraftConflict(null);
-      setRestoredResources([]);
-    }
-  }, [targetKey]);
+  useLayoutEffect(() => {
+    if (targetKeyRef.current === targetKey) return;
+    targetKeyRef.current = targetKey;
+    targetGeneration.current += 1;
+    pendingClientEventId.current = null;
+    localEditRevision.current = 0;
+    draftReadGeneration.current += 1;
+    draftRef.current = null;
+    draftLoadErrorRef.current = null;
+    lastSavedSignature.current = null;
+    // An unresolved save for the old target must neither block nor join the
+    // new target's autosave chain. Its own generation fence drops settlement.
+    saveChain.current = Promise.resolve();
+    setStateTargetKey(targetKey);
+    setValue("");
+    setSending(false);
+    setPausing(false);
+    setResuming(false);
+    setError(null);
+    setDraft(null);
+    setDraftLoading(Boolean(sessionId) && durableDrafts);
+    setDraftSaving(false);
+    setDraftConflict(null);
+    setRestoredResources([]);
+  }, [durableDrafts, sessionId, targetKey]);
 
   const applyDraft = useCallback(
     (next: ComposerDraft): void => {
+      if (targetKeyRef.current !== targetKey) return;
       if (!durableDrafts) {
         pendingClientEventId.current = null;
         localEditRevision.current += 1;
@@ -161,11 +176,12 @@ export function useComposer(
       setDraftConflict(null);
       onDraftApplied?.(next);
     },
-    [durableDrafts, onDraftApplied],
+    [durableDrafts, onDraftApplied, targetKey],
   );
 
   const loadDraft = useCallback(
     async (replaceLocal: boolean, rejectOnFailure = false): Promise<void> => {
+      if (targetKeyRef.current !== targetKey) return;
       if (!sessionId || !durableDrafts) {
         setDraftLoading(false);
         return;
@@ -176,7 +192,9 @@ export function useComposer(
       setDraftLoading(true);
       try {
         const fetched = await client.getComposerDraft(workspaceId, sessionId);
-        if (generation !== targetGeneration.current) return;
+        if (generation !== targetGeneration.current || targetKeyRef.current !== targetKey) {
+          return;
+        }
         const ownsLatestRead = readTicket === draftReadGeneration.current;
         const currentRevision = draftRef.current?.revision ?? -1;
         if ((ownsLatestRead || rejectOnFailure) && fetched.revision >= currentRevision) {
@@ -204,6 +222,7 @@ export function useComposer(
       } catch (cause) {
         if (
           generation === targetGeneration.current &&
+          targetKeyRef.current === targetKey &&
           (readTicket === draftReadGeneration.current || rejectOnFailure)
         ) {
           const failure = asError(cause);
@@ -212,12 +231,16 @@ export function useComposer(
         }
         if (rejectOnFailure) throw cause;
       } finally {
-        if (generation === targetGeneration.current && readTicket === draftReadGeneration.current) {
+        if (
+          generation === targetGeneration.current &&
+          targetKeyRef.current === targetKey &&
+          readTicket === draftReadGeneration.current
+        ) {
           setDraftLoading(false);
         }
       }
     },
-    [client, durableDrafts, onDraftApplied, sessionId, workspaceId],
+    [client, durableDrafts, onDraftApplied, sessionId, targetKey, workspaceId],
   );
 
   useEffect(() => {
@@ -245,6 +268,7 @@ export function useComposer(
   );
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
+    if (targetKeyRef.current !== targetKey) return null;
     const base = draftRef.current;
     if (!base) return null;
     const extras = resolveSendExtras(sendExtrasRef.current);
@@ -256,13 +280,21 @@ export function useComposer(
       model: extras.model ?? base.model,
       reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
     };
-  }, [restoredResources, value]);
+  }, [restoredResources, targetKey, value]);
 
   const persistPayload = useCallback(
     async (payload: SaveComposerDraftRequest): Promise<boolean> => {
-      if (!sessionId) return false;
+      const ownedTargetKey = targetKey;
+      const ownedGeneration = targetGeneration.current;
+      if (!sessionId || targetKeyRef.current !== ownedTargetKey) return false;
       let success = false;
       const run = async () => {
+        if (
+          targetKeyRef.current !== ownedTargetKey ||
+          targetGeneration.current !== ownedGeneration
+        ) {
+          return;
+        }
         const current = draftRef.current;
         if (!current) return;
         const request = { ...payload, expectedRevision: current.revision };
@@ -274,24 +306,40 @@ export function useComposer(
         setDraftSaving(true);
         try {
           const saved = await client.saveComposerDraft(workspaceId, sessionId, request);
+          if (
+            targetKeyRef.current !== ownedTargetKey ||
+            targetGeneration.current !== ownedGeneration
+          ) {
+            return;
+          }
           draftRef.current = saved;
           setDraft(saved);
           lastSavedSignature.current = signature;
           setDraftConflict(null);
           success = true;
         } catch (cause) {
-          const problem = asError(cause);
-          setDraftConflict(problem);
-          setError(problem);
+          if (
+            targetKeyRef.current === ownedTargetKey &&
+            targetGeneration.current === ownedGeneration
+          ) {
+            const problem = asError(cause);
+            setDraftConflict(problem);
+            setError(problem);
+          }
         } finally {
-          setDraftSaving(false);
+          if (
+            targetKeyRef.current === ownedTargetKey &&
+            targetGeneration.current === ownedGeneration
+          ) {
+            setDraftSaving(false);
+          }
         }
       };
       saveChain.current = saveChain.current.then(run, run);
       await saveChain.current;
       return success;
     },
-    [client, sessionId, workspaceId],
+    [client, sessionId, targetKey, workspaceId],
   );
 
   // Private durable autosave. A newer local edit is never replaced by an older
@@ -323,6 +371,8 @@ export function useComposer(
 
   const dispatch = useCallback(
     async (delivery: "send" | "steer", explicit?: string): Promise<boolean> => {
+      const ownedTargetKey = targetKey;
+      const ownedGeneration = targetGeneration.current;
       const draftAtSend = value;
       const rawText = explicit ?? draftAtSend;
       const hasText = rawText.trim().length > 0;
@@ -330,7 +380,12 @@ export function useComposer(
       // resource) is legitimate, so we must not bail on empty text alone.
       const extras = resolveSendExtras(sendExtrasRef.current);
       const hasResources = restoredResources.length > 0 || (extras.resources?.length ?? 0) > 0;
-      if ((!hasText && !hasResources) || !sessionId || sending) {
+      if (
+        (!hasText && !hasResources) ||
+        !sessionId ||
+        sending ||
+        targetKeyRef.current !== ownedTargetKey
+      ) {
         return false;
       }
       // Reuse the clientEventId across retries of the same draft so a
@@ -348,6 +403,12 @@ export function useComposer(
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
         if (payload && !(await persistPayload(payload))) return false;
+        if (
+          targetKeyRef.current !== ownedTargetKey ||
+          targetGeneration.current !== ownedGeneration
+        ) {
+          return false;
+        }
         const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
@@ -359,6 +420,12 @@ export function useComposer(
           await client.steerMessage(workspaceId, sessionId, input);
         } else {
           await client.sendMessage(workspaceId, sessionId, input);
+        }
+        if (
+          targetKeyRef.current !== ownedTargetKey ||
+          targetGeneration.current !== ownedGeneration
+        ) {
+          return false;
         }
         pendingClientEventId.current = null;
         const previousDraft = draftRef.current;
@@ -385,10 +452,20 @@ export function useComposer(
         onSent?.(sendText);
         return true;
       } catch (cause) {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setError(cause instanceof Error ? cause : new Error(String(cause)));
+        }
         return false;
       } finally {
-        setSending(false);
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setSending(false);
+        }
       }
     },
     [
@@ -400,6 +477,7 @@ export function useComposer(
       restoredResources,
       sending,
       sessionId,
+      targetKey,
       value,
       workspaceId,
     ],
@@ -413,13 +491,13 @@ export function useComposer(
   // — keeping useComposer attachment-agnostic while still lighting up the send
   // affordance the moment a file is ready. ChatComposer additionally gates this
   // on its `attachments.uploading` flag so a message never departs mid-upload.
-  const hasReadyResources =
-    restoredResources.length > 0 ||
-    (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
+  const hasReadyResources = restoredResources.length > 0 || (liveExtras.resources?.length ?? 0) > 0;
 
   const pause = useCallback(
     async (reason?: string): Promise<void> => {
-      if (!sessionId || pausing) {
+      const ownedTargetKey = targetKey;
+      const ownedGeneration = targetGeneration.current;
+      if (!sessionId || pausing || targetKeyRef.current !== ownedTargetKey) {
         return;
       }
       setPausing(true);
@@ -432,17 +510,29 @@ export function useComposer(
             : {}),
         });
       } catch (cause) {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setError(cause instanceof Error ? cause : new Error(String(cause)));
+        }
       } finally {
-        setPausing(false);
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setPausing(false);
+        }
       }
     },
-    [client, workspaceId, sessionId, pausing, options.effectiveControl?.controlEtag],
+    [client, workspaceId, sessionId, pausing, options.effectiveControl?.controlEtag, targetKey],
   );
 
   const resume = useCallback(
     async (reason?: string): Promise<void> => {
-      if (!sessionId || resuming) return;
+      const ownedTargetKey = targetKey;
+      const ownedGeneration = targetGeneration.current;
+      if (!sessionId || resuming || targetKeyRef.current !== ownedTargetKey) return;
       setResuming(true);
       setError(null);
       try {
@@ -453,17 +543,29 @@ export function useComposer(
             : {}),
         });
       } catch (cause) {
-        setError(cause instanceof Error ? cause : new Error(String(cause)));
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setError(cause instanceof Error ? cause : new Error(String(cause)));
+        }
       } finally {
-        setResuming(false);
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setResuming(false);
+        }
       }
     },
-    [client, workspaceId, sessionId, resuming, options.effectiveControl?.controlEtag],
+    [client, workspaceId, sessionId, resuming, options.effectiveControl?.controlEtag, targetKey],
   );
 
   const resumeScope = useCallback(
     async (option: EffectiveControlResumeOption): Promise<void> => {
-      if (!sessionId || resuming) return;
+      const ownedTargetKey = targetKey;
+      const ownedGeneration = targetGeneration.current;
+      if (!sessionId || resuming || targetKeyRef.current !== ownedTargetKey) return;
       setResuming(true);
       setError(null);
       try {
@@ -481,6 +583,12 @@ export function useComposer(
           });
         } else if (option.scope === "session" && option.targetId) {
           const target = await client.getQueue(workspaceId, option.targetId);
+          if (
+            targetKeyRef.current !== ownedTargetKey ||
+            targetGeneration.current !== ownedGeneration
+          ) {
+            return;
+          }
           await client.resumeSession(workspaceId, option.targetId, {
             expectedControlEtag: target.effectiveControl.controlEtag,
           });
@@ -492,29 +600,52 @@ export function useComposer(
           });
         }
       } catch (cause) {
-        setError(asError(cause));
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setError(asError(cause));
+        }
       } finally {
-        setResuming(false);
+        if (
+          targetKeyRef.current === ownedTargetKey &&
+          targetGeneration.current === ownedGeneration
+        ) {
+          setResuming(false);
+        }
       }
     },
-    [client, options.effectiveControl, resuming, sessionId, workspaceId],
+    [client, options.effectiveControl, resuming, sessionId, targetKey, workspaceId],
   );
 
-  const updateValue = useCallback((next: string) => {
-    pendingClientEventId.current = null;
-    localEditRevision.current += 1;
-    setValue(next);
-  }, []);
+  const updateValue = useCallback(
+    (next: string) => {
+      if (targetKeyRef.current !== targetKey) return;
+      pendingClientEventId.current = null;
+      localEditRevision.current += 1;
+      setValue(next);
+    },
+    [targetKey],
+  );
 
-  const removeRestoredResource = useCallback((index: number) => {
-    localEditRevision.current += 1;
-    setRestoredResources((current) => current.filter((_, candidate) => candidate !== index));
-  }, []);
+  const removeRestoredResource = useCallback(
+    (index: number) => {
+      if (targetKeyRef.current !== targetKey) return;
+      localEditRevision.current += 1;
+      setRestoredResources((current) => current.filter((_, candidate) => candidate !== index));
+    },
+    [targetKey],
+  );
 
   const resolveDraftConflict = useCallback(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
-      if (!sessionId || !durableDrafts) return;
+      const ownedTargetKey = targetKey;
+      const ownedGeneration = targetGeneration.current;
+      if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) return;
       const remote = await client.getComposerDraft(workspaceId, sessionId);
+      if (targetKeyRef.current !== ownedTargetKey || targetGeneration.current !== ownedGeneration) {
+        return;
+      }
       if (choice === "use_remote") {
         applyDraft(remote);
         return;
@@ -532,38 +663,48 @@ export function useComposer(
       durableDrafts,
       persistPayload,
       sessionId,
+      targetKey,
       workspaceId,
     ],
   );
 
+  const identityMatches = stateTargetKey === targetKey;
+  const reloadDraft = useCallback(async () => await loadDraft(true), [loadDraft]);
+  const clearError = useCallback(() => {
+    if (targetKeyRef.current !== targetKey) return;
+    setError(null);
+    setDraftConflict(null);
+  }, [targetKey]);
+
   return {
-    value,
+    value: identityMatches ? value : "",
     setValue: updateValue,
     send,
     steer,
-    sending,
-    canSend: Boolean(sessionId) && !sending && (value.trim().length > 0 || hasReadyResources),
+    sending: identityMatches ? sending : false,
+    canSend:
+      identityMatches &&
+      Boolean(sessionId) &&
+      !sending &&
+      (value.trim().length > 0 || hasReadyResources),
     pause,
-    pausing,
+    pausing: identityMatches ? pausing : false,
     resume,
     resumeScope,
-    resuming,
-    draft,
-    draftRevision: draft?.revision ?? 0,
-    draftLoading,
-    draftSaving,
-    draftConflict,
+    resuming: identityMatches ? resuming : false,
+    draft: identityMatches ? draft : null,
+    draftRevision: identityMatches ? (draft?.revision ?? 0) : 0,
+    draftLoading: identityMatches ? draftLoading : Boolean(sessionId) && durableDrafts,
+    draftSaving: identityMatches ? draftSaving : false,
+    draftConflict: identityMatches ? draftConflict : null,
     draftPersistence: durableDrafts ? "durable" : "disabled",
     applyDraft,
-    reloadDraft: useCallback(async () => await loadDraft(true), [loadDraft]),
+    reloadDraft,
     resolveDraftConflict,
-    restoredResources,
+    restoredResources: identityMatches ? restoredResources : [],
     removeRestoredResource,
-    error,
-    clearError: useCallback(() => {
-      setError(null);
-      setDraftConflict(null);
-    }, []),
+    error: identityMatches ? error : null,
+    clearError,
   };
 }
 
