@@ -306,7 +306,9 @@ wrong one is the classic mistake.
    what a new turn's input is built from. It is dual-written as the agent
    streams (reconciled after every model response and at every turn-end path)
    so a crash loses at most the single in-flight model call. Ordinary inference
-   has no second conversation-memory read path.
+   has no second conversation-memory read path. Private memory tool arguments
+   and results remain here so the model can continue truthfully; they are not
+   copied into the workspace-readable event projection.
 2. **`agent_run_states` — approval resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval
@@ -315,8 +317,15 @@ wrong one is the classic mistake.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
-   and lossy** (reasoning items and several item types are dropped), and each
-   payload is capped at 64 KiB with explicit surface/byte/token/non-retention
+   and lossy** (reasoning items and several item types are dropped). The worker
+   allocates one projection state per SDK stream: private `memory_search`,
+   `memory_save`, and `memory_correct` calls retain only id/name plus
+   `redacted: true`, their correlated outputs retain only id plus
+   `redacted: true`, and memory lifecycle events retain ids/kind/action rather
+   than text, queries, reasons, sources, or metadata. This store is correct for
+   humans and auditing and must never be fed back to the model.
+
+   Each payload is capped at 64 KiB with explicit surface/byte/token/non-retention
    metadata. Large text keeps deterministic head/tail facts; inline media is a
    compact `media_preview` and its bytes are not retained by this generic path.
    It is correct for human progress/audit previews and must never be used to
@@ -409,6 +418,47 @@ the session's sandbox on its next turn — decoupled from the RunState blob.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.
+
+### Workspace knowledge memory is bounded retrieval context
+
+`knowledge_memories` is a fourth, separate continuity surface, not conversation
+truth. Agent-visible `active ∪ approved` records compose typed workspace, user,
+role, session, and ephemeral scopes. Applicability derives only from the signed
+session id, the session's persisted creator subject, and normalized persisted
+`metadata.role`/`metadata.memoryLabels`; public payloads cannot select another
+subject, role, session, or actor. Role/label matches affect relevance and never
+grant access. Missing trusted user context fails closed under subject-aware FORCE
+RLS.
+
+REST validates any signed session id against the requested workspace before all
+memory reads, writes, relationships, export, maintenance, or deprecated
+documents-MCP operations. The worker bearer is only a transport principal: the
+effective subject and creator/actor attribution come from the persisted session
+creator. Creator provenance is protected by the composite workspace/session FK.
+The curated review lane rejects direct approved/rejected creation and permits a
+reviewed transition only from a row-locked `proposed` record.
+
+When `settings.memoryEnabled` is on, `resolveWorkspaceMemoryBlock` filters before
+ranking, considers at most 50 candidates, excludes episodic records, and emits
+only whole records within an estimated 2,500-token budget. Labeled workspace
+records enter standing context only on a persisted task-label match; explicit
+search may still find them. Search results expose bounded text/scope/label/
+freshness/confidence/provenance/conflict components and stable reason codes.
+Unresolved contradictions remain visible and penalized rather than silently
+choosing a winner.
+
+All writes continue through the sanitizing/deduplicating memory gate. Corrections
+atomically supersede or archive. Relationships make derivation, supersession, and
+conflict provenance explicit. Retention/reconciliation are audited
+preview → exact plan-hash and row-version-fenced apply → preconditioned revert
+capabilities; hard delete is deliberately irreversible and leaves only a
+text-free audit tombstone. Private export is workspace-admin-only, deterministic,
+and audited without memory text or metadata. These primitives compose existing
+users, workspaces, roles, and sessions; they do not define a durable Agent/profile.
+
+> Canonical live shapes: `packages/contracts/src/index.ts`,
+> `packages/db/src/schema.ts`, `packages/db/src/index.ts`. Rationale and rejected
+> alternatives: `docs/design/hierarchical-role-aware-memory.md`.
 
 One consequence of client-side conversation truth: model calls must not depend
 on the provider's server-side response store. Provider-assigned item ids

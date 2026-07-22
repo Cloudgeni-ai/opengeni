@@ -569,6 +569,10 @@ export const sessions = pgTable(
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    // Immutable authenticated creator provenance. Direct creates persist the
+    // grant subject; children inherit the parent's creator; system/history rows
+    // without trusted provenance remain null.
+    createdBySubjectId: text("created_by_subject_id"),
     model: text("model").notNull(),
     sandboxBackend: text("sandbox_backend").notNull(),
     // The OS this session's box runs. Defaults to 'linux' (today's only OS, so
@@ -1059,13 +1063,16 @@ export const knowledgeMemories = pgTable(
     status: text("status").notNull().default("proposed"),
     kind: text("kind").notNull().default("semantic"),
     scope: text("scope").notNull().default("workspace"),
+    scopeType: text("scope_type").notNull(),
+    scopeSubjectId: text("scope_subject_id"),
+    scopeRoleKey: text("scope_role_key"),
+    scopeSessionId: uuid("scope_session_id"),
+    labels: text("labels").array().notNull().default([]),
     text: text("text").notNull(),
     sourceRefs: jsonb("source_refs").$type<unknown[]>().notNull().default([]),
     confidence: integer("confidence").notNull().default(50),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
-    createdBySessionId: uuid("created_by_session_id").references(() => sessions.id, {
-      onDelete: "set null",
-    }),
+    createdBySessionId: uuid("created_by_session_id"),
     reviewedBy: text("reviewed_by"),
     reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
     // Workspace Memory V1 (migration 0045). Embedding is nullable: fail-soft writes
@@ -1097,10 +1104,22 @@ export const knowledgeMemories = pgTable(
       table.workspaceId,
       table.scope,
     ),
+    workspaceTypedScope: index("knowledge_memories_workspace_typed_scope_idx").on(
+      table.workspaceId,
+      table.scopeType,
+      table.scopeSubjectId,
+      table.scopeRoleKey,
+      table.scopeSessionId,
+    ),
     createdBySession: index("knowledge_memories_workspace_created_by_session_idx").on(
       table.workspaceId,
       table.createdBySessionId,
     ),
+    createdByWorkspaceSession: foreignKey({
+      name: "knowledge_memories_created_by_workspace_session_fk",
+      columns: [table.workspaceId, table.createdBySessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }),
     // Working-set selection (partial index mirrors migration 0045).
     workspaceVisible: index("knowledge_memories_workspace_visible_idx")
       .on(table.workspaceId, table.pinned, table.updatedAt)
@@ -1109,9 +1128,119 @@ export const knowledgeMemories = pgTable(
       table.workspaceId,
       table.textHash,
     ),
-    workspaceVisibleTextHashUnique: uniqueIndex("knowledge_memories_workspace_visible_text_hash_uq")
-      .on(table.workspaceId, table.textHash)
-      .where(sql`${table.status} in ('active', 'approved') and ${table.textHash} is not null`),
+  }),
+);
+
+export const knowledgeMemoryRelationships = pgTable(
+  "knowledge_memory_relationships",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sourceMemoryId: uuid("source_memory_id").notNull(),
+    targetMemoryId: uuid("target_memory_id").notNull(),
+    relationshipType: text("relationship_type").notNull(),
+    actorSubjectId: text("actor_subject_id"),
+    actorSessionId: uuid("actor_session_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    edge: uniqueIndex("knowledge_memory_relationships_edge_uq").on(
+      table.workspaceId,
+      table.sourceMemoryId,
+      table.targetMemoryId,
+      table.relationshipType,
+    ),
+    source: index("knowledge_memory_relationships_source_idx").on(
+      table.workspaceId,
+      table.sourceMemoryId,
+      table.createdAt,
+    ),
+    target: index("knowledge_memory_relationships_target_idx").on(
+      table.workspaceId,
+      table.targetMemoryId,
+      table.createdAt,
+    ),
+  }),
+);
+
+export const knowledgeMemoryOperations = pgTable(
+  "knowledge_memory_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    operationType: text("operation_type").notNull(),
+    status: text("status").notNull().default("previewed"),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorSessionId: uuid("actor_session_id"),
+    appliedBySubjectId: text("applied_by_subject_id"),
+    appliedBySessionId: uuid("applied_by_session_id"),
+    revertedBySubjectId: text("reverted_by_subject_id"),
+    revertedBySessionId: uuid("reverted_by_session_id"),
+    planHash: text("plan_hash").notNull(),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull().default({}),
+    inversePlan: jsonb("inverse_plan").$type<Record<string, unknown>>(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    appliedAt: timestamp("applied_at", { withTimezone: true }),
+    revertedAt: timestamp("reverted_at", { withTimezone: true }),
+  },
+  (table) => ({
+    actorCreated: index("knowledge_memory_operations_actor_created_idx").on(
+      table.workspaceId,
+      table.actorSubjectId,
+      table.createdAt,
+    ),
+  }),
+);
+
+// Irreversible deletion intentionally retains only a text-free audit tombstone.
+// The deleted memory has no FK: the purpose of this row is to prove who deleted
+// which id, when, and how many visible relationships cascaded with it.
+export const knowledgeMemoryDeletionAudits = pgTable(
+  "knowledge_memory_deletion_audits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    memoryId: uuid("memory_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorSessionId: uuid("actor_session_id"),
+    deletedRelationshipCount: integer("deleted_relationship_count").notNull().default(0),
+    deletedAt: timestamp("deleted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actorDeleted: index("knowledge_memory_deletion_audits_actor_deleted_idx").on(
+      table.workspaceId,
+      table.actorSubjectId,
+      table.deletedAt,
+    ),
+  }),
+);
+
+// Private-admin exports are exceptional reads across user scopes. Audit only
+// text-free operational facts so export accountability cannot itself retain
+// memory content, labels, source metadata, or search terms.
+export const knowledgeMemoryExportAudits = pgTable(
+  "knowledge_memory_export_audits",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    actorSubjectId: text("actor_subject_id").notNull(),
+    actorSessionId: uuid("actor_session_id"),
+    includedPrivate: boolean("included_private").notNull().default(true),
+    includedEphemeral: boolean("included_ephemeral").notNull().default(false),
+    memoryCount: integer("memory_count").notNull(),
+    relationshipCount: integer("relationship_count").notNull(),
+    exportedAt: timestamp("exported_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    actorExported: index("knowledge_memory_export_audits_actor_exported_idx").on(
+      table.workspaceId,
+      table.actorSubjectId,
+      table.exportedAt,
+    ),
   }),
 );
 

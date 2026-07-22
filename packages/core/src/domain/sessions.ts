@@ -29,6 +29,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
+  getSessionMemoryContext,
   getSessionByCreateIdempotencyKey,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -286,6 +287,9 @@ export async function createAndStartSession(input: {
   instructions?: string | null;
   // Validated against the creating grant before this is called.
   firstPartyMcpPermissions?: Permission[] | null;
+  // Internal immutable provenance. Direct sessions use the authenticated grant
+  // subject; children inherit the parent's creator rather than the worker MCP id.
+  createdBySubjectId?: string | null;
   // Encrypted DB rows plus matching safe metadata for create-time per-session
   // MCP servers. Metadata is the only shape emitted in events/responses.
   mcpServers?: CreateSessionMcpServerInput[];
@@ -356,6 +360,7 @@ export async function createAndStartSession(input: {
       rigId: input.rigId ?? null,
       rigVersionId: input.rigVersionId ?? null,
       firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      createdBySubjectId: input.createdBySubjectId ?? null,
       instructions: input.instructions ?? null,
       parentSessionId: input.parentSessionId ?? null,
       createIdempotencyKey: input.createIdempotencyKey,
@@ -384,6 +389,7 @@ export async function createAndStartSession(input: {
     rigId: input.rigId ?? null,
     rigVersionId: input.rigVersionId ?? null,
     firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+    createdBySubjectId: input.createdBySubjectId ?? null,
     instructions: input.instructions ?? null,
     parentSessionId: input.parentSessionId ?? null,
     sandboxGroupId: input.sandboxGroupId ?? null,
@@ -864,6 +870,9 @@ export async function createSessionForRequest(
     typeof grant.metadata?.["sessionId"] === "string"
       ? (grant.metadata["sessionId"] as string)
       : null;
+  const createdBySubjectId = parentSessionId
+    ? ((await getSessionMemoryContext(db, workspaceId, parentSessionId))?.access?.subjectId ?? null)
+    : grant.subjectId;
   // Shared-sandbox placement (addendum 05 §D.2/§D.3, decision I10/OD-S1).
   //
   // The DEFAULT rule is context-dependent and resolved server-side from the
@@ -1109,6 +1118,7 @@ export async function createSessionForRequest(
     // time. Not surfaced as an event.
     instructions: payload.instructions ?? null,
     firstPartyMcpPermissions,
+    createdBySubjectId,
     mcpServers: sessionMcpServers.dbServers,
     sessionMcpServers: sessionMcpServers.metadata,
     parentSessionId,

@@ -120,11 +120,17 @@ export type MemoryItem = {
   variant: "saved" | "corrected";
   /** The memory's kind enum (`"preference" | "semantic" | …`); mapped to a human label at render. */
   memoryKind: string;
-  /** The memory text, ellipsized to ≤120 chars server-side. For a supersede this is the OLD text. */
+  /**
+   * @deprecated Replay-only compatibility for historical events. New live
+   * memory events omit private text and project this to an empty string.
+   */
   preview: string;
   /** The save collapsed into an existing memory (no new row was written). Saved variant only. */
   deduped?: boolean;
-  /** The NEW text when a correction superseded the memory with a replacement; absent = updated-in-place or archived. */
+  /**
+   * @deprecated Replay-only compatibility for historical events. New live
+   * correction events omit replacement text.
+   */
   replacementPreview?: string;
   /**
    * What a `memory.corrected` did: `"superseded"` (replaced by a new record, see

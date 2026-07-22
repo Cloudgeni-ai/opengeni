@@ -468,6 +468,9 @@ describe("OpenGeniClient documents", () => {
     await client.listKnowledgeMemories(WORKSPACE_ID, {
       status: "approved",
       query: "azure",
+      scopeType: "role",
+      labels: ["deploy", "release"],
+      includeExpired: true,
       limit: 5,
     });
     await client.getKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID);
@@ -476,6 +479,32 @@ describe("OpenGeniClient documents", () => {
       kind: "decision",
     });
     await client.updateKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID, { status: "approved" });
+    await client.searchWorkspaceMemories(WORKSPACE_ID, {
+      query: "rollback evidence",
+      scopeTypes: ["user", "role"],
+      labels: ["release"],
+    });
+    await client.listMemoryRelationships(WORKSPACE_ID, {
+      memoryId: DOCUMENT_ID,
+      type: "contradicts",
+    });
+    await client.createMemoryRelationship(WORKSPACE_ID, {
+      sourceMemoryId: DOCUMENT_ID,
+      targetMemoryId: BASE_ID,
+      type: "related_to",
+    });
+    await client.deleteMemoryRelationship(WORKSPACE_ID, BASE_ID);
+    await client.exportWorkspaceMemories(WORKSPACE_ID, {
+      includeEphemeral: true,
+      includePrivate: true,
+    });
+    await client.deleteKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID, { includePrivate: true });
+    await client.previewMemoryMaintenance(WORKSPACE_ID, {
+      type: "retention",
+      expiredBefore: "2026-07-19T00:00:00.000Z",
+    });
+    await client.applyMemoryMaintenance(WORKSPACE_ID, TASK_ID, { planHash: "a".repeat(64) });
+    await client.revertMemoryMaintenance(WORKSPACE_ID, TASK_ID, { planHash: "a".repeat(64) });
     expect(search.results).toEqual([]);
     expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -492,6 +521,15 @@ describe("OpenGeniClient documents", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/search`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/relationships`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/relationships`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/relationships/${BASE_ID}`,
+        `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/export`,
+        `DELETE /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/maintenance/preview`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/maintenance/${TASK_ID}/apply`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/maintenance/${TASK_ID}/revert`,
       ],
     );
     expect(JSON.parse(requests[6]!.body!)).toEqual({ query: "rollback steps", limit: 3 });
@@ -501,11 +539,30 @@ describe("OpenGeniClient documents", () => {
       limit: 2,
     });
     expect(new URL(requests[8]!.url).searchParams.get("status")).toBe("approved");
+    expect(new URL(requests[8]!.url).searchParams.getAll("labels")).toEqual(["deploy", "release"]);
+    expect(new URL(requests[8]!.url).searchParams.get("scopeType")).toBe("role");
+    expect(new URL(requests[8]!.url).searchParams.get("includeExpired")).toBe("true");
     expect(JSON.parse(requests[10]!.body!)).toEqual({
       text: "Prefer reviewed memory.",
       kind: "decision",
     });
     expect(JSON.parse(requests[11]!.body!)).toEqual({ status: "approved" });
+    expect(JSON.parse(requests[12]!.body!)).toEqual({
+      query: "rollback evidence",
+      scopeTypes: ["user", "role"],
+      labels: ["release"],
+    });
+    expect(new URL(requests[13]!.url).searchParams.get("memoryId")).toBe(DOCUMENT_ID);
+    expect(new URL(requests[13]!.url).searchParams.get("type")).toBe("contradicts");
+    expect(new URL(requests[16]!.url).searchParams.get("includeEphemeral")).toBe("true");
+    expect(new URL(requests[16]!.url).searchParams.get("includePrivate")).toBe("true");
+    expect(new URL(requests[17]!.url).searchParams.get("includePrivate")).toBe("true");
+    expect(JSON.parse(requests[18]!.body!)).toEqual({
+      type: "retention",
+      expiredBefore: "2026-07-19T00:00:00.000Z",
+    });
+    expect(JSON.parse(requests[19]!.body!)).toEqual({ planHash: "a".repeat(64) });
+    expect(JSON.parse(requests[20]!.body!)).toEqual({ planHash: "a".repeat(64) });
   });
 
   test("deleteDocument DELETEs the document and resolves on 204", async () => {

@@ -1,17 +1,36 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  calculateMemoryTextScore,
+  explainMemoryApplicability,
   estimateMemoryTokens,
   hashMemoryText,
   isMemoryTextTooLong,
+  isMemoryApplicable,
+  isMemoryScopeApplicable,
+  MEMORY_BLOCK_RECORD_LIMIT,
+  MEMORY_CONFLICT_PENALTY,
+  MEMORY_FRESHNESS_MAX_AGE_MS,
+  MEMORY_LABEL_MAX_COUNT,
+  MEMORY_LABEL_MAX_CHARS,
+  MEMORY_ROLE_KEY_MAX_CHARS,
   MEMORY_TEXT_MAX_CHARS,
+  memoryFreshnessScore,
+  normalizeMemoryLabel,
+  normalizeMemoryLabels,
   normalizeMemoryText,
+  normalizeMemoryRoleKey,
+  rankMemoryRetrievalCandidates,
   renderWorkspaceMemoryBlock,
   sanitizeMemoryText,
+  selectWorkspaceMemoryRecords,
+  scoreMemoryRetrievalCandidate,
   shortMemoryId,
   WORKSPACE_MEMORY_BLOCK_HEADER_POPULATED,
   WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET,
   type MemoryBlockRecord,
+  type MemoryRetrievalCandidate,
+  type MemoryScopeSpec,
 } from "../src/memory-domain";
 
 describe("normalizeMemoryText", () => {
@@ -36,6 +55,141 @@ describe("normalizeMemoryText", () => {
     ]) {
       expect(normalizeMemoryText(sample)).toBe(sqlEquivalent(sample));
     }
+  });
+});
+
+describe("hierarchical labels and role keys", () => {
+  test("normalizes labels to bounded, sorted, unique slugs", () => {
+    expect(
+      normalizeMemoryLabels([" Deploy ", "OPS_team", "task one", "deploy", "bad.label"]),
+    ).toEqual(["bad.label", "deploy", "ops_team", "task-one"]);
+    expect(normalizeMemoryLabel("x".repeat(MEMORY_LABEL_MAX_CHARS))).toHaveLength(
+      MEMORY_LABEL_MAX_CHARS,
+    );
+    expect(normalizeMemoryLabel("x".repeat(MEMORY_LABEL_MAX_CHARS + 1))).toBeNull();
+    expect(normalizeMemoryLabel("ops.v2")).toBe("ops.v2");
+    expect(normalizeMemoryLabel("unsafe/label")).toBeNull();
+  });
+
+  test("bounds label count and normalizes role keys with the same fail-closed alphabet", () => {
+    const labels = normalizeMemoryLabels(
+      Array.from({ length: MEMORY_LABEL_MAX_COUNT + 4 }, (_, index) => `label-${index}`),
+    );
+    expect(labels).toHaveLength(MEMORY_LABEL_MAX_COUNT);
+    expect(labels.every((label) => label.length <= MEMORY_LABEL_MAX_CHARS)).toBe(true);
+    expect(normalizeMemoryRoleKey("  Incident Commander ")).toBe("incident-commander");
+    expect(normalizeMemoryRoleKey(" Release.Ops ")).toBe("release.ops");
+    expect(normalizeMemoryRoleKey("role/ops")).toBeNull();
+    expect(normalizeMemoryRoleKey("r".repeat(MEMORY_ROLE_KEY_MAX_CHARS + 1))).toBeNull();
+    expect(normalizeMemoryRoleKey(null)).toBeNull();
+  });
+});
+
+describe("hierarchical scope applicability", () => {
+  const now = "2026-07-18T12:00:00.000Z";
+  const sessionId = "session-a";
+  const userId = "subject-a";
+  const context = {
+    now,
+    trustedUserSubjectId: userId,
+    roleKey: "Build Operator",
+    sessionId,
+  } as const;
+
+  const scopes: Array<[string, MemoryScopeSpec, boolean]> = [
+    ["workspace", { scopeType: "workspace" }, true],
+    ["matching user", { scopeType: "user", scopeSubjectId: userId }, true],
+    ["missing user", { scopeType: "user", scopeSubjectId: userId }, false],
+    ["matching role", { scopeType: "role", scopeRoleKey: "build-operator" }, true],
+    ["matching session", { scopeType: "session", scopeSessionId: sessionId }, true],
+    [
+      "matching ephemeral",
+      { scopeType: "ephemeral", scopeSessionId: sessionId, validUntil: "2026-07-18T13:00:00.000Z" },
+      true,
+    ],
+    ["legacy", { scopeType: "legacy", legacyScope: "old-convention" }, false],
+  ];
+
+  test("evaluates typed scope matrix and fails closed for absent trusted user", () => {
+    for (const [name, scope, expected] of scopes) {
+      const actual = isMemoryScopeApplicable(
+        scope,
+        name === "missing user" ? { roleKey: context.roleKey, sessionId } : context,
+      );
+      expect(actual, name).toBe(expected);
+    }
+    expect(
+      isMemoryScopeApplicable(
+        { scopeType: "user", scopeSubjectId: userId },
+        { roleKey: context.roleKey, sessionId },
+      ),
+    ).toBe(false);
+    expect(
+      isMemoryScopeApplicable(
+        { scopeType: "role", scopeRoleKey: "ops.v2" },
+        { roleKey: "OPS.V2", sessionId },
+      ),
+    ).toBe(true);
+  });
+
+  test("uses the caller's one reference time for validity and ephemeral expiry", () => {
+    const ephemeral = {
+      scopeSpec: {
+        scopeType: "ephemeral" as const,
+        scopeSessionId: sessionId,
+        validUntil: "2026-07-18T13:00:00.000Z",
+      },
+      validFrom: "2026-07-18T11:00:00.000Z",
+    };
+    expect(isMemoryApplicable(ephemeral, { ...context, now })).toBe(true);
+    expect(isMemoryApplicable(ephemeral, { ...context, now: "2026-07-18T13:00:00.000Z" })).toBe(
+      false,
+    );
+    expect(
+      explainMemoryApplicability(ephemeral, {
+        ...context,
+        now: "2026-07-18T13:00:00.000Z",
+      }).reasonCodes,
+    ).toContain("scope.ephemeral_expired");
+  });
+
+  test("recomposes a persisted ephemeral row from its scope and validity columns", () => {
+    const persisted = {
+      scopeSpec: {
+        scopeType: "ephemeral" as const,
+        scopeSessionId: sessionId,
+      },
+      validFrom: "2026-07-18T11:00:00.000Z",
+      validUntil: "2026-07-18T13:00:00.000Z",
+    };
+    expect(isMemoryApplicable(persisted, context)).toBe(true);
+    expect(
+      isMemoryApplicable(
+        {
+          ...persisted,
+          validUntil: null,
+        },
+        context,
+      ),
+    ).toBe(false);
+  });
+
+  test("legacy workspace rows preserve V1 applicability while other legacy scopes do not", () => {
+    expect(isMemoryApplicable({ scope: "workspace" }, context)).toBe(true);
+    expect(isMemoryApplicable({ scope: "historical-role" }, context)).toBe(false);
+  });
+
+  test("workspace labels are admission hints for standing context, not search isolation", () => {
+    const labeled = { scopeSpec: { scopeType: "workspace" as const }, labels: ["infra"] };
+    expect(
+      isMemoryApplicable(labeled, { ...context, mode: "standing", memoryLabels: ["infra"] }),
+    ).toBe(true);
+    expect(
+      isMemoryApplicable(labeled, { ...context, mode: "standing", memoryLabels: ["product"] }),
+    ).toBe(false);
+    expect(
+      isMemoryApplicable(labeled, { ...context, mode: "search", memoryLabels: ["product"] }),
+    ).toBe(true);
   });
 });
 
@@ -92,6 +246,105 @@ describe("sanitizeMemoryText", () => {
     );
     expect(text).toBe("Prefer Terraform over Pulumi for new infra.");
     expect(redactionCount).toBe(0);
+  });
+});
+
+describe("retrieval components and deterministic ranking", () => {
+  const now = "2026-07-18T12:00:00.000Z";
+  const baseCandidate = (
+    over: Partial<MemoryRetrievalCandidate> = {},
+  ): MemoryRetrievalCandidate => ({
+    id: "aaaaaaaa-0000-4000-8000-000000000000",
+    scopeSpec: { scopeType: "workspace" },
+    vectorScore: 0.8,
+    keywordScore: 0.4,
+    updatedAt: now,
+    confidence: 0.8,
+    sourceRefs: [{ kind: "session_event" }],
+    ...over,
+  });
+
+  test("preserves the V1 text score formula for each search mode", () => {
+    expect(calculateMemoryTextScore(0.8, 0.4, "vector")).toBe(0.8);
+    expect(calculateMemoryTextScore(0.8, 0.4, "keyword")).toBe(0.4);
+    expect(calculateMemoryTextScore(0.8, 0.4, "hybrid")).toBeCloseTo(0.76);
+    expect(calculateMemoryTextScore(0.8, null, "hybrid")).toBeCloseTo(0.52);
+  });
+
+  test("returns bounded documented components, reason codes, and the conflict penalty", () => {
+    const clear = scoreMemoryRetrievalCandidate(
+      baseCandidate({ labels: ["infra"], unresolvedConflict: false }),
+      { now, queryLabels: ["infra"] },
+    );
+    const conflicted = scoreMemoryRetrievalCandidate(
+      baseCandidate({ labels: ["infra"], unresolvedConflict: true }),
+      { now, queryLabels: ["infra"] },
+    );
+    expect(clear).not.toBeNull();
+    expect(conflicted).not.toBeNull();
+    expect(conflicted!.conflict).toBe(MEMORY_CONFLICT_PENALTY);
+    expect(conflicted!.score).toBeCloseTo(clear!.score * MEMORY_CONFLICT_PENALTY, 5);
+    expect(conflicted!.reasonCodes).toContain("conflict.unresolved");
+    for (const component of [
+      conflicted!.score,
+      conflicted!.text,
+      conflicted!.scope,
+      conflicted!.labels,
+      conflicted!.freshness,
+      conflicted!.confidence,
+      conflicted!.provenance,
+      conflicted!.conflict,
+    ]) {
+      expect(component).toBeGreaterThanOrEqual(0);
+      expect(component).toBeLessThanOrEqual(1);
+    }
+  });
+
+  test("freshness is monotonic, bounded, and pinned records stay fresh", () => {
+    const fresh = memoryFreshnessScore(now, now);
+    const old = memoryFreshnessScore(
+      new Date(Date.parse(now) - MEMORY_FRESHNESS_MAX_AGE_MS / 2),
+      now,
+    );
+    const stale = memoryFreshnessScore(
+      new Date(Date.parse(now) - MEMORY_FRESHNESS_MAX_AGE_MS * 2),
+      now,
+    );
+    expect(fresh).toBe(1);
+    expect(fresh).toBeGreaterThan(old);
+    expect(old).toBeGreaterThan(stale);
+    expect(stale).toBe(0);
+    expect(memoryFreshnessScore("not-a-date", now)).toBe(0);
+    expect(memoryFreshnessScore("not-a-date", now, true)).toBe(1);
+  });
+
+  test("filters inapplicable candidates and uses UUID as the final total-order tie-break", () => {
+    const sameScore = {
+      scopeSpec: { scopeType: "workspace" as const },
+      vectorScore: 0.5,
+      keywordScore: 0.5,
+      updatedAt: now,
+      confidence: 0.5,
+    };
+    const ranked = rankMemoryRetrievalCandidates(
+      [
+        { ...sameScore, id: "bbbbbbbb-0000-4000-8000-000000000000" },
+        { ...sameScore, id: "aaaaaaaa-0000-4000-8000-000000000000" },
+        {
+          ...sameScore,
+          id: "cccccccc-0000-4000-8000-000000000000",
+          scopeSpec: { scopeType: "user", scopeSubjectId: "other-subject" },
+        },
+      ],
+      { now },
+    );
+    expect(ranked.map(({ candidate }) => candidate.id)).toEqual([
+      "aaaaaaaa-0000-4000-8000-000000000000",
+      "bbbbbbbb-0000-4000-8000-000000000000",
+    ]);
+    expect(scoreMemoryRetrievalCandidate(ranked[0]!.candidate, { now })!.reasonCodes).toContain(
+      "scope.workspace",
+    );
   });
 });
 
@@ -241,5 +494,118 @@ describe("renderWorkspaceMemoryBlock", () => {
       }),
     ])!;
     expect(block.indexOf("[aaaaaaaa]")).toBeLessThan(block.indexOf("[bbbbbbbb]"));
+  });
+
+  test("admits matching labeled workspace records and prioritizes narrower scopes", () => {
+    const context = {
+      now: "2026-07-18T12:00:00.000Z",
+      sessionId: "session-a",
+      trustedUserSubjectId: "subject-a",
+      roleKey: "builder",
+      memoryLabels: ["infra"],
+    } as const;
+    const workspaceRecords: MemoryBlockRecord[] = Array.from({ length: 55 }, (_, index) =>
+      record({
+        id: `${String(index).padStart(8, "0")}-0000-4000-8000-000000000000`,
+        kind: "semantic",
+        text: `Workspace fact ${index}.`,
+        scopeSpec: { scopeType: "workspace" },
+        updatedAt: "2026-07-18T11:00:00.000Z",
+      }),
+    );
+    const selected = selectWorkspaceMemoryRecords(
+      [
+        ...workspaceRecords,
+        record({
+          id: "eeeeeeee-0000-4000-8000-000000000000",
+          kind: "decision",
+          text: "Session fact.",
+          scopeSpec: { scopeType: "session", scopeSessionId: "session-a" },
+        }),
+        record({
+          id: "dddddddd-0000-4000-8000-000000000000",
+          kind: "decision",
+          text: "Role fact.",
+          scopeSpec: { scopeType: "role", scopeRoleKey: "builder" },
+        }),
+        record({
+          id: "ffffffff-0000-4000-8000-000000000000",
+          kind: "decision",
+          text: "Unmatched label.",
+          scopeSpec: { scopeType: "workspace" },
+          labels: ["product"],
+        }),
+      ],
+      context,
+    );
+    expect(selected).toHaveLength(MEMORY_BLOCK_RECORD_LIMIT);
+    expect(selected[0]!.id).toBe("eeeeeeee-0000-4000-8000-000000000000");
+    expect(selected[1]!.id).toBe("dddddddd-0000-4000-8000-000000000000");
+    expect(selected.some(({ id }) => id.startsWith("ffffffff"))).toBe(false);
+    expect(selected.slice(2).every(({ id }) => !id.startsWith("eeeeeeee"))).toBe(true);
+  });
+
+  test("renders additive scope, label, and conflict hints without weakening bounds", () => {
+    const block = renderWorkspaceMemoryBlock(
+      [
+        record({
+          id: "11111111-0000-4000-8000-000000000000",
+          kind: "semantic",
+          text: "Builder-only fact.",
+          scopeSpec: { scopeType: "role", scopeRoleKey: "builder" },
+          labels: ["Infra", "Deploy"],
+          unresolvedConflict: true,
+        }),
+        record({
+          id: "22222222-0000-4000-8000-000000000000",
+          kind: "semantic",
+          text: "Broad fact.",
+          scopeSpec: { scopeType: "workspace" },
+        }),
+        record({
+          id: "33333333-0000-4000-8000-000000000000",
+          kind: "episodic",
+          text: "Must stay excluded.",
+          scopeSpec: { scopeType: "workspace" },
+          labels: ["infra"],
+        }),
+      ],
+      {
+        now: "2026-07-18T12:00:00.000Z",
+        roleKey: "builder",
+        memoryLabels: ["infra"],
+      },
+    )!;
+    expect(block).toContain("[scope: role] [labels: deploy,infra] [conflict] Builder-only fact.");
+    expect(block).toContain("- [22222222] Broad fact.");
+    expect(block).not.toContain("Must stay excluded");
+    expect(estimateMemoryTokens(block)).toBeLessThanOrEqual(WORKSPACE_MEMORY_BLOCK_TOKEN_BUDGET);
+  });
+
+  test("does not inject legacy or targeted records through the V1 one-argument renderer", () => {
+    const block = renderWorkspaceMemoryBlock([
+      record({
+        id: "aaaaaaaa-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "Legacy convention.",
+        scope: "old-role-convention",
+      }),
+      record({
+        id: "bbbbbbbb-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "Labeled workspace fact.",
+        scopeSpec: { scopeType: "workspace" },
+        labels: ["infra"],
+      }),
+      record({
+        id: "cccccccc-0000-4000-8000-000000000000",
+        kind: "semantic",
+        text: "V1 workspace fact.",
+        scope: "workspace",
+      }),
+    ]);
+    expect(block).toContain("V1 workspace fact.");
+    expect(block).not.toContain("Legacy convention.");
+    expect(block).not.toContain("Labeled workspace fact.");
   });
 });

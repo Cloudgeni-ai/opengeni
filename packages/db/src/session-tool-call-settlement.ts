@@ -1,4 +1,4 @@
-import type { SessionEvent } from "@opengeni/contracts";
+import { isPrivateMemoryToolName, type SessionEvent } from "@opengeni/contracts";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import { and, asc, eq, sql } from "drizzle-orm";
 import type { Database } from "./index";
@@ -243,6 +243,7 @@ export async function closePendingSessionToolCallsInTransaction(
       (right.call.resultRecordedAt?.getTime() ?? Number.MAX_SAFE_INTEGER),
   );
   for (const resolution of orderedResults) {
+    const privateMemoryTool = isPrivateMemoryToolName(resolution.call.callItem.name);
     if (
       !resolution.completeDurablePair &&
       !resolution.activeResult &&
@@ -277,19 +278,22 @@ export async function closePendingSessionToolCallsInTransaction(
       turnAssociation: "current",
       payload: sanitizeEventPayload({
         id: resolution.call.callId,
-        output: resolution.interrupted
-          ? {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `Tool execution was interrupted by ${input.reason}; its side-effect outcome is unknown.`,
-                },
-              ],
-            }
-          : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
-            resolution.existingResult?.item ??
-            resolution.call.resultItem),
+        output: privateMemoryTool
+          ? null
+          : resolution.interrupted
+            ? {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `Tool execution was interrupted by ${input.reason}; its side-effect outcome is unknown.`,
+                  },
+                ],
+              }
+            : ((resolution.existingResult?.item ?? resolution.call.resultItem)?.output ??
+              resolution.existingResult?.item ??
+              resolution.call.resultItem),
+        ...(privateMemoryTool ? { redacted: true } : {}),
         recovery: {
           interrupted: resolution.interrupted,
           outcome: resolution.interrupted ? "unknown" : "durable_result_found",

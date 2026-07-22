@@ -1639,6 +1639,65 @@ export const KnowledgeMemoryKind = z.enum([
 ]);
 export type KnowledgeMemoryKind = z.infer<typeof KnowledgeMemoryKind>;
 
+export const MemoryScopeType = z.enum([
+  "workspace",
+  "user",
+  "role",
+  "session",
+  "ephemeral",
+  "legacy",
+]);
+export type MemoryScopeType = z.infer<typeof MemoryScopeType>;
+
+export const MemoryLabel = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/);
+export type MemoryLabel = z.infer<typeof MemoryLabel>;
+
+/**
+ * Memory tools return subject-scoped content that must stay in authorized
+ * model history rather than the workspace-readable session-event projection.
+ * Keep this classifier shared by live streaming and worker-death recovery so
+ * their privacy behavior cannot diverge.
+ */
+export function isPrivateMemoryToolName(name: unknown): name is string {
+  return typeof name === "string" && /(?:^|__)memory_(?:search|save|correct)$/.test(name);
+}
+
+// Public selectors intentionally omit the private user subject id. A user-scoped
+// response is already RLS-filtered to the caller; writes bind it from the trusted
+// grant/session creator rather than accepting an arbitrary subject on the wire.
+export const MemoryScopeSpec = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("workspace") }),
+  z.object({ type: z.literal("user") }),
+  z.object({ type: z.literal("role"), roleKey: MemoryLabel }),
+  z.object({ type: z.literal("session"), sessionId: z.string().uuid() }),
+  z.object({ type: z.literal("ephemeral"), sessionId: z.string().uuid() }),
+  z.object({ type: z.literal("legacy"), legacyScope: z.string().min(1) }),
+]);
+export type MemoryScopeSpec = z.infer<typeof MemoryScopeSpec>;
+
+export const WritableMemoryScopeSpec = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("workspace") }),
+  z.object({ type: z.literal("user") }),
+  z.object({ type: z.literal("role"), roleKey: MemoryLabel }),
+  z.object({ type: z.literal("session"), sessionId: z.string().uuid() }),
+  z.object({ type: z.literal("ephemeral"), sessionId: z.string().uuid() }),
+]);
+export type WritableMemoryScopeSpec = z.infer<typeof WritableMemoryScopeSpec>;
+
+export const MemoryRelationshipType = z.enum([
+  "derived_from",
+  "supersedes",
+  "contradicts",
+  "related_to",
+  "applies_to",
+  "depends_on",
+]);
+export type MemoryRelationshipType = z.infer<typeof MemoryRelationshipType>;
+
 export const KnowledgeSourceRef = z.object({
   kind: z.enum(["document_chunk", "document", "session_event", "memory", "external"]),
   id: z.string().min(1),
@@ -1654,6 +1713,8 @@ export const KnowledgeMemory = z.object({
   status: KnowledgeMemoryStatus,
   kind: KnowledgeMemoryKind,
   scope: z.string(),
+  scopeSpec: MemoryScopeSpec,
+  labels: z.array(MemoryLabel).max(16),
   text: z.string(),
   sourceRefs: z.array(KnowledgeSourceRef),
   confidence: z.number().min(0).max(1),
@@ -1678,35 +1739,54 @@ export const KnowledgeMemory = z.object({
 export type KnowledgeMemory = z.infer<typeof KnowledgeMemory>;
 
 // Default status is `active`: a create through this request lands an
-// agent-visible memory via the one write gate (saveWorkspaceMemory). Passing an
-// explicit `proposed`/`approved`/`rejected` status routes to the legacy curated
-// create instead (the docs-MCP memory_propose lane). pinned/replacesId apply to
-// the active (memory) path.
-export const CreateKnowledgeMemoryRequest = z.object({
-  status: KnowledgeMemoryStatus.default("active"),
-  kind: KnowledgeMemoryKind.default("semantic"),
-  scope: z.string().min(1).default("workspace"),
-  text: z.string().min(1),
-  sourceRefs: z.array(KnowledgeSourceRef).default([]),
-  confidence: z.number().min(0).max(1).default(0.5),
-  metadata: z.record(z.string(), z.unknown()).default({}),
-  createdBySessionId: z.string().uuid().optional(),
-  pinned: z.boolean().optional(),
-  replacesId: z.string().min(1).optional(),
-});
+// agent-visible memory via the one write gate (saveWorkspaceMemory). Explicit
+// `proposed` enters the curated review lane. Reviewed terminal statuses are
+// reachable only through the proposed -> approved/rejected update transition;
+// accepting them here would bypass that gate. pinned/replacesId apply to the
+// active (memory) path.
+export const CreateKnowledgeMemoryStatus = z.enum(["active", "proposed"]);
+export type CreateKnowledgeMemoryStatus = z.infer<typeof CreateKnowledgeMemoryStatus>;
+export const CreateKnowledgeMemoryRequest = z
+  .object({
+    status: CreateKnowledgeMemoryStatus.default("active"),
+    kind: KnowledgeMemoryKind.default("semantic"),
+    scope: z.string().min(1).default("workspace"),
+    scopeSpec: WritableMemoryScopeSpec.optional(),
+    labels: z.array(z.string().min(1).max(64)).max(16).optional(),
+    text: z.string().min(1),
+    sourceRefs: z.array(KnowledgeSourceRef).default([]),
+    confidence: z.number().min(0).max(1).default(0.5),
+    metadata: z.record(z.string(), z.unknown()).default({}),
+    pinned: z.boolean().optional(),
+    replacesId: z.string().min(1).optional(),
+    validFrom: z.string().datetime({ offset: true }).optional(),
+    validUntil: z.string().datetime({ offset: true }).nullable().optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.scopeSpec?.type === "ephemeral" && !value.validUntil) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["validUntil"],
+        message: "ephemeral memory requires validUntil",
+      });
+    }
+  });
 export type CreateKnowledgeMemoryRequest = z.infer<typeof CreateKnowledgeMemoryRequest>;
 
 export const UpdateKnowledgeMemoryRequest = z.object({
   status: KnowledgeMemoryStatus.optional(),
   kind: KnowledgeMemoryKind.optional(),
   scope: z.string().min(1).optional(),
+  scopeSpec: WritableMemoryScopeSpec.optional(),
+  labels: z.array(z.string().min(1).max(64)).max(16).optional(),
   text: z.string().min(1).optional(),
   sourceRefs: z.array(KnowledgeSourceRef).optional(),
   confidence: z.number().min(0).max(1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
-  reviewedBy: z.string().min(1).optional(),
   // Human audit action: pin (never decays) / unpin.
   pinned: z.boolean().optional(),
+  validFrom: z.string().datetime({ offset: true }).optional(),
+  validUntil: z.string().datetime({ offset: true }).nullable().optional(),
 });
 export type UpdateKnowledgeMemoryRequest = z.infer<typeof UpdateKnowledgeMemoryRequest>;
 
@@ -1716,6 +1796,9 @@ export const KnowledgeMemorySearchRequest = z.object({
   status: KnowledgeMemoryStatus.optional(),
   kind: KnowledgeMemoryKind.optional(),
   scope: z.string().min(1).optional(),
+  scopeType: MemoryScopeType.optional(),
+  labels: z.array(MemoryLabel).max(16).optional(),
+  includeExpired: z.boolean().optional(),
   limit: z.number().int().positive().max(100).default(20),
 });
 export type KnowledgeMemorySearchRequest = z.infer<typeof KnowledgeMemorySearchRequest>;
@@ -1727,10 +1810,24 @@ export type WorkspaceMemorySearchMode = z.infer<typeof WorkspaceMemorySearchMode
 export const WorkspaceMemorySearchRequest = z.object({
   query: z.string().min(1),
   kind: KnowledgeMemoryKind.optional(),
+  scopeTypes: z.array(MemoryScopeType).max(6).optional(),
+  labels: z.array(z.string().min(1).max(64)).max(16).optional(),
+  includeExpired: z.boolean().optional(),
   limit: z.number().int().positive().max(20).optional(),
   mode: WorkspaceMemorySearchMode.optional(),
 });
 export type WorkspaceMemorySearchRequest = z.infer<typeof WorkspaceMemorySearchRequest>;
+
+export const WorkspaceMemoryScoreComponents = z.object({
+  text: z.number().min(0).max(1),
+  scope: z.number().min(0).max(1),
+  labels: z.number().min(0).max(1),
+  freshness: z.number().min(0).max(1),
+  confidence: z.number().min(0).max(1),
+  provenance: z.number().min(0).max(1),
+  conflict: z.number().min(0).max(1),
+});
+export type WorkspaceMemoryScoreComponents = z.infer<typeof WorkspaceMemoryScoreComponents>;
 
 export const WorkspaceMemorySearchResult = z.object({
   memory: KnowledgeMemory,
@@ -1738,6 +1835,9 @@ export const WorkspaceMemorySearchResult = z.object({
   matchType: WorkspaceMemorySearchMode,
   vectorScore: z.number().nullable(),
   keywordScore: z.number().nullable(),
+  components: WorkspaceMemoryScoreComponents.optional(),
+  reasonCodes: z.array(z.string().min(1)).default([]),
+  conflictMemoryIds: z.array(z.string().uuid()).default([]),
 });
 export type WorkspaceMemorySearchResult = z.infer<typeof WorkspaceMemorySearchResult>;
 
@@ -1745,6 +1845,79 @@ export const WorkspaceMemorySearchResponse = z.object({
   results: z.array(WorkspaceMemorySearchResult),
 });
 export type WorkspaceMemorySearchResponse = z.infer<typeof WorkspaceMemorySearchResponse>;
+
+export const MemoryRelationship = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sourceMemoryId: z.string().uuid(),
+  targetMemoryId: z.string().uuid(),
+  type: MemoryRelationshipType,
+  actorSessionId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+});
+export type MemoryRelationship = z.infer<typeof MemoryRelationship>;
+
+export const CreateMemoryRelationshipRequest = z.object({
+  sourceMemoryId: z.string().uuid(),
+  targetMemoryId: z.string().uuid(),
+  type: MemoryRelationshipType,
+});
+export type CreateMemoryRelationshipRequest = z.infer<typeof CreateMemoryRelationshipRequest>;
+
+export const MemoryExportResponse = z.object({
+  version: z.literal(1),
+  workspaceId: z.string().uuid(),
+  generatedAt: z.string(),
+  includesEphemeral: z.boolean(),
+  memories: z.array(KnowledgeMemory),
+  relationships: z.array(MemoryRelationship),
+});
+export type MemoryExportResponse = z.infer<typeof MemoryExportResponse>;
+
+export const DeleteMemoryResponse = z.object({
+  deleted: z.literal(true),
+  memoryId: z.string().uuid(),
+  deletedRelationshipCount: z.number().int().nonnegative(),
+});
+export type DeleteMemoryResponse = z.infer<typeof DeleteMemoryResponse>;
+
+export const MemoryMaintenanceOperationType = z.enum(["retention", "reconcile"]);
+export type MemoryMaintenanceOperationType = z.infer<typeof MemoryMaintenanceOperationType>;
+export const MemoryMaintenanceOperationStatus = z.enum(["previewed", "applied", "reverted"]);
+export type MemoryMaintenanceOperationStatus = z.infer<typeof MemoryMaintenanceOperationStatus>;
+
+export const PreviewMemoryMaintenanceRequest = z.object({
+  type: MemoryMaintenanceOperationType.default("retention"),
+  terminalBefore: z.string().datetime({ offset: true }).optional(),
+  expiredBefore: z.string().datetime({ offset: true }).optional(),
+  memoryIds: z.array(z.string().uuid()).max(500).optional(),
+});
+export type PreviewMemoryMaintenanceRequest = z.infer<typeof PreviewMemoryMaintenanceRequest>;
+
+export const MemoryMaintenanceOperation = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  type: MemoryMaintenanceOperationType,
+  status: MemoryMaintenanceOperationStatus,
+  planHash: z.string().regex(/^[a-f0-9]{64}$/),
+  candidateMemoryIds: z.array(z.string().uuid()),
+  reasonCodes: z.array(z.string().min(1)),
+  previewActorSubjectId: z.string().min(1),
+  previewActorSessionId: z.string().uuid().nullable(),
+  appliedBySubjectId: z.string().min(1).nullable(),
+  appliedBySessionId: z.string().uuid().nullable(),
+  revertedBySubjectId: z.string().min(1).nullable(),
+  revertedBySessionId: z.string().uuid().nullable(),
+  createdAt: z.string(),
+  appliedAt: z.string().nullable(),
+  revertedAt: z.string().nullable(),
+});
+export type MemoryMaintenanceOperation = z.infer<typeof MemoryMaintenanceOperation>;
+
+export const ApplyMemoryMaintenanceRequest = z.object({
+  planHash: z.string().regex(/^[a-f0-9]{64}$/),
+});
+export type ApplyMemoryMaintenanceRequest = z.infer<typeof ApplyMemoryMaintenanceRequest>;
 
 export const ToolRef = z.object({
   kind: z.literal("mcp"),

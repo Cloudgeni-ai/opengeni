@@ -11,6 +11,10 @@ import {
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
   KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
+  MemoryExportResponse as ContractMemoryExportResponse,
+  MemoryMaintenanceOperation as ContractMemoryMaintenanceOperation,
+  MemoryRelationship as ContractMemoryRelationship,
+  DeleteMemoryResponse as ContractDeleteMemoryResponse,
   UpdateKnowledgeMemoryRequest as ContractUpdateKnowledgeMemoryRequest,
   UpdateWorkspaceSettingsRequest as ContractUpdateWorkspaceSettingsRequest,
   Workspace as ContractWorkspace,
@@ -68,6 +72,10 @@ import type {
   CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
   KnowledgeMemoryStatus,
+  MemoryExportResponse,
+  MemoryMaintenanceOperation,
+  MemoryRelationship,
+  DeleteMemoryResponse,
   UpdateKnowledgeMemoryRequest,
   UpdateWorkspaceSettingsRequest,
   Workspace,
@@ -326,8 +334,28 @@ describe("SDK / contracts parity", () => {
     const acceptSearchResponse = (
       value: z.infer<typeof ContractWorkspaceMemorySearchResponse>,
     ): WorkspaceMemorySearchResponse => value;
+    const acceptRelationship = (
+      value: z.infer<typeof ContractMemoryRelationship>,
+    ): MemoryRelationship => value;
+    const acceptExport = (
+      value: z.infer<typeof ContractMemoryExportResponse>,
+    ): MemoryExportResponse => value;
+    const acceptMaintenance = (
+      value: z.infer<typeof ContractMemoryMaintenanceOperation>,
+    ): MemoryMaintenanceOperation => value;
+    const acceptDelete = (
+      value: z.infer<typeof ContractDeleteMemoryResponse>,
+    ): DeleteMemoryResponse => value;
     expect(
-      [acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function"),
+      [
+        acceptMemory,
+        acceptWorkspace,
+        acceptSearchResponse,
+        acceptRelationship,
+        acceptExport,
+        acceptMaintenance,
+        acceptDelete,
+      ].every((fn) => typeof fn === "function"),
     ).toBe(true);
 
     // Client -> server: SDK-sent bodies parse under the contract schemas.
@@ -335,11 +363,31 @@ describe("SDK / contracts parity", () => {
       text: "Prefer Terraform.",
       kind: "preference",
       pinned: true,
+      scopeSpec: { type: "role", roleKey: "terraform-reviewer" },
+      labels: ["terraform", "review"],
+      validUntil: "2026-08-01T00:00:00.000Z",
+      createdBySessionId: "deprecated-and-ignored",
     };
-    const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
+    const update: UpdateKnowledgeMemoryRequest = {
+      pinned: false,
+      status: "archived",
+      scopeSpec: { type: "workspace" },
+      labels: ["review"],
+      reviewedBy: "deprecated-and-ignored",
+    };
     const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
+    expect(ContractCreateKnowledgeMemoryRequest.parse(create)).not.toHaveProperty(
+      "createdBySessionId",
+    );
+    expect(ContractUpdateKnowledgeMemoryRequest.parse(update)).not.toHaveProperty("reviewedBy");
+    expect(
+      ContractCreateKnowledgeMemoryRequest.safeParse({ text: "x", status: "approved" }).success,
+    ).toBe(false);
+    expect(
+      ContractCreateKnowledgeMemoryRequest.safeParse({ text: "x", status: "rejected" }).success,
+    ).toBe(false);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");

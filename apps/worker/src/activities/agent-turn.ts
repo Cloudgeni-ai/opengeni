@@ -31,6 +31,7 @@ import {
   recordCodexAccountConnectors,
   quarantineCodexCredentialForLease,
   setActiveCodexCredential,
+  getSessionMemoryContext,
   resolveWorkspaceMemoryBlock,
   setCodexCredentialExhaustedWithWakeTargets,
   withCodexCapacityMutation,
@@ -76,6 +77,7 @@ import {
   maxTurnsExceededRunState,
   modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
+  createSdkEventProjectionState,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   isEphemeralInternalContext,
@@ -2895,7 +2897,15 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         db,
         input.workspaceId,
       );
-      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId);
+      const sessionMemoryContext = await getSessionMemoryContext(
+        db,
+        input.workspaceId,
+        input.sessionId,
+      );
+      const workspaceMemory = await resolveWorkspaceMemoryBlock(db, input.workspaceId, {
+        ...(sessionMemoryContext ?? { sessionId: input.sessionId }),
+        now: new Date(),
+      });
       const baseRunSettings = {
         // IMAGE PRECEDENCE (M3): rig > pack > deployment. settingsWithRigImage runs
         // OUTERMOST so a rig-pinned image overrides both the pack image and the
@@ -4421,6 +4431,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
 
         const iterator = stream.toStream()[Symbol.asyncIterator]();
+        // Session events are workspace-readable audit/UI data, unlike the
+        // model's private conversation history. Correlate memory call outputs
+        // only within this stream so their text never enters the event log.
+        const eventProjectionState = createSdkEventProjectionState();
         let streamDone = false;
         try {
           while (true) {
@@ -4591,7 +4605,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 completedCurrentToolBatch = currentBatchIsStable;
               }
             }
-            const normalized = normalizeSdkEvent(next.value);
+            const normalized = normalizeSdkEvent(next.value, eventProjectionState);
             for (const event of normalized) {
               streamTiming.onEvent(event.type);
               await batcher.push(event);

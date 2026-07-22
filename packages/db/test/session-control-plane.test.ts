@@ -35,6 +35,7 @@ import {
   getSession,
   getSessionGoal,
   getSessionTurn,
+  listSessionEvents,
   listOutstandingSessionSystemUpdates,
   listSessionDiscoverySummaries,
   listSessionSystemUpdatesForTurn,
@@ -1208,6 +1209,125 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionPendingToolCalls.sessionId, session.id)),
       ),
     ).toEqual([]);
+  });
+
+  test("recovery redacts private memory results from events while preserving model history", async () => {
+    for (const historyAlreadyDurable of [false, true]) {
+      const { grant, session } = await fixture();
+      await send(grant, session.id, `recover private memory ${historyAlreadyDurable}`);
+      const attemptId = crypto.randomUUID();
+      const turn = await claimTestSessionWork(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        `session-${session.id}`,
+        { attemptId },
+      );
+      const suffix = historyAlreadyDurable ? "history" : "receipt";
+      const callId = `private-memory-${suffix}`;
+      const querySecret = `private-memory-query-${suffix}`;
+      const resultSecret = `private-memory-result-${suffix}`;
+      const callItem = {
+        type: "function_call",
+        callId,
+        name: "opengeni__memory_search",
+        arguments: JSON.stringify({ query: querySecret }),
+      };
+      const resultItem = {
+        type: "function_call_result",
+        callId,
+        output: { type: "text", text: resultSecret },
+      };
+
+      expect(
+        await registerPendingSessionToolCall(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          executionGeneration: turn!.executionGeneration,
+          attemptId,
+          callId,
+          callType: "function_call",
+          callItem,
+        }),
+      ).toEqual({ accepted: true, registered: true });
+      expect(
+        await recordPendingSessionToolCallResult(client.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          turnId: turn!.id,
+          executionGeneration: turn!.executionGeneration,
+          attemptId,
+          callId,
+          resultItem,
+        }),
+      ).toEqual({ accepted: true, recorded: true });
+
+      if (historyAlreadyDurable) {
+        expect(
+          await appendSessionHistoryItems(client.db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            turnId: turn!.id,
+            expectedExecutionGeneration: turn!.executionGeneration,
+            expectedAttemptId: attemptId,
+            items: [
+              { position: 1, item: callItem },
+              { position: 2, item: resultItem },
+            ],
+          }),
+        ).toBe(true);
+      }
+
+      const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+        sessionId: session.id,
+        turnId: turn!.id,
+        triggerEventId: turn!.triggerEventId,
+        attemptId,
+        reason: "worker_shutdown",
+      });
+      expect(recovery.action).toBe("recovering");
+      const recoveredOutput = recovery.events.find(
+        (event) =>
+          event.type === "agent.toolCall.output" &&
+          (event.payload as { id?: unknown }).id === callId,
+      );
+      expect(recoveredOutput?.payload).toEqual({
+        id: callId,
+        output: null,
+        redacted: true,
+        recovery: {
+          interrupted: false,
+          outcome: "durable_result_found",
+          reason: "worker_shutdown",
+          unsupportedCallShape: false,
+        },
+      });
+
+      const persistedEvents = await listSessionEvents(client.db, grant.workspaceId!, session.id);
+      const serializedEvents = JSON.stringify(persistedEvents);
+      expect(serializedEvents).not.toContain(querySecret);
+      expect(serializedEvents).not.toContain(resultSecret);
+
+      const recoveredHistory = await getActiveSessionHistoryItems(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+      );
+      const serializedHistory = JSON.stringify(recoveredHistory.map((row) => row.item));
+      expect(serializedHistory).toContain(querySecret);
+      expect(serializedHistory).toContain(resultSecret);
+      expect(
+        recoveredHistory.filter(
+          (row) =>
+            (row.item as { callId?: unknown }).callId === callId &&
+            (row.item.type === "function_call" || row.item.type === "function_call_result"),
+        ),
+      ).toHaveLength(2);
+    }
   });
 
   test("bulk control projection accepts an empty session page", async () => {

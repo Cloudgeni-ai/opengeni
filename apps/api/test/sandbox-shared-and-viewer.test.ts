@@ -15,6 +15,7 @@ import {
   createDb,
   createSession,
   getSession,
+  getSessionMemoryContext,
   reapStaleLeaseHolders,
   readLease,
   type Database,
@@ -185,6 +186,41 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
     expect(b.parentSessionId).toBe(a.id);
     // Distinct sessions, same group (one box, two conversations).
     expect(b.id).not.toBe(a.id);
+  }, 60_000);
+
+  test("creator provenance binds to the top-level grant and children inherit it from the trusted parent", async () => {
+    if (!available) return;
+    const { accountId, workspaceId } = await freshWorkspace();
+    const bus = new MemoryEventBus();
+    const topLevel = await createSessionForRequest(
+      deps(bus),
+      { ...grant(accountId, workspaceId), subjectId: "trusted-human" },
+      workspaceId,
+      {
+        initialMessage: "founder with forged creator",
+        createdBySubjectId: "forged-top-level",
+      } as Parameters<typeof createSessionForRequest>[3],
+    );
+    expect(await getSessionMemoryContext(db, workspaceId, topLevel.id)).toMatchObject({
+      access: { subjectId: "trusted-human" },
+    });
+
+    const child = await createSessionForRequest(
+      deps(bus),
+      {
+        ...grant(accountId, workspaceId, topLevel.id),
+        subjectId: "delegated-worker-principal",
+      },
+      workspaceId,
+      {
+        initialMessage: "child with forged creator",
+        createdBySubjectId: "forged-child",
+      } as Parameters<typeof createSessionForRequest>[3],
+    );
+    expect(child.parentSessionId).toBe(topLevel.id);
+    expect(await getSessionMemoryContext(db, workspaceId, child.id)).toMatchObject({
+      access: { subjectId: "trusted-human" },
+    });
   }, 60_000);
 
   test("explicit 'new' from inside a session opts OUT of sharing", async () => {

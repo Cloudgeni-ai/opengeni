@@ -44,6 +44,7 @@ import type {
   CreateGitHubAppManifestRequest,
   CreateGitHubAppManifestResponse,
   CreateKnowledgeMemoryRequest,
+  CreateMemoryRelationshipRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
   CreateVariableSetRequest,
@@ -69,12 +70,17 @@ import type {
   GitHubRepositoriesResponse,
   KnowledgeMemory,
   KnowledgeMemorySearchRequest,
+  ListMemoryRelationshipsRequest,
   ListApiKeysResponse,
   ListPacksResponse,
   // Bring-your-own-compute: the Machines dashboard + per-machine metrics (M10).
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
+  MemoryExportRequest,
+  MemoryExportResponse,
+  MemoryMaintenanceOperation,
+  MemoryRelationship,
   // Bring-your-own-compute: the user-authenticated active-sandbox swap (M7).
   SwapActiveSandboxRequest,
   SwapActiveSandboxResponse,
@@ -173,6 +179,10 @@ import type {
   ConnectionResponse,
   OAuthStartRequest,
   OAuthStartResponse,
+  PreviewMemoryMaintenanceRequest,
+  ApplyMemoryMaintenanceRequest,
+  DeleteMemoryRequest,
+  DeleteMemoryResponse,
 } from "./types";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
 
@@ -1942,6 +1952,11 @@ export class OpenGeniClient {
     if (request.status) params.set("status", request.status);
     if (request.kind) params.set("kind", request.kind);
     if (request.scope) params.set("scope", request.scope);
+    if (request.scopeType) params.set("scopeType", request.scopeType);
+    for (const label of request.labels ?? []) params.append("labels", label);
+    if (request.includeExpired !== undefined) {
+      params.set("includeExpired", String(request.includeExpired));
+    }
     if (request.limit) params.set("limit", String(request.limit));
     const query = params.toString();
     return await this.requestJson<KnowledgeMemory[]>(
@@ -1976,6 +1991,107 @@ export class OpenGeniClient {
     return await this.requestJson<KnowledgeMemory>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}`,
+      request,
+    );
+  }
+
+  async listMemoryRelationships(
+    workspaceId: string,
+    request: ListMemoryRelationshipsRequest = {},
+  ): Promise<MemoryRelationship[]> {
+    const params = new URLSearchParams();
+    if (request.memoryId) params.set("memoryId", request.memoryId);
+    if (request.type) params.set("type", request.type);
+    const query = params.toString();
+    return await this.requestJson<MemoryRelationship[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/relationships${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async createMemoryRelationship(
+    workspaceId: string,
+    request: CreateMemoryRelationshipRequest,
+  ): Promise<MemoryRelationship> {
+    return await this.requestJson<MemoryRelationship>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/relationships`,
+      request,
+    );
+  }
+
+  async deleteMemoryRelationship(workspaceId: string, relationshipId: string): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/relationships/${relationshipId}`,
+    );
+  }
+
+  async exportWorkspaceMemories(
+    workspaceId: string,
+    request: MemoryExportRequest = {},
+  ): Promise<MemoryExportResponse> {
+    const params = new URLSearchParams();
+    if (request.includeEphemeral !== undefined) {
+      params.set("includeEphemeral", String(request.includeEphemeral));
+    }
+    if (request.includePrivate !== undefined) {
+      params.set("includePrivate", String(request.includePrivate));
+    }
+    const query = params.toString();
+    return await this.requestJson<MemoryExportResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/export${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async deleteKnowledgeMemory(
+    workspaceId: string,
+    memoryId: string,
+    request: DeleteMemoryRequest = {},
+  ): Promise<DeleteMemoryResponse> {
+    const params = new URLSearchParams();
+    if (request.includePrivate !== undefined) {
+      params.set("includePrivate", String(request.includePrivate));
+    }
+    const query = params.toString();
+    return await this.requestJson<DeleteMemoryResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/${memoryId}${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async previewMemoryMaintenance(
+    workspaceId: string,
+    request: PreviewMemoryMaintenanceRequest,
+  ): Promise<MemoryMaintenanceOperation> {
+    return await this.requestJson<MemoryMaintenanceOperation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/maintenance/preview`,
+      request,
+    );
+  }
+
+  async applyMemoryMaintenance(
+    workspaceId: string,
+    operationId: string,
+    request: ApplyMemoryMaintenanceRequest,
+  ): Promise<MemoryMaintenanceOperation> {
+    return await this.requestJson<MemoryMaintenanceOperation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/maintenance/${operationId}/apply`,
+      request,
+    );
+  }
+
+  async revertMemoryMaintenance(
+    workspaceId: string,
+    operationId: string,
+    request: ApplyMemoryMaintenanceRequest,
+  ): Promise<MemoryMaintenanceOperation> {
+    return await this.requestJson<MemoryMaintenanceOperation>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/memories/maintenance/${operationId}/revert`,
       request,
     );
   }
