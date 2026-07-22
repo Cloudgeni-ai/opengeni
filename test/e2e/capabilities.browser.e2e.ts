@@ -10,7 +10,7 @@ const repoRoot = new URL("../..", import.meta.url).pathname;
 const workspaceId = "00000000-0000-4000-8000-000000000017";
 const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "skill:browser-focus";
-const evidenceDir = new URL("../../.agent/evidence/ope17-focus/", import.meta.url).pathname;
+const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
 const apiContractRevision = "2026-07-session-control-v1";
 
 type CapabilityState = {
