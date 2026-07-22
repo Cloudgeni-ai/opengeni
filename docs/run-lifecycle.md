@@ -9,7 +9,7 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 ## Turns
 
 A **turn** is one logical unit of agent work inside a session: a waiting
-human/API prompt, an approval decision, or one coalesced internal-update batch
+human/API prompt, an approval or structured-input response, or one coalesced internal-update batch
 is processed until the agent reaches a natural stopping point. The visible
 queue contains only waiting human/API prompts; goals, schedules, child results,
 capacity recovery, and lifecycle notices are typed internal updates, not queue
@@ -28,8 +28,8 @@ copied only when idempotently repairing that same create command's first turn.
 Queue move/edit/resubmit preserves the original initiator, while Steer creates a
 new turn with the steering actor. Agent-created work inherits the frozen
 initiator through the worker-signed calling-turn reference and appends bounded
-provenance. Approval, recovery, and retry reuse the existing row and therefore
-cannot change authority. Legacy rows use
+provenance. Approval, structured-human-input response, recovery, and retry
+reuse the existing row and therefore cannot change authority. Legacy rows use
 `{ kind: "service", subjectId: "unattributed-legacy" }`, which host credential
 ports must reject rather than infer from another identity.
 
@@ -323,11 +323,12 @@ wrong one is the classic mistake.
    streams (reconciled after every model response and at every turn-end path)
    so a crash loses at most the single in-flight model call. Ordinary inference
    has no second conversation-memory read path.
-2. **`agent_run_states` — approval resume only.** The serialized SDK `RunState`
+2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
-   job is resuming a turn that paused mid-flight for a human approval
-   (`requires_action`); a half-finished tool approval cannot be represented as
-   plain history items. The blob is written only for that case.
+   job is resuming a turn that paused mid-flight for a human approval or
+   structured-input tool call (`requires_action`); neither a half-finished tool
+   approval nor an unanswered tool call can be represented as plain history
+   items. The blob is written only for those cases.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
@@ -340,6 +341,17 @@ wrong one is the classic mistake.
    full-output evidence store. A manager can inspect an independently bounded
    cross-session monitoring projection as ordinary tool output; that does not
    turn audit events into conversation truth.
+
+Structured human input adds a durable control checkpoint, not a fourth memory
+store. When the built-in `request_human_input` tool interrupts a run, the same
+transaction stores its request rows, the opaque `agent_run_states` checkpoint,
+the `requires_action` projection, and requested events. The request row is
+owned by the exact turn execution generation; its creation attempt is only
+provenance. Answer, allowed skip, expiry, or cancellation is first-writer-wins
+and becomes structured output for that same SDK tool call. It never becomes a
+synthetic queue row or `user.message`. A replay-safe workflow timer settles
+expiry, Pause preserves the pending interruption, and permanent replacement
+settles it as cancelled. Canonical: [`human-input.md`](human-input.md).
 
 Cross-session monitoring is tail-first and selected in PostgreSQL. With no
 cursor, REST/SDK/MCP monitoring omits raw message, reasoning, command-output,

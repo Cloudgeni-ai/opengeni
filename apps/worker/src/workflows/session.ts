@@ -35,6 +35,7 @@ import {
  */
 const TURNS_PER_RUN_BACKSTOP = 2_000;
 const CODEX_CAPACITY_CHECKS_PER_RUN_BACKSTOP = 512;
+const HUMAN_INPUT_EXPIRY_STALE_RETRY_MS = 1_000;
 
 /**
  * The minimum hold for a rotation all-capped idle (`idleUntilReset`). A MANDATORY
@@ -80,6 +81,12 @@ export function continuationHoldMs(
  */
 export function deferredResultMayContinue(entryWakeups: number, currentWakeups: number): boolean {
   return currentWakeups !== entryWakeups;
+}
+
+/** Deterministic Temporal timer delay for a persisted structured-input deadline. */
+export function humanInputDeadlineWaitMs(expiresAt: string, nowMs = Date.now()): number {
+  const deadline = Date.parse(expiresAt);
+  return Number.isFinite(deadline) ? Math.max(0, deadline - nowMs) : 0;
 }
 
 /**
@@ -406,12 +413,33 @@ export async function sessionWorkflow(input: SessionWorkflowInput): Promise<void
       const seenApprovalWakeups = approvalWakeups;
       const seenWakeups = wakeups;
       const seenInterruptionWakeups = interruptionWakeups;
-      await condition(
-        () =>
-          interruptionWakeups !== seenInterruptionWakeups ||
-          approvalWakeups !== seenApprovalWakeups ||
-          wakeups !== seenWakeups,
-      );
+      const timeoutMs =
+        peek.humanInputRequestId && peek.expiresAt
+          ? humanInputDeadlineWaitMs(peek.expiresAt)
+          : undefined;
+      const wakeCondition = () =>
+        interruptionWakeups !== seenInterruptionWakeups ||
+        approvalWakeups !== seenApprovalWakeups ||
+        wakeups !== seenWakeups;
+      const woke =
+        timeoutMs === undefined
+          ? await condition(wakeCondition)
+          : await condition(wakeCondition, timeoutMs);
+      if (!woke && peek.humanInputRequestId) {
+        const expiry = await activity.expireSessionHumanInput({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          requestId: peek.humanInputRequestId,
+        });
+        // Temporal and PostgreSQL may observe slightly different wall clocks.
+        // If the workflow timer fired first, the DB settler truthfully leaves
+        // the request pending. Bound that skew with one interruptible timer
+        // instead of spinning peek + activity at zero delay.
+        if (expiry.action === "stale") {
+          await condition(wakeCondition, HUMAN_INPUT_EXPIRY_STALE_RETRY_MS);
+        }
+      }
       continue;
     }
     if (peek.kind === "idle") {

@@ -12,6 +12,7 @@ import {
   FsMoveRequest,
   FsReadRequest,
   FsWriteRequest,
+  HumanInputRequestStatus,
   GitDiffRequest,
   GitLogRequest,
   GitShowRequest,
@@ -47,6 +48,7 @@ import {
 import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
+  acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
   closePtySession,
@@ -55,10 +57,12 @@ import {
   getSession,
   getSessionForSubject,
   getSessionGoal,
+  getSessionHumanInputRequest,
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEventPage,
+  listSessionHumanInputRequests,
   listSessionIdsInGroup,
   listSessionsForSubject,
   listSessionTurns,
@@ -79,6 +83,7 @@ import {
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   SessionContextBusyError,
+  HumanInputResponseValidationError,
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
@@ -890,7 +895,82 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(accepted.event, 202);
     }
+
+    if (event.type === "user.humanInputResponse") {
+      let accepted;
+      try {
+        accepted = await acceptSessionHumanInputResponse(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          requestId: event.payload.requestId,
+          response: event.payload.response,
+          respondedBy: grant.subjectId,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof HumanInputResponseValidationError) {
+          throw new HTTPException(error.code === "SKIP_NOT_ALLOWED" ? 409 : 422, {
+            message: error.message,
+          });
+        }
+        throw error;
+      }
+      if (accepted.action === "not_found") {
+        throw new HTTPException(404, { message: "human-input request not found" });
+      }
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
+      if (accepted.workflowWakeRevision !== null) {
+        await workflowClient.signalApprovalDecision({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          eventId: accepted.events[0]?.id ?? event.payload.requestId,
+          workflowId: workflowIdForSession(sessionId),
+          workflowWakeRevision: accepted.workflowWakeRevision,
+        });
+      }
+      if (accepted.action === "conflict") {
+        throw new HTTPException(409, {
+          message: `human-input request is ${accepted.request.status}`,
+        });
+      }
+      return c.json(accepted.event, 202);
+    }
   });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const rawStatus = c.req.query("status");
+    const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
+    if (status && !status.success) {
+      throw new HTTPException(400, { message: "invalid human-input request status" });
+    }
+    const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
+      ...(status?.success ? { status: status.data } : {}),
+    });
+    return c.json({ requests });
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests/:requestId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const sessionId = c.req.param("sessionId");
+      const request = await getSessionHumanInputRequest(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("requestId"),
+      );
+      if (!request) throw new HTTPException(404, { message: "human-input request not found" });
+      return c.json(request);
+    },
+  );
 
   // ── API-direct stream capabilities + viewer attach (P1.4) ─────────────────
   //

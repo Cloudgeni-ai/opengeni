@@ -177,6 +177,17 @@ export type {
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
 
+// Structured human input: event projection, authoritative hook, and styled form.
+export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
+export type { PendingHumanInputRequest } from "./human-input";
+export { isHumanInputEvent, useHumanInputRequests } from "./hooks/use-human-input";
+export type {
+  UseHumanInputRequestsOptions,
+  UseHumanInputRequestsResult,
+} from "./hooks/use-human-input";
+export { HumanInputForm, answersFromDrafts } from "./components/human-input-form";
+export type { HumanInputAnswerDraft, HumanInputFormProps } from "./components/human-input-form";
+
 // Timeline projection
 export {
   buildTimeline,

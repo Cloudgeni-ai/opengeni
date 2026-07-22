@@ -26,10 +26,12 @@ import {
   mergeToolRefs,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  RequestHumanInputToolInput,
   RepositoryResourceRef,
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
+  SubmitHumanInputResponseRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
@@ -567,6 +569,76 @@ describe("contracts", () => {
       ClientSessionEvent.parse({
         type: "user.message",
         payload: { text: "" },
+      }),
+    ).toThrow();
+  });
+
+  test("validates structured human-input questions and typed client responses", () => {
+    const input = RequestHumanInputToolInput.parse({
+      questions: [
+        {
+          id: "environment",
+          kind: "single_select",
+          prompt: "Where should this run?",
+          options: [
+            { id: "staging", label: "Staging" },
+            { id: "production", label: "Production" },
+          ],
+        },
+        {
+          id: "notes",
+          kind: "text",
+          prompt: "Anything else?",
+          required: false,
+          validation: { maxLength: 200 },
+        },
+      ],
+      allowSkip: true,
+      expiresInSeconds: 300,
+    });
+    expect(input.questions[0]).toMatchObject({ required: true, allowOther: false });
+    expect(input.questions[1]?.options).toEqual([]);
+
+    const response = SubmitHumanInputResponseRequest.parse({
+      outcome: "answered",
+      answers: [{ questionId: "environment", values: ["staging"] }],
+    });
+    expect(
+      ClientSessionEvent.parse({
+        type: "user.humanInputResponse",
+        clientEventId: "human-response-1",
+        payload: {
+          requestId: "00000000-0000-4000-8000-000000000001",
+          response,
+        },
+      }),
+    ).toMatchObject({ type: "user.humanInputResponse" });
+
+    expect(() =>
+      RequestHumanInputToolInput.parse({
+        questions: [
+          {
+            id: "bad",
+            kind: "text",
+            prompt: "Bad",
+            options: [{ id: "not-allowed", label: "Not allowed" }],
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      RequestHumanInputToolInput.parse({
+        questions: [
+          {
+            id: "duplicate",
+            kind: "multi_select",
+            prompt: "Bad",
+            options: [
+              { id: "same", label: "One" },
+              { id: "same", label: "Two" },
+            ],
+          },
+        ],
       }),
     ).toThrow();
   });
