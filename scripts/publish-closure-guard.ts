@@ -12,6 +12,8 @@
  *       the SDK remains zero-runtime-dep, and React only depends on SDK among
  *       @opengeni/* packages.
  *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
+ *   (e) a built package imports an @opengeni/* runtime package that its
+ *       published manifest does not declare.
  *
  * Wired into the release gate and safe to run locally without publishing.
  */
@@ -225,6 +227,35 @@ function builtContractFiles(dir: string): string[] {
     else if (entry.name.endsWith(".js") || entry.name.endsWith(".d.ts")) files.push(path);
   }
   return files;
+}
+
+// Workspace hoisting can make an undeclared direct dependency appear healthy
+// in this monorepo while the published tarball fails under strict/isolated
+// resolution. Inspect the actual built import graph and require every external
+// @opengeni/* specifier to be present in a published dependency map.
+const builtImportScanner = new Bun.Transpiler({ loader: "js" });
+for (const pkg of publishable) {
+  const distDir = join(repoRoot, pkg.dir, "dist");
+  if (!existsSync(distDir)) continue;
+  const declaredRuntimePackages = new Set(workspaceDependencyNames(pkg, PUBLISHED_DEP_FIELDS));
+  for (const path of builtContractFiles(distDir).filter((file) => file.endsWith(".js"))) {
+    const text = readFileSync(path, "utf8");
+    const scan = await builtImportScanner.scan(text);
+    for (const imported of scan.imports) {
+      const match = imported.path.match(/^(@opengeni\/[^/]+)(?:\/|$)/u);
+      const importedPackage = match?.[1];
+      if (
+        importedPackage &&
+        importedPackage !== pkg.name &&
+        !declaredRuntimePackages.has(importedPackage)
+      ) {
+        failures.push(
+          `${path.slice(repoRoot.length + 1)} imports undeclared runtime workspace package ${importedPackage}. ` +
+            `${pkg.name} must declare every externalized direct import in dependencies, peerDependencies, or optionalDependencies.`,
+        );
+      }
+    }
+  }
 }
 
 for (const pkgDir of ["packages/sdk", "packages/react"]) {
