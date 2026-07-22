@@ -1,7 +1,10 @@
-import { describe, expect, mock, test } from "bun:test";
+import { describe, expect, mock, spyOn, test } from "bun:test";
 import { CancelledFailure } from "@temporalio/activity";
+import { RunRawModelStreamEvent, Usage } from "@openai/agents-core";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
+import { createObservability } from "@opengeni/observability";
+import * as opengeniDb from "@opengeni/db";
 import {
   codexRequestStorage,
   codexSubscriptionFetch,
@@ -16,7 +19,10 @@ import {
 } from "@opengeni/db";
 import {
   CompactionProviderResponseError,
+  CompactionNeededError,
   EmptyCompactionSummaryError,
+  contextRobustnessFilterForSettings,
+  modelResponseUsageFromResponse,
   sanitizeHistoryItemsForModel,
 } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
@@ -29,6 +35,8 @@ import {
   classifyMcpTransportTimeoutError,
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
+  createCompactionModelUsageEventState,
+  createModelResponseUsageEventState,
   createTurnSandboxProvisioner,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
@@ -39,7 +47,10 @@ import {
   isWorkerShutdownCancellation,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
+  modelResponseUsageContextSignal,
   pointerReconcileReason,
+  processCompactionModelUsageEvent,
+  processModelResponseUsageEvent,
   persistOrSignalSessionAttemptQuiescence,
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
@@ -55,6 +66,8 @@ import {
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
+
+const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
 // Item shapes mirror the SDK history representation persisted into
 // session_history_items (type discriminator, camelCase callId).
@@ -664,6 +677,315 @@ describe("completed model-call metering at ownership fences", () => {
   });
 });
 
+describe("production model-response usage callback authority", () => {
+  test("claims the pinned SDK terminal pair once and cannot bind stale usage after restart", async () => {
+    const response = {
+      id: "resp-sdk-terminal-pair",
+      usage: {
+        input_tokens: 100,
+        output_tokens: 20,
+        // The provider total is internally inconsistent. The callback must use
+        // the canonical input+output total for both context and billing.
+        total_tokens: 0,
+        input_tokens_details: { cached_tokens: 80, cache_write_tokens: 5 },
+      },
+    };
+    // These are the exact two terminal event shapes emitted, in order, by the
+    // repository-pinned @openai/agents-openai 0.13.3 stream implementation.
+    const normalizedTerminal = new RunRawModelStreamEvent({
+      type: "response_done",
+      response: {
+        id: response.id,
+        output: [],
+        usage: {
+          inputTokens: 100,
+          outputTokens: 20,
+          totalTokens: 0,
+          inputTokensDetails: { cached_tokens: 80, cache_write_tokens: 5 },
+        },
+      },
+    } as any);
+    const rawTerminal = new RunRawModelStreamEvent({
+      type: "model",
+      providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+      event: { type: "response.completed", response },
+    } as any);
+
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const billingRows = new Map<string, Record<string, unknown>>();
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        if (!billingRows.has(input.idempotencyKey)) {
+          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
+        }
+      },
+    );
+    try {
+      const durableUsageSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => {
+          const sourceKey = event.payload?.sourceKey as string;
+          const duplicate = durableUsageSourceKeys.has(sourceKey);
+          durableUsageSourceKeys.add(sourceKey);
+          return {
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+            ...(duplicate
+              ? {
+                  duplicateOfEventId: crypto.randomUUID(),
+                  duplicateReason: "duplicate_provider_response_usage",
+                }
+              : {}),
+          };
+        }),
+      });
+      const fencedInputs: number[] = [];
+      const state = createModelResponseUsageEventState();
+      const emittedSourceKeys = new Set<string>();
+      const process = (event: any, targetState = state, dispatchId = "activity-A") =>
+        processModelResponseUsageEvent({
+          event,
+          state: targetState,
+          dispatchId,
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          isCodexTurn: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async (tokens) => {
+            fencedInputs.push(tokens);
+          },
+        });
+
+      const filter = contextRobustnessFilterForSettings(
+        testSettings({
+          contextWindowTokens: 20_000,
+          contextAutoCompactThresholdTokens: 10_000,
+        }),
+        {
+          throwOnCompactionNeeded: true,
+          contextCompactionSignal: () => modelResponseUsageContextSignal(state),
+        },
+      );
+      const first = [{ type: "message", role: "user", content: "start" }] as any;
+      await filter({ modelData: { input: first, instructions: "system" }, agent: {} as any });
+      const second = [
+        ...first,
+        { type: "message", role: "assistant", content: "first response" },
+        { type: "message", role: "user", content: "continue" },
+      ] as any;
+      await filter({ modelData: { input: second, instructions: "system" }, agent: {} as any });
+
+      expect((await process(normalizedTerminal)).status).toBe("processed");
+      expect((await process(rawTerminal)).status).toBe("duplicate");
+      expect(state.responseUsageCount).toBe(1);
+      expect(state.providerContextRevision).toBe(1);
+      expect(state.lastProviderContextTokensObserved).toBe(120);
+      expect(fencedInputs).toEqual([100]);
+      expect(durableUsageSourceKeys).toEqual(new Set([response.id]));
+      expect([...billingRows.values()]).toEqual([
+        expect.objectContaining({
+          eventType: "model.cost",
+          quantity: 0,
+          idempotencyKey: `usage:model.cost:turn-1:${response.id}`,
+        }),
+      ]);
+
+      const metricsAfterPair = await observability.prometheusMetrics();
+      expect(metricsAfterPair).toMatch(
+        /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+      );
+      expect(metricsAfterPair).toMatch(
+        /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 80\b/,
+      );
+      expect(metricsAfterPair).toMatch(
+        /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 5\b/,
+      );
+
+      // The duplicate terminal callback must not advance the old response to
+      // revision 2. Revision 1 cannot bind to request 2, so the complete estimate
+      // (including the large new assistant output) still triggers compaction.
+      const third = [
+        ...second,
+        {
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "x".repeat(48_000) }],
+        },
+        { type: "message", role: "user", content: "continue again" },
+      ] as any;
+      await expect(
+        filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
+      ).rejects.toBeInstanceOf(CompactionNeededError);
+
+      // A worker restart/re-dispatch rebuilds local state. The stable provider
+      // response id reaches the durable fences again, but duplicate authority
+      // prevents every local metric/context/fenced-input effect and the DB-level
+      // idempotency key keeps one billing row.
+      const restartedState = createModelResponseUsageEventState();
+      const restartedInputsBefore = fencedInputs.length;
+      const restartedEmittedSourceKeys = new Set<string>();
+      const restarted = await processModelResponseUsageEvent({
+        event: normalizedTerminal as any,
+        state: restartedState,
+        dispatchId: "activity-B",
+        settings: testSettings(),
+        db: {} as any,
+        observability,
+        publish: publish as any,
+        accountId: "acct-1",
+        workspaceId: "ws-1",
+        sessionId: "sess-1",
+        turnId: "turn-1",
+        provider: "codex-subscription",
+        providerApi: "responses",
+        model: "codex/gpt-5.6-sol",
+        metricProvider: "codex-subscription",
+        isCodexTurn: true,
+        servingCredentialId: "credential-1",
+        priorSessionCredentialId: "credential-1",
+        emittedSourceKeys: restartedEmittedSourceKeys,
+        renewLease: async () => undefined,
+        leaseLost: () => false,
+        leaseLostMessage: "lease lost",
+        setLastInputTokens: async (tokens) => {
+          fencedInputs.push(tokens);
+        },
+      });
+      expect(restarted).toMatchObject({
+        status: "processed",
+        authoritative: false,
+        sourceKey: response.id,
+      });
+      expect(restartedState.responseUsageCount).toBe(1);
+      expect(restartedState.providerContextRevision).toBe(0);
+      expect(restartedState.lastProviderContextTokensObserved).toBeNull();
+      expect(fencedInputs).toHaveLength(restartedInputsBefore);
+      expect(billingRows).toHaveLength(1);
+      const metricsAfterRestart = await observability.prometheusMetrics();
+      expect(metricsAfterRestart).toMatch(
+        /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("claims compaction usage before retry side effects and defers restart authority to durable usage", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const billingRows = new Map<string, Record<string, unknown>>();
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        if (!billingRows.has(input.idempotencyKey)) {
+          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
+        }
+      },
+    );
+    try {
+      const durableUsageSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => {
+          const sourceKey = event.payload?.sourceKey as string;
+          const duplicate = durableUsageSourceKeys.has(sourceKey);
+          durableUsageSourceKeys.add(sourceKey);
+          return {
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+          };
+        }),
+      });
+      const usage = {
+        responseId: "resp-compaction-retry",
+        usage: {
+          inputTokens: 200,
+          outputTokens: 10,
+          totalTokens: 210,
+          inputTokensDetails: { cached_tokens: 150 },
+        },
+      };
+      let leaseRenewals = 0;
+      const state = createCompactionModelUsageEventState();
+      const emittedSourceKeys = new Set<string>();
+      const process = (
+        targetState = state,
+        targetEmittedSourceKeys = emittedSourceKeys,
+        dispatchId = "activity-A",
+      ) =>
+        processCompactionModelUsageEvent({
+          usage,
+          state: targetState,
+          dispatchId,
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          isCodexTurn: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys: targetEmittedSourceKeys,
+          renewLease: async () => {
+            leaseRenewals += 1;
+          },
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+        });
+
+      expect(await process()).toMatchObject({
+        status: "processed",
+        sourceKey: usage.responseId,
+        authoritative: true,
+      });
+      expect(await process()).toEqual({ status: "duplicate", sourceKey: usage.responseId });
+      expect(state.usageCount).toBe(1);
+      expect(leaseRenewals).toBe(1);
+      expect(billingRows.size).toBe(1);
+
+      const restartedState = createCompactionModelUsageEventState();
+      expect(await process(restartedState, new Set<string>(), "activity-B")).toMatchObject({
+        status: "processed",
+        sourceKey: usage.responseId,
+        authoritative: false,
+      });
+      expect(restartedState.usageCount).toBe(1);
+      expect(leaseRenewals).toBe(2);
+      expect(billingRows.size).toBe(1);
+      expect(durableUsageSourceKeys).toEqual(new Set([usage.responseId]));
+
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 150\b/,
+      );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+});
+
 describe("model call usage observability", () => {
   test("logs and emits normalized cache/reasoning usage fields", async () => {
     const infos: Array<Record<string, unknown>> = [];
@@ -705,7 +1027,7 @@ describe("model call usage observability", () => {
           inputTokens: 1200,
           outputTokens: 100,
           totalTokens: 1300,
-          inputTokensDetails: { cached_tokens: 1024 },
+          inputTokensDetails: { cached_tokens: 1024, cache_write_tokens: 256 },
           outputTokensDetails: { reasoning_tokens: 12 },
         },
       },
@@ -719,6 +1041,7 @@ describe("model call usage observability", () => {
       inputTokens: 1200,
       outputTokens: 100,
       cachedTokens: 1024,
+      cacheWriteTokens: 256,
       reasoningTokens: 12,
     });
     expect(events).toEqual([
@@ -732,6 +1055,7 @@ describe("model call usage observability", () => {
           inputTokens: 1200,
           outputTokens: 100,
           cachedTokens: 1024,
+          cacheWriteTokens: 256,
           reasoningTokens: 12,
         }),
       },
@@ -790,11 +1114,12 @@ describe("model call usage observability", () => {
 
   test("does not log a duplicate usage observation as authoritative", async () => {
     const infos: Array<Record<string, unknown>> = [];
+    const observability = createObservability(testSettings(), { component: "worker" });
+    observability.info = (_message: string, attributes: Record<string, unknown>) =>
+      infos.push(attributes);
+    observability.warn = mock();
     await emitModelCallUsage({
-      observability: {
-        info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
-        warn: mock(),
-      } as any,
+      observability,
       publish: async (batch) => ({
         accepted: true,
         events: batch.map((event) => ({
@@ -817,6 +1142,203 @@ describe("model call usage observability", () => {
     });
 
     expect(infos).toEqual([]);
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toMatch(/opengeni_model_cache_read_telemetry_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+  });
+
+  test("wires raw response cache writes through the authoritative production metric path", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-write",
+      usage: {
+        input_tokens: 1200,
+        output_tokens: 100,
+        total_tokens: 1300,
+        input_tokens_details: { cached_tokens: 800, cache_write_tokens: 250 },
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => ({
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      }),
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-write",
+      usage: responseUsage,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cached_tokens_total\{[^}]*provider="openai"[^}]*\} 800\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="openai"[^}]*\} 250\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+  });
+
+  test("sums SDK aggregate retries once and dedupes an authoritative source key", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: { cached_tokens: 100, cache_write_tokens: 200 },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+    const sourceKeys = new Set<string>();
+    const payloads: Array<Record<string, unknown>> = [];
+    let publishCount = 0;
+    const publish = async (batch: any[]) => {
+      publishCount += 1;
+      payloads.push(batch[0]?.payload as Record<string, unknown>);
+      return {
+        accepted: true,
+        events: batch.map((event) => ({
+          ...event,
+          id: crypto.randomUUID(),
+          turnAssociation: "current" as const,
+        })) as any,
+      };
+    };
+    const input = {
+      observability,
+      publish,
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "codex-subscription",
+      providerApi: "responses" as const,
+      model: "codex/gpt-5.6-sol",
+      sourceKey: "aggregate-1",
+      usage: { usage: aggregate },
+      emittedSourceKeys: sourceKeys,
+    };
+
+    await emitModelCallUsage(input);
+    await emitModelCallUsage(input);
+
+    expect(publishCount).toBe(1);
+    expect(payloads[0]).toMatchObject({
+      inputTokens: 3000,
+      outputTokens: 30,
+      cachedTokens: 400,
+      cacheWriteTokens: 600,
+      reasoningTokens: 12,
+    });
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cached_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 400\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"[^}]*\} 600\b/,
+    );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="reported"[^}]*\} 1\b/,
+    );
+  });
+
+  test("keeps malformed provider usage out of durable payloads and emits bounded diagnostics", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const info = mock();
+    const warn = mock();
+    observability.info = info;
+    observability.warn = warn;
+    const payloads: Array<Record<string, unknown>> = [];
+    const responseUsage = modelResponseUsageFromResponse({
+      id: "resp-malformed",
+      usage: {
+        input_tokens: 1.5,
+        output_tokens: Number.POSITIVE_INFINITY,
+        input_tokens_details: {
+          cached_tokens: Number.NaN,
+          cache_write_tokens: Number.MAX_SAFE_INTEGER,
+        },
+      },
+    });
+    expect(responseUsage).not.toBeNull();
+
+    await emitModelCallUsage({
+      observability,
+      publish: async (batch) => {
+        payloads.push(batch[0]?.payload as Record<string, unknown>);
+        return {
+          accepted: true,
+          events: batch.map((event) => ({
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: "current" as const,
+          })) as any,
+        };
+      },
+      accountId: "acct-1",
+      workspaceId: "ws-1",
+      sessionId: "sess-1",
+      turnId: "turn-1",
+      provider: "openai",
+      providerApi: "responses",
+      model: "gpt-5.6-sol",
+      sourceKey: "resp-malformed",
+      usage: responseUsage,
+    });
+
+    expect(payloads[0]).toMatchObject({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(Object.values(payloads[0] ?? {})).not.toContain(Number.POSITIVE_INFINITY);
+    expect(info).toHaveBeenCalledWith(
+      "model call usage",
+      expect.objectContaining({ cacheWriteTokens: null }),
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "model call usage fields rejected",
+      expect.objectContaining({
+        rejectedFields: expect.stringContaining("inputTokensDetails.cache_write_tokens"),
+      }),
+    );
+    const rejectedFields = (warn.mock.calls[0]?.[1] as Record<string, unknown>)
+      ?.rejectedFields as string;
+    expect(rejectedFields).not.toContain("9007199254740991");
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cache_write_tokens_total/);
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 1\b/,
+    );
   });
 });
 

@@ -6,6 +6,7 @@ import {
   getAllMcpTools,
   invalidateServerToolsCache,
 } from "@openai/agents";
+import { Usage } from "@openai/agents-core";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -35,6 +36,7 @@ import {
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
+  normalizeModelCallUsage,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
@@ -197,30 +199,32 @@ describe("runtime event normalization", () => {
     expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
-  test("normalizes model-call usage telemetry fields defensively", () => {
+  test("normalizes model-call usage telemetry fields and supported aliases", () => {
     expect(
       modelCallUsageTelemetry({
         inputTokens: 100,
         outputTokens: 20,
-        inputTokensDetails: { cached_tokens: 80 },
+        inputTokensDetails: { cached_tokens: 80, cache_write_tokens: 12 },
         outputTokensDetails: { reasoning_tokens: 7 },
       }),
     ).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       cachedTokens: 80,
+      cacheWriteTokens: 12,
       reasoningTokens: 7,
     });
     expect(
       modelCallUsageTelemetry({
         inputTokens: 50,
         outputTokens: 10,
-        inputTokensDetails: { cached_input_tokens: 30 },
+        inputTokensDetails: { cached_input_tokens: 30, cacheWriteTokens: 9 },
       }),
     ).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 30,
+      cacheWriteTokens: 9,
       reasoningTokens: null,
     });
     // A wire `cached_tokens: 0` is REAL data (the provider cached nothing) and
@@ -238,14 +242,262 @@ describe("runtime event normalization", () => {
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 0,
+      cacheWriteTokens: null,
       reasoningTokens: 0,
     });
     expect(modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 })).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: null,
+      cacheWriteTokens: null,
       reasoningTokens: null,
     });
+    // Aggregate detail arrays represent individual requests and must be summed.
+    expect(
+      modelCallUsageTelemetry({
+        inputTokensDetails: [
+          { cached_tokens: 0, cache_write_tokens: 0 },
+          { cached_tokens: 24, cacheWriteTokens: 6 },
+        ],
+      }),
+    ).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: 24,
+      cacheWriteTokens: 6,
+      reasoningTokens: null,
+    });
+    expect(modelCallUsageTelemetry({ inputTokensDetails: { cache_write_tokens: 0 } })).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: 0,
+      reasoningTokens: null,
+    });
+  });
+
+  test("sums installed SDK multi-request usage without double counting aliases", () => {
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: {
+          cached_tokens: 100,
+          cache_write_tokens: 200,
+          cacheWriteTokens: 999,
+        },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+
+    expect(normalizeModelCallUsage(aggregate)).toEqual({
+      telemetry: {
+        inputTokens: 3000,
+        outputTokens: 30,
+        cachedTokens: 400,
+        cacheWriteTokens: 600,
+        reasoningTokens: 12,
+      },
+      totalTokens: 3030,
+      rejectedFields: [],
+    });
+  });
+
+  test("prefers request details, falls back to aggregate arrays, and preserves unknowns", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [{ cached_tokens: 900, cache_write_tokens: 900 }],
+        requestUsageEntries: [
+          {
+            inputTokensDetails: {
+              cached_tokens: 10,
+              cache_write_tokens: 20,
+              cacheWriteTokens: 999,
+            },
+          },
+          {
+            inputTokensDetails: { cached_tokens: 30, cacheWriteTokens: 40 },
+          },
+        ],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 40, cacheWriteTokens: 60 });
+
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [
+          { cached_tokens: 100, cache_write_tokens: 200 },
+          { cached_tokens: 300, cacheWriteTokens: 400 },
+        ],
+        outputTokensDetails: [{ reasoning_tokens: 5 }, { reasoningTokens: 7 }],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 400, cacheWriteTokens: 600, reasoningTokens: 12 });
+
+    // If even one SDK request does not report a field, its aggregate total is
+    // unknown rather than an undercount of only the requests that did report.
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [
+          { inputTokensDetails: { cached_tokens: 0 } },
+          { inputTokensDetails: {} },
+        ],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [{ inputTokensDetails: { cached_tokens: 10 } }, { inputTokens: 20 }],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(normalizeModelCallUsage({ inputTokensDetails: { cached_tokens: 0 } }).telemetry).toEqual(
+      {
+        inputTokens: null,
+        outputTokens: null,
+        cachedTokens: 0,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+      },
+    );
+  });
+
+  test("rejects malformed and overflowing usage with bounded field-only diagnostics", () => {
+    const malformed = normalizeModelCallUsage({
+      inputTokens: 1.5,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+      totalTokens: Number.POSITIVE_INFINITY,
+      inputTokensDetails: {
+        cached_tokens: -1,
+        cache_write_tokens: 1_000_000_001,
+      },
+      outputTokensDetails: { reasoning_tokens: Number.NaN },
+    });
+    expect(malformed.telemetry).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(malformed.totalTokens).toBeNull();
+    expect(malformed.rejectedFields).toEqual([
+      "inputTokens",
+      "outputTokens",
+      "totalTokens",
+      "inputTokensDetails.cached_tokens",
+      "inputTokensDetails.cache_write_tokens",
+      "outputTokensDetails.reasoning_tokens",
+    ]);
+    expect(malformed.rejectedFields.join(" ")).not.toContain("Infinity");
+
+    const overflow = normalizeModelCallUsage({
+      inputTokens: 600_000_000,
+      outputTokens: 600_000_000,
+      inputTokensDetails: [{ cached_tokens: 600_000_000 }, { cached_tokens: 600_000_000 }],
+    });
+    expect(overflow.totalTokens).toBeNull();
+    expect(overflow.telemetry.cachedTokens).toBeNull();
+    expect(overflow.rejectedFields).toEqual(["totalTokens.aggregate", "cachedTokens.aggregate"]);
+
+    const partialDetails = normalizeModelCallUsage({
+      inputTokensDetails: [{ cached_tokens: 5 }, null as never, { cached_tokens: 7 }],
+    });
+    expect(partialDetails.telemetry.cachedTokens).toBeNull();
+    expect(partialDetails.rejectedFields).toEqual(["inputTokensDetails[1]"]);
+  });
+
+  test("derives canonical totals and rejects low, high, and conflicting aggregate totals", () => {
+    for (const reportedTotal of [0, 3, 119, 121, 999_999]) {
+      const normalized = normalizeModelCallUsage({
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: reportedTotal,
+      });
+      expect(normalized.totalTokens).toBe(120);
+      expect(normalized.rejectedFields).toContain("totalTokens");
+    }
+
+    const conflictingAggregate = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 2,
+      totalTokens: 3,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+        { input_tokens: 200, output_tokens: 40, total_tokens: 240 },
+      ],
+    });
+    expect(conflictingAggregate).toMatchObject({
+      telemetry: { inputTokens: 300, outputTokens: 50 },
+      totalTokens: 350,
+    });
+    expect(conflictingAggregate.rejectedFields).toEqual(
+      expect.arrayContaining(["inputTokens", "outputTokens", "totalTokens"]),
+    );
+
+    const conflictingRequestTotals = normalizeModelCallUsage({
+      inputTokens: 300,
+      outputTokens: 50,
+      totalTokens: 350,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 0 },
+        { inputTokens: 200, outputTokens: 40, totalTokens: 3 },
+      ],
+    });
+    expect(conflictingRequestTotals.totalTokens).toBe(350);
+    expect(conflictingRequestTotals.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "requestUsageEntries[0].totalTokens",
+        "requestUsageEntries[1].totalTokens",
+      ]),
+    );
+  });
+
+  test("keeps canonical-total arithmetic bounded at cumulative overflow boundaries", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokens: 999_999_999,
+        outputTokens: 1,
+        totalTokens: 0,
+      }),
+    ).toMatchObject({ totalTokens: 1_000_000_000 });
+
+    const derivedOverflow = normalizeModelCallUsage({
+      inputTokens: 1_000_000_000,
+      outputTokens: 1,
+      totalTokens: 1,
+    });
+    expect(derivedOverflow.totalTokens).toBeNull();
+    expect(derivedOverflow.rejectedFields).toEqual(
+      expect.arrayContaining(["totalTokens.aggregate", "totalTokens"]),
+    );
+
+    const requestOverflow = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 0,
+      totalTokens: 1,
+      requestUsageEntries: [
+        { inputTokens: 600_000_000, outputTokens: 0, totalTokens: 600_000_000 },
+        { inputTokens: 400_000_001, outputTokens: 0, totalTokens: 400_000_001 },
+      ],
+    });
+    expect(requestOverflow.telemetry.inputTokens).toBeNull();
+    expect(requestOverflow.totalTokens).toBeNull();
+    expect(requestOverflow.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "inputTokens.requestUsageEntries",
+        "totalTokens.requestUsageEntries",
+        "inputTokens",
+        "totalTokens",
+      ]),
+    );
   });
 
   test("ignores duplicate raw Responses text delta mirror events", () => {

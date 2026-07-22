@@ -292,12 +292,14 @@ A **scheduled task** is a stored, cron-style trigger that wakes a session and ru
 
 Each model call is metered and billed during turn execution (§4.2 step 5). Two enums in `packages/contracts/src/index.ts` parameterize this per deployment, each `"none" | "static" | "managed"`:
 
+Provider usage crosses one normalization boundary in `packages/runtime/src/usage-telemetry.ts`: nonnegative safe-integer token counts are bounded, SDK multi-request detail entries are summed without alias double counting, and missing cache fields remain unknown. `agent-turn.ts` reuses that one normalized frame for durable `agent.model.usage`, accounting, context signals, logs, and Prometheus cache metrics. Source-key authority gates the metric side effect, so a duplicate or replaced turn cannot double count it; provider-only reported/missing availability metrics keep telemetry regressions alertable without converting unknown cache reads into false zeros. See [`design/prompt-cache-affinity.md`](design/prompt-cache-affinity.md).
+
 - **`UsageLimitsMode`** — whether usage limits are off, enforced from static config, or managed externally. `createSessionForRequest` checks limits before enqueueing the first turn (§4.2 step 3) through `packages/core/src/billing/limits.ts`, and a recoverable budget/credit exhaustion **idles** the session rather than failing it (§3.4).
 - **`EntitlementsMode`** — whether feature/quota entitlements are off, statically configured, or managed.
 
 In `managed` mode, billing integrates with **Stripe**, which is confined to `apps/api/src/routes/billing.ts` (the Stripe webhook is on the access-key exempt-path allow-list, §10). The `check-workspace-billing-static.ts` static guard (§11) enforces that Stripe usage stays inside `routes/billing.ts` and that no operational `/v1` route is unscoped. Scheduled-task and billing idempotency are covered in [`reliability-fixes.md`](reliability-fixes.md).
 
-> Canonical: `packages/contracts/src/index.ts` (`UsageLimitsMode`/`EntitlementsMode`), `packages/core/src/billing/limits.ts`, `apps/api/src/routes/billing.ts`, `scripts/check-workspace-billing-static.ts`, [`reliability-fixes.md`](reliability-fixes.md).
+> Canonical: `packages/runtime/src/usage-telemetry.ts`, `apps/worker/src/activities/agent-turn.ts`, `apps/worker/src/observability-metrics.ts`, `packages/contracts/src/index.ts` (`UsageLimitsMode`/`EntitlementsMode`), `packages/core/src/billing/limits.ts`, `apps/api/src/routes/billing.ts`, `scripts/check-workspace-billing-static.ts`, [`design/prompt-cache-affinity.md`](design/prompt-cache-affinity.md), [`reliability-fixes.md`](reliability-fixes.md).
 
 ---
 
