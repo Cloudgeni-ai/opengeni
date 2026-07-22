@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
+import { McpServerConnectionRef as ContractMcpServerConnectionRef } from "@opengeni/contracts";
 import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
@@ -14,6 +15,7 @@ import {
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
+  McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
   resolveStreamTokenSecret,
   retryStartupDependency,
@@ -453,6 +455,27 @@ describe("sandbox preparation profiles", () => {
     };
     expect(settings.mcpServers[0]?.id).toBe("docs");
     expect(settings.mcpServers[0]?.allowedTools).toEqual(["search_documents"]);
+  });
+
+  test("keeps config and wire connection-ref schemas in lockstep", () => {
+    const cases: unknown[] = [
+      {
+        connectionId: "cloud-connection:github:42",
+        providerDomain: "github.com",
+        kind: "app_install",
+        scopes: ["repo"],
+        subjectScope: "subject",
+      },
+      { providerDomain: "gitlab.example" },
+      { connectionId: "opaque", providerDomain: "" },
+      { providerDomain: "github.com", unexpected: true },
+      null,
+    ];
+    for (const candidate of cases) {
+      expect(McpServerConnectionRefSchema.safeParse(candidate).success).toBe(
+        ContractMcpServerConnectionRef.safeParse(candidate).success,
+      );
+    }
   });
 
   test("registers built-in MCP profiles by default", () => {

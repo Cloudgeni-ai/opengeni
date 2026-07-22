@@ -1,3 +1,4 @@
+import type { McpServerConnectionRef } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import {
   bigint,
@@ -866,6 +867,9 @@ export const sessionMcpServers = pgTable(
     // Human-approval policy: `true` = every tool requires approval, a string[] of
     // UNPREFIXED tool names = only those require it, null/absent = auto-run.
     requireApproval: jsonb("require_approval").$type<boolean | string[]>(),
+    // Non-secret pointer resolved at request time by the standalone broker or
+    // an embedding host. Unlike headersEncrypted, this is safe to project.
+    connectionRef: jsonb("connection_ref").$type<McpServerConnectionRef>(),
     // Map of header name -> AES-GCM ciphertext. Values are decrypted only by the
     // worker's run-preparation path and never returned by API helpers.
     headersEncrypted: jsonb("headers_encrypted")

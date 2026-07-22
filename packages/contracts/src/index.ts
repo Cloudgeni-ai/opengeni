@@ -1259,8 +1259,8 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 
 // ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
-// The host-providable per-run credential-mint seam over OpenGeni's TWO
-// run-scoped credential sites in the worker:
+// The host-providable credential seam over OpenGeni's run-scoped credential
+// sites in the worker and API:
 //   - GIT credentials: run-scoped provider tokens minted in
 //     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
 //     `settings`; embedded hosts can broker GitHub, GitLab, and Azure DevOps)
@@ -1268,6 +1268,8 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //   - SANDBOX secrets: the decrypted variable set values loaded in
 //     `loadVariableSetForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
+//   - MCP credentials: request-time transport headers for connection-backed
+//     servers, shared by normal model tools and Toolspace/Code Mode.
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
@@ -1356,12 +1358,83 @@ export type SandboxSecrets = {
   description?: string | null;
 };
 
+export const McpServerConnectionRef = z
+  .object({
+    /** Opaque host or standalone connection identifier. */
+    connectionId: z.string().min(1).optional(),
+    providerDomain: z.string().min(1),
+    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    resource: z.string().min(1).optional(),
+    subjectScope: z.enum(["workspace", "subject"]).optional(),
+  })
+  .strict();
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
+
+export type McpCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  /** Null only while a durable turn exists without a currently executing attempt. */
+  attemptId: string | null;
+  executionGeneration: number;
+  /** The immutable authority that admitted this turn. Never substitute the sandbox caller. */
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  /** Immediate technical caller, retained only as non-authoritative audit context. */
+  callerSubjectId?: string;
+  surface: "model" | "toolspace";
+  serverId: string;
+  toolName?: string;
+  connectionRef: McpServerConnectionRef;
+  forceRefresh: boolean;
+};
+
+export type McpCredentialAuthNeededReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed";
+
+export type McpCredentialResolution =
+  | {
+      status: "ok";
+      /** Scope echoes are mandatory and verified before any header is used. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      headers: Record<string, string>;
+      connectionId: string;
+      expiresAt?: string | null;
+    }
+  | {
+      status: "auth_needed";
+      /** Scope echoes are mandatory even when the credential cannot be resolved. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      reason: McpCredentialAuthNeededReason;
+      providerDomain: string;
+      connectionId?: string;
+      scopes?: string[];
+      resource?: string;
+      authorizationUrl?: string;
+    };
+
 export type ConnectionCredentialsPort = {
-  // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
-  // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
-  // unset leg falls through to today's self-mint for THAT leg only.
+  // Every leg is optional: a host may drive only the credential classes it
+  // owns. An unset leg falls through to today's standalone implementation for
+  // that leg only.
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
+  /**
+   * Resolve rotating MCP transport credentials at request time. Embedded hosts
+   * use this to keep their provider connection as the sole credential source;
+   * OpenGeni never requires a duplicate connection record. The same resolver is
+   * used by model-visible MCP tools and the additive Toolspace/Code Mode proxy.
+   */
+  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -1865,6 +1938,9 @@ export const SessionMcpServerInput = z.object({
   // Write-only credential headers. Values are encrypted at rest and never
   // returned in session responses or events; response metadata exposes names.
   headers: z.record(z.string(), z.string()).optional(),
+  // Non-secret opaque pointer resolved at request time by the standalone
+  // connection broker or an embedding host's mcpCredentials port.
+  connectionRef: McpServerConnectionRef.optional(),
 });
 export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 
@@ -1881,6 +1957,7 @@ export const SessionMcpServerMetadata = z
     url: httpsUrl,
     headerNames: z.array(z.string()).default([]),
     credentialVersion: z.number().int().positive(),
+    connectionRef: McpServerConnectionRef.nullable().default(null),
   })
   .strict();
 export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
@@ -3292,18 +3369,6 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
-
-export const McpServerConnectionRef = z
-  .object({
-    connectionId: z.string().uuid().optional(),
-    providerDomain: z.string().min(1),
-    kind: ConnectionKind.optional(),
-    scopes: z.array(z.string().min(1)).optional(),
-    resource: z.string().min(1).optional(),
-    subjectScope: z.enum(["workspace", "subject"]).optional(),
-  })
-  .strict();
-export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),

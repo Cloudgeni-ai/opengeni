@@ -26,9 +26,15 @@ import {
   type TestMcpServer,
 } from "@opengeni/testing";
 import type { Observability } from "@opengeni/observability";
-import type { AccessGrant } from "@opengeni/contracts";
+import type { AccessGrant, McpCredentialsRequest } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { createDb, createSession, type Database, type DbClient } from "@opengeni/db";
+import {
+  createDb,
+  createSession,
+  createSessionMcpServers,
+  type Database,
+  type DbClient,
+} from "@opengeni/db";
 import {
   prepareToolspaceMcpSurface,
   toolspaceCanProxyServerId,
@@ -89,6 +95,7 @@ function makeDeps(maxCallsPerTurn: number): ApiRouteDeps {
 }
 
 async function seedSession(input: { selects: string[]; withActiveTurn: boolean }): Promise<{
+  accountId: string;
   workspaceId: string;
   sessionId: string;
 }> {
@@ -111,20 +118,26 @@ async function seedSession(input: { selects: string[]; withActiveTurn: boolean }
     const [turn] = await admin<{ id: string }[]>`
       insert into session_turns
         (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
-         status, position, prompt, model, reasoning_effort, sandbox_backend)
+         status, position, prompt, model, reasoning_effort, sandbox_backend,
+         execution_generation, initiator_kind, initiator_subject_id, initiator_context)
       values
         (${account!.id}, ${workspace!.id}, ${session.id}, gen_random_uuid(), 'wf-1',
-         'running', 0, 'hi', 'gpt-5.6-sol', 'medium', 'none')
+         'running', 0, 'hi', 'gpt-5.6-sol', 'medium', 'none',
+         3, 'subject', 'host:user:77', '{"source":"host-test"}'::jsonb)
       returning id`;
     await admin`update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
   }
-  return { workspaceId: workspace!.id, sessionId: session.id };
+  return { accountId: account!.id, workspaceId: workspace!.id, sessionId: session.id };
 }
 
-function grantFor(workspaceId: string, sessionId: string): AccessGrant {
+function grantFor(
+  workspaceId: string,
+  sessionId: string,
+  accountId = crypto.randomUUID(),
+): AccessGrant {
   return {
     workspaceId,
-    accountId: crypto.randomUUID(),
+    accountId,
     subjectId: "sandbox:run-1",
     permissions: ["toolspace:call"],
     metadata: { sessionId },
@@ -146,6 +159,87 @@ describe("toolspaceCanProxyServerId (recursion guard predicate)", () => {
 });
 
 describe("prepareToolspaceMcpSurface", () => {
+  test("uses the host MCP credential port with the active turn's frozen initiator", async () => {
+    if (!available) return;
+    const server = startTestMcpServer({ requiredAuthorization: "Bearer cloud-connection" });
+    const connectionId = crypto.randomUUID();
+    const requests: McpCredentialsRequest[] = [];
+    const settings = testSettings({
+      toolspaceEnabled: true,
+      toolspaceMaxCallsPerTurn: 200,
+      environmentsEncryptionKey: undefined,
+      mcpServers: [],
+    });
+    const seeded = await seedSession({ selects: ["host-github"], withActiveTurn: true });
+    await createSessionMcpServers(db, {
+      accountId: seeded.accountId,
+      workspaceId: seeded.workspaceId,
+      sessionId: seeded.sessionId,
+      servers: [
+        {
+          id: "host-github",
+          url: server.url,
+          cacheToolsList: false,
+          connectionRef: {
+            connectionId,
+            providerDomain: "github.com",
+            kind: "app_install",
+          },
+        },
+      ],
+    });
+    const deps = {
+      settings,
+      db,
+      bus: new MemoryEventBus(),
+      observability,
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => {
+          requests.push(request);
+          return {
+            status: "ok" as const,
+            accountId: request.accountId,
+            workspaceId: request.workspaceId,
+            sessionId: request.sessionId,
+            headers: { Authorization: "Bearer cloud-connection" },
+            connectionId,
+          };
+        },
+      },
+    } as unknown as ApiRouteDeps;
+    const surface = await prepareToolspaceMcpSurface({
+      deps,
+      grant: grantFor(seeded.workspaceId, seeded.sessionId, seeded.accountId),
+    });
+    const tool = surface!.tools.find(
+      (candidate) => candidate.name === "host-github__search_documents",
+    );
+    expect(tool).toBeDefined();
+    const result = await tool!.call({ query: "host credential" });
+    expect(result.isError).toBeFalsy();
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests.every((request) => request.surface === "toolspace")).toBe(true);
+    expect(requests.every((request) => request.accountId === seeded.accountId)).toBe(true);
+    expect(requests.every((request) => request.workspaceId === seeded.workspaceId)).toBe(true);
+    expect(requests.every((request) => request.sessionId === seeded.sessionId)).toBe(true);
+    expect(requests.every((request) => request.executionGeneration === 3)).toBe(true);
+    expect(requests.every((request) => request.attemptId === null)).toBe(true);
+    expect(requests.every((request) => request.callerSubjectId === "sandbox:run-1")).toBe(true);
+    expect(
+      requests.every(
+        (request) =>
+          JSON.stringify(request.initiator) ===
+          JSON.stringify({
+            kind: "subject",
+            subjectId: "host:user:77",
+          }),
+      ),
+    ).toBe(true);
+    expect(requests.some((request) => request.toolName === "search_documents")).toBe(true);
+    await surface!.close();
+    server.close();
+  }, 60_000);
+
   test("lists third-party tools but excludes first-party proxies from the surface", async () => {
     if (!available) return;
     const { workspaceId, sessionId } = await seedSession({

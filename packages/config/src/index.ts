@@ -103,7 +103,8 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
 
 export const McpServerConnectionRefSchema = z
   .object({
-    connectionId: z.string().uuid().optional(),
+    // Standalone ids are UUIDs; embedded hosts may use any stable opaque id.
+    connectionId: z.string().min(1).optional(),
     providerDomain: z.string().min(1),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     scopes: z.array(z.string().min(1)).optional(),

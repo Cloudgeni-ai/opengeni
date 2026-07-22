@@ -59,7 +59,6 @@ import {
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
-  buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
   markSessionAttemptQuiesced,
@@ -107,6 +106,7 @@ import {
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
+import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
   builtinProviderId,
   calculateModelUsageCostMicros,
@@ -3727,7 +3727,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
-      const resolveCredential = buildConnectionTokenResolver(db, runSettings);
+      const resolveCredential = connectionTokenResolverForTurn({
+        db,
+        settings: runSettings,
+        connectionCredentials: connectionCredentials ?? null,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        attemptId: input.attemptId,
+        turn,
+      });
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
