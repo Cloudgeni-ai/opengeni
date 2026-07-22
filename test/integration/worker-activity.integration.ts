@@ -1226,7 +1226,7 @@ describe("worker activities integration", () => {
       turnId: turn.id,
       expectedExecutionGeneration: turn.executionGeneration,
       expectedAttemptId: initialAttemptId,
-      serializedRunState: "saved-state",
+      serializedRunState: '{"schemaVersion":"test","history":[]}',
       pendingApprovals: [{ id: "approval-1" }],
     });
     expect(
@@ -1252,7 +1252,7 @@ describe("worker activities integration", () => {
       prepareTools: async () => ({ mcpServers: [], close: async () => {} }),
       prepareInput: async (_agent, input) => {
         expect(input.kind).toBe("approval");
-        return { input: "approved" };
+        return { input: "approved", historyItemCount: 0 };
       },
       runStream: async () => {
         const stored = await getSession(dbClient.db, grant.workspaceId, session.id);

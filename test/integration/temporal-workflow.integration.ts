@@ -5,7 +5,7 @@ import { startTestServices, type TestServices, waitFor } from "@opengeni/testing
 import { currentActivityContext } from "../../apps/worker/src/activities/streaming";
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  createTurnWorkerTuner,
 } from "../../apps/worker/src/concurrency";
 import { turnTaskQueue } from "../../apps/worker/src/workflows/activities";
 
@@ -1916,7 +1916,7 @@ async function testWorker(
       namespace: "default",
       taskQueue: turnTaskQueue(taskQueue),
       activities: { runAgentTurn },
-      maxConcurrentActivityTaskExecutions: TURN_WORKER_MAX_CONCURRENT_TURNS,
+      tuner: integrationTurnTuner(),
     }),
   ]);
   return {
@@ -1928,4 +1928,14 @@ async function testWorker(
       turns.shutdown();
     },
   };
+}
+
+function integrationTurnTuner() {
+  return createTurnWorkerTuner({
+    memorySnapshot: () => ({
+      currentBytes: 256 * 1024 * 1024,
+      limitBytes: 4 * 1024 * 1024 * 1024,
+      source: "cgroup-v2",
+    }),
+  }).tuner;
 }

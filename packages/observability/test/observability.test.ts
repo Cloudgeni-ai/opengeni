@@ -4,6 +4,7 @@ import { createObservability, logStartupDependencyRetry, parseHeaders } from "..
 const settings = {
   serviceName: "opengeni",
   environment: "test",
+  deploymentRevision: "revision-test",
   observabilityStructuredLogs: true,
   observabilityMetricsEnabled: true,
   observabilityOtlpEndpoint: "http://collector:4318",
@@ -32,6 +33,7 @@ describe("observability", () => {
     expect(metrics).toContain("opengeni_http_requests_total");
     expect(metrics).toContain('service="opengeni"');
     expect(metrics).toContain('environment="test"');
+    expect(metrics).toContain('deployment_revision="revision-test"');
     expect(metrics).toContain('route="/healthz"');
     expect(metrics).toContain("opengeni_http_request_duration_seconds_bucket");
     expect(metrics).toContain("opengeni_build_info");

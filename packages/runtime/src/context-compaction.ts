@@ -14,6 +14,7 @@ import {
 } from "./history-sanitizer";
 import { boundModelToolOutputItem } from "@opengeni/codex";
 import { createHash } from "node:crypto";
+import { isProxy } from "node:util/types";
 
 export type CompactionItem = Record<string, unknown>;
 
@@ -125,13 +126,361 @@ export function estimateTextTokens(text: string): number {
 
 /** Serialized-item estimate for pre-call accounting and retained user budgets. */
 export function estimateItemTokens(item: CompactionItem): number {
-  let text: string;
   try {
-    text = JSON.stringify(item);
+    return jsonSerializedTokenEstimate(item);
   } catch {
-    text = String(item);
+    return estimateTextTokens(materializedJson(item));
   }
-  return estimateTextTokens(text);
+}
+
+/**
+ * Count the UTF-16 code units JSON.stringify emits for a persisted plain
+ * JSON/JSONB value without materializing the serialized payload. This exact
+ * path deliberately rejects custom prototypes, proxies, accessors, wrappers,
+ * symbols, sparse arrays, and toJSON hooks. Direct non-persisted callers use
+ * JSON.stringify itself for unusual values so their estimate remains truthful;
+ * values with no JSON representation fail closed.
+ */
+export function jsonSerializedLength(value: unknown): number {
+  const length = jsonValueLength(value, new Set<object>());
+  if (length === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return length;
+}
+
+function jsonSerializedTokenEstimate(value: unknown): number {
+  const characters = jsonSerializedLength(value);
+  const nonAsciiCodeUnits = jsonValueNonAsciiCodeUnits(value, new Set<object>());
+  if (nonAsciiCodeUnits === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return nonAsciiCodeUnits + Math.ceil((characters - nonAsciiCodeUnits) / 4);
+}
+
+function jsonValueNonAsciiCodeUnits(value: unknown, ancestors: Set<object>): number | undefined {
+  switch (typeof value) {
+    case "string":
+      return jsonStringNonAsciiCodeUnits(value);
+    case "number":
+    case "boolean":
+      return 0;
+    case "undefined":
+    case "function":
+    case "symbol":
+      return undefined;
+    case "bigint":
+      throw new TypeError("BigInt is not JSON serializable");
+    case "object": {
+      if (value === null) return 0;
+      const kind = plainJsonContainerKind(value);
+      if (ancestors.has(value)) {
+        throw new TypeError("Converting circular structure to JSON");
+      }
+      ancestors.add(value);
+      try {
+        if (kind === "array") {
+          const arrayValue = value as unknown[];
+          let count = 0;
+          for (let index = 0; index < arrayValue.length; index += 1) {
+            count +=
+              jsonValueNonAsciiCodeUnits(plainJsonArrayValue(arrayValue, index), ancestors) ?? 0;
+          }
+          assertNoNamedEnumerableArrayProperties(arrayValue);
+          return count;
+        }
+
+        let count = 0;
+        for (const property in value) {
+          if (!Object.hasOwn(value, property)) continue;
+          const child = plainJsonObjectValue(value, property);
+          const childCount = jsonValueNonAsciiCodeUnits(child, ancestors);
+          if (childCount === undefined) continue;
+          count += jsonStringNonAsciiCodeUnits(property) + childCount;
+        }
+        return count;
+      } finally {
+        ancestors.delete(value);
+      }
+    }
+  }
+}
+
+function jsonStringNonAsciiCodeUnits(value: string): number {
+  let count = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        count += 2;
+        index += 1;
+      }
+    } else if (code > 0x7f && !(code >= 0xdc00 && code <= 0xdfff)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** Count UTF-8 bytes for a persisted plain JSON/JSONB value without materializing it. */
+export function jsonSerializedUtf8ByteLength(value: unknown): number {
+  const length = jsonValueUtf8ByteLength(value, new Set<object>());
+  if (length === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return length;
+}
+
+function jsonValueLength(value: unknown, ancestors: Set<object>): number | undefined {
+  switch (typeof value) {
+    case "string":
+      return jsonStringLength(value);
+    case "number":
+      return Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value).length : 4;
+    case "boolean":
+      return value ? 4 : 5;
+    case "undefined":
+    case "function":
+    case "symbol":
+      return undefined;
+    case "bigint":
+      throw new TypeError("BigInt is not JSON serializable");
+    case "object": {
+      if (value === null) return 4;
+      const kind = plainJsonContainerKind(value);
+      if (ancestors.has(value)) {
+        throw new TypeError("Converting circular structure to JSON");
+      }
+      ancestors.add(value);
+      try {
+        if (kind === "array") {
+          const arrayValue = value as unknown[];
+          let length = 2;
+          for (let index = 0; index < arrayValue.length; index += 1) {
+            if (index > 0) length += 1;
+            length += jsonValueLength(plainJsonArrayValue(arrayValue, index), ancestors) ?? 4;
+          }
+          assertNoNamedEnumerableArrayProperties(arrayValue);
+          return length;
+        }
+
+        let length = 2;
+        let emitted = 0;
+        for (const property in value) {
+          if (!Object.hasOwn(value, property)) continue;
+          const child = plainJsonObjectValue(value, property);
+          const childLength = jsonValueLength(child, ancestors);
+          if (childLength === undefined) continue;
+          if (emitted > 0) length += 1;
+          length += jsonStringLength(property) + 1 + childLength;
+          emitted += 1;
+        }
+        return length;
+      } finally {
+        ancestors.delete(value);
+      }
+    }
+  }
+}
+
+function jsonStringLength(value: string): number {
+  let length = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x22 || code === 0x5c || code === 0x08 || code === 0x0c) {
+      length += 2;
+    } else if (code === 0x0a || code === 0x0d || code === 0x09) {
+      length += 2;
+    } else if (code <= 0x1f) {
+      length += 6;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 2;
+        index += 1;
+      } else {
+        length += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      length += 6;
+    } else {
+      length += 1;
+    }
+  }
+  return length;
+}
+
+function jsonValueUtf8ByteLength(value: unknown, ancestors: Set<object>): number | undefined {
+  switch (typeof value) {
+    case "string":
+      return jsonStringUtf8ByteLength(value);
+    case "number":
+      return Number.isFinite(value) ? String(Object.is(value, -0) ? 0 : value).length : 4;
+    case "boolean":
+      return value ? 4 : 5;
+    case "undefined":
+    case "function":
+    case "symbol":
+      return undefined;
+    case "bigint":
+      throw new TypeError("BigInt is not JSON serializable");
+    case "object": {
+      if (value === null) return 4;
+      const kind = plainJsonContainerKind(value);
+      if (ancestors.has(value)) {
+        throw new TypeError("Converting circular structure to JSON");
+      }
+      ancestors.add(value);
+      try {
+        if (kind === "array") {
+          const arrayValue = value as unknown[];
+          let length = 2;
+          for (let index = 0; index < arrayValue.length; index += 1) {
+            if (index > 0) length += 1;
+            length +=
+              jsonValueUtf8ByteLength(plainJsonArrayValue(arrayValue, index), ancestors) ?? 4;
+          }
+          assertNoNamedEnumerableArrayProperties(arrayValue);
+          return length;
+        }
+
+        let length = 2;
+        let emitted = 0;
+        for (const property in value) {
+          if (!Object.hasOwn(value, property)) continue;
+          const child = plainJsonObjectValue(value, property);
+          const childLength = jsonValueUtf8ByteLength(child, ancestors);
+          if (childLength === undefined) continue;
+          if (emitted > 0) length += 1;
+          length += jsonStringUtf8ByteLength(property) + 1 + childLength;
+          emitted += 1;
+        }
+        return length;
+      } finally {
+        ancestors.delete(value);
+      }
+    }
+  }
+}
+
+function plainJsonContainerKind(value: object): "array" | "object" {
+  if (isProxy(value)) {
+    throw new TypeError("plain JSON estimator does not accept proxies");
+  }
+  if (Object.getOwnPropertySymbols(value).length > 0) {
+    throw new TypeError("plain JSON estimator does not accept symbol properties");
+  }
+  const toJsonDescriptor = Object.getOwnPropertyDescriptor(value, "toJSON");
+  if (
+    toJsonDescriptor &&
+    (!("value" in toJsonDescriptor) || typeof toJsonDescriptor.value === "function")
+  ) {
+    throw new TypeError("plain JSON estimator does not accept toJSON hooks");
+  }
+  if (Array.isArray(value)) {
+    if (Object.getPrototypeOf(value) !== Array.prototype) {
+      throw new TypeError("plain JSON estimator does not accept cross-realm or subclassed arrays");
+    }
+    return "array";
+  }
+
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("plain JSON estimator accepts only plain objects");
+  }
+  return "object";
+}
+
+function plainJsonArrayValue(value: unknown[], index: number): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+  if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+    throw new TypeError("plain JSON estimator requires dense data-property arrays");
+  }
+  return descriptor.value;
+}
+
+function assertNoNamedEnumerableArrayProperties(value: unknown[]): void {
+  for (const property in value) {
+    if (!Object.hasOwn(value, property) || isCanonicalArrayIndex(property, value.length)) continue;
+    throw new TypeError("plain JSON estimator does not accept named array properties");
+  }
+}
+
+function plainJsonObjectValue(value: object, property: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(value, property);
+  if (!descriptor || !("value" in descriptor)) {
+    throw new TypeError("plain JSON estimator does not accept accessors");
+  }
+  return descriptor.value;
+}
+
+function isCanonicalArrayIndex(property: string, length: number): boolean {
+  const index = Number(property);
+  return Number.isSafeInteger(index) && index >= 0 && index < length && String(index) === property;
+}
+
+/** Count raw UTF-8 bytes using the standard three-byte lone-surrogate replacement. */
+export function utf8ByteLength(value: string): number {
+  let length = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        index += 1;
+      } else {
+        length += 3;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      length += 3;
+    } else {
+      length += 3;
+    }
+  }
+  return length;
+}
+
+function jsonStringUtf8ByteLength(value: string): number {
+  let length = 2;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (
+      code === 0x22 ||
+      code === 0x5c ||
+      code === 0x08 ||
+      code === 0x0c ||
+      code === 0x0a ||
+      code === 0x0d ||
+      code === 0x09
+    ) {
+      length += 2;
+    } else if (code <= 0x1f) {
+      length += 6;
+    } else if (code <= 0x7f) {
+      length += 1;
+    } else if (code <= 0x7ff) {
+      length += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        length += 4;
+        index += 1;
+      } else {
+        length += 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      length += 6;
+    } else {
+      length += 3;
+    }
+  }
+  return length;
 }
 
 export function estimateTokens(items: readonly CompactionItem[]): number {
@@ -143,13 +492,26 @@ export function estimateTokens(items: readonly CompactionItem[]): number {
 }
 
 export function estimateSerializedValueTokens(value: unknown): number {
-  let serialized: string;
-  try {
-    serialized = typeof value === "string" ? value : JSON.stringify(value);
-  } catch {
-    serialized = String(value);
+  if (typeof value === "string") {
+    return estimateTextTokens(value);
   }
-  return estimateTextTokens(serialized ?? "");
+  try {
+    return jsonSerializedTokenEstimate(value);
+  } catch {
+    return estimateTextTokens(materializedJson(value));
+  }
+}
+
+function materializedJsonLength(value: unknown): number {
+  return materializedJson(value).length;
+}
+
+function materializedJson(value: unknown): string {
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) {
+    throw new TypeError("value has no JSON representation");
+  }
+  return serialized;
 }
 
 export type CompleteModelInputFootprint = {

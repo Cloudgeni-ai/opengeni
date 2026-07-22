@@ -351,6 +351,12 @@ export type AgentSegmentInput =
 
 export type PreparedAgentInput = {
   input: string | AgentInputItem[] | RunState<any, any>;
+  /**
+   * Length of the sanitized durable-history prefix already represented by
+   * `input`. The worker carries this directly into its reconciliation
+   * watermark, avoiding a second full database history materialization.
+   */
+  historyItemCount: number;
   sandboxSessionState?: SandboxSessionState;
 };
 
@@ -3084,6 +3090,7 @@ export async function prepareRunInput(
         sanitizedHistory.length === 0 && !input.internalContext?.trim() && input.text?.trim()
           ? input.text
           : assembled,
+      historyItemCount: sanitizedHistory.length,
       ...(sandboxSessionState ? { sandboxSessionState } : {}),
     };
   }
@@ -3107,7 +3114,11 @@ export async function prepareRunInput(
   } else {
     state.reject(target as any, input.message ? { message: input.message } : undefined);
   }
-  return { input: state };
+  const history = (state as { history?: unknown[] }).history;
+  if (!Array.isArray(history)) {
+    throw new Error("Approval run state has no materialized history");
+  }
+  return { input: state, historyItemCount: history.length };
 }
 
 export type RunAgentStreamOptions = {
@@ -3419,7 +3430,7 @@ export async function runAgentStream(
   overrides: RunAgentStreamOptions = {},
 ) {
   const prepared: PreparedAgentInput =
-    typeof input === "string" || input instanceof RunState ? { input } : input;
+    typeof input === "string" || input instanceof RunState ? { input, historyItemCount: 0 } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
 

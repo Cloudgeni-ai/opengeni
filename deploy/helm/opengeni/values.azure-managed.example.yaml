@@ -33,6 +33,13 @@ worker:
       maxReplicas: 20
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: 80
+      # Enable only after installing and verifying a custom.metrics.k8s.io
+      # adapter. This is the truthful per-pod demand signal; the legacy
+      # aggregate prompt queue includes paused sessions and must never scale.
+      slotSaturationMetric:
+        enabled: false
+        name: opengeni_turn_slot_saturation_ratio
+        targetAverageValue: "750m"
       customMetrics: []
       behavior:
         scaleUp:

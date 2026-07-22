@@ -33,7 +33,12 @@ import type {
 } from "./activities/types";
 import { turnTaskQueue } from "./workflows/activities";
 import { dbReadyCheck, natsReadyCheck, startWorkerHttpServer } from "./http";
-import { observabilityEventLogger } from "./observability-metrics";
+import {
+  observabilityEventLogger,
+  normalizeTurnTaskQueueStats,
+  startTurnCapacityMonitor,
+  type TurnTaskQueueStats,
+} from "./observability-metrics";
 import {
   SESSION_WORKFLOW_WAKE_DISPATCHER_PERIOD_MS,
   SESSION_WORKFLOW_WAKE_DISPATCHER_SCHEDULE_ID,
@@ -43,6 +48,7 @@ import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
   TURN_WORKER_MAX_CONCURRENT_TURNS,
+  createTurnWorkerTuner,
 } from "./concurrency";
 
 // The deterministic id of the ONE global reaper Schedule. A single id means
@@ -104,45 +110,46 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
       settings,
       observability,
     });
-  const worker = await Worker.create({
-    connection,
-    namespace: settings.temporalNamespace,
-    taskQueue:
-      options.role === "control"
-        ? settings.temporalTaskQueue
-        : turnTaskQueue(settings.temporalTaskQueue),
-    ...(options.role === "control"
-      ? {
-          workflowsPath:
-            options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
-          maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-        }
-      : {}),
-    activities,
-    maxConcurrentActivityTaskExecutions:
-      options.role === "turn"
-        ? TURN_WORKER_MAX_CONCURRENT_TURNS
-        : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
-    // Cancellation is delivered through an activity heartbeat. The SDK would
-    // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
-    // making Pause/Steer take roughly a minute even though runAgentTurn emits a
-    // heartbeat every ten seconds. Keep delivery bounded independently of the
-    // heartbeat timeout and local timer cadence.
-    maxHeartbeatThrottleInterval: "5s",
-    defaultHeartbeatThrottleInterval: "5s",
-    // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
-    // after shutdown() stops polling, in-flight activities get this long to
-    // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
-    // which triggers agent-turn's same-turn recovery checkpoint instead of a
-    // heartbeat-timeout worker_death. Short on purpose: a long grace here
-    // only delays the checkpoint window long turns actually need.
-    shutdownGraceTime: "5s",
-    // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
-    // wedged checkpoint force-stops here, on our terms, rather than riding
-    // into the kubelet's SIGKILL mid-DB-write.
-    shutdownForceTime: "100s",
-  });
-  return { worker, connection };
+  const turnTuner = options.role === "turn" ? createTurnWorkerTuner({ observability }) : null;
+  try {
+    const worker = await Worker.create({
+      connection,
+      namespace: settings.temporalNamespace,
+      taskQueue:
+        options.role === "control"
+          ? settings.temporalTaskQueue
+          : turnTaskQueue(settings.temporalTaskQueue),
+      ...(options.role === "control"
+        ? {
+            workflowsPath:
+              options.workflowsPath ?? new URL("../src/workflows.ts", import.meta.url).pathname,
+            maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+          }
+        : {}),
+      activities,
+      ...(turnTuner
+        ? { tuner: turnTuner.tuner }
+        : { maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES }),
+      maxHeartbeatThrottleInterval: "5s",
+      defaultHeartbeatThrottleInterval: "5s",
+      // GRACEFUL DEPLOY SHUTDOWN (with the SIGTERM handler in startWorker):
+      // after shutdown() stops polling, in-flight activities get this long to
+      // finish naturally; the rest are then CANCELLED with WORKER_SHUTDOWN —
+      // which triggers agent-turn's same-turn recovery checkpoint instead of a
+      // heartbeat-timeout worker_death. Short on purpose: a long grace here
+      // only delays the checkpoint window long turns actually need.
+      shutdownGraceTime: "5s",
+      // Hard ceiling INSIDE the pod's terminationGracePeriodSeconds (120s): a
+      // wedged checkpoint force-stops here, on our terms, rather than riding
+      // into the kubelet's SIGKILL mid-DB-write.
+      shutdownForceTime: "100s",
+    });
+    turnTuner?.admission.finalizeStartupBaseline();
+    return { worker, connection };
+  } catch (error) {
+    await connection.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 // A signalWithStart capability so a worker activity can wake a PARENT
@@ -157,6 +164,7 @@ export async function createWorkerWorkflowSignaler(
   wakeSessionWorkflow: WakeSessionWorkflowSignal;
   signalSessionAttemptQuiesced: SignalSessionAttemptQuiesced;
   signalCodexCapacityWorkflow: SignalCodexCapacityWorkflow;
+  getTurnTaskQueueStats: () => Promise<TurnTaskQueueStats>;
   check: () => Promise<void>;
   close: () => Promise<void>;
 }> {
@@ -234,6 +242,18 @@ export async function createWorkerWorkflowSignaler(
       // A typed capacity signal cannot acknowledge the generic outbox row:
       // another producer may have advanced it with a Pause/Steer that requires
       // sessionControl. The global dispatcher owns that acknowledgement.
+    },
+    getTurnTaskQueueStats: async () => {
+      const response = await connection.workflowService.describeTaskQueue({
+        namespace: settings.temporalNamespace,
+        taskQueue: { name: turnTaskQueue(settings.temporalTaskQueue) },
+        // temporal.api.enums.v1.TASK_QUEUE_TYPE_ACTIVITY. Keep this request in
+        // the supported DEFAULT mode; `stats.approximateBacklogCount` is the
+        // server-documented scaling signal.
+        taskQueueType: 2,
+        reportStats: true,
+      });
+      return normalizeTurnTaskQueueStats(response.stats);
     },
     check: async () => {
       await connection.workflowService.getSystemInfo({});
@@ -435,6 +455,7 @@ export async function startWorker() {
   let workflowWakeDispatcherSchedule:
     | Awaited<ReturnType<typeof registerSessionWorkflowWakeDispatcherSchedule>>
     | undefined;
+  let turnCapacityMonitor: ReturnType<typeof startTurnCapacityMonitor> | undefined;
   let httpServer: ReturnType<typeof startWorkerHttpServer> | undefined;
   try {
     bus = await retryStartupDependency(
@@ -466,6 +487,12 @@ export async function startWorker() {
         bus,
       },
     });
+    if (role === "turn") {
+      turnCapacityMonitor = startTurnCapacityMonitor({
+        observability,
+        read: signaler.getTurnTaskQueueStats,
+      });
+    }
     httpServer = startWorkerHttpServer({
       settings,
       observability,
@@ -544,6 +571,7 @@ export async function startWorker() {
       reaperSchedule?.close(),
       fileUploadReaperSchedule?.close(),
       workflowWakeDispatcherSchedule?.close(),
+      turnCapacityMonitor?.close(),
       bus?.close(),
       dbClient.close(),
     ]);

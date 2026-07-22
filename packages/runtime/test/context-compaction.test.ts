@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { runInNewContext } from "node:vm";
 import OpenAI from "openai";
 import {
   codexRequestStorage,
@@ -33,9 +34,12 @@ import {
   isCompactionSummary,
   isEphemeralInternalContext,
   isUserMessage,
+  jsonSerializedLength,
+  jsonSerializedUtf8ByteLength,
   prepareCompactionPromptInput,
   renderCompactionPromptInputForChat,
   type CompactionItem,
+  utf8ByteLength,
 } from "../src/context-compaction";
 import { extractResponseOutputText, summarizeForCompaction } from "../src/index";
 import { sanitizeHistoryItemsForModel } from "../src/history-sanitizer";
@@ -92,6 +96,139 @@ function hasLoneSurrogate(text: string): boolean {
 const WINDOW = 1_050_000;
 const RESERVED_OUTPUT = 128_000;
 const THRESHOLD = Math.floor(WINDOW * DEFAULT_COMPACTION_THRESHOLD_RATIO);
+
+describe("non-materializing plain JSON length", () => {
+  test("matches JSON.stringify for persisted history shapes and escapes", () => {
+    const values: unknown[] = [
+      null,
+      true,
+      false,
+      0,
+      -0,
+      1.25,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "plain",
+      'quotes " slash \\ controls \b\f\n\r\t\u0000',
+      "unicode 🦄 café 中文",
+      "lone-high-\ud800",
+      "lone-low-\udfff",
+      [1, undefined, "three", null],
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "x".repeat(4_096) }],
+        omitted: undefined,
+      },
+      { nested: { array: [{ ok: true }, { value: 42 }] } },
+    ];
+
+    for (const value of values) {
+      expect(jsonSerializedLength(value)).toBe(JSON.stringify(value)!.length);
+      expect(jsonSerializedUtf8ByteLength(value)).toBe(
+        Buffer.byteLength(JSON.stringify(value)!, "utf8"),
+      );
+    }
+  });
+
+  test("matches raw UTF-8 instruction and serialized descriptor token estimates", () => {
+    const rawStrings = [
+      "plain",
+      'quotes " slash \\ controls \b\f\n\r\t\u0000',
+      "unicode 🦄 café 中文",
+      "lone-high-\ud800",
+      "lone-low-\udfff",
+    ];
+    for (const value of rawStrings) {
+      // TextEncoder follows the UTF-8 replacement contract for lone UTF-16
+      // surrogates. Bun 1.3.14's Buffer.byteLength SIMD path undercounts these
+      // by one byte on some CPUs, while Node and TextEncoder report three.
+      const encodedLength = new TextEncoder().encode(value).length;
+      expect(utf8ByteLength(value)).toBe(encodedLength);
+      expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(value));
+    }
+
+    const descriptors: unknown[] = [
+      { name: "shell", description: "ASCII" },
+      { name: "搜索🦄", inputSchema: { type: "object", description: "café 中文" } },
+      { escaped: 'quotes " slash \\ controls \u0000', lone: "\ud800" },
+      [undefined, "three", null],
+    ];
+    for (const value of descriptors) {
+      expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(JSON.stringify(value)!));
+    }
+  });
+
+  test("rejects values JSON.stringify cannot represent at the root", () => {
+    expect(() => jsonSerializedLength(undefined)).toThrow();
+    expect(() => jsonSerializedUtf8ByteLength(undefined)).toThrow();
+    expect(() => jsonSerializedLength(1n)).toThrow();
+    expect(() => jsonSerializedUtf8ByteLength(1n)).toThrow();
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    expect(() => jsonSerializedLength(cyclic)).toThrow();
+    expect(() => jsonSerializedUtf8ByteLength(cyclic)).toThrow();
+    expect(() => estimateSerializedValueTokens(undefined)).toThrow();
+    expect(() => estimateSerializedValueTokens(1n)).toThrow();
+    expect(() => estimateSerializedValueTokens(cyclic)).toThrow();
+  });
+
+  test("uses real JSON.stringify semantics for unusual non-persisted values", () => {
+    const getter = Object.defineProperty({}, "value", {
+      enumerable: true,
+      get: () => 1,
+    });
+    const proxy = new Proxy({ value: 1 }, {});
+    const crossRealm = runInNewContext("({ value: 1 })");
+    const boxedBigInt = Object(1n);
+    const hiddenToJson: Record<string, unknown> = { safe: true };
+    Object.defineProperty(hiddenToJson, "toJSON", {
+      value: () => ({ changed: true }),
+      enumerable: false,
+    });
+    const arrayToJson = [1, 2];
+    Object.defineProperty(arrayToJson, "toJSON", {
+      value: () => [3],
+      enumerable: false,
+    });
+    const serializableValues = [
+      new Date("2026-07-18T00:00:00.000Z"),
+      new Number(7),
+      { toJSON: () => ({ value: 1 }) },
+      hiddenToJson,
+      arrayToJson,
+      getter,
+      proxy,
+      crossRealm,
+    ];
+    for (const value of serializableValues) {
+      expect(() => jsonSerializedLength(value)).toThrow();
+      expect(() => jsonSerializedUtf8ByteLength(value)).toThrow();
+      expect(estimateSerializedValueTokens(value)).toBe(
+        Math.ceil(Buffer.byteLength(JSON.stringify(value)!, "utf8") / 4),
+      );
+    }
+    expect(() => estimateSerializedValueTokens(boxedBigInt)).toThrow();
+  });
+
+  test("does not copy a wide persisted object while counting its exact JSON form", () => {
+    const wide: Record<string, unknown> = {};
+    for (let index = 0; index < 50_000; index += 1) {
+      wide[`property_${index}`] = index;
+    }
+    const serialized = JSON.stringify(wide);
+    expect(jsonSerializedLength(wide)).toBe(serialized.length);
+    expect(jsonSerializedUtf8ByteLength(wide)).toBe(Buffer.byteLength(serialized, "utf8"));
+  });
+
+  test("counts a large custom toJSON result instead of its object tag", () => {
+    const value = {
+      toJSON: () => ({ text: "🦄".repeat(256 * 1024) }),
+    };
+    const serialized = JSON.stringify(value);
+    expect(estimateSerializedValueTokens(value)).toBe(estimateTextTokens(serialized));
+  });
+});
 
 describe("codex-parity constants and summary marker", () => {
   test("uses Codex's checkpoint prompt and summary prefix verbatim", () => {

@@ -1,7 +1,7 @@
 {
   "uid": "opengeni-worker-fleet",
-  "title": "OpenGeni \u00b7 Worker Fleet",
-  "description": "Turn flow, worker memory vs limit, HPA replicas, sandbox leases, and compaction firing vs context pressure.",
+  "title": "OpenGeni · Worker Fleet",
+  "description": "Eligible turn backlog, memory-aware slot saturation, worker memory vs limit, HPA replicas, sandbox leases, and compaction pressure.",
   "schemaVersion": 39,
   "version": 1,
   "editable": true,
@@ -23,13 +23,70 @@
         "current": {},
         "hide": 0,
         "refresh": 1
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_turn_slots_capacity, namespace)",
+          "refId": "namespace"
+        },
+        "definition": "label_values(opengeni_turn_slots_capacity, namespace)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "environment",
+        "label": "Environment",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\"}, environment)",
+          "refId": "environment"
+        },
+        "definition": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\"}, environment)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
+      },
+      {
+        "name": "release",
+        "label": "Release",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${datasource}"
+        },
+        "query": {
+          "query": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+          "refId": "release"
+        },
+        "definition": "label_values(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\"}, release)",
+        "current": {},
+        "includeAll": false,
+        "multi": false,
+        "refresh": 1,
+        "sort": 1
       }
     ]
   },
   "panels": [
     {
       "type": "row",
-      "title": "Turn flow \u2014 inflight, queued, throughput",
+      "title": "Turn flow — inflight, eligible backlog, throughput",
       "collapsed": false,
       "panels": [],
       "id": 1,
@@ -42,8 +99,8 @@
     },
     {
       "type": "timeseries",
-      "title": "Turns inflight vs queued (fleet total)",
-      "description": "Backlog pressure. Queued climbing while inflight is flat = capacity-bound.",
+      "title": "Turns inflight vs eligible backlog (fleet total)",
+      "description": "Temporal activity backlog contains only runAgentTurn work eligible for worker admission. Paused human prompts are intentionally excluded. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -74,7 +131,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(opengeni_turns_inflight)",
+          "expr": "sum(opengeni_turns_inflight{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "inflight",
           "datasource": {
             "type": "prometheus",
@@ -85,8 +142,8 @@
         },
         {
           "refId": "B",
-          "expr": "sum(opengeni_turns_queued)",
-          "legendFormat": "queued",
+          "expr": "max(opengeni_turn_eligible_backlog{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} and on(namespace, release, environment, component, instance) opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} == 1 and on(namespace, release, environment, component, instance) time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} < 45)",
+          "legendFormat": "eligible backlog",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -147,7 +204,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max(opengeni_turn_oldest_inflight_age_seconds)",
+          "expr": "max(opengeni_turn_oldest_inflight_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
@@ -199,7 +256,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (outcome) (rate(opengeni_turns_total[5m]))",
+          "expr": "sum by (outcome) (rate(opengeni_turns_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[5m]))",
           "legendFormat": "{{outcome}}",
           "datasource": {
             "type": "prometheus",
@@ -218,8 +275,60 @@
       }
     },
     {
+      "type": "timeseries",
+      "title": "Oldest eligible turn backlog age",
+      "description": "Temporal schedule-to-start pressure. Sustained age means runnable work is waiting for admission; paused human prompts never enter this series. Backlog is shown only when freshness and last-success age come from the same scrape instance.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(opengeni_turn_eligible_backlog_oldest_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} and on(namespace, release, environment, component, instance) opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} == 1 and on(namespace, release, environment, component, instance) time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"} < 45)",
+          "legendFormat": "oldest eligible",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 15,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      }
+    },
+    {
       "type": "row",
-      "title": "Memory \u2014 working set vs the container limit (pre-OOM)",
+      "title": "Memory — working set vs the container limit (pre-OOM)",
       "collapsed": false,
       "panels": [],
       "id": 5,
@@ -233,7 +342,7 @@
     {
       "type": "timeseries",
       "title": "Worker memory: fraction of limit",
-      "description": "cAdvisor working set \u00f7 kube-state-metrics limit. >0.9 sustained precedes an OOM kill mid-turn.",
+      "description": "cAdvisor working set ÷ kube-state-metrics limit. >0.9 sustained precedes an OOM kill mid-turn.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -264,7 +373,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (pod) (container_memory_working_set_bytes{container=\"worker\", pod=~\".*opengeni.*\"}) / max by (pod) (kube_pod_container_resource_limits{resource=\"memory\", container=\"worker\", pod=~\".*opengeni.*\"})",
+          "expr": "(\n  max by (namespace, pod) (container_memory_working_set_bytes{namespace=\"$namespace\",container=\"worker\"})\n  * on (namespace, pod) group_left()\n  max by (namespace, pod) (kube_pod_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})\n)\n/\n(\n  max by (namespace, pod) (kube_pod_container_resource_limits{namespace=\"$namespace\",resource=\"memory\",container=\"worker\"})\n  * on (namespace, pod) group_left()\n  max by (namespace, pod) (kube_pod_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})\n)",
           "legendFormat": "{{pod}}",
           "datasource": {
             "type": "prometheus",
@@ -285,7 +394,7 @@
     {
       "type": "timeseries",
       "title": "App RSS by process (fallback when cluster infra is absent)",
-      "description": "App-emitted resident memory (prom-client default metrics) \u2014 works without cAdvisor.",
+      "description": "App-emitted resident memory (prom-client default metrics) — works without cAdvisor.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -316,7 +425,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "opengeni_process_resident_memory_bytes{component=\"worker\"}",
+          "expr": "opengeni_process_resident_memory_bytes{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\",component=~\"worker-.*\"}",
           "legendFormat": "{{instance}}",
           "datasource": {
             "type": "prometheus",
@@ -336,7 +445,7 @@
     },
     {
       "type": "row",
-      "title": "Autoscaling \u2014 HPA replicas vs max",
+      "title": "Autoscaling — eligible work and memory-safe slots",
       "collapsed": false,
       "panels": [],
       "id": 8,
@@ -350,7 +459,7 @@
     {
       "type": "timeseries",
       "title": "Worker HPA: current vs max replicas",
-      "description": "When current pins at max and stays there, turns queue \u2014 raise max or shed load.",
+      "description": "Resource-HPA fallback. Backlog/slot scaling requires a Kubernetes custom-metrics adapter; never configure the legacy aggregate prompt gauge.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -381,7 +490,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~\".*opengeni.*worker.*\"}",
+          "expr": "kube_horizontalpodautoscaler_status_current_replicas{namespace=\"$namespace\"}\n* on (namespace, horizontalpodautoscaler) group_left()\nmax by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})",
           "legendFormat": "current {{horizontalpodautoscaler}}",
           "datasource": {
             "type": "prometheus",
@@ -392,7 +501,7 @@
         },
         {
           "refId": "B",
-          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~\".*opengeni.*worker.*\"}",
+          "expr": "kube_horizontalpodautoscaler_spec_max_replicas{namespace=\"$namespace\"}\n* on (namespace, horizontalpodautoscaler) group_left()\nmax by (namespace, horizontalpodautoscaler) (kube_horizontalpodautoscaler_labels{namespace=\"$namespace\",label_app_kubernetes_io_instance=\"$release\",label_app_kubernetes_io_component=~\"worker-control|worker-turns\"})",
           "legendFormat": "max {{horizontalpodautoscaler}}",
           "datasource": {
             "type": "prometheus",
@@ -405,8 +514,71 @@
       "id": 9,
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
+        "y": 27
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Turn slot saturation",
+      "description": "Used runAgentTurn slots divided by the memory-safe per-pod capacity. The maximum exposes one saturated pod; the fleet ratio weights by safe capacity.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": ["last", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(opengeni_turn_slots_used{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}) / clamp_min(sum(opengeni_turn_slots_capacity{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}), 1)",
+          "legendFormat": "fleet weighted",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "expr": "max(opengeni_turn_slot_saturation_ratio{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "most saturated pod",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 16,
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
         "y": 27
       }
     },
@@ -444,7 +616,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (liveness) (opengeni_sandbox_leases)",
+          "expr": "sum by (liveness) (opengeni_sandbox_leases{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
           "legendFormat": "{{liveness}}",
           "datasource": {
             "type": "prometheus",
@@ -457,14 +629,153 @@
       "id": 10,
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 16,
         "y": 27
       }
     },
     {
+      "type": "stat",
+      "title": "Turn capacity monitor freshness (all workers)",
+      "description": "Minimum worker-turn capacity-monitor freshness. Zero means at least one exported monitor is stale; no data is also unsafe and is covered by the fleet alert.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "Stale"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "Fresh"
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "min(opengeni_turn_capacity_monitor_fresh{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "minimum freshness",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 17,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 35
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Turn capacity monitor last-success age (max)",
+      "description": "Worst reported age since a worker-turn process last read Temporal eligible-runnable queue statistics successfully.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 30
+              },
+              {
+                "color": "red",
+                "value": 120
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(opengeni_turn_capacity_monitor_last_success_age_seconds{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"})",
+          "legendFormat": "oldest last success",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "range": true
+        }
+      ],
+      "id": 18,
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 35
+      }
+    },
+    {
       "type": "row",
-      "title": "Context pressure \u2014 is compaction keeping up?",
+      "title": "Context pressure — is compaction keeping up?",
       "collapsed": false,
       "panels": [],
       "id": 11,
@@ -472,7 +783,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 43
       }
     },
     {
@@ -509,7 +820,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (trigger) (increase(opengeni_context_compactions_total[15m]))",
+          "expr": "sum by (trigger) (increase(opengeni_context_compactions_total{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[15m]))",
           "legendFormat": "{{trigger}}",
           "datasource": {
             "type": "prometheus",
@@ -524,13 +835,13 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       }
     },
     {
       "type": "timeseries",
       "title": "Observed model input tokens p95 / p50 (context size)",
-      "description": "Context tokens per model response \u2014 the pressure toward the model window.",
+      "description": "Context tokens per model response — the pressure toward the model window.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -561,7 +872,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_input_tokens_bucket[10m])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(opengeni_model_input_tokens_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[10m])))",
           "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
@@ -572,7 +883,7 @@
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(opengeni_model_input_tokens_bucket[10m])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(opengeni_model_input_tokens_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[10m])))",
           "legendFormat": "p50",
           "datasource": {
             "type": "prometheus",
@@ -587,13 +898,13 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       }
     },
     {
       "type": "timeseries",
       "title": "Model call duration p95 by provider",
-      "description": "Full model HTTP call (request \u2192 response headers).",
+      "description": "Full model HTTP call (request → response headers).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -624,7 +935,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(opengeni_model_call_duration_seconds_bucket[5m])))",
+          "expr": "histogram_quantile(0.95, sum by (le, provider) (rate(opengeni_model_call_duration_seconds_bucket{namespace=\"$namespace\",environment=\"$environment\",release=\"$release\"}[5m])))",
           "legendFormat": "{{provider}}",
           "datasource": {
             "type": "prometheus",
@@ -639,7 +950,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 52
       }
     }
   ]

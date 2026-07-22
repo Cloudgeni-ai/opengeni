@@ -14,6 +14,23 @@ export type TurnOutcome = "completed" | "failed" | "cancelled" | "recovering";
 export type CreditMicrosKind = "usage" | "grant" | "topup" | "refund";
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
 export type CreditBalanceGauge = { accountId: string; balanceMicros: number };
+export type TurnTaskQueueStats = {
+  /** Temporal activity tasks ready for a turn worker to accept. */
+  eligibleBacklog: number;
+  oldestBacklogAgeSeconds: number;
+  tasksAddRate: number;
+  tasksDispatchRate: number;
+};
+
+export type TemporalTurnTaskQueueStats = {
+  approximateBacklogCount?: unknown;
+  approximateBacklogAge?: {
+    seconds?: unknown;
+    nanos?: unknown;
+  } | null;
+  tasksAddRate?: unknown;
+  tasksDispatchRate?: unknown;
+} | null;
 
 const turnTrackers = new WeakMap<Observability, TurnLifecycleMetrics>();
 const creditBalanceGaugeAccounts = new WeakMap<Observability, Set<string>>();
@@ -314,12 +331,150 @@ export class TurnLifecycleMetrics {
   }
 }
 
-export function recordTurnsQueuedGauge(observability: Observability, value: number): void {
+/**
+ * Record the authoritative turn activity queue rather than aggregate Postgres
+ * prompts. A paused human prompt is durable queue truth but is not runnable and
+ * never reaches this Temporal task queue. DescribeTaskQueue's approximate
+ * backlog count and age are explicitly documented by Temporal as autoscaling
+ * signals.
+ */
+export function recordTurnTaskQueueStats(
+  observability: Observability,
+  stats: TurnTaskQueueStats,
+): void {
   observability.setGauge({
-    name: "opengeni_turns_queued",
-    help: "Current number of queued session turns.",
-    value,
+    name: "opengeni_turn_eligible_backlog",
+    help: "Temporal runAgentTurn activity tasks eligible for immediate worker admission.",
+    value: nonnegativeFinite(stats.eligibleBacklog),
   });
+  observability.setGauge({
+    name: "opengeni_turn_eligible_backlog_oldest_age_seconds",
+    help: "Approximate age of the oldest eligible runAgentTurn activity task.",
+    value: nonnegativeFinite(stats.oldestBacklogAgeSeconds),
+  });
+  observability.setGauge({
+    name: "opengeni_turn_eligible_tasks_add_rate",
+    help: "Temporal runAgentTurn tasks added per second over its rolling window.",
+    value: nonnegativeFinite(stats.tasksAddRate),
+  });
+  observability.setGauge({
+    name: "opengeni_turn_eligible_tasks_dispatch_rate",
+    help: "Temporal runAgentTurn tasks dispatched per second over its rolling window.",
+    value: nonnegativeFinite(stats.tasksDispatchRate),
+  });
+}
+
+export function normalizeTurnTaskQueueStats(
+  stats: TemporalTurnTaskQueueStats | undefined,
+): TurnTaskQueueStats {
+  if (!stats) {
+    throw new Error("Temporal DescribeTaskQueue response omitted required stats");
+  }
+  const eligibleBacklog = requiredTemporalNumber(
+    stats.approximateBacklogCount,
+    "approximateBacklogCount",
+    { integer: true },
+  );
+  let oldestBacklogAgeSeconds = 0;
+  if (stats.approximateBacklogAge) {
+    const seconds = optionalTemporalNumber(
+      stats.approximateBacklogAge.seconds,
+      "approximateBacklogAge.seconds",
+      { integer: true },
+    );
+    const nanos = optionalTemporalNumber(
+      stats.approximateBacklogAge.nanos,
+      "approximateBacklogAge.nanos",
+      { integer: true },
+    );
+    if (nanos >= 1_000_000_000) {
+      throw new Error("Temporal approximateBacklogAge.nanos must be less than one second");
+    }
+    oldestBacklogAgeSeconds = seconds + nanos / 1_000_000_000;
+  } else if (eligibleBacklog > 0) {
+    throw new Error("Temporal stats omitted approximateBacklogAge for a nonzero backlog");
+  }
+  return {
+    eligibleBacklog,
+    oldestBacklogAgeSeconds,
+    tasksAddRate: optionalTemporalNumber(stats.tasksAddRate, "tasksAddRate"),
+    tasksDispatchRate: optionalTemporalNumber(stats.tasksDispatchRate, "tasksDispatchRate"),
+  };
+}
+
+export function startTurnCapacityMonitor(input: {
+  observability: Observability;
+  read: () => Promise<TurnTaskQueueStats>;
+  intervalMs?: number;
+  now?: () => number;
+}): { close: () => Promise<void> } {
+  const intervalMs = input.intervalMs ?? 15_000;
+  const now = input.now ?? Date.now;
+  const startedAt = now();
+  let lastSuccessAt: number | null = null;
+  let lastReadSucceeded = false;
+  let stopped = false;
+  let running: Promise<void> | null = null;
+  const recordStatus = () => {
+    const observedAt = now();
+    const successAgeMs = observedAt - (lastSuccessAt ?? startedAt);
+    const set = (name: string, help: string, value: number) =>
+      input.observability.setGauge({ name, help, value });
+    set(
+      "opengeni_turn_capacity_monitor_last_read_success",
+      "Whether the latest Temporal turn-queue capacity read completed successfully.",
+      lastReadSucceeded ? 1 : 0,
+    );
+    set(
+      "opengeni_turn_capacity_monitor_last_success_timestamp_seconds",
+      "Unix timestamp of the latest successful Temporal turn-queue capacity read, or zero before one succeeds.",
+      lastSuccessAt === null ? 0 : lastSuccessAt / 1_000,
+    );
+    set(
+      "opengeni_turn_capacity_monitor_last_success_age_seconds",
+      "Age of the latest successful Temporal turn-queue capacity read, or monitor age before one succeeds.",
+      Math.max(0, successAgeMs / 1_000),
+    );
+    set(
+      "opengeni_turn_capacity_monitor_fresh",
+      "Whether eligible-backlog gauges have a successful Temporal read within three monitor intervals.",
+      lastReadSucceeded && lastSuccessAt !== null && successAgeMs <= intervalMs * 3 ? 1 : 0,
+    );
+  };
+  const refresh = () => {
+    // Advance freshness age even while a Temporal read is hung. Old backlog
+    // values remain observable for diagnosis but cease to be authoritative.
+    recordStatus();
+    if (stopped || running) return;
+    running = input
+      .read()
+      .then((stats) => {
+        recordTurnTaskQueueStats(input.observability, stats);
+        lastSuccessAt = now();
+        lastReadSucceeded = true;
+        recordStatus();
+      })
+      .catch((error) => {
+        lastReadSucceeded = false;
+        recordStatus();
+        input.observability.warn("turn capacity monitor: Temporal task-queue stats failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      })
+      .finally(() => {
+        running = null;
+      });
+  };
+  refresh();
+  const timer = setInterval(refresh, intervalMs);
+  timer.unref?.();
+  return {
+    close: async () => {
+      stopped = true;
+      clearInterval(timer);
+      await running;
+    },
+  };
 }
 
 export function recordSandboxLeaseGauges(
@@ -635,6 +790,37 @@ export function recordModelCacheTokens(
 
 function nonNegativeTokenCount(value: number | null | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function nonnegativeFinite(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function requiredTemporalNumber(
+  value: unknown,
+  field: string,
+  options: { integer?: boolean } = {},
+): number {
+  if (value === null || value === undefined) {
+    throw new Error(`Temporal stats omitted required ${field}`);
+  }
+  const parsed = Number(value);
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < 0 ||
+    (options.integer && !Number.isSafeInteger(parsed))
+  ) {
+    throw new Error(`Temporal stats returned invalid ${field}: ${String(value)}`);
+  }
+  return parsed;
+}
+
+function optionalTemporalNumber(
+  value: unknown,
+  field: string,
+  options: { integer?: boolean } = {},
+): number {
+  return value === null || value === undefined ? 0 : requiredTemporalNumber(value, field, options);
 }
 
 /**

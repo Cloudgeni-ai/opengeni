@@ -1,6 +1,6 @@
 import type { FileAsset, ResourceRef, SessionSystemUpdate } from "@opengeni/contracts";
 import {
-  getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
   getLatestRunState,
   getSandboxSessionEnvelope,
   getSessionEvent,
@@ -122,22 +122,14 @@ export function resumeRunStateForCodexAccount(
 }
 
 /**
- * A prepared turn input plus the watermark-seed discriminator the reconcile pass
- * needs (HOLE E). `modelHistoryFromItems` is TRUE iff `state.history` was seeded
- * from the cross-account-STRIPPED active history items (the items read path) — so
- * the turn-end reconcile must seed `persistedHistoryCount` from the SAME strip
- * (HOLE D). It is FALSE only when `state.history` was seeded from the approval
- * RunState: there
- * foreign reasoning is NEUTRALIZED-IN-PLACE by {@link resumeRunStateForCodexAccount}
- * (the item is KEPT, only its id/encrypted_content go), so the blob's history
- * length still COUNTS those items. Seeding the watermark with the strip on that
- * path under-counts by K and the reconcile re-appends K already-persisted items at
- * fresh positions — that is HOLE E. The watermark must therefore NOT strip on the
- * blob path (count the raw sanitized active length, matching the blob).
+ * Prepared model input plus the exact sanitized durable prefix represented by
+ * that input. Carrying the runtime-produced count keeps item-mode cross-account
+ * stripping and approval RunState neutralization path-correct without a second
+ * active-history read during reconciliation.
  */
 export type PreparedTurnInput = {
   input: Awaited<ReturnType<OpenGeniRuntime["prepareInput"]>>;
-  modelHistoryFromItems: boolean;
+  persistedHistoryCount: number;
 };
 
 export type TurnInputOptions = {
@@ -210,22 +202,21 @@ export async function turnInput(
     if (!state) {
       throw new Error("No saved run state is available for approval decision");
     }
+    const input = await runtime.prepareInput(agent, {
+      kind: "approval",
+      // Cross-account run-state strip (HOLE C): if the account resuming this
+      // frozen approval differs from the one that froze it, neutralize the
+      // blob's account-bound reasoning before replay (else byte-for-byte).
+      serializedRunState: resumeRunStateForCodexAccount(state, current),
+      approvalId: String(payload.approvalId ?? ""),
+      decision: payload.decision === "approve" ? "approve" : "reject",
+      ...(typeof payload.message === "string" ? { message: payload.message } : {}),
+    });
     return {
-      input: await runtime.prepareInput(agent, {
-        kind: "approval",
-        // Cross-account run-state strip (HOLE C): if the account resuming this
-        // frozen approval differs from the one that froze it, neutralize the
-        // blob's account-bound reasoning before replay (else byte-for-byte).
-        serializedRunState: resumeRunStateForCodexAccount(state, current),
-        approvalId: String(payload.approvalId ?? ""),
-        decision: payload.decision === "approve" ? "approve" : "reject",
-        ...(typeof payload.message === "string" ? { message: payload.message } : {}),
-      }),
-      // Model seeded from the run-state BLOB (neutralize-in-place), NOT stripped
-      // items: the reconcile watermark must NOT apply the cross-account strip
-      // (HOLE E) — else a cross-account approval resume re-appends K
-      // already-persisted items at fresh positions.
-      modelHistoryFromItems: false,
+      input,
+      // The approval RunState neutralizes foreign reasoning in place, so its
+      // materialized history count includes those retained items (HOLE E).
+      persistedHistoryCount: input.historyItemCount,
     };
   }
   throw new Error(`Unsupported trigger event type: ${trigger.type}`);
@@ -265,18 +256,25 @@ async function messageInput(
   internalContext: string | undefined,
   current: TurnCodexAccount = NON_CODEX_TURN,
 ): Promise<PreparedTurnInput> {
-  const stored = await getActiveSessionHistoryItems(db, trigger.workspaceId, trigger.sessionId);
+  const stored = await getActiveSessionHistoryItemsPaged(
+    db,
+    trigger.workspaceId,
+    trigger.sessionId,
+  );
   const envelope = await getSandboxSessionEnvelope(db, trigger.workspaceId, trigger.sessionId);
   const historyItems = applyCodexHistoryStrip(stored, current);
+  const input = await runtime.prepareInput(agent, {
+    kind: "message",
+    ...(text ? { text } : {}),
+    ...(internalContext ? { internalContext } : {}),
+    historyItems: historyItems as any,
+    sandboxEnvelope: envelope,
+  });
   return {
-    input: await runtime.prepareInput(agent, {
-      kind: "message",
-      ...(text ? { text } : {}),
-      ...(internalContext ? { internalContext } : {}),
-      historyItems: historyItems as any,
-      sandboxEnvelope: envelope,
-    }),
-    modelHistoryFromItems: true,
+    input,
+    // prepareInput sanitized the already cross-account-stripped item history,
+    // so its count matches the exact prefix the model received (HOLE D).
+    persistedHistoryCount: input.historyItemCount,
   };
 }
 

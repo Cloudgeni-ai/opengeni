@@ -3,7 +3,7 @@ import { createDb } from "@opengeni/db";
 import { createDocumentServices } from "@opengeni/documents";
 import { createNatsEventBus } from "@opengeni/events";
 import { createObservability } from "@opengeni/observability";
-import { createProductionAgentRuntime } from "@opengeni/runtime";
+import { createProductionAgentRuntime, summarizeForCompaction } from "@opengeni/runtime";
 import { createObjectStorage } from "@opengeni/storage";
 import { createRunAgentTurnActivity } from "./activities/agent-turn";
 import { createCodexCapacityActivities } from "./activities/codex-capacity";
@@ -95,6 +95,8 @@ function createActivityServices(
           createProductionAgentRuntime({
             metrics: runtimeMetricsHooksForObservability(observability),
           }),
+        summarizeContextForCompaction:
+          dependencies.summarizeContextForCompaction ?? summarizeForCompaction,
         objectStorage: dependencies.objectStorage ?? createObjectStorage(settings),
         documentServices: dependencies.documentServices ?? createDocumentServices(settings),
         observability,

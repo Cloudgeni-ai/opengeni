@@ -17,6 +17,26 @@ rows. One execution attempt runs as one non-retryable Temporal `runAgentTurn`
 activity. Inside the activity the OpenAI Agents SDK loop makes as many model
 calls and tool calls as the work needs.
 
+The prompt queue is not worker backlog. In particular, human prompts preserved
+behind paused session/workspace gates are intentionally ineligible and do not
+schedule an activity. Fleet pressure comes from Temporal's dedicated
+`runAgentTurn` activity queue (`approximateBacklogCount` and oldest backlog
+age), together with the turn workers' used/memory-safe slots. Each turn worker
+must obtain a cgroup-aware slot before polling. Admission is capped at the
+measured density of 16 and reserves a hard 100 MiB per turn plus 512 MiB of
+runtime/native headroom; a finite container that cannot safely admit one turn
+does not start. The invariant is checked both before and after Temporal's native
+worker construction, and live retained-memory growth contracts new slot
+availability. Before decoding model-facing JSONB, PostgreSQL rejects a complete
+active transcript above any of four materialization limits: 32 MiB UTF-8 JSON,
+4,096 rows, 200,000 decoded JSON nodes, or 100,000 object properties. It never
+silently trims conversation truth; normal proactive compaction keeps long
+sessions under the boundary. A missing or malformed Temporal task-queue stats
+object is a failed read and makes the capacity sample stale; it is never
+normalized into a fresh zero backlog. The release target remains at most
+50 MiB incremental RSS per active turn. See
+[`design/turn-worker-density-2026-07-16.md`](design/turn-worker-density-2026-07-16.md).
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing
@@ -311,8 +331,13 @@ wrong one is the classic mistake.
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval
    (`requires_action`); a half-finished tool approval cannot be represented as
-   plain history items. The blob is written only for that case.
-   Do not use it as conversation memory.
+   plain history items. The blob is written only for that case. Its save and
+   approval-resume read paths enforce 32 MiB, 200,000-node, and 100,000-property
+   envelopes; pending approvals are separately limited to 256 items and 256 KiB.
+   Rejected values are withheld before driver transfer/decoding. Ordinary turns
+   select only the latest state ownership metadata, never the blob, so active
+   history and approval history are not double-held. Do not use RunState as
+   conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
    and lossy** (reasoning items and several item types are dropped), and each

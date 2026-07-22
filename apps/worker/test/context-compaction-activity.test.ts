@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
   addSessionSystemUpdate,
   bootstrapWorkspace,
   claimSessionWorkForAttempt,
@@ -7,6 +9,9 @@ import {
   createSession,
   createSessionGoal,
   getActiveSessionHistoryItems,
+  getActiveSessionHistoryItemsPaged,
+  getLatestRunState,
+  getLatestRunStateResumeMetadata,
   getSession,
   getSessionQueueSnapshot,
   getSessionTurn,
@@ -17,6 +22,7 @@ import {
   listSessionSystemUpdatesForTurn,
   peekSessionWork,
   requestSessionCompaction,
+  saveRunState,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
@@ -75,6 +81,214 @@ describe("standalone context compaction execution", () => {
     await client?.close();
     await shared?.release();
   }, 60_000);
+
+  test("rejects an oversized active UTF-8 JSON transcript before paged item decoding", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "History envelope test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "History envelope test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.sessionHistoryItems).values([
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 0,
+          item: { type: "message", role: "user", content: "x".repeat(4_096) },
+        },
+        {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: session.id,
+          position: 1,
+          item: { type: "message", role: "assistant", content: [{ type: "text", text: "ok" }] },
+        },
+      ]);
+    });
+
+    const read = getActiveSessionHistoryItemsPaged(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      16,
+      1_024,
+    );
+    await expect(read).rejects.toBeInstanceOf(ActiveSessionHistoryLimitExceededError);
+    await expect(read).rejects.toMatchObject({
+      code: "active_history_too_large",
+      maximumBytes: 1_024,
+      actualBytes: expect.any(Number),
+    });
+
+    await expect(
+      getActiveSessionHistoryItemsPaged(client.db, grant.workspaceId!, session.id, 16, 100_000, 1),
+    ).rejects.toMatchObject({ limitKind: "rows", actual: 2, maximum: 1 });
+    await expect(
+      getActiveSessionHistoryItemsPaged(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        16,
+        100_000,
+        10,
+        1,
+      ),
+    ).rejects.toMatchObject({ limitKind: "json_nodes", actual: 2, maximum: 1 });
+    await expect(
+      getActiveSessionHistoryItemsPaged(
+        client.db,
+        grant.workspaceId!,
+        session.id,
+        16,
+        100_000,
+        10,
+        100,
+        1,
+      ),
+    ).rejects.toMatchObject({ limitKind: "json_properties", actual: 2, maximum: 1 });
+  });
+
+  test("withholds approval RunState before decoding when any materialization bound fails", async () => {
+    const suffix = crypto.randomUUID();
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `account-${suffix}`,
+      accountName: "RunState envelope test",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `workspace-${suffix}`,
+      workspaceName: "RunState envelope test",
+      subjectId: `subject-${suffix}`,
+    });
+    const grant = access.workspaceGrants[0]!;
+    const session = await createSession(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      initialMessage: "initial",
+      resources: [],
+      metadata: {},
+      model: "scripted-compactor",
+      sandboxBackend: "none",
+    });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db.insert(schema.agentRunStates).values({
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        stateVersion: 1,
+        serializedRunState: JSON.stringify({
+          schemaVersion: "test",
+          history: [{ type: "message", role: "user", content: "bounded" }],
+        }),
+        pendingApprovals: [{ id: "approval-1" }, { id: "approval-2" }],
+      });
+    });
+
+    const defaults = {
+      maximumJsonBytes: 100_000,
+      maximumJsonNodes: 100,
+      maximumJsonProperties: 100,
+      maximumPendingApprovalBytes: 100_000,
+      maximumPendingApprovalItems: 10,
+    };
+    await expect(
+      getLatestRunStateResumeMetadata(client.db, grant.workspaceId!, session.id),
+    ).resolves.toEqual({ turnId: null, frozenCodexCredentialId: null });
+    await expect(
+      getLatestRunState(client.db, grant.workspaceId!, session.id, {
+        ...defaults,
+        maximumJsonBytes: 10,
+      }),
+    ).rejects.toMatchObject({
+      code: "approval_run_state_too_large",
+      limitKind: "json_bytes",
+    });
+    await expect(
+      getLatestRunState(client.db, grant.workspaceId!, session.id, {
+        ...defaults,
+        maximumJsonNodes: 1,
+      }),
+    ).rejects.toMatchObject({ limitKind: "json_nodes", actual: 2, maximum: 1 });
+    await expect(
+      getLatestRunState(client.db, grant.workspaceId!, session.id, {
+        ...defaults,
+        maximumJsonProperties: 1,
+      }),
+    ).rejects.toMatchObject({ limitKind: "json_properties", actual: 2, maximum: 1 });
+    await expect(
+      getLatestRunState(client.db, grant.workspaceId!, session.id, {
+        ...defaults,
+        maximumPendingApprovalBytes: 2,
+      }),
+    ).rejects.toBeInstanceOf(ApprovalRunStateLimitExceededError);
+    await expect(
+      getLatestRunState(client.db, grant.workspaceId!, session.id, {
+        ...defaults,
+        maximumPendingApprovalItems: 1,
+      }),
+    ).rejects.toMatchObject({ limitKind: "pending_approval_items", actual: 2, maximum: 1 });
+
+    await requestSessionCompaction(client.db, grant.workspaceId!, session.id);
+    const attemptId = crypto.randomUUID();
+    const turn = await claimCompactionForAttempt(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      attemptId,
+    );
+    const saveInput = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn.id,
+      expectedExecutionGeneration: turn.executionGeneration,
+      expectedAttemptId: attemptId,
+      pendingApprovals: [] as unknown[],
+    };
+    await expect(
+      saveRunState(client.db, {
+        ...saveInput,
+        serializedRunState: JSON.stringify({ text: "x".repeat(32 * 1024 * 1024) }),
+      }),
+    ).rejects.toMatchObject({ limitKind: "json_bytes" });
+    await expect(
+      saveRunState(client.db, {
+        ...saveInput,
+        serializedRunState: `{"history":[${"0,".repeat(200_000)}0]}`,
+      }),
+    ).rejects.toMatchObject({ limitKind: "json_nodes" });
+    await expect(
+      saveRunState(client.db, {
+        ...saveInput,
+        serializedRunState: `{${Array.from(
+          { length: 100_001 },
+          (_, index) => `"property_${index}":0`,
+        ).join(",")}}`,
+      }),
+    ).rejects.toMatchObject({ limitKind: "json_properties" });
+    await expect(
+      saveRunState(client.db, {
+        ...saveInput,
+        serializedRunState: '{"schemaVersion":"test","history":[]}',
+        pendingApprovals: Array.from({ length: 257 }, (_, index) => ({ id: index })),
+      }),
+    ).rejects.toMatchObject({ limitKind: "pending_approval_items" });
+  });
 
   test("compacts idle history without preparing tools, input, or a sandbox", async () => {
     const suffix = crypto.randomUUID();

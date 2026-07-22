@@ -234,13 +234,23 @@ worker:
         memory: 4Gi
     podDisruptionBudget:
       enabled: true
-      minAvailable: 1
+      # Bound voluntary node drains to one turn pod. At the 16-turn hard
+      # density this limits simultaneous graceful checkpoint pressure to 16
+      # logical turns regardless of current HPA replica count.
+      maxUnavailable: 1
     autoscaling:
       enabled: false
       minReplicas: 4
       maxReplicas: 20
       targetCPUUtilizationPercentage: 70
       targetMemoryUtilizationPercentage: null
+      # Requires a custom.metrics.k8s.io adapter that maps the per-pod
+      # Prometheus gauge under this exact name. Leave disabled otherwise: an
+      # unavailable metric makes the HPA report ScalingActive=False.
+      slotSaturationMetric:
+        enabled: false
+        name: opengeni_turn_slot_saturation_ratio
+        targetAverageValue: "750m"
       customMetrics: []
       behavior: {}
   podSecurityContext:

@@ -73,8 +73,6 @@ describe("session-state interrupt settlement", () => {
             publishedEvents.push(...events);
           },
         ),
-        countQueuedTurns: mock(async () => 0),
-        recordTurnsQueuedGauge: mock(() => undefined),
       },
     );
 
@@ -125,8 +123,6 @@ describe("session-state interrupt settlement", () => {
         settleSessionAttemptInterruptions: mock(async () => {
           throw new Error("logical settlement must not be repeated");
         }),
-        countQueuedTurns: mock(async () => 0),
-        recordTurnsQueuedGauge: mock(() => undefined),
       },
     );
 

@@ -56,6 +56,8 @@ export type ActivityServices = {
   db: Database;
   bus: EventBus;
   runtime: OpenGeniRuntime;
+  /** Provider-free test/profiling seam; production injects the real runtime summarizer. */
+  summarizeContextForCompaction: typeof import("@opengeni/runtime").summarizeForCompaction;
   objectStorage: ObjectStorage | null;
   documentServices: DocumentServices;
   observability: Observability;

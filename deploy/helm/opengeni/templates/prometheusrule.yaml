@@ -1,4 +1,5 @@
 {{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+{{- $environment := default "production" (index .Values.config "OPENGENI_ENVIRONMENT") }}
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
@@ -148,6 +149,58 @@ spec:
         # those exporters are absent the alerts simply never fire (no data). Pod/
         # HPA matchers assume the default "opengeni" release name — override
         # observability.prometheusRule.rules for a custom name.
+        - alert: OpenGeniTurnEligibleBacklogOld
+          expr: |
+            max(
+              opengeni_turn_eligible_backlog_oldest_age_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 30
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
+              and on(namespace, release, environment, component, instance)
+              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 45
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: Runnable OpenGeni turns have waited for worker admission for more than 30 seconds
+            description: Temporal's runAgentTurn activity queue contains eligible work. Paused human prompts are deliberately excluded from this capacity signal.
+        - alert: OpenGeniTurnSlotsSaturated
+          expr: |
+            max(
+              opengeni_turn_slot_saturation_ratio{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0.9
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_eligible_backlog{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} > 0
+              and on(namespace, release, environment, component, instance)
+              opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} == 1
+              and on(namespace, release, environment, component, instance)
+              time() - opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"} < 45
+            ) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A turn worker is above 90% of memory-safe slots while eligible work waits
+            description: Scale the turn fleet or inspect an admission-memory contraction. The slot denominator already honors the hard per-turn memory budget.
+        - alert: OpenGeniTurnCapacityMonitorStale
+          expr: |
+            absent(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) == 1
+            or
+            min(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) < 1
+            or
+            time() - min(opengeni_turn_capacity_monitor_last_success_timestamp_seconds{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"}) > 45
+            or
+            min(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"}) < 1
+            or
+            count(up{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},opengeni_workload_component="worker-turns"} == 1)
+              > count(opengeni_turn_capacity_monitor_fresh{namespace={{ .Release.Namespace | quote }},release={{ .Release.Name | quote }},environment={{ $environment | quote }},component="worker-turn"})
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni eligible-turn backlog monitoring is stale
+            description: At least one expected turn-worker scrape is down, missing its monitor series, or has not produced a fresh Temporal DescribeTaskQueue sample for this exact namespace, release, and environment. Backlog values are diagnostic only until freshness recovers.
         - alert: OpenGeniWorkerMemoryNearLimit
           expr: |
             max by (namespace, pod, container) (

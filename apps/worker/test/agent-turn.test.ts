@@ -1,4 +1,8 @@
 import { describe, expect, mock, test } from "bun:test";
+import {
+  ActiveSessionHistoryLimitExceededError,
+  ApprovalRunStateLimitExceededError,
+} from "@opengeni/db";
 import { CancelledFailure } from "@temporalio/activity";
 import { ModelItem } from "@openai/agents-core/types";
 import type { Settings } from "@opengeni/config";
@@ -1815,6 +1819,32 @@ describe("transient provider error classifier", () => {
     expect(payload.retryable).toBeUndefined();
     expect(payload.code).toBeUndefined();
     expect(payload.error).toBe("Invalid 'input': expected a string");
+  });
+
+  test("agentRunFailurePayload reports the active-history envelope as deterministic", () => {
+    expect(
+      agentRunFailurePayload(new ActiveSessionHistoryLimitExceededError(2_048, 1_024)),
+    ).toEqual({
+      error:
+        "The session's active conversation history exceeds the worker's safe materialization envelope. Compact or clear the session context before retrying.",
+      code: "active_history_too_large",
+      retryable: false,
+      detail:
+        "Active session history is 2048 UTF-8 JSON bytes, exceeding the 1024-byte materialization limit.",
+    });
+  });
+
+  test("agentRunFailurePayload reports the approval RunState envelope as deterministic", () => {
+    expect(
+      agentRunFailurePayload(new ApprovalRunStateLimitExceededError("json_properties", 101, 100)),
+    ).toEqual({
+      error:
+        "The saved approval state exceeds the worker's safe materialization envelope. Clear the pending approval context before retrying.",
+      code: "approval_run_state_too_large",
+      retryable: false,
+      detail:
+        "Approval run state has 101 decoded JSON object properties; the materialization limit is 100.",
+    });
   });
 
   test("only transient provider compaction failures use same-turn recovery", () => {
