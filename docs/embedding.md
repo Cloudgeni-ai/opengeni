@@ -23,6 +23,7 @@ A host that runs multiple agent personas has two composable, system-level instru
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
 - **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
+- **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
 Prefer `instructions` over stuffing persona text into `initialMessage`: `initialMessage` renders as visible timeline content, has weaker instruction authority, and is readable by anyone with the session. Reach for workspace `agentInstructions` when the persona is the same for the whole tenant; reach for session `instructions` when it varies per session. Omitting `instructions` is byte-identical to today's composition. It is trimmed, non-empty, and capped at 32768 characters.
 
@@ -107,45 +108,177 @@ When bound on the worker through `ActivityDependencies.entitlements`, `admitRun`
 
 ### Connection Credentials
 
-Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`, consumers in `apps/worker/src/activities/environment.ts`.
+Canonical sources: `ConnectionCredentialsPort` in `packages/contracts/src/index.ts`,
+the worker consumers in `apps/worker/src/activities/`, and the API Toolspace
+consumer in `apps/api/src/mcp/toolspace.ts`.
 
-The port can bind either or both legs:
+The port can bind any combination of its four legs:
 
 ```ts
 type ConnectionCredentialsPort = {
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
+  runCredentials?(
+    input: RunCredentialsRequest,
+  ): Promise<RunCredentialsResolution>;
+  mcpCredentials?(
+    input: McpCredentialsRequest,
+  ): Promise<McpCredentialResolution>;
 };
 ```
 
-`gitCredentials` is provider-aware and remains GitHub-backward-compatible:
-GitHub repository resources still arrive as the legacy shape
-`{ accountId, workspaceId, installationId, repositoryIds }`, with omitted
-`provider` meaning `"github"`. Non-GitHub resources arrive with
-`provider: "gitlab" | "azure_devops"` plus `repositoryRefs`. Provider-neutral
-repository refs can carry `provider`, `repositoryId`, `installationId`,
-`projectId`, and `connectionId`; `RepositoryResourceRef` accepts the same
-optional fields while retaining the existing `githubInstallationId` and
-`githubRepositoryId` aliases. `GitCredentials` may also return an ISO-8601
-`expiresAt`; when absent OpenGeni uses a conservative bounded refresh cadence.
-The returned token plus scoped `workspaceId` is checked by the workspace-scope cross-check
-workspace-echo assert before the worker injects anything. A mismatch hard-fails
-before tenant B's credential can land in tenant A's run.
+`gitCredentials` is provider-aware and remains GitHub-backward-compatible.
+`RepositoryResourceRef.credentialBindingId` names one independently mintable,
+host-owned credential; it is opaque, bounded to 256 characters, and never used
+raw in sandbox paths. `access: "read" | "write"` tells the host what token scope
+the repository needs (omitted retains the historical write-capable behavior).
+One session may attach any number of repositories across GitHub, GitLab, and
+Azure DevOps, including more than one account/installation for the same
+provider. A host must not use `provider` alone as credential identity.
+
+Every request carries the current `sessionId`, root-session lineage,
+turn/attempt/execution generation, frozen initiator, and immutable initiator
+provenance. A host must authorize that authority against its own session binding
+and selected repositories immediately before minting either a token or stable
+Git identity. OpenGeni reuses the same frozen authority for initial provisioning,
+deferred identity resolution, lazy provisioning, and proactive renewal; it fails
+closed before calling a bound host broker when the authority is unavailable.
+
+Legacy sessions with one binding for a provider retain the old request shape:
+GitHub receives the authority plus `{ accountId, workspaceId, installationId, repositoryIds }`
+with omitted `provider`; non-GitHub requests receive `provider` plus
+`repositoryRefs`. An explicit binding, or multiple bindings for one provider,
+adds `credentialBindingId`, `provider`, and (for a single canonical host)
+`providerHost`. The host must echo those fields exactly in `GitCredentials`.
+OpenGeni validates those echoes together with `workspaceId` before accepting a
+token. Provider-neutral repository refs carry the same binding/access fields
+plus `provider`, `repositoryId`, `installationId`, `projectId`, and
+`connectionId`; GitHub aliases remain accepted. `expiresAt` is per binding;
+without it OpenGeni uses a conservative bounded refresh cadence.
 
 The worker never writes token values into the sandbox manifest or attach-time
-environment delta. It passes current provider tokens to the runtime as
-off-manifest seeds; the sandbox setup writes them to
-`OPENGENI_GIT_CREDENTIALS_DIR/<provider>-token`, keeps
-`OPENGENI_GIT_TOKEN_FILE` as the GitHub alias, and provisions `gh`, `glab`, and
-`az` wrappers that read the current token file before each CLI invocation. For
-the lifetime of an active managed-sandbox turn, the worker proactively calls
-the same provider for every selected Git host and atomically replaces the token
-files. This renewal requires no model/MCP call and never mutates the manifest.
+environment delta. The runtime stores each token at
+`OPENGENI_GIT_CREDENTIALS_DIR/<sha256(binding-id)>-token`, installs a Git
+credential helper that selects by protocol + host + path with
+`credential.useHttpPath`, and resets broader helpers so an unbound remote cannot
+fall through to a sibling credential. Provider aliases (including
+`OPENGENI_GIT_TOKEN_FILE`) are written only while that provider has exactly one
+binding; they are removed when a second appears. `gh`, `glab`, and `az` select
+an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then
+a sole provider binding, and fail closed if selection remains ambiguous. Each
+binding renews independently, so one failed connection cannot block or replace
+a healthy sibling token. Renewal requires no model/MCP call and never mutates
+the manifest.
 `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
-check.
+check before values are applied.
 
-Unset legs fall back independently to standalone self-mint/decrypt. This port does **not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in `packages/runtime/src/index.ts` self-mints the `ogd_` bearer with `signDelegatedAccessToken(settings.delegationSecret, ...)`.
+`runCredentials` is the session-aware seam for credentials that programs inside
+the sandbox need: cloud CLI variables, kubeconfigs, provider configuration files,
+or equivalent host-owned material. It is independent of `variableSetId`; the
+request includes a variable-set id/name only as informational context. An
+embedding host should resolve the OpenGeni session through its own durable
+session binding instead of creating a marker variable set or copying host
+connection rows into OpenGeni.
+
+Every request carries account/workspace/session, parent and root session,
+the shared `sandboxGroupId`,
+turn/attempt/execution generation, frozen initiator and provenance, effective
+sandbox backend and OS, and whether the call is initial provision or renewal.
+The host decides which of its connections apply—including whether to deliver
+anything to a connected machine—and returns provider-neutral environment
+values, relative credential files, and environment names that point at those
+files. One response may contain credentials for multiple providers and multiple
+accounts; OpenGeni does not infer or constrain provider combinations.
+`not_applicable` is the explicit per-attempt opt-out for a target OS/backend or
+host policy; it carries no material and must remain stable for the frozen
+attempt. On a compatible command surface OpenGeni still removes any prior
+session credential root before agent or Channel-A commands run, so a worker
+crash cannot leave an old pointer readable merely because the next attempt opts
+out.
+
+Run material is never added to the sandbox manifest or `/workspace`. The worker
+validates scope echoes, paths, sizes, expiry, and reconnect metadata, then the
+runtime writes an immutable generation under a session-specific `/tmp` root and
+atomically replaces a small pointer file. Every new agent command and
+session-scoped Channel-A terminal process sources that generation. Renewal is
+single-flight and proactive; a stopped attempt rejects late host responses,
+drains any physical write, and removes only its own generations before admitting
+a successor or capturing the workspace. A successor's already-active generation
+cannot be erased by stale cleanup; its initial provision also prunes orphaned
+generations left by a worker crash after the prior attempt was fenced. Renewal
+retains the active and immediately prior immutable generation, which gives an
+already-running process one rotation of overlap while bounding disk growth;
+processes do not receive live environment mutation and should restart or perform
+their own provider refresh if they outlive rotating credentials.
+
+Credential selection and renewal are pinned to the effective sandbox backend
+and unproxied session established at turn start. If a user swaps the active route
+mid-turn, OpenGeni does not copy that turn's host material onto the new target;
+the next admitted turn resolves and seeds credentials for that target. This is a
+deliberate authority boundary, especially when the new target is a connected
+machine. A chat-only lazy turn still resolves the host port so reconnect state
+and model context are deterministic even if no sandbox is ultimately created;
+hosts should therefore keep resolution bounded, idempotent, and inexpensive.
+
+`sandboxGroupId` is also a security fact, not bookkeeping. Sessions in one group
+share an OS user and filesystem; separate session directory names prevent
+accidental activation collisions but are not an isolation boundary. A host must
+therefore select credentials that are valid for the whole shared-box trust
+domain (commonly the intersection or root-session policy), decline delivery, or
+place differently trusted sessions in separate sandbox groups. OpenGeni never
+claims that `/tmp` path separation protects one same-user process from another.
+
+Environment values are automatically registered with event-output redaction.
+When a credential file embeds atomic secrets (for example a bearer inside a
+kubeconfig), the host must also return those values through `redactions`; this
+lets OpenGeni redact chunked command output without understanding provider file
+formats. `auth_needed` can coexist with usable material and becomes both bounded
+model context and a structured `credential.auth_needed` reconnect card.
+
+The box-global websocket `ttyd` server remains credential-free because one box
+may be shared by several sessions. Session-scoped terminal exec and PTY calls do
+receive the active generation. A future websocket terminal implementation must
+first isolate its server/process by session; pointing the current group-global
+server at one session's credential root would be a cross-session leak.
+
+Materialization uses a POSIX `bash` command surface. Base64 decoding is probed
+across GNU, macOS, and OpenSSL variants, and every file's decoded byte count is
+verified before activation. Pointer updates prefer
+`flock(1)` and fall back to an atomic, stale-reaped directory lock so macOS does
+not require an extra package. A host targeting a non-POSIX command surface (for
+example native Windows without a compatible shell/toolset) must return
+`not_applicable` for that attempt.
+
+`mcpCredentials` is the request-time credential seam for connection-backed MCP
+servers. Bind the same port on `createOpenGeniWorker({ activityDependencies })`
+and `createApp(deps)`. The worker uses it for ordinary model-visible MCP calls;
+the API router uses it for Toolspace/Code Mode. When the leg is absent, both
+surfaces use OpenGeni's standalone encrypted connection store and refresh broker.
+When it is present, the host is the sole credential source: OpenGeni does not
+create or require a duplicate provider connection.
+
+Every request includes account/workspace/session scope, the exact durable turn
+and execution generation, the immutable `TurnInitiator`, the non-authoritative
+technical caller, the MCP server/tool, the opaque `connectionRef`, and whether a
+401 forced a refresh. The frozen initiator—not `sandbox:<runId>`, the session
+creator, or a synthetic worker subject—is the authorization principal. Results
+must echo account/workspace/session. OpenGeni verifies those echoes and validates
+the returned header snapshot before sending it upstream. Credential values never
+enter session events; `auth_needed` carries only reconnect metadata.
+
+The port is provider-neutral. A host can resolve its existing GitHub, GitLab,
+Azure DevOps, or other connection from the opaque reference, and can return a
+short-lived capability bearer for a host-owned MCP gateway. Normal MCP and
+Toolspace deliberately share this resolver, so Code Mode is additive rather than
+a second connection or authorization system.
+
+Unset legs fall back independently to standalone self-mint/decrypt. `runCredentials`
+has no standalone fallback because ordinary standalone sandbox credentials
+continue to come from variable sets and existing lifecycle hooks. This port does
+**not** supply the first-party MCP delegated token: `firstPartyMcpRequestInit` in
+`packages/runtime/src/index.ts` self-mints the `ogd_` bearer with
+`signDelegatedAccessToken(settings.delegationSecret, ...)`.
 
 ### Persistence
 

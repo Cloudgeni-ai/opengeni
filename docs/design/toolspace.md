@@ -4,7 +4,8 @@
 
 # Toolspace call
 
-Status: implementation design for `toolspace:call` (2026-07-05).
+Status: v1 implemented for `toolspace:call`; remaining extensions are listed below
+(updated 2026-07-22).
 
 ## Problem
 
@@ -49,7 +50,7 @@ permission list.
 The split is control plane versus data plane. Token minting, session ownership,
 MCP server attachment, credential decryption, pack expansion, approval policy,
 budget checks, and audit events stay in the API/worker control plane. The
-sandbox receives only a file path containing a short-lived delegated bearer plus
+sandbox receives only a per-session file path containing a short-lived delegated bearer plus
 the workspace MCP URL. It sends MCP JSON-RPC over HTTP; it does not receive MCP
 server credentials, connection tokens, platform git provider tokens, or direct
 database/object-store access.
@@ -114,12 +115,18 @@ short-lived `ogd_` token during environment preparation:
 }
 ```
 
-The TTL follows the turn-appropriate token policy used for the platform git
-token path. Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
-written into a sandbox file and the environment exposes only
-`OPENGENI_TOOLSPACE_TOKEN_FILE` plus `OPENGENI_TOOLSPACE_URL`. The token value
-must not appear in the sandbox manifest, env delta, event log, run state, or
-logs.
+Each bearer has a one-hour TTL. After the initial seed reaches a real sandbox
+session, the worker proactively re-signs the same account/workspace/session/run
+authority and atomically replaces the file on a bounded cadence. Renewal is
+single-flight, retries transient write failures, and is stopped and drained at
+attempt finalization so a settled attempt cannot land a late replacement.
+Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
+written into a sandbox file and the environment exposes only one stable legacy
+`OPENGENI_TOOLSPACE_TOKEN_FILE` pointer plus `OPENGENI_TOOLSPACE_URL`. That
+manifest pointer never contains a live bearer. Runtime derives a SHA-256-named
+per-session file beside it and overrides the pointer on every agent or
+Channel-A command. The token value must not appear in the sandbox manifest, env
+delta, event log, run state, or logs.
 
 ### Every backend, including selfhosted
 
@@ -130,10 +137,11 @@ machine uses its own git credentials. That reasoning does not transfer to the
 toolspace token: it is the machine's *only* path to programmatic tool calling,
 and refusing to deliver it would silently downgrade selfhosted agents.
 
-On a selfhosted turn the token seed is written to `OPENGENI_TOOLSPACE_TOKEN_FILE`
-over the machine's existing exec channel (the same NATS-backed `exec` the agent
-runs commands through), reusing the identical off-manifest seed hook the docker
-path uses — the value never rides the manifest. The other platform setup hooks
+On a selfhosted turn the token seed is written to the derived per-session file
+selected by `OPENGENI_TOOLSPACE_TOKEN_FILE` over the machine's existing exec
+channel (the same NATS-backed `exec` the agent runs commands through), reusing
+the identical off-manifest seed hook the docker path uses — the value never
+rides the manifest. The other platform setup hooks
 (repository clone, `az login`) and file materialization still do **not** run
 against the user's real computer; the toolspace token seed is the single piece of
 per-turn material that crosses to it.
@@ -155,6 +163,41 @@ reach.
 When the flag is off, behavior is byte-identical to the current tree: no
 permission is minted, no file path appears, no URL appears, and no toolspace
 surface is added.
+
+### Shared sandbox groups
+
+The box manifest remains group-global by design: changing its environment to a
+session-specific path would violate the live-sandbox environment-delta guard and
+break existing warm boxes. The manifest's legacy pointer is therefore retained
+as stable, non-secret compatibility metadata only.
+
+Initial seed and renewal instead write
+`<legacy-directory>/toolspace-tokens/<sha256(sessionId)>`. They atomically
+replace only that session's file and delete a stale bearer at the legacy path.
+Every SDK-owned, externally owned, lazy, routed selfhosted, and API-direct
+Channel-A command exports its session-specific file before executing. Concurrent
+sibling turns therefore cannot accidentally overwrite or select one another's
+pointer, and a warm manifest never changes.
+
+The filename hash is path hygiene, not access control. Sessions in one sandbox
+group already share an OS/filesystem trust domain; group admission must not
+co-locate principals that are forbidden to observe one another's workspace
+state. The delegated token's signed `sessionId` remains the API authorization and
+attribution boundary.
+
+The optional `ttyd` stream is one process per sandbox group, not per OpenGeni
+session, and cannot safely select a session token for each websocket. Its launch
+environment pins `OPENGENI_TOOLSPACE_TOKEN_FILE=/dev/null`. Toolspace remains
+available to the agent shell and the session-scoped Channel-A exec/PTY plane;
+the shared ttyd shell fails closed until that stream plane becomes
+session-isolated.
+
+The graphical desktop stack is group-global for the same reason. A terminal
+opened inside that desktop sees only the stable legacy pointer, whose bearer is
+removed during session seeding, and therefore receives no session Toolspace
+authority. Computer-use and interactive stream planes may regain Toolspace only
+after their launched process can be bound to one OpenGeni session; selecting any
+one group member's token for the shared process would be a cross-session grant.
 
 ## Audit And Budgets
 
@@ -251,4 +294,10 @@ still refines it.
 - Approval v2: block on a durable human approval and resume the direct call after
   the decision.
 - Results by reference: large tool outputs should be able to land in OpenGeni
-  storage and return a reference instead of a giant inline JSON-RPC payload.
+  storage and return a reference instead of a giant inline JSON-RPC payload;
+  investigate without preselecting a design in #536.
+- Distribute and discover `ogtool` independently of the stock sandbox image so
+  custom rigs and connected machines can consume a release-coherent artifact
+  (#537).
+- Restore Toolspace in interactive terminal and graphical stream planes only
+  through a session-isolated process/transport contract (#540).

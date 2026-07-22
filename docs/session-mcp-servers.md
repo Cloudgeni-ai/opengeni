@@ -15,6 +15,9 @@ credentials, without making those servers deployment-global.
 - `allowedTools`, `timeoutMs`, `cacheToolsList`: same runtime meaning as
   deployment MCP server settings.
 - `headers`: write-only credential headers.
+- `connectionRef`: optional non-secret opaque connection pointer. Standalone
+  deployments resolve it through OpenGeni's connection store; embedded hosts
+  can resolve the same pointer through `ConnectionCredentialsPort.mcpCredentials`.
 
 Session responses and session events expose only metadata:
 
@@ -25,6 +28,7 @@ Session responses and session events expose only metadata:
   url: string;
   headerNames: string[];
   credentialVersion: number;
+  connectionRef: McpServerConnectionRef | null;
 }
 ```
 
@@ -46,6 +50,13 @@ the same AES-GCM helper used by workspace variable sets. The deployment must set
 `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` before accepting session MCP credentials;
 otherwise create/rotation requests fail with 503.
 
+`connection_ref` is non-secret JSON and does not require the encryption key by
+itself. This lets an embedding host attach its existing GitHub, GitLab, Azure
+DevOps, or other provider connection without copying a token or creating an
+OpenGeni connection row. Opaque host ids are accepted; standalone connection
+lookups still use their ordinary UUID ids. A session server may use static
+headers, a connection ref, or neither.
+
 Credentials rotate through a `user.message` payload:
 
 ```json
@@ -64,6 +75,10 @@ Rotation can only update headers for servers already attached to that session.
 It cannot change URL, name, allowed tools, timeout, or cache behavior. Each
 successful rotation replaces the encrypted header map and increments
 `credentialVersion`.
+
+The connection ref is likewise immutable for the session server. To switch an
+endpoint to a different host connection, create a new session attachment rather
+than treating credential rotation as a connection-rebinding operation.
 
 Rotation is effective on the next turn: the API validates updates up front, then
 applies credential updates only after the session has accepted the `user.message`
@@ -84,8 +99,10 @@ event.
 
 `apps/worker/src/activities/agent-turn.ts` overlays session MCP servers after
 capability and Codex overlays, and before `runtime.prepareTools`. The worker-only
-DB accessor decrypts headers for that run path; normal session reads return only
-metadata.
+DB accessor decrypts headers for that run path and carries the connection ref
+into the runtime settings. Normal model MCP and Toolspace/Code Mode then use the
+same request-time resolver, including forced refresh after a 401. Normal session
+reads return only safe metadata and the non-secret connection pointer.
 
 ## Never-return-values invariant
 

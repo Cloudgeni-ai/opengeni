@@ -14,6 +14,7 @@ import {
   getSessionTurn,
   initializeSessionStartAtomically,
   saveComposerDraftInTransaction,
+  SessionIdConflictError,
   submitHumanPromptInTransaction,
   withWorkspaceRls,
   withWorkspaceSubjectRls,
@@ -68,6 +69,70 @@ function sessionInput(grant: Awaited<ReturnType<typeof fixture>>) {
 }
 
 describe("immutable session turn initiators", () => {
+  test("uses a caller-preallocated UUID and rejects collisions", async () => {
+    const grant = await fixture();
+    const requestedSessionId = crypto.randomUUID();
+    const first = await createSession(client.db, {
+      ...sessionInput(grant),
+      requestedSessionId,
+    });
+    expect(first.id).toBe(requestedSessionId);
+
+    await expect(
+      createSession(client.db, {
+        ...sessionInput(grant),
+        requestedSessionId,
+      }),
+    ).rejects.toBeInstanceOf(SessionIdConflictError);
+  });
+
+  test("requires an idempotency-key replay to retain its preallocated UUID", async () => {
+    const grant = await fixture();
+    const createIdempotencyKey = crypto.randomUUID();
+    const requestedSessionId = crypto.randomUUID();
+    const first = await createSessionWithIdempotencyKey(client.db, {
+      ...sessionInput(grant),
+      createIdempotencyKey,
+      requestedSessionId,
+    });
+    expect(first.session.id).toBe(requestedSessionId);
+
+    const replay = await createSessionWithIdempotencyKey(client.db, {
+      ...sessionInput(grant),
+      createIdempotencyKey,
+      requestedSessionId,
+    });
+    expect(replay.created).toBe(false);
+    expect(replay.session.id).toBe(requestedSessionId);
+
+    await expect(
+      createSessionWithIdempotencyKey(client.db, {
+        ...sessionInput(grant),
+        createIdempotencyKey,
+        requestedSessionId: crypto.randomUUID(),
+      }),
+    ).rejects.toBeInstanceOf(SessionIdConflictError);
+  });
+
+  test("classifies a cross-workspace UUID collision without relying on RLS visibility", async () => {
+    const owner = await fixture();
+    const requester = await fixture();
+    const requestedSessionId = crypto.randomUUID();
+    await createSessionWithIdempotencyKey(client.db, {
+      ...sessionInput(owner),
+      createIdempotencyKey: crypto.randomUUID(),
+      requestedSessionId,
+    });
+
+    await expect(
+      createSessionWithIdempotencyKey(client.db, {
+        ...sessionInput(requester),
+        createIdempotencyKey: crypto.randomUUID(),
+        requestedSessionId,
+      }),
+    ).rejects.toBeInstanceOf(SessionIdConflictError);
+  });
+
   test("initial-turn repair uses the frozen session creator, not the retrying caller", async () => {
     const grant = await fixture();
     const idempotencyKey = crypto.randomUUID();

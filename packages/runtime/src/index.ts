@@ -13,6 +13,8 @@ import {
 } from "@opengeni/config";
 import {
   CAPABILITY_DESCRIPTORS,
+  gitCredentialBindingIdForRepository,
+  gitCredentialProviderForRepository,
   isClearedRunStateBlob,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   sessionEventMediaPreview,
@@ -113,6 +115,7 @@ import {
   codexSubscriptionFetch,
 } from "@opengeni/codex";
 import { cpSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, posix as posixPath, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -141,6 +144,12 @@ import {
   desktopCapableBackend,
   restoredSandboxSessionStateFromEntry,
   setSelfhostedApplyDiff,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenClient,
+  withToolspaceTokenSession,
+  withRunCredentialsClient,
+  withRunCredentialsSession,
+  type RunCredentialSessionReady,
 } from "./sandbox";
 import { runWithToolCallCorrelation } from "./sandbox/op-correlation";
 import {
@@ -1142,7 +1151,16 @@ class CompactionResponsesModel extends OpenAIResponsesModel {
 }
 
 export type GitTokenSeeds = Partial<Record<GitCredentialProvider, string>>;
+export type GitCredentialBindingSeed = {
+  credentialBindingId: string;
+  provider: GitCredentialProvider;
+  token: string;
+  expiresAt?: string;
+  /** Total active bindings for this provider, used to suppress unsafe aliases. */
+  providerBindingCount?: number;
+};
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
+export type ToolspaceTokenWriterSession = SandboxSessionLike;
 
 export type BuildAgentOptions = {
   model?: Model;
@@ -1241,11 +1259,18 @@ export type BuildAgentOptions = {
   // repository-clone hooks; runStream forwards them into the hook context, which
   // seeds provider token FILES before the clone/setup runs.
   gitTokenSeeds?: GitTokenSeeds;
+  // Provider-neutral, independently mintable credentials. Binding ids remain
+  // off-manifest and are hashed before they influence sandbox paths.
+  gitCredentialBindings?: GitCredentialBindingSeed[];
   // TOOLSPACE: the run-scoped delegated token to seed into
   // $OPENGENI_TOOLSPACE_TOKEN_FILE. Like gitTokenSeed, this stays off the
   // manifest/env delta and is written into the sandbox filesystem by a lifecycle
   // hook before the agent starts.
   toolspaceTokenSeed?: string;
+  // Durable OpenGeni session identity used only to derive the off-manifest,
+  // per-session token file. Required together with toolspaceTokenSeed so two
+  // sessions sharing one box never overwrite the same pointer.
+  toolspaceTokenSessionId?: string;
   // Genesis turn only: inject a one-shot instruction into the FIRST model
   // call telling it to title the session via opengeni__set_session_title.
   // Keeping this out of the persistent Agent.instructions prevents every
@@ -1484,7 +1509,9 @@ const agentRepositoryCloneHooks = new WeakMap<object, SandboxLifecycleHook[]>();
 // provided-session env; runStream reads them to build the clone hook context.
 // Absent when no brokered repo is attached / on the selfhosted path.
 const agentGitTokenSeeds = new WeakMap<object, GitTokenSeeds>();
+const agentGitCredentialBindings = new WeakMap<object, GitCredentialBindingSeed[]>();
 const agentToolspaceTokenSeed = new WeakMap<object, string>();
+const agentToolspaceTokenSessionId = new WeakMap<object, string>();
 // A genesis directive is consumed by runAgentStream exactly once for the
 // freshly-built agent. It must not remain in Agent.instructions: those
 // instructions are presented again on every internal model/tool loop.
@@ -1553,6 +1580,9 @@ export function buildOpenGeniAgent(
   resources: ResourceRef[],
   options: BuildAgentOptions = {},
 ): Agent<any, any> {
+  if (Boolean(options.toolspaceTokenSeed) !== Boolean(options.toolspaceTokenSessionId)) {
+    throw new Error("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  }
   // Resolved per-turn gating. Each override defaults to today's settings-derived
   // behaviour, so the legacy global-client callers (no resolved model) build the
   // exact same agent as before; the multi-provider worker path passes the
@@ -1714,8 +1744,12 @@ export function buildOpenGeniAgent(
   if (Object.keys(gitTokenSeeds).length > 0) {
     agentGitTokenSeeds.set(agent, gitTokenSeeds);
   }
+  if (options.gitCredentialBindings && options.gitCredentialBindings.length > 0) {
+    agentGitCredentialBindings.set(agent, options.gitCredentialBindings);
+  }
   if (options.toolspaceTokenSeed) {
     agentToolspaceTokenSeed.set(agent, options.toolspaceTokenSeed);
+    agentToolspaceTokenSessionId.set(agent, options.toolspaceTokenSessionId!);
   }
   // M3: stash the rig setup descriptor + RESOLVE the rig credential hooks now.
   // sandboxLifecycleHooksForIds throws on an unknown hook name, so a typo'd rig
@@ -3123,6 +3157,14 @@ export type RunAgentStreamOptions = {
   // owns the multi-day timer and uses this pinned, un-proxied session to
   // atomically replace token files; runtime never mints credentials itself.
   onGitCredentialSessionReady?: (session: GitCredentialTokenWriterSession) => Promise<void> | void;
+  // OpenGeni-minted Toolspace token renewal registration. Called only after the
+  // initial token file reached the real sandbox session.
+  onToolspaceTokenSessionReady?: (session: ToolspaceTokenWriterSession) => Promise<void> | void;
+  // Host-owned run material is seeded off-manifest before setup and every
+  // agent-created process sources the active immutable generation. The worker
+  // owns resolution/renewal/fencing; runtime owns sandbox transport.
+  runCredentialSessionId?: string;
+  onRunCredentialSessionReady?: RunCredentialSessionReady;
   // OWNERSHIP INVERSION (P1.2): an externally-owned, already-live sandbox
   // session resolved by the per-turn resume-by-id path. When present,
   // runAgentStream does NOT build (or resume, or discard) a client — it threads
@@ -3421,7 +3463,11 @@ export async function runAgentStream(
   const prepared: PreparedAgentInput =
     typeof input === "string" || input instanceof RunState ? { input } : input;
   const environment = overrides.sandboxEnvironment ?? collectSandboxEnvironment(settings);
+  const toolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const genesisTitleInputFilter = takeGenesisTitleInputFilter(agent);
+  if (overrides.onRunCredentialSessionReady && !overrides.runCredentialSessionId) {
+    throw new Error("runCredentialSessionId is required when run credential setup is enabled");
+  }
 
   // OWNED PATH (P1.2 ownership inversion): the per-turn resume path injected a
   // live, externally-owned box. We thread the live `session` straight into
@@ -3440,11 +3486,24 @@ export async function runAgentStream(
     // whose per-op pointer re-read could land these execs on a machine swapped in
     // mid-turn.
     const setupSession = (overrides.ownedSandbox.setupSession ?? session) as SandboxSessionLike;
+    const credentialAgentSession = overrides.runCredentialSessionId
+      ? withRunCredentialsSession(session as SandboxSessionLike, overrides.runCredentialSessionId)
+      : (session as SandboxSessionLike);
+    const agentSession = toolspaceTokenFile
+      ? withToolspaceTokenSession(credentialAgentSession, toolspaceTokenFile)
+      : credentialAgentSession;
+    const credentialSetupSession = overrides.runCredentialSessionId
+      ? withRunCredentialsSession(setupSession, overrides.runCredentialSessionId)
+      : setupSession;
+    const decoratedSetupSession = toolspaceTokenFile
+      ? withToolspaceTokenSession(credentialSetupSession, toolspaceTokenFile)
+      : credentialSetupSession;
     // Platform setup (manifest-env pin + beforeAgentStart hooks + file downloads)
     // against the UN-proxied established box — the ONE-TRUTH helper shared with the
     // lazy provisioner. Eager path: runs here, before the run starts (unchanged).
     if (!overrides.ownedSandbox.deferredSetup) {
-      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, setupSession, {
+      await overrides.onRunCredentialSessionReady?.(session as SandboxSessionLike);
+      await runOwnedSandboxSetup(agent, session as SandboxSessionLike, decoratedSetupSession, {
         settings,
         environment,
         preparedInput: prepared,
@@ -3460,6 +3519,9 @@ export async function runAgentStream(
             }
           : {}),
       });
+      if (toolspaceTokenSeedForAgent(agent)) {
+        await overrides.onToolspaceTokenSessionReady?.(agentSession);
+      }
       await overrides.onGitCredentialSessionReady?.(setupSession);
     }
     const runAs = sandboxRunAs(settings);
@@ -3481,6 +3543,7 @@ export async function runAgentStream(
     // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
     // repository-clone hook seeds it to the box's token file before the clone.
     const ownedGitTokenSeeds = gitTokenSeedsForAgent(agent);
+    const ownedGitCredentialBindings = gitCredentialBindingsForAgent(agent);
     const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
     const ownedRigSetup = rigSetupDescriptorForAgent(agent);
     const ownedHooks = [
@@ -3493,6 +3556,9 @@ export async function runAgentStream(
         rigCredentialHooksForAgent(agent),
       ),
       ...sandboxToolspaceTokenHooksForAgent(agent),
+      ...toolspaceTokenSessionRegistrationHooks(
+        ownedToolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+      ),
       ...sandboxRepositoryCloneHooksForAgent(agent),
       ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
     ];
@@ -3501,12 +3567,29 @@ export async function runAgentStream(
       ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
       ...(runAs ? { runAs } : {}),
       ...(ownedGitTokenSeeds ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
+      ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
       ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+      ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
       ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     };
-    // Keep the decoration as a safety net for any session the SDK does create/resume
-    // through the client during this run (it is inert for the provided session).
-    const decoratedClient = withSandboxLifecycleHooks(resourceClient, ownedHooks, ownedHookContext);
+    // Keep both credential seeding and lifecycle decoration as a safety net for
+    // any session the SDK does create/resume during this run. They are inert for
+    // the provided session, which remains the normal ownership-inverted path.
+    const credentialResourceClient = overrides.runCredentialSessionId
+      ? withRunCredentialsClient(
+          resourceClient,
+          overrides.runCredentialSessionId,
+          overrides.onRunCredentialSessionReady,
+        )
+      : resourceClient;
+    const toolspaceResourceClient = toolspaceTokenFile
+      ? withToolspaceTokenClient(credentialResourceClient, toolspaceTokenFile)
+      : credentialResourceClient;
+    const decoratedClient = withSandboxLifecycleHooks(
+      toolspaceResourceClient,
+      ownedHooks,
+      ownedHookContext,
+    );
     const ownedFilter = composeCallModelInputFilters(
       [
         callModelInputFilterForSettings(settings),
@@ -3537,7 +3620,7 @@ export async function runAgentStream(
     };
     ownedRunOptions.sandbox = {
       client: decoratedClient,
-      session,
+      session: agentSession,
       ...(sessionState ? { sessionState } : {}),
     } as SandboxRunConfig;
     return await runScopedRunner(settings).run(agent, prepared.input, ownedRunOptions);
@@ -3562,14 +3645,27 @@ export async function runAgentStream(
           ...(runAs ? { runAs } : {}),
         })
       : refreshedClient;
+  const credentialClient =
+    resourceClient && overrides.runCredentialSessionId
+      ? withRunCredentialsClient(
+          resourceClient,
+          overrides.runCredentialSessionId,
+          overrides.onRunCredentialSessionReady,
+        )
+      : resourceClient;
+  const toolspaceClient =
+    credentialClient && toolspaceTokenFile
+      ? withToolspaceTokenClient(credentialClient, toolspaceTokenFile)
+      : credentialClient;
   // TOKEN-BROKER (B1): the per-turn git token seed, forwarded OFF-MANIFEST so the
   // repository-clone hook seeds it to the box's token file before the clone.
   const gitTokenSeeds = gitTokenSeedsForAgent(agent);
+  const gitCredentialBindings = gitCredentialBindingsForAgent(agent);
   const toolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
   const legacyRigSetup = rigSetupDescriptorForAgent(agent);
-  const client = resourceClient
+  const client = toolspaceClient
     ? withSandboxLifecycleHooks(
-        resourceClient,
+        toolspaceClient,
         [
           // M3: same rig-setup-first ordering + credential-hook union as the owned
           // path (this legacy create/resume decoration path is byte-for-byte today
@@ -3580,6 +3676,9 @@ export async function runAgentStream(
             rigCredentialHooksForAgent(agent),
           ),
           ...sandboxToolspaceTokenHooksForAgent(agent),
+          ...toolspaceTokenSessionRegistrationHooks(
+            toolspaceTokenSeed ? overrides.onToolspaceTokenSessionReady : undefined,
+          ),
           ...sandboxRepositoryCloneHooksForAgent(agent),
           ...gitCredentialSessionRegistrationHooks(overrides.onGitCredentialSessionReady),
         ],
@@ -3588,7 +3687,9 @@ export async function runAgentStream(
           ...(overrides.onRuntimeEvent ? { onRuntimeEvent: overrides.onRuntimeEvent } : {}),
           ...(runAs ? { runAs } : {}),
           ...(gitTokenSeeds ? { gitTokenSeeds } : {}),
+          ...(gitCredentialBindings ? { gitCredentialBindings } : {}),
           ...(toolspaceTokenSeed ? { toolspaceTokenSeed } : {}),
+          ...(toolspaceTokenFile ? { toolspaceTokenFile } : {}),
           ...(legacyRigSetup ? { rigSetup: legacyRigSetup } : {}),
         },
       )
@@ -4018,6 +4119,8 @@ export async function runOwnedSandboxSetup(
     onRuntimeEvent?: SandboxLifecycleHookContext["onRuntimeEvent"];
     gitTokenSeedsOverride?: GitTokenSeeds;
     gitTokenSeedOverride?: string;
+    gitCredentialBindingsOverride?: GitCredentialBindingSeed[];
+    toolspaceTokenSeedOverride?: string;
     commandRunner?: SandboxLifecycleCommandRunner;
   },
 ): Promise<void> {
@@ -4040,7 +4143,11 @@ export async function runOwnedSandboxSetup(
     ...(opts.gitTokenSeedOverride ? { github: opts.gitTokenSeedOverride } : {}),
     ...(opts.gitTokenSeedsOverride ?? {}),
   } satisfies GitTokenSeeds;
-  const ownedToolspaceTokenSeed = toolspaceTokenSeedForAgent(agent);
+  const ownedGitCredentialBindings =
+    opts.gitCredentialBindingsOverride ?? gitCredentialBindingsForAgent(agent);
+  const ownedToolspaceTokenSeed =
+    opts.toolspaceTokenSeedOverride ?? toolspaceTokenSeedForAgent(agent);
+  const ownedToolspaceTokenFile = toolspaceTokenFileForAgent(agent, environment);
   const ownedRigSetup = rigSetupDescriptorForAgent(agent);
   const ownedHooks = [
     // M3: rig setup runs FIRST so any tooling it installs is present for the
@@ -4062,7 +4169,9 @@ export async function runOwnedSandboxSetup(
     ...(opts.onRuntimeEvent ? { onRuntimeEvent: opts.onRuntimeEvent } : {}),
     ...(runAs ? { runAs } : {}),
     ...(Object.keys(ownedGitTokenSeeds).length > 0 ? { gitTokenSeeds: ownedGitTokenSeeds } : {}),
+    ...(ownedGitCredentialBindings ? { gitCredentialBindings: ownedGitCredentialBindings } : {}),
     ...(ownedToolspaceTokenSeed ? { toolspaceTokenSeed: ownedToolspaceTokenSeed } : {}),
+    ...(ownedToolspaceTokenFile ? { toolspaceTokenFile: ownedToolspaceTokenFile } : {}),
     ...(ownedRigSetup ? { rigSetup: ownedRigSetup } : {}),
     ...(opts.commandRunner ? { commandRunner: opts.commandRunner } : {}),
   };
@@ -4896,7 +5005,9 @@ export type SandboxLifecycleHookContext = {
   // NEVER the box/agent manifest env (validateNoEnvironmentDelta must never see
   // rotating values).
   gitTokenSeeds?: GitTokenSeeds;
+  gitCredentialBindings?: GitCredentialBindingSeed[];
   toolspaceTokenSeed?: string;
+  toolspaceTokenFile?: string;
   // M3: the rig setup descriptor for the rig-setup hook (the script + marker
   // version id + the rig's own timeout). Present only on a rig-bound turn.
   rigSetup?: RigSetupDescriptor;
@@ -5065,8 +5176,30 @@ function gitTokenSeedsForAgent(agent: Agent<any, any>): GitTokenSeeds | undefine
   return agentGitTokenSeeds.get(agent);
 }
 
+function gitCredentialBindingsForAgent(
+  agent: Agent<any, any>,
+): GitCredentialBindingSeed[] | undefined {
+  return agentGitCredentialBindings.get(agent);
+}
+
 function toolspaceTokenSeedForAgent(agent: Agent<any, any>): string | undefined {
   return agentToolspaceTokenSeed.get(agent);
+}
+
+function toolspaceTokenSessionIdForAgent(agent: Agent<any, any>): string | undefined {
+  return agentToolspaceTokenSessionId.get(agent);
+}
+
+function toolspaceTokenFileForAgent(
+  agent: Agent<any, any>,
+  environment: Readonly<Record<string, string>>,
+): string | undefined {
+  if (!toolspaceTokenSeedForAgent(agent)) return undefined;
+  const sessionId = toolspaceTokenSessionIdForAgent(agent);
+  if (!sessionId) {
+    throw new Error("Toolspace token seed is missing its session identity");
+  }
+  return toolspaceTokenFileFromEnvironment(environment, sessionId);
 }
 
 function sandboxToolspaceTokenHooksForAgent(agent: Agent<any, any>): SandboxLifecycleHook[] {
@@ -5129,6 +5262,22 @@ function gitCredentialSessionRegistrationHooks(
     ? [
         {
           id: "git-credential-renewal-registration",
+          phase: "beforeAgentStart",
+          run: async (session) => {
+            await callback(session);
+          },
+        },
+      ]
+    : [];
+}
+
+function toolspaceTokenSessionRegistrationHooks(
+  callback: RunAgentStreamOptions["onToolspaceTokenSessionReady"],
+): SandboxLifecycleHook[] {
+  return callback
+    ? [
+        {
+          id: "toolspace-token-renewal-registration",
           phase: "beforeAgentStart",
           run: async (session) => {
             await callback(session);
@@ -5205,6 +5354,20 @@ function gitProviderSeedEnv(provider: GitCredentialProvider): string {
   return `OPENGENI_GIT_${provider.toUpperCase()}_TOKEN_SEED`;
 }
 
+export function gitCredentialBindingHash(credentialBindingId: string): string {
+  return createHash("sha256").update(credentialBindingId, "utf8").digest("hex").slice(0, 32);
+}
+
+function gitBindingSeedEnv(binding: GitCredentialBindingSeed): string {
+  return `OPENGENI_GIT_BINDING_${gitCredentialBindingHash(binding.credentialBindingId).toUpperCase()}_TOKEN_SEED`;
+}
+
+function gitCredentialBindingSeedExportPrefix(bindings: GitCredentialBindingSeed[]): string {
+  return bindings
+    .map((binding) => `export ${gitBindingSeedEnv(binding)}=${shellQuote(binding.token)}`)
+    .join("\n");
+}
+
 function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   const lines: string[] = [];
   for (const provider of GIT_CREDENTIAL_PROVIDERS) {
@@ -5220,37 +5383,116 @@ function gitTokenSeedExportPrefix(seeds: GitTokenSeeds): string {
   return lines.join("\n");
 }
 
-function repositoryCredentialProvider(
-  resource: Extract<ResourceRef, { kind: "repository" }>,
-): GitCredentialProvider {
-  return resource.provider ?? "github";
+type RuntimeGitBindingDescriptor = {
+  provider: GitCredentialProvider;
+  credentialBindingId: string;
+  bindingHash: string;
+  protocol: string;
+  host: string;
+  path: string;
+  uri: string;
+};
+
+function runtimeGitBindingDescriptors(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): RuntimeGitBindingDescriptor[] {
+  const remoteBindings = new Map<string, string>();
+  const bindingProviders = new Map<string, GitCredentialProvider>();
+  return resources.map((resource) => {
+    const url = new URL(resource.uri);
+    const credentialProvider = gitCredentialProviderForRepository(resource);
+    // Provider-less public/legacy resources retain the historical GitHub
+    // askpass fallback, but credential-bound resources derive through the
+    // shared contracts helper used by the worker and core.
+    const provider = credentialProvider ?? "github";
+    const credentialBindingId =
+      gitCredentialBindingIdForRepository(resource, credentialProvider) ?? provider;
+    const path = url.pathname.replace(/^\/+|\/+$/g, "");
+    const remote = `${url.protocol.toLowerCase()}//${url.host.toLowerCase()}/${path.replace(/\.git$/, "")}`;
+    const bindingKey = `${provider}\u0000${credentialBindingId}`;
+    const boundProvider = bindingProviders.get(credentialBindingId);
+    if (boundProvider && boundProvider !== provider) {
+      throw new Error(
+        `credential binding ${credentialBindingId} is assigned to multiple Git providers`,
+      );
+    }
+    bindingProviders.set(credentialBindingId, provider);
+    const claimed = remoteBindings.get(remote);
+    if (claimed && claimed !== bindingKey) {
+      throw new Error(
+        `repository remote ${resource.uri} is claimed by multiple credential bindings`,
+      );
+    }
+    remoteBindings.set(remote, bindingKey);
+    return {
+      provider,
+      credentialBindingId,
+      bindingHash: gitCredentialBindingHash(credentialBindingId),
+      protocol: url.protocol.replace(/:$/, "").toLowerCase(),
+      host: url.host.toLowerCase(),
+      path,
+      uri: resource.uri,
+    };
+  });
+}
+
+function gitUsernameForProvider(provider: GitCredentialProvider): string {
+  if (provider === "github") return "x-access-token";
+  if (provider === "gitlab") return "oauth2";
+  return "opengeni";
+}
+
+function gitCredentialHelperBindingCaseLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+): string[] {
+  return runtimeGitBindingDescriptors(resources).flatMap((descriptor) => {
+    const paths = new Set([
+      descriptor.path,
+      descriptor.path.replace(/\.git$/, ""),
+      `${descriptor.path.replace(/\.git$/, "")}.git`,
+    ]);
+    return [...paths].map(
+      (path) =>
+        `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+    );
+  });
 }
 
 function gitAskpassHostProviderCaseLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
 ): string[] {
-  const hosts = new Map<string, GitCredentialProvider>();
-  for (const resource of resources) {
-    try {
-      const hostname = new URL(resource.uri).hostname.toLowerCase();
-      if (!hostname) {
-        continue;
-      }
-      hosts.set(hostname, repositoryCredentialProvider(resource));
-    } catch {
-      // Resource validation catches invalid URIs before normal runtime use. Keep
-      // helper generation tolerant so tests for clone failure can still build.
-    }
+  const hosts = new Map<string, { provider: GitCredentialProvider; bindings: Set<string> }>();
+  for (const descriptor of runtimeGitBindingDescriptors(resources)) {
+    const entry = hosts.get(descriptor.host) ?? {
+      provider: descriptor.provider,
+      bindings: new Set<string>(),
+    };
+    entry.bindings.add(`${descriptor.provider}\u0000${descriptor.credentialBindingId}`);
+    hosts.set(descriptor.host, entry);
   }
   return [...hosts.entries()]
+    .filter(([, entry]) => entry.bindings.size === 1)
     .sort(([a], [b]) => a.localeCompare(b))
     .map(
-      ([hostname, provider]) =>
-        `    ${shellQuote(hostname)}) printf '%s\\n' ${provider}; return 0 ;;`,
+      ([hostname, entry]) =>
+        `    ${shellQuote(hostname)}) printf '%s\\n' ${entry.provider}; return 0 ;;`,
     );
 }
 
-function gitCredentialTokenWriterCommandLines(): string[] {
+function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed[] = []): string[] {
+  const bindingWrites = bindings.flatMap((binding) => {
+    const hash = gitCredentialBindingHash(binding.credentialBindingId);
+    const seedEnv = gitBindingSeedEnv(binding);
+    const count = Math.max(1, binding.providerBindingCount ?? 1);
+    const provider = binding.provider;
+    const lines = [`write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`];
+    if (count === 1) {
+      lines.push(`write_git_provider_token ${shellQuote(provider)} "\${${seedEnv}:-}"`);
+    } else {
+      lines.push(`remove_git_provider_token ${shellQuote(provider)}`);
+    }
+    return lines;
+  });
   return [
     // TOKEN-BROKER (B1/B2): seed run-scoped provider tokens into stable files and
     // atomically replace each provider file. Token VALUES are supplied only by
@@ -5263,6 +5505,23 @@ function gitCredentialTokenWriterCommandLines(): string[] {
     "    github) printf '%s\\n' \"${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}\" ;;",
     "    *) printf '%s\\n' \"${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token\" ;;",
     "  esac",
+    "}",
+    "write_git_binding_token() {",
+    '  binding_hash="$1"',
+    '  token="$2"',
+    '  [ -n "$token" ] || return 0',
+    '  credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    '  mkdir -p "$credential_dir"',
+    '  token_file="$credential_dir/$binding_hash-token"',
+    '  printf \'%s\' "$token" > "$token_file.tmp.$$"',
+    '  mv -f "$token_file.tmp.$$" "$token_file"',
+    "}",
+    "remove_git_provider_token() {",
+    '  provider="$1"',
+    '  rm -f "$(git_provider_token_file "$provider")"',
+    '  if [ "$provider" = github ]; then',
+    '    rm -f "${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/github-token"',
+    "  fi",
     "}",
     "write_git_provider_token() {",
     '  provider="$1"',
@@ -5284,16 +5543,53 @@ function gitCredentialTokenWriterCommandLines(): string[] {
     'write_git_provider_token github "${OPENGENI_GIT_GITHUB_TOKEN_SEED:-${OPENGENI_GIT_TOKEN_SEED:-}}"',
     'write_git_provider_token gitlab "${OPENGENI_GIT_GITLAB_TOKEN_SEED:-}"',
     'write_git_provider_token azure_devops "${OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED:-}"',
+    ...bindingWrites,
     'umask "$seed_umask"',
   ];
 }
 
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
+  bindings: GitCredentialBindingSeed[] = [],
 ): string[] {
   const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
+  const bindingCases = gitCredentialHelperBindingCaseLines(resources);
+  const descriptors = runtimeGitBindingDescriptors(resources);
+  const wrapperDescriptors = bindings.length > 0 ? descriptors : [];
+  const bindingProviders = new Map<GitCredentialProvider, Set<string>>();
+  for (const descriptor of runtimeGitBindingDescriptors(resources)) {
+    const ids = bindingProviders.get(descriptor.provider) ?? new Set<string>();
+    ids.add(descriptor.credentialBindingId);
+    bindingProviders.set(descriptor.provider, ids);
+  }
+  const strictAskpass = [...bindingProviders.values()].some((ids) => ids.size > 1);
+  const allowedWrapperHashes = [
+    ...new Set(wrapperDescriptors.map((item) => `${item.provider}|${item.bindingHash}`)),
+  ].map((key) => `    ${shellQuote(key)}) return 0 ;;`);
+  const originWrapperHashes = wrapperDescriptors.flatMap((item) => {
+    const base = item.uri.replace(/\.git$/, "");
+    return [...new Set([item.uri, base, `${base}.git`])].map(
+      (uri) =>
+        `    ${shellQuote(`${item.provider}|${uri}`)}) printf '%s\\n' ${shellQuote(item.bindingHash)}; return 0 ;;`,
+    );
+  });
+  const soleWrapperHashes = [...bindingProviders.entries()].flatMap(([provider, ids]) => {
+    if (ids.size !== 1) return [];
+    const descriptor = wrapperDescriptors.find((item) => item.provider === provider);
+    return descriptor
+      ? [
+          `    ${shellQuote(provider)}) printf '%s\\n' ${shellQuote(descriptor.bindingHash)}; return 0 ;;`,
+        ]
+      : [];
+  });
+  const multiWrapperProviders =
+    bindings.length > 0
+      ? [...bindingProviders.entries()]
+          .filter(([, ids]) => ids.size > 1)
+          .map(([provider]) => provider)
+      : [];
   return [
-    ...gitCredentialTokenWriterCommandLines(),
+    ...gitCredentialTokenWriterCommandLines(bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
     // runs. Renewal updates only token files and deliberately leaves these
     // repository-specific host mappings intact.
@@ -5310,8 +5606,8 @@ function gitCredentialHelperCommandLines(
     '  rest="${prompt_lower#*://}"',
     '  rest="${rest#*@}"',
     '  host="${rest%%/*}"',
-    '  host="${host%%:*}"',
     '  host="$(printf \'%s\\n\' "$host" | tr -d "\'")"',
+    '  host="${host%:}"',
     "  printf '%s\\n' \"$host\"",
     "}",
     "provider_for_prompt() {",
@@ -5323,7 +5619,7 @@ function gitCredentialHelperCommandLines(
     "    *github.com*|*githubusercontent.com*) printf '%s\\n' github ;;",
     "    *gitlab*) printf '%s\\n' gitlab ;;",
     "    *dev.azure.com*|*.visualstudio.com*) printf '%s\\n' azure_devops ;;",
-    "    *) printf '%s\\n' github ;;",
+    strictAskpass ? "    *) printf '\\n' ;;" : "    *) printf '%s\\n' github ;;",
     "  esac",
     "}",
     "token_file_for_provider() {",
@@ -5349,6 +5645,40 @@ function gitCredentialHelperCommandLines(
     "ASKPASS_EOF",
     'chmod 0755 "$git_askpass.tmp.$$"',
     'mv -f "$git_askpass.tmp.$$" "$git_askpass"',
+    'git_credential_helper="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/helper"',
+    'mkdir -p "$(dirname "$git_credential_helper")"',
+    "cat > \"$git_credential_helper.tmp.$$\" <<'GIT_CREDENTIAL_HELPER_EOF'",
+    "#!/usr/bin/env sh",
+    "set -eu",
+    '[ "${1:-get}" = get ] || exit 0',
+    "protocol= host= path=",
+    "while IFS='=' read -r key value; do",
+    '  case "$key" in',
+    "    protocol) protocol=\"$(printf '%s' \"$value\" | tr '[:upper:]' '[:lower:]')\" ;;",
+    "    host) host=\"$(printf '%s' \"$value\" | tr '[:upper:]' '[:lower:]')\" ;;",
+    '    path) path="${value#/}" ;;',
+    "  esac",
+    "done",
+    'credential_dir="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}"',
+    "username= token_file=",
+    'case "$protocol|$host|$path" in',
+    ...bindingCases,
+    "  *) exit 0 ;;",
+    "esac",
+    '[ -r "$token_file" ] || exit 0',
+    'password="$(cat "$token_file" 2>/dev/null || true)"',
+    '[ -n "$password" ] || exit 0',
+    'printf \'username=%s\\npassword=%s\\n\' "$username" "$password"',
+    "GIT_CREDENTIAL_HELPER_EOF",
+    'chmod 0755 "$git_credential_helper.tmp.$$"',
+    'mv -f "$git_credential_helper.tmp.$$" "$git_credential_helper"',
+    // Empty helper resets lower-priority/system helpers; our exact path-aware
+    // helper returns no credential for an unbound remote, so multi-binding
+    // sessions fail closed instead of falling through to ambient credentials.
+    "git config --global --unset-all credential.helper >/dev/null 2>&1 || true",
+    "git config --global --add credential.helper ''",
+    'git config --global --add credential.helper "$git_credential_helper"',
+    "git config --global credential.useHttpPath true",
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
     "for opengeni_git_cli_tool in gh glab az; do",
@@ -5363,11 +5693,53 @@ function gitCredentialHelperCommandLines(
     "  az) provider=azure_devops; token_env=AZURE_DEVOPS_EXT_PAT ;;",
     "  *) provider=; token_env= ;;",
     "esac",
-    'if [ -n "$provider" ]; then',
-    '  case "$provider" in',
-    '    github) token_file="${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}" ;;',
-    '    *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
+    "hash_binding_id() {",
+    "  if command -v sha256sum >/dev/null 2>&1; then printf '%s' \"$1\" | sha256sum | cut -c1-32; return; fi",
+    "  if command -v shasum >/dev/null 2>&1; then printf '%s' \"$1\" | shasum -a 256 | cut -c1-32; return; fi",
+    "  if command -v openssl >/dev/null 2>&1; then printf '%s' \"$1\" | openssl dgst -sha256 | sed 's/^.*= //' | cut -c1-32; return; fi",
+    "  printf '%s\\n' 'No SHA-256 utility is available to select OPENGENI_GIT_BINDING' >&2",
+    "  return 127",
+    "}",
+    "binding_hash_allowed() {",
+    '  case "$provider|$1" in',
+    ...allowedWrapperHashes,
+    "    *) return 1 ;;",
     "  esac",
+    "}",
+    "binding_hash_for_origin() {",
+    '  case "$provider|$1" in',
+    ...originWrapperHashes,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    "sole_binding_hash() {",
+    '  case "$provider" in',
+    ...soleWrapperHashes,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
+    'if [ -n "$provider" ]; then',
+    "  binding_hash=",
+    '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
+    '    binding_hash="$(hash_binding_id "$OPENGENI_GIT_BINDING")"',
+    '    binding_hash_allowed "$binding_hash" || { printf \'%s\\n\' "OPENGENI_GIT_BINDING does not select a $provider credential attached to this session" >&2; exit 2; }',
+    "  elif command -v git >/dev/null 2>&1; then",
+    '    origin="$(git config --get remote.origin.url 2>/dev/null || true)"',
+    '    [ -z "$origin" ] || binding_hash="$(binding_hash_for_origin "$origin" 2>/dev/null || true)"',
+    "  fi",
+    '  [ -n "$binding_hash" ] || binding_hash="$(sole_binding_hash 2>/dev/null || true)"',
+    '  if [ -n "$binding_hash" ]; then',
+    '    token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$binding_hash-token"',
+    "  else",
+    '    case " $multi_binding_providers " in',
+    '      *" $provider "*) printf \'%s\\n\' "Unable to select one of multiple $provider credentials; run inside an attached repository or set OPENGENI_GIT_BINDING" >&2; exit 2 ;;',
+    "    esac",
+    '    case "$provider" in',
+    '      github) token_file="${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}" ;;',
+    '      *) token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$provider-token" ;;',
+    "    esac",
+    "  fi",
     '  if [ -f "$token_file" ]; then',
     '    token="$(cat "$token_file" 2>/dev/null || true)"',
     '    if [ -n "$token" ]; then',
@@ -5422,6 +5794,19 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
   ].join("\n");
 }
 
+export function gitCredentialBindingTokenRefreshCommand(
+  bindings: GitCredentialBindingSeed[],
+): string {
+  const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
+  if (!seedPrefix) return "";
+  return [
+    seedPrefix,
+    "set -eu",
+    'export HOME="${HOME:-/workspace}"',
+    ...gitCredentialTokenWriterCommandLines(bindings),
+  ].join("\n");
+}
+
 export async function refreshGitProviderTokenFiles(
   session: GitCredentialTokenWriterSession,
   seeds: GitTokenSeeds,
@@ -5444,14 +5829,34 @@ export async function refreshGitProviderTokenFiles(
   );
 }
 
+export async function refreshGitCredentialBindingTokenFiles(
+  session: GitCredentialTokenWriterSession,
+  bindings: GitCredentialBindingSeed[],
+  options: { runAs?: string; commandRunner?: SandboxLifecycleCommandRunner } = {},
+): Promise<void> {
+  const command = gitCredentialBindingTokenRefreshCommand(bindings);
+  if (!command) return;
+  const args = {
+    cmd: command,
+    workdir: "/workspace",
+    ...(options.runAs ? { runAs: options.runAs } : {}),
+    yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+    maxOutputTokens: 4_000,
+  };
+  assertSandboxCommandSucceeded(
+    await runSandboxLifecycleCommand(session, args, options.commandRunner),
+    "Git credential binding refresh",
+  );
+}
+
 export function repositoryCloneCommand(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[] = [],
 ): string {
   const commands = [
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"',
-    ...gitCredentialHelperCommandLines(resources),
     "ensure_git() {",
     "  if command -v git >/dev/null 2>&1; then",
     "    return 0",
@@ -5467,6 +5872,7 @@ export function repositoryCloneCommand(
     "  exit 127",
     "}",
     "ensure_git",
+    ...gitCredentialHelperCommandLines(resources, bindings),
     "clone_repository() {",
     '  target="$1"',
     '  uri="$2"',
@@ -5555,17 +5961,27 @@ export function repositoryCloneCommand(
   return commands.join("\n");
 }
 
-export function toolspaceTokenSeedCommand(): string {
+export function toolspaceTokenSeedCommand(
+  options: { tokenFile?: string; legacyTokenFile?: string } = {},
+): string {
   return [
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then',
     '  seed_umask="$(umask)"',
     "  umask 077",
-    '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    options.tokenFile
+      ? `  token_file=${shellQuote(options.tokenFile)}`
+      : '  token_file="${OPENGENI_TOOLSPACE_TOKEN_FILE:-$HOME/.opengeni/toolspace-token}"',
+    options.legacyTokenFile
+      ? `  legacy_token_file=${shellQuote(options.legacyTokenFile)}`
+      : '  legacy_token_file=""',
     '  mkdir -p "$(dirname "$token_file")"',
     '  printf \'%s\' "$OPENGENI_TOOLSPACE_TOKEN_SEED" > "$token_file.tmp.$$"',
     '  mv -f "$token_file.tmp.$$" "$token_file"',
+    '  if [ -n "$legacy_token_file" ] && [ "$legacy_token_file" != "$token_file" ]; then',
+    '    rm -f -- "$legacy_token_file"',
+    "  fi",
     '  umask "$seed_umask"',
     "fi",
   ].join("\n");
@@ -5578,7 +5994,14 @@ export async function runToolspaceTokenSeedHook(
   if (!context.toolspaceTokenSeed) {
     return;
   }
-  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand()}`;
+  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand(
+    {
+      ...(context.toolspaceTokenFile ? { tokenFile: context.toolspaceTokenFile } : {}),
+      ...(context.toolspaceTokenFile && context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE
+        ? { legacyTokenFile: context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE }
+        : {}),
+    },
+  )}`;
   const result = await runSandboxLifecycleCommand(
     session,
     {
@@ -5591,6 +6014,36 @@ export async function runToolspaceTokenSeedHook(
     context.commandRunner,
   );
   assertSandboxCommandSucceeded(result, "Toolspace token seed hook");
+}
+
+export async function refreshToolspaceTokenFile(
+  session: ToolspaceTokenWriterSession,
+  token: string,
+  options: {
+    runAs?: string;
+    commandRunner?: SandboxLifecycleCommandRunner;
+    tokenFile?: string;
+    legacyTokenFile?: string;
+  } = {},
+): Promise<void> {
+  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand(
+    {
+      ...(options.tokenFile ? { tokenFile: options.tokenFile } : {}),
+      ...(options.legacyTokenFile ? { legacyTokenFile: options.legacyTokenFile } : {}),
+    },
+  )}`;
+  const result = await runSandboxLifecycleCommand(
+    session,
+    {
+      cmd: command,
+      workdir: "/workspace",
+      ...(options.runAs ? { runAs: options.runAs } : {}),
+      yieldTimeMs: SANDBOX_LIFECYCLE_COMMAND_TIMEOUT_MS,
+      maxOutputTokens: 4_000,
+    },
+    options.commandRunner,
+  );
+  assertSandboxCommandSucceeded(result, "Toolspace token refresh");
 }
 
 // Bounds the setup output tail carried on a rig.setup failure event/error so a
@@ -5778,10 +6231,15 @@ export async function runRepositoryCloneHook(
       ...(context.gitTokenSeeds ?? {}),
       ...(context.gitTokenSeed ? { github: context.gitTokenSeed } : {}),
     } satisfies GitTokenSeeds;
-    const seedPrefix = gitTokenSeedExportPrefix(gitTokenSeeds);
-    const command = seedPrefix
-      ? `${seedPrefix}\n${repositoryCloneCommand(resources)}`
-      : repositoryCloneCommand(resources);
+    const gitCredentialBindings = context.gitCredentialBindings ?? [];
+    const seedPrefix = [
+      gitTokenSeedExportPrefix(gitTokenSeeds),
+      gitCredentialBindingSeedExportPrefix(gitCredentialBindings),
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const cloneCommand = repositoryCloneCommand(resources, gitCredentialBindings);
+    const command = seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand;
     const result = await runSandboxLifecycleCommand(
       session,
       {

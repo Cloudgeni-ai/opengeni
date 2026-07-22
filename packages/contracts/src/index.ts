@@ -1233,10 +1233,21 @@ export type EntitlementsPort = {
 export const GitCredentialProvider = z.enum(["github", "gitlab", "azure_devops"]);
 export type GitCredentialProvider = z.infer<typeof GitCredentialProvider>;
 
+// Host-opaque identity for one independently mintable Git credential. It is
+// deliberately NOT constrained to a filesystem-safe alphabet: runtimes hash it
+// before using it in paths, command text, or environment variable names.
+export const GitCredentialBindingId = z.string().min(1).max(256);
+export type GitCredentialBindingId = z.infer<typeof GitCredentialBindingId>;
+
+export const GitRepositoryAccess = z.enum(["read", "write"]);
+export type GitRepositoryAccess = z.infer<typeof GitRepositoryAccess>;
+
 const GitProviderRepositoryId = z.union([z.number().int().positive(), z.string().min(1)]);
 
 export const GitCredentialRepositoryRef = z.object({
   provider: GitCredentialProvider.optional(),
+  credentialBindingId: GitCredentialBindingId.optional(),
+  access: GitRepositoryAccess.optional(),
   uri: z.string().min(1),
   ref: z.string().min(1),
   repositoryId: GitProviderRepositoryId.optional(),
@@ -1248,8 +1259,8 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 
 // ============ connection-credential provider — Connection-credential provider (§7.6) ============
 //
-// The host-providable per-run credential-mint seam over OpenGeni's TWO
-// run-scoped credential sites in the worker:
+// The host-providable credential seam over OpenGeni's run-scoped credential
+// sites in the worker and API:
 //   - GIT credentials: run-scoped provider tokens minted in
 //     `sandboxEnvironmentForRun` (standalone self-mints GitHub App tokens from
 //     `settings`; embedded hosts can broker GitHub, GitLab, and Azure DevOps)
@@ -1257,6 +1268,8 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 //   - SANDBOX secrets: the decrypted variable set values loaded in
 //     `loadVariableSetForRun` (today decrypted with
 //     `environmentsEncryptionKeyBytes(settings)`).
+//   - MCP credentials: request-time transport headers for connection-backed
+//     servers, shared by normal model tools and Toolspace/Code Mode.
 //
 // In embedded/separate topologies the HOST owns these external connections
 // (its GitHub App, its secret vault + encryption key). When a host binds this
@@ -1274,10 +1287,26 @@ export type GitCredentialRepositoryRef = z.infer<typeof GitCredentialRepositoryR
 export type GitCredentialsRequest = {
   accountId: string;
   workspaceId: string;
+  /** Immutable authority admitted with the turn requesting this credential. */
+  sessionId: string;
+  rootSessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
   // Provider defaults to "github" for the legacy request shape. GitHub-only
   // hosts can keep reading installationId/repositoryIds exactly as before;
   // provider-aware hosts should branch on this and repositoryRefs.
   provider?: GitCredentialProvider;
+  // Present when the host supplied an explicit binding or when more than one
+  // independently mintable credential exists for this provider. A host must
+  // mint only this binding; OpenGeni never treats provider identity as enough
+  // to select among multiple accounts/installations.
+  credentialBindingId?: GitCredentialBindingId;
+  // Canonical lower-case host shared by this binding's repository refs when
+  // there is exactly one. Binding-aware providers echo it when present.
+  providerHost?: string;
   // Token requests are the existing behavior. Identity requests let lazy
   // sandbox provisioning resolve stable git author/committer identity before
   // the box exists while deferring the rotating token value to first provision.
@@ -1298,6 +1327,13 @@ export type GitCredentials = {
   // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;
+  // Strict request echoes for binding-aware requests. OpenGeni validates these
+  // before accepting a token, preventing a host routing bug from returning a
+  // sibling connection's credential. They remain optional for legacy single-
+  // binding/provider hosts.
+  credentialBindingId?: GitCredentialBindingId;
+  provider?: GitCredentialProvider;
+  providerHost?: string;
   // Optional provider expiry for host-managed proactive renewal. ISO-8601;
   // null/omitted means the host does not expose a deadline and OpenGeni uses
   // its conservative bounded refresh cadence instead.
@@ -1330,12 +1366,184 @@ export type SandboxSecrets = {
   description?: string | null;
 };
 
+export type CredentialAuthNeededReason =
+  | "missing_connection"
+  | "expired"
+  | "insufficient_scope"
+  | "refresh_failed";
+
+/**
+ * Host-owned run credentials are materialized below one OpenGeni-owned sandbox
+ * directory. Paths are relative POSIX names; the runtime validates traversal,
+ * collisions, bounds, and modes before any content reaches a sandbox.
+ */
+export type RunCredentialFile = {
+  path: string;
+  content: string;
+  mode?: "0400" | "0600";
+};
+
+export type RunCredentialAuthNeeded = {
+  reason: CredentialAuthNeededReason;
+  providerDomain?: string;
+  connectionId?: string;
+  scopes?: string[];
+  resource?: string;
+  authorizationUrl?: string;
+  /** Bounded non-secret guidance. Never place credential material here. */
+  message?: string;
+};
+
+export type RunCredentialRedaction = {
+  /** Bounded diagnostic label used only in the replacement marker. */
+  name: string;
+  /** One atomic secret value that must be removed from streamed/audit output. */
+  value: string;
+};
+
+export type RunCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  parentSessionId: string | null;
+  rootSessionId: string;
+  /** All sessions sharing this sandbox group share one OS/filesystem trust boundary. */
+  sandboxGroupId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+  /** Immutable authority admitted with this turn. */
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  effectiveSandboxBackend: SandboxBackend;
+  sandboxOs: SandboxOs;
+  purpose: "provision" | "renewal";
+  forceRefresh: boolean;
+  /** Informational standalone variable-set identity; never gates host resolution. */
+  variableSet: { id: string; name: string } | null;
+};
+
+export type RunCredentialsResolution =
+  | {
+      /**
+       * The frozen target/attempt must not receive host material. Hosts use
+       * this for unsupported OSes/backends and policy-based opt-out; the
+       * decision must remain stable for the attempt.
+       */
+      status: "not_applicable";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+    }
+  | {
+      status: "ok";
+      /** Scope echoes are mandatory and checked before materialization. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      /** Secret environment values. Always delivered off-manifest. */
+      environment: Record<string, string>;
+      files?: RunCredentialFile[];
+      /** Environment name to one returned relative file path. */
+      fileEnvironment?: Record<string, string>;
+      /**
+       * Atomic sensitive values embedded inside credential files or derived
+       * material. Environment values are registered automatically; hosts list
+       * additional file-contained values here so chunked output is redacted.
+       */
+      redactions?: RunCredentialRedaction[];
+      /** Earliest material expiry. Null/omitted uses a bounded refresh cadence. */
+      expiresAt?: string | null;
+      /** Partial degradation: usable material may coexist with reconnect notices. */
+      authNeeded?: RunCredentialAuthNeeded[];
+    }
+  | {
+      status: "auth_needed";
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      authNeeded: RunCredentialAuthNeeded[];
+    };
+
+export const McpServerConnectionRef = z
+  .object({
+    /** Opaque host or standalone connection identifier. */
+    connectionId: z.string().min(1).optional(),
+    providerDomain: z.string().min(1),
+    kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
+    scopes: z.array(z.string().min(1)).optional(),
+    resource: z.string().min(1).optional(),
+    subjectScope: z.enum(["workspace", "subject"]).optional(),
+  })
+  .strict();
+export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
+
+export type McpCredentialsRequest = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  /** Null only while a durable turn exists without a currently executing attempt. */
+  attemptId: string | null;
+  executionGeneration: number;
+  /** The immutable authority that admitted this turn. Never substitute the sandbox caller. */
+  initiator: TurnInitiator;
+  initiatorContext: TurnInitiatorContext;
+  /** Immediate technical caller, retained only as non-authoritative audit context. */
+  callerSubjectId?: string;
+  surface: "model" | "toolspace";
+  serverId: string;
+  toolName?: string;
+  connectionRef: McpServerConnectionRef;
+  forceRefresh: boolean;
+};
+
+export type McpCredentialAuthNeededReason = CredentialAuthNeededReason;
+
+export type McpCredentialResolution =
+  | {
+      status: "ok";
+      /** Scope echoes are mandatory and verified before any header is used. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      headers: Record<string, string>;
+      connectionId: string;
+      expiresAt?: string | null;
+    }
+  | {
+      status: "auth_needed";
+      /** Scope echoes are mandatory even when the credential cannot be resolved. */
+      accountId: string;
+      workspaceId: string;
+      sessionId: string;
+      reason: McpCredentialAuthNeededReason;
+      providerDomain: string;
+      connectionId?: string;
+      scopes?: string[];
+      resource?: string;
+      authorizationUrl?: string;
+    };
+
 export type ConnectionCredentialsPort = {
-  // Both legs are optional: a host may drive ONLY git creds (BYO-GitHub-App)
-  // and leave sandbox secrets to OpenGeni's local decrypt, or vice-versa. An
-  // unset leg falls through to today's self-mint for THAT leg only.
+  // Every leg is optional: a host may drive only the credential classes it
+  // owns. An unset leg falls through to today's standalone implementation for
+  // that leg only.
   gitCredentials?(input: GitCredentialsRequest): Promise<GitCredentials>;
   sandboxSecrets?(input: SandboxSecretsRequest): Promise<SandboxSecrets>;
+  /**
+   * Resolve host-owned, session-aware sandbox credentials independently of an
+   * OpenGeni variable set. OpenGeni transports and renews the material; the host
+   * remains the sole owner of connection selection and credential policy.
+   */
+  runCredentials?(input: RunCredentialsRequest): Promise<RunCredentialsResolution>;
+  /**
+   * Resolve rotating MCP transport credentials at request time. Embedded hosts
+   * use this to keep their provider connection as the sole credential source;
+   * OpenGeni never requires a duplicate connection record. The same resolver is
+   * used by model-visible MCP tools and the additive Toolspace/Code Mode proxy.
+   */
+  mcpCredentials?(input: McpCredentialsRequest): Promise<McpCredentialResolution>;
 };
 
 // ============ connection-credential provider — GitHub App API port (BYO-App, §7.6 / GitHub credential prototype remainder) ===
@@ -1430,6 +1638,8 @@ export const RepositoryResourceRef = z.object({
   mountPath: z.string().min(1).optional(),
   subpath: z.string().min(1).optional(),
   provider: GitCredentialProvider.optional(),
+  credentialBindingId: GitCredentialBindingId.optional(),
+  access: GitRepositoryAccess.optional(),
   repositoryId: GitProviderRepositoryId.optional(),
   installationId: GitProviderRepositoryId.optional(),
   projectId: GitProviderRepositoryId.optional(),
@@ -1438,6 +1648,53 @@ export const RepositoryResourceRef = z.object({
   githubRepositoryId: z.number().int().positive().optional(),
 });
 export type RepositoryResourceRef = z.infer<typeof RepositoryResourceRef>;
+
+function positiveGitProviderInteger(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) return value;
+  if (typeof value === "string" && /^\d+$/.test(value) && Number(value) > 0) {
+    return Number(value);
+  }
+  return null;
+}
+
+/**
+ * Resolve whether a repository participates in platform-brokered Git auth.
+ * Provider-less public repositories return null; legacy GitHub aliases infer
+ * GitHub only when both positive installation and repository ids are present.
+ */
+export function gitCredentialProviderForRepository(
+  resource: RepositoryResourceRef,
+): GitCredentialProvider | null {
+  if (resource.provider) return resource.provider;
+  if (
+    positiveGitProviderInteger(resource.githubInstallationId) &&
+    positiveGitProviderInteger(resource.githubRepositoryId)
+  ) {
+    return "github";
+  }
+  return null;
+}
+
+/**
+ * Derive the one canonical runtime/broker identity for a repository credential.
+ * Every consumer must use this helper so mint grouping, token filenames, and
+ * credential-helper routing cannot diverge on legacy provider ids.
+ */
+export function gitCredentialBindingIdForRepository(
+  resource: RepositoryResourceRef,
+  provider: GitCredentialProvider | null = gitCredentialProviderForRepository(resource),
+): GitCredentialBindingId | null {
+  if (!provider) return null;
+  const installationId =
+    provider === "github"
+      ? positiveGitProviderInteger(resource.githubInstallationId ?? resource.installationId)
+      : null;
+  return (
+    resource.credentialBindingId ??
+    resource.connectionId ??
+    (installationId ? `github-installation:${installationId}` : provider)
+  );
+}
 
 export const FileResourceRef = z.object({
   kind: z.literal("file"),
@@ -1790,6 +2047,9 @@ export const SessionMcpServerInput = z.object({
   // Write-only credential headers. Values are encrypted at rest and never
   // returned in session responses or events; response metadata exposes names.
   headers: z.record(z.string(), z.string()).optional(),
+  // Non-secret opaque pointer resolved at request time by the standalone
+  // connection broker or an embedding host's mcpCredentials port.
+  connectionRef: McpServerConnectionRef.optional(),
 });
 export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 
@@ -1806,6 +2066,7 @@ export const SessionMcpServerMetadata = z
     url: httpsUrl,
     headerNames: z.array(z.string()).default([]),
     credentialVersion: z.number().int().positive(),
+    connectionRef: McpServerConnectionRef.nullable().default(null),
   })
   .strict();
 export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
@@ -3223,18 +3484,6 @@ export type ConnectionKind = z.infer<typeof ConnectionKind>;
 export const ConnectionStatus = z.enum(["active", "needs_reauth", "revoked", "error"]);
 export type ConnectionStatus = z.infer<typeof ConnectionStatus>;
 
-export const McpServerConnectionRef = z
-  .object({
-    connectionId: z.string().uuid().optional(),
-    providerDomain: z.string().min(1),
-    kind: ConnectionKind.optional(),
-    scopes: z.array(z.string().min(1)).optional(),
-    resource: z.string().min(1).optional(),
-    subjectScope: z.enum(["workspace", "subject"]).optional(),
-  })
-  .strict();
-export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
-
 export const ConnectionMetadata = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -3665,6 +3914,7 @@ export const SessionEventType = z.enum([
   "agent.toolCall.output",
   "agent.model.usage",
   "tool.auth_needed",
+  "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
   "rig.setup.completed",
@@ -3878,6 +4128,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.event.envelope_omitted",
     "turn.failed",
     "tool.auth_needed",
+    "credential.auth_needed",
     "rig.setup.failed",
     "sandbox.operation.failed",
     "recording.failed",
@@ -3959,7 +4210,9 @@ export const ToolAuthNeededPayload = z.object({
   serverId: z.string().min(1),
   toolName: z.string().min(1).nullable().optional(),
   providerDomain: z.string().min(1),
-  connectionId: z.string().uuid().nullable().optional(),
+  // Embedded hosts may use an opaque connection identity; never assume an
+  // OpenGeni UUID on the public event wire.
+  connectionId: z.string().min(1).nullable().optional(),
   reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
   scopes: z.array(z.string().min(1)).optional(),
   resource: z.string().min(1).optional(),
@@ -3967,6 +4220,19 @@ export const ToolAuthNeededPayload = z.object({
   subjectId: z.string().min(1).nullable().optional(),
 });
 export type ToolAuthNeededPayload = z.infer<typeof ToolAuthNeededPayload>;
+
+/** A host-owned non-tool credential needed by the active run. */
+export const CredentialAuthNeededPayload = z.object({
+  credentialClass: z.literal("run"),
+  providerDomain: z.string().min(1).optional(),
+  connectionId: z.string().min(1).optional(),
+  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  scopes: z.array(z.string().min(1)).optional(),
+  resource: z.string().min(1).optional(),
+  authorizationUrl: z.string().url().optional(),
+  message: z.string().min(1).optional(),
+});
+export type CredentialAuthNeededPayload = z.infer<typeof CredentialAuthNeededPayload>;
 
 // Channel-B stream-event payloads (07-channel-b §1.2). SessionEvent.payload is
 // z.unknown() (NOT a discriminated union) — these are standalone schemas parsed
@@ -5298,6 +5564,13 @@ export const SessionControlResponse = z.object({
 export type SessionControlResponse = z.infer<typeof SessionControlResponse>;
 
 export const CreateSessionRequest = withVariableSetIdAlias({
+  /**
+   * Optional UUID preallocated by an embedding host. This lets the host durably
+   * link its own projection before OpenGeni admits the initial turn. Replays
+   * must pair it with the same idempotency key; OpenGeni never derives host
+   * identity or authorization from the UUID.
+   */
+  requestedSessionId: z.string().uuid().optional(),
   initialMessage: z.string().min(1),
   // Per-session agent persona/system instructions (org-visible metadata, NOT a
   // secret). Rides the SAME system-level instructions channel the per-workspace
