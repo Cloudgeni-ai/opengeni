@@ -49,12 +49,14 @@ import {
 } from "./lib/session-create";
 import {
   buildTools,
+  buildResources,
   effortOptionsFor,
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
   initialReasoningEffort,
   labelEffort,
   mergeMcpServerOptions,
+  normalizeRepositoryUrl,
   reasoningEffortOrder,
   selectedAvailableCapabilityToolIds,
 } from "./lib/session-tools";
@@ -1111,7 +1113,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-turn-initiator-v1",
+      apiContractRevision: "2026-07-human-input-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -1457,12 +1459,44 @@ describe("scheduled task run summaries", () => {
 });
 
 describe("GitHub repository resources", () => {
+  test("uses host-aware defaults for same-name repositories across providers", () => {
+    const resources = buildResources(
+      [
+        { id: 1, url: "https://github.com/acme/app.git", ref: "main" },
+        { id: 2, url: "https://gitlab.com/acme/app.git", ref: "main" },
+        { id: 3, url: "https://dev.azure.com/acme/project/_git/app", ref: "main" },
+      ],
+      [],
+      new Set(),
+      {},
+    );
+    expect(resources.map((resource) => resource.mountPath)).toEqual([
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+      "repos/dev.azure.com/acme/project/_git/app",
+    ]);
+    expect(normalizeRepositoryUrl("https://git.example.com:8443/acme/app.git").host).toBe(
+      "git.example.com:8443",
+    );
+    expect(() =>
+      buildResources(
+        [
+          { id: 1, url: "https://github.com/Acme/App.git", ref: "main" },
+          { id: 2, url: "https://github.com/acme/app.git", ref: "main" },
+        ],
+        [],
+        new Set(),
+        {},
+      ),
+    ).toThrow("Duplicate repository mount path");
+  });
+
   test("uses normal git resources for public GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: false }), "main")).toEqual({
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
-      mountPath: "repos/example/public",
+      mountPath: "repos/github.com/example/public",
     });
   });
 
@@ -1471,7 +1505,7 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
-      mountPath: "repos/example/public",
+      mountPath: "repos/github.com/example/public",
       githubInstallationId: 123,
       githubRepositoryId: 456,
     });

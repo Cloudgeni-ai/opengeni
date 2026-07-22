@@ -1706,6 +1706,109 @@ export type FileResourceRef = z.infer<typeof FileResourceRef>;
 export const ResourceRef = z.discriminatedUnion("kind", [RepositoryResourceRef, FileResourceRef]);
 export type ResourceRef = z.infer<typeof ResourceRef>;
 
+export class ResourceMountPathError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ResourceMountPathError";
+  }
+}
+
+/**
+ * Normalize one workspace-relative resource mount path for every runtime.
+ *
+ * Backslashes are treated as separators so a path cannot be harmless on Linux
+ * but become traversal on a connected Windows machine. Empty, absolute,
+ * drive-qualified, dot-segment, NUL-containing, and repeated-separator paths
+ * fail closed instead of being silently reinterpreted.
+ */
+export function normalizeResourceMountPath(path: string): string {
+  const normalizedSeparators = path.trim().replace(/\\/g, "/");
+  if (
+    !normalizedSeparators ||
+    normalizedSeparators.startsWith("/") ||
+    /^[A-Za-z]:\//.test(normalizedSeparators) ||
+    normalizedSeparators.includes("\0")
+  ) {
+    throw new ResourceMountPathError(`invalid resource mount path: ${path}`);
+  }
+  const segments = normalizedSeparators.split("/");
+  if (
+    segments.some(
+      (segment) =>
+        !segment ||
+        segment === "." ||
+        segment === ".." ||
+        /[<>:"|?*\u0000-\u001f]/.test(segment) ||
+        /[ .]$/.test(segment) ||
+        /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment),
+    )
+  ) {
+    throw new ResourceMountPathError(`invalid resource mount path: ${path}`);
+  }
+  return segments.join("/");
+}
+
+/** Normalize a repository-internal subpath while preserving legacy `/path/` input. */
+export function normalizeRepositorySubpath(path: string): string {
+  const relative = path
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\/+|\/+$/g, "");
+  return normalizeResourceMountPath(relative);
+}
+
+/** A conservative collision identity that is portable to case-insensitive hosts. */
+export function resourceMountPathCollisionKey(path: string): string {
+  return normalizeResourceMountPath(path).normalize("NFKC").toLowerCase();
+}
+
+/**
+ * Default repository mount identity. The normalized remote host (including a
+ * non-default port) is part of the path, so equal owner/repo names on GitHub,
+ * GitLab, Azure DevOps, or a custom host do not collide. Encoding the host keeps
+ * IPv6/custom-port identities inside one portable path segment.
+ */
+export function defaultRepositoryMountPath(uri: string): string {
+  let url: URL;
+  try {
+    url = new URL(uri);
+  } catch {
+    throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
+  }
+  if (url.protocol !== "https:" || !url.host) {
+    throw new ResourceMountPathError(`invalid repository URI for mount path: ${uri}`);
+  }
+  const repositoryPath = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  const segments = repositoryPath.split("/").filter(Boolean);
+  if (segments.length < 2) {
+    throw new ResourceMountPathError(`repository URI must include owner and repo: ${uri}`);
+  }
+  return normalizeResourceMountPath(
+    `repos/${encodeURIComponent(url.host.toLowerCase())}/${segments.join("/")}`,
+  );
+}
+
+/** Resolve the exact mount used by API normalization, manifests, and clone hooks. */
+export function resourceMountPath(resource: ResourceRef): string {
+  if (resource.mountPath) return normalizeResourceMountPath(resource.mountPath);
+  return resource.kind === "file"
+    ? normalizeResourceMountPath(`files/${resource.fileId}`)
+    : defaultRepositoryMountPath(resource.uri);
+}
+
+/** Fail before sandbox execution when two resources share a portable path. */
+export function assertUniqueResourceMountPaths(resources: readonly ResourceRef[]): void {
+  const mounted = new Set<string>();
+  for (const resource of resources) {
+    const path = resourceMountPath(resource);
+    const key = resourceMountPathCollisionKey(path);
+    if (mounted.has(key)) {
+      throw new ResourceRefConflictError(`resource mount path is already attached: ${path}`);
+    }
+    mounted.add(key);
+  }
+}
+
 export const FileStatus = z.enum(["pending_upload", "ready", "failed", "expired", "deleted"]);
 export type FileStatus = z.infer<typeof FileStatus>;
 
@@ -2106,10 +2209,14 @@ export function mergeResourceRefs(
   additions: ResourceRef[],
   options: { rejectConflicts?: boolean } = {},
 ): ResourceRef[] {
+  if (options.rejectConflicts) {
+    assertUniqueResourceMountPaths(existing);
+  }
   const out = [...existing];
   const mountPaths = new Map(
-    existing.flatMap((resource) =>
-      resource.mountPath ? [[resource.mountPath, stableJson(resource)] as const] : [],
+    existing.map(
+      (resource) =>
+        [resourceMountPathCollisionKey(resourceMountPath(resource)), stableJson(resource)] as const,
     ),
   );
   const identities = new Map(
@@ -2123,11 +2230,10 @@ export function mergeResourceRefs(
       continue;
     }
     if (options.rejectConflicts) {
-      const existingAtMount = resource.mountPath ? mountPaths.get(resource.mountPath) : undefined;
+      const mountPath = resourceMountPath(resource);
+      const existingAtMount = mountPaths.get(resourceMountPathCollisionKey(mountPath));
       if (existingAtMount && existingAtMount !== serialized) {
-        throw new ResourceRefConflictError(
-          `resource mount path is already attached: ${resource.mountPath}`,
-        );
+        throw new ResourceRefConflictError(`resource mount path is already attached: ${mountPath}`);
       }
       const identity = resourceIdentityKey(resource);
       const existingIdentity = identities.get(identity);
@@ -2140,9 +2246,7 @@ export function mergeResourceRefs(
     out.push(resource);
     exact.add(serialized);
     identities.set(resourceIdentityKey(resource), serialized);
-    if (resource.mountPath) {
-      mountPaths.set(resource.mountPath, serialized);
-    }
+    mountPaths.set(resourceMountPathCollisionKey(resourceMountPath(resource)), serialized);
   }
   return out;
 }
@@ -3892,6 +3996,7 @@ export const SessionEventType = z.enum([
   "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
+  "session.humanInput.requested",
   "session.context.compaction.requested",
   "session.context.compacted",
   "session.context.compaction.skipped",
@@ -3899,6 +4004,7 @@ export const SessionEventType = z.enum([
   "user.message",
   "user.pause",
   "user.approvalDecision",
+  "user.humanInputResponse",
   "turn.queued",
   "turn.started",
   "turn.completed",
@@ -4089,8 +4195,10 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   control: [
     "session.status.changed",
     "session.requiresAction",
+    "session.humanInput.requested",
     "user.pause",
     "user.approvalDecision",
+    "user.humanInputResponse",
     "goal.set",
     "goal.updated",
     "goal.completed",
@@ -5647,6 +5755,156 @@ export const CreateSessionRequest = withVariableSetIdAlias({
 });
 export type CreateSessionRequest = z.infer<typeof CreateSessionRequest>;
 
+// Generic, host-neutral structured human input. One model tool call creates one
+// request containing one or more questions; the durable response resumes that
+// exact call. This is deliberately distinct from tool approval: an answer,
+// skip, or expiry is structured tool output, never an approve/reject decision.
+export const HumanInputQuestionKind = z.enum(["text", "single_select", "multi_select"]);
+export type HumanInputQuestionKind = z.infer<typeof HumanInputQuestionKind>;
+
+export const HumanInputOption = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().min(1).max(256),
+  description: z.string().max(2048).nullable().optional(),
+});
+export type HumanInputOption = z.infer<typeof HumanInputOption>;
+
+export const HumanInputQuestion = z
+  .object({
+    id: z.string().min(1).max(64),
+    kind: HumanInputQuestionKind,
+    prompt: z.string().min(1).max(4096),
+    label: z.string().min(1).max(128).nullable().optional(),
+    helpText: z.string().max(2048).nullable().optional(),
+    options: z.array(HumanInputOption).max(20).default([]),
+    required: z.boolean().default(true),
+    allowOther: z.boolean().default(false),
+    validation: z
+      .object({
+        minLength: z.number().int().nonnegative().max(8192).nullable().optional(),
+        maxLength: z.number().int().positive().max(8192).nullable().optional(),
+        minSelections: z.number().int().nonnegative().max(20).nullable().optional(),
+        maxSelections: z.number().int().positive().max(20).nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  })
+  .superRefine((question, ctx) => {
+    const optionIds = new Set(question.options.map((option) => option.id));
+    if (optionIds.size !== question.options.length) {
+      ctx.addIssue({ code: "custom", path: ["options"], message: "option ids must be unique" });
+    }
+    if (question.kind === "text") {
+      if (question.options.length > 0) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["options"],
+          message: "text questions cannot have options",
+        });
+      }
+      if (question.allowOther) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["allowOther"],
+          message: "text questions do not use Other",
+        });
+      }
+    } else if (question.options.length === 0) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["options"],
+        message: "select questions require options",
+      });
+    }
+    const validation = question.validation;
+    if (
+      validation?.minLength != null &&
+      validation?.maxLength != null &&
+      validation.minLength > validation.maxLength
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["validation"],
+        message: "minLength exceeds maxLength",
+      });
+    }
+    if (
+      validation?.minSelections != null &&
+      validation?.maxSelections != null &&
+      validation.minSelections > validation.maxSelections
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["validation"],
+        message: "minSelections exceeds maxSelections",
+      });
+    }
+  });
+export type HumanInputQuestion = z.infer<typeof HumanInputQuestion>;
+
+export const HumanInputRequestStatus = z.enum([
+  "pending",
+  "answered",
+  "skipped",
+  "expired",
+  "cancelled",
+]);
+export type HumanInputRequestStatus = z.infer<typeof HumanInputRequestStatus>;
+
+export const RequestHumanInputToolInput = z.object({
+  questions: z.array(HumanInputQuestion).min(1).max(20),
+  allowSkip: z.boolean().default(false),
+  expiresInSeconds: z
+    .number()
+    .int()
+    .positive()
+    .max(30 * 24 * 60 * 60)
+    .nullable()
+    .optional(),
+});
+export type RequestHumanInputToolInput = z.infer<typeof RequestHumanInputToolInput>;
+
+export const HumanInputAnswer = z.object({
+  questionId: z.string().min(1).max(64),
+  values: z.array(z.string().max(8192)).max(20),
+  other: z.string().max(8192).nullable().optional(),
+});
+export type HumanInputAnswer = z.infer<typeof HumanInputAnswer>;
+
+export const HumanInputResponse = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("answered"), answers: z.array(HumanInputAnswer).max(20) }),
+  z.object({ outcome: z.literal("skipped") }),
+  z.object({ outcome: z.literal("expired") }),
+  z.object({ outcome: z.literal("cancelled") }),
+]);
+export type HumanInputResponse = z.infer<typeof HumanInputResponse>;
+
+export const SubmitHumanInputResponseRequest = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("answered"), answers: z.array(HumanInputAnswer).max(20) }),
+  z.object({ outcome: z.literal("skipped") }),
+]);
+export type SubmitHumanInputResponseRequest = z.infer<typeof SubmitHumanInputResponseRequest>;
+
+export const SessionHumanInputRequest = z.object({
+  id: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  turnId: z.string().uuid(),
+  turnGeneration: z.number().int().positive(),
+  creationAttemptId: z.string().uuid(),
+  toolCallId: z.string().min(1).max(1024),
+  status: HumanInputRequestStatus,
+  questions: z.array(HumanInputQuestion).min(1).max(20),
+  allowSkip: z.boolean(),
+  response: HumanInputResponse.nullable(),
+  respondedBy: z.string().max(1024).nullable(),
+  respondedAt: z.string().nullable(),
+  expiresAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type SessionHumanInputRequest = z.infer<typeof SessionHumanInputRequest>;
+
 export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),
@@ -5671,6 +5929,14 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
       approvalId: z.string().min(1).max(SESSION_OPERATION_KEY_MAX_CHARS),
       decision: z.enum(["approve", "reject"]),
       message: z.string().optional(),
+    }),
+  }),
+  z.object({
+    type: z.literal("user.humanInputResponse"),
+    clientEventId: SessionOperationKey.optional(),
+    payload: z.object({
+      requestId: z.string().uuid(),
+      response: SubmitHumanInputResponseRequest,
     }),
   }),
 ]);
@@ -6367,7 +6633,7 @@ export type ClientModel = z.infer<typeof ClientModel>;
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-initiator-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-human-input-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 export const ClientConfig = z.object({

@@ -21,6 +21,9 @@ export type SessionClientLike = Pick<
   | "pauseSession"
   | "resumeSession"
   | "sendApprovalDecision"
+  | "listHumanInputRequests"
+  | "getHumanInputRequest"
+  | "submitHumanInputResponse"
   | "listEvents"
   | "streamEvents"
   // Turn queue
