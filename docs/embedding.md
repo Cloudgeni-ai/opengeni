@@ -27,6 +27,14 @@ acceptSessionUserMessage(deps, grant, workspaceId, sessionId, input);
 
 Both live in `packages/core/src/domain/sessions.ts` and expect `ApiRouteDeps` plus an `AccessGrant`. Scheduled-task validation/sync helpers live in `packages/core/src/domain/scheduled-tasks.ts`. V2 skips Hono parsing/routing, but it does not skip Postgres, EventBus, Temporal wakeups, or worker execution.
 
+**Runtime dependency isolation.** `@opengeni/runtime` bundles its OpenAI Agents
+implementation together with the Zod 4 instance that defines those runtime
+schemas. An embedding host does not need to adopt OpenGeni's Zod major and must
+not patch or symlink the Agents dependency tree. The published type declarations
+still reference the public Agents types, so the Agents packages remain declared
+dependencies, but OpenGeni's executable `dist` contains no external Agents or
+Zod import. The publish-closure guard enforces that boundary.
+
 ### Agent persona: two levers
 
 A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + variable set block) always substituted in.
@@ -304,14 +312,18 @@ surfaces use OpenGeni's standalone encrypted connection store and refresh broker
 When it is present, the host is the sole credential source: OpenGeni does not
 create or require a duplicate provider connection.
 
-Every request includes account/workspace/session scope, the exact durable turn
-and execution generation, the immutable `TurnInitiator`, the non-authoritative
-technical caller, the MCP server/tool, the opaque `connectionRef`, and whether a
-401 forced a refresh. The frozen initiator—not `sandbox:<runId>`, the session
-creator, or a synthetic worker subject—is the authorization principal. Results
-must echo account/workspace/session. OpenGeni verifies those echoes and validates
-the returned header snapshot before sending it upstream. Credential values never
-enter session events; `auth_needed` carries only reconnect metadata.
+Every request includes account/workspace scope, the immediate session and its
+workspace-scoped `rootSessionId`, the exact durable turn and execution
+generation, the immutable `TurnInitiator`, the non-authoritative technical
+caller, the MCP server/tool, the opaque `connectionRef`, and whether a 401
+forced a refresh. The same lineage is resolved for ordinary model tools and
+Toolspace, so a host can authorize a child through one durable root binding
+without mirroring every child row. The frozen initiator—not `sandbox:<runId>`,
+the session creator, or a synthetic worker subject—is the authorization
+principal. Results must echo account/workspace/immediate-session. OpenGeni
+verifies those echoes and validates the returned header snapshot before sending
+it upstream. Credential values never enter session events; `auth_needed` carries
+only reconnect metadata.
 
 The port is provider-neutral. A host can resolve its existing GitHub, GitLab,
 Azure DevOps, or other connection from the opaque reference, and can return a
@@ -416,7 +428,8 @@ write them into a sandbox.
 
 Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
 `packages/contracts/src/index.ts`, the host-export repository API in
-`packages/db/src/index.ts`, migration `0097_host_export_outbox.sql`, and
+`packages/db/src/index.ts`, migrations `0097_host_export_outbox.sql` and
+`0103_host_export_root_session.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
@@ -424,11 +437,14 @@ its own business store without polling tenant routes or treating NATS as a durab
 is optional. With no registered consumer, both export gates default to false and source transactions
 write zero outbox rows, preserving standalone behavior.
 
-Provision the projection identity **after migrations**. It is deliberately not the normal
-`opengeni_app` role: an exporter reads a cross-workspace stream, while the app role is tenant-scoped.
-Run role provisioning again after any later migration that adds host-export functions; grants cover
-the functions present when provisioning runs. One OpenGeni installation per database is supported:
-dedicated data schemas do not make the shared private/export function schemas multi-installation-safe.
+Provision the projection identity **after the first migration run**. It is deliberately not the
+normal `opengeni_app` role: an exporter reads a cross-workspace stream, while the app role is
+tenant-scoped. Provisioning grants the current API and registers same-owner default privileges;
+shipped migrations also preserve existing exporter ACLs when adding an export function, so the
+standard migration-only upgrade job does not strand a live exporter. Re-run provisioning if a
+different database principal owns later custom functions. One OpenGeni installation per database
+is supported: dedicated data schemas do not make the shared private/export function schemas
+multi-installation-safe.
 
 ```ts
 await provisionRoles(adminDatabaseUrl, {
@@ -465,6 +481,11 @@ deduplicate those keys. Session ordering is authoritative by `event.sequence`; c
 stable across sessions but deliberately not claimed to be causal. High-volume raw delta event types
 are excluded from the host stream; their completed semantic events remain. Event types are bounded
 but forward-tolerant so an older consumer can carry a newer writer's event during a rolling upgrade.
+Each session-bound event and usage fact also carries the immutable lineage `rootSessionId` captured
+with the outbox row. A host can therefore retain the immediate child id for audit while attributing
+usage or host-owned business signals to one root binding. An unresolved pre-lineage legacy row uses
+`null`; consumers must fail closed rather than guess. Child lifecycle remains child lifecycle—the
+root id is attribution context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
 Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
 new fact fails its source transaction instead of committing a poison export row, while standalone

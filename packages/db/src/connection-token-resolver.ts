@@ -53,6 +53,7 @@ export type HostMcpCredentialResolverContext = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  rootSessionId: string;
   turnId: string;
   attemptId: string | null;
   executionGeneration: number;
@@ -87,6 +88,7 @@ export function buildHostConnectionTokenResolver(
       accountId: context.accountId,
       workspaceId: context.workspaceId,
       sessionId: context.sessionId,
+      rootSessionId: context.rootSessionId,
       turnId: context.turnId,
       attemptId: context.attemptId,
       executionGeneration: context.executionGeneration,

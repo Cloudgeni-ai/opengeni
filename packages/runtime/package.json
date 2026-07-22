@@ -8,6 +8,7 @@
     "directory": "packages/runtime"
   },
   "files": [
+    "THIRD_PARTY_NOTICES",
     "dist",
     "src"
   ],
@@ -35,6 +36,7 @@
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@noble/hashes": "^1.8.0",
     "@openai/agents": "0.13.3",
     "@openai/agents-extensions": "0.13.3",
@@ -42,12 +44,15 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "debug": "4.4.3",
     "modal": "0.7.6",
-    "openai": "6.47.0"
+    "openai": "6.47.0",
+    "ws": "8.21.1"
   },
   "devDependencies": {
     "@openai/agents-core": "0.13.3",
     "tsup": "^8.5.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "zod": "4.4.3"
   }
 }

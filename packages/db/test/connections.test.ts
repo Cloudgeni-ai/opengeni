@@ -502,6 +502,7 @@ describe("buildHostConnectionTokenResolver", () => {
     accountId: "acct_1",
     workspaceId: "ws_1",
     sessionId: "session_1",
+    rootSessionId: "session_root",
     turnId: "turn_1",
     attemptId: "attempt_1",
     executionGeneration: 4,

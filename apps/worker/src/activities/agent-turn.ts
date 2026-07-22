@@ -3505,22 +3505,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           selection.repositoryIds,
         );
       };
-      const gitCredentialRootSessionId = connectionCredentials?.gitCredentials
+      // Git and MCP credentials share one lineage snapshot for this turn. A
+      // host that supplies both ports must never see two independently resolved
+      // roots for the same execution merely because the call sites are far apart.
+      const needsHostCredentialRoot = Boolean(
+        connectionCredentials?.gitCredentials || connectionCredentials?.mcpCredentials,
+      );
+      const hostCredentialRootSessionId = needsHostCredentialRoot
         ? await getSessionRootId(db, input.workspaceId, input.sessionId)
         : null;
-      if (connectionCredentials?.gitCredentials && !gitCredentialRootSessionId) {
-        throw new Error(
-          `cannot resolve host git credentials for missing session ${input.sessionId}`,
-        );
+      if (needsHostCredentialRoot && !hostCredentialRootSessionId) {
+        throw new Error(`cannot resolve host credentials for missing session ${input.sessionId}`);
       }
-      const gitCredentialAuthority = gitCredentialRootSessionId
-        ? gitCredentialAuthorityForTurn({
-            sessionId: input.sessionId,
-            rootSessionId: gitCredentialRootSessionId,
-            attemptId: input.attemptId,
-            turn,
-          })
-        : undefined;
+      const gitCredentialAuthority =
+        connectionCredentials?.gitCredentials && hostCredentialRootSessionId
+          ? gitCredentialAuthorityForTurn({
+              sessionId: input.sessionId,
+              rootSessionId: hostCredentialRootSessionId,
+              attemptId: input.attemptId,
+              turn,
+            })
+          : undefined;
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -4050,6 +4055,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
+      const mcpCredentialRootSessionId =
+        connectionCredentials?.mcpCredentials && hostCredentialRootSessionId
+          ? hostCredentialRootSessionId
+          : input.sessionId;
       // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
@@ -4061,6 +4070,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         accountId: input.accountId,
         workspaceId: input.workspaceId,
         sessionId: input.sessionId,
+        rootSessionId: mcpCredentialRootSessionId,
         attemptId: input.attemptId,
         turn,
       });

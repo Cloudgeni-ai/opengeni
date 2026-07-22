@@ -187,6 +187,9 @@ jobs:
       - name: Clean published consumer
         run: bun run test:publish-consumer
 
+      - name: Runtime embedding consumer
+        run: bun run test:runtime-embedding-consumer
+
       - name: Build React demo harness
         run: cd packages/react && bun run demo:build
 

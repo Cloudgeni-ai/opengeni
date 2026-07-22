@@ -159,6 +159,62 @@ describe("durable host export (real PostgreSQL)", () => {
       turnId: active.turn.id,
       idempotencyKey: `usage:test:${active.turn.id}`,
     });
+    const child = await createSession(app.db, {
+      accountId: active.grant.accountId,
+      workspaceId: active.grant.workspaceId!,
+      initialMessage: "child work",
+      resources: [],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      parentSessionId: active.session.id,
+      createdBy: { kind: "subject", subjectId: active.subjectId },
+    });
+    const childStarted = await initializeSessionStartAtomically(app.db, {
+      accountId: active.grant.accountId,
+      workspaceId: active.grant.workspaceId!,
+      sessionId: child.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    const [childCompleted, childLegacyUnresolved] = await appendSessionEvents(
+      app.db,
+      active.grant.workspaceId!,
+      child.id,
+      [
+        {
+          type: "agent.message.completed",
+          payload: { text: "child exported" },
+          turnId: childStarted.turn!.id,
+        },
+        {
+          type: "agent.message.completed",
+          payload: { text: "legacy child export" },
+          turnId: childStarted.turn!.id,
+        },
+      ],
+    );
+    // Model one unresolved pre-lineage row for the same session. Root lookup is
+    // cursor-bound, not session-bound: this legacy null must not erase or borrow
+    // the root captured by the adjacent current row.
+    await shared.admin`
+      update host_export_outbox
+      set root_session_id = null
+      where source_id = ${childLegacyUnresolved!.id}::uuid`;
+    await recordUsageEvent(app.db, {
+      accountId: active.grant.accountId,
+      workspaceId: active.grant.workspaceId!,
+      subjectId: active.subjectId,
+      eventType: "model.tokens",
+      quantity: 7,
+      unit: "tokens",
+      sourceResourceType: "model_response",
+      sourceResourceId: `${childStarted.turn!.id}:one`,
+      sessionId: child.id,
+      turnId: childStarted.turn!.id,
+      idempotencyKey: `usage:test:${childStarted.turn!.id}`,
+    });
 
     const eventBatch = await claim("session_event", "host-test-events");
     expect(eventBatch?.events.length).toBeGreaterThan(0);
@@ -166,6 +222,7 @@ describe("durable host export (real PostgreSQL)", () => {
     const completedExport = eventBatch?.events.find((item) => item.event.id === completed?.id);
     expect(completedExport?.event.payload).toEqual({ text: "exported" });
     expect(completedExport?.event.turnId).toBe(active.turn.id);
+    expect(completedExport?.rootSessionId).toBe(active.session.id);
     expect(completedExport?.origin).toBe("user");
     expect(completedExport?.initiator).toEqual({
       kind: "subject",
@@ -175,6 +232,14 @@ describe("durable host export (real PostgreSQL)", () => {
     const createdExport = eventBatch?.events.find((item) => item.event.type === "session.created");
     expect(createdExport?.origin).toBeNull();
     expect(createdExport?.initiator?.subjectId).toBe(active.subjectId);
+    const childExport = eventBatch?.events.find((item) => item.event.id === childCompleted?.id);
+    expect(childExport?.event.sessionId).toBe(child.id);
+    expect(childExport?.rootSessionId).toBe(active.session.id);
+    const unresolvedChildExport = eventBatch?.events.find(
+      (item) => item.event.id === childLegacyUnresolved?.id,
+    );
+    expect(unresolvedChildExport?.event.sessionId).toBe(child.id);
+    expect(unresolvedChildExport?.rootSessionId).toBeNull();
     expect(
       eventBatch?.events.every(
         (item, index, items) =>
@@ -188,11 +253,15 @@ describe("durable host export (real PostgreSQL)", () => {
     });
 
     const usageBatch = await claim("usage_event", "host-test-usage");
-    expect(usageBatch?.events).toHaveLength(1);
-    expect(usageBatch?.events[0]?.usage.quantity).toBe(42);
-    expect(usageBatch?.events[0]?.sessionId).toBe(active.session.id);
-    expect(usageBatch?.events[0]?.turnId).toBe(active.turn.id);
-    expect(usageBatch?.events[0]?.initiator?.subjectId).toBe(active.subjectId);
+    expect(usageBatch?.events).toHaveLength(2);
+    const rootUsage = usageBatch?.events.find((item) => item.sessionId === active.session.id);
+    expect(rootUsage?.usage.quantity).toBe(42);
+    expect(rootUsage?.rootSessionId).toBe(active.session.id);
+    expect(rootUsage?.turnId).toBe(active.turn.id);
+    expect(rootUsage?.initiator?.subjectId).toBe(active.subjectId);
+    const childUsage = usageBatch?.events.find((item) => item.sessionId === child.id);
+    expect(childUsage?.usage.quantity).toBe(7);
+    expect(childUsage?.rootSessionId).toBe(active.session.id);
     await acknowledgeHostExportBatch(exporter.db, {
       kind: "usage_event",
       consumerId: "host-test-usage",

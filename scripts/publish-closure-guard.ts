@@ -12,6 +12,10 @@
  *       the SDK remains zero-runtime-dep, and React only depends on SDK among
  *       @opengeni/* packages.
  *   (d) the BUILT sdk/react dist bundles reference any server/embed package.
+ *   (e) the BUILT runtime leaves OpenAI Agents or Zod externally resolved,
+ *       allowing an embedding host to change their runtime schema identity.
+ *   (f) the runtime's third-party notices omit a package present in its built
+ *       executable source maps.
  *
  * Wired into the release gate and safe to run locally without publishing.
  */
@@ -291,6 +295,16 @@ function builtContractFiles(dir: string): string[] {
   return files;
 }
 
+function builtSourceMapFiles(dir: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const filePath = join(dir, entry.name);
+    if (entry.isDirectory()) files.push(...builtSourceMapFiles(filePath));
+    else if (entry.name.endsWith(".js.map")) files.push(filePath);
+  }
+  return files;
+}
+
 for (const pkgDir of ["packages/sdk", "packages/react"]) {
   const distDir = join(repoRoot, pkgDir, "dist");
   if (!existsSync(distDir)) continue;
@@ -303,6 +317,81 @@ for (const pkgDir of ["packages/sdk", "packages/react"]) {
         `${path.slice(repoRoot.length + 1)} references a server/embed package (${leaked}). ` +
           `A server import leaked into a published client bundle.`,
       );
+    }
+  }
+}
+
+// OpenAI Agents requires Zod 4, while an embedding host may legitimately use a
+// different Zod major. The runtime build must therefore contain that whole
+// implementation boundary. Type declarations may continue to reference the
+// public Agents types, so inspect executable JavaScript only.
+const externalAgentsRuntimeImportPattern =
+  /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)["'`](?:@openai\/agents(?:[/-]|["'`])|zod(?:\/|["'`]))/;
+const runtimeDistDir = join(repoRoot, "packages/runtime/dist");
+const runtimeNoticesPath = join(repoRoot, "packages/runtime/THIRD_PARTY_NOTICES");
+const runtimePkg = readPkg("packages/runtime") as PackageJson & { files?: unknown };
+if (!existsSync(runtimeNoticesPath)) {
+  failures.push("@opengeni/runtime bundles third-party code but is missing THIRD_PARTY_NOTICES.");
+}
+if (!Array.isArray(runtimePkg.files) || !runtimePkg.files.includes("THIRD_PARTY_NOTICES")) {
+  failures.push("@opengeni/runtime must publish THIRD_PARTY_NOTICES with its bundled code.");
+}
+if (existsSync(runtimeDistDir)) {
+  for (const builtPath of builtContractFiles(runtimeDistDir).filter((path) =>
+    path.endsWith(".js"),
+  )) {
+    const text = readFileSync(builtPath, "utf8");
+    if (externalAgentsRuntimeImportPattern.test(text)) {
+      failures.push(
+        `${builtPath.slice(repoRoot.length + 1)} externally imports OpenAI Agents or Zod. ` +
+          "The runtime must bundle that schema-identity boundary for embedding hosts.",
+      );
+    }
+  }
+  if (existsSync(runtimeNoticesPath)) {
+    const notices = readFileSync(runtimeNoticesPath, "utf8");
+    const bundledPackages = new Map<string, string>();
+    for (const sourceMapPath of builtSourceMapFiles(runtimeDistDir)) {
+      const sourceMap = JSON.parse(readFileSync(sourceMapPath, "utf8")) as {
+        sources?: unknown;
+      };
+      if (!Array.isArray(sourceMap.sources)) continue;
+      for (const source of sourceMap.sources) {
+        if (typeof source !== "string") continue;
+        const match = source.match(
+          /node_modules\/\.bun\/([^/]+)\/node_modules\/((?:@[^/]+\/)?[^/]+)\//,
+        );
+        if (!match) continue;
+        const [, storeDirectory, sourcePackageName] = match;
+        const manifestPath = join(
+          repoRoot,
+          "node_modules/.bun",
+          storeDirectory!,
+          "node_modules",
+          sourcePackageName!,
+          "package.json",
+        );
+        if (!existsSync(manifestPath)) {
+          failures.push(`Bundled source package manifest is missing: ${manifestPath}`);
+          continue;
+        }
+        const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+          name?: unknown;
+          version?: unknown;
+        };
+        if (typeof manifest.name === "string" && typeof manifest.version === "string") {
+          bundledPackages.set(manifest.name, manifest.version);
+        }
+      }
+    }
+    for (const [name, version] of [...bundledPackages].sort(([left], [right]) =>
+      left.localeCompare(right),
+    )) {
+      if (!notices.includes(`${name} ${version}`)) {
+        failures.push(
+          `@opengeni/runtime bundles ${name} ${version} but THIRD_PARTY_NOTICES omits it.`,
+        );
+      }
     }
   }
 }
@@ -320,5 +409,5 @@ if (failures.length > 0) {
 }
 
 process.stdout.write(
-  `Publish closure guard passed: ${publishable.length} package(s) in the npm closure, client bundle is clean.\n`,
+  `Publish closure guard passed: ${publishable.length} package(s) in the npm closure, client bundle is clean, and runtime dependencies are isolated.\n`,
 );
