@@ -90,6 +90,7 @@ import type {
   RigCheck,
 } from "@opengeni/contracts";
 import {
+  approvalIdentifier,
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
   SESSION_EVENT_RAW_DELTA_TYPES,
@@ -26397,6 +26398,32 @@ export async function acceptSessionApprovalDecision(
             turnGeneration: turn.executionGeneration,
             triggerEventId: turn.triggerEventId,
           })
+        ) {
+          return {
+            action: "conflict",
+            sessionStatus: "requires_action",
+          } as const;
+        }
+        const approvalId = input.payload.approvalId;
+        const [runState] = await tx
+          .select({
+            turnId: schema.agentRunStates.turnId,
+            pendingApprovals: schema.agentRunStates.pendingApprovals,
+          })
+          .from(schema.agentRunStates)
+          .where(
+            and(
+              eq(schema.agentRunStates.workspaceId, input.workspaceId),
+              eq(schema.agentRunStates.sessionId, input.sessionId),
+              eq(schema.agentRunStates.turnId, turn.id),
+            ),
+          )
+          .orderBy(desc(schema.agentRunStates.stateVersion))
+          .limit(1);
+        if (
+          typeof approvalId !== "string" ||
+          !runState ||
+          !runState.pendingApprovals.some((pending) => approvalIdentifier(pending) === approvalId)
         ) {
           return {
             action: "conflict",

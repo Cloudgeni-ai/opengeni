@@ -6027,6 +6027,23 @@ export const SessionHumanInputRequest = z.object({
 });
 export type SessionHumanInputRequest = z.infer<typeof SessionHumanInputRequest>;
 
+/**
+ * Extract the stable approval identity used by both durable admission and
+ * runtime resume. Serialized SDK interruptions may place it on the wrapper or
+ * its raw item; malformed entries fail closed instead of inventing an id.
+ */
+export function approvalIdentifier(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const approval = value as Record<string, unknown>;
+  const rawItem =
+    approval.rawItem && typeof approval.rawItem === "object"
+      ? (approval.rawItem as Record<string, unknown>)
+      : null;
+  const candidate = rawItem?.callId ?? rawItem?.id ?? approval.id ?? approval.name;
+  if (typeof candidate !== "string" && typeof candidate !== "number") return null;
+  return String(candidate);
+}
+
 export const ClientSessionEvent = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("user.message"),

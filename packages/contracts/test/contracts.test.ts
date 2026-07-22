@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
   assertUniqueResourceMountPaths,
+  approvalIdentifier,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
   CapabilityPack,
@@ -61,6 +62,15 @@ describe("contracts", () => {
         reason: "missing_connection",
       }).connectionId,
     ).toBe("host:cloud:7");
+  });
+
+  test("extracts approval identity from every serialized interruption shape", () => {
+    expect(approvalIdentifier({ id: "approval-direct" })).toBe("approval-direct");
+    expect(approvalIdentifier({ rawItem: { callId: "approval-call" } })).toBe("approval-call");
+    expect(approvalIdentifier({ rawItem: { id: 42 } })).toBe("42");
+    expect(approvalIdentifier({ name: "approval-name" })).toBe("approval-name");
+    expect(approvalIdentifier({ approvalId: "unsupported-shape" })).toBeNull();
+    expect(approvalIdentifier(null)).toBeNull();
   });
 
   test("accepts create session defaults", () => {

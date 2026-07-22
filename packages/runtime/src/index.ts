@@ -12,6 +12,7 @@ import {
   sandboxLifecycleHookIds,
 } from "@opengeni/config";
 import {
+  approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
@@ -4776,7 +4777,7 @@ export function serializeApprovals(interruptions: unknown[]): unknown[] {
         return item.toJSON();
       }
       return {
-        id: approvalIdentifier(item),
+        id: approvalIdentifier(item) ?? "approval",
         name: item?.name ?? item?.rawItem?.name ?? "tool",
         arguments: item?.arguments ?? item?.rawItem?.arguments ?? null,
         raw: item,
@@ -4799,8 +4800,12 @@ export function serializeHumanInputRequests(
           throw new Error("Human-input interruption contains invalid JSON arguments");
         }
       }
+      const toolCallId = approvalIdentifier(item);
+      if (!toolCallId) {
+        throw new Error("Human-input interruption is missing a stable tool-call identity");
+      }
       return {
-        toolCallId: approvalIdentifier(item),
+        toolCallId,
         input: RequestHumanInputToolInput.parse(parsedArguments),
       };
     });
@@ -6739,11 +6744,6 @@ function sortJson(value: unknown): unknown {
   }
   return value;
 }
-
-function approvalIdentifier(item: any): string {
-  return String(item?.rawItem?.callId ?? item?.rawItem?.id ?? item?.id ?? item?.name ?? "approval");
-}
-
 function interruptionToolName(item: unknown): string {
   const candidate = item as {
     toolName?: unknown;

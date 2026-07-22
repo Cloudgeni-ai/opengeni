@@ -231,6 +231,19 @@ describe("structured human-input runtime boundary", () => {
       ]),
     ).toThrow(/invalid JSON/i);
   });
+
+  test("rejects a human-input interruption without a stable tool-call identity", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          toolName: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [{ id: "q", kind: "text", prompt: "Why?" }],
+          }),
+        },
+      ]),
+    ).toThrow(/stable tool-call identity/i);
+  });
 });
 
 describe("runtime event normalization", () => {
