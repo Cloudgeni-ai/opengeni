@@ -387,6 +387,7 @@ async function sendPublishedAgentMessage(
     {
       accountId: actor.accountId,
       workspaceId: actor.workspaceId,
+      subjectId: `agent-test:${actor.sessionId}`,
       callerSessionId: actor.sessionId,
       callerTurnId: actor.turnId,
       callerAttemptId: actor.attemptId,
@@ -420,6 +421,7 @@ async function steerPublishedAgentSession(
     {
       accountId: actor.accountId,
       workspaceId: actor.workspaceId,
+      subjectId: `agent-test:${actor.sessionId}`,
       callerSessionId: actor.sessionId,
       callerTurnId: actor.turnId,
       callerAttemptId: actor.attemptId,
@@ -889,6 +891,55 @@ afterAll(async () => {
 }, 60_000);
 
 describe("event-ordering invariant canonical session-event lock order", () => {
+  test("runs the lock-order races through a non-superuser without RLS bypass", async () => {
+    const appProbe = postgres(shared.appUrl, { max: 1 });
+    try {
+      const [identity] = await appProbe<{ currentUser: string; rowSecurity: string }[]>`
+        select current_user as "currentUser", current_setting('row_security') as "rowSecurity"`;
+      expect(identity).toEqual({ currentUser: "opengeni_app", rowSecurity: "on" });
+
+      const tenantSession = await seedRunningSession();
+      const otherTenant = await freshWorkspace();
+      const crossTenantRows = await appProbe.begin(async (tx) => {
+        await tx`
+          select
+            set_config('opengeni.account_id', ${otherTenant.accountId}, true),
+            set_config('opengeni.workspace_id', ${otherTenant.workspaceId}, true)`;
+        return await tx<{ id: string }[]>`
+          select id from sessions where id = ${tenantSession.sessionId}`;
+      });
+      expect(Array.from(crossTenantRows)).toEqual([]);
+    } finally {
+      await appProbe.end().catch(() => undefined);
+    }
+
+    const [role] = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+      select rolsuper, rolbypassrls from pg_roles where rolname = 'opengeni_app'`;
+    expect(role).toEqual({ rolsuper: false, rolbypassrls: false });
+
+    const lockedTables = await admin<
+      { relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }[]
+    >`
+      select c.relname, c.relrowsecurity, c.relforcerowsecurity
+      from pg_class c
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = 'public'
+        and c.relname in (
+          'workspace_inference_controls', 'sessions',
+          'session_turns', 'session_turn_attempts', 'session_events'
+        )
+      order by c.relname`;
+    expect(Array.from(lockedTables)).toEqual(
+      [
+        "session_events",
+        "session_turn_attempts",
+        "session_turns",
+        "sessions",
+        "workspace_inference_controls",
+      ].map((relname) => ({ relname, relrowsecurity: true, relforcerowsecurity: true })),
+    );
+  });
+
   test("serializes every generic writer with usage and streamed activity in both arrival orders", async () => {
     for (const generic of genericWriters) {
       for (const activityType of ["agent.model.usage", "agent.message.delta"] as const) {
@@ -1542,6 +1593,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
             {
               accountId: actor.accountId,
               workspaceId: actor.workspaceId,
+              subjectId: `agent-test:${actor.sessionId}`,
               callerSessionId: actor.sessionId,
               callerTurnId: actor.turnId,
               callerAttemptId: actor.attemptId,
@@ -1621,6 +1673,7 @@ describe("event-ordering invariant canonical session-event lock order", () => {
             {
               accountId: actor.accountId,
               workspaceId: actor.workspaceId,
+              subjectId: `agent-test:${actor.sessionId}`,
               callerSessionId: actor.sessionId,
               callerTurnId: actor.turnId,
               callerAttemptId: actor.attemptId,

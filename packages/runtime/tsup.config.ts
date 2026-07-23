@@ -17,5 +17,15 @@ export default defineConfig({
   dts: true,
   sourcemap: true,
   clean: true,
-  external: [/^@opengeni\//],
+  external: [
+    /^@opengeni\//,
+    /^@modelcontextprotocol\/sdk(?:$|\/)/,
+    /^debug$/,
+    /^openai(?:$|\/)/,
+    /^ws$/,
+  ],
+  // The OpenAI Agents packages require Zod 4 as a peer. Bundle that complete
+  // implementation boundary so an embedding host can use another Zod major
+  // without changing Agents' runtime schema identity underneath it.
+  noExternal: [/^@openai\/agents(?:$|\/|-)/, /^zod(?:$|\/)/],
 });

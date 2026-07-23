@@ -433,9 +433,13 @@ async function validateMcpCapabilityConnectionRef(
     providerDomain: ref.providerDomain.trim(),
     subjectScope: "workspace",
     ...(ref.connectionId ? { connectionId: ref.connectionId } : {}),
+    ...(ref.provider ? { provider: ref.provider.trim() } : {}),
     ...(ref.kind ? { kind: ref.kind } : {}),
     ...(ref.scopes ? { scopes: uniqueStrings(ref.scopes) } : {}),
     ...(ref.resource ? { resource: ref.resource } : {}),
+    ...(ref.selectedResources
+      ? { selectedResources: ref.selectedResources.map((resource) => ({ ...resource })) }
+      : {}),
   };
   if (!normalized.providerDomain) {
     throw new HTTPException(422, { message: "connectionRef.providerDomain is required" });

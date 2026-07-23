@@ -2,9 +2,12 @@ import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
 import { configuredAllowedModels, policyProviderIdForModel, type Settings } from "@opengeni/config";
 import {
   CreateSessionRequest,
+  ServiceTurnInitiator,
+  ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
   type AccessGrant,
+  type CreateSessionResponse,
   type GoalSpec,
   type Permission,
   type ReasoningEffort,
@@ -14,8 +17,11 @@ import {
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
+  type SessionAuthorizationPort,
   type SessionTurn,
   type ToolRef,
+  type TurnInitiator,
+  type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import {
   createSession,
@@ -29,6 +35,7 @@ import {
   listDistinctRigVersionIdsInGroup,
   getSandbox,
   getSession,
+  SessionIdConflictError,
   getSessionByCreateIdempotencyKey,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -36,6 +43,8 @@ import {
   getSessionTurn,
   getWorkspaceModelPolicy,
   initializeSessionStartAtomically,
+  listSessionTurns,
+  listSessionMcpServersForChildInheritance,
   requireSession,
   submitHumanPromptInTransaction,
   updateSessionTitle as updateSessionTitleRow,
@@ -44,7 +53,9 @@ import {
   type Database,
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
+  AgentCommandAuthorityError,
   SessionControlConflictError,
+  type SessionCommandActor,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -60,6 +71,7 @@ import type {
   ApiRouteDeps,
   SessionWorkflowClient,
 } from "../dependencies";
+import { requireSessionAuthorization } from "../session-authorization";
 import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
@@ -83,6 +95,99 @@ type ValidatedSessionMcpServers = {
   dbServers: CreateSessionMcpServerInput[];
   metadata: SessionMcpServerMetadata[];
 };
+
+type FrozenCreationInitiator = {
+  initiator?: TurnInitiator;
+  context?: TurnInitiatorContext;
+  actor?: Extract<SessionCommandActor, { type: "agent_attempt" }>;
+};
+
+function serviceInitiatorForGrant(grant: AccessGrant): {
+  initiator: ServiceTurnInitiator;
+  context: ServiceTurnInitiatorContext;
+} | null {
+  if (!grant.serviceInitiator) {
+    if (grant.serviceInitiatorContext) {
+      throw new HTTPException(403, {
+        message: "service initiator context requires a signed service initiator",
+      });
+    }
+    return null;
+  }
+  const initiator = ServiceTurnInitiator.safeParse(grant.serviceInitiator);
+  if (!initiator.success) {
+    throw new HTTPException(403, {
+      message: "a delegated command initiator must be a bounded service principal",
+    });
+  }
+  const context = ServiceTurnInitiatorContext.safeParse(grant.serviceInitiatorContext ?? {});
+  if (!context.success) {
+    throw new HTTPException(403, {
+      message: "delegated service initiator context is invalid or reserved",
+    });
+  }
+  const callerTurnId = grant.metadata?.["turnId"];
+  const callerAttemptId = grant.metadata?.["attemptId"];
+  const callerExecutionGeneration = grant.metadata?.["executionGeneration"];
+  if (
+    callerTurnId !== undefined ||
+    callerAttemptId !== undefined ||
+    callerExecutionGeneration !== undefined
+  ) {
+    throw new HTTPException(403, {
+      message: "a service initiator cannot replace an exact agent-attempt initiator",
+    });
+  }
+  return {
+    initiator: initiator.data,
+    context: context.data,
+  };
+}
+
+function creationInitiatorForGrant(grant: AccessGrant): FrozenCreationInitiator {
+  const serviceInitiator = serviceInitiatorForGrant(grant);
+  const callerSessionId = grant.metadata?.["sessionId"];
+  const callerTurnId = grant.metadata?.["turnId"];
+  const callerAttemptId = grant.metadata?.["attemptId"];
+  const callerExecutionGeneration = grant.metadata?.["executionGeneration"];
+  const hasCallerTurnClaim =
+    callerTurnId !== undefined ||
+    callerAttemptId !== undefined ||
+    callerExecutionGeneration !== undefined;
+  if (hasCallerTurnClaim) {
+    if (
+      typeof callerSessionId !== "string" ||
+      typeof callerTurnId !== "string" ||
+      typeof callerAttemptId !== "string" ||
+      typeof callerExecutionGeneration !== "number" ||
+      !Number.isSafeInteger(callerExecutionGeneration) ||
+      callerExecutionGeneration < 1
+    ) {
+      throw new HTTPException(403, { message: "caller attempt claims are incomplete" });
+    }
+    const actor = {
+      type: "agent_attempt",
+      sessionId: callerSessionId,
+      turnId: callerTurnId,
+      attemptId: callerAttemptId,
+      executionGeneration: callerExecutionGeneration,
+    } as const;
+    // The DB create transaction validates this exact attempt and derives the
+    // inherited subject under the same locks as the child-session insert.
+    return { actor };
+  }
+  if (serviceInitiator) {
+    return serviceInitiator;
+  }
+  return {
+    initiator: {
+      kind: "subject",
+      subjectId: grant.subjectId,
+      ...(grant.subjectLabel ? { label: grant.subjectLabel } : {}),
+    },
+    context: {},
+  };
+}
 
 function normalizedSessionMcpCredentialHeaders(
   headers: Record<string, string> | undefined,
@@ -133,6 +238,22 @@ function mcpServerConfigFromInput(server: SessionMcpServerInput): Settings["mcpS
     ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
     cacheToolsList: server.cacheToolsList ?? false,
     ...(server.requireApproval !== undefined ? { requireApproval: server.requireApproval } : {}),
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
+  };
+}
+
+function mcpServerConfigFromStoredInput(
+  server: CreateSessionMcpServerInput,
+): Settings["mcpServers"][number] {
+  return {
+    id: server.id,
+    ...(server.name ? { name: server.name } : {}),
+    url: server.url,
+    ...(server.allowedTools ? { allowedTools: server.allowedTools } : {}),
+    ...(server.timeoutMs ? { timeoutMs: server.timeoutMs } : {}),
+    cacheToolsList: server.cacheToolsList ?? false,
+    ...(server.requireApproval != null ? { requireApproval: server.requireApproval } : {}),
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -144,6 +265,7 @@ function mcpServerConfigFromMetadata(
     ...(server.name ? { name: server.name } : {}),
     url: server.url,
     cacheToolsList: false,
+    ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
 
@@ -177,7 +299,9 @@ function validateSessionMcpServersForCreate(
     return { runtimeServers: [], dbServers: [], metadata: [] };
   }
   requirePermission(grant, "mcp_servers:attach");
-  const encryptionKey = requireVariableSetEncryption(settings);
+  const encryptionKey = servers.some((server) => Object.keys(server.headers ?? {}).length > 0)
+    ? requireVariableSetEncryption(settings)
+    : null;
   const existingIds = new Set(settings.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
   const runtimeServers: Settings["mcpServers"] = [];
@@ -195,7 +319,7 @@ function validateSessionMcpServersForCreate(
     const headersEncrypted = Object.fromEntries(
       Object.entries(headers).map(([name, value]) => [
         name,
-        encryptVariableSetValue(encryptionKey, value),
+        encryptVariableSetValue(encryptionKey!, value),
       ]),
     );
     runtimeServers.push(mcpServerConfigFromInput(server));
@@ -207,6 +331,7 @@ function validateSessionMcpServersForCreate(
       timeoutMs: server.timeoutMs ?? null,
       cacheToolsList: server.cacheToolsList ?? false,
       requireApproval: server.requireApproval ?? null,
+      connectionRef: server.connectionRef ?? null,
       headersEncrypted,
     });
     metadata.push({
@@ -215,9 +340,52 @@ function validateSessionMcpServersForCreate(
       url: server.url,
       headerNames: Object.keys(headersEncrypted).sort(),
       credentialVersion: 1,
+      connectionRef: server.connectionRef ?? null,
     });
   }
   return { runtimeServers, dbServers, metadata };
+}
+
+function validateInheritedSessionMcpServersForCreate(
+  servers: CreateSessionMcpServerInput[],
+): ValidatedSessionMcpServers {
+  if (servers.length === 0) {
+    return { runtimeServers: [], dbServers: [], metadata: [] };
+  }
+  const seenIds = new Set<string>();
+  for (const server of servers) {
+    if (seenIds.has(server.id)) {
+      throw new HTTPException(422, {
+        message: `duplicate inherited session MCP server id: ${server.id}`,
+      });
+    }
+    seenIds.add(server.id);
+    if (reservedSessionMcpServerIds.has(server.id)) {
+      throw new HTTPException(422, {
+        message: `reserved inherited session MCP server id: ${server.id}`,
+      });
+    }
+  }
+  // A newly enabled deployment/workspace capability may now reuse an id that
+  // belonged to this parent attachment first. Preserve the parent's existing
+  // session-overlay precedence instead of making child creation depend on a
+  // later workspace setting; settingsWithSessionMcpServerConfigs performs that
+  // same overlay for ordinary parent turns.
+  return {
+    runtimeServers: servers.map(mcpServerConfigFromStoredInput),
+    dbServers: servers.map((server) => ({
+      ...server,
+      headersEncrypted: { ...(server.headersEncrypted ?? {}) },
+    })),
+    metadata: servers.map((server) => ({
+      id: server.id,
+      name: server.name ?? null,
+      url: server.url,
+      headerNames: Object.keys(server.headersEncrypted ?? {}).sort(),
+      credentialVersion: 1,
+      connectionRef: server.connectionRef ?? null,
+    })),
+  };
 }
 
 function validateSessionMcpCredentialUpdates(input: {
@@ -258,6 +426,7 @@ function validateSessionMcpCredentialUpdates(input: {
 }
 
 export async function createAndStartSession(input: {
+  requestedSessionId?: string;
   db: Database;
   bus: EventBus;
   workflowClient: SessionWorkflowClient;
@@ -271,6 +440,9 @@ export async function createAndStartSession(input: {
   reasoningEffort: Settings["openaiReasoningEffort"];
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
+  createdBy?: TurnInitiator;
+  createdByContext?: TurnInitiatorContext;
+  createdByActor?: Extract<SessionCommandActor, { type: "agent_attempt" }> | null;
   // Names/ids only; the session.created payload never carries variable values.
   variableSet?: { id: string; name: string } | null;
   // The rig + frozen active rig version resolved at create (M3). Both null ⇒ a
@@ -317,7 +489,7 @@ export async function createAndStartSession(input: {
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
-}) {
+}): Promise<CreateSessionResponse> {
   const sessionMetadata = {
     ...input.metadata,
     model: input.model,
@@ -332,6 +504,9 @@ export async function createAndStartSession(input: {
       input.createIdempotencyKey,
     );
     if (existing) {
+      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+        throw new SessionIdConflictError(input.requestedSessionId);
+      }
       return await finishStartSession(
         existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
         existing,
@@ -344,12 +519,16 @@ export async function createAndStartSession(input: {
     // advances the coalesced wake revision so an in-flight stale delivery can
     // never acknowledge work committed by the other caller.
     const { session: keyed, created } = await createSessionWithIdempotencyKey(input.db, {
+      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
       resources: input.resources,
       tools: input.tools,
       metadata: sessionMetadata,
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+      createdByActor: input.createdByActor ?? null,
       model: input.model,
       sandboxBackend: input.sandboxBackend,
       variableSetId: input.variableSet?.id ?? null,
@@ -372,12 +551,16 @@ export async function createAndStartSession(input: {
     return await finishStartSession(input, keyed);
   }
   const session = await createSession(input.db, {
+    ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: input.initialMessage,
     resources: input.resources,
     tools: input.tools,
     metadata: sessionMetadata,
+    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+    ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+    createdByActor: input.createdByActor ?? null,
     model: input.model,
     sandboxBackend: input.sandboxBackend,
     variableSetId: input.variableSet?.id ?? null,
@@ -421,7 +604,7 @@ async function finishStartSession(
     } | null;
   },
   session: Session,
-): Promise<Session> {
+): Promise<CreateSessionResponse> {
   // Create-time machine targeting (A-2a): seed the active-sandbox pointer BEFORE
   // the atomic initial turn transaction, so the FIRST turn routes to the chosen
   // machine. swapActiveSandbox does
@@ -488,7 +671,12 @@ async function finishStartSession(
       wakeRevision: started.workflowWakeRevision,
     });
   }
-  return await requireSession(input.db, session.workspaceId, session.id);
+  const persisted = await requireSession(input.db, session.workspaceId, session.id);
+  const initialTurnId =
+    started.turn?.id ??
+    (await listSessionTurns(input.db, session.workspaceId, session.id, 1))[0]?.id ??
+    null;
+  return { ...persisted, initialTurnId };
 }
 
 export function workflowIdForSession(sessionId: string): string {
@@ -616,6 +804,8 @@ export async function postUserMessageTurn(input: {
   delivery?: "send" | "steer";
   origin?: "human" | "operator";
   actor?: string;
+  actorLabel?: string;
+  commandActor?: SessionCommandActor;
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
@@ -636,7 +826,11 @@ export async function postUserMessageTurn(input: {
           workspaceId,
           sessionId,
           subjectId: input.actor ?? accountId,
-          actor: { type: "human", subjectId: input.actor ?? accountId },
+          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
+          actor: input.commandActor ?? {
+            type: "human",
+            subjectId: input.actor ?? accountId,
+          },
           operationKey,
           delivery: input.delivery ?? "send",
           controlEtag: input.controlEtag ?? null,
@@ -718,8 +912,10 @@ export async function postUserMessageTurn(input: {
  * Full create-session flow shared by `POST /sessions` and the first-party MCP
  * `session_create` tool: payload validation, resource/tool/variableSet
  * checks, usage limits, session start, and usage recording. `rawPayload` is
- * the unparsed request body so absent-vs-empty `tools` keeps its meaning
- * (absent applies the workspace's default capability MCP tools).
+ * the unparsed request body so absent-vs-empty execution-context fields keep
+ * their meaning: a child inherits omitted resources/tools/mcpServers from its
+ * trusted immediate parent, while explicit arrays (including []) win. A
+ * top-level create with omitted tools applies workspace-default capability MCPs.
  */
 export async function createSessionForRequest(
   deps: ApiRouteDeps,
@@ -729,25 +925,56 @@ export async function createSessionForRequest(
 ): Promise<Session> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
+  // Parent linkage and execution-context inheritance come ONLY from the
+  // worker-signed sessionId claim. A caller cannot nominate a parent in the
+  // payload, so inheriting an existing repository/tool/credential snapshot does
+  // not turn sessions:create into arbitrary cross-session read authority.
+  const parentSessionId =
+    typeof grant.metadata?.["sessionId"] === "string"
+      ? (grant.metadata["sessionId"] as string)
+      : null;
+  if (parentSessionId) {
+    await requireSessionAuthorization(deps, grant, {
+      sessionId: parentSessionId,
+      operation: "session.child.create",
+      surface: "core",
+    });
+  }
+  const parentSession = parentSessionId ? await getSession(db, workspaceId, parentSessionId) : null;
+  if (parentSessionId && !parentSession) {
+    throw new HTTPException(404, {
+      message: `parent session not found in workspace: ${parentSessionId}`,
+    });
+  }
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
     settings,
   );
-  const sessionMcpServers = validateSessionMcpServersForCreate(
-    capabilityRuntimeSettings,
-    grant,
-    payload.mcpServers,
-  );
+  const sessionMcpServers = hasOwnProperty(rawPayload, "mcpServers")
+    ? validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers)
+    : parentSession
+      ? validateInheritedSessionMcpServersForCreate(
+          await listSessionMcpServersForChildInheritance(db, workspaceId, parentSession.id),
+        )
+      : validateSessionMcpServersForCreate(capabilityRuntimeSettings, grant, payload.mcpServers);
   const runtimeSettings = settingsWithSessionMcpServerConfigs(
     capabilityRuntimeSettings,
     sessionMcpServers.runtimeServers,
   );
-  const resources = normalizeResources(payload.resources);
-  const requestedTools = validateToolRefs(payload.tools, runtimeSettings);
-  const defaultedTools = hasOwnProperty(rawPayload, "tools")
-    ? requestedTools
-    : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
+  const resources = normalizeResources(
+    hasOwnProperty(rawPayload, "resources")
+      ? payload.resources
+      : (parentSession?.resources ?? payload.resources),
+  );
+  const requestedTools = validateToolRefs(
+    hasOwnProperty(rawPayload, "tools") ? payload.tools : (parentSession?.tools ?? payload.tools),
+    runtimeSettings,
+  );
+  const defaultedTools =
+    hasOwnProperty(rawPayload, "tools") || parentSession
+      ? requestedTools
+      : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
   // The first-party MCP server is attached to EVERY session. It hosts the
   // session's own metadata tool (set_session_title) + goal tools, and — only
   // when the grant carries the permission — the orchestration/variableSet/
@@ -813,11 +1040,18 @@ export async function createSessionForRequest(
   );
   const model = payload.model ?? settings.openaiModel;
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  // Parent linkage was resolved above, before context validation. A child with
+  // no explicit permission override inherits the creating session's effective
+  // grant instead of silently expanding to standalone worker defaults.
   // A session's first-party MCP token can carry a non-default permission set
   // (how an operator hands a manager-style session the orchestration tools),
   // but never one out-ranking its creator: every requested permission must be
-  // held by the creating grant.
-  let firstPartyMcpPermissions = payload.firstPartyMcpPermissions ?? null;
+  // held by the creating grant. A top-level omission keeps the deployment's
+  // normal worker defaults. A child omission inherits its creator's exact
+  // effective grant, preserving a host/operator's narrowed capability boundary
+  // through the whole session tree.
+  let firstPartyMcpPermissions =
+    payload.firstPartyMcpPermissions ?? (parentSessionId ? [...new Set(grant.permissions)] : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -833,21 +1067,21 @@ export async function createSessionForRequest(
       });
     }
   }
-  // Invariant: a goal-bearing session always carries goals:manage in its
-  // effective first-party permissions. Without it the worker's delegated
-  // token never sees the goal tools (goal_complete/goal_pause/...), so the
-  // agent cannot stop its own goal and the continuation loop runs until an
-  // operator intervenes. The auto-added permission is deliberately exempt
-  // from the creating-grant check above: goal tools are scoped to the
-  // spawned session itself via the worker-signed sessionId claim, so a
-  // worker managing its OWN goal is not an escalation of the spawner's
-  // authority.
+  // A goal-bearing session with an explicit/effective permission set must
+  // already carry goals:manage. Without it the worker cannot stop its own
+  // continuation loop, but silently adding it would violate the child
+  // authority contract: a child inherits or narrows its creator's exact grant
+  // and never gains an unrequested permission. Top-level omission remains the
+  // deployment's worker default, which includes the goal tools.
   if (
     payload.goal &&
     firstPartyMcpPermissions &&
     !firstPartyMcpPermissions.includes("goals:manage")
   ) {
-    firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
+    throw new HTTPException(422, {
+      message:
+        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+    });
   }
   // Parent linkage: a worker is linked to its manager ONLY from the
   // worker-signed sessionId claim on the creating grant — the manager
@@ -860,10 +1094,6 @@ export async function createSessionForRequest(
   // its completion wake injects a user.message + queued turn into that session
   // without holding sessions:control on it (a cross-session write escalation).
   // The claim is the only trustworthy parent source.
-  const parentSessionId =
-    typeof grant.metadata?.["sessionId"] === "string"
-      ? (grant.metadata["sessionId"] as string)
-      : null;
   // Shared-sandbox placement (addendum 05 §D.2/§D.3, decision I10/OD-S1).
   //
   // The DEFAULT rule is context-dependent and resolved server-side from the
@@ -921,12 +1151,10 @@ export async function createSessionForRequest(
           "sandbox:'shared' requires a parent session (spawn from inside a session); use 'new' for a top-level create.",
       });
     }
-    const parent = await getSession(db, workspaceId, parentSessionId);
-    if (!parent) {
-      throw new HTTPException(404, {
-        message: `parent session not found in workspace: ${parentSessionId}`,
-      });
+    if (!parentSession) {
+      throw new Error("trusted parent session was not resolved");
     }
+    const parent = parentSession;
     const parentBoxed = parent.sandboxBackend !== "none";
     const variableSetMismatch =
       parentBoxed && !variableSetMatchesGroup(parent.variableSetId ?? null);
@@ -1074,53 +1302,71 @@ export async function createSessionForRequest(
     quantity: 1,
     model,
   });
-  const session = await createAndStartSession({
-    db,
-    bus,
-    workflowClient,
-    accountId: grant.accountId,
-    workspaceId,
-    initialMessage: payload.initialMessage,
-    resources,
-    tools,
-    ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-    model,
-    reasoningEffort,
-    // A shared spawn inherits the box's backend; a caller-supplied
-    // sandboxBackend on a shared spawn is ignored (it is the same box). A
-    // machine-targeted top-level create labels the home "selfhosted"
-    // (machineHomeBackend), overriding the caller/deployment default so the row
-    // matches where the session actually runs.
-    sandboxBackend:
-      inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
-    // Mirror the backend relabel on the OS axis: only a machine-targeted
-    // top-level create carries a derived OS; everything else is omitted and the
-    // "linux" default holds (shared spawns keep the parent-box behavior).
-    ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
-    sandboxGroupId,
-    metadata: payload.metadata,
-    variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
-    // Frozen rig binding (M3): both null for a rig-less session (today's path).
-    rigId: frozenRigId,
-    rigVersionId: frozenRigVersionId,
-    goal: payload.goal ?? null,
-    // Per-session persona instructions (already trimmed/validated by the
-    // contracts schema). Persisted on the row; composed system-level at turn
-    // time. Not surfaced as an event.
-    instructions: payload.instructions ?? null,
-    firstPartyMcpPermissions,
-    mcpServers: sessionMcpServers.dbServers,
-    sessionMcpServers: sessionMcpServers.metadata,
-    parentSessionId,
-    createIdempotencyKey: payload.idempotencyKey ?? null,
-    // Create-time machine targeting (A-2a): when a target sandbox is named, the
-    // active-sandbox pointer is seeded race-free inside createAndStartSession
-    // (after the row exists, before the first turn dispatches). Validation
-    // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
-    seedTargetSandbox: payload.targetSandboxId
-      ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
-      : null,
-  });
+  const creationInitiator = creationInitiatorForGrant(grant);
+  let session: CreateSessionResponse;
+  try {
+    session = await createAndStartSession({
+      ...(payload.requestedSessionId ? { requestedSessionId: payload.requestedSessionId } : {}),
+      db,
+      bus,
+      workflowClient,
+      accountId: grant.accountId,
+      workspaceId,
+      initialMessage: payload.initialMessage,
+      resources,
+      tools,
+      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      model,
+      reasoningEffort,
+      // A shared spawn inherits the box's backend; a caller-supplied
+      // sandboxBackend on a shared spawn is ignored (it is the same box). A
+      // machine-targeted top-level create labels the home "selfhosted"
+      // (machineHomeBackend), overriding the caller/deployment default so the row
+      // matches where the session actually runs.
+      sandboxBackend:
+        inheritedBackend ?? machineHomeBackend ?? payload.sandboxBackend ?? settings.sandboxBackend,
+      // Mirror the backend relabel on the OS axis: only a machine-targeted
+      // top-level create carries a derived OS; everything else is omitted and the
+      // "linux" default holds (shared spawns keep the parent-box behavior).
+      ...(machineHomeOs ? { sandboxOs: machineHomeOs } : {}),
+      sandboxGroupId,
+      metadata: payload.metadata,
+      ...(creationInitiator.initiator ? { createdBy: creationInitiator.initiator } : {}),
+      ...(creationInitiator.context ? { createdByContext: creationInitiator.context } : {}),
+      createdByActor: creationInitiator.actor ?? null,
+      variableSet: variableSet ? { id: variableSet.id, name: variableSet.name } : null,
+      // Frozen rig binding (M3): both null for a rig-less session (today's path).
+      rigId: frozenRigId,
+      rigVersionId: frozenRigVersionId,
+      goal: payload.goal ?? null,
+      // Per-session persona instructions (already trimmed/validated by the
+      // contracts schema). Persisted on the row; composed system-level at turn
+      // time. Not surfaced as an event.
+      instructions: payload.instructions ?? null,
+      firstPartyMcpPermissions,
+      mcpServers: sessionMcpServers.dbServers,
+      sessionMcpServers: sessionMcpServers.metadata,
+      parentSessionId,
+      createIdempotencyKey: payload.idempotencyKey ?? null,
+      // Create-time machine targeting (A-2a): when a target sandbox is named, the
+      // active-sandbox pointer is seeded race-free inside createAndStartSession
+      // (after the row exists, before the first turn dispatches). Validation
+      // (ownership/liveness) lives in swapActiveSandbox; an invalid target 422s.
+      seedTargetSandbox: payload.targetSandboxId
+        ? { sandboxId: payload.targetSandboxId, settings, workingDir: payload.workingDir ?? null }
+        : null,
+    });
+  } catch (error) {
+    if (error instanceof AgentCommandAuthorityError) {
+      throw new HTTPException(403, { message: error.message });
+    }
+    if (error instanceof SessionIdConflictError) {
+      throw new HTTPException(409, {
+        message: "requested session id is already in use",
+      });
+    }
+    throw error;
+  }
   await recordWorkspaceUsage(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -1130,6 +1376,10 @@ export async function createSessionForRequest(
     unit: "run",
     sourceResourceType: "session",
     sourceResourceId: session.id,
+    sessionId: session.id,
+    initiator: session.createdBy,
+    initiatorContext: session.createdByContext,
+    origin: creationInitiator.actor ? "system" : "user",
     idempotencyKey: `agent_run.created:${workspaceId}:${session.id}`,
   });
   return session;
@@ -1163,6 +1413,11 @@ export async function acceptSessionUserMessage(
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: input.delivery === "steer" ? "session.steer" : "session.append",
+    surface: "core",
+  });
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -1202,6 +1457,7 @@ export async function acceptSessionUserMessage(
     session: existingSession,
     updates: input.mcpCredentialUpdates ?? [],
   });
+  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
   const { accepted, turn } = await postUserMessageTurn({
     db,
     bus,
@@ -1217,8 +1473,21 @@ export async function acceptSessionUserMessage(
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
     delivery: input.delivery ?? "send",
-    origin: input.origin ?? "human",
+    origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
     actor: grant.subjectId,
+    ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
+    ...(delegatedServiceInitiator
+      ? {
+          commandActor: {
+            type: "service" as const,
+            subjectId: delegatedServiceInitiator.initiator.subjectId,
+            ...(delegatedServiceInitiator.initiator.label
+              ? { subjectLabel: delegatedServiceInitiator.initiator.label }
+              : {}),
+            context: delegatedServiceInitiator.context,
+          },
+        }
+      : {}),
     ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
     ...(input.expectedDraftRevision !== undefined
       ? { expectedDraftRevision: input.expectedDraftRevision }
@@ -1234,6 +1503,11 @@ export async function acceptSessionUserMessage(
     unit: "run",
     sourceResourceType: "session_turn",
     sourceResourceId: turn.id,
+    sessionId,
+    turnId: turn.id,
+    initiator: turn.initiator,
+    initiatorContext: turn.initiatorContext,
+    origin: turn.source,
     idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
   });
   return { accepted, turn };
@@ -1249,13 +1523,27 @@ export async function acceptSessionUserMessage(
  * happened so callers can avoid double work.
  */
 export async function updateSessionTitle(
-  deps: { db: Database; bus: EventBus },
-  workspaceId: string,
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
   sessionId: string,
   title: string,
   source: "user" | "agent",
-): Promise<{ updated: boolean; title: string | null }> {
+): Promise<{
+  updated: boolean;
+  title: string | null;
+  relatedSessionAccess: "target" | "root";
+}> {
   const { db, bus } = deps;
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.title.write",
+    surface: "core",
+  });
+  const workspaceId = grant.workspaceId;
   const result = await updateSessionTitleRow(db, { workspaceId, sessionId, title, source });
   if (result.updated) {
     await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
@@ -1268,11 +1556,30 @@ export async function updateSessionTitle(
       },
     ]);
   }
-  return result;
+  return {
+    ...result,
+    relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
+  };
 }
 
-export async function readSessionLineage(db: Database, workspaceId: string, sessionId: string) {
-  const lineage = await getSessionLineage(db, workspaceId, sessionId);
+export async function readSessionLineage(
+  deps: Pick<ApiRouteDeps, "db" | "sessionAuthorization">,
+  grant: AccessGrant,
+  sessionId: string,
+) {
+  const authorization = await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.lineage.read",
+    surface: "core",
+  });
+  if (authorization?.relatedSessionAccess === "target") {
+    const session = await getSession(deps.db, grant.workspaceId, sessionId);
+    if (!session) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    return { ancestors: [], children: [], truncated: false };
+  }
+  const lineage = await getSessionLineage(deps.db, grant.workspaceId, sessionId);
   if (!lineage) {
     throw new HTTPException(404, { message: "session not found" });
   }

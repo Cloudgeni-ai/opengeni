@@ -38,7 +38,9 @@ means reviewers failed to notice a problem.
 Every live evidence bundle MUST bind:
 
 - full 40-character OpenGeni source SHA;
-- API, worker, web, relay, and migration image digests;
+- the immutable `release-candidate.json` URL and SHA-256;
+- API, worker, web, relay, and stock headless-sandbox image digests, with
+  migrations explicitly aliased to the API manifest;
 - package versions and package tarball integrity hashes;
 - deployment environment and workflow run URL;
 - browser name/version, operating system, viewport, device scale factor, input
@@ -56,17 +58,29 @@ Evidence MUST NOT contain raw credentials, cookies, signed object URLs,
 kubeconfigs, customer data, conversation content outside the deterministic
 fixture, or unredacted provider responses.
 
-The pre-publication release workflow downloads the sanitized JSON bundle from
-the supplied HTTPS location, verifies its SHA-256, and validates it against
+The manually dispatched release-candidate workflow accepts the exact package
+plan, requires the current versioned `main` SHA with no pending changesets,
+builds each physical image at most once under a full-SHA candidate tag, and
+publishes an immutable `opengeni-candidate-<sourceSha>` receipt. A retry reuses
+an already-present manifest instead of rebuilding it.
+
+The pre-publication release workflow downloads both that candidate receipt and
+the sanitized schema-v2 acceptance bundle from their supplied HTTPS locations,
+verifies both SHA-256 values, and validates the bundle against
 [`scripts/workbench-acceptance-contract.ts`](../scripts/workbench-acceptance-contract.ts).
 The validator rejects a missing environment/requirement pair, retries, skips,
-known defects, artifact drift, sub-budget performance evidence, emulated
-real-device claims, fewer than ten desktop or mobile polish passes, a canary
-window shorter than 72 hours, and secret-bearing evidence. A checkbox or prose
-summary is never accepted in place of the parsed bundle.
+known defects, changed/missing/extra image roles, a migration digest that does
+not equal the API digest, candidate/staging/production drift, sub-budget
+performance evidence, emulated real-device claims, fewer than ten desktop or
+mobile polish passes, a canary window shorter than 72 hours, and secret-bearing
+evidence. A checkbox or prose summary is never accepted in place of the parsed
+bundle.
 
 Staging and production evidence MUST identify the same source SHA and image
-digests. Promotion imports or reuses those digests; it never rebuilds them.
+digests as the candidate receipt. Final release promotion creates version,
+full-SHA, and `latest` aliases for those accepted manifests, verifies each alias
+still resolves to the accepted digest, and writes the BOM from the receipt. It
+never rebuilds them.
 
 ## 3. Dedicated live fixture
 
@@ -290,17 +304,23 @@ The acceptance bundle MUST prove:
 The release sequence is linear and fail-closed:
 
 1. Merge reviewed source to `main`.
-2. Build immutable artifacts once and record digests.
-3. Deploy those exact digests to staging.
-4. Pass the complete authenticated live matrix on staging.
-5. Run a failure-free staging soak long enough to cover sandbox expiry,
+2. Merge the generated Version PR so the release source has exact package
+   versions and no pending changesets.
+3. Dispatch `release-candidate.yml` from that exact current `main` SHA and
+   package plan. Build the five physical images once, record their digests, and
+   record `migration → api`.
+4. Deploy those exact receipt digests to staging.
+5. Pass the complete authenticated live matrix on staging.
+6. Run a failure-free staging soak long enough to cover sandbox expiry,
    hibernation, signed-URL expiry, and scheduled canary cycles.
-6. Promote the identical digests to production; do not rebuild.
-7. Re-run the production-safe acceptance subset immediately.
-8. Run 72 hours of production canaries with zero failed, skipped, missing, or
+7. Promote the identical digests to production; do not rebuild.
+8. Re-run the production-safe acceptance subset immediately.
+9. Run 72 hours of production canaries with zero failed, skipped, missing, or
    late cycles and no workbench SLO breach.
-9. Publish client packages only from the verified release commit.
-10. Install the packages into a clean registry-only consumer and repeat the
+10. Publish packages only from the verified release commit, then retag the
+    accepted manifests and emit the immutable package/image BOM without a
+    Docker build.
+11. Install the packages into a clean registry-only consumer and repeat the
     embedding smoke for CSR, SSR/hydration, optional-peer degradation, and
     production build output.
 

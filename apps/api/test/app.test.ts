@@ -12,6 +12,7 @@ import {
   replaySessionEvents,
   routeLabel,
   validateGitHubRepositorySelectionShape,
+  validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
   workflowIdForSession,
@@ -66,8 +67,67 @@ describe("API helpers", () => {
       uri: "https://github.com/OpenAI/example.git",
       ref: "main",
       subpath: "infra",
-      mountPath: "repos/OpenAI/example",
+      mountPath: "repos/github.com/OpenAI/example",
     });
+  });
+
+  test("preserves custom Git HTTPS ports during normalization", () => {
+    expect(
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://git.example.com:8443/acme/repo.git",
+          ref: "main",
+          provider: "gitlab",
+        },
+      ])[0],
+    ).toMatchObject({
+      uri: "https://git.example.com:8443/acme/repo.git",
+      mountPath: "repos/git.example.com%3A8443/acme/repo",
+    });
+  });
+
+  test("keeps same-name repositories on different providers collision-free", () => {
+    expect(
+      normalizeResources([
+        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/app.git",
+          ref: "main",
+          provider: "gitlab",
+        },
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/project/_git/app",
+          ref: "main",
+          provider: "azure_devops",
+        },
+      ]).map((resource) => resource.mountPath),
+    ).toEqual([
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+      "repos/dev.azure.com/acme/project/_git/app",
+    ]);
+  });
+
+  test("rejects explicit mount collisions under portable case folding", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          mountPath: "repos/Shared/App",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/two.git",
+          ref: "main",
+          mountPath: "repos/shared/app",
+        },
+      ]),
+    ).toThrow("duplicate resource mount path");
   });
 
   test("preserves provider-neutral repository credential metadata while normalizing", () => {
@@ -79,6 +139,8 @@ describe("API helpers", () => {
         provider: "gitlab",
         repositoryId: "gl-123",
         connectionId: "conn-1",
+        credentialBindingId: "host-binding-1",
+        access: "read",
       },
     ]);
 
@@ -89,8 +151,44 @@ describe("API helpers", () => {
       provider: "gitlab",
       repositoryId: "gl-123",
       connectionId: "conn-1",
-      mountPath: "repos/OpenAI/example",
+      credentialBindingId: "host-binding-1",
+      access: "read",
+      mountPath: "repos/gitlab.com/OpenAI/example",
     });
+  });
+
+  test("rejects one credential binding id assigned to multiple providers", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          provider: "github",
+          credentialBindingId: "shared-id",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/two.git",
+          ref: "main",
+          provider: "gitlab",
+          credentialBindingId: "shared-id",
+        },
+      ]),
+    ).toThrow("multiple Git providers");
+  });
+
+  test("rejects a credential binding without an explicit or legacy-inferred provider", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://example.com/acme/repo.git",
+          ref: "main",
+          credentialBindingId: "ambiguous-host-binding",
+        },
+      ]),
+    ).toThrow("require a Git provider");
   });
 
   test("normalizes file resources into sandbox mount paths", () => {
@@ -214,9 +312,9 @@ describe("API helpers", () => {
     expect(shouldCreateScheduleAfterUpdateError(new Error("network unavailable"))).toBe(false);
   });
 
-  test("rejects selected GitHub App repos from multiple installations", () => {
-    expect(() =>
-      validateGitHubRepositorySelectionShape([
+  test("accepts selected GitHub App repos from multiple installations", () => {
+    expect(
+      validateGitHubRepositorySelectionShapes([
         {
           kind: "repository",
           uri: "https://github.com/a/one.git",
@@ -232,7 +330,7 @@ describe("API helpers", () => {
           githubRepositoryId: 22,
         },
       ]),
-    ).toThrow("one installation");
+    ).toEqual([1, 2]);
   });
 
   test("rejects incomplete GitHub App repository metadata", () => {

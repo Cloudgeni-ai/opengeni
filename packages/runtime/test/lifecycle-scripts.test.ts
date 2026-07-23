@@ -6,6 +6,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   azureCliLoginCommand,
+  gitCredentialBindingHash,
+  gitCredentialBindingTokenRefreshCommand,
   gitProviderTokenRefreshCommand,
   repositoryCloneCommand,
 } from "../src/index";
@@ -38,12 +40,24 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       githubRepositoryId: 456,
     },
   ): string {
-    const generated = repositoryCloneCommand([resource]);
+    const generated = repositoryCloneCommand([
+      { ...resource, mountPath: resource.mountPath ?? "repos/test/repository" },
+    ]);
     const withoutInvocations = generated
       .split("\n")
       .filter((line) => !line.startsWith("clone_repository '"))
       .join("\n");
     return `${withoutInvocations}\nclone_repository '${target}' '${uri}' 'main' ''`;
+  }
+
+  function setupScript(
+    resources: Parameters<typeof repositoryCloneCommand>[0],
+    bindings: NonNullable<Parameters<typeof repositoryCloneCommand>[1]>,
+  ): string {
+    return repositoryCloneCommand(resources, bindings)
+      .split("\n")
+      .filter((line) => !line.startsWith("clone_repository '"))
+      .join("\n");
   }
 
   function makeOrigin(root: string): string {
@@ -82,6 +96,29 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       return { status: e.status ?? 1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
     }
   }
+
+  test("rejects one remote claimed by two credential bindings before sandbox execution", () => {
+    expect(() =>
+      repositoryCloneCommand([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/repo.git",
+          ref: "main",
+          mountPath: "repos/test/one",
+          provider: "github",
+          credentialBindingId: "one",
+        },
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/repo",
+          ref: "feature",
+          mountPath: "repos/test/two",
+          provider: "github",
+          credentialBindingId: "two",
+        },
+      ]),
+    ).toThrow("claimed by multiple credential bindings");
+  });
 
   test("seed block: provider token files 600 + askpass/wrappers 755, atomic, askpass reads current provider token", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
@@ -176,6 +213,272 @@ describe("lifecycle scripts — real sh execution semantics", () => {
       expect(readFileSync(join(credentialDir, "azure_devops-token"), "utf8")).toBe("az-new");
       expect(readdirSync(join(home, ".opengeni")).filter((f) => f.includes(".tmp."))).toEqual([]);
       expect(readdirSync(credentialDir).filter((f) => f.includes(".tmp."))).toEqual([]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("path-aware Git helper keeps two credentials for the same provider and host isolated", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-bindings-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          provider: "github" as const,
+          credentialBindingId: "installation/one",
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/two.git",
+          ref: "main",
+          provider: "github" as const,
+          credentialBindingId: "../../installation two",
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "installation/one",
+          provider: "github" as const,
+          token: "gh-one",
+          providerBindingCount: 2,
+        },
+        {
+          credentialBindingId: "../../installation two",
+          provider: "github" as const,
+          token: "gh-two",
+          providerBindingCount: 2,
+        },
+      ];
+      const run = runScript(
+        `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
+        { HOME: home },
+      );
+      expect(run.status).toBe(0);
+
+      const credentialDir = join(home, ".opengeni", "git-credentials");
+      expect(
+        readFileSync(
+          join(credentialDir, `${gitCredentialBindingHash("installation/one")}-token`),
+          "utf8",
+        ),
+      ).toBe("gh-one");
+      expect(
+        readFileSync(
+          join(credentialDir, `${gitCredentialBindingHash("../../installation two")}-token`),
+          "utf8",
+        ),
+      ).toBe("gh-two");
+      expect(readdirSync(credentialDir).some((name) => name.includes("installation"))).toBe(false);
+      expect(existsSync(join(home, ".opengeni", "git-token"))).toBe(false);
+      expect(existsSync(join(credentialDir, "github-token"))).toBe(false);
+
+      const fill = (path: string) =>
+        execFileSync("git", ["credential", "fill"], {
+          env: {
+            ...process.env,
+            HOME: home,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_ASKPASS: join(home, ".opengeni", "askpass"),
+          },
+          input: `protocol=https\nhost=github.com\npath=${path}\n\n`,
+          encoding: "utf8",
+        });
+      expect(fill("acme/one.git")).toContain("password=gh-one");
+      expect(fill("acme/two.git")).toContain("password=gh-two");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("path-aware Git helper treats custom ports as distinct remote hosts", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-binding-ports-"));
+    try {
+      const home = join(root, "home");
+      mkdirSync(home, { recursive: true });
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://git.example.com:8443/acme/repo.git",
+          ref: "main",
+          provider: "gitlab" as const,
+          credentialBindingId: "port-8443",
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://git.example.com:9443/acme/repo.git",
+          ref: "main",
+          provider: "gitlab" as const,
+          credentialBindingId: "port-9443",
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "port-8443",
+          provider: "gitlab" as const,
+          token: "token-8443",
+          providerBindingCount: 2,
+        },
+        {
+          credentialBindingId: "port-9443",
+          provider: "gitlab" as const,
+          token: "token-9443",
+          providerBindingCount: 2,
+        },
+      ];
+      expect(
+        runScript(
+          `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+      const fill = (host: string) =>
+        execFileSync("git", ["credential", "fill"], {
+          env: {
+            ...process.env,
+            HOME: home,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_ASKPASS: join(home, ".opengeni", "askpass"),
+          },
+          input: `protocol=https\nhost=${host}\npath=acme/repo.git\n\n`,
+          encoding: "utf8",
+        });
+      expect(fill("git.example.com:8443")).toContain("password=token-8443");
+      expect(fill("git.example.com:9443")).toContain("password=token-9443");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("provider CLI wrapper selects by origin, then explicit binding, and fails closed when ambiguous", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-wrapper-bindings-"));
+    try {
+      const home = join(root, "home");
+      const realbin = join(root, "realbin");
+      const repoOne = join(root, "one");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(realbin, { recursive: true });
+      mkdirSync(repoOne, { recursive: true });
+      execFileSync("git", ["init", repoOne]);
+      execFileSync("git", [
+        "-C",
+        repoOne,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/acme/one.git",
+      ]);
+      writeFileSync(
+        join(realbin, "gh"),
+        "#!/usr/bin/env sh\nprintf 'GH=%s\\n' \"${GH_TOKEN-unset}\"\n",
+        { mode: 0o755 },
+      );
+
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          provider: "github" as const,
+          credentialBindingId: "one",
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://github.com/acme/two.git",
+          ref: "main",
+          provider: "github" as const,
+          credentialBindingId: "two",
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "one",
+          provider: "github" as const,
+          token: "gh-one",
+          providerBindingCount: 2,
+        },
+        {
+          credentialBindingId: "two",
+          provider: "github" as const,
+          token: "gh-two",
+          providerBindingCount: 2,
+        },
+      ];
+      expect(
+        runScript(
+          `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+      const env = {
+        ...process.env,
+        HOME: home,
+        PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      };
+      delete env.GH_TOKEN;
+      expect(execFileSync("gh", [], { cwd: repoOne, env, encoding: "utf8" })).toBe("GH=gh-one\n");
+      expect(
+        execFileSync("gh", [], {
+          cwd: root,
+          env: { ...env, OPENGENI_GIT_BINDING: "two" },
+          encoding: "utf8",
+        }),
+      ).toBe("GH=gh-two\n");
+      expect(() => execFileSync("gh", [], { cwd: root, env, encoding: "utf8" })).toThrow();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("Azure CLI wrapper gives the selected brokered PAT precedence over an ambient PAT", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-az-wrapper-binding-"));
+    try {
+      const home = join(root, "home");
+      const realbin = join(root, "realbin");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(realbin, { recursive: true });
+      writeFileSync(
+        join(realbin, "az"),
+        "#!/usr/bin/env sh\nprintf 'AZ=%s\\n' \"${AZURE_DEVOPS_EXT_PAT-unset}\"\n",
+        { mode: 0o755 },
+      );
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://dev.azure.com/acme/project/_git/repo",
+          ref: "main",
+          provider: "azure_devops" as const,
+          credentialBindingId: "ado-connection",
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "ado-connection",
+          provider: "azure_devops" as const,
+          token: "brokered-ado-pat",
+          providerBindingCount: 1,
+        },
+      ];
+      expect(
+        runScript(
+          `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+      expect(
+        execFileSync("az", [], {
+          env: {
+            ...process.env,
+            HOME: home,
+            AZURE_DEVOPS_EXT_PAT: "ambient-pat-must-not-win",
+            PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+          },
+          encoding: "utf8",
+        }),
+      ).toBe("AZ=brokered-ado-pat\n");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

@@ -77,6 +77,8 @@ function makeTurn(index: number): SessionTurn {
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:harness" },
+    initiatorContext: {},
     startedAt: null,
     finishedAt: null,
     createdAt: "2026-07-19T00:00:00.000Z",

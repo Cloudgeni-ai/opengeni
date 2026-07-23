@@ -230,6 +230,7 @@ describe("boundSessionDetailMcp", () => {
         url: `https://mcp-${index}.example.com`,
         headerNames: [huge],
         credentialVersion: 1,
+        connectionRef: null,
       })),
       firstPartyMcpPermissions: Array.from({ length: 200 }, () => "sessions:read") as never,
     });

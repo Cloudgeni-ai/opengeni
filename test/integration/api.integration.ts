@@ -1886,6 +1886,7 @@ describe("API component integration", () => {
       text: "search docs",
       tools: [{ kind: "mcp", id: "docs" }],
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     expect((await requireSession(dbClient.db, workspaceId, session.id)).tools).toEqual([
       { kind: "mcp", id: "docs" },
@@ -2027,6 +2028,7 @@ describe("API component integration", () => {
       model: "gpt-5.6-sol",
       reasoningEffort: "xhigh",
       delivery: "send",
+      initiator: { kind: "subject", subjectId: "dev", label: "Local dev" },
     });
     const turns = await listSessionTurns(dbClient.db, workspaceId, session.id);
     const turn = turns.find((item) => item.triggerEventId === event.id);
@@ -4152,12 +4154,12 @@ describe("API component integration", () => {
     ]);
 
     const clampedMax = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=1000000000`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=1000000000`),
     );
     expect(clampedMax.status).toBe(200);
     expect((await clampedMax.json()) as SessionEvent[]).toHaveLength(2000);
     const clampedMin = await app.request(
-      workspacePath(workspaceId, `/sessions/${session.id}/events?limit=0`),
+      workspacePath(workspaceId, `/sessions/${session.id}/events?after=0&limit=0`),
     );
     expect(clampedMin.status).toBe(200);
     expect((await clampedMin.json()) as SessionEvent[]).toHaveLength(1);
@@ -7124,6 +7126,28 @@ describe("API component integration", () => {
     expect(spawned.firstPartyMcpPermissions).toEqual(["sessions:read"]);
     expect(spawned.sandboxBackend).toBe("none");
 
+    // A worker-signed parent claim makes this a child create. Omitting the
+    // override must inherit the manager's effective grant instead of widening
+    // the child to OpenGeni's full standalone worker defaults.
+    const childMcp = buildOpenGeniMcpServer(mcpDeps, {
+      ...managerGrant,
+      // Delegated permission arrays are semantically sets. Inheritance stores
+      // one canonical copy even if an issuer supplied a duplicate.
+      permissions: [...managerGrant.permissions, "sessions:read"],
+      metadata: { sessionId: managerSession.id },
+    });
+    const inheritedChild = await callMcpTool<{
+      id: string;
+      parentSessionId: string | null;
+      firstPartyMcpPermissions: string[] | null;
+    }>(childMcp, "session_create", {
+      initialMessage: "inherit the manager boundary",
+      model: "scripted-model",
+      sandboxBackend: "none",
+    });
+    expect(inheritedChild.parentSessionId).toBe(managerSession.id);
+    expect(inheritedChild.firstPartyMcpPermissions).toEqual(managerGrant.permissions);
+
     // The delegated token the runtime mints for a session's first-party MCP
     // connection carries the session's permission set, which gates manager
     // tool visibility end to end; the default set stays worker-shaped.
@@ -7265,6 +7289,11 @@ describe("API component integration", () => {
         url: string;
         headerNames: string[];
         credentialVersion: number;
+        connectionRef: {
+          connectionId?: string;
+          providerDomain: string;
+          kind?: string;
+        } | null;
         headers?: unknown;
       }>;
     };
@@ -7276,6 +7305,7 @@ describe("API component integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        connectionRef: null,
       },
     ]);
     expect(session.mcpServers[0]?.headers).toBeUndefined();
@@ -7474,6 +7504,55 @@ describe("API component integration", () => {
     });
     expect(missingKey.status).toBe(503);
     expect(await missingKey.text()).toContain("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+
+    const hostConnectionRef = {
+      connectionId: "cloud-connection:github:1",
+      providerDomain: "github.com",
+      kind: "app_install",
+    } as const;
+    const hostBacked = await appWithoutKey.request(workspacePath(grant.workspaceId, "/sessions"), {
+      method: "POST",
+      body: JSON.stringify({
+        initialMessage: "use the host connection",
+        model: "scripted-model",
+        tools: [{ kind: "mcp", id: "host_github" }],
+        mcpServers: [
+          {
+            id: "host_github",
+            url: "https://host-github.example/mcp",
+            connectionRef: hostConnectionRef,
+          },
+        ],
+      }),
+      headers: {
+        "content-type": "application/json",
+        authorization: attachAuth,
+      },
+    });
+    expect(hostBacked.status).toBe(202);
+    const hostSession = (await hostBacked.json()) as {
+      id: string;
+      mcpServers: Array<{
+        headerNames: string[];
+        credentialVersion: number;
+        connectionRef: typeof hostConnectionRef | null;
+      }>;
+    };
+    expect(hostSession.mcpServers[0]).toMatchObject({
+      headerNames: [],
+      credentialVersion: 1,
+      connectionRef: hostConnectionRef,
+    });
+    const hostRunServers = await listSessionMcpServersForRun(
+      dbClient.db,
+      grant.workspaceId,
+      hostSession.id,
+      null,
+    );
+    expect(hostRunServers[0]).toMatchObject({
+      headers: {},
+      connectionRef: hostConnectionRef,
+    });
   });
 
   test("toolspace bearer expands to selected session MCP servers, proxies calls, and cannot escalate", async () => {
@@ -7892,7 +7971,7 @@ describe("API component integration", () => {
     expect(wf.wakeups.length).toBe(wakeupsBefore);
   });
 
-  test("goal-bearing sessions always hold goals:manage in their first-party MCP permissions", async () => {
+  test("goal-bearing child permissions never expand beyond explicit creator authority", async () => {
     const wf = new FakeWorkflowClient();
     const grant = await bootstrapMcpGrant(dbClient.db);
     const delegationSecret = "test-delegation-secret";
@@ -7907,11 +7986,9 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: wf,
     });
-    // The creating grant deliberately lacks goals:manage: the auto-added
-    // permission is exempt from the creator-holds-it check because goal
-    // tools are scoped to the spawned session itself via the worker-signed
-    // sessionId claim - a worker managing its OWN goal is not an escalation
-    // of the spawner's authority.
+    // The creating grant deliberately lacks goals:manage. Asking for it
+    // explicitly must fail the same creator-holds-it check as every other
+    // permission; supplying a goal never creates a hidden exception.
     const creatorToken = await signDelegatedAccessToken(delegationSecret, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId,
@@ -7920,38 +7997,32 @@ describe("API component integration", () => {
       exp: Math.floor(Date.now() / 1000) + 300,
     });
 
-    // REST create with a goal: goals:manage is unioned into the explicit
-    // set, otherwise the agent could never call goal_complete/goal_pause and
-    // the goal continuation loop would run until an operator intervenes.
-    const withGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
+    const unauthorizedGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({
         initialMessage: "take repo zero-to-one",
         model: "scripted-model",
         goal: { text: "repo deployed to staging" },
-        firstPartyMcpPermissions: ["workspace:read"],
+        firstPartyMcpPermissions: ["workspace:read", "goals:manage"],
       }),
       headers: {
         "content-type": "application/json",
         authorization: `Bearer ${creatorToken}`,
       },
     });
-    expect(withGoal.status).toBe(202);
-    const goalSession = (await withGoal.json()) as {
-      id: string;
-      firstPartyMcpPermissions: string[] | null;
-    };
-    expect(goalSession.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
-    expect(
-      (await getSession(dbClient.db, grant.workspaceId, goalSession.id))?.firstPartyMcpPermissions,
-    ).toEqual(["workspace:read", "goals:manage"] as Permission[]);
+    expect(unauthorizedGoal.status).toBe(403);
+    expect(await unauthorizedGoal.text()).toContain(
+      "cannot grant first-party MCP permission beyond the creating grant: goals:manage",
+    );
 
-    // Without a goal the explicit permission set is stored untouched.
+    // A goalless session can retain the creator's narrower explicit set and
+    // becomes the trusted parent for the child cases below.
     const withoutGoal = await app.request(workspacePath(grant.workspaceId, "/sessions"), {
       method: "POST",
       body: JSON.stringify({
         initialMessage: "no goal here",
         model: "scripted-model",
+        sandboxBackend: "none",
         firstPartyMcpPermissions: ["workspace:read"],
       }),
       headers: {
@@ -7969,8 +8040,6 @@ describe("API component integration", () => {
       (await getSession(dbClient.db, grant.workspaceId, plainSession.id))?.firstPartyMcpPermissions,
     ).toEqual(["workspace:read"] as Permission[]);
 
-    // Same invariant through the MCP session_create tool, from a manager
-    // grant that also lacks goals:manage.
     const mcpDeps = {
       settings: appSettings,
       db: dbClient.db,
@@ -7987,22 +8056,54 @@ describe("API component integration", () => {
     const managerGrant = {
       ...grant,
       permissions: ["workspace:read", "sessions:create", "sessions:read"] as Permission[],
+      metadata: { sessionId: plainSession.id },
     };
     const managerMcp = buildOpenGeniMcpServer(mcpDeps, managerGrant);
+
+    // Omission inherits the manager's exact effective set. If that set lacks
+    // goals:manage, a goal-bearing child is rejected instead of being widened.
+    await expect(
+      callMcpTool(managerMcp, "session_create", {
+        initialMessage: "spawn an under-authorized goal worker",
+        model: "scripted-model",
+        sandboxBackend: "none",
+        sandbox: "new",
+        goal: { text: "fleet healthy" },
+      }),
+    ).rejects.toThrow("goal-bearing sessions require goals:manage");
+
+    const authorizedGrant = {
+      ...managerGrant,
+      permissions: [...managerGrant.permissions, "goals:manage"] as Permission[],
+    };
+    const authorizedMcp = buildOpenGeniMcpServer(mcpDeps, authorizedGrant);
     const spawned = await callMcpTool<{
       id: string;
       firstPartyMcpPermissions: string[] | null;
-    }>(managerMcp, "session_create", {
+    }>(authorizedMcp, "session_create", {
       initialMessage: "spawn a goal-bearing worker",
       model: "scripted-model",
       sandboxBackend: "none",
+      sandbox: "new",
       goal: { text: "fleet healthy" },
-      firstPartyMcpPermissions: ["workspace:read"],
     });
-    expect(spawned.firstPartyMcpPermissions).toEqual(["workspace:read", "goals:manage"]);
+    expect(spawned.firstPartyMcpPermissions).toEqual(authorizedGrant.permissions);
     expect(
       (await getSession(dbClient.db, grant.workspaceId, spawned.id))?.firstPartyMcpPermissions,
-    ).toEqual(["workspace:read", "goals:manage"] as Permission[]);
+    ).toEqual(authorizedGrant.permissions);
+
+    // Even an authorized creator cannot ask for a goal while explicitly
+    // narrowing goals:manage out of the child token.
+    await expect(
+      callMcpTool(authorizedMcp, "session_create", {
+        initialMessage: "narrow away goal authority",
+        model: "scripted-model",
+        sandboxBackend: "none",
+        sandbox: "new",
+        goal: { text: "fleet healthy" },
+        firstPartyMcpPermissions: ["workspace:read"],
+      }),
+    ).rejects.toThrow("goal-bearing sessions require goals:manage");
   });
 
   test("manager MCP session tools enforce environment attachment permission and billing limits", async () => {

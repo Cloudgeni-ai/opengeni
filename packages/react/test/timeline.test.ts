@@ -1175,6 +1175,31 @@ describe("buildTimeline", () => {
     });
   });
 
+  test("credential.auth_needed reuses the reconnect card without inventing a tool", () => {
+    reset();
+    const items = buildTimeline([
+      event(
+        "credential.auth_needed",
+        {
+          credentialClass: "run",
+          providerDomain: "cloud.example",
+          connectionId: "host:connection:1",
+          reason: "expired",
+          authorizationUrl: "https://cloud.example/connect",
+        },
+        { turnId: "turn-1" },
+      ),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      turnId: "turn-1",
+      providerDomain: "cloud.example",
+      connectionId: "host:connection:1",
+      reason: "expired",
+      toolName: null,
+    });
+  });
+
   test("unknown event types are ignored, keeping the projection forward-compatible", () => {
     reset();
     const items = buildTimeline([
