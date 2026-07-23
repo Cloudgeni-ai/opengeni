@@ -39,6 +39,7 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
       for (const migrationFile of files.filter((entry) => entry.localeCompare(migration) < 0)) {
         await sql.unsafe(await readFile(join(migrationsDir, migrationFile), "utf8"));
       }
+      const migrationSql = await readFile(join(migrationsDir, migration), "utf8");
 
       const [account] = await sql<Array<{ id: string }>>`
         insert into managed_accounts (name) values ('migration-0097-account') returning id`;
@@ -46,6 +47,7 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
         insert into workspaces (account_id, name)
         values (${account!.id}, 'migration-0097-workspace') returning id`;
       const sessionId = crypto.randomUUID();
+      const childSessionId = crypto.randomUUID();
       await sql`
         insert into sessions (
           id, account_id, workspace_id, initial_message, model, sandbox_backend,
@@ -54,6 +56,14 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
           ${sessionId}, ${account!.id}, ${workspace!.id}, 'populated session',
           'scripted-model', 'none', ${sessionId}
         )`;
+      await sql`
+        insert into sessions (
+          id, account_id, workspace_id, initial_message, model, sandbox_backend,
+          sandbox_group_id, parent_session_id
+        ) values (
+          ${childSessionId}, ${account!.id}, ${workspace!.id}, 'populated child',
+          'scripted-model', 'none', ${childSessionId}, ${sessionId}
+        )`;
       const turnId = crypto.randomUUID();
       await sql`
         insert into session_turns (
@@ -61,15 +71,15 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
           temporal_workflow_id, status, position, prompt, model,
           reasoning_effort, sandbox_backend
         ) values (
-          ${turnId}, ${account!.id}, ${workspace!.id}, ${sessionId},
-          ${crypto.randomUUID()}, ${`session-${sessionId}`}, 'queued', 1,
+          ${turnId}, ${account!.id}, ${workspace!.id}, ${childSessionId},
+          ${crypto.randomUUID()}, ${`session-${childSessionId}`}, 'queued', 1,
           'populated prompt', 'scripted-model', 'low', 'none'
         )`;
       await sql`
         insert into session_events (
           account_id, workspace_id, session_id, turn_id, sequence, type, payload
         ) values (
-          ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 1,
+          ${account!.id}, ${workspace!.id}, ${childSessionId}, ${turnId}, 1,
           'turn.queued', ${sql.json({ historical: true })}
         )`;
       await sql`
@@ -81,7 +91,10 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
           ${`historical:${turnId}`}, now()
         )`;
 
-      await sql.unsafe(await readFile(join(migrationsDir, migration), "utf8"));
+      await sql.unsafe(migrationSql);
+      // Ordinary SQL files commit before the runner writes schema_migrations.
+      // Replay the exact committed file to model a crash in that gap.
+      await sql.unsafe(migrationSql);
 
       const [empty] = await sql<Array<{ count: string }>>`
         select count(*)::text as count from host_export_outbox`;
@@ -103,6 +116,75 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
         select count(*)::text as count from host_export_outbox`;
       expect(stillEmpty?.count).toBe("0");
 
+      // Linearize a source commit against first-consumer registration. The
+      // deferred source trigger must wait for the uncommitted config update,
+      // observe the enabled state, and capture lineage before committing.
+      const sourceApplication = `migration-0097-source-${crypto.randomUUID()}`;
+      const sourceSql = postgres(blank.databaseUrl, {
+        max: 1,
+        prepare: false,
+        connection: { application_name: sourceApplication },
+      });
+      const registrationSql = postgres(blank.databaseUrl, { max: 1, prepare: false });
+      const concurrentEventId = crypto.randomUUID();
+      let sourceTransactionOpen = false;
+      let registrationTransactionOpen = false;
+      try {
+        await sourceSql.unsafe("begin");
+        sourceTransactionOpen = true;
+        await sourceSql`
+          insert into session_events (
+            id, account_id, workspace_id, session_id, turn_id, sequence, type, payload
+          ) values (
+            ${concurrentEventId}, ${account!.id}, ${workspace!.id}, ${childSessionId},
+            ${turnId}, 2, 'agent.message.completed',
+            ${sourceSql.json({ concurrentRegistration: true })}
+          )`;
+
+        await registrationSql.unsafe("begin");
+        registrationTransactionOpen = true;
+        await registrationSql`select opengeni_host_export.register_host_export_consumer(
+          'session_event', 'migration-0097-concurrent'
+        )`;
+
+        let sourceCommitSettled = false;
+        const sourceCommit = sourceSql.unsafe("commit").finally(() => {
+          sourceTransactionOpen = false;
+          sourceCommitSettled = true;
+        });
+        let sourceWaitedForRegistration = false;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          if (sourceCommitSettled) break;
+          const [activity] = await sql<Array<{ waitEventType: string | null }>>`
+            select wait_event_type as "waitEventType"
+            from pg_stat_activity
+            where application_name = ${sourceApplication}`;
+          if (activity?.waitEventType === "Lock") {
+            sourceWaitedForRegistration = true;
+            break;
+          }
+          await Bun.sleep(10);
+        }
+
+        await registrationSql.unsafe("commit");
+        registrationTransactionOpen = false;
+        await sourceCommit;
+        expect(sourceWaitedForRegistration).toBe(true);
+      } finally {
+        if (registrationTransactionOpen) {
+          await registrationSql.unsafe("rollback").catch(() => undefined);
+        }
+        if (sourceTransactionOpen) {
+          await sourceSql.unsafe("rollback").catch(() => undefined);
+        }
+        await registrationSql.end();
+        await sourceSql.end();
+      }
+      const [concurrentExport] = await sql<Array<{ rootSessionId: string | null }>>`
+        select root_session_id as "rootSessionId"
+        from host_export_outbox where source_id = ${concurrentEventId}::uuid`;
+      expect(concurrentExport?.rootSessionId).toBe(sessionId);
+
       await sql`select opengeni_host_export.register_host_export_consumer(
         'session_event', 'migration-0097-events'
       )`;
@@ -114,7 +196,7 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
         insert into session_events (
           id, account_id, workspace_id, session_id, turn_id, sequence, type, payload
         ) values (
-          ${newEventId}, ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId}, 2,
+          ${newEventId}, ${account!.id}, ${workspace!.id}, ${childSessionId}, ${turnId}, 3,
           'agent.message.completed', ${sql.json({ current: true })}
         )`;
       await sql`
@@ -123,18 +205,22 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
           unit, source_resource_type, source_resource_id, idempotency_key,
           occurred_at
         ) values (
-          ${account!.id}, ${workspace!.id}, ${sessionId}, ${turnId},
+          ${account!.id}, ${workspace!.id}, ${childSessionId}, ${turnId},
           'agent_run.completed', 1, 'run', 'session_turn', ${turnId},
           ${`current:${turnId}`}, now()
         )`;
-      const exported = await sql<Array<{ kind: string; sourceId: string }>>`
-        select export_kind as kind, source_id as "sourceId"
+      const exported = await sql<
+        Array<{ kind: string; sourceId: string; rootSessionId: string | null }>
+      >`
+        select export_kind as kind, source_id as "sourceId",
+          root_session_id as "rootSessionId"
         from host_export_outbox order by export_kind`;
-      expect(exported).toHaveLength(2);
+      expect(exported).toHaveLength(3);
       expect(
         exported.some((row) => row.kind === "session_event" && row.sourceId === newEventId),
       ).toBe(true);
       expect(exported.some((row) => row.kind === "usage_event")).toBe(true);
+      expect(exported.every((row) => row.rootSessionId === sessionId)).toBe(true);
 
       let oversizedExportError: unknown;
       try {
