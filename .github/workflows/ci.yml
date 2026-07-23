@@ -492,6 +492,15 @@ jobs:
           push: false
           tags: opengeni-sandbox:ci
 
+      - name: Build relay image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: agent
+          file: agent/crates/opengeni-relay/Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-relay:ci
+
   automation-report:
     name: Report exact-head automation CI
     needs: [automation-admission, test, deployment, images]

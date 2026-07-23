@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -8,11 +9,16 @@ import {
   WORKBENCH_ACCEPTANCE_REQUIREMENTS,
   type AcceptanceEnvironment,
 } from "./workbench-acceptance-contract";
+import {
+  deploymentImageDigests,
+  validateReleaseCandidateReceipt,
+  type ReleaseCandidateReceipt,
+} from "./release-candidate";
 
 const shaPattern = /^[0-9a-f]{40}$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
-const requiredImages = ["api", "worker", "web", "relay", "migration"] as const;
+const requiredImages = ["api", "migration", "worker", "web", "relay", "sandbox"] as const;
 const forbiddenKeyPattern =
   /^(authorization|cookie|password|secret|api[_-]?key|access[_-]?token|signed[_-]?url)$/i;
 const forbiddenValuePatterns = [
@@ -66,9 +72,13 @@ export type AcceptanceResult = {
 };
 
 export type WorkbenchAcceptanceBundle = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   generatedAt: string;
-  candidate: { sourceSha: string; imageDigests: ImageDigests };
+  candidate: {
+    sourceSha: string;
+    imageDigests: ImageDigests;
+    receipt: EvidenceRef;
+  };
   staging: {
     sourceSha: string;
     imageDigests: ImageDigests;
@@ -114,6 +124,9 @@ export type VisualPass = {
 
 export type AcceptanceBundleExpectations = {
   sourceSha: string;
+  candidateReceipt: ReleaseCandidateReceipt;
+  candidateReceiptUrl: string;
+  candidateReceiptSha256: string;
   stagingEvidenceUrl?: string;
   productionEvidenceUrl?: string;
   productionCanaryEvidenceUrl?: string;
@@ -123,13 +136,16 @@ export function validateWorkbenchAcceptanceBundle(
   value: unknown,
   expected: AcceptanceBundleExpectations,
 ): WorkbenchAcceptanceBundle {
+  const expectedCandidateReceipt = validateReleaseCandidateReceipt(expected.candidateReceipt, {
+    sourceSha: expected.sourceSha,
+  });
   const errors: string[] = [];
   const bundle = record(value, "bundle", errors) as Partial<WorkbenchAcceptanceBundle>;
 
   if (!shaPattern.test(expected.sourceSha)) {
     errors.push("expected source SHA must be 40 lowercase hexadecimal characters");
   }
-  if (bundle.schemaVersion !== 1) errors.push("schemaVersion must be 1");
+  if (bundle.schemaVersion !== 2) errors.push("schemaVersion must be 2");
   isoDate(bundle.generatedAt, "generatedAt", errors);
   scanForSecrets(value, "$", errors);
 
@@ -139,6 +155,27 @@ export function validateWorkbenchAcceptanceBundle(
     errors.push(`candidate.sourceSha must equal expected source ${expected.sourceSha}`);
   }
   const candidateImages = imageDigests(candidate.imageDigests, "candidate.imageDigests", errors);
+  const expectedCandidateImages = deploymentImageDigests(expectedCandidateReceipt);
+  if (candidateImages) {
+    sameImages(
+      expectedCandidateImages,
+      candidateImages,
+      "candidate receipt and acceptance candidate",
+      errors,
+    );
+  }
+  const candidateReceipt = singleEvidenceRef(candidate.receipt, "candidate.receipt", errors);
+  if (candidateReceipt) {
+    if (candidateReceipt.url !== expected.candidateReceiptUrl) {
+      errors.push("candidate.receipt.url does not match the release input");
+    }
+    if (candidateReceipt.sha256 !== expected.candidateReceiptSha256) {
+      errors.push("candidate.receipt.sha256 does not match the release input");
+    }
+    if (candidateReceipt.artifact !== "release-candidate.json") {
+      errors.push("candidate.receipt.artifact must be release-candidate.json");
+    }
+  }
 
   const staging = environmentBinding(bundle.staging, "staging", expected.sourceSha, errors);
   const production = environmentBinding(
@@ -418,11 +455,22 @@ function validateRealDevice(value: unknown, path: string, errors: string[]): voi
 
 function imageDigests(value: unknown, path: string, errors: string[]): ImageDigests | null {
   const images = record(value, path, errors);
+  const actualKeys = Object.keys(images).sort();
+  const expectedKeys = [...requiredImages].sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index])
+  ) {
+    errors.push(`${path} must contain exactly: ${expectedKeys.join(", ")}`);
+  }
   const output = {} as ImageDigests;
   for (const name of requiredImages) {
     const digest = string(images[name], `${path}.${name}`, errors);
     if (!digestPattern.test(digest)) errors.push(`${path}.${name} must be a sha256 image digest`);
     output[name] = digest;
+  }
+  if (output.api !== output.migration) {
+    errors.push(`${path}.migration must equal ${path}.api`);
   }
   return output;
 }
@@ -451,6 +499,15 @@ function evidenceRefs(value: unknown, path: string, errors: string[]): void {
     if (!hashPattern.test(sha256)) errors.push(`${itemPath}.sha256 must be lowercase SHA-256`);
     nonempty(item.artifact, `${itemPath}.artifact`, errors);
   }
+}
+
+function singleEvidenceRef(value: unknown, path: string, errors: string[]): EvidenceRef | null {
+  const item = record(value, path, errors);
+  const url = httpsUrl(item.url, `${path}.url`, errors);
+  const sha256 = string(item.sha256, `${path}.sha256`, errors);
+  if (!hashPattern.test(sha256)) errors.push(`${path}.sha256 must be lowercase SHA-256`);
+  const artifact = string(item.artifact, `${path}.artifact`, errors);
+  return { url, sha256, artifact };
 }
 
 function sameEvidenceRefs(left: unknown, right: unknown): boolean {
@@ -559,8 +616,28 @@ async function main(): Promise<void> {
   } catch (error) {
     throw new Error("acceptance bundle is not valid JSON", { cause: error });
   }
+  const candidateReceiptRaw = await readFile(resolve(args.candidateReceipt), "utf8");
+  if (candidateReceiptRaw.length > 1024 * 1024) {
+    throw new Error("release candidate receipt exceeds 1 MiB");
+  }
+  const candidateReceiptHash = createHash("sha256").update(candidateReceiptRaw).digest("hex");
+  if (candidateReceiptHash !== args.candidateReceiptSha256) {
+    throw new Error("release candidate receipt SHA-256 does not match");
+  }
+  let candidateReceiptValue: unknown;
+  try {
+    candidateReceiptValue = JSON.parse(candidateReceiptRaw);
+  } catch (error) {
+    throw new Error("release candidate receipt is not valid JSON", { cause: error });
+  }
+  const candidateReceipt = validateReleaseCandidateReceipt(candidateReceiptValue, {
+    sourceSha: args.sourceSha,
+  });
   const bundle = validateWorkbenchAcceptanceBundle(parsed, {
     sourceSha: args.sourceSha,
+    candidateReceipt,
+    candidateReceiptUrl: args.candidateReceiptUrl,
+    candidateReceiptSha256: args.candidateReceiptSha256,
     ...(args.stagingEvidenceUrl ? { stagingEvidenceUrl: args.stagingEvidenceUrl } : {}),
     ...(args.productionEvidenceUrl ? { productionEvidenceUrl: args.productionEvidenceUrl } : {}),
     ...(args.productionCanaryEvidenceUrl
@@ -582,6 +659,9 @@ async function main(): Promise<void> {
 function parseArgs(values: string[]): {
   bundle: string;
   sourceSha: string;
+  candidateReceipt: string;
+  candidateReceiptUrl: string;
+  candidateReceiptSha256: string;
   stagingEvidenceUrl: string | null;
   productionEvidenceUrl: string | null;
   productionCanaryEvidenceUrl: string | null;
@@ -589,6 +669,9 @@ function parseArgs(values: string[]): {
   const output = {
     bundle: "",
     sourceSha: "",
+    candidateReceipt: "",
+    candidateReceiptUrl: "",
+    candidateReceiptSha256: "",
     stagingEvidenceUrl: null as string | null,
     productionEvidenceUrl: null as string | null,
     productionCanaryEvidenceUrl: null as string | null,
@@ -602,7 +685,11 @@ function parseArgs(values: string[]): {
     };
     if (flag === "--bundle") output.bundle = next();
     else if (flag === "--source-sha") output.sourceSha = next();
-    else if (flag === "--staging-evidence-url") output.stagingEvidenceUrl = next();
+    else if (flag === "--candidate-receipt") output.candidateReceipt = next();
+    else if (flag === "--candidate-receipt-url") output.candidateReceiptUrl = next();
+    else if (flag === "--candidate-receipt-sha256") {
+      output.candidateReceiptSha256 = next();
+    } else if (flag === "--staging-evidence-url") output.stagingEvidenceUrl = next();
     else if (flag === "--production-evidence-url") output.productionEvidenceUrl = next();
     else if (flag === "--production-canary-evidence-url") {
       output.productionCanaryEvidenceUrl = next();
@@ -610,6 +697,11 @@ function parseArgs(values: string[]): {
   }
   if (!output.bundle) throw new Error("--bundle is required");
   if (!output.sourceSha) throw new Error("--source-sha is required");
+  if (!output.candidateReceipt) throw new Error("--candidate-receipt is required");
+  if (!output.candidateReceiptUrl) throw new Error("--candidate-receipt-url is required");
+  if (!hashPattern.test(output.candidateReceiptSha256)) {
+    throw new Error("--candidate-receipt-sha256 must be lowercase SHA-256");
+  }
   return output;
 }
 

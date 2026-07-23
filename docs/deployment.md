@@ -166,31 +166,45 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 ## Verified public release
 
 Merging a changesets Version PR only commits package versions and changelogs; it
-does not publish packages or release images. Public release is an explicit
-dispatch of `.github/workflows/release.yml` from a ref pinned to the exact
-accepted source SHA. The dispatch fails closed unless it receives retained
-staging, production, and 72-hour production-canary evidence URLs, the sanitized
-acceptance bundle's direct HTTPS URL and SHA-256, and an explicit confirmation
-that there are zero known defects, skipped/late cycles, or unverified acceptance
-rows. It also
-requires the exact expected package set (for example,
-`@opengeni/react@0.15.0`). The selected
+does not publish packages or release images. It produces the versioned source
+required by the manually dispatched `.github/workflows/release-candidate.yml`.
+That workflow requires the exact current `main` SHA, no pending changesets, and
+the exact expected package set (for example, `@opengeni/react@0.15.0`). It
+builds API, worker, web, relay, and stock headless-sandbox images under
+full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
+Each manifest is built at most once; retries reuse existing partial results.
+The immutable GitHub release tag `opengeni-candidate-<full-source-sha>` retains
+`release-candidate.json` plus its SHA-256 sidecar.
+
+After staging, production, and the 72-hour canary have consumed those exact
+digests, public release is an explicit dispatch of
+`.github/workflows/release.yml` from a ref pinned to the accepted source SHA.
+The dispatch fails closed unless it receives the candidate receipt's direct
+HTTPS URL and SHA-256, retained staging/production/canary evidence URLs, the
+sanitized schema-v2 acceptance bundle's direct HTTPS URL and SHA-256, the same
+exact expected package set, and an explicit confirmation that there are zero
+known defects, skipped/late cycles, or unverified acceptance rows. The selected
 dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
 `main` must all identify the same revision.
 
-The dispatch downloads the exact acceptance JSON, verifies its digest, and
-validates every machine-readable contract row before re-running the package
-typecheck, builds, SDK parity test, and publish closure guard. Before touching
-npm it rejects any unlisted unpublished package,
+The dispatch downloads the exact candidate receipt and acceptance JSON,
+verifies both digests, rejects any changed, missing, or extra image role,
+requires migration to equal API, and validates every machine-readable contract
+row before re-running the package typecheck, builds, SDK parity test, and
+publish closure guard. Before touching npm it rejects any unlisted unpublished package,
 rejects local version drift or an occupied version from another git source, and
 retains a pre-publication plan. Afterward it requires every expected registry
 entry to bind the accepted source through `gitHead` and a SHA-512 integrity
-value before release images can build. That reconciliation also makes an
-interrupted post-publication run safely resumable. The final
+value before release image aliases can be promoted. That reconciliation also
+makes an interrupted post-publication run safely resumable. The final
 `verified-release-receipt-<sha>` binds the source, acceptance evidence, bundle
 digest, changed-package registry identities, and the complete publishable package
-inventory. After the API, worker, web, relay, and stock headless sandbox images are pushed, the workflow
-emits `release-bom-<sha>` containing one deterministic `release-bom.json`: exact
+inventory. The workflow then creates version, full-SHA, and `latest` aliases
+for the already-accepted manifests and verifies that every alias still resolves
+to the receipt digest. It never invokes a Docker build after acceptance.
+
+The workflow emits `release-bom-<sha>` containing one deterministic
+`release-bom.json`: exact
 source SHA, release version, every publishable package version plus npm `gitHead`
 and SHA-512 integrity, and every release image's immutable SHA-256 digest. Hosts
 should consume this BOM as one unit and reject missing, extra, mutable-tag-only, or
