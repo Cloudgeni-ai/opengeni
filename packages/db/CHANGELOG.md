@@ -1,5 +1,15 @@
 # @opengeni/db
 
+## 0.9.3
+
+### Patch Changes
+
+- 9f84cc9: Add durable host-provided per-turn instructions, headless structured-input hooks, host-local queue
+  focus, and reusable approval and human-input surfaces for embedded session consumers.
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+  - @opengeni/config@0.6.2
+
 ## 0.9.2
 
 ### Patch Changes
