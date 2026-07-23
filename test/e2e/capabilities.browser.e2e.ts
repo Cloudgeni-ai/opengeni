@@ -97,6 +97,34 @@ describe("capabilities focus restoration browser e2e", () => {
     }
   }, 60_000);
 
+  test("default-dark Enable action preserves WCAG AA text contrast", async () => {
+    const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
+    const context = await browser.newContext({
+      viewport: { width: 1440, height: 900 },
+    });
+    const page = await context.newPage();
+    try {
+      await installCapabilityApi(page, state);
+      await page.goto(`${webBaseUrl}/workspaces/${workspaceId}/capabilities`, {
+        waitUntil: "networkidle",
+      });
+
+      expect(
+        await page.evaluate(() => document.documentElement.hasAttribute("data-og-theme")),
+      ).toBe(false);
+      await openBrowseSheet(page);
+      await expectVisible(page.getByRole("dialog").getByRole("button", { name: "Enable" }));
+
+      const axe = await new AxeBuilder({ page })
+        .include('[role="dialog"]')
+        .withRules(["color-contrast"])
+        .analyze();
+      expect(axe.violations).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  }, 60_000);
+
   test("Escape and an enable error restore the exact opener on a coarse pointer", async () => {
     const state: CapabilityState = { enabled: false, failNextEnable: false, enableCalls: 0 };
     const context = await browser.newContext({
