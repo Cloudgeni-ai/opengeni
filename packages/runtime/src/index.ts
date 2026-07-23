@@ -307,9 +307,11 @@ export type ResolveConnectionCredentialResult =
       status: "auth_needed";
       reason: ToolAuthNeededPayload["reason"];
       providerDomain: string;
+      provider?: string;
       connectionId?: string;
       scopes?: string[];
       resource?: string;
+      selectedResources?: McpServerConnectionRef["selectedResources"];
       authorizationUrl?: string;
     };
 
@@ -2373,9 +2375,13 @@ function connectionBrokerFetch(
             status: "auth_needed",
             reason: "expired",
             providerDomain: connectionRef.providerDomain,
+            ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
             connectionId: refreshed.connectionId,
             ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
             ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+            ...(connectionRef.selectedResources
+              ? { selectedResources: connectionRef.selectedResources }
+              : {}),
           },
           connectionRef,
         );
@@ -2404,9 +2410,13 @@ async function resolveConnectionForRequest(
       status: "auth_needed",
       reason: "missing_connection",
       providerDomain: connectionRef.providerDomain,
+      ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
       ...(connectionRef.connectionId ? { connectionId: connectionRef.connectionId } : {}),
       ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
       ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+      ...(connectionRef.selectedResources
+        ? { selectedResources: connectionRef.selectedResources }
+        : {}),
     };
   }
   const request: ResolveConnectionCredentialInput = {
@@ -2424,9 +2434,13 @@ async function resolveConnectionForRequest(
       status: "auth_needed",
       reason: "refresh_failed",
       providerDomain: connectionRef.providerDomain,
+      ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
       ...(connectionRef.connectionId ? { connectionId: connectionRef.connectionId } : {}),
       ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
       ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+      ...(connectionRef.selectedResources
+        ? { selectedResources: connectionRef.selectedResources }
+        : {}),
     };
   }
 }
@@ -2444,6 +2458,7 @@ function insufficientScopeAuth(
     status: "auth_needed",
     reason: "insufficient_scope",
     providerDomain: connectionRef.providerDomain,
+    ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
     connectionId,
     ...(challenge.scope?.length
       ? { scopes: challenge.scope }
@@ -2455,6 +2470,9 @@ function insufficientScopeAuth(
       : connectionRef.resource
         ? { resource: connectionRef.resource }
         : {}),
+    ...(connectionRef.selectedResources
+      ? { selectedResources: connectionRef.selectedResources }
+      : {}),
   };
 }
 
@@ -2470,6 +2488,11 @@ async function authNeededFetchResponse(
     serverId,
     toolName: request.toolName ?? null,
     providerDomain: auth.providerDomain,
+    ...(auth.provider
+      ? { provider: auth.provider }
+      : connectionRef.provider
+        ? { provider: connectionRef.provider }
+        : {}),
     reason: auth.reason,
     ...(connectionId ? { connectionId } : {}),
     ...(auth.scopes
@@ -2481,6 +2504,11 @@ async function authNeededFetchResponse(
       ? { resource: auth.resource }
       : connectionRef.resource
         ? { resource: connectionRef.resource }
+        : {}),
+    ...(auth.selectedResources
+      ? { selectedResources: auth.selectedResources }
+      : connectionRef.selectedResources
+        ? { selectedResources: connectionRef.selectedResources }
         : {}),
     ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
     ...(options.subjectId ? { subjectId: options.subjectId } : {}),

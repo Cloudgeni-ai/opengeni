@@ -27952,6 +27952,9 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   if (typeof record.connectionId === "string" && record.connectionId.length > 0) {
     ref.connectionId = record.connectionId;
   }
+  if (typeof record.provider === "string" && record.provider.length > 0) {
+    ref.provider = record.provider;
+  }
   if (
     typeof record.kind === "string" &&
     ["oauth2", "api_key", "app_install", "delegated"].includes(record.kind)
@@ -27968,6 +27971,22 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   }
   if (typeof record.resource === "string" && record.resource.length > 0) {
     ref.resource = record.resource;
+  }
+  if (Array.isArray(record.selectedResources)) {
+    const selectedResources = record.selectedResources.flatMap((candidate) => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return [];
+      }
+      const resource = candidate as Record<string, unknown>;
+      return resource.kind === "repository" &&
+        typeof resource.id === "string" &&
+        resource.id.length > 0
+        ? [{ kind: "repository" as const, id: resource.id }]
+        : [];
+    });
+    if (selectedResources.length > 0) {
+      ref.selectedResources = selectedResources;
+    }
   }
   if (record.subjectScope === "workspace" || record.subjectScope === "subject") {
     ref.subjectScope = record.subjectScope;

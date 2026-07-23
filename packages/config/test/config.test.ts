@@ -546,9 +546,20 @@ describe("sandbox preparation profiles", () => {
       {
         connectionId: "cloud-connection:github:42",
         providerDomain: "github.com",
+        provider: "github",
         kind: "app_install",
         scopes: ["repo"],
+        selectedResources: [{ kind: "repository", id: "42" }],
         subjectScope: "subject",
+      },
+      {
+        connectionId: "azure-one",
+        providerDomain: "dev.azure.com",
+        provider: "azure_devops",
+        selectedResources: [
+          { kind: "repository", id: "repo-1" },
+          { kind: "repository", id: "repo-1" },
+        ],
       },
       { providerDomain: "gitlab.example" },
       { connectionId: "opaque", providerDomain: "" },

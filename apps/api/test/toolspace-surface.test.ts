@@ -209,8 +209,10 @@ describe("prepareToolspaceMcpSurface", () => {
           cacheToolsList: false,
           connectionRef: {
             connectionId,
+            provider: "github",
             providerDomain: "github.com",
             kind: "app_install",
+            selectedResources: [{ kind: "repository", id: "9001" }],
           },
         },
       ],
@@ -230,6 +232,11 @@ describe("prepareToolspaceMcpSurface", () => {
             sessionId: request.sessionId,
             headers: { Authorization: "Bearer cloud-connection" },
             connectionId,
+            providerDomain: request.connectionRef.providerDomain,
+            ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+            ...(request.connectionRef.selectedResources
+              ? { selectedResources: request.connectionRef.selectedResources }
+              : {}),
           };
         },
       },

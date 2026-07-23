@@ -1199,6 +1199,8 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "expired",
   "insufficient_scope",
   "refresh_failed",
+  "unsupported_auth",
+  "resource_scope_unavailable",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {

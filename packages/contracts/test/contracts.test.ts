@@ -25,6 +25,7 @@ import {
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  McpServerConnectionRef,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
   RequestHumanInputToolInput,
@@ -45,13 +46,46 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  test("models provider-neutral MCP bindings with exact selected repository scope", () => {
+    const binding = McpServerConnectionRef.parse({
+      connectionId: "host:github:one",
+      provider: "github",
+      providerDomain: "github.com",
+      kind: "app_install",
+      selectedResources: [
+        { kind: "repository", id: "101" },
+        { kind: "repository", id: "202" },
+      ],
+    });
+    expect(binding.selectedResources?.map((resource) => resource.id)).toEqual(["101", "202"]);
+    expect(() =>
+      McpServerConnectionRef.parse({
+        connectionId: "azure-one",
+        provider: "azure_devops",
+        providerDomain: "dev.azure.com",
+        selectedResources: [
+          { kind: "repository", id: "repo-guid" },
+          { kind: "repository", id: "repo-guid" },
+        ],
+      }),
+    ).toThrow("selectedResources must not contain duplicates");
+    expect(() =>
+      McpServerConnectionRef.parse({
+        providerDomain: "gitlab.example",
+        selectedResources: [{ kind: "repository", id: "42" }],
+      }),
+    ).toThrow("selectedResources requires connectionId");
+  });
+
   test("auth-needed events accept opaque embedded-host connection identities", () => {
     expect(
       ToolAuthNeededPayload.parse({
         serverId: "provider-tools",
         providerDomain: "provider.example",
         connectionId: "host:connection:42",
-        reason: "expired",
+        provider: "gitlab",
+        reason: "unsupported_auth",
+        selectedResources: [{ kind: "repository", id: "project-42" }],
       }).connectionId,
     ).toBe("host:connection:42");
     expect(

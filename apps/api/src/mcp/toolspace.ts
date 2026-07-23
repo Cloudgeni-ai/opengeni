@@ -683,9 +683,13 @@ function authNeededFromStatus(
     status: "auth_needed",
     reason,
     providerDomain: connectionRef.providerDomain,
+    ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
     connectionId: first.connectionId,
     ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
     ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(connectionRef.selectedResources
+      ? { selectedResources: connectionRef.selectedResources }
+      : {}),
   };
 }
 
@@ -713,10 +717,12 @@ async function authNeededFetchResponse(
           serverId: input.config.id,
           toolName: request.toolName ?? null,
           providerDomain: auth.providerDomain,
+          ...(auth.provider ? { provider: auth.provider } : {}),
           reason: auth.reason,
           ...(auth.connectionId ? { connectionId: auth.connectionId } : {}),
           ...(auth.scopes ? { scopes: auth.scopes } : {}),
           ...(auth.resource ? { resource: auth.resource } : {}),
+          ...(auth.selectedResources ? { selectedResources: auth.selectedResources } : {}),
           ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
           subjectId: input.grant.subjectId,
         },

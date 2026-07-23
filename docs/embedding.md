@@ -375,16 +375,40 @@ forced a refresh. The same lineage is resolved for ordinary model tools and
 Toolspace, so a host can authorize a child through one durable root binding
 without mirroring every child row. The frozen initiator—not `sandbox:<runId>`,
 the session creator, or a synthetic worker subject—is the authorization
-principal. Results must echo account/workspace/immediate-session. OpenGeni
-verifies those echoes and validates the returned header snapshot before sending
-it upstream. Credential values never enter session events; `auth_needed` carries
-only reconnect metadata.
+principal.
+
+For provider-native developer tooling, `connectionRef.provider` identifies the
+provider family, `providerDomain` identifies its host/tenant, `connectionId` is
+the host's opaque binding identity, and `selectedResources` freezes the exact
+repository ids the server may access. Multiple server entries may bind different
+accounts for one provider or different providers in the same session. The
+singular `resource` field remains the OAuth resource indicator; it is not a
+repository selector.
+
+Successful results must echo account/workspace/immediate-session plus the exact
+provider, provider domain, requested connection id, OAuth scopes/resource, and
+selected-resource set. OpenGeni rejects a mismatched echo before any returned
+header can reach the provider. Credential values never enter session events;
+`auth_needed` carries only bounded connection metadata. A host that cannot
+satisfy the configured endpoint's auth model returns `unsupported_auth`; one
+that cannot enforce the selected repository set returns
+`resource_scope_unavailable`. These reasons render as unavailable, not as a
+duplicate OpenGeni reconnect flow, and a connection-backed optional MCP server
+still degrades without breaking unrelated session tools.
+
+The standalone generic connection broker intentionally rejects a
+`selectedResources` binding with `resource_scope_unavailable`: it can refresh a
+connection token, but it has no provider-specific proof that the token or
+adapter enforces those repositories. A standalone provider adapter must add that
+proof before it may resolve the scoped binding.
 
 The port is provider-neutral. A host can resolve its existing GitHub, GitLab,
 Azure DevOps, or other connection from the opaque reference, and can return a
-short-lived capability bearer for a host-owned MCP gateway. Normal MCP and
-Toolspace deliberately share this resolver, so Code Mode is additive rather than
-a second connection or authorization system.
+provider-supported token or a short-lived capability bearer for a compatible
+host-owned adapter. OpenGeni does not imply that one provider's bearer works at
+another provider's hosted MCP endpoint. Normal MCP and Toolspace deliberately
+share this resolver, so Code Mode is additive rather than a second connection or
+authorization system.
 
 Unset legs fall back independently to standalone self-mint/decrypt. `runCredentials`
 has no standalone fallback because ordinary standalone sandbox credentials

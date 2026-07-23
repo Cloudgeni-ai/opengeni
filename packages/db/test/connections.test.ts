@@ -11,6 +11,7 @@ import {
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
   ConnectionRefreshHttpError,
+  HostMcpCredentialBindingError,
   HostMcpCredentialScopeError,
   normalizeBearerScheme,
   createConnection,
@@ -523,6 +524,12 @@ describe("buildHostConnectionTokenResolver", () => {
         sessionId: request.sessionId,
         headers,
         connectionId: "host-connection-7",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+        ...(request.connectionRef.selectedResources
+          ? { selectedResources: request.connectionRef.selectedResources }
+          : {}),
         expiresAt: "2026-07-21T23:00:00.000Z",
       };
     }, context);
@@ -533,10 +540,15 @@ describe("buildHostConnectionTokenResolver", () => {
       serverId: "github",
       toolName: "create_pull_request",
       connectionRef: {
+        provider: "github",
         providerDomain: "github.com",
         kind: "app_install",
         connectionId: "host-connection-7",
         scopes: ["repo"],
+        selectedResources: [
+          { kind: "repository", id: "101" },
+          { kind: "repository", id: "202" },
+        ],
       },
       forceRefresh: true,
     });
@@ -547,10 +559,15 @@ describe("buildHostConnectionTokenResolver", () => {
       serverId: "github",
       toolName: "create_pull_request",
       connectionRef: {
+        provider: "github",
         providerDomain: "github.com",
         kind: "app_install",
         connectionId: "host-connection-7",
         scopes: ["repo"],
+        selectedResources: [
+          { kind: "repository", id: "101" },
+          { kind: "repository", id: "202" },
+        ],
       },
       forceRefresh: true,
     });
@@ -573,6 +590,7 @@ describe("buildHostConnectionTokenResolver", () => {
         sessionId: "session_1",
         headers: { Authorization: "Bearer wrong-tenant" },
         connectionId: "host-connection-7",
+        providerDomain: "github.com",
       }),
       context,
     );
@@ -584,6 +602,36 @@ describe("buildHostConnectionTokenResolver", () => {
         connectionRef: { providerDomain: "github.com" },
       }),
     ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
+  });
+
+  test("rejects host credential material routed from a different binding or repository set", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { Authorization: "Bearer wrong-binding" },
+        connectionId: "host-connection-other",
+        provider: "github",
+        providerDomain: "github.com",
+        selectedResources: [{ kind: "repository", id: "999" }],
+      }),
+      context,
+    );
+
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        connectionRef: {
+          connectionId: "host-connection-7",
+          provider: "github",
+          providerDomain: "github.com",
+          selectedResources: [{ kind: "repository", id: "101" }],
+        },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
   });
 
   test("passes through reconnect metadata without credential headers", async () => {
@@ -642,6 +690,32 @@ describe("buildHostConnectionTokenResolver", () => {
 });
 
 describe("buildConnectionTokenResolver", () => {
+  test("fails closed before credential lookup for repository-scoped provider bindings", async () => {
+    const { deps, counts } = resolverDeps();
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "github",
+      connectionRef: {
+        connectionId: "github-installation-one",
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        selectedResources: [{ kind: "repository", id: "101" }],
+      },
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "resource_scope_unavailable",
+      connectionId: "github-installation-one",
+      provider: "github",
+      providerDomain: "github.com",
+      selectedResources: [{ kind: "repository", id: "101" }],
+    });
+    expect(counts.load).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("materializes api_key headers and records usage", async () => {
     const { deps, counts } = resolverDeps();
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
@@ -896,8 +970,10 @@ describe("buildConnectionTokenResolver", () => {
   test("public-client refresh sends client_id from the credential bundle", async () => {
     const originalFetch = globalThis.fetch;
     let capturedBody: URLSearchParams | null = null;
+    let capturedSignal: AbortSignal | null = null;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       capturedBody = new URLSearchParams(String(init?.body));
+      capturedSignal = init?.signal ?? null;
       return new Response(
         JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }),
         {
@@ -925,6 +1001,7 @@ describe("buildConnectionTokenResolver", () => {
         "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
       );
       expect(capturedBody!.get("grant_type")).toBe("refresh_token");
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
     } finally {
       globalThis.fetch = originalFetch;
     }

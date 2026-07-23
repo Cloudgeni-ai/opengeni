@@ -5,6 +5,8 @@ import {
 } from "@opengeni/config";
 import type {
   ConnectionCredentialsPort,
+  McpConnectionResourceScope,
+  McpCredentialAuthNeededReason,
   McpCredentialsRequest,
   TurnInitiator,
   TurnInitiatorContext,
@@ -26,11 +28,13 @@ export type ResolveConnectionCredentialResult =
   | { status: "ok"; headers: Record<string, string>; connectionId: string; expiresAt?: Date | null }
   | {
       status: "auth_needed";
-      reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
+      reason: McpCredentialAuthNeededReason;
       providerDomain: string;
+      provider?: string;
       connectionId?: string;
       scopes?: string[];
       resource?: string;
+      selectedResources?: McpConnectionResourceScope[];
       authorizationUrl?: string;
     };
 type AuthNeededReason = Extract<
@@ -69,6 +73,21 @@ export class HostMcpCredentialScopeError extends Error {
   }
 }
 
+export class HostMcpCredentialBindingError extends Error {
+  constructor(
+    field:
+      | "provider"
+      | "providerDomain"
+      | "connectionId"
+      | "scopes"
+      | "resource"
+      | "selectedResources",
+  ) {
+    super(`host MCP credential ${field} binding mismatch`);
+    this.name = "HostMcpCredentialBindingError";
+  }
+}
+
 /**
  * Adapts the public embedding credential port to the runtime's connection
  * resolver contract. Scope echoes are checked before credential headers can
@@ -98,12 +117,16 @@ export function buildHostConnectionTokenResolver(
       serverId: input.serverId,
       connectionRef: {
         providerDomain: input.connectionRef.providerDomain,
+        ...(input.connectionRef.provider ? { provider: input.connectionRef.provider } : {}),
         ...(input.connectionRef.connectionId
           ? { connectionId: input.connectionRef.connectionId }
           : {}),
         ...(input.connectionRef.kind ? { kind: input.connectionRef.kind } : {}),
         ...(input.connectionRef.scopes ? { scopes: [...input.connectionRef.scopes] } : {}),
         ...(input.connectionRef.resource ? { resource: input.connectionRef.resource } : {}),
+        ...(input.connectionRef.selectedResources
+          ? { selectedResources: copySelectedResources(input.connectionRef.selectedResources) }
+          : {}),
         ...(input.connectionRef.subjectScope
           ? { subjectScope: input.connectionRef.subjectScope }
           : {}),
@@ -114,18 +137,20 @@ export function buildHostConnectionTokenResolver(
     };
     const result = await resolve(request);
     assertHostMcpCredentialScope(result, context);
+    assertHostMcpCredentialBinding(result, input.connectionRef);
     if (result.status === "auth_needed") {
-      if (result.providerDomain !== input.connectionRef.providerDomain) {
-        throw new Error("host MCP credential provider domain mismatch");
-      }
       const authorizationUrl = normalizedAuthorizationUrl(result.authorizationUrl);
       return {
         status: "auth_needed",
         reason: result.reason,
         providerDomain: result.providerDomain,
+        ...(result.provider ? { provider: result.provider } : {}),
         ...(result.connectionId ? { connectionId: result.connectionId } : {}),
         ...(result.scopes ? { scopes: [...result.scopes] } : {}),
         ...(result.resource ? { resource: result.resource } : {}),
+        ...(result.selectedResources
+          ? { selectedResources: copySelectedResources(result.selectedResources) }
+          : {}),
         ...(authorizationUrl ? { authorizationUrl } : {}),
       };
     }
@@ -140,6 +165,82 @@ export function buildHostConnectionTokenResolver(
       ...(expiresAt !== undefined ? { expiresAt } : {}),
     };
   };
+}
+
+function assertHostMcpCredentialBinding(
+  result: Awaited<ReturnType<NonNullable<ConnectionCredentialsPort["mcpCredentials"]>>>,
+  requested: McpServerConnectionRef,
+): void {
+  if (result.providerDomain !== requested.providerDomain) {
+    throw new HostMcpCredentialBindingError("providerDomain");
+  }
+  if (result.provider !== requested.provider) {
+    throw new HostMcpCredentialBindingError("provider");
+  }
+  if (requested.connectionId && result.connectionId !== requested.connectionId) {
+    throw new HostMcpCredentialBindingError("connectionId");
+  }
+  if (!sameSelectedResources(result.selectedResources, requested.selectedResources)) {
+    throw new HostMcpCredentialBindingError("selectedResources");
+  }
+  if (result.status === "ok") {
+    if (!sameStringSet(result.scopes, requested.scopes)) {
+      throw new HostMcpCredentialBindingError("scopes");
+    }
+    if (result.resource !== requested.resource) {
+      throw new HostMcpCredentialBindingError("resource");
+    }
+  }
+}
+
+function sameStringSet(left: string[] | undefined, right: string[] | undefined): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function sameSelectedResources(
+  left: McpConnectionResourceScope[] | undefined,
+  right: McpConnectionResourceScope[] | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  const leftKeys = copySelectedResources(left)
+    .map((resource) => `${resource.kind}\0${resource.id}`)
+    .sort();
+  const rightKeys = copySelectedResources(right)
+    .map((resource) => `${resource.kind}\0${resource.id}`)
+    .sort();
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every((value, index) => value === rightKeys[index])
+  );
+}
+
+function copySelectedResources(
+  resources: McpConnectionResourceScope[],
+): McpConnectionResourceScope[] {
+  if (resources.length === 0 || resources.length > 256) {
+    throw new Error("host MCP credential returned an invalid selected resource count");
+  }
+  const seen = new Set<string>();
+  return resources.map((resource) => {
+    if (
+      resource.kind !== "repository" ||
+      typeof resource.id !== "string" ||
+      resource.id.length === 0 ||
+      resource.id.length > 512
+    ) {
+      throw new Error("host MCP credential returned an invalid selected resource");
+    }
+    const key = `${resource.kind}\0${resource.id}`;
+    if (seen.has(key)) {
+      throw new Error("host MCP credential returned duplicate selected resources");
+    }
+    seen.add(key);
+    return { kind: resource.kind, id: resource.id };
+  });
 }
 
 function assertHostMcpCredentialScope(
@@ -229,6 +330,7 @@ const defaultDeps: ConnectionBrokerDeps = {
 
 const inflight = new Map<string, Promise<ConnectionCredentialForBroker>>();
 const REFRESH_WINDOW_MS = 60_000;
+const CONNECTION_REFRESH_TIMEOUT_MS = 10_000;
 
 export function buildConnectionTokenResolver(
   db: Database,
@@ -269,9 +371,13 @@ export function buildConnectionTokenResolver(
         status: "auth_needed",
         reason: "insufficient_scope",
         providerDomain: ref.providerDomain,
+        ...(ref.provider ? { provider: ref.provider } : {}),
         connectionId: cred.id,
         scopes: missingScopes,
         ...(ref.resource ? { resource: ref.resource } : {}),
+        ...(ref.selectedResources
+          ? { selectedResources: copySelectedResources(ref.selectedResources) }
+          : {}),
       };
     }
     const headers = headersForCredential(cred);
@@ -280,9 +386,13 @@ export function buildConnectionTokenResolver(
         status: "auth_needed",
         reason: "refresh_failed",
         providerDomain: ref.providerDomain,
+        ...(ref.provider ? { provider: ref.provider } : {}),
         connectionId: cred.id,
         ...(ref.scopes ? { scopes: ref.scopes } : {}),
         ...(ref.resource ? { resource: ref.resource } : {}),
+        ...(ref.selectedResources
+          ? { selectedResources: copySelectedResources(ref.selectedResources) }
+          : {}),
       };
     }
     await deps.recordUsed(db, cred.workspaceId, cred.id);
@@ -356,6 +466,13 @@ export function buildConnectionTokenResolver(
 
   return async (input) => {
     const ref = input.connectionRef;
+    // Repository-scoped provider bindings require a broker that can prove the
+    // selected-resource boundary. The generic standalone credential store has
+    // no provider-specific containment adapter, so it must fail closed instead
+    // of handing an account-wide token to the configured endpoint.
+    if (ref.selectedResources) {
+      return authNeeded(ref, "resource_scope_unavailable", ref.connectionId);
+    }
     let cred: ConnectionCredentialForBroker | null;
     try {
       cred = await load(input);
@@ -440,9 +557,13 @@ function authNeeded(
     status: "auth_needed",
     reason,
     providerDomain: ref.providerDomain,
+    ...(ref.provider ? { provider: ref.provider } : {}),
     ...(connectionId ? { connectionId } : {}),
     ...(ref.scopes ? { scopes: ref.scopes } : {}),
     ...(ref.resource ? { resource: ref.resource } : {}),
+    ...(ref.selectedResources
+      ? { selectedResources: copySelectedResources(ref.selectedResources) }
+      : {}),
   };
 }
 
@@ -558,6 +679,7 @@ export async function refreshOAuthConnectionCredential(
     headers,
     body,
     redirect: "manual",
+    signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
   });
   if (response.status >= 300 && response.status < 400) {
     throw new ConnectionRefreshHttpError(response.status);

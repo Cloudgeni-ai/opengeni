@@ -1597,17 +1597,68 @@ export type RunCredentialsResolution =
       authNeeded: RunCredentialAuthNeeded[];
     };
 
+export const McpConnectionResourceScope = z
+  .object({
+    /** Provider-stable repository identity, serialized as a string on the wire. */
+    id: z.string().min(1).max(512),
+    kind: z.literal("repository"),
+  })
+  .strict();
+export type McpConnectionResourceScope = z.infer<typeof McpConnectionResourceScope>;
+
+const McpConnectionResourceScopes = z
+  .array(McpConnectionResourceScope)
+  .min(1)
+  .max(256)
+  .superRefine((resources, context) => {
+    const seen = new Set<string>();
+    for (const [index, resource] of resources.entries()) {
+      const key = `${resource.kind}\0${resource.id}`;
+      if (seen.has(key)) {
+        context.addIssue({
+          code: "custom",
+          message: "selectedResources must not contain duplicates",
+          path: [index],
+        });
+      }
+      seen.add(key);
+    }
+  });
+
 export const McpServerConnectionRef = z
   .object({
     /** Opaque host or standalone connection identifier. */
     connectionId: z.string().min(1).optional(),
+    /** Stable provider family (for example github, gitlab, or azure_devops). */
+    provider: z.string().min(1).max(128).optional(),
+    /** Provider host or tenant domain. */
     providerDomain: z.string().min(1),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     scopes: z.array(z.string().min(1)).optional(),
+    /** OAuth resource indicator. This is distinct from selectedResources. */
     resource: z.string().min(1).optional(),
+    /** Exact provider resources this MCP binding is allowed to operate on. */
+    selectedResources: McpConnectionResourceScopes.optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((reference, context) => {
+    if (!reference.selectedResources) return;
+    if (!reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires connectionId",
+        path: ["connectionId"],
+      });
+    }
+    if (!reference.provider) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires provider",
+        path: ["provider"],
+      });
+    }
+  });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRef>;
 
 export type McpCredentialsRequest = {
@@ -1633,7 +1684,10 @@ export type McpCredentialsRequest = {
   forceRefresh: boolean;
 };
 
-export type McpCredentialAuthNeededReason = CredentialAuthNeededReason;
+export type McpCredentialAuthNeededReason =
+  | CredentialAuthNeededReason
+  | "unsupported_auth"
+  | "resource_scope_unavailable";
 
 export type McpCredentialResolution =
   | {
@@ -1644,6 +1698,11 @@ export type McpCredentialResolution =
       sessionId: string;
       headers: Record<string, string>;
       connectionId: string;
+      providerDomain: string;
+      provider?: string;
+      scopes?: string[];
+      resource?: string;
+      selectedResources?: McpConnectionResourceScope[];
       expiresAt?: string | null;
     }
   | {
@@ -1654,9 +1713,11 @@ export type McpCredentialResolution =
       sessionId: string;
       reason: McpCredentialAuthNeededReason;
       providerDomain: string;
+      provider?: string;
       connectionId?: string;
       scopes?: string[];
       resource?: string;
+      selectedResources?: McpConnectionResourceScope[];
       authorizationUrl?: string;
     };
 
@@ -4606,12 +4667,21 @@ export const ToolAuthNeededPayload = z.object({
   serverId: z.string().min(1),
   toolName: z.string().min(1).nullable().optional(),
   providerDomain: z.string().min(1),
+  provider: z.string().min(1).max(128).optional(),
   // Embedded hosts may use an opaque connection identity; never assume an
   // OpenGeni UUID on the public event wire.
   connectionId: z.string().min(1).nullable().optional(),
-  reason: z.enum(["missing_connection", "expired", "insufficient_scope", "refresh_failed"]),
+  reason: z.enum([
+    "missing_connection",
+    "expired",
+    "insufficient_scope",
+    "refresh_failed",
+    "unsupported_auth",
+    "resource_scope_unavailable",
+  ]),
   scopes: z.array(z.string().min(1)).optional(),
   resource: z.string().min(1).optional(),
+  selectedResources: McpConnectionResourceScopes.optional(),
   authorizationUrl: z.string().url().optional(),
   subjectId: z.string().min(1).nullable().optional(),
 });

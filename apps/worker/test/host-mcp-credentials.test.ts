@@ -32,6 +32,11 @@ describe("connectionTokenResolverForTurn", () => {
             sessionId: request.sessionId,
             headers: { Authorization: "Bearer host-owned" },
             connectionId: "connection-1",
+            providerDomain: request.connectionRef.providerDomain,
+            ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+            ...(request.connectionRef.selectedResources
+              ? { selectedResources: request.connectionRef.selectedResources }
+              : {}),
           };
         },
       },
@@ -43,9 +48,11 @@ describe("connectionTokenResolverForTurn", () => {
       serverId: "gitlab",
       toolName: "merge_request_create",
       connectionRef: {
+        provider: "gitlab",
         providerDomain: "gitlab.example",
         connectionId: "connection-1",
         kind: "oauth2",
+        selectedResources: [{ kind: "repository", id: "44" }],
       },
     });
 
@@ -64,9 +71,11 @@ describe("connectionTokenResolverForTurn", () => {
       serverId: "gitlab",
       toolName: "merge_request_create",
       connectionRef: {
+        provider: "gitlab",
         providerDomain: "gitlab.example",
         connectionId: "connection-1",
         kind: "oauth2",
+        selectedResources: [{ kind: "repository", id: "44" }],
       },
       forceRefresh: false,
     });

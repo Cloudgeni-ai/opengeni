@@ -105,13 +105,57 @@ export const McpServerConnectionRefSchema = z
   .object({
     // Standalone ids are UUIDs; embedded hosts may use any stable opaque id.
     connectionId: z.string().min(1).optional(),
+    provider: z.string().min(1).max(128).optional(),
     providerDomain: z.string().min(1),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     scopes: z.array(z.string().min(1)).optional(),
     resource: z.string().min(1).optional(),
+    selectedResources: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(512),
+            kind: z.literal("repository"),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(256)
+      .superRefine((resources, context) => {
+        const seen = new Set<string>();
+        for (const [index, resource] of resources.entries()) {
+          const key = `${resource.kind}\0${resource.id}`;
+          if (seen.has(key)) {
+            context.addIssue({
+              code: "custom",
+              message: "selectedResources must not contain duplicates",
+              path: [index],
+            });
+          }
+          seen.add(key);
+        }
+      })
+      .optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((reference, context) => {
+    if (!reference.selectedResources) return;
+    if (!reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires connectionId",
+        path: ["connectionId"],
+      });
+    }
+    if (!reference.provider) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires provider",
+        path: ["provider"],
+      });
+    }
+  });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
 const SettingsSchema = z.object({

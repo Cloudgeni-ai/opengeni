@@ -998,10 +998,10 @@ function NoticeRow({ item }: { item: NoticeItem }) {
 }
 
 /**
- * The inline reconnect card: a lapsed connection surfaces as a calm, tappable
- * affordance — provider logo, one human line, one primary Reconnect button —
- * instead of a raw "linear.app needs to be reconnected." string. The `reason`
- * only shapes the helper copy; no domain or enum code is shown as a label.
+ * The inline connection card: a lapsed connection surfaces as a calm, tappable
+ * reconnect affordance, while an incompatible host-owned endpoint/resource
+ * contract remains informative and non-actionable. The `reason` only shapes
+ * the helper copy; no domain or enum code is shown as a label.
  * `onReconnect` (from the app, which owns the SDK client) runs the flow; without
  * it, a pre-minted authorization link is offered, or the card stays informative.
  */
@@ -1018,6 +1018,8 @@ function AuthNeededRow({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
+  const unavailable =
+    item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
 
   const start = async () => {
     if (!onReconnect || busy) {
@@ -1045,11 +1047,13 @@ function AuthNeededRow({
             label={provider}
           />
           <div className="min-w-0">
-            <p className="truncate text-og-md font-medium text-og-fg">Reconnect {provider}</p>
+            <p className="truncate text-og-md font-medium text-og-fg">
+              {unavailable ? `${provider} tools unavailable` : `Reconnect ${provider}`}
+            </p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
           </div>
         </div>
-        {onReconnect ? (
+        {!unavailable && onReconnect ? (
           <button
             type="button"
             onClick={() => void start()}
@@ -1062,7 +1066,7 @@ function AuthNeededRow({
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
             {busy ? "Reconnecting…" : "Reconnect"}
           </button>
-        ) : item.authorizationUrl ? (
+        ) : !unavailable && item.authorizationUrl ? (
           <a
             href={item.authorizationUrl}
             rel="noreferrer"
@@ -1160,6 +1164,10 @@ function authReasonLine(reason: AuthNeededItem["reason"]): string {
     case "expired":
     case "refresh_failed":
       return "Its access expired.";
+    case "unsupported_auth":
+      return "This connection cannot authenticate the configured tool endpoint.";
+    case "resource_scope_unavailable":
+      return "This tool endpoint cannot enforce the selected repository access.";
     default:
       return "Its connection needs attention.";
   }

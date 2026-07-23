@@ -300,10 +300,17 @@ export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
+  selectedResources?:
+    | Array<{
+        id: string;
+        kind: "repository";
+      }>
+    | undefined;
   subjectScope?: "workspace" | "subject" | undefined;
 };
 
@@ -814,10 +821,18 @@ export type ToolAuthNeededPayload = {
   serverId: string;
   toolName?: string | null | undefined;
   providerDomain: string;
+  provider?: string | undefined;
   connectionId?: string | null | undefined;
-  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
+  reason:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "unsupported_auth"
+    | "resource_scope_unavailable";
   scopes?: string[] | undefined;
   resource?: string | undefined;
+  selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
   authorizationUrl?: string | undefined;
   subjectId?: string | null | undefined;
 };
