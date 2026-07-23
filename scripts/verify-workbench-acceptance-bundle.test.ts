@@ -11,6 +11,7 @@ import {
   type AcceptanceResult,
   type WorkbenchAcceptanceBundle,
 } from "./verify-workbench-acceptance-bundle";
+import { buildReleaseCandidateReceipt, type ReleaseImageRole } from "./release-candidate";
 
 const sourceSha = "a".repeat(40);
 const digest = `sha256:${"b".repeat(64)}`;
@@ -18,6 +19,20 @@ const artifactHash = "c".repeat(64);
 const stagingEvidenceUrl = "https://evidence.example/staging.json";
 const productionEvidenceUrl = "https://evidence.example/production.json";
 const canaryEvidenceUrl = "https://evidence.example/canary.json";
+const candidateReceiptUrl =
+  "https://github.com/example/opengeni/releases/download/opengeni-candidate-a/release-candidate.json";
+const candidateReceiptSha256 = "d".repeat(64);
+const candidateReceipt = buildReleaseCandidateReceipt({
+  sourceSha,
+  packages: [{ name: "@opengeni/sdk", version: "0.18.0" }],
+  imageDigests: {
+    api: digest,
+    worker: digest,
+    web: digest,
+    relay: digest,
+    sandbox: digest,
+  } satisfies Record<ReleaseImageRole, string>,
+});
 
 function evidence(name: string) {
   return [{ url: `https://evidence.example/${name}.json`, sha256: artifactHash, artifact: name }];
@@ -78,6 +93,7 @@ function validBundle(): WorkbenchAcceptanceBundle {
     web: digest,
     relay: digest,
     migration: digest,
+    sandbox: digest,
   });
   const visualPasses = (kind: string) =>
     Array.from({ length: 10 }, (_, index) => ({
@@ -89,9 +105,17 @@ function validBundle(): WorkbenchAcceptanceBundle {
       after: evidence(`${kind}-${index + 1}-after`),
     }));
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: "2026-07-16T00:00:00.000Z",
-    candidate: { sourceSha, imageDigests: images() },
+    candidate: {
+      sourceSha,
+      imageDigests: images(),
+      receipt: {
+        url: candidateReceiptUrl,
+        sha256: candidateReceiptSha256,
+        artifact: "release-candidate.json",
+      },
+    },
     staging: {
       sourceSha,
       imageDigests: images(),
@@ -129,6 +153,9 @@ function validBundle(): WorkbenchAcceptanceBundle {
 function validate(bundle: WorkbenchAcceptanceBundle) {
   return validateWorkbenchAcceptanceBundle(bundle, {
     sourceSha,
+    candidateReceipt,
+    candidateReceiptUrl,
+    candidateReceiptSha256,
     stagingEvidenceUrl,
     productionEvidenceUrl,
     productionCanaryEvidenceUrl: canaryEvidenceUrl,
@@ -163,6 +190,25 @@ describe("workbench acceptance bundle", () => {
     const short = validBundle();
     short.productionCanary.endedAt = "2026-07-03T23:59:59.000Z";
     expect(() => validate(short)).toThrow("at least 72 hours");
+  });
+
+  test("fails closed on candidate-receipt drift, missing/extra roles, or migration drift", () => {
+    const changed = validBundle();
+    changed.candidate.imageDigests.api = `sha256:${"e".repeat(64)}`;
+    changed.candidate.imageDigests.migration = changed.candidate.imageDigests.api;
+    expect(() => validate(changed)).toThrow("candidate receipt and acceptance candidate");
+
+    const missing = validBundle() as any;
+    delete missing.candidate.imageDigests.sandbox;
+    expect(() => validate(missing)).toThrow("must contain exactly");
+
+    const extra = validBundle() as any;
+    extra.candidate.imageDigests.desktop = digest;
+    expect(() => validate(extra)).toThrow("must contain exactly");
+
+    const migration = validBundle();
+    migration.production.imageDigests.migration = `sha256:${"f".repeat(64)}`;
+    expect(() => validate(migration)).toThrow("migration must equal");
   });
 
   test("rejects emulated hardware, fewer than ten passes, and timing shortcuts", () => {

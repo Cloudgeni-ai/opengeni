@@ -1,0 +1,381 @@
+name: Release candidate
+
+# Build the complete public image set exactly once before staging. Every image is
+# pushed under a full-source-SHA candidate tag. A retry reuses any already
+# present candidate manifest and an existing immutable receipt must compare
+# byte-for-byte, so a partially completed run never rebuilds accepted bytes.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact current versioned main SHA; dispatch this workflow from that same ref.
+        required: true
+        type: string
+      expected_packages:
+        description: Exact comma-separated package set intended for the evidence-bound npm release.
+        required: true
+        type: string
+
+concurrency:
+  group: release-candidate-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Build immutable release candidate
+    runs-on: ubuntu-latest
+    if: ${{ vars.RELEASE_ENABLED == 'true' }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Check out candidate source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact versioned main source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "source_sha must be a 40-character lowercase git SHA" >&2
+            exit 1
+          }
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
+            echo "checked-out source does not match source_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
+            echo "dispatch ref must resolve to source_sha" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          [ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ] || {
+            echo "release candidates must start from the current main head" >&2
+            exit 1
+          }
+          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
+            echo "pending changesets remain; merge the generated Version PR first" >&2
+            exit 1
+          fi
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Plan exact package publication
+        id: package-plan
+        env:
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: plan
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Resolve candidate identity
+        id: meta
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          version="$(jq -er '((.packages | map(select(.name == "@opengeni/sdk"))) + (.packages | sort_by(.name)))[0].version' evidence/release-packages-plan.json)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || {
+            echo "resolved release version is not exact semver: $version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=candidate-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve existing API candidate
+        id: existing-api
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install the Rust toolchain
+        if: steps.existing-api.outputs.exists != 'true'
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --no-self-update
+          rustup default 1.97.1
+
+      - name: Bake and sign per-SHA agent binaries
+        if: steps.existing-api.outputs.exists != 'true'
+        env:
+          OPENGENI_AGENT_MINISIGN_KEY: ${{ secrets.OPENGENI_AGENT_MINISIGN_KEY }}
+        run: scripts/bake-agent.sh
+
+      - name: Build and push API candidate
+        if: steps.existing-api.outputs.exists != 'true'
+        id: build-api
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: api
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
+          tags: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+
+      - name: Resolve API candidate digest
+        id: api
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+          BUILT_DIGEST: ${{ steps.build-api.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || {
+            echo "pushed API digest differs from the build output" >&2
+            exit 1
+          }
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing worker candidate
+        id: existing-worker
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push worker candidate
+        if: steps.existing-worker.outputs.exists != 'true'
+        id: build-worker
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: worker
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
+          tags: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+
+      - name: Resolve worker candidate digest
+        id: worker
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+          BUILT_DIGEST: ${{ steps.build-worker.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing web candidate
+        id: existing-web
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push web candidate
+        if: steps.existing-web.outputs.exists != 'true'
+        id: build-web
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/opengeni.Dockerfile
+          target: web
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
+            OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
+          tags: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+
+      - name: Resolve web candidate digest
+        id: web
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+          BUILT_DIGEST: ${{ steps.build-web.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing sandbox candidate
+        id: existing-sandbox
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push headless sandbox candidate
+        if: steps.existing-sandbox.outputs.exists != 'true'
+        id: build-sandbox
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+
+      - name: Resolve sandbox candidate digest
+        id: sandbox
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+          BUILT_DIGEST: ${{ steps.build-sandbox.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve existing relay candidate
+        id: existing-relay
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push relay candidate
+        if: steps.existing-relay.outputs.exists != 'true'
+        id: build-relay
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: agent
+          file: agent/crates/opengeni-relay/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+
+      - name: Resolve relay candidate digest
+        id: relay
+        env:
+          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+          BUILT_DIGEST: ${{ steps.build-relay.outputs.digest }}
+        run: |
+          set -euo pipefail
+          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || exit 1
+          [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Write immutable candidate receipt
+        id: receipt
+        env:
+          OPENGENI_RELEASE_CANDIDATE_SOURCE_SHA: ${{ inputs.source_sha }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          RELAY_DIGEST: ${{ steps.relay.outputs.digest }}
+          SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
+        run: |
+          set -euo pipefail
+          packages="$(jq -c '[.packages[] | {name, version}]' evidence/release-packages-plan.json)"
+          OPENGENI_RELEASE_CANDIDATE_IMAGE_DIGESTS="$(jq -cn \
+            --arg api "$API_DIGEST" \
+            --arg worker "$WORKER_DIGEST" \
+            --arg web "$WEB_DIGEST" \
+            --arg relay "$RELAY_DIGEST" \
+            --arg sandbox "$SANDBOX_DIGEST" \
+            '{api:$api,worker:$worker,web:$web,relay:$relay,sandbox:$sandbox}')" \
+          OPENGENI_RELEASE_CANDIDATE_PACKAGES="$packages" \
+            bun scripts/release-candidate.ts
+          checksum="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          printf '%s  %s\n' \
+            "$checksum" \
+            evidence/release-candidate.json \
+            > evidence/release-candidate.sha256
+
+      - name: Upload candidate receipt
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-candidate-${{ inputs.source_sha }}
+          path: |
+            evidence/release-candidate.json
+            evidence/release-candidate.sha256
+            evidence/release-packages-plan.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish immutable source-SHA candidate receipt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="opengeni-candidate-${SOURCE_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            [ "$resolved" = "$SOURCE_SHA" ] || {
+              echo "existing candidate tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            }
+            mkdir -p /tmp/opengeni-release-candidate-existing
+            gh release download "$tag" \
+              --dir /tmp/opengeni-release-candidate-existing \
+              --pattern release-candidate.json \
+              --pattern release-candidate.sha256
+            cmp evidence/release-candidate.json /tmp/opengeni-release-candidate-existing/release-candidate.json
+            cmp evidence/release-candidate.sha256 /tmp/opengeni-release-candidate-existing/release-candidate.sha256
+          else
+            gh release create "$tag" \
+              evidence/release-candidate.json \
+              evidence/release-candidate.sha256 \
+              --target "$SOURCE_SHA" \
+              --title "OpenGeni release candidate ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
+              --notes "Immutable image candidate receipt for source ${SOURCE_SHA}. Deploy every role by the recorded digest." \
+              --latest=false
+          fi
