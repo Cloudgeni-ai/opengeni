@@ -32,6 +32,9 @@ import {
   GENESIS_TITLE_DIRECTIVE,
   oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
+  effectiveSkillSelectionsForAgent,
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   materializeSandboxFileDownloads,
@@ -4241,6 +4244,33 @@ describe("pack skills in the sandbox skill index", () => {
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
+    expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
+  });
+
+  test("an explicit curated library selection is materialized and indexed", () => {
+    const entry = listSkillLibraryEntries().find(
+      (candidate) => candidate.id === "azure-verified-modules",
+    );
+    expect(entry).toBeDefined();
+    const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
+    const source = lazySkillSourceWithPackSkills(
+      [],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children[loaded.skill.name].type).toBe("dir");
+    expect(sourceDir.children[loaded.skill.name].children["SKILL.md"].content).toContain(
+      "Azure Verified Modules",
+    );
+    expect((source.getIndex?.(emptyManifest, ".agents") ?? []).map((item) => item.name)).toContain(
+      "azure-verified-modules",
+    );
   });
 
   test("pack skills join the bundled skills in one lazy skill index", () => {
@@ -4298,6 +4328,31 @@ describe("pack skills in the sandbox skill index", () => {
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
     expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+  });
+
+  test("a pack skill has precedence over an explicitly selected curated skill", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const source = lazySkillSourceWithPackSkills(
+      [
+        {
+          name: loaded.skill.name,
+          description: "Pack override.",
+          files: [{ path: "SKILL.md", content: "# Pack override\n" }],
+        },
+      ],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const entries = (source.getIndex?.(emptyManifest, ".agents") ?? []).filter(
+      (entry) => entry.name === loaded.skill.name,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.description).toBe("Pack override.");
   });
 
   test("rejects unsafe pack skill content instead of mounting it", () => {
@@ -4361,6 +4416,37 @@ describe("pack skills in the sandbox skill index", () => {
       }>
     ).find((capability) => capability.type === "skills");
     expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+  });
+
+  test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+      skillLibrarySkills: [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+      skillLibrarySelections: [
+        {
+          id: loaded.entry.id,
+          name: loaded.entry.name,
+          source: "library",
+          version: loaded.entry.version,
+          contentSha256: loaded.entry.contentSha256,
+          reason: "enabled workspace capability installation",
+        },
+      ],
+    });
+    expect(effectiveSkillSelectionsForAgent(agent)).toContainEqual({
+      id: loaded.entry.id,
+      name: loaded.entry.name,
+      source: "library",
+      version: loaded.entry.version,
+      contentSha256: loaded.entry.contentSha256,
+      reason: "enabled workspace capability installation",
+    });
   });
 });
 

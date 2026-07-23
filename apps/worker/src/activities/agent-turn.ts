@@ -207,6 +207,7 @@ import {
   mergeRigDefaultVariableSetEnvironment,
   resolveWorkspaceAgentInstructions,
   resolveWorkspacePackRuntime,
+  resolveWorkspaceSkillLibraryRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
 } from "./packs";
@@ -2941,7 +2942,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Resolved after turn.started so a composition conflict (two enabled
       // packs declaring images) fails the turn with its plain error instead
       // of failing the activity opaquely.
-      const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+      const [packRuntime, skillLibraryRuntime] = await Promise.all([
+        resolveWorkspacePackRuntime(db, input.workspaceId),
+        resolveWorkspaceSkillLibraryRuntime(db, input.workspaceId),
+      ]);
       // RIG BINDING (M3): load the session's FROZEN rig version (resolved+frozen
       // at create). Everything rig-derived below (image precedence, env default
       // sets, setup hook, credential hooks, doctrine, lease/telemetry stamps) is
@@ -4246,6 +4250,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
+        ...(skillLibraryRuntime.skillLibrarySkills.length > 0
+          ? {
+              skillLibrarySkills: skillLibraryRuntime.skillLibrarySkills,
+              skillLibrarySelections: skillLibraryRuntime.skillLibrarySelections,
+            }
+          : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).

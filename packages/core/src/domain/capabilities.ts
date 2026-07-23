@@ -36,6 +36,11 @@ import {
   type EnabledMcpCapabilityServer,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
+import {
+  getSkillLibraryEntry,
+  listSkillLibraryEntries,
+  type SkillLibraryEntry,
+} from "@opengeni/runtime/skill-library";
 import { validateVariableSetAttachment } from "./environments";
 import {
   assertPackSandboxImageCompatible,
@@ -65,12 +70,14 @@ export async function buildCapabilityCatalog(input: {
     packInstallations,
     workspacePacks,
     bundledSkills,
+    curatedLibrarySkills,
   ] = await Promise.all([
     listCapabilityCatalogItems(input.db, input.workspaceId),
     listCapabilityInstallations(input.db, input.workspaceId),
     listPackInstallations(input.db, input.workspaceId),
     listWorkspaceCapabilityPacks(input.db, input.workspaceId),
     discoverBundledSkills(),
+    discoverCuratedSkillLibraryItems(),
   ]);
   const capabilityInstallationById = new Map(
     capabilityInstallations.map((installation) => [installation.capabilityId, installation]),
@@ -88,6 +95,7 @@ export async function buildCapabilityCatalog(input: {
     ...configuredMcpCatalogItems(input.settings),
     ...platformApiCatalogItems(),
     ...bundledSkills,
+    ...curatedLibrarySkills,
   ];
   const items = dedupeCatalogItems([...builtIns, ...persistedItems])
     .map((item) =>
@@ -112,8 +120,14 @@ export async function createCatalogItem(input: {
       message: "packs are managed by OpenGeni and cannot be manually created",
     });
   }
+  if (id.startsWith("skill:")) {
+    throw new HTTPException(422, {
+      message: "skill ids are managed by the OpenGeni skill library or runtime adapters",
+    });
+  }
   const source =
     input.payload.source === "built_in" ||
+    input.payload.source === "library" ||
     input.payload.source === "configured" ||
     input.payload.source === "registry"
       ? "manual"
@@ -169,11 +183,49 @@ export async function enableCapability(input: {
   // Credential-header storage is written exclusively by this flow; strip the
   // reserved keys from caller-provided config so the stored shape stays
   // trustworthy and no plaintext credentials sneak in through config.headers.
-  const installationConfig: Record<string, unknown> = { ...input.payload.config };
+  let installationConfig: Record<string, unknown> = { ...input.payload.config };
   delete installationConfig.headers;
   delete installationConfig.headersEncrypted;
   delete installationConfig.headerNames;
   delete installationConfig.connectionRef;
+  if (item.kind === "skill" && item.source === "library") {
+    const libraryId = stringMetadata(item.metadata.libraryId);
+    const catalogVersion = stringMetadata(item.metadata.version);
+    if (!libraryId || !catalogVersion) {
+      throw new HTTPException(422, {
+        message: `skill library metadata is incomplete for ${item.id}`,
+      });
+    }
+    const requestedVersion = input.payload.config.version;
+    if (requestedVersion !== undefined && typeof requestedVersion !== "string") {
+      throw new HTTPException(422, {
+        message: "skill activation config.version must be a string",
+      });
+    }
+    const normalizedVersion = requestedVersion?.trim() || catalogVersion;
+    if (normalizedVersion !== catalogVersion) {
+      throw new HTTPException(422, {
+        message: `skill ${libraryId} only supports immutable version ${catalogVersion}`,
+      });
+    }
+    const entry = getSkillLibraryEntry(libraryId, normalizedVersion);
+    if (!entry) {
+      throw new HTTPException(422, {
+        message: `skill library entry is unavailable: ${libraryId}@${normalizedVersion}`,
+      });
+    }
+    // Skill activation has a deliberately narrow config surface. In
+    // particular, no variable-set, connection, credential-header, MCP, or
+    // provider-routing input is persisted or consulted for a library skill.
+    installationConfig = { version: entry.version };
+    installationMetadata = {
+      libraryId: entry.id,
+      libraryVersion: entry.version,
+      contentSha256: entry.contentSha256,
+      sourceCommit: entry.sourceCommit,
+      provenance: entry.provenance,
+    };
+  }
   if (item.kind === "mcp") {
     const headers = await resolveMcpCredentialHeaders(input, item);
     const connectionRef = input.payload.connectionRef
@@ -940,6 +992,52 @@ async function discoverBundledSkills(): Promise<CapabilityCatalogItem[]> {
   }
 }
 
+/**
+ * Curated skills are catalogued independently from the always-mounted bundle.
+ * The runtime helper only returns entries whose reviewed artifact is present,
+ * so a deployment that omits optional library assets does not advertise a
+ * skill it cannot materialize.
+ */
+async function discoverCuratedSkillLibraryItems(): Promise<CapabilityCatalogItem[]> {
+  return listSkillLibraryEntries().map((entry) => curatedSkillCatalogItem(entry));
+}
+
+function curatedSkillCatalogItem(entry: SkillLibraryEntry): CapabilityCatalogItem {
+  return CapabilityCatalogItem.parse({
+    id: `skill:${entry.id}`,
+    kind: "skill",
+    source: "library",
+    name: entry.name,
+    description: entry.description,
+    category: entry.category,
+    tags: [...entry.tags],
+    homepageUrl: entry.sourceUrl,
+    provenance: entry.provenance,
+    tier: "verified",
+    runtime: {
+      available: true,
+      notes: "Available as an explicit immutable opt-in skill selection.",
+    },
+    metadata: {
+      libraryId: entry.id,
+      version: entry.version,
+      contentSha256: entry.contentSha256,
+      sourceCommit: entry.sourceCommit,
+      sourceUrl: entry.sourceUrl,
+      provenance: entry.provenance,
+      license: entry.license,
+      documentationUrl: entry.documentationUrl,
+      compatibility: entry.compatibility,
+      upgrade: entry.upgrade,
+      artifactPath: entry.relativePath,
+    },
+  });
+}
+
+function stringMetadata(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
 async function readSkillMetadata(
   url: URL,
   fallbackName: string,
@@ -990,6 +1088,16 @@ export function applyCapabilityEnablement(
       enabledReason: item.source === "configured" ? "configured" : "built in",
     };
   }
+  if (item.source === "library") {
+    const enabled =
+      installation?.status === "active" && skillLibraryInstallationRuntimeReady(item, installation);
+    return {
+      ...item,
+      enabled,
+      enabledReason: enabled ? "explicitly selected" : null,
+      connectionRef: null,
+    };
+  }
   const activeInstallation = installation?.status === "active";
   const enabled = !!activeInstallation && capabilityInstallationRuntimeReady(item, installation);
   return {
@@ -998,6 +1106,42 @@ export function applyCapabilityEnablement(
     enabledReason: enabled ? "enabled" : null,
     connectionRef: enabled && installation ? installationConnectionRef(installation.config) : null,
   };
+}
+
+function skillLibraryInstallationRuntimeReady(
+  item: CapabilityCatalogItem,
+  installation: CapabilityInstallation,
+): boolean {
+  if (item.kind !== "skill" || item.source !== "library" || installation.kind !== "skill") {
+    return false;
+  }
+  const libraryId = stringMetadata(item.metadata.libraryId);
+  const version = stringMetadata(item.metadata.version);
+  const contentSha256 = stringMetadata(item.metadata.contentSha256);
+  const sourceCommit = stringMetadata(item.metadata.sourceCommit);
+  const provenance = stringMetadata(item.metadata.provenance);
+  if (!libraryId || !version || !contentSha256 || !sourceCommit || !provenance) {
+    return false;
+  }
+  const entry = getSkillLibraryEntry(libraryId, version);
+  if (
+    !entry ||
+    item.id !== `skill:${entry.id}` ||
+    installation.capabilityId !== `skill:${entry.id}` ||
+    contentSha256 !== entry.contentSha256 ||
+    sourceCommit !== entry.sourceCommit ||
+    provenance !== entry.provenance
+  ) {
+    return false;
+  }
+  return (
+    installation.config.version === entry.version &&
+    stringMetadata(installation.metadata.libraryId) === entry.id &&
+    stringMetadata(installation.metadata.libraryVersion) === entry.version &&
+    stringMetadata(installation.metadata.contentSha256) === entry.contentSha256 &&
+    stringMetadata(installation.metadata.sourceCommit) === entry.sourceCommit &&
+    stringMetadata(installation.metadata.provenance) === entry.provenance
+  );
 }
 
 /**
@@ -1027,6 +1171,17 @@ function installationConnectionRef(
 function dedupeCatalogItems(items: CapabilityCatalogItem[]): CapabilityCatalogItem[] {
   const byId = new Map<string, CapabilityCatalogItem>();
   for (const item of items) {
+    // Curated library entries are runtime-managed and must not be replaced by
+    // stale/manual rows with the same reserved skill id. Other catalog sources
+    // retain the historical last-write-wins behavior below.
+    if (item.kind === "skill" && item.source === "library" && byId.has(item.id)) {
+      byId.set(item.id, item);
+      continue;
+    }
+    const existing = byId.get(item.id);
+    if (existing?.kind === "skill" && existing.source === "library") {
+      continue;
+    }
     byId.set(item.id, item);
   }
   return [...byId.values()];
