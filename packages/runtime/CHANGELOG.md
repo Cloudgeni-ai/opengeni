@@ -1,5 +1,22 @@
 # @opengeni/runtime
 
+## 0.12.0
+
+### Minor Changes
+
+- b9cec61: Let embedding hosts return exact HTTPS smart-Git broker transports for repository
+  bindings whose provider credentials cannot be contained to the selected
+  repositories. Keep broker bearers off manifests, Git configuration, repository
+  metadata, and provider CLIs; renew bearers independently without changing the
+  admitted route set.
+
+### Patch Changes
+
+- Updated dependencies [b9cec61]
+- Updated dependencies [c978676]
+  - @opengeni/contracts@0.16.0
+  - @opengeni/config@0.6.3
+
 ## 0.11.0
 
 ### Minor Changes
