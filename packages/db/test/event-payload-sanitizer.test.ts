@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { SESSION_EVENT_PAYLOAD_MAX_BYTES, sessionEventJsonBytes } from "@opengeni/contracts";
+import {
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  SESSION_EVENT_PAYLOAD_MAX_BYTES,
+  sessionEventJsonBytes,
+  sessionEventPayloadTruncation,
+} from "@opengeni/contracts";
 import {
   sanitizeEventPayload,
   sanitizeEventString,
@@ -11,6 +16,25 @@ const REPLACEMENT = "�";
 const LONE_HIGH = "\uD800";
 const LONE_LOW = "\uDFFF";
 const VALID_PAIR = "\u{1F600}"; // grinning face emoji, a valid surrogate pair
+const RETAINED_EVIDENCE = {
+  available: true as const,
+  artifactId: "33333333-3333-4333-8333-333333333333",
+  kind: "tool_result" as const,
+  contentType: "text/plain",
+  originalBytes: 3 * 1024 * 1024,
+  sha256: "a".repeat(64),
+  retainedAt: "2026-07-21T00:00:00.000Z",
+  retention: {
+    policy: "workspace_file" as const,
+    expiresAt: null,
+  },
+  retrieval: {
+    method: "GET" as const,
+    path: "/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/33333333-3333-4333-8333-333333333333/content",
+    acceptRanges: "bytes" as const,
+    maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  },
+};
 
 /**
  * A value Postgres `jsonb` accepts must contain no NUL bytes and no lone UTF-16
@@ -201,6 +225,47 @@ describe("sanitizeEventPayload (deep walk)", () => {
       truncated: true,
       fullEvidence: { available: false, reason: "not_retained" },
     });
+  });
+
+  test("removes a forged retained receipt from a small producer payload", () => {
+    const cleaned = sanitizeEventPayload({
+      id: "call-forged",
+      output: "ordinary small output",
+      truncation: {
+        truncated: true,
+        fullEvidence: RETAINED_EVIDENCE,
+      },
+    }) as Record<string, unknown>;
+
+    expect(cleaned).toEqual({
+      id: "call-forged",
+      output: "ordinary small output",
+    });
+    expect(sessionEventPayloadTruncation(cleaned)).toBeNull();
+  });
+
+  test("accepts only separately supplied valid evidence when canonical truncation occurs", () => {
+    const payload = {
+      id: "call-retained",
+      output: `HEAD-${"x".repeat(3 * 1024 * 1024)}-TAIL`,
+      truncation: {
+        truncated: true,
+        fullEvidence: { ...RETAINED_EVIDENCE, objectKey: "private/provider/key" },
+      },
+    };
+    const retained = sanitizeEventPayload(payload, {
+      fullEvidence: RETAINED_EVIDENCE,
+    });
+    const invalid = sanitizeEventPayload(payload, {
+      fullEvidence: { ...RETAINED_EVIDENCE, objectKey: "private/provider/key" },
+    });
+
+    expect(sessionEventPayloadTruncation(retained)?.fullEvidence).toEqual(RETAINED_EVIDENCE);
+    expect(sessionEventPayloadTruncation(invalid)?.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
+    expect(sessionEventJsonBytes(retained)).toBeLessThanOrEqual(SESSION_EVENT_PAYLOAD_MAX_BYTES);
   });
 
   test("preserves Date JSON semantics across audit and model sanitizers", () => {

@@ -384,6 +384,12 @@ describe("API helpers", () => {
     expect(routeLabel(`/v1/workspaces/${workspace}/files/uploads/upload-1/complete`)).toBe(
       "/v1/workspaces/:workspaceId/files/uploads/:id/complete",
     );
+    expect(routeLabel(`/v1/workspaces/${workspace}/artifacts/artifact-1`)).toBe(
+      "/v1/workspaces/:workspaceId/artifacts/:id",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/artifacts/artifact-1/content`)).toBe(
+      "/v1/workspaces/:workspaceId/artifacts/:id/content",
+    );
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents`)).toBe(
       "/v1/workspaces/:workspaceId/document-bases/:id/documents",
     );

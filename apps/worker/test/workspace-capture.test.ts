@@ -49,6 +49,7 @@ function forbiddenStorage(): ObjectStorage {
     createGetUrl: boom as never,
     headFile: boom as never,
     getFileBytes: boom as never,
+    getFileRange: boom as never,
     getObjectBytes: boom as never,
     putObject: boom as never,
     deleteObject: boom as never,
