@@ -1,3 +1,6 @@
+-- deployment-mode: rolling
+SET LOCAL lock_timeout = '5s';
+
 ALTER TABLE "session_command_receipts"
   DROP CONSTRAINT "session_command_receipts_actor_check",
   ADD CONSTRAINT "session_command_receipts_actor_check"
@@ -7,4 +10,7 @@ ALTER TABLE "session_command_receipts"
       OR ("actor_type" IN ('human', 'operator', 'service')
         AND "actor_subject_id" IS NOT NULL
         AND "actor_attempt_id" IS NULL)
-    );
+    ) NOT VALID;
+
+ALTER TABLE "session_command_receipts"
+  VALIDATE CONSTRAINT "session_command_receipts_actor_check";

@@ -1067,21 +1067,21 @@ export async function createSessionForRequest(
       });
     }
   }
-  // Invariant: a goal-bearing session always carries goals:manage in its
-  // effective first-party permissions. Without it the worker's delegated
-  // token never sees the goal tools (goal_complete/goal_pause/...), so the
-  // agent cannot stop its own goal and the continuation loop runs until an
-  // operator intervenes. The auto-added permission is deliberately exempt
-  // from the creating-grant check above: goal tools are scoped to the
-  // spawned session itself via the worker-signed sessionId claim, so a
-  // worker managing its OWN goal is not an escalation of the spawner's
-  // authority.
+  // A goal-bearing session with an explicit/effective permission set must
+  // already carry goals:manage. Without it the worker cannot stop its own
+  // continuation loop, but silently adding it would violate the child
+  // authority contract: a child inherits or narrows its creator's exact grant
+  // and never gains an unrequested permission. Top-level omission remains the
+  // deployment's worker default, which includes the goal tools.
   if (
     payload.goal &&
     firstPartyMcpPermissions &&
     !firstPartyMcpPermissions.includes("goals:manage")
   ) {
-    firstPartyMcpPermissions = [...firstPartyMcpPermissions, "goals:manage"];
+    throw new HTTPException(422, {
+      message:
+        "goal-bearing sessions require goals:manage in the resulting first-party MCP permission set",
+    });
   }
   // Parent linkage: a worker is linked to its manager ONLY from the
   // worker-signed sessionId claim on the creating grant — the manager
