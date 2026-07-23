@@ -182,6 +182,27 @@ function assertVersionPull(pull, expected) {
   return headSha;
 }
 
+function versionBranchProjection(value) {
+  invariant(
+    value?.ref === `refs/heads/${RELEASE_AUTOMATION_CONTRACT.versionBranch}`,
+    "Version branch ref changed",
+  );
+  invariant(value?.object?.type === "commit", "Version branch is not a direct commit ref");
+  return assertSha(value.object.sha, "Version branch SHA");
+}
+
+function versionHeadParent(value, expectedHeadSha) {
+  invariant(
+    assertSha(value?.sha, "Version head commit SHA") === expectedHeadSha,
+    "Version head changed",
+  );
+  invariant(
+    Array.isArray(value?.parents) && value.parents.length === 1,
+    "Version head is not one commit",
+  );
+  return assertSha(value.parents[0]?.sha, "Version head parent SHA");
+}
+
 function baseGithubContext(env, workflowPath, eventName) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
@@ -274,12 +295,22 @@ function repositoryPath(path) {
 }
 
 async function terminalVersionIdentity(api, context) {
-  const [main, pull] = await Promise.all([
+  const [main, pull, versionBranch, headCommit] = await Promise.all([
     api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
     api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.versionBranch}`)),
+    api.get(repositoryPath(`/git/commits/${context.headSha}`)),
   ]);
   assertMainRef(main, context.baseSha, "terminal default branch");
   assertVersionPull(pull, context);
+  invariant(
+    versionBranchProjection(versionBranch) === context.headSha,
+    "terminal Version branch changed",
+  );
+  invariant(
+    versionHeadParent(headCommit, context.headSha) === context.baseSha,
+    "terminal Version head parent changed",
+  );
   return pull;
 }
 
@@ -307,14 +338,30 @@ async function convergedVersionHeadSha(api, context, options = {}) {
     // A moving main is never eventual-consistency lag. Fail immediately instead
     // of waiting against a source run that is no longer current.
     assertMainRef(main, context.baseSha);
+    let headSha;
     try {
-      return assertVersionPull(pull, context);
+      headSha = assertVersionPull(pull, context);
     } catch (error) {
       const retryable =
         error instanceof Error && retryableVersionProjectionErrors.has(error.message);
       if (!retryable || attempt === attempts) throw error;
       await sleep(delayMs);
+      continue;
     }
+
+    const [versionBranch, headCommit] = await Promise.all([
+      api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.versionBranch}`)),
+      api.get(repositoryPath(`/git/commits/${headSha}`)),
+    ]);
+    const branchSha = versionBranchProjection(versionBranch);
+    const parentSha = versionHeadParent(headCommit, headSha);
+    if (branchSha === headSha && parentSha === context.baseSha) return headSha;
+    if (attempt === attempts) {
+      throw new Error(
+        `Version PR #${context.prNumber} base/head topology did not converge after ${attempts} attempts`,
+      );
+    }
+    await sleep(delayMs);
   }
   throw new Error("Version PR projection did not converge");
 }
@@ -331,8 +378,8 @@ export async function validateVersionPrDispatch(options = {}) {
   const repository = await api.get(repositoryPath(""));
   assertRepository(repository);
   // changesets/action can finish updating the branch before GitHub's PR
-  // projection reflects the new base/head pair. Wait only for those two exact
-  // projection fields; every identity or ownership mismatch still fails fast.
+  // projection reflects the new base/head pair. Wait only for otherwise valid
+  // projection/topology drift; every identity or ownership mismatch fails fast.
   const headSha = await convergedVersionHeadSha(
     api,
     { prNumber, baseSha: context.sha },

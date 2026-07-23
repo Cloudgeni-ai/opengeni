@@ -52,27 +52,30 @@ jobs:
       AUTOMATION_BASE_SHA: ${{ inputs.automation_base_sha }}
       AUTOMATION_SOURCE_RUN_ID: ${{ inputs.source_release_run_id }}
       AUTOMATION_SOURCE_RUN_ATTEMPT: ${{ inputs.source_release_run_attempt }}
-      GITHUB_TOKEN: ${{ github.token }}
     steps:
       # workflow_dispatch is sent to ref=main. Pin the checkout again so helper
       # and dependency bytes are the exact trusted base, never candidate bytes.
       - name: Check out trusted workflow source
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
       - name: Begin exact-head automation checks
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs begin-version-checks
 
       - name: Admit trusted dispatch and exact source tree
         id: admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs admit-version-ci
 
       - name: Set up Bun
         if: ${{ steps.admission.outcome == 'success' }}
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: 1.3.14
 
@@ -116,6 +119,7 @@ jobs:
         env:
           AUTOMATION_CHECK_KIND: source-admission
           AUTOMATION_CHECK_CONCLUSION: ${{ steps.admission.outcome == 'success' && steps.version_tree.outcome == 'success' && 'success' || 'failure' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
 
   test:
@@ -516,10 +520,9 @@ jobs:
       AUTOMATION_BASE_SHA: ${{ inputs.automation_base_sha }}
       AUTOMATION_SOURCE_RUN_ID: ${{ inputs.source_release_run_id }}
       AUTOMATION_SOURCE_RUN_ATTEMPT: ${{ inputs.source_release_run_attempt }}
-      GITHUB_TOKEN: ${{ github.token }}
     steps:
       - name: Check out trusted workflow source
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -528,4 +531,5 @@ jobs:
         env:
           AUTOMATION_CHECK_KIND: automation-ci
           AUTOMATION_CHECK_CONCLUSION: ${{ needs.automation-admission.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/check-release-pr-automation.mjs complete-version-check
