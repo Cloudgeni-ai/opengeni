@@ -127,9 +127,11 @@ function dispatchFixture(
     author?: Record<string, unknown>;
     headRepository?: string;
     mainSha?: string;
+    stalePullReads?: number;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
+  let pullReads = 0;
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
@@ -139,10 +141,16 @@ function dispatchFixture(
     if (method === "GET" && url.pathname === prefix) return response(repository());
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
       return response(mainRef(options.mainSha));
-    if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`)
+    if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`) {
+      pullReads += 1;
       return response(
-        versionPull({ author: options.author, headRepository: options.headRepository }),
+        versionPull({
+          author: options.author,
+          base: pullReads <= (options.stalePullReads ?? 0) ? "a".repeat(40) : baseSha,
+          headRepository: options.headRepository,
+        }),
       );
+    }
     if (method === "POST" && url.pathname === `${prefix}/actions/workflows/ci.yml/dispatches`)
       return response(null, 204);
     return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
@@ -170,6 +178,41 @@ describe("Version PR dispatch identity", () => {
         source_release_run_attempt: String(runAttempt),
       },
     });
+  });
+
+  test("waits for the exact Version PR base projection before dispatching", async () => {
+    const fixture = dispatchFixture({ stalePullReads: 1 });
+    const sleeps: number[] = [];
+    const result = await validateVersionPrDispatch({
+      env: releasePushEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      projectionAttempts: 2,
+      projectionDelayMs: 7,
+      projectionSleep: async (milliseconds: number) => {
+        sleeps.push(milliseconds);
+      },
+    });
+    expect(result).toEqual({ prNumber: pullNumber, headSha, baseSha });
+    expect(sleeps).toEqual([7]);
+    expect(
+      fixture.requests.filter((request) => request.path.endsWith(`/pulls/${pullNumber}`)),
+    ).toHaveLength(3);
+    expect(fixture.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
+  test("fails closed when the Version PR projection never converges", async () => {
+    const fixture = dispatchFixture({ stalePullReads: 3 });
+    await expect(
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: fixture.fetchImpl,
+        projectionAttempts: 2,
+        projectionDelayMs: 0,
+        projectionSleep: async () => {},
+      }),
+    ).rejects.toThrow("Version PR base SHA changed");
+    expect(fixture.requests.some((request) => request.method === "POST")).toBe(false);
   });
 
   test("rejects a human-authored Version PR without dispatching", async () => {
