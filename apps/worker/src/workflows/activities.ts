@@ -5,6 +5,7 @@ type WorkflowControlActivities = Pick<
   typeof activities,
   | "dispatchScheduledTaskRun"
   | "enqueueGoalRetryWake"
+  | "expireSessionHumanInput"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"

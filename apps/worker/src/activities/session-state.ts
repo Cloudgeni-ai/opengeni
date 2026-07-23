@@ -6,6 +6,7 @@ import {
   countQueuedTurns,
   getSessionEvent,
   getSessionTurnForAttempt,
+  expireSessionHumanInputRequest,
   markSessionAttemptQuiesced,
   requireSession,
   settleSessionIdleWithParentOutbox,
@@ -15,6 +16,8 @@ import { deliverFailedChildTurnToParent, notifyParentOfChildIdle } from "./paren
 import { recordTurnsQueuedGauge } from "../observability-metrics";
 import type {
   ActivityServices,
+  ExpireSessionHumanInputInput,
+  ExpireSessionHumanInputResult,
   PeekSessionWorkInput,
   FailSessionAttemptInput,
   SettleSessionInterruptionsInput,
@@ -32,6 +35,7 @@ export type SessionStateActivityOverrides = Partial<{
   countQueuedTurns: typeof countQueuedTurns;
   getSessionEvent: typeof getSessionEvent;
   getSessionTurnForAttempt: typeof getSessionTurnForAttempt;
+  expireSessionHumanInputRequest: typeof expireSessionHumanInputRequest;
   requireSession: typeof requireSession;
   settleSessionIdleWithParentOutbox: typeof settleSessionIdleWithParentOutbox;
   markSessionAttemptQuiesced: typeof markSessionAttemptQuiesced;
@@ -60,6 +64,8 @@ export function createSessionStateActivities(
   const countQueuedTurnsFn = overrides.countQueuedTurns ?? countQueuedTurns;
   const getSessionEventFn = overrides.getSessionEvent ?? getSessionEvent;
   const getSessionTurnForAttemptFn = overrides.getSessionTurnForAttempt ?? getSessionTurnForAttempt;
+  const expireSessionHumanInputRequestFn =
+    overrides.expireSessionHumanInputRequest ?? expireSessionHumanInputRequest;
   const requireSessionFn = overrides.requireSession ?? requireSession;
   const settleSessionIdleWithParentOutboxFn =
     overrides.settleSessionIdleWithParentOutbox ?? settleSessionIdleWithParentOutbox;
@@ -227,6 +233,20 @@ export function createSessionStateActivities(
     return peek;
   }
 
+  async function expireSessionHumanInput(
+    input: ExpireSessionHumanInputInput,
+  ): Promise<ExpireSessionHumanInputResult> {
+    const { db, bus } = await services();
+    const result = await expireSessionHumanInputRequestFn(db, input);
+    if (result.action === "not_found") return { action: "not_found" };
+    if (result.events.length > 0) {
+      await publishDurableSessionEventsFn(bus, input.workspaceId, input.sessionId, result.events);
+    }
+    return {
+      action: result.request.status === "expired" ? "expired" : "stale",
+    };
+  }
+
   async function markSessionIdle(input: MarkSessionIdleInput): Promise<void> {
     const { db, bus, settings, observability, wakeSessionWorkflow } = await services();
     const settled = await settleSessionIdleWithParentOutboxFn(
@@ -260,6 +280,7 @@ export function createSessionStateActivities(
     persistSessionAttemptQuiescence,
     recoverDispatch,
     peekSessionWork,
+    expireSessionHumanInput,
     markSessionIdle,
   };
 }

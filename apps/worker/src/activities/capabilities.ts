@@ -49,11 +49,15 @@ export async function settingsWithSessionMcpServersForRun(
     if (metadata.length === 0) {
       return settings;
     }
-    throw new Error("session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    if (metadata.some((server) => server.headerNames.length > 0)) {
+      throw new Error(
+        "session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+      );
+    }
   }
   return settingsWithSessionMcpServers(
     settings,
-    await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey),
+    await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey ?? null),
   );
 }
 
@@ -79,6 +83,7 @@ export function settingsWithSessionMcpServers(
         ...(server.requireApproval !== undefined
           ? { requireApproval: server.requireApproval }
           : {}),
+        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         headers: server.headers,
       })),
     ],

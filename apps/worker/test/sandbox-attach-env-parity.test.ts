@@ -331,6 +331,15 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       };
     };
     const scope = { accountId: "acct-1", workspaceId: "ws-1" };
+    const authority = {
+      sessionId: "00000000-0000-4000-8000-000000000001",
+      rootSessionId: "00000000-0000-4000-8000-000000000002",
+      turnId: "00000000-0000-4000-8000-000000000003",
+      attemptId: "00000000-0000-4000-8000-000000000004",
+      executionGeneration: 3,
+      initiator: { kind: "subject" as const, subjectId: "host:user:42" },
+      initiatorContext: { source: "embedded-host" },
+    };
 
     const { environment: lazyEnv, gitToken } = await sandboxEnvironmentForRun(
       settings,
@@ -339,6 +348,7 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
       {
         deferGitHubToken: true,
         scope,
+        authority,
         gitCredentials,
       },
     );
@@ -351,7 +361,11 @@ describe("repo-attached attach-vs-turn parity (the viewer-attach cold-create rac
     expect(Object.values(lazyEnv)).not.toContain("ghs_lazy_mint");
     expect(calls).toEqual([{ purpose: "identity" }]);
 
-    const token = await mintRunGitToken(settings, [repoResource], { scope, gitCredentials });
+    const token = await mintRunGitToken(settings, [repoResource], {
+      scope,
+      authority,
+      gitCredentials,
+    });
     expect(token).toBe("ghs_lazy_mint");
     expect(calls).toEqual([{ purpose: "identity" }, { purpose: "token" }]);
   });

@@ -16,11 +16,18 @@ import type {
   FileAsset,
   FileStatus,
   FileUploadStatus,
+  HumanInputAnswer,
+  HumanInputQuestion,
+  HumanInputResponse,
   KnowledgeMemory,
   KnowledgeMemoryKind,
   KnowledgeMemoryStatus,
   KnowledgeSourceRef,
   GitHubRepositoryScope,
+  HostEventExport,
+  HostEventExportBatch,
+  HostUsageExport,
+  HostUsageExportBatch,
   ManagedAccount,
   Permission,
   PackInstallation,
@@ -38,6 +45,7 @@ import type {
   ScheduledTaskStatus,
   ScheduledTaskTriggerType,
   Session,
+  SessionAuthorizationListScope,
   SessionListResponse,
   SessionEvent,
   SessionEventPayloadMode,
@@ -47,6 +55,7 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  SessionHumanInputRequest,
   LineageNode,
   SessionMcpServerMetadata,
   SessionStatus,
@@ -58,6 +67,8 @@ import type {
   SystemUpdateClassification,
   SessionTurnSource,
   SessionTurnStatus,
+  TurnInitiator,
+  TurnInitiatorContext,
   SocialConnection,
   SocialConnectionStatus,
   SocialPost,
@@ -79,6 +90,7 @@ import type {
   RigChangeStatus,
   RigCheck,
 } from "@opengeni/contracts";
+import { SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS } from "@opengeni/contracts";
 import {
   approvalIdentifier,
   boundWorkspaceControlEvent,
@@ -93,6 +105,14 @@ import {
   resolveWorkspaceMemoryEnabled,
   RigChange as RigChangeContract,
   SessionSystemUpdatePayload,
+  HostEventExport as HostEventExportContract,
+  HostEventExportBatch as HostEventExportBatchContract,
+  HostExportConsumerId,
+  HostUsageExport as HostUsageExportContract,
+  HostUsageExportBatch as HostUsageExportBatchContract,
+  OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+  HumanInputQuestion as HumanInputQuestionContract,
+  SubmitHumanInputResponseRequest,
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
@@ -117,6 +137,15 @@ import {
   sql,
   type SQL,
 } from "drizzle-orm";
+import {
+  creatorColumns,
+  frozenInitiatorForCommandActor,
+  initiatorColumns,
+  initiatorFromStorage,
+  UNATTRIBUTED_LEGACY_INITIATOR,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
+export { frozenInitiatorForCommandActor, type FrozenTurnInitiator } from "./turn-initiator";
 import type { PgDatabase, PgTransactionConfig } from "drizzle-orm/pg-core";
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
@@ -133,6 +162,7 @@ import {
   TOOL_RESULT_TYPE_BY_CALL_TYPE,
 } from "./session-tool-call-settlement";
 import {
+  assertAgentCommandAuthorityInTransaction,
   closeSessionTurnAttemptInTransaction,
   evaluateSessionControl,
   evaluateSessionControls,
@@ -144,6 +174,7 @@ import {
   registerSessionTurnAttemptClaim,
   serializeEffectiveSessionControl,
   type SessionDiscoveryControl,
+  type SessionCommandActor,
   SessionControlInvariantError,
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
@@ -303,19 +334,24 @@ export function rlsStrategyFor(db: Database): RlsStrategy {
  * across drivers whose raw-result shapes differ (postgres-js → row array;
  * node-postgres → `{ rows }`). A side effect is that `db.execute<T>(…)` now
  * resolves to `any`, erasing the per-row element type at the call site. OpenGeni's
- * OWN internal raw queries (sandbox-lease reaping, warm-meter reads, group
- * session-id lists) ALWAYS run over the postgres-js handle `createDb` builds,
- * whose `.execute` returns an array of rows — so this helper re-applies that
- * array-of-`T` typing in ONE documented place instead of scattering casts. It is
- * NOT a cross-driver abstraction: a host on a non-array driver must override the
- * specific helper (today only `userLookup`), not call internal raw queries.
+ * OWN internal raw queries usually run over the postgres-js handle `createDb`
+ * builds (array result), while an embedded host may inject a node-postgres style
+ * driver (`{ rows }`). Normalize those two standard shapes in one place; reject
+ * an unknown driver result rather than silently treating it as an empty query.
  */
 async function rawRows<T extends Record<string, unknown>>(
   executor: Pick<Database, "execute">,
   query: SQL,
 ): Promise<T[]> {
   const result = await executor.execute<T>(query);
-  return result as unknown as T[];
+  if (Array.isArray(result)) {
+    return result as unknown as T[];
+  }
+  const rows = (result as unknown as { rows?: unknown }).rows;
+  if (Array.isArray(rows)) {
+    return rows as T[];
+  }
+  throw new Error("Unsupported database execute() result shape");
 }
 
 export function createDb(databaseUrl: string, options: CreateDbOptions = {}): DbClient {
@@ -370,6 +406,481 @@ export function registerDbBinding(
     rlsStrategy: binding.rlsStrategy ?? "force",
     ...(binding.userLookup ? { userLookup: binding.userLookup } : {}),
   });
+}
+
+// ---------------------------------------------------------------------------
+// Durable host export
+// ---------------------------------------------------------------------------
+
+export type HostExportKind = "session_event" | "usage_event";
+
+/**
+ * A leased row did not satisfy this consumer build's export contract. Only
+ * bounded schema diagnostics are retained here; the source payload is never
+ * copied into the error. The lease can therefore be failed visibly, or an
+ * operator can re-claim it with a known token and explicitly dead-letter the
+ * reported head cursor.
+ */
+export class HostExportPayloadError extends Error {
+  override readonly name = "HostExportPayloadError";
+
+  constructor(
+    readonly kind: HostExportKind,
+    readonly consumerId: string,
+    readonly leaseToken: string,
+    readonly cursor: string,
+    readonly schemaIssues: string[],
+  ) {
+    super(
+      `Host export ${kind} cursor ${cursor} failed schema validation: ${schemaIssues.join("; ")}`,
+    );
+  }
+}
+
+export type HostExportConsumerStatus = {
+  exportKind: HostExportKind;
+  consumerId: string;
+  checkpoint: string;
+  enabled: boolean;
+  consecutiveFailures: number;
+  nextAttemptAt: string;
+  lastError: string | null;
+  lastErrorAt: string | null;
+  blockedAt: string | null;
+  leaseExpiresAt: string | null;
+  maxCursor: string;
+  pendingCount: string;
+  unassignedCount: string;
+  prunedThrough: string;
+};
+
+type HostExportRow = {
+  consumer_id: string;
+  export_kind: HostExportKind;
+  checkpoint: string | number | bigint;
+  lease_token: string;
+  lease_through: string | number | bigint;
+  export_cursor: string | number | bigint;
+  source_id: string;
+  account_id: string;
+  workspace_id: string;
+  session_id: string | null;
+  root_session_id: string | null;
+  turn_id: string | null;
+  turn_generation: number | null;
+  turn_attempt_id: string | null;
+  session_sequence: number | null;
+  client_event_id: string | null;
+  turn_association: string | null;
+  duplicate_of_event_id: string | null;
+  duplicate_reason: string | null;
+  event_type: string;
+  idempotency_key: string;
+  initiator: unknown;
+  initiator_context: unknown;
+  origin: string | null;
+  payload: unknown;
+  occurred_at: Date | string;
+  source_recorded_at: Date | string;
+};
+
+type HostExportClaimRow = Omit<HostExportRow, "root_session_id">;
+
+function hostExportCursor(value: string | number | bigint): string {
+  return BigInt(value).toString();
+}
+
+function hostExportTimestamp(value: Date | string): string {
+  return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
+}
+
+function validateHostExportKind(kind: HostExportKind): void {
+  if (kind !== "session_event" && kind !== "usage_event") {
+    throw new Error(`Unknown host export kind: ${kind}`);
+  }
+}
+
+function validateHostExportIdentity(kind: HostExportKind, consumerId: string): void {
+  validateHostExportKind(kind);
+  HostExportConsumerId.parse(consumerId);
+}
+
+/**
+ * Enable a named consumer. This call deliberately requires a database handle
+ * authenticated as the separately provisioned host-export role; the ordinary
+ * tenant-scoped app role cannot execute this cross-workspace API.
+ */
+export async function registerHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.register_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+export async function disableHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.disable_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+/**
+ * Permanently remove a quiesced consumer and release its retention floor.
+ * Unlike disable, re-registering this name later starts at the retained floor.
+ */
+export async function retireHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.retire_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: "session_event";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: "usage_event";
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostUsageExportBatch | null>;
+export async function claimHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    leaseHolderId: string;
+    leaseSeconds?: number;
+    limit?: number;
+    maxBytes?: number;
+  },
+): Promise<HostEventExportBatch | HostUsageExportBatch | null> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const claimedRows = await rawRows<HostExportClaimRow>(
+    db,
+    sql`
+      select * from opengeni_host_export.claim_host_export_batch(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+        ${input.leaseHolderId}, ${input.leaseSeconds ?? 60},
+        ${input.limit ?? 100}, ${input.maxBytes ?? 1_048_576}
+      )
+    `,
+  );
+  if (claimedRows.length === 0) return null;
+  const claimedFirst = claimedRows[0]!;
+  if (
+    claimedRows.some(
+      (row) =>
+        row.consumer_id !== claimedFirst.consumer_id ||
+        row.export_kind !== claimedFirst.export_kind ||
+        row.lease_token !== claimedFirst.lease_token ||
+        hostExportCursor(row.checkpoint) !== hostExportCursor(claimedFirst.checkpoint) ||
+        hostExportCursor(row.lease_through) !== hostExportCursor(claimedFirst.lease_through),
+    )
+  ) {
+    throw new Error("Host export claim returned inconsistent batch metadata");
+  }
+
+  const roots = await rawRows<{
+    export_cursor: string | number | bigint;
+    root_session_id: string | null;
+  }>(
+    db,
+    sql`
+      select * from opengeni_host_export.host_export_cursor_roots(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+      )
+    `,
+  );
+  const rootByExportCursor = new Map(
+    roots.map((row) => [hostExportCursor(row.export_cursor), row.root_session_id]),
+  );
+  const rows = claimedRows.map((row): HostExportRow => {
+    const cursor = hostExportCursor(row.export_cursor);
+    if (!rootByExportCursor.has(cursor)) {
+      throw new Error(`Host export root lookup omitted leased cursor ${cursor}`);
+    }
+    return { ...row, root_session_id: rootByExportCursor.get(cursor) ?? null };
+  });
+  const first = rows[0]!;
+
+  if (input.kind === "session_event") {
+    const events = rows.map((row): HostEventExport => {
+      const parsed = HostEventExportContract.safeParse({
+        schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+        cursor: hostExportCursor(row.export_cursor),
+        idempotencyKey: row.idempotency_key,
+        accountId: row.account_id,
+        workspaceId: row.workspace_id,
+        rootSessionId: row.root_session_id,
+        initiator: row.initiator,
+        initiatorContext: row.initiator_context,
+        origin: row.origin,
+        event: {
+          id: row.source_id,
+          workspaceId: row.workspace_id,
+          sessionId: row.session_id,
+          sequence: row.session_sequence,
+          type: row.event_type,
+          payload: row.payload,
+          occurredAt: hostExportTimestamp(row.occurred_at),
+          clientEventId: row.client_event_id,
+          turnId: row.turn_id,
+          turnGeneration: row.turn_generation,
+          turnAttemptId: row.turn_attempt_id,
+          turnAssociation: row.turn_association,
+          duplicateOfEventId: row.duplicate_of_event_id,
+          duplicateReason: row.duplicate_reason,
+        },
+      });
+      if (!parsed.success) {
+        throw hostExportPayloadError(input, row, parsed.error.issues);
+      }
+      return parsed.data;
+    });
+    return HostEventExportBatchContract.parse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      consumerId: first.consumer_id,
+      leaseToken: first.lease_token,
+      checkpoint: hostExportCursor(first.checkpoint),
+      throughCursor: hostExportCursor(first.lease_through),
+      events,
+    });
+  }
+
+  const events = rows.map((row): HostUsageExport => {
+    const parsed = HostUsageExportContract.safeParse({
+      schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+      cursor: hostExportCursor(row.export_cursor),
+      accountId: row.account_id,
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      rootSessionId: row.root_session_id,
+      turnId: row.turn_id,
+      turnAttemptId: row.turn_attempt_id,
+      initiator: row.initiator,
+      initiatorContext: row.initiator_context,
+      origin: row.origin,
+      usage: row.payload,
+    });
+    if (!parsed.success) {
+      throw hostExportPayloadError(input, row, parsed.error.issues);
+    }
+    return parsed.data;
+  });
+  return HostUsageExportBatchContract.parse({
+    schemaRevision: OPENGENI_HOST_EXPORT_SCHEMA_REVISION,
+    consumerId: first.consumer_id,
+    leaseToken: first.lease_token,
+    checkpoint: hostExportCursor(first.checkpoint),
+    throughCursor: hostExportCursor(first.lease_through),
+    events,
+  });
+}
+
+function hostExportPayloadError(
+  input: { kind: HostExportKind; consumerId: string; leaseToken: string },
+  row: HostExportRow,
+  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>,
+): HostExportPayloadError {
+  const schemaIssues = issues.slice(0, 8).map((issue) => {
+    const path = issue.path.map(String).join(".") || "envelope";
+    return `${path}: ${issue.message}`.slice(0, 240);
+  });
+  return new HostExportPayloadError(
+    input.kind,
+    input.consumerId,
+    input.leaseToken,
+    hostExportCursor(row.export_cursor),
+    schemaIssues.length > 0 ? schemaIssues : ["invalid envelope"],
+  );
+}
+
+export async function acknowledgeHostExportBatch(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string; leaseToken: string },
+): Promise<string> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const [row] = await rawRows<{ checkpoint: string | number | bigint }>(
+    db,
+    sql`
+      select opengeni_host_export.ack_host_export_batch(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid
+      ) as checkpoint
+    `,
+  );
+  if (!row) throw new Error("Host export acknowledgement returned no checkpoint");
+  return hostExportCursor(row.checkpoint);
+}
+
+export async function failHostExportBatch(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    error: string;
+    maxFailures?: number;
+  },
+): Promise<number> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const [row] = await rawRows<{ failures: number }>(
+    db,
+    sql`
+      select opengeni_host_export.fail_host_export_batch(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+        ${input.error}, ${input.maxFailures ?? 20}
+      ) as failures
+    `,
+  );
+  if (!row) throw new Error("Host export failure settlement returned no result");
+  return Number(row.failures);
+}
+
+export async function deadLetterHostExportHead(
+  db: Database,
+  input: {
+    kind: HostExportKind;
+    consumerId: string;
+    leaseToken: string;
+    cursor: string;
+    reason: string;
+  },
+): Promise<string> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const cursor = hostExportCursor(input.cursor);
+  const [row] = await rawRows<{ checkpoint: string | number | bigint }>(
+    db,
+    sql`
+      select opengeni_host_export.dead_letter_host_export_head(
+        ${input.kind}, ${input.consumerId}, ${input.leaseToken}::uuid,
+        ${cursor}::bigint, ${input.reason}
+      ) as checkpoint
+    `,
+  );
+  if (!row) throw new Error("Host export dead-letter settlement returned no checkpoint");
+  return hostExportCursor(row.checkpoint);
+}
+
+export async function resumeHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  await db.execute(sql`
+    select opengeni_host_export.resume_host_export_consumer(
+      ${input.kind}, ${input.consumerId}
+    )
+  `);
+}
+
+export async function rewindHostExportConsumer(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string; checkpoint: string },
+): Promise<void> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const checkpoint = hostExportCursor(input.checkpoint);
+  await db.execute(sql`
+    select opengeni_host_export.rewind_host_export_consumer(
+      ${input.kind}, ${input.consumerId}, ${checkpoint}::bigint
+    )
+  `);
+}
+
+export async function pruneHostExportOutbox(
+  db: Database,
+  input: { kind: HostExportKind; graceSeconds?: number; limit?: number },
+): Promise<number> {
+  validateHostExportKind(input.kind);
+  const [row] = await rawRows<{ deleted: number }>(
+    db,
+    sql`
+      select opengeni_host_export.prune_host_export_outbox(
+        ${input.kind}, ${input.graceSeconds ?? 3600}, ${input.limit ?? 1000}
+      ) as deleted
+    `,
+  );
+  return Number(row?.deleted ?? 0);
+}
+
+export async function getHostExportConsumerStatus(
+  db: Database,
+  input: { kind: HostExportKind; consumerId: string },
+): Promise<HostExportConsumerStatus | null> {
+  validateHostExportIdentity(input.kind, input.consumerId);
+  const [row] = await rawRows<{
+    export_kind: HostExportKind;
+    consumer_id: string;
+    checkpoint: string | number | bigint;
+    enabled: boolean;
+    consecutive_failures: number;
+    next_attempt_at: Date | string;
+    last_error: string | null;
+    last_error_at: Date | string | null;
+    blocked_at: Date | string | null;
+    lease_expires_at: Date | string | null;
+    max_cursor: string | number | bigint;
+    pending_count: string | number | bigint;
+    unassigned_count: string | number | bigint;
+    pruned_through: string | number | bigint;
+  }>(
+    db,
+    sql`
+      select * from opengeni_host_export.host_export_consumer_status(
+        ${input.kind}, ${input.consumerId}
+      )
+    `,
+  );
+  if (!row) return null;
+  const optionalTimestamp = (value: Date | string | null): string | null =>
+    value === null ? null : hostExportTimestamp(value);
+  return {
+    exportKind: row.export_kind,
+    consumerId: row.consumer_id,
+    checkpoint: hostExportCursor(row.checkpoint),
+    enabled: row.enabled,
+    consecutiveFailures: Number(row.consecutive_failures),
+    nextAttemptAt: hostExportTimestamp(row.next_attempt_at),
+    lastError: row.last_error,
+    lastErrorAt: optionalTimestamp(row.last_error_at),
+    blockedAt: optionalTimestamp(row.blocked_at),
+    leaseExpiresAt: optionalTimestamp(row.lease_expires_at),
+    maxCursor: hostExportCursor(row.max_cursor),
+    pendingCount: hostExportCursor(row.pending_count),
+    unassignedCount: hostExportCursor(row.unassigned_count),
+    prunedThrough: hostExportCursor(row.pruned_through),
+  };
 }
 
 export async function setRlsContext(db: Database, context: RlsContext): Promise<void> {
@@ -1614,7 +2125,9 @@ export async function areGitHubRepositoriesAllowedForWorkspace(
       return true;
     }
     const allowed = await scopedDb
-      .select({ repositoryId: schema.githubInstallationRepositories.repositoryId })
+      .select({
+        repositoryId: schema.githubInstallationRepositories.repositoryId,
+      })
       .from(schema.githubInstallationRepositories)
       .where(
         and(
@@ -1660,10 +2173,35 @@ export async function recordUsageEvent(
     unit: string;
     sourceResourceType?: string | null;
     sourceResourceId?: string | null;
+    sessionId?: string | null;
+    turnId?: string | null;
+    turnAttemptId?: string | null;
+    initiator?: TurnInitiator | null;
+    initiatorContext?: TurnInitiatorContext;
+    origin?: SessionTurnSource | null;
     idempotencyKey: string;
     occurredAt?: Date;
   },
 ): Promise<UsageEvent> {
+  if (input.turnId && !input.sessionId) {
+    throw new Error("recordUsageEvent: turnId requires sessionId");
+  }
+  if (input.turnAttemptId && !input.turnId) {
+    throw new Error("recordUsageEvent: turnAttemptId requires turnId");
+  }
+  if (input.initiatorContext && !input.initiator) {
+    throw new Error("recordUsageEvent: initiatorContext requires initiator");
+  }
+  const attribution = input.initiator
+    ? initiatorColumns({
+        initiator: input.initiator,
+        context: input.initiatorContext ?? {},
+      })
+    : {
+        initiatorKind: null,
+        initiatorSubjectId: null,
+        initiatorContext: {},
+      };
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -1679,23 +2217,54 @@ export async function recordUsageEvent(
           unit: input.unit,
           sourceResourceType: input.sourceResourceType ?? null,
           sourceResourceId: input.sourceResourceId ?? null,
+          sessionId: input.sessionId ?? null,
+          turnId: input.turnId ?? null,
+          turnAttemptId: input.turnAttemptId ?? null,
+          ...attribution,
+          origin: input.origin ?? null,
           idempotencyKey: input.idempotencyKey,
           occurredAt: input.occurredAt ?? new Date(),
         })
-        .onConflictDoNothing({ target: schema.usageEvents.idempotencyKey })
+        .onConflictDoUpdate({
+          target: schema.usageEvents.idempotencyKey,
+          set: {
+            sessionId: sql`coalesce(${schema.usageEvents.sessionId}, excluded.session_id)`,
+            turnId: sql`coalesce(${schema.usageEvents.turnId}, excluded.turn_id)`,
+            turnAttemptId: sql`coalesce(${schema.usageEvents.turnAttemptId}, excluded.turn_attempt_id)`,
+            initiatorKind: sql`coalesce(${schema.usageEvents.initiatorKind}, excluded.initiator_kind)`,
+            initiatorSubjectId: sql`coalesce(${schema.usageEvents.initiatorSubjectId}, excluded.initiator_subject_id)`,
+            initiatorContext: sql`case
+              when ${schema.usageEvents.initiatorKind} is null then excluded.initiator_context
+              else ${schema.usageEvents.initiatorContext}
+            end`,
+            origin: sql`coalesce(${schema.usageEvents.origin}, excluded.origin)`,
+          },
+        })
         .returning();
       if (row) {
+        const expectedContext = [
+          ["sessionId", input.sessionId, row.sessionId],
+          ["turnId", input.turnId, row.turnId],
+          ["turnAttemptId", input.turnAttemptId, row.turnAttemptId],
+        ] as const;
+        for (const [field, expected, actual] of expectedContext) {
+          if (expected && actual !== expected) {
+            throw new Error(`recordUsageEvent: idempotency key resolved to a different ${field}`);
+          }
+        }
+        if (
+          input.initiator &&
+          (row.initiatorKind !== input.initiator.kind ||
+            row.initiatorSubjectId !== input.initiator.subjectId)
+        ) {
+          throw new Error("recordUsageEvent: idempotency key resolved to a different initiator");
+        }
+        if (input.origin && row.origin !== input.origin) {
+          throw new Error("recordUsageEvent: idempotency key resolved to a different origin");
+        }
         return mapUsageEvent(row);
       }
-      const [existing] = await scopedDb
-        .select()
-        .from(schema.usageEvents)
-        .where(eq(schema.usageEvents.idempotencyKey, input.idempotencyKey))
-        .limit(1);
-      if (!existing) {
-        throw new Error("Failed to record usage event");
-      }
-      return mapUsageEvent(existing);
+      throw new Error("Failed to record usage event");
     },
   );
 }
@@ -2341,6 +2910,7 @@ export type CreateSessionMcpServerInput = {
   timeoutMs?: number | null;
   cacheToolsList?: boolean | null;
   requireApproval?: boolean | string[] | null;
+  connectionRef?: McpServerConnectionRef | null;
   headersEncrypted?: Record<string, string>;
 };
 
@@ -2378,6 +2948,8 @@ export type EnqueueSessionTurnInput = {
   sandboxOs?: SandboxOs | null;
   metadata: Record<string, unknown>;
   lineage?: Record<string, unknown>;
+  initiator: TurnInitiator;
+  initiatorContext?: TurnInitiatorContext;
   /** Steer inserts before all waiting prompts; Send appends after them. */
   placement?: "head" | "tail";
 };
@@ -6861,7 +7433,11 @@ export async function listRigVersionMonitoringSummaries(
   workspaceId: string,
   rigId: string,
   limit = 20,
-): Promise<{ versions: RigVersionMonitoringSummary[]; hasMore: boolean; total: number }> {
+): Promise<{
+  versions: RigVersionMonitoringSummary[];
+  hasMore: boolean;
+  total: number;
+}> {
   const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -7116,7 +7692,11 @@ export async function listRigChangeMonitoringSummaries(
   workspaceId: string,
   rigId: string,
   limit = 20,
-): Promise<{ changes: RigChangeMonitoringSummary[]; hasMore: boolean; total: number }> {
+): Promise<{
+  changes: RigChangeMonitoringSummary[];
+  hasMore: boolean;
+  total: number;
+}> {
   const boundedLimit = Math.max(1, Math.min(100, Math.floor(limit)));
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -9610,6 +10190,11 @@ export async function reconcileCodexCapacityWait<
             unit: "run",
             sourceResourceType: "session_system_update",
             sourceResourceId: update.id,
+            sessionId: input.sessionId,
+            initiatorKind: "service",
+            initiatorSubjectId: "goal-continuation",
+            initiatorContext: { goalId: goal.id, reason: "codex_capacity" },
+            origin: "goal",
             idempotencyKey: `agent_run.created:codex-capacity:${input.workspaceId}:${update.id}`,
             occurredAt: now,
           })
@@ -10674,6 +11259,7 @@ function mapSessionMcpServerMetadata(
     url: row.url,
     headerNames: Object.keys(row.headersEncrypted ?? {}).sort(),
     credentialVersion: Number(row.credentialVersion),
+    connectionRef: row.connectionRef ?? null,
   };
 }
 
@@ -10730,6 +11316,7 @@ async function insertSessionMcpServers(
         timeoutMs: server.timeoutMs ?? null,
         cacheToolsList: server.cacheToolsList ?? false,
         requireApproval: server.requireApproval ?? null,
+        connectionRef: server.connectionRef ?? null,
         headersEncrypted: server.headersEncrypted ?? {},
       })),
     )
@@ -10761,6 +11348,46 @@ export async function listSessionMcpServerMetadata(
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [sessionId]);
     return grouped.get(sessionId) ?? [];
+  });
+}
+
+/**
+ * Returns the complete stored server configuration needed to snapshot an
+ * immediate parent's MCP context onto a child session. Credential values stay
+ * encrypted throughout this path: the core can copy the ciphertext into the
+ * child's rows, but it never receives plaintext headers.
+ *
+ * This is intentionally distinct from `listSessionMcpServersForRun`, whose
+ * worker-only responsibility is decrypting credentials at the execution
+ * boundary.
+ */
+export async function listSessionMcpServersForChildInheritance(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<CreateSessionMcpServerInput[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionMcpServers)
+      .where(
+        and(
+          eq(schema.sessionMcpServers.workspaceId, workspaceId),
+          eq(schema.sessionMcpServers.sessionId, sessionId),
+        ),
+      )
+      .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
+    return rows.map((row) => ({
+      id: row.serverId,
+      name: row.name ?? null,
+      url: row.url,
+      allowedTools: row.allowedTools ?? null,
+      timeoutMs: row.timeoutMs ?? null,
+      cacheToolsList: row.cacheToolsList,
+      requireApproval: row.requireApproval ?? null,
+      connectionRef: row.connectionRef ?? null,
+      headersEncrypted: { ...(row.headersEncrypted ?? {}) },
+    }));
   });
 }
 
@@ -10821,7 +11448,7 @@ export async function listSessionMcpServersForRun(
   db: Database,
   workspaceId: string,
   sessionId: string,
-  encryptionKey: Uint8Array,
+  encryptionKey: Uint8Array | null,
 ): Promise<SessionMcpServerForRun[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
@@ -10837,10 +11464,13 @@ export async function listSessionMcpServersForRun(
     return rows.map((row) => {
       let headers: Record<string, string>;
       try {
+        if (!encryptionKey && Object.keys(row.headersEncrypted ?? {}).length > 0) {
+          throw new Error("missing encryption key");
+        }
         headers = Object.fromEntries(
           Object.entries(row.headersEncrypted ?? {}).map(([name, stored]) => [
             name,
-            decryptEnvironmentValue(encryptionKey, stored),
+            decryptEnvironmentValue(encryptionKey!, stored),
           ]),
         );
       } catch {
@@ -10870,15 +11500,63 @@ async function lockWorkspaceForSessionCreate(tx: Database, workspaceId: string):
   }
 }
 
+type AgentSessionCreationActor = Extract<SessionCommandActor, { type: "agent_attempt" }>;
+
+/** A caller-preallocated session UUID is already owned by another session. */
+export class SessionIdConflictError extends Error {
+  constructor(readonly sessionId: string) {
+    super(`Session id is already in use: ${sessionId}`);
+    this.name = "SessionIdConflictError";
+  }
+}
+
+async function frozenSessionCreatorForInsert(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
+  },
+): Promise<FrozenTurnInitiator> {
+  if (!input.createdByActor) {
+    return {
+      initiator: input.createdBy ?? UNATTRIBUTED_LEGACY_INITIATOR,
+      context: input.createdByContext ?? {},
+    };
+  }
+  // A first-party worker bearer is minted per request with the exact current
+  // turn/attempt. Freeze the creator under the same ownership locks as the
+  // session insert so a superseded attempt cannot create a child attributed to
+  // its former initiating subject. Session-scoped Toolspace credentials remain
+  // deliberately renewable and are a separate, non-orchestration surface.
+  await assertAgentCommandAuthorityInTransaction(tx, {
+    workspaceId: input.workspaceId,
+    actor: input.createdByActor,
+    targetSessionId: input.createdByActor.sessionId,
+    action: "message",
+  });
+  return await frozenInitiatorForCommandActor(tx, input.workspaceId, input.createdByActor);
+}
+
 export async function createSession(
   db: Database,
   input: {
+    requestedSessionId?: string;
     accountId: string;
     workspaceId: string;
     initialMessage: string;
     resources: ResourceRef[];
     tools?: ToolRef[];
     metadata: Record<string, unknown>;
+    /**
+     * Frozen creator authority. Legacy/test-only callers may omit this and get
+     * an explicit unattributed service sentinel; production producers must pass
+     * an authenticated subject or named service.
+     */
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
     model: string;
     sandboxBackend: SandboxBackend;
     variableSetId?: string | null;
@@ -10902,13 +11580,14 @@ export async function createSession(
 ): Promise<Session> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
-  const id = crypto.randomUUID();
+  const id = input.requestedSessionId ?? crypto.randomUUID();
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockWorkspaceForSessionCreate(tx as unknown as Database, input.workspaceId);
+        const frozenCreator = await frozenSessionCreatorForInsert(tx as unknown as Database, input);
         const [row] = await tx
           .insert(schema.sessions)
           .values({
@@ -10919,6 +11598,7 @@ export async function createSession(
             resources: input.resources,
             tools: input.tools ?? [],
             metadata: input.metadata,
+            ...creatorColumns(frozenCreator),
             model: input.model,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
@@ -10932,8 +11612,12 @@ export async function createSession(
             createIdempotencyKey: input.createIdempotencyKey ?? null,
             status: "queued",
           })
+          .onConflictDoNothing({ target: schema.sessions.id })
           .returning();
         if (!row) {
+          if (input.requestedSessionId) {
+            throw new SessionIdConflictError(input.requestedSessionId);
+          }
           throw new Error("Failed to create session");
         }
         const mcpServers = await insertSessionMcpServers(tx as unknown as Database, {
@@ -10960,12 +11644,16 @@ export async function createSession(
 export async function createSessionWithIdempotencyKey(
   db: Database,
   input: {
+    requestedSessionId?: string;
     accountId: string;
     workspaceId: string;
     initialMessage: string;
     resources: ResourceRef[];
     tools?: ToolRef[];
     metadata: Record<string, unknown>;
+    createdBy?: TurnInitiator;
+    createdByContext?: TurnInitiatorContext;
+    createdByActor?: AgentSessionCreationActor | null;
     model: string;
     sandboxBackend: SandboxBackend;
     variableSetId?: string | null;
@@ -10987,13 +11675,14 @@ export async function createSessionWithIdempotencyKey(
 ): Promise<{ session: Session; created: boolean }> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
-  const id = crypto.randomUUID();
+  const id = input.requestedSessionId ?? crypto.randomUUID();
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
         await lockWorkspaceForSessionCreate(tx as unknown as Database, input.workspaceId);
+        const frozenCreator = await frozenSessionCreatorForInsert(tx as unknown as Database, input);
         const [inserted] = await tx
           .insert(schema.sessions)
           .values({
@@ -11004,6 +11693,7 @@ export async function createSessionWithIdempotencyKey(
             resources: input.resources,
             tools: input.tools ?? [],
             metadata: input.metadata,
+            ...creatorColumns(frozenCreator),
             model: input.model,
             sandboxBackend: input.sandboxBackend,
             sandboxOs: input.sandboxOs ?? "linux",
@@ -11017,10 +11707,10 @@ export async function createSessionWithIdempotencyKey(
             createIdempotencyKey: input.createIdempotencyKey,
             status: "queued",
           })
-          .onConflictDoNothing({
-            target: [schema.sessions.workspaceId, schema.sessions.createIdempotencyKey],
-            where: sql`${schema.sessions.createIdempotencyKey} is not null`,
-          })
+          // No target deliberately handles either the idempotency-key race or a
+          // caller-preallocated primary-key collision. We classify the exact
+          // winner below instead of turning the latter into an opaque 500.
+          .onConflictDoNothing()
           .returning();
         if (inserted) {
           const mcpServers = await insertSessionMcpServers(tx as unknown as Database, {
@@ -11045,10 +11735,21 @@ export async function createSessionWithIdempotencyKey(
           )
           .limit(1);
         if (!existing) {
+          if (input.requestedSessionId) {
+            // The insert did nothing and no row owns this idempotency key. With
+            // a caller-supplied primary key, the only remaining conflict is that
+            // UUID. Do not try to confirm it through workspace RLS: an owner in
+            // another workspace is intentionally invisible but must still map
+            // to the same non-leaking 409.
+            throw new SessionIdConflictError(input.requestedSessionId);
+          }
           // No row inserted and none found: the conflict target did not actually
           // collide (should never happen for a present key) — surface it rather
           // than silently returning a phantom.
           throw new Error("Failed to create session under idempotency key");
+        }
+        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+          throw new SessionIdConflictError(input.requestedSessionId);
         }
         const grouped = await sessionMcpServerMetadataForSessions(
           tx as unknown as Database,
@@ -11221,6 +11922,7 @@ export type ListSessionsForSubjectOptions = ListSessionsOptions & {
   subjectId: string;
   cursor?: SessionListCursor | undefined;
   search?: string | undefined;
+  authorizationScope?: SessionAuthorizationListScope | undefined;
 };
 
 export class SessionPinVersionConflictError extends Error {
@@ -11299,6 +12001,95 @@ const SESSION_TREE_STATS_MAX_DESCENDANTS = 1_000;
 const SESSION_TREE_STATS_MAX_DEPTH = 32;
 const SESSION_TREE_STATS_MAX_ROOTS = 600;
 const SESSION_LIST_MAX_PINNED = 100;
+
+const EMPTY_SESSION_TREE_STATS: SessionTreeStats = {
+  directChildren: 0,
+  totalDescendants: 0,
+  runningDescendants: 0,
+  queuedDescendants: 0,
+  attentionDescendants: 0,
+  pausedDescendants: 0,
+  failedDescendants: 0,
+  truncated: false,
+};
+
+/**
+ * Remove control metadata derived from sessions other than the exact target.
+ * Effective state and the opaque OCC etag remain usable without exposing
+ * ancestor ids/titles/actors/reasons or descendant settlement facts.
+ */
+export function projectEffectiveControlForRelatedAccess(
+  control: Session["effectiveControl"],
+  sessionId: string,
+  access: "target" | "root",
+): Session["effectiveControl"] {
+  if (access === "root") return control;
+  const hasHiddenAncestorBlocker = control.blockers.some(
+    (blocker) => blocker.kind === "session" && blocker.sessionId !== sessionId,
+  );
+  const hiddenAncestorBlocker = hasHiddenAncestorBlocker
+    ? {
+        kind: "session" as const,
+        displayName: "An ancestor session",
+        actor: null,
+        reason: null,
+        changedAt: null,
+        revision: 0,
+      }
+    : null;
+  let includedHiddenAncestor = false;
+  const blockers = control.blockers.flatMap((blocker) => {
+    if (blocker.kind !== "session" || blocker.sessionId === sessionId) return [blocker];
+    if (!hiddenAncestorBlocker || includedHiddenAncestor) return [];
+    includedHiddenAncestor = true;
+    return [hiddenAncestorBlocker];
+  });
+  const primary = control.primaryBlocker;
+  const primaryBlocker =
+    primary?.kind === "session" && primary.sessionId !== sessionId
+      ? hiddenAncestorBlocker
+      : primary;
+  return {
+    ...control,
+    primaryBlocker,
+    blockers,
+    additionalBlockerCount: Math.max(0, blockers.length - 1),
+    resumeOptions:
+      control.state === "paused"
+        ? [
+            {
+              scope: "selected",
+              targetId: sessionId,
+              selectedStateAfter: "active",
+              impactCopy: "Resume this session without changing other workstreams.",
+            },
+          ]
+        : [],
+    override: control.override?.rootSessionId === sessionId ? control.override : null,
+    settlement: null,
+  };
+}
+
+/**
+ * Remove metadata derived from sessions other than the exact authorized
+ * target, including parent identity and descendant counts.
+ */
+export function projectSessionForRelatedAccess(
+  session: Session,
+  access: "target" | "root",
+): Session {
+  if (access === "root") return session;
+  return {
+    ...session,
+    parentSessionId: null,
+    treeStats: EMPTY_SESSION_TREE_STATS,
+    effectiveControl: projectEffectiveControlForRelatedAccess(
+      session.effectiveControl,
+      session.id,
+      access,
+    ),
+  };
+}
 
 /**
  * Return bounded descendant aggregates for the bounded set of rows being
@@ -11435,9 +12226,12 @@ export async function sessionTreeStatsForSessions(
 }
 
 function sessionFilters(
-  options: Pick<ListSessionsForSubjectOptions, "parentSessionId" | "search">,
+  options: Pick<ListSessionsForSubjectOptions, "authorizationScope" | "parentSessionId" | "search">,
 ): SQL[] {
   const filters: SQL[] = [];
+  if (options.authorizationScope) {
+    filters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+  }
   if (Object.prototype.hasOwnProperty.call(options, "parentSessionId")) {
     const parentSessionId = options.parentSessionId;
     if (parentSessionId === null) {
@@ -11461,6 +12255,75 @@ function sessionFilters(
     );
   }
   return filters;
+}
+
+/**
+ * Convert the embedding host's complete list scope into a workspace-bound SQL
+ * predicate. Root scopes include every descendant through the durable parent
+ * graph; exact ids never imply access to related sessions. `UNION` (rather than
+ * `UNION ALL`) makes legacy cycles terminate without a caller-sized path array.
+ */
+export function sessionAuthorizationScopeFilter(scope: SessionAuthorizationListScope): SQL {
+  if (scope.kind === "all") return sql`true`;
+  if (
+    scope.rootSessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS ||
+    scope.sessionIds.length > SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS
+  ) {
+    throw new RangeError(
+      `Session authorization scope exceeds ${SESSION_AUTHORIZATION_LIST_SCOPE_MAX_IDS} ids per field`,
+    );
+  }
+  const rootIds = [...new Set(scope.rootSessionIds)];
+  const sessionIds = [...new Set(scope.sessionIds)];
+  if (rootIds.length === 0 && sessionIds.length === 0) return sql`false`;
+  const exact = sessionIds.length > 0 ? inArray(schema.sessions.id, sessionIds) : sql`false`;
+  const descendants =
+    rootIds.length > 0
+      ? sql`${schema.sessions.id} in (
+          with recursive authorized_sessions(id) as (
+            select root.id
+            from ${schema.sessions} root
+            where root.workspace_id = ${schema.sessions.workspaceId}
+              and ${inArray(sql`root.id`, rootIds)}
+
+            union
+
+            select child.id
+            from authorized_sessions parent
+            join ${schema.sessions} child
+              on child.workspace_id = ${schema.sessions.workspaceId}
+             and child.parent_session_id = parent.id
+          )
+          select id from authorized_sessions
+        )`
+      : sql`false`;
+  return or(exact, descendants)!;
+}
+
+async function sessionIdsCoveredByAuthorizationRoots(
+  db: Database,
+  workspaceId: string,
+  sessionIds: string[],
+  scope: SessionAuthorizationListScope | undefined,
+): Promise<Set<string>> {
+  if (sessionIds.length === 0) return new Set();
+  if (!scope || scope.kind === "all") return new Set(sessionIds);
+  if (scope.rootSessionIds.length === 0) return new Set();
+  const rows = await db
+    .select({ id: schema.sessions.id })
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        inArray(schema.sessions.id, sessionIds),
+        sessionAuthorizationScopeFilter({
+          kind: "scoped",
+          rootSessionIds: scope.rootSessionIds,
+          sessionIds: [],
+        }),
+      ),
+    );
+  return new Set(rows.map((row) => row.id));
 }
 
 const SESSION_LIST_SNAPSHOT_TTL_MS = 10 * 60 * 1000;
@@ -11629,9 +12492,53 @@ export async function listSessionsForSubject(
           ) {
             throw new SessionListCursorError();
           }
-          pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
-          const nextOffset = cursor.offset + pageIds.length;
-          if (nextOffset < snapshot.ordinarySessionIds.length) {
+          let nextOffset: number | null = null;
+          if (options.authorizationScope) {
+            // A host may revoke rows between pages. Scan the immutable snapshot
+            // in bounded database-filtered batches until this page is full plus
+            // one authorized lookahead; never hydrate a stale broad slice and
+            // return a short/empty page while later authorized rows still exist.
+            const visible: Array<{ id: string; offsetAfter: number }> = [];
+            const scanBatchSize = Math.max(500, Math.min(2_000, limit * 4));
+            let scanOffset = cursor.offset;
+            while (scanOffset < snapshot.ordinarySessionIds.length && visible.length < limit + 1) {
+              const batchEnd = Math.min(
+                snapshot.ordinarySessionIds.length,
+                scanOffset + scanBatchSize,
+              );
+              const candidates = snapshot.ordinarySessionIds.slice(scanOffset, batchEnd);
+              const allowedRows = await tx
+                .select({ id: schema.sessions.id })
+                .from(schema.sessions)
+                .where(
+                  and(
+                    eq(schema.sessions.workspaceId, workspaceId),
+                    inArray(schema.sessions.id, candidates),
+                    sessionAuthorizationScopeFilter(options.authorizationScope),
+                  ),
+                );
+              const allowed = new Set(allowedRows.map((row) => row.id));
+              for (let index = 0; index < candidates.length; index += 1) {
+                const id = candidates[index]!;
+                if (allowed.has(id)) {
+                  visible.push({ id, offsetAfter: scanOffset + index + 1 });
+                  if (visible.length >= limit + 1) break;
+                }
+              }
+              scanOffset = batchEnd;
+            }
+            pageIds = visible.slice(0, limit).map((row) => row.id);
+            if (visible.length > limit) {
+              nextOffset = visible[limit - 1]!.offsetAfter;
+            }
+          } else {
+            pageIds = snapshot.ordinarySessionIds.slice(cursor.offset, cursor.offset + limit);
+            const candidateOffset = cursor.offset + pageIds.length;
+            if (candidateOffset < snapshot.ordinarySessionIds.length) {
+              nextOffset = candidateOffset;
+            }
+          }
+          if (nextOffset !== null) {
             nextCursor = encodeSessionListCursor({
               snapshotId: snapshot.id,
               offset: nextOffset,
@@ -11726,6 +12633,9 @@ export async function listSessionsForSubject(
                   and(
                     eq(schema.sessions.workspaceId, workspaceId),
                     inArray(schema.sessions.id, pageIds),
+                    ...(options.authorizationScope
+                      ? [sessionAuthorizationScopeFilter(options.authorizationScope)]
+                      : []),
                     or(isNull(schema.sessionPins.id), eq(schema.sessionPins.pinned, false)),
                   ),
                 );
@@ -11739,31 +12649,31 @@ export async function listSessionsForSubject(
           ...pageRows.map((row) => row.session.id),
         ];
         const mcpServers = await sessionMcpServerMetadataForSessions(tx, workspaceId, ids);
-        const treeStats = await sessionTreeStatsForSessions(tx, workspaceId, ids);
+        const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
+          tx,
+          workspaceId,
+          ids,
+          options.authorizationScope,
+        );
+        const treeStats = await sessionTreeStatsForSessions(tx, workspaceId, [...rootRelatedIds]);
         const controls = await sessionControlProjections(tx, workspaceId, ids);
         const mapListSession = (
           row: (typeof pinnedRows)[number] | (typeof pageRows)[number],
         ): Session => {
           const control = controls.get(row.session.id);
           if (!control) throw new Error(`Effective control missing for session ${row.session.id}`);
-          return {
-            ...mapSession(
-              row.session,
-              control,
-              mcpServers.get(row.session.id) ?? [],
-              mapSessionPin(row.pin),
-            ),
-            treeStats: treeStats.get(row.session.id) ?? {
-              directChildren: 0,
-              totalDescendants: 0,
-              runningDescendants: 0,
-              queuedDescendants: 0,
-              attentionDescendants: 0,
-              pausedDescendants: 0,
-              failedDescendants: 0,
-              truncated: false,
+          return projectSessionForRelatedAccess(
+            {
+              ...mapSession(
+                row.session,
+                control,
+                mcpServers.get(row.session.id) ?? [],
+                mapSessionPin(row.pin),
+              ),
+              treeStats: treeStats.get(row.session.id) ?? EMPTY_SESSION_TREE_STATS,
             },
-          };
+            rootRelatedIds.has(row.session.id) ? "root" : "target",
+          );
         };
         return {
           pinned: pinnedRows.map(mapListSession),
@@ -11795,6 +12705,7 @@ export async function getSessionForSubject(
   workspaceId: string,
   sessionId: string,
   subjectId: string,
+  relatedSessionAccess: "target" | "root" = "root",
 ): Promise<Session | null> {
   return await withWorkspaceSubjectRls(db, workspaceId, subjectId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -11814,11 +12725,14 @@ export async function getSessionForSubject(
     const mcpServers = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [
       sessionId,
     ]);
-    return await mapSessionWithControl(
-      scopedDb,
-      row.session,
-      mcpServers.get(sessionId) ?? [],
-      mapSessionPin(row.pin),
+    return projectSessionForRelatedAccess(
+      await mapSessionWithControl(
+        scopedDb,
+        row.session,
+        mcpServers.get(sessionId) ?? [],
+        mapSessionPin(row.pin),
+      ),
+      relatedSessionAccess,
     );
   });
 }
@@ -12028,7 +12942,11 @@ export type SessionDiscoverySummary = {
   parentSessionId: string | null;
   status: SessionStatus;
   effectiveControl: SessionDiscoveryControl;
-  goal: { status: SessionGoalStatus; text: string; textOriginalChars: number } | null;
+  goal: {
+    status: SessionGoalStatus;
+    text: string;
+    textOriginalChars: number;
+  } | null;
   queuedPromptCount: number;
   treeStats: NonNullable<Session["treeStats"]>;
   latestMessage: {
@@ -12043,6 +12961,29 @@ export type SessionDiscoverySummary = {
   /** Internal exact keyset timestamp; omitted from the MCP row projection. */
   sortAt: string;
 };
+
+function projectSessionDiscoveryControlForRelatedAccess(
+  control: SessionDiscoveryControl,
+  sessionId: string,
+  access: "target" | "root",
+): SessionDiscoveryControl {
+  if (
+    access === "root" ||
+    control.primaryBlocker?.kind !== "session" ||
+    control.primaryBlocker.sessionId === sessionId
+  ) {
+    return control;
+  }
+  return {
+    ...control,
+    primaryBlocker: {
+      kind: "session",
+      displayName: "An ancestor session",
+      displayNameOriginalChars: "An ancestor session".length,
+    },
+    additionalBlockerCount: 0,
+  };
+}
 
 const SESSION_ACTIVITY_REVISION_PATTERN = /^(?:0|[1-9]\d*)$/;
 const SESSION_ACTIVITY_REVISION_MAX = 9_223_372_036_854_775_807n;
@@ -12101,6 +13042,7 @@ export async function listSessionDiscoverySummaries(
     includeLastMessage?: boolean;
     orderBy?: SessionDiscoveryOrderBy;
     updatedAfter?: string;
+    authorizationScope?: SessionAuthorizationListScope;
   },
 ): Promise<{
   sessions: SessionDiscoverySummary[];
@@ -12197,6 +13139,9 @@ export async function listSessionDiscoverySummaries(
           )
       : undefined;
     const snapshotFilters: SQL[] = [eq(schema.sessions.workspaceId, workspaceId)];
+    if (options.authorizationScope) {
+      snapshotFilters.push(sessionAuthorizationScopeFilter(options.authorizationScope));
+    }
     snapshotFilters.push(
       orderBy === "updatedAt"
         ? sql`${schema.sessions.activityRevision} <= ${snapshotRevision}::text::bigint`
@@ -12260,8 +13205,14 @@ export async function listSessionDiscoverySummaries(
       };
     }
 
+    const rootRelatedIds = await sessionIdsCoveredByAuthorizationRoots(
+      scopedDb,
+      workspaceId,
+      ids,
+      options.authorizationScope,
+    );
     const controls = await evaluateSessionDiscoveryControls(scopedDb, workspaceId, ids);
-    const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, ids);
+    const treeStats = await sessionTreeStatsForSessions(scopedDb, workspaceId, [...rootRelatedIds]);
     const goals = await scopedDb
       .select({
         sessionId: schema.sessionGoals.sessionId,
@@ -12328,15 +13279,20 @@ export async function listSessionDiscoverySummaries(
     const sessions = page.map((row): SessionDiscoverySummary => {
       const control = controls.get(row.id);
       if (!control) throw new Error(`Effective control missing for session ${row.id}`);
+      const relatedAccess = rootRelatedIds.has(row.id) ? "root" : "target";
       const goal = goalsBySession.get(row.id);
       const latest = latestBySession.get(row.id);
       return {
         id: row.id,
         title: row.title,
         titleOriginalChars: row.titleOriginalChars === null ? null : Number(row.titleOriginalChars),
-        parentSessionId: row.parentSessionId,
+        parentSessionId: relatedAccess === "root" ? row.parentSessionId : null,
         status: row.status as SessionStatus,
-        effectiveControl: control,
+        effectiveControl: projectSessionDiscoveryControlForRelatedAccess(
+          control,
+          row.id,
+          relatedAccess,
+        ),
         goal: goal
           ? {
               status: goal.status as SessionGoalStatus,
@@ -12345,16 +13301,10 @@ export async function listSessionDiscoverySummaries(
             }
           : null,
         queuedPromptCount: queueBySession.get(row.id) ?? 0,
-        treeStats: treeStats.get(row.id) ?? {
-          directChildren: 0,
-          totalDescendants: 0,
-          runningDescendants: 0,
-          queuedDescendants: 0,
-          attentionDescendants: 0,
-          pausedDescendants: 0,
-          failedDescendants: 0,
-          truncated: false,
-        },
+        treeStats:
+          relatedAccess === "root"
+            ? (treeStats.get(row.id) ?? EMPTY_SESSION_TREE_STATS)
+            : EMPTY_SESSION_TREE_STATS,
         latestMessage: latest
           ? {
               type: latest.type as SessionEventType,
@@ -12400,6 +13350,64 @@ export type SessionLineage = {
   children: LineageNode[];
   truncated: boolean;
 };
+
+/**
+ * Resolve a session tree to its root without materializing the full lineage.
+ * Every recursive hop stays workspace-scoped and invalid/cyclic/deep chains
+ * fail closed instead of returning an ambiguous credential authority.
+ */
+export async function getSessionRootId(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<string | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb.execute<{
+      id: string;
+      parentSessionId: string | null;
+      depth: number;
+      cycle: boolean;
+    }>(sql`
+      with recursive lineage(id, parent_session_id, depth, path, cycle) as (
+        select
+          ${schema.sessions.id},
+          ${schema.sessions.parentSessionId},
+          0,
+          array[${schema.sessions.id}],
+          false
+        from ${schema.sessions}
+        where ${schema.sessions.workspaceId} = ${workspaceId}
+          and ${schema.sessions.id} = ${sessionId}
+        union all
+        select
+          parent.id,
+          parent.parent_session_id,
+          lineage.depth + 1,
+          lineage.path || parent.id,
+          parent.id = any(lineage.path)
+        from ${schema.sessions} parent
+        join lineage on lineage.parent_session_id = parent.id
+        where parent.workspace_id = ${workspaceId}
+          and not lineage.cycle
+          and lineage.depth < 64
+      )
+      select
+        id,
+        parent_session_id as "parentSessionId",
+        depth,
+        cycle
+      from lineage
+      order by depth desc
+      limit 1
+    `);
+    const root = rows[0];
+    if (!root) return null;
+    if (root.cycle || root.parentSessionId !== null || Number(root.depth) >= 64) {
+      throw new Error(`session lineage for ${sessionId} has no valid workspace root`);
+    }
+    return root.id;
+  });
+}
 
 type LineageIdRow = {
   id: string;
@@ -13147,6 +14155,526 @@ export async function getLatestRunState(
         }
       : null;
   });
+}
+
+export class HumanInputResponseValidationError extends Error {
+  readonly name = "HumanInputResponseValidationError";
+
+  constructor(
+    readonly code: "INVALID_RESPONSE" | "SKIP_NOT_ALLOWED",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function mapSessionHumanInputRequest(
+  row: typeof schema.sessionHumanInputRequests.$inferSelect,
+): SessionHumanInputRequest {
+  return {
+    id: row.id,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    turnId: row.turnId,
+    turnGeneration: row.turnGeneration,
+    creationAttemptId: row.creationAttemptId,
+    toolCallId: row.toolCallId,
+    status: row.status as SessionHumanInputRequest["status"],
+    questions: row.questions,
+    allowSkip: row.allowSkip,
+    response: row.response ?? null,
+    respondedBy: row.respondedBy ?? null,
+    respondedAt: row.respondedAt?.toISOString() ?? null,
+    expiresAt: row.expiresAt?.toISOString() ?? null,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+export async function getSessionHumanInputRequest(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  requestId: string,
+): Promise<SessionHumanInputRequest | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionHumanInputRequests)
+      .where(
+        and(
+          eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+          eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+          eq(schema.sessionHumanInputRequests.id, requestId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionHumanInputRequest(row) : null;
+  });
+}
+
+export async function listSessionHumanInputRequests(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  options: { status?: SessionHumanInputRequest["status"]; limit?: number } = {},
+): Promise<SessionHumanInputRequest[]> {
+  const limit = Math.min(100, Math.max(1, Math.floor(options.limit ?? 50)));
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const predicates = [
+      eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+      eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+    ];
+    if (options.status) {
+      predicates.push(eq(schema.sessionHumanInputRequests.status, options.status));
+    }
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionHumanInputRequests)
+      .where(and(...predicates))
+      .orderBy(
+        desc(schema.sessionHumanInputRequests.createdAt),
+        desc(schema.sessionHumanInputRequests.id),
+      )
+      .limit(limit);
+    return rows.map(mapSessionHumanInputRequest);
+  });
+}
+
+function validateAnsweredHumanInput(
+  questions: HumanInputQuestion[],
+  answers: HumanInputAnswer[],
+): HumanInputAnswer[] {
+  const questionsById = new Map(questions.map((question) => [question.id, question]));
+  const answersById = new Map<string, HumanInputAnswer>();
+  for (const answer of answers) {
+    if (!questionsById.has(answer.questionId)) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Unknown human-input question: ${answer.questionId}`,
+      );
+    }
+    if (answersById.has(answer.questionId)) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Duplicate human-input answer: ${answer.questionId}`,
+      );
+    }
+    answersById.set(answer.questionId, answer);
+  }
+  for (const question of questions) {
+    const answer = answersById.get(question.id);
+    const values = answer?.values ?? [];
+    const other = answer?.other?.trim() ?? "";
+    const suppliedCount = values.length + (other ? 1 : 0);
+    if (question.required && suppliedCount === 0) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} requires an answer`,
+      );
+    }
+    if (!answer) continue;
+    if (new Set(values).size !== values.length) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} contains duplicate values`,
+      );
+    }
+    if (question.kind === "text") {
+      if (values.length > 1 || other) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Text question ${question.id} accepts one value`,
+        );
+      }
+      const value = values[0] ?? "";
+      const minLength = question.validation?.minLength;
+      const maxLength = question.validation?.maxLength;
+      if (minLength != null && value.length < minLength) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} is shorter than its minimum length`,
+        );
+      }
+      if (maxLength != null && value.length > maxLength) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} exceeds its maximum length`,
+        );
+      }
+      continue;
+    }
+    if (other && !question.allowOther) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} does not allow Other`,
+      );
+    }
+    const optionIds = new Set(question.options.map((option) => option.id));
+    if (values.some((value) => !optionIds.has(value))) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Question ${question.id} contains an unknown option`,
+      );
+    }
+    if (question.kind === "single_select" && suppliedCount > 1) {
+      throw new HumanInputResponseValidationError(
+        "INVALID_RESPONSE",
+        `Single-select question ${question.id} accepts one selection`,
+      );
+    }
+    if (question.kind === "multi_select") {
+      const minSelections = question.validation?.minSelections;
+      const maxSelections = question.validation?.maxSelections;
+      if (minSelections != null && suppliedCount < minSelections) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} has too few selections`,
+        );
+      }
+      if (maxSelections != null && suppliedCount > maxSelections) {
+        throw new HumanInputResponseValidationError(
+          "INVALID_RESPONSE",
+          `Question ${question.id} has too many selections`,
+        );
+      }
+    }
+  }
+  return answers;
+}
+
+export function validateHumanInputResponse(
+  request: Pick<SessionHumanInputRequest, "questions" | "allowSkip">,
+  rawResponse: unknown,
+): HumanInputResponse {
+  const response = SubmitHumanInputResponseRequest.parse(rawResponse);
+  if (response.outcome === "skipped") {
+    if (!request.allowSkip) {
+      throw new HumanInputResponseValidationError(
+        "SKIP_NOT_ALLOWED",
+        "This human-input request cannot be skipped",
+      );
+    }
+    return response;
+  }
+  return {
+    outcome: "answered",
+    answers: validateAnsweredHumanInput(request.questions, response.answers),
+  };
+}
+
+export type AcceptSessionHumanInputResponseResult =
+  | {
+      action: "accepted";
+      request: SessionHumanInputRequest;
+      event: SessionEvent;
+      events: SessionEvent[];
+      workflowWakeRevision: number;
+    }
+  | {
+      action: "conflict";
+      request: SessionHumanInputRequest;
+      events: SessionEvent[];
+      workflowWakeRevision: number | null;
+    }
+  | { action: "not_found" };
+
+/**
+ * One requires-action boundary may admit exactly one durable resume event.
+ * Human-input responses and ordinary approval decisions share this gate: a
+ * mixed parallel interruption batch must not accept one of each before the
+ * workflow claims the first and advances the turn's trigger/generation.
+ */
+async function hasAcceptedRequiresActionAdvance(
+  tx: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    turnGeneration: number;
+    triggerEventId: string;
+  },
+): Promise<boolean> {
+  const [trigger] = await tx
+    .select({ sequence: schema.sessionEvents.sequence })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.id, input.triggerEventId),
+      ),
+    )
+    .limit(1);
+  if (!trigger) throw new Error(`Turn trigger not found: ${input.triggerEventId}`);
+  const [accepted] = await tx
+    .select({ id: schema.sessionEvents.id })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        eq(schema.sessionEvents.turnId, input.turnId),
+        eq(schema.sessionEvents.turnGeneration, input.turnGeneration),
+        inArray(schema.sessionEvents.type, ["user.approvalDecision", "user.humanInputResponse"]),
+        gt(schema.sessionEvents.sequence, trigger.sequence),
+      ),
+    )
+    .limit(1);
+  return accepted !== undefined;
+}
+
+/**
+ * First-writer-wins settlement for one pending structured input boundary.
+ * Session + logical turn + current freeze generation are locked with the row;
+ * the creation attempt is provenance and is intentionally not the resume owner.
+ */
+export async function acceptSessionHumanInputResponse(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+    response: unknown;
+    respondedBy: string;
+    clientEventId?: string | null;
+    expireOnly?: boolean;
+  },
+): Promise<AcceptSessionHumanInputResponseResult> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) return { action: "not_found" } as const;
+        const [request] = await tx
+          .select()
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+              eq(schema.sessionHumanInputRequests.id, input.requestId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!request) return { action: "not_found" } as const;
+        if (input.clientEventId) {
+          const [existing] = await tx
+            .select()
+            .from(schema.sessionEvents)
+            .where(
+              and(
+                eq(schema.sessionEvents.workspaceId, input.workspaceId),
+                eq(schema.sessionEvents.sessionId, input.sessionId),
+                eq(schema.sessionEvents.clientEventId, input.clientEventId),
+              ),
+            )
+            .limit(1);
+          if (existing) {
+            if (
+              existing.type !== "user.humanInputResponse" ||
+              (existing.payload as { requestId?: unknown }).requestId !== request.id
+            ) {
+              throw new Error("clientEventId belongs to a different session operation");
+            }
+            const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+              tx as unknown as Database,
+              {
+                accountId: session.accountId,
+                workspaceId: input.workspaceId,
+                sessionId: session.id,
+                temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+                reason: "approval_decision",
+              },
+            );
+            return {
+              action: "accepted",
+              request: mapSessionHumanInputRequest(request),
+              event: mapEvent(existing),
+              events: [],
+              workflowWakeRevision,
+            } as const;
+          }
+        }
+        const [turnPreview] = session.activeTurnId
+          ? await tx
+              .select()
+              .from(schema.sessionTurns)
+              .where(
+                and(
+                  eq(schema.sessionTurns.workspaceId, input.workspaceId),
+                  eq(schema.sessionTurns.sessionId, input.sessionId),
+                  eq(schema.sessionTurns.id, session.activeTurnId),
+                ),
+              )
+              .limit(1)
+          : [];
+        const turn = turnPreview
+          ? (
+              await lockSessionEventWriteRows(tx as unknown as Database, {
+                workspaceId: input.workspaceId,
+                workspaceLock: "already_locked",
+                turnIds: [turnPreview.id],
+              })
+            ).turns[0]
+          : undefined;
+        const boundaryOwnsRequest =
+          session.status === "requires_action" &&
+          turn?.status === "requires_action" &&
+          turn.id === request.turnId &&
+          turn.executionGeneration === request.turnGeneration;
+        if (request.status !== "pending" || !boundaryOwnsRequest) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        if (
+          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            triggerEventId: turn.triggerEventId,
+          })
+        ) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        const now = new Date();
+        const expired = request.expiresAt !== null && request.expiresAt.getTime() <= now.getTime();
+        if (input.expireOnly && !expired) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        const response: HumanInputResponse = expired
+          ? { outcome: "expired" }
+          : validateHumanInputResponse(mapSessionHumanInputRequest(request), input.response);
+        const [updated] = await tx
+          .update(schema.sessionHumanInputRequests)
+          .set({
+            status: response.outcome,
+            response,
+            respondedBy: expired ? "system:expired" : input.respondedBy,
+            respondedAt: now,
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.id, request.id),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+              eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          return {
+            action: "conflict",
+            request: mapSessionHumanInputRequest(request),
+            events: [],
+            workflowWakeRevision: null,
+          } as const;
+        }
+        const [event] = await tx
+          .insert(schema.sessionEvents)
+          .values({
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            turnAssociation: "current",
+            sequence: session.lastSequence + 1,
+            type: "user.humanInputResponse",
+            payload: sanitizeEventPayload({ requestId: request.id, response }),
+            clientEventId: expired ? null : (input.clientEventId ?? null),
+            occurredAt: now,
+          })
+          .returning();
+        if (!event) throw new Error("Failed to append human-input response");
+        await tx
+          .update(schema.sessions)
+          .set({ lastSequence: session.lastSequence + 1, updatedAt: now })
+          .where(eq(schema.sessions.id, session.id));
+        const workflowWakeRevision = await enqueueSessionWorkflowWakeInTransaction(
+          tx as unknown as Database,
+          {
+            accountId: session.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: session.id,
+            temporalWorkflowId: session.temporalWorkflowId ?? `session-${session.id}`,
+            reason: "approval_decision",
+          },
+        );
+        const mappedEvent = mapEvent(event);
+        const result = {
+          request: mapSessionHumanInputRequest(updated),
+          events: [mappedEvent],
+          workflowWakeRevision,
+        };
+        return expired
+          ? ({ action: "conflict", ...result } as const)
+          : ({ action: "accepted", event: mappedEvent, ...result } as const);
+      }),
+  );
+}
+
+export async function expireSessionHumanInputRequest(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+  },
+): Promise<AcceptSessionHumanInputResponseResult> {
+  return await acceptSessionHumanInputResponse(db, {
+    ...input,
+    response: { outcome: "skipped" },
+    respondedBy: "system:expired",
+    expireOnly: true,
+  });
+}
+
+export async function getHumanInputResumeForEvent(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  event: Pick<SessionEvent, "type" | "payload">,
+): Promise<{
+  requestId: string;
+  toolCallId: string;
+  response: HumanInputResponse;
+} | null> {
+  if (event.type !== "user.humanInputResponse") return null;
+  const requestId = (event.payload as { requestId?: unknown }).requestId;
+  if (typeof requestId !== "string") return null;
+  const request = await getSessionHumanInputRequest(db, workspaceId, sessionId, requestId);
+  return request?.response
+    ? {
+        requestId: request.id,
+        toolCallId: request.toolCallId,
+        response: request.response,
+      }
+    : null;
 }
 
 export type TurnAttemptFenceRejectReason =
@@ -16287,7 +17815,12 @@ export async function persistWarmSnapshot(
         interruption ||
         !attemptMayPersistWorkspace
       ) {
-        return { wrote: false, throttled: false, superseded: true, priorArchiveForGc: null };
+        return {
+          wrote: false,
+          throttled: false,
+          superseded: true,
+          priorArchiveForGc: null,
+        };
       }
       const guard = await scopedDb.execute<{
         prior_archive: string | null;
@@ -19789,6 +21322,15 @@ export async function initializeSessionStartAtomically(
         });
         const session = locks.sessions[0];
         if (!locks.workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const creatorContext = session.createdByContext ?? {};
+        const creator: FrozenTurnInitiator = {
+          initiator: initiatorFromStorage(
+            session.createdByKind,
+            session.createdBySubjectId,
+            creatorContext,
+          ),
+          context: creatorContext,
+        };
         const effectiveControl = await evaluateSessionControl(
           tx as unknown as Database,
           input.workspaceId,
@@ -19868,6 +21410,7 @@ export async function initializeSessionStartAtomically(
                 payload: sanitizeEventPayload({
                   ...input.createdEventPayload,
                   status: publicQueuedStatus,
+                  createdBy: creator.initiator,
                 }),
               },
               ...(goal
@@ -19895,7 +21438,10 @@ export async function initializeSessionStartAtomically(
                 sessionId: session.id,
                 sequence: ++sequence,
                 type: "user.message",
-                payload: sanitizeEventPayload(initialPayload),
+                payload: sanitizeEventPayload({
+                  ...initialPayload,
+                  initiator: creator.initiator,
+                }),
                 clientEventId: input.clientEventId ?? `session-initial:${session.id}`,
               },
               {
@@ -19952,6 +21498,7 @@ export async function initializeSessionStartAtomically(
               sandboxOs: session.sandboxOs,
               metadata: {},
               lineage: {},
+              ...initiatorColumns(creator),
             })
             .returning();
           if (!turn) throw new Error("Failed to create initial session turn");
@@ -19989,6 +21536,7 @@ export async function initializeSessionStartAtomically(
                 turnId: turn.id,
                 triggerEventId: userEvent.id,
                 source: turn.source,
+                initiator: creator.initiator,
               }),
             })
             .returning();
@@ -20092,6 +21640,10 @@ export async function enqueueSessionTurn(
             sandboxOs: input.sandboxOs ?? null,
             metadata: input.metadata,
             lineage: input.lineage ?? {},
+            ...initiatorColumns({
+              initiator: input.initiator,
+              context: input.initiatorContext ?? {},
+            }),
           })
           .returning();
         if (!row) {
@@ -20706,6 +22258,14 @@ export async function claimSessionWorkForAttempt(
             const turnId = crypto.randomUUID();
             const triggerEventId = crypto.randomUUID();
             const dispatchGeneration = 1;
+            const compactionInitiator: FrozenTurnInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "compaction",
+                label: "OpenGeni compaction",
+              },
+              context: {},
+            };
             const [{ position } = { position: 1 }] = await tx
               .select({
                 position: sql<number>`coalesce(max(${schema.sessionTurns.position}), 0) + 1`,
@@ -20767,6 +22327,7 @@ export async function claimSessionWorkForAttempt(
                     triggerEventId,
                   },
                 ),
+                ...initiatorColumns(compactionInitiator),
                 startedAt: now,
               })
               .returning();
@@ -20785,7 +22346,10 @@ export async function claimSessionWorkForAttempt(
                 turnAssociation: "current",
                 sequence: session.lastSequence + 1,
                 type: "session.context.compaction.requested",
-                payload: { trigger: "operator" },
+                payload: {
+                  trigger: "operator",
+                  initiator: compactionInitiator.initiator,
+                },
                 occurredAt: now,
               })
               .returning();
@@ -20868,9 +22432,117 @@ export async function claimSessionWorkForAttempt(
           const goalUpdate = delivered.updates.find(
             (update) => update.payload.type === "goal_continuation",
           );
+          const pureGoalUpdate =
+            delivered.updates.length > 0 &&
+            delivered.updates.every((update) => update.payload.type === "goal_continuation")
+              ? goalUpdate
+              : undefined;
+          const agentSteerUpdate = delivered.updates.find(
+            (update) => update.kind === "agent_steer_instruction",
+          );
+          // Goal policy/routing survives unrelated coalesced notices. Only an
+          // Agent Steer is a stronger causal command and therefore suppresses
+          // goal routing for this inference.
+          const routingGoalUpdate = agentSteerUpdate ? undefined : goalUpdate;
+          const internalUpdateInitiator = (provenanceError?: string): FrozenTurnInitiator => ({
+            initiator: {
+              kind: "service",
+              subjectId: "internal-update",
+              label: "OpenGeni internal update",
+            },
+            context: {
+              updateIds: delivered.updates.map((update) => update.id),
+              ...(provenanceError ? { provenanceError } : {}),
+            },
+          });
+          let internalInitiator: FrozenTurnInitiator;
+          // Agent Steer is the causal command for this inference. Ordinary
+          // machine notices may coalesce into the same batch as context, but
+          // their timing must not erase the steering subject's authority.
+          if (agentSteerUpdate) {
+            const lineage = agentSteerUpdate.lineage;
+            const callerSessionId = lineage.callerSessionId;
+            const callerTurnId = lineage.callerTurnId;
+            const callerAttemptId = lineage.callerAttemptId;
+            const callerExecutionGeneration = lineage.callerExecutionGeneration;
+            if (
+              typeof callerSessionId !== "string" ||
+              typeof callerTurnId !== "string" ||
+              typeof callerAttemptId !== "string" ||
+              typeof callerExecutionGeneration !== "number" ||
+              !Number.isSafeInteger(callerExecutionGeneration) ||
+              callerExecutionGeneration < 1
+            ) {
+              // Corrupt/hand-inserted historical rows must not wedge every
+              // recovery claim forever. Fail closed to a named service actor
+              // while retaining a bounded, non-secret diagnostic marker.
+              internalInitiator = internalUpdateInitiator("agent_steer_lineage_incomplete");
+            } else {
+              try {
+                internalInitiator = await frozenInitiatorForCommandActor(
+                  tx as unknown as Database,
+                  workspaceId,
+                  {
+                    type: "agent_attempt",
+                    sessionId: callerSessionId,
+                    turnId: callerTurnId,
+                    attemptId: callerAttemptId,
+                    executionGeneration: callerExecutionGeneration,
+                  },
+                );
+              } catch (error) {
+                if (
+                  error instanceof Error &&
+                  error.message.startsWith("Agent initiator turn not found:")
+                ) {
+                  internalInitiator = internalUpdateInitiator("agent_steer_source_turn_missing");
+                } else {
+                  throw error;
+                }
+              }
+            }
+          } else if (pureGoalUpdate) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "goal-continuation",
+                label: "OpenGeni goal continuation",
+              },
+              context: {
+                updateIds: delivered.updates.map((update) => update.id),
+                ...(typeof pureGoalUpdate.payload.goalId === "string"
+                  ? { goalId: pureGoalUpdate.payload.goalId }
+                  : {}),
+              },
+            };
+          } else if (
+            delivered.updates.length > 0 &&
+            delivered.updates.every((update) => update.kind === "scheduled_occurrence")
+          ) {
+            internalInitiator = {
+              initiator: {
+                kind: "service",
+                subjectId: "scheduler",
+                label: "OpenGeni scheduler",
+              },
+              context: {
+                updateIds: delivered.updates.map((update) => update.id),
+                scheduledRunIds: delivered.updates.map((update) => update.sourceId),
+              },
+            };
+          } else {
+            internalInitiator = internalUpdateInitiator();
+          }
+          if (delivered.event) {
+            delivered.event.payload = sanitizeEventPayload({
+              ...(delivered.event.payload as Record<string, unknown>),
+              initiator: internalInitiator.initiator,
+            });
+          }
           const goalPolicy =
-            goalUpdate?.payload.policy && typeof goalUpdate.payload.policy === "object"
-              ? (goalUpdate.payload.policy as Record<string, unknown>)
+            routingGoalUpdate?.payload.policy &&
+            typeof routingGoalUpdate.payload.policy === "object"
+              ? (routingGoalUpdate.payload.policy as Record<string, unknown>)
               : null;
           const [latestStarted] = await tx
             .select({
@@ -20920,7 +22592,7 @@ export async function claimSessionWorkForAttempt(
               status: "running",
               executionGeneration: 1,
               activeAttemptId: input.attemptId,
-              source: goalUpdate ? "goal" : "system",
+              source: routingGoalUpdate ? "goal" : "system",
               position: Number(position),
               prompt: "Process the delivered internal session updates.",
               resources: [],
@@ -20932,10 +22604,11 @@ export async function claimSessionWorkForAttempt(
               metadata: metadataWithTurnDispatchAttempt(
                 {
                   internalUpdateCount: delivered.count,
-                  ...(goalUpdate ? { goalId: goalUpdate.payload.goalId } : {}),
+                  ...(routingGoalUpdate ? { goalId: routingGoalUpdate.payload.goalId } : {}),
                 },
                 { id: input.dispatchId, generation: 1, triggerEventId },
               ),
+              ...initiatorColumns(internalInitiator),
               startedAt: now,
             })
             .returning();
@@ -21595,7 +23268,7 @@ export async function settleSessionAttemptInterruptions(
 export type SessionWorkPeek =
   | { kind: "runnable" }
   | { kind: "approval-pending"; triggerEventId: string }
-  | { kind: "approval-wait" }
+  | { kind: "approval-wait"; humanInputRequestId?: string; expiresAt?: string }
   | {
       kind: "capacity-wait";
       ref: {
@@ -21709,7 +23382,10 @@ export async function peekSessionWork(
       latestInterruption.quiescedAt === null &&
       ["settled", "rejected_stale"].includes(latestInterruption.interruptionState)
     ) {
-      return { kind: "cancellation-wait", attemptId: latestInterruption.attemptId };
+      return {
+        kind: "cancellation-wait",
+        attemptId: latestInterruption.attemptId,
+      };
     }
 
     const [capacityWait] = await scopedDb
@@ -21773,21 +23449,55 @@ export async function peekSessionWork(
         if (!currentTrigger) {
           throw new Error(`Turn ${turn.id} points to missing trigger ${turn.triggerEventId}`);
         }
-        const [approval] = await scopedDb
+        const [actionResponse] = await scopedDb
           .select({ id: schema.sessionEvents.id })
           .from(schema.sessionEvents)
           .where(
             and(
               eq(schema.sessionEvents.workspaceId, workspaceId),
               eq(schema.sessionEvents.sessionId, sessionId),
-              eq(schema.sessionEvents.type, "user.approvalDecision"),
+              inArray(schema.sessionEvents.type, [
+                "user.approvalDecision",
+                "user.humanInputResponse",
+              ]),
               gt(schema.sessionEvents.sequence, currentTrigger.sequence),
             ),
           )
           .orderBy(desc(schema.sessionEvents.sequence), desc(schema.sessionEvents.id))
           .limit(1);
-        return approval
-          ? { kind: "approval-pending", triggerEventId: approval.id }
+        if (actionResponse) {
+          return {
+            kind: "approval-pending",
+            triggerEventId: actionResponse.id,
+          };
+        }
+        const [expiringHumanInput] = await scopedDb
+          .select({
+            id: schema.sessionHumanInputRequests.id,
+            expiresAt: schema.sessionHumanInputRequests.expiresAt,
+          })
+          .from(schema.sessionHumanInputRequests)
+          .where(
+            and(
+              eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+              eq(schema.sessionHumanInputRequests.sessionId, sessionId),
+              eq(schema.sessionHumanInputRequests.turnId, turn.id),
+              eq(schema.sessionHumanInputRequests.turnGeneration, turn.executionGeneration),
+              eq(schema.sessionHumanInputRequests.status, "pending"),
+              isNotNull(schema.sessionHumanInputRequests.expiresAt),
+            ),
+          )
+          .orderBy(
+            sql`${schema.sessionHumanInputRequests.expiresAt} asc nulls last`,
+            asc(schema.sessionHumanInputRequests.id),
+          )
+          .limit(1);
+        return expiringHumanInput?.expiresAt
+          ? {
+              kind: "approval-wait",
+              humanInputRequestId: expiringHumanInput.id,
+              expiresAt: expiringHumanInput.expiresAt.toISOString(),
+            }
           : { kind: "approval-wait" };
       }
       if (turn.status === "running") {
@@ -21866,7 +23576,10 @@ async function lockChildLifecycleOutboxWriteRowsTx(
     sessionIds: [],
   });
   const [preview] = await tx
-    .select({ id: schema.sessions.id, parentSessionId: schema.sessions.parentSessionId })
+    .select({
+      id: schema.sessions.id,
+      parentSessionId: schema.sessions.parentSessionId,
+    })
     .from(schema.sessions)
     .where(
       and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, input.sessionId)),
@@ -22262,7 +23975,7 @@ async function isNewerApprovalTrigger(
   return Boolean(
     current &&
     candidate &&
-    candidate.type === "user.approvalDecision" &&
+    ["user.approvalDecision", "user.humanInputResponse"].includes(candidate.type) &&
     candidate.sequence > current.sequence,
   );
 }
@@ -22298,6 +24011,25 @@ export type ApplySessionTurnSettlementInput = {
   sessionStatus: SessionStatus;
   activeTurnId: string | null;
   events: AppendEventInput[];
+  /**
+   * A mid-turn SDK freeze installed atomically with requires_action. Human
+   * input requests are public protocol rows; ordinary approvals remain only in
+   * pendingApprovals. No request can become visible without the exact frozen
+   * RunState needed to resume it, and no frozen request can miss its status
+   * transition/events because all writes share this transaction.
+   */
+  runState?: {
+    serializedRunState: string;
+    pendingApprovals: unknown[];
+    frozenCodexCredentialId?: string | null;
+    humanInputRequests?: Array<{
+      id: string;
+      toolCallId: string;
+      questions: HumanInputQuestion[];
+      allowSkip: boolean;
+      expiresAt?: Date | null;
+    }>;
+  };
   recording?: SessionTurnRecordingSettlement;
   /**
    * Atomically consume an operator /compact request and record why it could
@@ -22436,6 +24168,96 @@ export async function applySessionTurnSettlement(
           turnStatus,
           activeTurnId: session.activeTurnId,
         };
+      }
+
+      if (input.runState) {
+        if (input.turnStatus !== "requires_action" || input.sessionStatus !== "requires_action") {
+          throw new Error("A frozen run state requires a requires_action settlement");
+        }
+        const humanInputRequests = input.runState.humanInputRequests ?? [];
+        for (const request of humanInputRequests) {
+          const parsedQuestions = request.questions.map((question) =>
+            HumanInputQuestionContract.parse(question),
+          );
+          if (Buffer.byteLength(JSON.stringify(parsedQuestions)) > 49_152) {
+            throw new Error("Human-input request questions exceed the durable payload limit");
+          }
+          if (
+            Buffer.byteLength(request.toolCallId) < 1 ||
+            Buffer.byteLength(request.toolCallId) > 1024
+          ) {
+            throw new Error("Human-input tool call id exceeds the durable payload limit");
+          }
+        }
+        const [{ maxVersion } = { maxVersion: 0 }] = await tx
+          .select({
+            maxVersion: sql<number>`coalesce(max(${schema.agentRunStates.stateVersion}), 0)`,
+          })
+          .from(schema.agentRunStates)
+          .where(
+            and(
+              eq(schema.agentRunStates.workspaceId, workspaceId),
+              eq(schema.agentRunStates.sessionId, input.sessionId),
+            ),
+          );
+        await tx.insert(schema.agentRunStates).values({
+          accountId: session.accountId,
+          workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          stateVersion: Number(maxVersion) + 1,
+          serializedRunState: input.runState.serializedRunState,
+          pendingApprovals: input.runState.pendingApprovals,
+          frozenCodexCredentialId: input.runState.frozenCodexCredentialId ?? null,
+        });
+        if (humanInputRequests.length > 0) {
+          for (const request of humanInputRequests) {
+            const [persistedRequest] = await tx
+              .insert(schema.sessionHumanInputRequests)
+              .values({
+                id: request.id,
+                accountId: session.accountId,
+                workspaceId,
+                sessionId: input.sessionId,
+                turnId: input.turnId,
+                turnGeneration: turn.executionGeneration,
+                creationAttemptId: input.attemptId,
+                toolCallId: request.toolCallId,
+                questions: request.questions,
+                allowSkip: request.allowSkip,
+                expiresAt: request.expiresAt ?? null,
+              })
+              .onConflictDoUpdate({
+                target: [
+                  schema.sessionHumanInputRequests.workspaceId,
+                  schema.sessionHumanInputRequests.sessionId,
+                  schema.sessionHumanInputRequests.turnId,
+                  schema.sessionHumanInputRequests.toolCallId,
+                ],
+                set: {
+                  // A different interruption may be answered first. The same
+                  // tool call then re-freezes under the turn's next execution
+                  // generation; preserve its stable request id/deadline and
+                  // advance only the ownership generation.
+                  turnGeneration: turn.executionGeneration,
+                  updatedAt: new Date(),
+                },
+                setWhere: sql`
+                  ${schema.sessionHumanInputRequests.status} = 'pending'
+                  and ${schema.sessionHumanInputRequests.allowSkip} = ${request.allowSkip}
+                  and ${schema.sessionHumanInputRequests.questions} = ${JSON.stringify(request.questions)}::jsonb
+                  and ${schema.sessionHumanInputRequests.expiresAt}
+                    is not distinct from ${request.expiresAt?.toISOString() ?? null}::timestamptz
+                `,
+              })
+              .returning({ id: schema.sessionHumanInputRequests.id });
+            if (!persistedRequest) {
+              throw new Error(
+                `Human-input request ${request.id} changed contract or settled before re-freeze`,
+              );
+            }
+          }
+        }
       }
 
       let recordingEvent: AppendEventInput | null = null;
@@ -22584,9 +24406,41 @@ export async function applySessionTurnSettlement(
               : {}),
           }
         : null;
+      const terminalHumanInputRows = ["completed", "failed", "cancelled", "superseded"].includes(
+        input.turnStatus,
+      )
+        ? await tx
+            .update(schema.sessionHumanInputRequests)
+            .set({
+              status: "cancelled",
+              response: { outcome: "cancelled" },
+              respondedBy: `system:turn_${input.turnStatus}`,
+              respondedAt: now,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(schema.sessionHumanInputRequests.workspaceId, workspaceId),
+                eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+                eq(schema.sessionHumanInputRequests.turnId, input.turnId),
+                eq(schema.sessionHumanInputRequests.status, "pending"),
+              ),
+            )
+            .returning({ id: schema.sessionHumanInputRequests.id })
+        : [];
+      const terminalHumanInputEvents: AppendEventInput[] = terminalHumanInputRows.map(
+        (request) => ({
+          type: "user.humanInputResponse",
+          payload: {
+            requestId: request.id,
+            response: { outcome: "cancelled" },
+          },
+        }),
+      );
       const settlementEvents = [
         ...(recordingEvent ? [recordingEvent] : []),
         ...(compactionRequestEvent ? [compactionRequestEvent] : []),
+        ...terminalHumanInputEvents,
         ...input.events,
       ];
       const values = settlementEvents.map((event) => {
@@ -23701,17 +25555,47 @@ export async function getSessionTurnForAttempt(
 ): Promise<SessionTurn | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
-      .select()
-      .from(schema.sessionTurns)
+      .select({ turn: schema.sessionTurns })
+      .from(schema.sessionTurnAttempts)
+      .innerJoin(
+        schema.sessionTurns,
+        and(
+          eq(schema.sessionTurns.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessionTurns.id, schema.sessionTurnAttempts.turnId),
+        ),
+      )
+      .innerJoin(
+        schema.sessions,
+        and(
+          eq(schema.sessions.workspaceId, schema.sessionTurnAttempts.workspaceId),
+          eq(schema.sessions.id, schema.sessionTurnAttempts.sessionId),
+        ),
+      )
       .where(
         and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.id, attemptId),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
           eq(schema.sessionTurns.activeAttemptId, attemptId),
+          eq(schema.sessions.activeTurnId, schema.sessionTurns.id),
+          inArray(schema.sessionTurns.status, [
+            "running",
+            "requires_action",
+            "recovering",
+            "waiting_capacity",
+          ]),
+          sql`not exists (
+            select 1
+            from ${schema.sessionAttemptInterruptions} interruption
+            where interruption.workspace_id = ${workspaceId}
+              and interruption.attempt_id = ${attemptId}
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          )`,
         ),
       )
       .limit(1);
-    return row ? mapSessionTurn(row) : null;
+    return row ? mapSessionTurn(row.turn) : null;
   });
 }
 
@@ -24238,7 +26122,10 @@ export async function getOrCreateSessionSystemUpdateOutbox(
     eventTypes: ["child_terminal_result"],
     maxAttempts: 3,
   };
-  const context = { accountId: input.accountId, workspaceId: input.workspaceId };
+  const context = {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+  };
   return await retryRlsPersistence(db, context, persistence, async (scopedDb) => {
     const locks = await lockSessionEventWriteRows(scopedDb, {
       workspaceId: input.workspaceId,
@@ -24854,31 +26741,15 @@ export async function acceptSessionApprovalDecision(
             sessionStatus: session.status as SessionStatus,
           } as const;
         }
-        const [trigger] = await tx
-          .select({ sequence: schema.sessionEvents.sequence })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, input.sessionId),
-              eq(schema.sessionEvents.id, turn.triggerEventId),
-            ),
-          )
-          .limit(1);
-        if (!trigger) throw new Error(`Turn trigger not found: ${turn.triggerEventId}`);
-        const [alreadyAccepted] = await tx
-          .select({ id: schema.sessionEvents.id })
-          .from(schema.sessionEvents)
-          .where(
-            and(
-              eq(schema.sessionEvents.workspaceId, input.workspaceId),
-              eq(schema.sessionEvents.sessionId, input.sessionId),
-              eq(schema.sessionEvents.type, "user.approvalDecision"),
-              gt(schema.sessionEvents.sequence, trigger.sequence),
-            ),
-          )
-          .limit(1);
-        if (alreadyAccepted) {
+        if (
+          await hasAcceptedRequiresActionAdvance(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            turnId: turn.id,
+            turnGeneration: turn.executionGeneration,
+            triggerEventId: turn.triggerEventId,
+          })
+        ) {
           return {
             action: "conflict",
             sessionStatus: "requires_action",
@@ -25437,6 +27308,12 @@ function mapSession(
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
     metadata: row.metadata,
+    createdBy: initiatorFromStorage(
+      row.createdByKind,
+      row.createdBySubjectId,
+      row.createdByContext ?? {},
+    ),
+    createdByContext: row.createdByContext ?? {},
     model: row.model,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
     sandboxOs: row.sandboxOs as SandboxOs,
@@ -25539,6 +27416,12 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     executionGeneration: row.executionGeneration,
     activeAttemptId: row.activeAttemptId,
     lineage: row.lineage,
+    initiator: initiatorFromStorage(
+      row.initiatorKind,
+      row.initiatorSubjectId,
+      row.initiatorContext ?? {},
+    ),
+    initiatorContext: row.initiatorContext ?? {},
     cancelledBy: row.cancelledBy,
     cancelReason: row.cancelReason,
     startedAt: row.startedAt ? row.startedAt.toISOString() : null,
@@ -26069,6 +27952,9 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   if (typeof record.connectionId === "string" && record.connectionId.length > 0) {
     ref.connectionId = record.connectionId;
   }
+  if (typeof record.provider === "string" && record.provider.length > 0) {
+    ref.provider = record.provider;
+  }
   if (
     typeof record.kind === "string" &&
     ["oauth2", "api_key", "app_install", "delegated"].includes(record.kind)
@@ -26085,6 +27971,22 @@ function connectionRefConfig(value: unknown): McpServerConnectionRef | undefined
   }
   if (typeof record.resource === "string" && record.resource.length > 0) {
     ref.resource = record.resource;
+  }
+  if (Array.isArray(record.selectedResources)) {
+    const selectedResources = record.selectedResources.flatMap((candidate) => {
+      if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+        return [];
+      }
+      const resource = candidate as Record<string, unknown>;
+      return resource.kind === "repository" &&
+        typeof resource.id === "string" &&
+        resource.id.length > 0
+        ? [{ kind: "repository" as const, id: resource.id }]
+        : [];
+    });
+    if (selectedResources.length > 0) {
+      ref.selectedResources = selectedResources;
+    }
   }
   if (record.subjectScope === "workspace" || record.subjectScope === "subject") {
     ref.subjectScope = record.subjectScope;

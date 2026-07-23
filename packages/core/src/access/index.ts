@@ -240,6 +240,10 @@ async function delegatedAccessContext(
             ? { executionGeneration: payload.executionGeneration }
             : {}),
         },
+        ...(payload.serviceInitiator ? { serviceInitiator: payload.serviceInitiator } : {}),
+        ...(payload.serviceInitiatorContext
+          ? { serviceInitiatorContext: payload.serviceInitiatorContext }
+          : {}),
       },
     ],
     defaultAccountId: payload.accountId,

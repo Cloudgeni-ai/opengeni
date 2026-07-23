@@ -26,6 +26,12 @@ import {
   updateSessionCommandReceiptResult,
 } from "./session-control";
 import * as schema from "./schema";
+import {
+  frozenInitiatorForCommandActor,
+  initiatorColumns,
+  initiatorFromStorage,
+  type FrozenTurnInitiator,
+} from "./turn-initiator";
 
 export type QueueCommandConflictCode =
   | "QUEUE_VERSION_CHANGED"
@@ -216,6 +222,44 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     sequence: input.lastSequence,
     now,
   });
+  const cancelledHumanInputs = await db
+    .update(schema.sessionHumanInputRequests)
+    .set({
+      status: "cancelled",
+      response: { outcome: "cancelled" },
+      respondedBy:
+        input.actor.type === "agent_attempt"
+          ? `attempt:${input.actor.attemptId}`
+          : input.actor.subjectId,
+      respondedAt: now,
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(schema.sessionHumanInputRequests.workspaceId, input.workspaceId),
+        eq(schema.sessionHumanInputRequests.sessionId, input.sessionId),
+        eq(schema.sessionHumanInputRequests.turnId, current.id),
+        eq(schema.sessionHumanInputRequests.status, "pending"),
+      ),
+    )
+    .returning({ id: schema.sessionHumanInputRequests.id });
+  let lastSequence = closedTools.sequence;
+  if (cancelledHumanInputs.length > 0) {
+    await db.insert(schema.sessionEvents).values(
+      cancelledHumanInputs.map((request) => ({
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        sequence: ++lastSequence,
+        type: "user.humanInputResponse",
+        turnId: current.id,
+        turnGeneration: current.executionGeneration,
+        turnAssociation: "current",
+        payload: { requestId: request.id, response: { outcome: "cancelled" } },
+        occurredAt: now,
+      })),
+    );
+  }
   await db
     .update(schema.sessionTurns)
     .set({
@@ -258,7 +302,7 @@ export async function supersedeSessionCurrentDirectionInTransaction(
     interruptionCount: 0,
     replacedTurn: current,
     liveCurrentTurnId: null,
-    lastSequence: closedTools.sequence,
+    lastSequence,
   };
 }
 
@@ -405,8 +449,11 @@ export async function saveComposerDraftInTransaction(
     tools: input.tools,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
-    sourceTurnId: null,
-    sourceTurnVersion: null,
+    // A queue edit is still the same accepted work item. Preserve its frozen
+    // initiator through arbitrary draft saves; only a genuinely new compose or
+    // Steer captures the submitting actor.
+    sourceTurnId: current?.sourceTurnId ?? null,
+    sourceTurnVersion: current?.sourceTurnVersion ?? null,
     updatedAt: new Date(),
   };
   const [saved] = current
@@ -1077,6 +1124,7 @@ export async function submitHumanPromptInTransaction(
     workspaceId: string;
     sessionId: string;
     subjectId: string;
+    subjectLabel?: string;
     actor: SessionCommandActor;
     operationKey: string;
     delivery: "send" | "steer";
@@ -1117,6 +1165,15 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort: input.reasoningEffort ?? null,
     source: input.source,
     mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+    ...(input.actor.type === "service"
+      ? {
+          serviceInitiator: {
+            subjectId: input.actor.subjectId,
+            subjectLabel: input.actor.subjectLabel ?? null,
+            context: input.actor.context ?? {},
+          },
+        }
+      : {}),
   });
   const reserved = await reserveSessionCommandReceipt(db, {
     accountId: input.accountId,
@@ -1168,7 +1225,14 @@ export async function submitHumanPromptInTransaction(
       input.actor.type === "agent_attempt"
         ? `attempt:${input.actor.attemptId}`
         : input.actor.subjectId,
-    reason: input.delivery === "steer" ? "human_steer" : "human_send",
+    reason:
+      input.actor.type === "service"
+        ? input.delivery === "steer"
+          ? "service_steer"
+          : "service_send"
+        : input.delivery === "steer"
+          ? "human_steer"
+          : "human_send",
     observedControlEtag: input.controlEtag ?? null,
   });
   const session = await lockSession(db, input.workspaceId, input.sessionId);
@@ -1247,6 +1311,43 @@ export async function submitHumanPromptInTransaction(
   }
 
   const now = new Date();
+  let frozenInitiator: FrozenTurnInitiator;
+  if (input.delivery === "send" && draft?.sourceTurnId) {
+    const [sourceTurn] = await db
+      .select({
+        sessionId: schema.sessionTurns.sessionId,
+        initiatorKind: schema.sessionTurns.initiatorKind,
+        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
+        initiatorContext: schema.sessionTurns.initiatorContext,
+      })
+      .from(schema.sessionTurns)
+      .where(
+        and(
+          eq(schema.sessionTurns.workspaceId, input.workspaceId),
+          eq(schema.sessionTurns.sessionId, input.sessionId),
+          eq(schema.sessionTurns.id, draft.sourceTurnId),
+        ),
+      )
+      .limit(1);
+    if (!sourceTurn) {
+      throw new SessionControlInvariantError("Edited prompt source turn is missing");
+    }
+    frozenInitiator = {
+      initiator: initiatorFromStorage(
+        sourceTurn.initiatorKind,
+        sourceTurn.initiatorSubjectId,
+        sourceTurn.initiatorContext ?? {},
+      ),
+      context: sourceTurn.initiatorContext ?? {},
+    };
+  } else {
+    frozenInitiator = await frozenInitiatorForCommandActor(
+      db,
+      input.workspaceId,
+      input.actor,
+      input.subjectLabel,
+    );
+  }
   const acceptedEventId = crypto.randomUUID();
   const turnId = crypto.randomUUID();
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
@@ -1267,6 +1368,7 @@ export async function submitHumanPromptInTransaction(
         ...(input.model ? { model: input.model } : {}),
         ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
         delivery: input.delivery,
+        initiator: frozenInitiator.initiator,
       }),
       occurredAt: now,
     },
@@ -1292,6 +1394,7 @@ export async function submitHumanPromptInTransaction(
       sandboxBackend: session.sandboxBackend,
       metadata: {},
       lineage: { actor: input.actor.type },
+      ...initiatorColumns(frozenInitiator),
     })
     .returning();
   if (!turn) throw new SessionControlInvariantError("Prompt turn was not inserted");
@@ -1302,7 +1405,12 @@ export async function submitHumanPromptInTransaction(
     sequence: ++sequence,
     type: "turn.queued",
     turnId,
-    payload: { turnId, triggerEventId: acceptedEventId, source: input.source },
+    payload: {
+      turnId,
+      triggerEventId: acceptedEventId,
+      source: input.source,
+      initiator: frozenInitiator.initiator,
+    },
     occurredAt: now,
   });
 

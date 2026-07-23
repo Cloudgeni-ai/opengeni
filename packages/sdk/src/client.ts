@@ -46,6 +46,7 @@ import type {
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
+  CreateSessionResponse,
   CreateVariableSetRequest,
   CreateRigRequest,
   CreateWorkspaceRequest,
@@ -92,6 +93,7 @@ import type {
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
+  SessionHumanInputRequest,
   SessionLineageResponse,
   SessionMcpCredentialUpdateInput,
   SessionQueueSnapshot,
@@ -106,6 +108,7 @@ import type {
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
   SessionTurn,
+  SubmitHumanInputResponseRequest,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
   AttachViewerRequest,
@@ -239,8 +242,11 @@ export class OpenGeniClient {
 
   // --- Session lifecycle ---------------------------------------------------
 
-  async createSession(workspaceId: string, request: CreateSessionRequest): Promise<Session> {
-    return await this.requestJson<Session>(
+  async createSession(
+    workspaceId: string,
+    request: CreateSessionRequest,
+  ): Promise<CreateSessionResponse> {
+    return await this.requestJson<CreateSessionResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions`,
       request,
@@ -660,6 +666,47 @@ export class OpenGeniClient {
       type: "user.approvalDecision",
       ...(clientEventId !== undefined ? { clientEventId } : {}),
       payload,
+    });
+  }
+
+  async listHumanInputRequests(
+    workspaceId: string,
+    sessionId: string,
+    options: {
+      status?: SessionHumanInputRequest["status"];
+    } = {},
+  ): Promise<SessionHumanInputRequest[]> {
+    const result = await this.requestJson<{ requests: SessionHumanInputRequest[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests`,
+      undefined,
+      options.status ? { status: options.status } : undefined,
+    );
+    return result.requests;
+  }
+
+  async getHumanInputRequest(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<SessionHumanInputRequest> {
+    return await this.requestJson<SessionHumanInputRequest>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests/${requestId}`,
+    );
+  }
+
+  async submitHumanInputResponse(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    response: SubmitHumanInputResponseRequest,
+    options: { clientEventId?: string } = {},
+  ): Promise<SessionEvent> {
+    return await this.sendEvent(workspaceId, sessionId, {
+      type: "user.humanInputResponse",
+      ...(options.clientEventId ? { clientEventId: options.clientEventId } : {}),
+      payload: { requestId, response },
     });
   }
 
