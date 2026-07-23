@@ -679,21 +679,19 @@ describe("workflow contracts", () => {
     expect(releaseText).toContain("verify-approved-merge");
   });
 
-  test("keeps the maintainer fast path explicit and evidence-honest", () => {
-    expect(releaseText).toContain("maintainer_fast_path:");
-    expect(releaseText).toContain("Download and validate the immutable release candidate");
-    expect(releaseText).toContain(
-      'mode: (if $fastPath == "true" then "maintainer-fast-path" else "production-canary" end)',
-    );
-    expect(releaseText).toContain(
-      'zeroKnownDefectsAndGapsConfirmed: (if $fastPath == "true" then null else true end)',
-    );
+  test("requires complete live acceptance before any publication", () => {
+    expect(releaseText).not.toContain("maintainer_fast_path");
+    expect(releaseText).not.toContain("maintainer-fast-path");
+    expect(releaseText).toContain("Download and validate the complete acceptance bundle");
+    expect(releaseText).toContain("bun scripts/verify-workbench-acceptance-bundle.ts");
+    expect(releaseText).toContain("confirm_zero_gaps must be explicitly true");
+    expect(releaseText).toContain("zeroKnownDefectsAndGapsConfirmed: true");
     expect(releaseText).toContain("bun run typecheck");
     expect(releaseText).toContain("bun run build:packages");
     expect(releaseText).toContain("bun scripts/publish-closure-guard.ts");
   });
 
   test("follows immutable release-asset redirects before hashing", () => {
-    expect(releaseText.match(/--location/g)).toHaveLength(4);
+    expect(releaseText.match(/--location/g)).toHaveLength(3);
   });
 });

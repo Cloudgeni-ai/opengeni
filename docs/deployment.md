@@ -176,6 +176,15 @@ Each manifest is built at most once; retries reuse existing partial results.
 The immutable GitHub release tag `opengeni-candidate-<full-source-sha>` retains
 `release-candidate.json` plus its SHA-256 sidecar.
 
+Before the first public image release, an organization package administrator
+must set the `opengeni-api`, `opengeni-worker`, `opengeni-web`,
+`opengeni-relay`, and `opengeni-sandbox` container packages to **Public** in
+their GitHub package settings. GitHub does not expose a supported REST endpoint
+for changing package visibility. The release workflow therefore treats this as
+one-time operator setup: after promotion it removes its GHCR login and fails
+closed unless every public release tag resolves anonymously to the exact
+candidate digest.
+
 After staging, production, and the 72-hour canary have consumed those exact
 digests, public release is an explicit dispatch of
 `.github/workflows/release.yml` from a ref pinned to the accepted source SHA.

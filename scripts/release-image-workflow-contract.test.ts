@@ -39,6 +39,7 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain("Verify official images support anonymous pull");
     expect(finalJob).toContain("docker logout ghcr.io");
     expect(finalJob).toContain("docker buildx imagetools inspect");
+    expect(release).toContain("GitHub has no supported REST API");
     expect(finalJob).not.toContain("--method PATCH");
     expect(finalJob).not.toContain("docker/build-push-action");
     expect(finalJob).not.toContain("docker build ");
