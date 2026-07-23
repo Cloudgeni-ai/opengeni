@@ -3,6 +3,12 @@ import type { AccessGrant } from "@opengeni/contracts";
 import { hasPermission } from "@opengeni/core";
 import type { GitHubSignedStatePayload } from "@opengeni/github";
 
+/**
+ * Dormant compatibility helpers for tests and decoding already-issued browser
+ * handoffs. No production route imports this module. Its signed claims preserve
+ * a prior OpenGeni grant across a redirect; they do not prove that GitHub
+ * authorizes the human to install, configure, or bind an App installation.
+ */
 export const githubBrowserGrantMaxAgeSeconds = 10 * 60;
 
 export function githubBrowserGrantClaims(

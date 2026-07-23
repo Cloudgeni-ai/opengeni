@@ -46,6 +46,7 @@ import type {
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
+  CreateSessionResponse,
   CreateVariableSetRequest,
   CreateRigRequest,
   CreateWorkspaceRequest,
@@ -92,6 +93,7 @@ import type {
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
+  SessionHumanInputRequest,
   SessionLineageResponse,
   SessionMcpCredentialUpdateInput,
   SessionQueueSnapshot,
@@ -106,6 +108,7 @@ import type {
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
   SessionTurn,
+  SubmitHumanInputResponseRequest,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
   AttachViewerRequest,
@@ -239,8 +242,11 @@ export class OpenGeniClient {
 
   // --- Session lifecycle ---------------------------------------------------
 
-  async createSession(workspaceId: string, request: CreateSessionRequest): Promise<Session> {
-    return await this.requestJson<Session>(
+  async createSession(
+    workspaceId: string,
+    request: CreateSessionRequest,
+  ): Promise<CreateSessionResponse> {
+    return await this.requestJson<CreateSessionResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions`,
       request,
@@ -660,6 +666,47 @@ export class OpenGeniClient {
       type: "user.approvalDecision",
       ...(clientEventId !== undefined ? { clientEventId } : {}),
       payload,
+    });
+  }
+
+  async listHumanInputRequests(
+    workspaceId: string,
+    sessionId: string,
+    options: {
+      status?: SessionHumanInputRequest["status"];
+    } = {},
+  ): Promise<SessionHumanInputRequest[]> {
+    const result = await this.requestJson<{ requests: SessionHumanInputRequest[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests`,
+      undefined,
+      options.status ? { status: options.status } : undefined,
+    );
+    return result.requests;
+  }
+
+  async getHumanInputRequest(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<SessionHumanInputRequest> {
+    return await this.requestJson<SessionHumanInputRequest>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests/${requestId}`,
+    );
+  }
+
+  async submitHumanInputResponse(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    response: SubmitHumanInputResponseRequest,
+    options: { clientEventId?: string } = {},
+  ): Promise<SessionEvent> {
+    return await this.sendEvent(workspaceId, sessionId, {
+      type: "user.humanInputResponse",
+      ...(options.clientEventId ? { clientEventId: options.clientEventId } : {}),
+      payload: { requestId, response },
     });
   }
 
@@ -2189,15 +2236,14 @@ export class OpenGeniClient {
 
   // --- GitHub ----------------------------------------------------------------------------------
 
-  /** GitHub App configuration status + a signed install URL when configured. */
+  /** GitHub App configuration status; install/link URLs are null while new binding is disabled. */
   async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
     return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
   }
 
   /**
-   * Browser entry point that plants the CSRF cookie and forwards to GitHub's
-   * install page. Open this in a browser (it redirects); `state` comes from
-   * `getGitHubApp().installUrl` or a github_connect_link tool.
+   * Compatibility URL for previously issued state. New installation binding is
+   * disabled, so the endpoint validates state and terminates with HTTP 410.
    */
   githubConnectUrl(workspaceId: string, state: string): string {
     return this.url(`/v1/workspaces/${workspaceId}/github/connect`, { state });

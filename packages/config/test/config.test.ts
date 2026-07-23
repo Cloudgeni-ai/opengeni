@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { describe, expect, test } from "bun:test";
+import { McpServerConnectionRef as ContractMcpServerConnectionRef } from "@opengeni/contracts";
 import {
   collectGitIdentityEnvironment,
   configuredEntitlements,
@@ -14,6 +15,7 @@ import {
   parseStaticEntitlementsJson,
   parseStaticUsageLimitsJson,
   parseMcpServers,
+  McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
   resolveStreamTokenSecret,
   retryStartupDependency,
@@ -23,6 +25,7 @@ import {
   stableSandboxEnvironmentForRun,
   startupRetryOptions,
   streamTokenDegraded,
+  temporalConnectionOptions,
 } from "../src";
 
 describe(".env.example", () => {
@@ -49,6 +52,89 @@ describe(".env.example", () => {
     }
 
     expect(() => withEnv(sourcedEnv, () => getSettings())).not.toThrow();
+  });
+});
+
+describe("Temporal connection security", () => {
+  test("keeps the local default plaintext and enables TLS for an API key", () => {
+    expect(temporalConnectionOptions(withEnv({}, () => getSettings()))).toEqual({
+      address: "127.0.0.1:7233",
+    });
+
+    expect(
+      temporalConnectionOptions(
+        withEnv({ OPENGENI_TEMPORAL_TLS_ENABLED: "true" }, () => getSettings()),
+      ),
+    ).toEqual({
+      address: "127.0.0.1:7233",
+      tls: true,
+    });
+
+    const secured = withEnv(
+      {
+        OPENGENI_TEMPORAL_HOST: "namespace.account.tmprl.cloud:7233",
+        OPENGENI_TEMPORAL_API_KEY: "temporal-test-key",
+      },
+      () => getSettings(),
+    );
+    expect(temporalConnectionOptions(secured)).toEqual({
+      address: "namespace.account.tmprl.cloud:7233",
+      tls: true,
+      apiKey: "temporal-test-key",
+    });
+  });
+
+  test("supports server-auth TLS, custom roots, SNI override, and mTLS", () => {
+    const rootCa = Buffer.from("root-ca".repeat(20));
+    const clientCertificate = Buffer.from("client-certificate");
+    const clientPrivateKey = Buffer.from("client-private-key");
+    const settings = withEnv(
+      {
+        OPENGENI_TEMPORAL_TLS_ENABLED: "true",
+        OPENGENI_TEMPORAL_TLS_SERVER_NAME: "temporal.internal",
+        OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: rootCa
+          .toString("base64")
+          .match(/.{1,76}/g)
+          ?.join("\n"),
+        OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64: clientCertificate.toString("base64"),
+        OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64: clientPrivateKey.toString("base64"),
+      },
+      () => getSettings(),
+    );
+
+    expect(temporalConnectionOptions(settings)).toEqual({
+      address: "127.0.0.1:7233",
+      tls: {
+        serverNameOverride: "temporal.internal",
+        serverRootCACertificate: new Uint8Array(rootCa),
+        clientCertPair: {
+          crt: new Uint8Array(clientCertificate),
+          key: new Uint8Array(clientPrivateKey),
+        },
+      },
+    });
+  });
+
+  test("rejects incomplete or malformed mTLS material without echoing it", () => {
+    expect(() =>
+      withEnv(
+        {
+          OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64:
+            Buffer.from("client-certificate").toString("base64"),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow("must both be set or both omitted");
+
+    const malformed = "not-a-secret!";
+    expect(() =>
+      withEnv({ OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: malformed }, () => getSettings()),
+    ).toThrow("OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64 must contain valid base64");
+    try {
+      withEnv({ OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: malformed }, () => getSettings());
+    } catch (error) {
+      expect(String(error)).not.toContain(malformed);
+    }
   });
 });
 
@@ -455,6 +541,38 @@ describe("sandbox preparation profiles", () => {
     expect(settings.mcpServers[0]?.allowedTools).toEqual(["search_documents"]);
   });
 
+  test("keeps config and wire connection-ref schemas in lockstep", () => {
+    const cases: unknown[] = [
+      {
+        connectionId: "cloud-connection:github:42",
+        providerDomain: "github.com",
+        provider: "github",
+        kind: "app_install",
+        scopes: ["repo"],
+        selectedResources: [{ kind: "repository", id: "42" }],
+        subjectScope: "subject",
+      },
+      {
+        connectionId: "azure-one",
+        providerDomain: "dev.azure.com",
+        provider: "azure_devops",
+        selectedResources: [
+          { kind: "repository", id: "repo-1" },
+          { kind: "repository", id: "repo-1" },
+        ],
+      },
+      { providerDomain: "gitlab.example" },
+      { connectionId: "opaque", providerDomain: "" },
+      { providerDomain: "github.com", unexpected: true },
+      null,
+    ];
+    for (const candidate of cases) {
+      expect(McpServerConnectionRefSchema.safeParse(candidate).success).toBe(
+        ContractMcpServerConnectionRef.safeParse(candidate).success,
+      );
+    }
+  });
+
   test("registers built-in MCP profiles by default", () => {
     const settings = withEnv({}, () => getSettings());
     expect(settings.mcpServers.find((server) => server.id === "opengeni")).toMatchObject({
@@ -509,6 +627,7 @@ describe("sandbox preparation profiles", () => {
     const off = withEnv({}, () => getSettings());
     expect(off.toolspaceEnabled).toBe(false);
     expect(off.toolspaceMaxCallsPerTurn).toBe(200);
+    expect(off.ogtoolPackageSpec).toBeUndefined();
     expect(
       stableSandboxEnvironmentForRun(off, {}, { workspaceId: "ws-1" })
         .OPENGENI_TOOLSPACE_TOKEN_FILE,
@@ -521,6 +640,7 @@ describe("sandbox preparation profiles", () => {
       {
         OPENGENI_TOOLSPACE_ENABLED: "true",
         OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN: "17",
+        OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         OPENGENI_DELEGATION_SECRET: "delegation-secret",
       },
       () => getSettings(),
@@ -530,7 +650,26 @@ describe("sandbox preparation profiles", () => {
     expect(stableSandboxEnvironmentForRun(on, {}, { workspaceId: "ws-1" })).toMatchObject({
       OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
       OPENGENI_TOOLSPACE_URL: "http://127.0.0.1:8000/v1/workspaces/ws-1/mcp",
+      OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
     });
+  });
+
+  test("rejects floating or malformed ogtool package specs", () => {
+    for (const value of [
+      "@opengeni/ogtool@latest",
+      "@opengeni/ogtool@1",
+      "@opengeni/ogtool@1.2.3-beta.1",
+      "other-package@1.2.3",
+    ]) {
+      expect(() =>
+        withEnv(
+          {
+            OPENGENI_OGTOOL_PACKAGE_SPEC: value,
+          },
+          () => getSettings(),
+        ),
+      ).toThrow();
+    }
   });
 
   test("adds stable git credential pointers and provider CLI wrapper PATH for provisioned sandboxes", () => {

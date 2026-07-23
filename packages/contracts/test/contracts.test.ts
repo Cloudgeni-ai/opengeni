@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   AddDocumentRequest,
+  assertUniqueResourceMountPaths,
   approvalIdentifier,
   CapabilityCatalogResponse,
   evaluateWorkspaceModelPolicy,
@@ -18,20 +19,85 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   EnablePackRequest,
+  GitCredentialBindingId,
+  gitCredentialBindingIdForRepository,
+  gitCredentialProviderForRepository,
   KnowledgeMemorySearchRequest,
   MarketingDailyAnalysisTaskRequest,
   mergeToolRefs,
+  McpServerConnectionRef,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
+  RequestHumanInputToolInput,
+  RepositoryResourceRef,
   ResourceRef,
   SessionBusMessage,
   SessionMcpServerMetadata,
+  SubmitHumanInputResponseRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  ToolAuthNeededPayload,
+  CredentialAuthNeededPayload,
+  defaultRepositoryMountPath,
+  mergeResourceRefs,
+  normalizeResourceMountPath,
+  resourceMountPathCollisionKey,
 } from "../src";
 
 describe("contracts", () => {
+  test("models provider-neutral MCP bindings with exact selected repository scope", () => {
+    const binding = McpServerConnectionRef.parse({
+      connectionId: "host:github:one",
+      provider: "github",
+      providerDomain: "github.com",
+      kind: "app_install",
+      selectedResources: [
+        { kind: "repository", id: "101" },
+        { kind: "repository", id: "202" },
+      ],
+    });
+    expect(binding.selectedResources?.map((resource) => resource.id)).toEqual(["101", "202"]);
+    expect(() =>
+      McpServerConnectionRef.parse({
+        connectionId: "azure-one",
+        provider: "azure_devops",
+        providerDomain: "dev.azure.com",
+        selectedResources: [
+          { kind: "repository", id: "repo-guid" },
+          { kind: "repository", id: "repo-guid" },
+        ],
+      }),
+    ).toThrow("selectedResources must not contain duplicates");
+    expect(() =>
+      McpServerConnectionRef.parse({
+        providerDomain: "gitlab.example",
+        selectedResources: [{ kind: "repository", id: "42" }],
+      }),
+    ).toThrow("selectedResources requires connectionId");
+  });
+
+  test("auth-needed events accept opaque embedded-host connection identities", () => {
+    expect(
+      ToolAuthNeededPayload.parse({
+        serverId: "provider-tools",
+        providerDomain: "provider.example",
+        connectionId: "host:connection:42",
+        provider: "gitlab",
+        reason: "unsupported_auth",
+        selectedResources: [{ kind: "repository", id: "project-42" }],
+      }).connectionId,
+    ).toBe("host:connection:42");
+    expect(
+      CredentialAuthNeededPayload.parse({
+        credentialClass: "run",
+        providerDomain: "cloud.example",
+        connectionId: "host:cloud:7",
+        reason: "missing_connection",
+      }).connectionId,
+    ).toBe("host:cloud:7");
+  });
+
   test("extracts approval identity from every serialized interruption shape", () => {
     expect(approvalIdentifier({ id: "approval-direct" })).toBe("approval-direct");
     expect(approvalIdentifier({ rawItem: { callId: "approval-call" } })).toBe("approval-call");
@@ -46,6 +112,160 @@ describe("contracts", () => {
     expect(payload.resources).toEqual([]);
     expect(payload.tools).toEqual([]);
     expect(payload.metadata).toEqual({});
+  });
+
+  test("accepts only a UUID as a caller-preallocated session id", () => {
+    const requestedSessionId = "00000000-0000-4000-8000-000000000042";
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        requestedSessionId,
+      }).requestedSessionId,
+    ).toBe(requestedSessionId);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "inspect repo",
+        requestedSessionId: "host-session-42",
+      }),
+    ).toThrow();
+  });
+
+  test("accepts opaque bounded repository credential bindings and access intent", () => {
+    expect(
+      ResourceRef.parse({
+        kind: "repository",
+        uri: "https://gitlab.example/acme/repo.git",
+        ref: "main",
+        provider: "gitlab",
+        credentialBindingId: "host/opaque binding:1",
+        access: "read",
+      }),
+    ).toMatchObject({
+      credentialBindingId: "host/opaque binding:1",
+      access: "read",
+    });
+    expect(GitCredentialBindingId.safeParse("x".repeat(256)).success).toBe(true);
+    expect(GitCredentialBindingId.safeParse("x".repeat(257)).success).toBe(false);
+    expect(GitCredentialBindingId.safeParse("").success).toBe(false);
+  });
+
+  test("derives portable host-aware repository mount paths", () => {
+    expect(defaultRepositoryMountPath("https://github.com/acme/app.git")).toBe(
+      "repos/github.com/acme/app",
+    );
+    expect(defaultRepositoryMountPath("https://gitlab.com/acme/app.git")).toBe(
+      "repos/gitlab.com/acme/app",
+    );
+    expect(defaultRepositoryMountPath("https://dev.azure.com/acme/project/_git/app")).toBe(
+      "repos/dev.azure.com/acme/project/_git/app",
+    );
+    expect(defaultRepositoryMountPath("https://git.example.com:8443/acme/app.git")).toBe(
+      "repos/git.example.com%3A8443/acme/app",
+    );
+    expect(() => defaultRepositoryMountPath("ssh://git.example.com/acme/app.git")).toThrow(
+      "invalid repository URI",
+    );
+    expect(normalizeResourceMountPath("repos\\github.com\\acme\\app")).toBe(
+      "repos/github.com/acme/app",
+    );
+    expect(resourceMountPathCollisionKey("repos/GitHub.com/Acme/App")).toBe(
+      "repos/github.com/acme/app",
+    );
+    expect(resourceMountPathCollisionKey("repos/example.com/acme/caf\u00e9")).toBe(
+      resourceMountPathCollisionKey("repos/example.com/acme/cafe\u0301"),
+    );
+    expect(() => defaultRepositoryMountPath("https://github.com/acme/aux.git")).toThrow(
+      "invalid resource mount path",
+    );
+    expect(normalizeResourceMountPath("repos/github.com/acme/aux-repository")).toBe(
+      "repos/github.com/acme/aux-repository",
+    );
+  });
+
+  test("rejects non-portable and traversal mount paths", () => {
+    for (const path of [
+      "/repos/acme/app",
+      "C:\\repos\\acme\\app",
+      "repos/../secrets",
+      "repos//acme/app",
+      "repos/./acme",
+      "repos/acme/",
+      "repos/acme/NUL",
+      "repos/acme/trailing.",
+      "repos/acme/a:b",
+    ]) {
+      expect(() => normalizeResourceMountPath(path), path).toThrow("invalid resource mount path");
+    }
+  });
+
+  test("resource merges compare effective mount paths case-insensitively", () => {
+    const github = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    const gitlab = {
+      kind: "repository" as const,
+      uri: "https://gitlab.com/acme/app.git",
+      ref: "main",
+    };
+    expect(mergeResourceRefs([github], [gitlab], { rejectConflicts: true })).toHaveLength(2);
+    expect(() =>
+      mergeResourceRefs(
+        [{ ...github, mountPath: "repos/shared/App" }],
+        [{ ...gitlab, mountPath: "repos/SHARED/app" }],
+        { rejectConflicts: true },
+      ),
+    ).toThrow("resource mount path is already attached");
+    expect(() =>
+      mergeResourceRefs(
+        [
+          { ...github, mountPath: "repos/shared/App" },
+          { ...gitlab, mountPath: "repos/SHARED/app" },
+        ],
+        [],
+        { rejectConflicts: true },
+      ),
+    ).toThrow("resource mount path is already attached");
+  });
+
+  test("runtime uniqueness rejects repeated resources before materialization", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    expect(() => assertUniqueResourceMountPaths([resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
+  });
+
+  test("derives one canonical binding id across legacy provider-id shapes", () => {
+    const nonNumericGitHub = RepositoryResourceRef.parse({
+      kind: "repository",
+      uri: "https://github.com/acme/repo.git",
+      ref: "main",
+      provider: "github",
+      installationId: "external-installation",
+    });
+    expect(gitCredentialProviderForRepository(nonNumericGitHub)).toBe("github");
+    expect(gitCredentialBindingIdForRepository(nonNumericGitHub)).toBe("github");
+
+    const numericGitHub = RepositoryResourceRef.parse({
+      ...nonNumericGitHub,
+      installationId: "123",
+    });
+    expect(gitCredentialBindingIdForRepository(numericGitHub)).toBe("github-installation:123");
+
+    const gitlabWithStrayLegacyAlias = RepositoryResourceRef.parse({
+      kind: "repository",
+      uri: "https://gitlab.example/acme/repo.git",
+      ref: "main",
+      provider: "gitlab",
+      githubInstallationId: 123,
+      githubRepositoryId: 456,
+    });
+    expect(gitCredentialBindingIdForRepository(gitlabWithStrayLegacyAlias)).toBe("gitlab");
   });
 
   test("accepts MCP tool refs on create session", () => {
@@ -79,6 +299,24 @@ describe("contracts", () => {
       ],
     });
     expect(payload.mcpServers[0]?.headers).toEqual({ Authorization: "Bearer create-secret" });
+    const hostPayload = CreateSessionRequest.parse({
+      initialMessage: "inspect host repo",
+      tools: [{ kind: "mcp", id: "host_gitlab" }],
+      mcpServers: [
+        {
+          id: "host_gitlab",
+          url: "https://gitlab-tools.example/mcp",
+          connectionRef: {
+            connectionId: "cloud-connection:gitlab:42",
+            providerDomain: "gitlab.example",
+            kind: "oauth2",
+          },
+        },
+      ],
+    });
+    expect(hostPayload.mcpServers[0]?.connectionRef?.connectionId).toBe(
+      "cloud-connection:gitlab:42",
+    );
     expect(() =>
       CreateSessionRequest.parse({
         initialMessage: "bad url",
@@ -114,6 +352,7 @@ describe("contracts", () => {
       url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 2,
+      connectionRef: null,
     });
     expect(() =>
       SessionMcpServerMetadata.parse({
@@ -374,6 +613,76 @@ describe("contracts", () => {
       ClientSessionEvent.parse({
         type: "user.message",
         payload: { text: "" },
+      }),
+    ).toThrow();
+  });
+
+  test("validates structured human-input questions and typed client responses", () => {
+    const input = RequestHumanInputToolInput.parse({
+      questions: [
+        {
+          id: "environment",
+          kind: "single_select",
+          prompt: "Where should this run?",
+          options: [
+            { id: "staging", label: "Staging" },
+            { id: "production", label: "Production" },
+          ],
+        },
+        {
+          id: "notes",
+          kind: "text",
+          prompt: "Anything else?",
+          required: false,
+          validation: { maxLength: 200 },
+        },
+      ],
+      allowSkip: true,
+      expiresInSeconds: 300,
+    });
+    expect(input.questions[0]).toMatchObject({ required: true, allowOther: false });
+    expect(input.questions[1]?.options).toEqual([]);
+
+    const response = SubmitHumanInputResponseRequest.parse({
+      outcome: "answered",
+      answers: [{ questionId: "environment", values: ["staging"] }],
+    });
+    expect(
+      ClientSessionEvent.parse({
+        type: "user.humanInputResponse",
+        clientEventId: "human-response-1",
+        payload: {
+          requestId: "00000000-0000-4000-8000-000000000001",
+          response,
+        },
+      }),
+    ).toMatchObject({ type: "user.humanInputResponse" });
+
+    expect(() =>
+      RequestHumanInputToolInput.parse({
+        questions: [
+          {
+            id: "bad",
+            kind: "text",
+            prompt: "Bad",
+            options: [{ id: "not-allowed", label: "Not allowed" }],
+          },
+        ],
+      }),
+    ).toThrow();
+    expect(() =>
+      RequestHumanInputToolInput.parse({
+        questions: [
+          {
+            id: "duplicate",
+            kind: "multi_select",
+            prompt: "Bad",
+            options: [
+              { id: "same", label: "One" },
+              { id: "same", label: "Two" },
+            ],
+          },
+        ],
       }),
     ).toThrow();
   });

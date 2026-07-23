@@ -4,6 +4,9 @@ import type {
   EditSessionQueueItemRequest,
   MoveSessionQueueItemRequest,
   SaveComposerDraftRequest,
+  AccessGrant,
+  SessionAuthorizationOperation,
+  SessionAuthorizationPort,
   SessionCommandReceipt,
   SessionControlRequest,
   SessionControlResponse,
@@ -24,6 +27,7 @@ import {
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
   mutateWorkspaceControlInTransaction,
+  projectEffectiveControlForRelatedAccess,
   runIdempotentPersistenceTransaction,
   saveComposerDraftInTransaction,
   sendAgentMessageInTransaction,
@@ -41,6 +45,10 @@ import {
   type EventBus,
 } from "@opengeni/events";
 import type { SessionWorkflowClient } from "../dependencies";
+import {
+  requireSessionAuthorization,
+  type ResolvedSessionAuthorization,
+} from "../session-authorization";
 
 export type HumanSessionCommandContext = {
   accountId: string;
@@ -52,11 +60,66 @@ export type HumanSessionCommandContext = {
 export type AgentSessionCommandContext = {
   accountId: string;
   workspaceId: string;
+  subjectId: string;
   callerSessionId: string;
   callerTurnId: string;
   callerAttemptId: string;
   callerExecutionGeneration: number;
 };
+
+type SessionAuthorizationCommandDeps = {
+  db: Database;
+  sessionAuthorization?: SessionAuthorizationPort | null;
+};
+
+function humanAccessGrant(context: HumanSessionCommandContext): AccessGrant {
+  return {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    permissions: [],
+  };
+}
+
+function agentAccessGrant(context: AgentSessionCommandContext): AccessGrant {
+  return {
+    accountId: context.accountId,
+    workspaceId: context.workspaceId,
+    subjectId: context.subjectId,
+    permissions: [],
+    metadata: {
+      sessionId: context.callerSessionId,
+      turnId: context.callerTurnId,
+      attemptId: context.callerAttemptId,
+      executionGeneration: context.callerExecutionGeneration,
+    },
+  };
+}
+
+async function authorizeHumanSessionCommand(
+  deps: SessionAuthorizationCommandDeps,
+  context: HumanSessionCommandContext,
+  operation: SessionAuthorizationOperation,
+): Promise<ResolvedSessionAuthorization | null> {
+  return await requireSessionAuthorization(deps, humanAccessGrant(context), {
+    sessionId: context.sessionId,
+    operation,
+    surface: "core",
+  });
+}
+
+async function authorizeAgentSessionCommand(
+  deps: SessionAuthorizationCommandDeps,
+  context: AgentSessionCommandContext,
+  targetSessionId: string,
+  operation: SessionAuthorizationOperation,
+): Promise<ResolvedSessionAuthorization | null> {
+  return await requireSessionAuthorization(deps, agentAccessGrant(context), {
+    sessionId: targetSessionId,
+    operation,
+    surface: "core",
+  });
+}
 
 function agentActor(context: AgentSessionCommandContext) {
   return {
@@ -100,6 +163,7 @@ async function publishAndWakeAgentCommand(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    sessionAuthorization?: SessionAuthorizationPort | null;
   },
   input: {
     accountId: string;
@@ -189,10 +253,12 @@ export async function sendAgentSessionMessage(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    sessionAuthorization?: SessionAuthorizationPort | null;
   },
   context: AgentSessionCommandContext,
   input: { targetSessionId: string; text: string; idempotencyKey: string },
 ) {
+  await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.append");
   const result = await runAgentCommandPersistenceTransaction(deps, context, {
     stage: "session_commands.agent_message",
     eventTypes: ["system.update.pending"],
@@ -225,10 +291,12 @@ export async function steerAgentSession(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    sessionAuthorization?: SessionAuthorizationPort | null;
   },
   context: AgentSessionCommandContext,
   input: { targetSessionId: string; instruction: string; idempotencyKey: string },
 ) {
+  await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.steer");
   const result = await runAgentCommandPersistenceTransaction(deps, context, {
     stage: "session_commands.agent_steer",
     eventTypes: ["session.control.steer_requested", "system.update.pending", "turn.superseded"],
@@ -261,6 +329,7 @@ export async function controlAgentSessionWorkstream(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "requestSessionWorkflowWakeDispatch">;
+    sessionAuthorization?: SessionAuthorizationPort | null;
   },
   context: AgentSessionCommandContext,
   input: {
@@ -270,6 +339,7 @@ export async function controlAgentSessionWorkstream(
     reason?: string | null;
   },
 ) {
+  await authorizeAgentSessionCommand(deps, context, input.targetSessionId, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       mutateSessionControlInTransaction(tx as unknown as Database, {
@@ -323,18 +393,31 @@ function composerDraft(
   };
 }
 
-async function authoritativeQueue(db: Database, workspaceId: string, sessionId: string) {
+async function authoritativeQueue(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+  relatedSessionAccess: "target" | "root",
+) {
   const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
   if (!snapshot) throw new Error(`Session not found: ${sessionId}`);
-  return snapshot;
+  return {
+    ...snapshot,
+    effectiveControl: projectEffectiveControlForRelatedAccess(
+      snapshot.effectiveControl,
+      sessionId,
+      relatedSessionAccess,
+    ),
+  };
 }
 
 export async function moveHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus },
+  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
   context: HumanSessionCommandContext,
   turnId: string,
   input: MoveSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
+  const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       moveQueuedTurnInTransaction(tx as unknown as Database, {
@@ -349,18 +432,24 @@ export async function moveHumanQueuePrompt(
   );
   const response = {
     receipt: receipt(result.receipt),
-    snapshot: await authoritativeQueue(deps.db, context.workspaceId, context.sessionId),
+    snapshot: await authoritativeQueue(
+      deps.db,
+      context.workspaceId,
+      context.sessionId,
+      authorization?.relatedSessionAccess ?? "root",
+    ),
   };
   await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
   return response;
 }
 
 export async function deleteHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus },
+  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
   context: HumanSessionCommandContext,
   turnId: string,
   input: DeleteSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
+  const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       deleteSessionQueueItemInTransaction(tx as unknown as Database, {
@@ -375,18 +464,24 @@ export async function deleteHumanQueuePrompt(
   );
   const response = {
     receipt: receipt(result.receipt),
-    snapshot: await authoritativeQueue(deps.db, context.workspaceId, context.sessionId),
+    snapshot: await authoritativeQueue(
+      deps.db,
+      context.workspaceId,
+      context.sessionId,
+      authorization?.relatedSessionAccess ?? "root",
+    ),
   };
   await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
   return response;
 }
 
 export async function editHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus },
+  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
   context: HumanSessionCommandContext,
   turnId: string,
   input: EditSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
+  const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
   const result = await withWorkspaceSubjectRls(
     deps.db,
     context.workspaceId,
@@ -406,7 +501,12 @@ export async function editHumanQueuePrompt(
   );
   const response = {
     receipt: receipt(result.receipt),
-    snapshot: await authoritativeQueue(deps.db, context.workspaceId, context.sessionId),
+    snapshot: await authoritativeQueue(
+      deps.db,
+      context.workspaceId,
+      context.sessionId,
+      authorization?.relatedSessionAccess ?? "root",
+    ),
     draft: composerDraft(result.draft)!,
   };
   await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
@@ -414,11 +514,12 @@ export async function editHumanQueuePrompt(
 }
 
 export async function steerHumanQueuePrompt(
-  deps: { db: Database; bus: EventBus },
+  deps: { db: Database; bus: EventBus; sessionAuthorization?: SessionAuthorizationPort | null },
   context: HumanSessionCommandContext,
   turnId: string,
   input: SteerSessionQueueItemRequest,
 ): Promise<SessionQueueMutationResponse> {
+  const authorization = await authorizeHumanSessionCommand(deps, context, "session.queue.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       steerQueuedTurnInTransaction(tx as unknown as Database, {
@@ -433,7 +534,12 @@ export async function steerHumanQueuePrompt(
   );
   const response = {
     receipt: receipt(result.receipt),
-    snapshot: await authoritativeQueue(deps.db, context.workspaceId, context.sessionId),
+    snapshot: await authoritativeQueue(
+      deps.db,
+      context.workspaceId,
+      context.sessionId,
+      authorization?.relatedSessionAccess ?? "root",
+    ),
   };
   await publishSessionEventIds(deps, context.workspaceId, context.sessionId, result.eventIds);
   await publishWorkspaceControlEvent(deps, context.workspaceId, result.workspaceControlEventId);
@@ -445,10 +551,12 @@ export async function controlHumanSessionWorkstream(
     db: Database;
     bus: EventBus;
     workflowClient: Pick<SessionWorkflowClient, "requestSessionWorkflowWakeDispatch">;
+    sessionAuthorization?: SessionAuthorizationPort | null;
   },
   context: HumanSessionCommandContext,
   input: SessionControlRequest,
 ): Promise<SessionControlResponse> {
+  const authorization = await authorizeHumanSessionCommand(deps, context, "session.control");
   const result = await withWorkspaceRls(deps.db, context.workspaceId, (scoped) =>
     scoped.transaction((tx) =>
       mutateSessionControlInTransaction(tx as unknown as Database, {
@@ -465,7 +573,11 @@ export async function controlHumanSessionWorkstream(
   );
   const response = {
     receipt: receipt(result.receipt),
-    effectiveControl: serializeEffectiveSessionControl(result.control),
+    effectiveControl: projectEffectiveControlForRelatedAccess(
+      serializeEffectiveSessionControl(result.control),
+      context.sessionId,
+      authorization?.relatedSessionAccess ?? "root",
+    ),
     interruptionCount: result.interruptionCount,
     wakeCount: result.wakeCount,
   };
@@ -512,19 +624,24 @@ export async function controlHumanWorkspace(
 }
 
 export async function getHumanComposerDraft(
-  db: Database,
+  deps: SessionAuthorizationCommandDeps,
   context: HumanSessionCommandContext,
 ): Promise<ComposerDraft> {
-  const row = await withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, (scoped) =>
-    getComposerDraftInTransaction(scoped, {
-      workspaceId: context.workspaceId,
-      sessionId: context.sessionId,
-      subjectId: context.subjectId,
-    }),
+  await authorizeHumanSessionCommand(deps, context, "session.composer.read");
+  const row = await withWorkspaceSubjectRls(
+    deps.db,
+    context.workspaceId,
+    context.subjectId,
+    (scoped) =>
+      getComposerDraftInTransaction(scoped, {
+        workspaceId: context.workspaceId,
+        sessionId: context.sessionId,
+        subjectId: context.subjectId,
+      }),
   );
   const mapped = composerDraft(row);
   if (mapped) return mapped;
-  const session = await getSession(db, context.workspaceId, context.sessionId);
+  const session = await getSession(deps.db, context.workspaceId, context.sessionId);
   if (!session) throw new Error(`Session not found: ${context.sessionId}`);
   return {
     revision: 0,
@@ -540,18 +657,23 @@ export async function getHumanComposerDraft(
 }
 
 export async function saveHumanComposerDraft(
-  db: Database,
+  deps: SessionAuthorizationCommandDeps,
   context: HumanSessionCommandContext,
   input: SaveComposerDraftRequest,
 ): Promise<ComposerDraft> {
-  const row = await withWorkspaceSubjectRls(db, context.workspaceId, context.subjectId, (scoped) =>
-    scoped.transaction((tx) =>
-      saveComposerDraftInTransaction(tx as unknown as Database, {
-        ...context,
-        ...input,
-        subjectId: context.subjectId,
-      }),
-    ),
+  await authorizeHumanSessionCommand(deps, context, "session.composer.write");
+  const row = await withWorkspaceSubjectRls(
+    deps.db,
+    context.workspaceId,
+    context.subjectId,
+    (scoped) =>
+      scoped.transaction((tx) =>
+        saveComposerDraftInTransaction(tx as unknown as Database, {
+          ...context,
+          ...input,
+          subjectId: context.subjectId,
+        }),
+      ),
   );
   return composerDraft(row)!;
 }

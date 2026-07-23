@@ -187,6 +187,12 @@ jobs:
       - name: Clean published consumer
         run: bun run test:publish-consumer
 
+      - name: Runtime embedding consumer
+        run: bun run test:runtime-embedding-consumer
+
+      - name: Portable ogtool package
+        run: bun run test:ogtool-package
+
       - name: Build React demo harness
         run: cd packages/react && bun run demo:build
 
@@ -340,3 +346,12 @@ jobs:
           platforms: linux/amd64
           push: false
           tags: opengeni-web:ci
+
+      - name: Build headless sandbox image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-sandbox:ci

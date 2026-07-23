@@ -9,7 +9,10 @@ import {
 import postgres from "postgres";
 import {
   buildConnectionTokenResolver,
+  buildHostConnectionTokenResolver,
   ConnectionRefreshHttpError,
+  HostMcpCredentialBindingError,
+  HostMcpCredentialScopeError,
   normalizeBearerScheme,
   createConnection,
   createDb,
@@ -495,7 +498,224 @@ describe("connections table and helpers", () => {
   });
 });
 
+describe("buildHostConnectionTokenResolver", () => {
+  const context = {
+    accountId: "acct_1",
+    workspaceId: "ws_1",
+    sessionId: "session_1",
+    rootSessionId: "session_root",
+    turnId: "turn_1",
+    attemptId: "attempt_1",
+    executionGeneration: 4,
+    initiator: { kind: "subject" as const, subjectId: "host:user:42", label: "Ada" },
+    initiatorContext: { source: "host", via: [{ kind: "agent" }] },
+    surface: "model" as const,
+  };
+
+  test("forwards frozen turn authority and returns a scope-checked header snapshot", async () => {
+    let received: unknown;
+    const headers = { Authorization: "Bearer host-token" };
+    const resolver = buildHostConnectionTokenResolver(async (request) => {
+      received = request;
+      return {
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers,
+        connectionId: "host-connection-7",
+        providerDomain: request.connectionRef.providerDomain,
+        ...(request.connectionRef.provider ? { provider: request.connectionRef.provider } : {}),
+        ...(request.connectionRef.scopes ? { scopes: request.connectionRef.scopes } : {}),
+        ...(request.connectionRef.selectedResources
+          ? { selectedResources: request.connectionRef.selectedResources }
+          : {}),
+        expiresAt: "2026-07-21T23:00:00.000Z",
+      };
+    }, context);
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      subjectId: "worker:first-party-mcp",
+      serverId: "github",
+      toolName: "create_pull_request",
+      connectionRef: {
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        connectionId: "host-connection-7",
+        scopes: ["repo"],
+        selectedResources: [
+          { kind: "repository", id: "101" },
+          { kind: "repository", id: "202" },
+        ],
+      },
+      forceRefresh: true,
+    });
+
+    expect(received).toEqual({
+      ...context,
+      callerSubjectId: "worker:first-party-mcp",
+      serverId: "github",
+      toolName: "create_pull_request",
+      connectionRef: {
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        connectionId: "host-connection-7",
+        scopes: ["repo"],
+        selectedResources: [
+          { kind: "repository", id: "101" },
+          { kind: "repository", id: "202" },
+        ],
+      },
+      forceRefresh: true,
+    });
+    expect(result).toEqual({
+      status: "ok",
+      headers: { Authorization: "Bearer host-token" },
+      connectionId: "host-connection-7",
+      expiresAt: new Date("2026-07-21T23:00:00.000Z"),
+    });
+    headers.Authorization = "Bearer mutated-after-return";
+    expect(result).toMatchObject({ headers: { Authorization: "Bearer host-token" } });
+  });
+
+  test("rejects a mismatched host scope before returning credential material", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async () => ({
+        status: "ok",
+        accountId: "acct_1",
+        workspaceId: "other-workspace",
+        sessionId: "session_1",
+        headers: { Authorization: "Bearer wrong-tenant" },
+        connectionId: "host-connection-7",
+        providerDomain: "github.com",
+      }),
+      context,
+    );
+
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        connectionRef: { providerDomain: "github.com" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
+  });
+
+  test("rejects host credential material routed from a different binding or repository set", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "ok",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        headers: { Authorization: "Bearer wrong-binding" },
+        connectionId: "host-connection-other",
+        provider: "github",
+        providerDomain: "github.com",
+        selectedResources: [{ kind: "repository", id: "999" }],
+      }),
+      context,
+    );
+
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        connectionRef: {
+          connectionId: "host-connection-7",
+          provider: "github",
+          providerDomain: "github.com",
+          selectedResources: [{ kind: "repository", id: "101" }],
+        },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+  });
+
+  test("passes through reconnect metadata without credential headers", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "auth_needed",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        reason: "expired",
+        providerDomain: "gitlab.com",
+        connectionId: "gitlab-connection",
+        scopes: ["api"],
+        authorizationUrl: "https://host.example/reconnect/gitlab-connection",
+      }),
+      { ...context, surface: "toolspace" },
+    );
+
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "gitlab",
+      connectionRef: { providerDomain: "gitlab.com" },
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "expired",
+      providerDomain: "gitlab.com",
+      connectionId: "gitlab-connection",
+      scopes: ["api"],
+      authorizationUrl: "https://host.example/reconnect/gitlab-connection",
+    });
+    expect(JSON.stringify(result)).not.toContain("Bearer");
+  });
+
+  test("rejects insecure non-loopback reconnect URLs", async () => {
+    const resolver = buildHostConnectionTokenResolver(
+      async (request) => ({
+        status: "auth_needed",
+        accountId: request.accountId,
+        workspaceId: request.workspaceId,
+        sessionId: request.sessionId,
+        reason: "expired",
+        providerDomain: "gitlab.com",
+        authorizationUrl: "http://host.example/reconnect",
+      }),
+      context,
+    );
+    expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "gitlab",
+        connectionRef: { providerDomain: "gitlab.com" },
+      }),
+    ).rejects.toThrow("invalid authorizationUrl");
+  });
+});
+
 describe("buildConnectionTokenResolver", () => {
+  test("fails closed before credential lookup for repository-scoped provider bindings", async () => {
+    const { deps, counts } = resolverDeps();
+    const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
+    const result = await resolver({
+      workspaceId: "ws_1",
+      serverId: "github",
+      connectionRef: {
+        connectionId: "github-installation-one",
+        provider: "github",
+        providerDomain: "github.com",
+        kind: "app_install",
+        selectedResources: [{ kind: "repository", id: "101" }],
+      },
+    });
+    expect(result).toEqual({
+      status: "auth_needed",
+      reason: "resource_scope_unavailable",
+      connectionId: "github-installation-one",
+      provider: "github",
+      providerDomain: "github.com",
+      selectedResources: [{ kind: "repository", id: "101" }],
+    });
+    expect(counts.load).toBe(0);
+    expect(counts.recordUsed).toBe(0);
+  });
+
   test("materializes api_key headers and records usage", async () => {
     const { deps, counts } = resolverDeps();
     const resolver = buildConnectionTokenResolver({} as Database, settings, deps);
@@ -750,8 +970,10 @@ describe("buildConnectionTokenResolver", () => {
   test("public-client refresh sends client_id from the credential bundle", async () => {
     const originalFetch = globalThis.fetch;
     let capturedBody: URLSearchParams | null = null;
+    let capturedSignal: AbortSignal | null = null;
     globalThis.fetch = (async (_url: string | URL | Request, init?: RequestInit) => {
       capturedBody = new URLSearchParams(String(init?.body));
+      capturedSignal = init?.signal ?? null;
       return new Response(
         JSON.stringify({ access_token: "AC2", token_type: "Bearer", expires_in: 3600 }),
         {
@@ -779,6 +1001,7 @@ describe("buildConnectionTokenResolver", () => {
         "https://opengeni.example.com/v1/integrations/oauth/client-metadata.json",
       );
       expect(capturedBody!.get("grant_type")).toBe("refresh_token");
+      expect(capturedSignal).toBeInstanceOf(AbortSignal);
     } finally {
       globalThis.fetch = originalFetch;
     }

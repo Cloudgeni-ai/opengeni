@@ -8,6 +8,7 @@ import {
   ClientConfig as ContractClientConfig,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  CreateSessionResponse as ContractCreateSessionResponse,
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
   KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
@@ -34,8 +35,10 @@ import {
   SessionMcpServerInput as ContractSessionMcpServerInput,
   SessionEventType as ContractSessionEventType,
   TranscriptionEvent as ContractTranscriptionEvent,
+  SessionHumanInputRequest as ContractSessionHumanInputRequest,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
+  SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
   ViewerHeartbeatRequest as ContractViewerHeartbeatRequest,
   ViewerHeartbeatResponse as ContractViewerHeartbeatResponse,
@@ -78,6 +81,7 @@ import type {
   ClientConfig,
   ClientSessionEventInput,
   CreateSessionRequest,
+  CreateSessionResponse,
   ListWorkspaceMembersResponse,
   MachineState,
   MachineView,
@@ -102,11 +106,13 @@ import type {
   Session,
   SessionCapabilities,
   SessionEvent,
+  SessionHumanInputRequest,
   SessionMcpServerInput,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
+  SubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload,
   UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
@@ -167,7 +173,13 @@ describe("SDK / contracts parity", () => {
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
     // Server -> client shapes: anything the contracts produce, the SDK accepts.
     const acceptSession = (value: z.infer<typeof ContractSessionSchema>): Session => value;
+    const acceptCreateResponse = (
+      value: z.infer<typeof ContractCreateSessionResponse>,
+    ): CreateSessionResponse => value;
     const acceptEvent = (value: z.infer<typeof ContractSessionEventSchema>): SessionEvent => value;
+    const acceptHumanInputRequest = (
+      value: z.infer<typeof ContractSessionHumanInputRequest>,
+    ): SessionHumanInputRequest => value;
     const acceptTurn = (value: z.infer<typeof ContractSessionTurn>): SessionTurn => value;
     const acceptTurnStatus = (
       value: z.infer<typeof ContractSessionTurn>["status"],
@@ -185,6 +197,9 @@ describe("SDK / contracts parity", () => {
     const acceptClientEvent = (
       value: ClientSessionEventInput,
     ): z.input<typeof ClientSessionEvent> => value;
+    const acceptHumanInputResponse = (
+      value: SubmitHumanInputResponseRequest,
+    ): z.input<typeof ContractSubmitHumanInputResponseRequest> => value;
     const acceptMcpServer = (
       value: z.infer<typeof ContractSessionMcpServerInput>,
     ): SessionMcpServerInput => value;
@@ -195,12 +210,15 @@ describe("SDK / contracts parity", () => {
     };
     const checks = [
       acceptSession,
+      acceptCreateResponse,
       acceptEvent,
+      acceptHumanInputRequest,
       acceptTurn,
       acceptTurnStatus,
       acceptTurnSource,
       acceptCreateRequest,
       acceptClientEvent,
+      acceptHumanInputResponse,
       acceptMcpServer,
     ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
@@ -283,7 +301,18 @@ describe("SDK / contracts parity", () => {
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
     };
-    for (const event of [message, approval]) {
+    const humanInput: ClientSessionEventInput = {
+      type: "user.humanInputResponse",
+      clientEventId: "ce-2",
+      payload: {
+        requestId: "00000000-0000-4000-8000-000000000001",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "choice", values: ["staging"] }],
+        },
+      },
+    };
+    for (const event of [message, approval, humanInput]) {
       expect(ClientSessionEvent.safeParse(event).success).toBe(true);
     }
   });
@@ -490,6 +519,7 @@ describe("SDK / contracts parity", () => {
 
   test("SDK-built create-session requests parse under the contracts schema", () => {
     const request: CreateSessionRequest = {
+      requestedSessionId: "00000000-0000-4000-8000-000000000042",
       initialMessage: "Investigate the failing deploy",
       resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
       tools: [{ kind: "mcp", id: "documents" }],

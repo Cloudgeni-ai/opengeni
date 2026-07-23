@@ -19,13 +19,14 @@ Most agent products give you some of these; OpenGeni's premise is that organizat
 - **Self-host everything, Apache-2.0 all the way down.** The control plane, sessions API, web app, and deployment artifacts (Helm chart, reference Terraform for Azure/AWS/GCP) are open source. The durable record is a Postgres database you operate.
 - **Durable, replayable sessions as an API.** Every event lands in a Postgres event log; live streams over SSE backfill from it, so a browser reload, a new client, or an audit replays the same history.
 - **Your hardware as a first-class target.** Connected Machines run sessions on computers you enroll, with dial-out-only networking, no platform-minted credentials on your machines, loud consent-based enrollment, and one-click revocation. Off by default until an operator enables it.
-- **Governance built in, not bolted on.** Human approvals gate tool use, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
+- **Governance built in, not bolted on.** Human approvals gate tool use, agents can pause durably for structured answers, credentials are brokered per session, and agent memory is a reviewed resource — agents *propose* memories, and a human or your API approves them before they become retrieval context.
 
 ## What It Does
 
 - Runs OpenAI Agents SDK agents behind a durable API.
 - Streams live session events over SSE while storing the replayable event log in Postgres.
 - Coordinates long-running work with Temporal signals for follow-ups, approvals, and interrupts.
+- Lets an in-flight agent request validated text or choice input and resume that exact tool call after an answer, allowed skip, expiry, or restart. See [docs/human-input.md](docs/human-input.md).
 - Runs each session on a chosen compute target: a managed sandbox (Docker, Modal, local, cloud provider, or none) or a **Connected Machine** you enroll — with a per-session working folder on that machine.
 - Establishes a machine-targeted turn directly on the enrolled machine, using the machine's own git credentials — no cloud box is created and no OpenGeni-minted token is pushed to it.
 - Keeps sessions working until the job is actually done: a session can carry a **goal** with success criteria, and stopping becomes an explicit act (`goal_complete` with evidence, `goal_pause` with a rationale, or a human interrupt) with no-progress and budget guards. See [docs/goals.md](docs/goals.md).
@@ -173,6 +174,7 @@ Copy `.env.example` to `.env` and configure at least:
 - `OPENGENI_DATABASE_URL`
 - `OPENGENI_NATS_URL`
 - `OPENGENI_TEMPORAL_HOST`
+- `OPENGENI_TEMPORAL_API_KEY` when using Temporal Cloud (enables TLS automatically)
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` if dependencies need longer startup windows
 - `OPENGENI_OPENAI_PROVIDER`
 - OpenAI or Azure OpenAI credentials
@@ -270,7 +272,7 @@ A Connected Machine is a first-class, co-equal alternative to the managed sandbo
 How a machine session differs from a managed sandbox:
 
 - **Runs directly on your machine.** A machine-targeted turn establishes the session on the enrolled machine directly — no cloud box is created or billed for that turn.
-- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni injects a short-lived, run-scoped git provider token when a GitHub, GitLab, or Azure DevOps broker is available; for a machine that injection is skipped.)
+- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni can inject independently scoped, short-lived repository-binding tokens for any mix of GitHub, GitLab, and Azure DevOps repositories; for a machine that injection is skipped.)
 - **Your files, not a clone.** OpenGeni does not clone selected repositories onto the machine's real disk; the machine already owns its filesystem. The agent works in the per-session working folder you chose.
 - **Per-session working folder.** Each session names a working directory on the machine (the machine root, or a subdirectory); it is the cwd base for the agent's exec, terminal, and file dock.
 
@@ -296,7 +298,7 @@ Provision NATS and the relay with your own managed services or upstream charts, 
 
 ## GitHub App Setup
 
-The GitHub App integration is optional, but it is the recommended way to give agents scoped repository access. It lets the UI list installed repositories and lets the worker mint short-lived installation tokens only for repositories selected for a session. A GitHub installation can be linked to any number of OpenGeni workspaces: each workspace owns an independent repository allowlist and can unlink without uninstalling the App from GitHub or affecting another workspace.
+The GitHub App integration is optional, but it is the recommended way to give agents scoped repository access. It lets the UI list installed repositories and lets the worker mint short-lived installation tokens only for repositories selected for a session. Each workspace binding owns an independent repository allowlist and can be unlinked without uninstalling the App from GitHub.
 
 From the web app:
 
@@ -307,11 +309,9 @@ From the web app:
 5. Create the app in GitHub. The callback page prints `OPENGENI_GITHUB_APP_*` lines and includes a copy button.
 6. Copy those lines into `.env`.
 7. Restart the API and worker, or restart everything with `bun run dev`.
-8. Install the app on the repositories the agent should access.
-9. Return to **GitHub app settings**, choose **Link existing**, authorize with GitHub, and select the repositories this workspace may use. Only repositories where the authorizing GitHub user has administrator access are eligible.
-10. Refresh repositories in the picker and select repositories for the session.
+8. Keep the generated credentials available for a future authority-safe connection flow. App registration remains supported, but new workspace-installation binding is temporarily disabled.
 
-For an App that is already installed, skip App creation and choose **Link existing**. GitHub shows every installation of this App accessible to the signed-in user; OpenGeni then records a workspace-local binding for the selected repositories. Repeat the same flow in another workspace to reuse the installation there. Choosing **Unlink** removes only that workspace binding.
+All new installation binding is disabled. `GET /user/installations`, repository administrator permission, and `setup_action=request` do not prove that the current human may bind or manage an installation for an OpenGeni workspace. GitHub's own rules vary by account and organization policy: a personal-account user may install on their account; an organization owner may install for the organization; and a repository administrator may install only when the App's requested permissions and the organization's installation policy allow it. The GitHub App manager role does not itself grant installation authority. GitHub also documents the setup-URL `installation_id` as spoofable and recommends only associating it with the OAuth user, which proves visibility rather than install/configure authority. Consequently, both `installUrl` and `linkUrl` are `null`, legacy install/link states and callbacks return `410`, and an owner-approval request never creates a binding.
 
 For local development, the manifest callback can use the API origin from the running request. If you run behind a tunnel or deployed URL, set:
 
@@ -320,9 +320,9 @@ OPENGENI_GITHUB_APP_MANIFEST_BASE_URL=https://YOUR_DOMAIN
 OPENGENI_GITHUB_APP_MANIFEST_STATE_SECRET=change-me
 ```
 
-The generated App requests user authorization during install and configures `<baseUrl>/v1/github/oauth/callback` as its callback URL. For an App created manually, configure that exact callback URL in the GitHub App settings. OpenGeni uses the resulting GitHub App user token only during the callback to discover installations and repository permission bits; it does not persist the user token. Installation and repository choices are carried back to OpenGeni in short-lived signed tickets, and the final bind still requires `github:manage` for the workspace.
+The generated App still configures `<baseUrl>/v1/github/oauth/callback` as its callback URL for compatibility, but OpenGeni does not exchange an OAuth code or persist a workspace binding through that callback while authority proof is disabled. Existing provider adapter methods remain ABI-compatible and are not an authorization grant.
 
-Existing database bindings created before repository allowlists were introduced retain `all` scope for compatibility. Relink an installation through **Link existing** to replace that legacy scope with an explicit selected-repository allowlist. Session creation, first-party GitHub token minting, and GitHub-authenticated worker turn startup all recheck the current workspace binding, so unlinking or narrowing a binding also revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
+Existing database bindings created before repository allowlists were introduced retain `all` scope for compatibility. Migration 0095 and all selected-repository allowlists remain in place; no migration ordinal is reused or reordered. Session creation, first-party GitHub token minting, and GitHub-authenticated worker turn startup all recheck the current workspace binding, so unlinking or narrowing a binding also revokes queued and scheduled use before a new token is minted. Connected Machines remain exempt because they use their own git credentials and OpenGeni mints no GitHub token for them.
 
 The generated App does not register GitHub webhooks; repository listing, clone tokens, commits, pushes, and pull requests use installation access tokens.
 

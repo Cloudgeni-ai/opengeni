@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { boundWorkspaceControlEvent, workspaceControlUtf8Bytes } from "@opengeni/contracts";
+import {
+  boundWorkspaceControlEvent,
+  workspaceControlUtf8Bytes,
+  type TurnInitiatorContext,
+} from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Database } from "./index";
 import * as schema from "./schema";
@@ -10,6 +14,12 @@ export type WorkspaceControlLockMode = "share" | "update";
 export type EffectiveControlState = "active" | "paused";
 export type SessionCommandActor =
   | { type: "human" | "operator"; subjectId: string }
+  | {
+      type: "service";
+      subjectId: string;
+      subjectLabel?: string;
+      context?: TurnInitiatorContext;
+    }
   | {
       type: "agent_attempt";
       attemptId: string;
@@ -363,9 +373,9 @@ export type SessionEventWriteLockInput = {
   /**
    * Control-aware writes take this lock first. Callers that already hold the
    * workspace control row (for example a Pause mutation under FOR UPDATE) say
-   * `already_locked`; ordinary audit/title appends use `none`.
+   * `already_locked`; ordinary audit/title appends explicitly use `none`.
    */
-  controlLock?: WorkspaceControlLockMode | "already_locked" | "none";
+  controlLock: WorkspaceControlLockMode | "already_locked" | "none";
   /** Used only when a staged caller already established the workspace prefix. */
   workspaceLock?: "key_share" | "already_locked";
   sessionIds?: string[];
@@ -404,7 +414,7 @@ export async function lockSessionEventWriteRows(
   db: Database,
   input: SessionEventWriteLockInput,
 ): Promise<SessionEventWriteLocks> {
-  const controlLock = input.controlLock ?? "none";
+  const controlLock = input.controlLock;
   const control =
     controlLock === "share" || controlLock === "update"
       ? await lockWorkspaceInferenceControl(db, input.workspaceId, controlLock)
@@ -1915,7 +1925,7 @@ export async function autoResumeSessionBranchInTransaction(
     workspaceId: string;
     sessionId: string;
     actor: string;
-    reason: "human_send" | "human_steer" | "agent_steer";
+    reason: "human_send" | "human_steer" | "service_send" | "service_steer" | "agent_steer";
     observedControlEtag?: string | null;
   },
 ): Promise<{

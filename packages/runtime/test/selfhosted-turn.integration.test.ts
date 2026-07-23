@@ -50,6 +50,9 @@ async function runPinnedToVmTurn(
     toolspaceTokenSeed?: string;
     responder?: MockAgentResponder;
     activeSandboxBackend?: "selfhosted";
+    onToolspaceTokenSessionReady?: Parameters<
+      typeof runAgentStream
+    >[3]["onToolspaceTokenSessionReady"];
   } = {},
 ): Promise<string> {
   const settings = testSettings({
@@ -99,11 +102,19 @@ async function runPinnedToVmTurn(
   const agent = buildOpenGeniAgent(settings, [], {
     model,
     sandboxEnvironment: ENV,
-    ...(opts.toolspaceTokenSeed ? { toolspaceTokenSeed: opts.toolspaceTokenSeed } : {}),
+    ...(opts.toolspaceTokenSeed
+      ? {
+          toolspaceTokenSeed: opts.toolspaceTokenSeed,
+          toolspaceTokenSessionId: "session-selfhosted",
+        }
+      : {}),
     ...(opts.activeSandboxBackend ? { activeSandboxBackend: opts.activeSandboxBackend } : {}),
   });
   const result = await runAgentStream(agent, "run echo on the vm", settings, {
     ownedSandbox: { client: client as never, session: proxy as never },
+    ...(opts.onToolspaceTokenSessionReady
+      ? { onToolspaceTokenSessionReady: opts.onToolspaceTokenSessionReady }
+      : {}),
   });
   for await (const _ of result.toStream()) {
     void _;
@@ -167,10 +178,14 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
         };
       },
     });
+    let renewalSessionIsRouted = false;
     await runPinnedToVmTurn(new ScriptedModel([{ output: [assistantMessage("ok")] }]), {
       toolspaceTokenSeed: "ogd_selfhosted_seed",
       responder,
       activeSandboxBackend: "selfhosted",
+      onToolspaceTokenSessionReady: (session) => {
+        renewalSessionIsRouted = session instanceof RoutingSandboxSession;
+      },
     });
     // The seed hook ran over the machine's exec channel and carried the token value.
     expect(
@@ -181,6 +196,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
     // But NO platform setup ran against the user's real computer.
     expect(execLog.some((c) => c.includes("git clone"))).toBe(false);
     expect(execLog.some((c) => c.includes("az login") || c.includes("az account"))).toBe(false);
+    expect(renewalSessionIsRouted).toBe(true);
   });
 
   test("NO-TOOLSPACE selfhosted turn seeds nothing (the hook list is empty without a token)", async () => {
@@ -231,6 +247,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       environment: {
         OPENGENI_TOOLSPACE_URL: "https://app.opengeni.example/v1/workspaces/ws/mcp",
         OPENGENI_TOOLSPACE_TOKEN_FILE: "/workspace/.opengeni/toolspace-token",
+        OPENGENI_OGTOOL_PACKAGE_SPEC: "@opengeni/ogtool@0.1.0",
         HOME: "/workspace",
         GIT_AUTHOR_NAME: "OpenGeni Bot",
       },
@@ -240,6 +257,7 @@ describe("selfhosted agent-turn contract — full run loop over a pinned selfhos
       "https://app.opengeni.example/v1/workspaces/ws/mcp",
     );
     expect(capturedEnv.OPENGENI_TOOLSPACE_TOKEN_FILE).toBe("/workspace/.opengeni/toolspace-token");
+    expect(capturedEnv.OPENGENI_OGTOOL_PACKAGE_SPEC).toBe("@opengeni/ogtool@0.1.0");
     expect(capturedEnv.HOME).toBeUndefined();
     expect(capturedEnv.GIT_AUTHOR_NAME).toBeUndefined();
   });

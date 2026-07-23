@@ -123,9 +123,13 @@ The goal tools are session-scoped first-party MCP tools. The worker signs the
 session id into the delegated access token it uses for first-party MCP calls
 (HMAC, worker-asserted — not agent-controlled), and the API registers
 `goal_set`/`goal_update`/`goal_complete`/`goal_pause` only for grants carrying
-that claim plus the `goals:manage` permission. Goal-bearing sessions, turns,
-and scheduled dispatches force-merge the `opengeni` tool ref so these tools are
-reachable even when the session was created with an empty tool list.
+that claim plus the `goals:manage` permission. A top-level session with no
+first-party permission override uses the worker default. A child inherits its
+creator's exact effective permissions, and an explicit set may only narrow
+them; goal-bearing creation is rejected when that resulting set omits
+`goals:manage` rather than silently broadening the child. Goal-bearing sessions,
+turns, and scheduled dispatches force-merge the `opengeni` tool ref so these
+tools are reachable even when the session was created with an empty tool list.
 
 ## Settings
 

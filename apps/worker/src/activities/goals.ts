@@ -190,6 +190,10 @@ export function createGoalActivities(services: () => Promise<ActivityServices>) 
       unit: "run",
       sourceResourceType: "session_system_update",
       sourceResourceId: update.update.id,
+      sessionId: input.sessionId,
+      initiator: { kind: "service", subjectId: "goal-continuation" },
+      initiatorContext: { goalId: decision.goal.id },
+      origin: "goal",
       idempotencyKey: `agent_run.created:goal:${input.workspaceId}:${update.update.id}`,
     });
     return { action: "continue" };

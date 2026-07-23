@@ -47,6 +47,7 @@ import {
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
+  stableHumanInputRequestId,
   turnOperationCancellationFailure,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
@@ -78,6 +79,16 @@ function functionResult(callId: string) {
     output: { type: "text", text: "ok" },
   };
 }
+
+describe("structured human-input identity", () => {
+  test("is stable for one logical tool call and distinct across calls or turns", () => {
+    const first = stableHumanInputRequestId("session-1", "turn-1", "call-1");
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-1")).toBe(first);
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-2")).not.toBe(first);
+    expect(stableHumanInputRequestId("session-1", "turn-2", "call-1")).not.toBe(first);
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
 
 async function actualCodexStreamingFailure(event: Record<string, unknown>): Promise<{
   calls: number;

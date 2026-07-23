@@ -27,6 +27,18 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     effectiveControl?: EffectiveSessionControl | null | undefined;
     /** Apply durable model/tool/reasoning settings in the host's controlled UI. */
     onDraftApplied?: ((draft: ComposerDraft) => void) | undefined;
+    /**
+     * Opt out of OpenGeni's remote composer-draft reads and writes. Embedded
+     * hosts can use this when their human lane permits messages and controls but
+     * deliberately withholds draft mutation because model/tool policy is
+     * server-owned. The unsent value remains local React state and send/steer
+     * continue to work without a draft revision fence. Queue checkout is hidden
+     * because the current queue-edit contract necessarily creates a durable
+     * composer draft.
+     *
+     * @default "durable"
+     */
+    draftPersistence?: "durable" | "disabled" | undefined;
   };
 
 export type ComposerState = {
@@ -49,6 +61,13 @@ export type ComposerState = {
   draftLoading: boolean;
   draftSaving: boolean;
   draftConflict: Error | null;
+  /**
+   * Whether this controller owns a durable server-side draft. Custom
+   * controllers that omit the field retain the historical durable behavior.
+   * Queue checkout is unavailable when persistence is disabled because the
+   * current queue-edit contract atomically moves the turn into that draft.
+   */
+  draftPersistence?: "durable" | "disabled" | undefined;
   /** Apply an atomic queue Edit checkout without a second read. */
   applyDraft: (draft: ComposerDraft) => void;
   reloadDraft: () => Promise<void>;
@@ -70,7 +89,8 @@ export function useComposer(
   options: UseComposerOptions = {},
 ): ComposerState {
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
-  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}`;
+  const durableDrafts = options.draftPersistence !== "disabled";
+  const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const [value, setValue] = useState("");
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [sending, setSending] = useState(false);
@@ -78,7 +98,7 @@ export function useComposer(
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [draft, setDraft] = useState<ComposerDraft | null>(null);
-  const [draftLoading, setDraftLoading] = useState(Boolean(sessionId));
+  const [draftLoading, setDraftLoading] = useState(Boolean(sessionId) && durableDrafts);
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftConflict, setDraftConflict] = useState<Error | null>(null);
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
@@ -126,15 +146,26 @@ export function useComposer(
     setResuming(false);
     setError(null);
     setDraft(null);
-    setDraftLoading(Boolean(sessionId));
+    setDraftLoading(Boolean(sessionId) && durableDrafts);
     setDraftSaving(false);
     setDraftConflict(null);
     setRestoredResources([]);
-  }, [sessionId, targetKey]);
+  }, [durableDrafts, sessionId, targetKey]);
 
   const applyDraft = useCallback(
     (next: ComposerDraft): void => {
       if (targetKeyRef.current !== targetKey) return;
+      if (!durableDrafts) {
+        pendingClientEventId.current = null;
+        localEditRevision.current += 1;
+        draftRef.current = null;
+        lastSavedSignature.current = null;
+        setDraft(null);
+        setValue(next.text);
+        setRestoredResources(next.resources);
+        setDraftConflict(null);
+        return;
+      }
       draftRef.current = next;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
@@ -145,12 +176,16 @@ export function useComposer(
       setDraftConflict(null);
       onDraftApplied?.(next);
     },
-    [onDraftApplied, targetKey],
+    [durableDrafts, onDraftApplied, targetKey],
   );
 
   const loadDraft = useCallback(
     async (replaceLocal: boolean, rejectOnFailure = false): Promise<void> => {
-      if (!sessionId || targetKeyRef.current !== targetKey) return;
+      if (targetKeyRef.current !== targetKey) return;
+      if (!sessionId || !durableDrafts) {
+        setDraftLoading(false);
+        return;
+      }
       const generation = targetGeneration.current;
       const readTicket = ++draftReadGeneration.current;
       const localAtStart = localEditRevision.current;
@@ -205,20 +240,20 @@ export function useComposer(
         }
       }
     },
-    [client, onDraftApplied, sessionId, targetKey, workspaceId],
+    [client, durableDrafts, onDraftApplied, sessionId, targetKey, workspaceId],
   );
 
   useEffect(() => {
-    if (!sessionId) {
+    if (!sessionId || !durableDrafts) {
       setDraftLoading(false);
       return;
     }
     void loadDraft(false);
-  }, [loadDraft, sessionId]);
+  }, [durableDrafts, loadDraft, sessionId]);
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !durableDrafts) return;
     return registerSessionReconciler(sessionId, "composer", async () => await loadDraft(false));
-  }, [loadDraft, registerSessionReconciler, sessionId]);
+  }, [durableDrafts, loadDraft, registerSessionReconciler, sessionId]);
   useSessionEventTrigger(
     client,
     workspaceId,
@@ -226,7 +261,7 @@ export function useComposer(
     isComposerDraftEvent,
     () => void loadDraft(false),
     {
-      enabled: Boolean(sessionId),
+      enabled: Boolean(sessionId) && durableDrafts,
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
     async () => await loadDraft(false, true),
@@ -310,13 +345,22 @@ export function useComposer(
   // Private durable autosave. A newer local edit is never replaced by an older
   // response; saves serialize and each reads the latest acknowledged revision.
   useEffect(() => {
-    if (!sessionId || draftLoading || sending || !draftRef.current || draftConflict) return;
+    if (
+      !durableDrafts ||
+      !sessionId ||
+      draftLoading ||
+      sending ||
+      !draftRef.current ||
+      draftConflict
+    )
+      return;
     const payload = currentDraftPayload();
     if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
     const timer = window.setTimeout(() => void persistPayload(payload), 500);
     return () => window.clearTimeout(timer);
   }, [
     currentDraftPayload,
+    durableDrafts,
     draftConflict,
     draftLoading,
     liveExtrasVersion,
@@ -597,7 +641,7 @@ export function useComposer(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
-      if (!sessionId || targetKeyRef.current !== ownedTargetKey) return;
+      if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) return;
       const remote = await client.getComposerDraft(workspaceId, sessionId);
       if (targetKeyRef.current !== ownedTargetKey || targetGeneration.current !== ownedGeneration) {
         return;
@@ -612,7 +656,16 @@ export function useComposer(
       const payload = currentDraftPayload();
       if (payload) await persistPayload({ ...payload, expectedRevision: remote.revision });
     },
-    [applyDraft, client, currentDraftPayload, persistPayload, sessionId, targetKey, workspaceId],
+    [
+      applyDraft,
+      client,
+      currentDraftPayload,
+      durableDrafts,
+      persistPayload,
+      sessionId,
+      targetKey,
+      workspaceId,
+    ],
   );
 
   const identityMatches = stateTargetKey === targetKey;
@@ -641,9 +694,10 @@ export function useComposer(
     resuming: identityMatches ? resuming : false,
     draft: identityMatches ? draft : null,
     draftRevision: identityMatches ? (draft?.revision ?? 0) : 0,
-    draftLoading: identityMatches ? draftLoading : Boolean(sessionId),
+    draftLoading: identityMatches ? draftLoading : Boolean(sessionId) && durableDrafts,
     draftSaving: identityMatches ? draftSaving : false,
     draftConflict: identityMatches ? draftConflict : null,
+    draftPersistence: durableDrafts ? "durable" : "disabled",
     applyDraft,
     reloadDraft,
     resolveDraftConflict,
