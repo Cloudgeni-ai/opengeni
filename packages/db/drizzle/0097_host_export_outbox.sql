@@ -166,7 +166,6 @@ CREATE TABLE IF NOT EXISTS "host_export_outbox" (
   "account_id" uuid NOT NULL,
   "workspace_id" uuid NOT NULL,
   "session_id" uuid,
-  "root_session_id" uuid,
   "turn_id" uuid,
   "turn_generation" integer,
   "turn_attempt_id" uuid,
@@ -211,23 +210,6 @@ CREATE TABLE IF NOT EXISTS "host_export_outbox" (
     ))
 );
 
-ALTER TABLE "host_export_outbox"
-  ADD COLUMN IF NOT EXISTS "root_session_id" uuid;
-
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'host_export_outbox_root_session_check'
-      AND conrelid = 'host_export_outbox'::regclass
-  ) THEN
-    ALTER TABLE "host_export_outbox"
-      ADD CONSTRAINT "host_export_outbox_root_session_check"
-      CHECK ("session_id" IS NULL OR "root_session_id" IS NOT NULL)
-      NOT VALID;
-  END IF;
-END $$;
-
 CREATE UNIQUE INDEX IF NOT EXISTS "host_export_outbox_source_uq"
   ON "host_export_outbox" ("export_kind", "source_id");
 CREATE UNIQUE INDEX IF NOT EXISTS "host_export_outbox_cursor_uq"
@@ -242,86 +224,6 @@ CREATE INDEX IF NOT EXISTS "host_export_outbox_unassigned_session_idx"
 CREATE INDEX IF NOT EXISTS "host_export_outbox_cursor_read_idx"
   ON "host_export_outbox" ("export_kind", "export_cursor")
   INCLUDE ("envelope_bytes") WHERE "export_cursor" IS NOT NULL;
-
-DO $migration$
-DECLARE target_schema text := current_schema();
-BEGIN
-  EXECUTE format($create$
-    CREATE OR REPLACE FUNCTION opengeni_private.host_export_session_root(
-      p_workspace_id uuid,
-      p_session_id uuid
-    ) RETURNS uuid
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-    DECLARE
-      v_root_id uuid;
-      v_parent_id uuid;
-      v_depth integer;
-      v_cycle boolean;
-    BEGIN
-      IF p_session_id IS NULL THEN
-        RETURN NULL;
-      END IF;
-      WITH RECURSIVE lineage(id, parent_session_id, depth, path, cycle) AS (
-        SELECT s.id, s.parent_session_id, 0, ARRAY[s.id], false
-        FROM %1$I.sessions s
-        WHERE s.workspace_id = p_workspace_id AND s.id = p_session_id
-        UNION ALL
-        SELECT parent.id, parent.parent_session_id, lineage.depth + 1,
-          lineage.path || parent.id, parent.id = ANY(lineage.path)
-        FROM %1$I.sessions parent
-        JOIN lineage ON lineage.parent_session_id = parent.id
-        WHERE parent.workspace_id = p_workspace_id
-          AND NOT lineage.cycle
-          AND lineage.depth < 64
-      )
-      SELECT id, parent_session_id, depth, cycle
-      INTO v_root_id, v_parent_id, v_depth, v_cycle
-      FROM lineage
-      ORDER BY depth DESC
-      LIMIT 1;
-
-      IF v_root_id IS NULL THEN
-        RETURN NULL;
-      END IF;
-      IF v_cycle OR v_parent_id IS NOT NULL OR v_depth >= 64 THEN
-        RAISE EXCEPTION 'session lineage for %% has no valid workspace root', p_session_id
-          USING ERRCODE = '23514';
-      END IF;
-      RETURN v_root_id;
-    END $function$;
-  $create$, target_schema);
-
-  EXECUTE format($create$
-    CREATE OR REPLACE FUNCTION opengeni_private.capture_host_export_root_session()
-    RETURNS trigger
-    LANGUAGE plpgsql
-    SECURITY DEFINER
-    SET search_path = pg_catalog
-    AS $function$
-    BEGIN
-      NEW.root_session_id := opengeni_private.host_export_session_root(
-        NEW.workspace_id,
-        NEW.session_id
-      );
-      IF NEW.session_id IS NOT NULL AND NEW.root_session_id IS NULL THEN
-        RAISE EXCEPTION 'host export session %% does not exist in workspace %%',
-          NEW.session_id, NEW.workspace_id
-          USING ERRCODE = '23503';
-      END IF;
-      RETURN NEW;
-    END $function$;
-  $create$, target_schema);
-END $migration$;
-
-DROP TRIGGER IF EXISTS host_export_outbox_capture_root_session
-  ON "host_export_outbox";
-CREATE TRIGGER host_export_outbox_capture_root_session
-BEFORE INSERT ON "host_export_outbox"
-FOR EACH ROW EXECUTE FUNCTION
-  opengeni_private.capture_host_export_root_session();
 
 CREATE TABLE IF NOT EXISTS "host_export_consumers" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -466,8 +368,7 @@ BEGIN
       END IF;
 
       SELECT c.session_events_enabled INTO v_enabled
-      FROM %1$I.host_export_config c WHERE c.id = 1
-      FOR SHARE;
+      FROM %1$I.host_export_config c WHERE c.id = 1;
       IF coalesce(v_enabled, false) = false THEN
         RETURN NEW;
       END IF;
@@ -607,8 +508,7 @@ BEGIN
       v_payload_bytes integer;
     BEGIN
       SELECT c.usage_events_enabled INTO v_enabled
-      FROM %1$I.host_export_config c WHERE c.id = 1
-      FOR SHARE;
+      FROM %1$I.host_export_config c WHERE c.id = 1;
       IF coalesce(v_enabled, false) = false THEN
         RETURN NEW;
       END IF;
@@ -1303,8 +1203,6 @@ END $migration$;
 REVOKE ALL ON FUNCTION opengeni_private.enqueue_host_session_event_export() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.enqueue_host_usage_event_export() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_private.validate_usage_event_execution_context() FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_private.host_export_session_root(uuid, uuid) FROM PUBLIC;
-REVOKE ALL ON FUNCTION opengeni_private.capture_host_export_root_session() FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_host_export.register_host_export_consumer(text, text) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_host_export.allocate_host_export_cursors(text, integer) FROM PUBLIC;
 REVOKE ALL ON FUNCTION opengeni_host_export.claim_host_export_batch(text, text, uuid, text, integer, integer, integer) FROM PUBLIC;

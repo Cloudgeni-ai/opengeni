@@ -1,8 +1,8 @@
 -- deployment-mode: rolling
--- Reinforce the immutable lineage capture installed atomically with the outbox
--- in 0097, and expose the root lookup for an exact leased cursor range. Keeping
--- the helper and trigger replacement here makes upgrades and migration-ledger
--- replay idempotent without leaving a producer-visible capture window.
+-- Preserve immutable session lineage in durable host exports. The outbox owns
+-- the captured root so a later session deletion cannot change an unacknowledged
+-- export. Legacy rows whose source session is already gone remain explicitly
+-- unresolved (NULL) instead of guessing.
 
 ALTER TABLE "host_export_outbox"
   ADD COLUMN IF NOT EXISTS "root_session_id" uuid;

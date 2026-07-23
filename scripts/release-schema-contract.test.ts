@@ -55,6 +55,31 @@ describe("release schema contract", () => {
       "0063_classified.sql: classified migrations require -- deployment-mode: rolling or -- deployment-mode: maintenance on the first line",
     );
   });
+
+  test("preserves published host-export history and appends the forward repair", async () => {
+    const contract = await buildSchemaContract();
+    const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+
+    expect(contract.fileCount).toBe(96);
+    expect(contract.latestMigration).toBe("0105_host_export_lineage_contract.sql");
+    expect(migrations.get("0097_host_export_outbox.sql")).toMatchObject({
+      sha256: "918763f2438efd06232f221305db6acac76e2bee5fa436e9665a860794c43d03",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0103_host_export_root_session.sql")).toMatchObject({
+      sha256: "7a1a5c22bd7f0f5e38c5641257f709c99d7cfa0b4816fcdab2f8cbe0ba9db743",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0104_host_export_root_session_backfill.sql")).toMatchObject({
+      sha256: "42d29994ac12b7118f0a1e3c252615509e887ee84bb1854056c9bf90e578760d",
+      deploymentMode: "maintenance",
+    });
+
+    expect(migrations.get("0105_host_export_lineage_contract.sql")).toMatchObject({
+      sha256: "a7b1a905f5567fcb562aa140571d4979321cef92cd36a62b17dc6b192f3c66c0",
+      deploymentMode: "rolling",
+    });
+  });
 });
 
 async function fixture(files: Array<[string, string]>): Promise<string> {

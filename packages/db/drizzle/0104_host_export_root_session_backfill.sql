@@ -1,23 +1,27 @@
--- deployment-mode: rolling
--- Migration 0097 installs lineage capture before its outbox producers become
--- visible, and its NOT VALID constraint rejects every later session-scoped row
--- without a captured root. Validate that invariant online without rewriting
--- durable export history. Any unexpected legacy gap fails closed for explicit
--- operator disposition instead of guessing lineage from mutable current data.
+-- deployment-mode: maintenance
+-- Backfill immutable root lineage for the pre-0103 durable outbox population.
+-- Migration 0103 already captures every new row, so this unbounded rewrite is
+-- isolated to an explicitly reviewed maintenance step instead of hiding in the
+-- rolling expand migration. Deleted source sessions remain unresolved (NULL).
 
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint
-    WHERE conname = 'host_export_outbox_root_session_check'
-      AND conrelid = 'host_export_outbox'::regclass
-  ) THEN
-    ALTER TABLE "host_export_outbox"
-      ADD CONSTRAINT "host_export_outbox_root_session_check"
-      CHECK ("session_id" IS NULL OR "root_session_id" IS NOT NULL)
-      NOT VALID;
-  END IF;
-END $$;
-
-ALTER TABLE "host_export_outbox"
-  VALIDATE CONSTRAINT "host_export_outbox_root_session_check";
+WITH distinct_sessions AS MATERIALIZED (
+  SELECT DISTINCT "workspace_id", "session_id"
+  FROM "host_export_outbox"
+  WHERE "session_id" IS NOT NULL
+    AND "root_session_id" IS NULL
+), resolved_roots AS MATERIALIZED (
+  SELECT
+    "workspace_id",
+    "session_id",
+    opengeni_private.host_export_session_root(
+      "workspace_id",
+      "session_id"
+    ) AS "root_session_id"
+  FROM distinct_sessions
+)
+UPDATE "host_export_outbox" o
+SET "root_session_id" = roots."root_session_id"
+FROM resolved_roots roots
+WHERE o."workspace_id" = roots."workspace_id"
+  AND o."session_id" = roots."session_id"
+  AND o."root_session_id" IS NULL;

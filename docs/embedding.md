@@ -554,8 +554,9 @@ write them into a sandbox.
 Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
 `packages/contracts/src/index.ts`, the host-export repository API in
 `packages/db/src/index.ts`, migrations `0097_host_export_outbox.sql` and
-`0103_host_export_root_session.sql`, the rolling contract validation in
-`0104_host_export_root_session_backfill.sql`, and
+`0103_host_export_root_session.sql`, the immutable maintenance backfill in
+`0104_host_export_root_session_backfill.sql`, the forward-only validation and
+registration repair in `0105_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
@@ -614,8 +615,14 @@ with the outbox row in the source transaction. A host can therefore retain the i
 for audit while attributing usage or host-owned business signals to one root binding. Only a
 sessionless fact has a `null` root. The rolling schema contract rejects a session-bound null and
 fails validation on unexpected drift for explicit operator disposition; neither migrations nor
-consumers guess lineage from mutable current data. Child lifecycle remains child lifecycle—the root
-id is attribution context, not permission to settle a root run.
+consumers guess lineage from mutable current data. Published migration `0104` remains an immutable
+maintenance-class history entry: its legacy backfill used then-current session ancestry and cannot
+universally prove source-transaction provenance. Forward migration `0105` never rewrites that
+history or outbox data. It rejects a session-bound row that predates the `0103` ledger boundary (even
+when `0104` populated a non-null root) until an operator performs a separate evidence-backed
+maintenance disposition, while installations with no suspect population can apply `0105` through
+the bounded rolling path. Child lifecycle remains child lifecycle—the root id is attribution
+context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
 Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
 new fact fails its source transaction instead of committing a poison export row, while standalone
