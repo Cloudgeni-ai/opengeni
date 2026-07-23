@@ -36,6 +36,11 @@ describe("0102 service command receipt actors (real PostgreSQL)", () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1 });
     try {
+      const migrationSql = await readFile(join(migrationsDir, migration), "utf8");
+      expect(migrationSql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
+      expect(migrationSql).toContain(
+        ') NOT VALID;\n\nALTER TABLE "session_command_receipts"\n  VALIDATE CONSTRAINT "session_command_receipts_actor_check";',
+      );
       const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
       for (const migrationFile of files.filter((entry) => entry.localeCompare(migration) < 0)) {
         await sql.unsafe(await readFile(join(migrationsDir, migrationFile), "utf8"));
@@ -58,7 +63,14 @@ describe("0102 service command receipt actors (real PostgreSQL)", () => {
           'prompt.send', 'before-migration', 'existing-hash'
         )`;
 
-      await sql.unsafe(await readFile(join(migrationsDir, migration), "utf8"));
+      await sql.unsafe(migrationSql);
+
+      const [constraint] = await sql<Array<{ validated: boolean }>>`
+        select convalidated as validated
+        from pg_catalog.pg_constraint
+        where conrelid = 'session_command_receipts'::regclass
+          and conname = 'session_command_receipts_actor_check'`;
+      expect(constraint?.validated).toBe(true);
 
       await sql`
         insert into session_command_receipts (

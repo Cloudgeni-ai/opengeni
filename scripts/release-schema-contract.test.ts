@@ -44,6 +44,17 @@ describe("release schema contract", () => {
     expect((await buildSchemaContract(changedContent)).sha256).not.toBe(baselineHash);
     expect((await buildSchemaContract(changedPath)).sha256).not.toBe(baselineHash);
   });
+
+  test("rejects an unclassified migration in the governed deployment-mode era", async () => {
+    const directory = await fixture([
+      ["0062_historical.sql", "select 1;"],
+      ["0063_classified.sql", "select 2;"],
+    ]);
+
+    await expect(buildSchemaContract(directory)).rejects.toThrow(
+      "0063_classified.sql: classified migrations require -- deployment-mode: rolling or -- deployment-mode: maintenance on the first line",
+    );
+  });
 });
 
 async function fixture(files: Array<[string, string]>): Promise<string> {

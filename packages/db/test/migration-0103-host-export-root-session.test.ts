@@ -7,7 +7,8 @@ import { provisionRoles } from "../src/provision-roles";
 import postgres from "postgres";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
-const migration = "0103_host_export_root_session.sql";
+const expandMigration = "0103_host_export_root_session.sql";
+const backfillMigration = "0104_host_export_root_session_backfill.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 let blank: BlankTestDatabase | null = null;
@@ -27,15 +28,21 @@ afterAll(async () => {
   await blank?.release();
 });
 
-describe("0103 host-export root session lineage (real PostgreSQL)", () => {
-  test("backfills valid lineages, preserves unresolved legacy rows, and captures new children", async () => {
+describe("0103/0104 host-export root session lineage (real PostgreSQL)", () => {
+  test("captures new children before the maintenance backfill resolves legacy lineages", async () => {
     if (!available || !blank) return;
     const sql = postgres(blank.databaseUrl, { max: 1, prepare: false });
     const hostExportRole = `og_export_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
     let roleCreated = false;
     try {
+      const expandSql = await readFile(join(migrationsDir, expandMigration), "utf8");
+      const backfillSql = await readFile(join(migrationsDir, backfillMigration), "utf8");
+      expect(expandSql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
+      expect(backfillSql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: maintenance");
       const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-      for (const migrationFile of files.filter((entry) => entry.localeCompare(migration) < 0)) {
+      for (const migrationFile of files.filter(
+        (entry) => entry.localeCompare(expandMigration) < 0,
+      )) {
         await sql.unsafe(await readFile(join(migrationsDir, migrationFile), "utf8"));
       }
 
@@ -102,9 +109,9 @@ describe("0103 host-export root session lineage (real PostgreSQL)", () => {
         REVOKE ALL ON FUNCTION opengeni_host_export.default_acl_probe() FROM PUBLIC;
       `);
 
-      await sql.unsafe(await readFile(join(migrationsDir, migration), "utf8"));
+      await sql.unsafe(expandSql);
 
-      const backfilled = await sql<Array<{ sourceId: string; rootSessionId: string | null }>>`
+      const beforeBackfill = await sql<Array<{ sourceId: string; rootSessionId: string | null }>>`
         select source_id as "sourceId", root_session_id as "rootSessionId"
         from host_export_outbox
         where source_id in (
@@ -114,14 +121,14 @@ describe("0103 host-export root session lineage (real PostgreSQL)", () => {
         )
         order by idempotency_key`;
       expect(
-        backfilled.map((row) => ({
+        beforeBackfill.map((row) => ({
           sourceId: row.sourceId,
           rootSessionId: row.rootSessionId,
         })),
       ).toEqual([
-        { sourceId: childSourceId, rootSessionId: rootId },
+        { sourceId: childSourceId, rootSessionId: null },
         { sourceId: orphanSourceId, rootSessionId: null },
-        { sourceId: rootSourceId, rootSessionId: rootId },
+        { sourceId: rootSourceId, rootSessionId: null },
       ]);
 
       const newSourceId = crypto.randomUUID();
@@ -159,6 +166,27 @@ describe("0103 host-export root session lineage (real PostgreSQL)", () => {
       expect((missingCurrentSessionError as Error).message).toContain(
         "does not exist in workspace",
       );
+
+      await sql.unsafe(backfillSql);
+      const backfilled = await sql<Array<{ sourceId: string; rootSessionId: string | null }>>`
+        select source_id as "sourceId", root_session_id as "rootSessionId"
+        from host_export_outbox
+        where source_id in (
+          ${rootSourceId}::uuid,
+          ${childSourceId}::uuid,
+          ${orphanSourceId}::uuid
+        )
+        order by idempotency_key`;
+      expect(
+        backfilled.map((row) => ({
+          sourceId: row.sourceId,
+          rootSessionId: row.rootSessionId,
+        })),
+      ).toEqual([
+        { sourceId: childSourceId, rootSessionId: rootId },
+        { sourceId: orphanSourceId, rootSessionId: null },
+        { sourceId: rootSourceId, rootSessionId: rootId },
+      ]);
 
       const exporterUrl = new URL(blank.databaseUrl);
       exporterUrl.username = hostExportRole;

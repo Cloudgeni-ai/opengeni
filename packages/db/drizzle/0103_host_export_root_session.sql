@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- Preserve immutable session lineage in durable host exports. The outbox owns
 -- the captured root so a later session deletion cannot change an unacknowledged
 -- export. Legacy rows whose source session is already gone remain explicitly
@@ -163,27 +164,3 @@ BEGIN
     );
   END LOOP;
 END $migration$;
-
--- Keep data conversion last: no later table/function DDL should run while a
--- populated database may have pending constraint triggers from this update.
-WITH distinct_sessions AS MATERIALIZED (
-  SELECT DISTINCT "workspace_id", "session_id"
-  FROM "host_export_outbox"
-  WHERE "session_id" IS NOT NULL
-    AND "root_session_id" IS NULL
-), resolved_roots AS MATERIALIZED (
-  SELECT
-    "workspace_id",
-    "session_id",
-    opengeni_private.host_export_session_root(
-      "workspace_id",
-      "session_id"
-    ) AS "root_session_id"
-  FROM distinct_sessions
-)
-UPDATE "host_export_outbox" o
-SET "root_session_id" = roots."root_session_id"
-FROM resolved_roots roots
-WHERE o."workspace_id" = roots."workspace_id"
-  AND o."session_id" = roots."session_id"
-  AND o."root_session_id" IS NULL;

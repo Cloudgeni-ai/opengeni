@@ -6100,6 +6100,8 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // omission uses the deployment's worker default; a child omission inherits
   // the creating session's effective grant. An explicit set is capped at
   // creation: every requested permission must be held by the creating grant.
+  // A goal-bearing session whose explicit/effective set omits goals:manage is
+  // rejected; creation never silently expands a child beyond that set.
   firstPartyMcpPermissions: z.array(Permission).optional(),
   // Third-party MCP servers attached only to this session. For an agent-created
   // child, omission snapshots its trusted immediate parent's server definitions,

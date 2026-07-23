@@ -1536,11 +1536,13 @@ function registerWorkspaceOrchestrationTools(
           idempotencyKey: z4.string().min(1).max(200).optional(),
           // First-party MCP token permissions for the spawned session; every
           // permission must be held by this grant (validated in the domain).
+          // A goal requires goals:manage in the resulting set; it is never
+          // silently added beyond the inherited or explicit authority.
           firstPartyMcpPermissions: z4
             .array(z4.string())
             .optional()
             .describe(
-              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session.",
+              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
             ),
           // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
           // creator's box — one filesystem/repo/desktop, N independent conversations;

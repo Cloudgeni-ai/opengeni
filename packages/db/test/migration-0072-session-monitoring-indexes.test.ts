@@ -22,7 +22,7 @@ describe("migrations 0072/0073 (session monitoring keysets)", () => {
       const sql = await readFile(join(migrationsDir, file), "utf8");
       expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
       expect(sql).toContain("-- opengeni:concurrent-index lock-timeout=5s");
-      expect(sql).toContain(`CREATE INDEX CONCURRENTLY IF NOT EXISTS "${index}"`);
+      expect(sql).toContain(`CREATE INDEX CONCURRENTLY "${index}"`);
       expect(sql).toContain(`ON "sessions" ("workspace_id", "${timestamp}" DESC, "id" DESC);`);
     });
   }
@@ -34,9 +34,7 @@ describe("migrations 0072/0073 (session monitoring keysets)", () => {
     );
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(sql).toContain("-- opengeni:concurrent-index lock-timeout=5s");
-    expect(sql).toContain(
-      'CREATE INDEX CONCURRENTLY IF NOT EXISTS "sessions_workspace_activity_revision_idx"',
-    );
+    expect(sql).toContain('CREATE INDEX CONCURRENTLY "sessions_workspace_activity_revision_idx"');
     expect(sql).toContain(
       'ON "sessions" ("workspace_id", "activity_revision" DESC, "updated_at" DESC, "id" DESC);',
     );
