@@ -1,5 +1,45 @@
 # @opengeni/config
 
+## 0.6.0
+
+### Minor Changes
+
+- 4401ce7: Add a scope-checked host MCP credential resolver to the public embedding port and use it consistently for model-visible MCP tools and Toolspace/Code Mode while preserving the standalone connection broker as the default. Requests carry both the immediate session and its workspace-scoped lineage root so embedded hosts can authorize child sessions through one durable root binding. Provider-neutral bindings now carry a provider family, provider host, opaque host binding id, and exact selected-repository set; successful credentials must echo the complete binding before headers are accepted. Incompatible endpoint authentication and unenforceable resource containment surface as explicit unavailable states instead of starting a duplicate OpenGeni provider connection.
+- 334b63f: Publish the dependency-free Toolspace CLI, consume its canonical source from stock sandbox images, and expose an exact deployment-pinned bootstrap hint so custom rigs and connected machines can install it without ever guessing `latest`.
+
+### Patch Changes
+
+- 1fcd83d: Make repository mount paths provider-neutral and collision-free. Omitted paths
+  now resolve to a canonical host-aware default that distinguishes GitHub,
+  GitLab, Azure DevOps, and custom hosts, while one shared portable-path validator
+  rejects traversal and case-folded collisions before sandbox execution.
+
+  Hosts upgrading sessions persisted without `mountPath` should expect those
+  repositories to materialize at the new host-aware location. To preserve an
+  existing warm workspace location, stamp the session's former effective
+  `repos/<owner>/<repo>` path explicitly before upgrading. Previously accepted
+  explicit paths that are non-portable or collide after Unicode normalization and
+  case folding now fail validation and must be renamed.
+
+- 5529945: Support Temporal Cloud and secured external Temporal endpoints across every API
+  and worker connection. API-key authentication enables TLS automatically, while
+  optional server-auth TLS, SNI override, custom root CA, and paired mTLS
+  certificate settings share one validated connection policy.
+- Updated dependencies [1fcd83d]
+- Updated dependencies [32011f1]
+- Updated dependencies [3983021]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [1f9305b]
+- Updated dependencies [8c66185]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [44ff327]
+- Updated dependencies [dda6398]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/contracts@0.13.0
+
 ## 0.5.3
 
 ### Patch Changes

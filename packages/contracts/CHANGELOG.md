@@ -1,5 +1,77 @@
 # @opengeni/contracts
 
+## 0.13.0
+
+### Minor Changes
+
+- 1fcd83d: Make repository mount paths provider-neutral and collision-free. Omitted paths
+  now resolve to a canonical host-aware default that distinguishes GitHub,
+  GitLab, Azure DevOps, and custom hosts, while one shared portable-path validator
+  rejects traversal and case-folded collisions before sandbox execution.
+
+  Hosts upgrading sessions persisted without `mountPath` should expect those
+  repositories to materialize at the new host-aware location. To preserve an
+  existing warm workspace location, stamp the session's former effective
+  `repos/<owner>/<repo>` path explicitly before upgrading. Previously accepted
+  explicit paths that are non-portable or collide after Unicode normalization and
+  case folding now fail validation and must be renamed.
+
+- 32011f1: Add an optional durable host event and usage export for embedded deployments: source-transactional bounded snapshots, immutable turn attribution and session-root lineage, named at-least-once checkpoints, multi-replica leases, replay and retention controls, explicit poison-record disposition, an isolated exporter database role, and a worker delivery pump. Standalone deployments keep capture disabled until a host registers a sink.
+- 3983021: Bind every host Git credential request to immutable session, root-session, turn,
+  attempt, execution-generation, and initiator authority. The worker fails closed
+  when a host broker is configured without that authority and preserves the same
+  authority across identity resolution, lazy provisioning, and proactive renewal.
+- 4401ce7: Add a scope-checked host MCP credential resolver to the public embedding port and use it consistently for model-visible MCP tools and Toolspace/Code Mode while preserving the standalone connection broker as the default. Requests carry both the immediate session and its workspace-scoped lineage root so embedded hosts can authorize child sessions through one durable root binding. Provider-neutral bindings now carry a provider family, provider host, opaque host binding id, and exact selected-repository set; successful credentials must echo the complete binding before headers are accepted. Incompatible endpoint authentication and unenforceable resource containment surface as explicit unavailable states instead of starting a duplicate OpenGeni provider connection.
+- c389adc: Add a provider-neutral host run-credential port with frozen turn/session lineage,
+  off-manifest environment and file generations, proactive renewal, attempt-safe
+  cleanup with bounded generation retention, output redaction hints, and structured
+  reconnect UI support. Hosts can explicitly opt a frozen target out, and the
+  POSIX materializer supports both Linux `flock` and a portable directory-lock
+  fallback with cross-platform base64 decoding.
+- 1f9305b: Add a host-owned session authorization port for embedded deployments. The port
+  receives server-resolved root lineage and live agent-attempt authority, scopes
+  session listing inside database queries, distinguishes exact from whole-tree
+  projection access, gates HTTP/core/first-party MCP/Toolspace surfaces, and
+  periodically reauthorizes idle SSE streams while standalone deployments retain
+  their existing behavior when the port is unset.
+- 8c66185: Let agent-created child sessions inherit omitted repository, MCP tool, and
+  per-session MCP server context from their trusted immediate parent. Explicit
+  arrays remain authoritative, mixed Git providers and multiple bindings are
+  preserved, and credential headers are copied only as encrypted ciphertext.
+- d249403: Allow embedding hosts to preallocate a session UUID before OpenGeni admits the
+  initial turn. Session creation preserves idempotent replays of the same UUID and
+  returns a conflict for UUID reuse or an idempotency replay that changes identity.
+  The additive create response also returns `initialTurnId`, so an embedding host
+  can correlate a preallocated host run without misusing the nullable
+  `activeTurnId` execution pointer.
+- a11a7fc: Support mixed GitHub, GitLab, and Azure DevOps repositories—including multiple
+  accounts or installations for one provider—in a single session through bounded,
+  host-opaque credential bindings and optional read/write access intent.
+
+  Validate binding/provider/host echoes before token injection, isolate tokens in
+  hashed binding files, select Git credentials by remote path, fail provider CLIs
+  closed on ambiguous bindings, and renew each binding independently while keeping
+  legacy one-binding-per-provider request and file aliases compatible.
+
+- dda6398: Add durable structured human-input tool calls with exact-turn ownership,
+  answer/skip/expiry/cancellation outcomes, restart-safe Temporal resumption,
+  authorized API and SDK methods, and headless plus styled React embed surfaces.
+- e8ca4f6: Let trusted embedding hosts sign a service-only causal initiator separately
+  from the delegated subject that authorizes a create, Send, or Steer command.
+  Freeze that service and its non-secret provenance onto the new session/turn,
+  while rejecting human impersonation, exact agent-attempt replacement, reserved
+  lineage fields, the legacy migration sentinel, and oversized provenance.
+  Service-provenance HTTP tokens use a prefix-bound `ogd2_` envelope so older
+  rolling-deploy verifiers fail closed instead of silently stripping attribution.
+- 736f4fe: Persist and expose one immutable subject-or-service initiator for every accepted turn, including creator-safe idempotent repair, queue-edit preservation, exact live-attempt fencing for agent-created sessions, signed agent inheritance, causally dominant Agent Steer attribution, explicit service producers, rolling legacy backfill, and database-enforced immutability.
+  Bounded agent provenance now retains its first causal hop together with the
+  newest hops, so deep child chains do not discard their root authority when the
+  middle of the audit path is truncated.
+
+### Patch Changes
+
+- 44ff327: Fence queue, composer, and control hook state to the active workspace and session so target switches cannot expose or accept stale private state.
+
 ## 0.12.0
 
 ### Minor Changes
