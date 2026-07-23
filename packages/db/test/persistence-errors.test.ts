@@ -4,6 +4,7 @@ import {
   nestedPostgresSqlState,
   runIdempotentPersistenceTransaction,
   safeDatabaseErrorFacts,
+  SanitizedDatabasePersistenceCause,
   SessionEventPersistenceError,
 } from "../src";
 
@@ -96,6 +97,14 @@ describe("session event persistence failure truth", () => {
       correlationId: "stable-correlation",
       database: { table: "session_events" },
     });
+    expect((error as SessionEventPersistenceError).cause).toBeInstanceOf(
+      SanitizedDatabasePersistenceCause,
+    );
+    expect((error as SessionEventPersistenceError).cause).toMatchObject({
+      sqlState: "40P01",
+      database: { table: "session_events" },
+    });
+    expect(nestedPostgresSqlState(error)).toBe("40P01");
     expect(JSON.stringify((error as SessionEventPersistenceError).details)).not.toContain(
       "private-token",
     );
@@ -139,12 +148,16 @@ describe("session event persistence failure truth", () => {
       retryOutcome: "not_retryable",
       database: { table: "session_events" },
     });
-    expect((error as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect((error as SessionEventPersistenceError).cause).toMatchObject({
+      name: "SanitizedDatabasePersistenceCause",
+      sqlState: null,
+      database: { table: "session_events" },
+    });
     const observable = JSON.stringify({
       message: (error as Error).message,
       stack: (error as Error).stack,
       details: (error as SessionEventPersistenceError).details,
-      cause: (error as Error & { cause?: unknown }).cause,
+      cause: (error as SessionEventPersistenceError).cause,
     });
     expect(observable).not.toContain("private-token");
     expect(observable).not.toContain("insert into");
@@ -227,12 +240,21 @@ describe("session event persistence failure truth", () => {
         constraint: "session_command_receipts_operation_uq",
       },
     });
-    expect((caught as Error & { cause?: unknown }).cause).toBeUndefined();
+    expect((caught as SessionEventPersistenceError).cause).toMatchObject({
+      name: "SanitizedDatabasePersistenceCause",
+      sqlState: "23505",
+      database: {
+        severity: "ERROR",
+        table: "session_command_receipts",
+        constraint: "session_command_receipts_operation_uq",
+      },
+    });
+    expect(nestedPostgresSqlState(caught)).toBe("23505");
     const observable = JSON.stringify({
       message: (caught as Error).message,
       stack: (caught as Error).stack,
       details: (caught as SessionEventPersistenceError).details,
-      cause: (caught as Error & { cause?: unknown }).cause,
+      cause: (caught as SessionEventPersistenceError).cause,
     });
     expect(observable).not.toContain("private-token");
     expect(observable).not.toContain("insert into");

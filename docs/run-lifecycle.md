@@ -167,7 +167,8 @@ Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQ
 Provider inference, tools, live event publication, and workflow wakes remain after
 that boundary and are never replayed. An exhausted or non-retryable database
 failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
-ID, and allowlisted catalog identifiers—never raw SQL text or bound parameters.
+ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
+raw SQL text, a raw driver cause, or bound parameters.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires
