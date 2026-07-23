@@ -554,6 +554,19 @@ jobs:
             ghcr.io/cloudgeni-ai/opengeni-web:sha-${{ steps.meta.outputs.sha }}
             ghcr.io/cloudgeni-ai/opengeni-web:latest
 
+      - name: Build and push headless sandbox image
+        id: build-sandbox
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.version }}
+            ghcr.io/cloudgeni-ai/opengeni-sandbox:sha-${{ steps.meta.outputs.sha }}
+            ghcr.io/cloudgeni-ai/opengeni-sandbox:latest
+
       # The bring-your-own-compute stream relay. A single-stage
       # distroless image built from the Rust agent workspace — its build context is
       # agent/ (NOT the repo root) because the relay shares the agent-stream codec
@@ -587,6 +600,7 @@ jobs:
           API_IMAGE_DIGEST: ${{ steps.build-api.outputs.digest }}
           WORKER_IMAGE_DIGEST: ${{ steps.build-worker.outputs.digest }}
           WEB_IMAGE_DIGEST: ${{ steps.build-web.outputs.digest }}
+          SANDBOX_IMAGE_DIGEST: ${{ steps.build-sandbox.outputs.digest }}
           RELAY_IMAGE_DIGEST: ${{ steps.build-relay.outputs.digest }}
         run: |
           set -euo pipefail
@@ -594,11 +608,13 @@ jobs:
             --arg api "$API_IMAGE_DIGEST" \
             --arg worker "$WORKER_IMAGE_DIGEST" \
             --arg web "$WEB_IMAGE_DIGEST" \
+            --arg sandbox "$SANDBOX_IMAGE_DIGEST" \
             --arg relay "$RELAY_IMAGE_DIGEST" \
             '[
               {name:"ghcr.io/cloudgeni-ai/opengeni-api",digest:$api},
               {name:"ghcr.io/cloudgeni-ai/opengeni-worker",digest:$worker},
               {name:"ghcr.io/cloudgeni-ai/opengeni-web",digest:$web},
+              {name:"ghcr.io/cloudgeni-ai/opengeni-sandbox",digest:$sandbox},
               {name:"ghcr.io/cloudgeni-ai/opengeni-relay",digest:$relay}
             ]')"
           OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \

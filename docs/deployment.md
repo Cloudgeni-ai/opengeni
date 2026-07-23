@@ -189,7 +189,7 @@ value before release images can build. That reconciliation also makes an
 interrupted post-publication run safely resumable. The final
 `verified-release-receipt-<sha>` binds the source, acceptance evidence, bundle
 digest, changed-package registry identities, and the complete publishable package
-inventory. After the API, worker, web, and relay images are pushed, the workflow
+inventory. After the API, worker, web, relay, and stock headless sandbox images are pushed, the workflow
 emits `release-bom-<sha>` containing one deterministic `release-bom.json`: exact
 source SHA, release version, every publishable package version plus npm `gitHead`
 and SHA-512 integrity, and every release image's immutable SHA-256 digest. Hosts
@@ -200,7 +200,8 @@ retry compares the existing public assets byte for byte and fails instead of
 overwriting them. No moving BOM alias is created. Ordinary pushes to `main` can
 open/update the Version PR but cannot publish.
 
-The sandbox image remains separate:
+The stock sandbox remains a separate workload image, but the public release publishes it and
+binds its immutable digest in the same BOM:
 
 ```bash
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .

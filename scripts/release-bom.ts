@@ -28,6 +28,13 @@ const sourceShaPattern = /^[0-9a-f]{40}$/;
 const integrityPattern = /^sha512-[A-Za-z0-9+/=]+$/;
 const imageNamePattern = /^ghcr\.io\/[a-z0-9._/-]+$/;
 const imageDigestPattern = /^sha256:[0-9a-f]{64}$/;
+const requiredReleaseImages = [
+  "ghcr.io/cloudgeni-ai/opengeni-api",
+  "ghcr.io/cloudgeni-ai/opengeni-relay",
+  "ghcr.io/cloudgeni-ai/opengeni-sandbox",
+  "ghcr.io/cloudgeni-ai/opengeni-web",
+  "ghcr.io/cloudgeni-ai/opengeni-worker",
+] as const;
 
 function uniqueBy<T>(items: T[], key: (item: T) => string, label: string): void {
   const seen = new Set<string>();
@@ -74,6 +81,12 @@ export function buildReleaseBom(input: {
 
   uniqueBy(input.packages, (pkg) => pkg.name, "package");
   uniqueBy(input.images, (image) => image.name, "image");
+  const suppliedImages = new Set(input.images.map((image) => image.name));
+  for (const requiredImage of requiredReleaseImages) {
+    if (!suppliedImages.has(requiredImage)) {
+      throw new Error(`release BOM is missing required image: ${requiredImage}`);
+    }
+  }
 
   return {
     schemaVersion: 1,

@@ -346,3 +346,12 @@ jobs:
           platforms: linux/amd64
           push: false
           tags: opengeni-web:ci
+
+      - name: Build headless sandbox image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: .
+          file: docker/sandbox.Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-sandbox:ci

@@ -38,7 +38,7 @@ means reviewers failed to notice a problem.
 Every live evidence bundle MUST bind:
 
 - full 40-character OpenGeni source SHA;
-- API, worker, web, relay, and migration image digests;
+- API/migration, worker, web, relay, and stock headless-sandbox image digests;
 - package versions and package tarball integrity hashes;
 - deployment environment and workflow run URL;
 - browser name/version, operating system, viewport, device scale factor, input
