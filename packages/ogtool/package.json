@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/ogtool",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Dependency-free CLI for calling the OpenGeni Toolspace MCP surface from a sandbox or custom rig.",
   "license": "Apache-2.0",
   "repository": {
