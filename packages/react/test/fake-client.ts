@@ -24,7 +24,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     getClientConfig: async () =>
       ({
         deploymentRevision: "test",
-        apiContractRevision: "2026-07-human-input-v1",
+        apiContractRevision: "2026-07-turn-instructions-v1",
         defaultModel: "model-x",
         allowedModels: ["model-x"],
         models: [],

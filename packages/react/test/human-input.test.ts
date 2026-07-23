@@ -129,6 +129,13 @@ describe("answersFromDrafts", () => {
       }).errors.summary,
     ).toContain("at least 3");
   });
+
+  test("uses host validation copy without replacing the native validator", () => {
+    expect(
+      answersFromDrafts(questions.slice(0, 1), {}, { required: "Dette feltet er påkrevd." }).errors
+        .summary,
+    ).toBe("Dette feltet er påkrevd.");
+  });
 });
 
 describe("HumanInputForm async host boundary", () => {
@@ -167,6 +174,24 @@ describe("HumanInputForm async host boundary", () => {
     expect(mounted.container.querySelector('[role="alert"]')?.textContent).toContain(
       "Host submission failed",
     );
+  });
+
+  test("supports complete host copy and autofocus", async () => {
+    mounted = await renderComponent(
+      createElement(HumanInputForm, {
+        request,
+        onSubmit: () => undefined,
+        messages: {
+          title: "Vi trenger svaret ditt",
+          description: "Agenten venter på deg.",
+          submit: "Fortsett",
+          other: "Annet",
+        },
+      }),
+    );
+    expect(mounted.container.textContent).toContain("Vi trenger svaret ditt");
+    expect(mounted.container.textContent).toContain("Fortsett");
+    expect(document.activeElement).toBe(mounted.container.querySelector("textarea"));
   });
 
   test("admits only one callback while the first submission is unresolved", async () => {

@@ -1323,6 +1323,8 @@ export type CreateSessionRequest = {
   // same UUID and idempotency key.
   requestedSessionId?: string | undefined;
   initialMessage: string;
+  /** System instructions scoped to the initial turn; never visible timeline text. */
+  turnInstructions?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -1589,7 +1591,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-human-input-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 /**
@@ -2927,6 +2929,7 @@ export type UserMessageEventInput = {
   clientEventId?: string | undefined;
   payload: {
     text: string;
+    turnInstructions?: string | undefined;
     resources?: ResourceRef[] | undefined;
     tools?: ToolRef[] | undefined;
     model?: string | undefined;

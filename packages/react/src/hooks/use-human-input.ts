@@ -4,7 +4,10 @@ import type {
   SubmitHumanInputResponseRequest,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import {
+  useEmbeddedHumanInputSession,
+  type EmbeddedHumanInputClientOverride,
+} from "../session-context";
 import {
   useDebouncedCallback,
   useMutationRunner,
@@ -24,7 +27,7 @@ export function isHumanInputEvent(event: Pick<SessionEvent, "type">): boolean {
   );
 }
 
-export type UseHumanInputRequestsOptions = ClientOverride &
+export type UseHumanInputRequestsOptions = EmbeddedHumanInputClientOverride &
   SessionEventFeedOptions & {
     /** Optional safety-net polling. Durable events drive refresh by default. */
     pollIntervalMs?: number | undefined;
@@ -54,7 +57,7 @@ export function useHumanInputRequests(
   sessionId: string | null | undefined,
   options: UseHumanInputRequestsOptions = {},
 ): UseHumanInputRequestsResult {
-  const { client, workspaceId, registerSessionReconciler } = useOpenGeni(options);
+  const { client, workspaceId, registerSessionReconciler } = useEmbeddedHumanInputSession(options);
   const enabled = (options.enabled ?? true) && Boolean(sessionId);
   const load = useCallback(
     async (): Promise<SessionHumanInputRequest[]> =>

@@ -1361,6 +1361,9 @@ export type BuildAgentOptions = {
   // timeline message. Omitted ⇒ the composed instructions are byte-identical to
   // a workspace-only persona.
   sessionInstructions?: string;
+  // Host context for this exact accepted turn. Composed system-level after the
+  // durable session persona and omitted from all later turns.
+  turnInstructions?: string;
   // Skills delivered by enabled capability packs. They join the bundled
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
@@ -1508,6 +1511,12 @@ export function composeAgentInstructions(
  */
 export function appendSessionInstructions(composed: string, sessionInstructions?: string): string {
   const trimmed = sessionInstructions?.trim();
+  return trimmed ? `${composed} ${trimmed}` : composed;
+}
+
+/** Append system instructions that apply to this exact turn only. */
+export function appendTurnInstructions(composed: string, turnInstructions?: string): string {
+  const trimmed = turnInstructions?.trim();
   return trimmed ? `${composed} ${trimmed}` : composed;
 }
 
@@ -1718,24 +1727,28 @@ export function buildOpenGeniAgent(
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
     //   4. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   5. + durable session-setting state (title present + child notification
+    //   5. + host context for this exact turn, when supplied,
+    //   6. + durable session-setting state (title present + child notification
     //      mode), when supplied by the worker,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
     instructions: appendPersistentSessionSettings(
-      appendSessionInstructions(
-        appendWorkspaceMemory(
-          appendToolspaceInstructions(
-            composeAgentInstructions(
-              options.instructionsTemplate ?? settings.agentInstructionsTemplate,
-              options.workspaceEnvironment,
-              options.rig,
+      appendTurnInstructions(
+        appendSessionInstructions(
+          appendWorkspaceMemory(
+            appendToolspaceInstructions(
+              composeAgentInstructions(
+                options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+                options.workspaceEnvironment,
+                options.rig,
+              ),
+              settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
             ),
-            settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+            options.workspaceMemory,
           ),
-          options.workspaceMemory,
+          options.sessionInstructions,
         ),
-        options.sessionInstructions,
+        options.turnInstructions,
       ),
       options.persistentSessionSettings,
     ),

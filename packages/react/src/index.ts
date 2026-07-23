@@ -7,7 +7,11 @@
 //   @import "@opengeni/react/styles.css";
 //   @source "../node_modules/@opengeni/react/src";
 
-export type { SessionClientLike } from "./client";
+export type {
+  EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionClientLike,
+  SessionClientLike,
+} from "./client";
 export { OpenGeniProvider } from "./provider";
 export type { OpenGeniProviderProps } from "./provider";
 export { useOpenGeni, useOpenGeniClient } from "./session-context";
@@ -191,6 +195,8 @@ export type {
 // Pending-approvals projection
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
+export { ApprovalSurface, defaultApprovalSurfaceMessages } from "./components/approval-surface";
+export type { ApprovalSurfaceMessages, ApprovalSurfaceProps } from "./components/approval-surface";
 
 // Structured human input: event projection, authoritative hook, and styled form.
 export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
@@ -200,8 +206,16 @@ export type {
   UseHumanInputRequestsOptions,
   UseHumanInputRequestsResult,
 } from "./hooks/use-human-input";
-export { HumanInputForm, answersFromDrafts } from "./components/human-input-form";
-export type { HumanInputAnswerDraft, HumanInputFormProps } from "./components/human-input-form";
+export {
+  HumanInputForm,
+  answersFromDrafts,
+  defaultHumanInputFormMessages,
+} from "./components/human-input-form";
+export type {
+  HumanInputAnswerDraft,
+  HumanInputFormMessages,
+  HumanInputFormProps,
+} from "./components/human-input-form";
 
 // Timeline projection
 export {

@@ -32,6 +32,7 @@ import {
   useCallback,
   useId,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -42,17 +43,22 @@ import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-qu
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 
 /** The sole human prompt queue: compact above Goal, Agents, and composer. */
+type QueueSurfaceCommonProps = {
+  /** Focus the composer owned by this queue after checkout/removal. */
+  onRequestComposerFocus?: (() => void) | undefined;
+};
+
 export type QueueSurfaceProps =
-  | {
+  | (QueueSurfaceCommonProps & {
       queue: UseTurnQueueResult;
       composer: ComposerState;
       readOnly?: false | undefined;
-    }
-  | {
+    })
+  | (QueueSurfaceCommonProps & {
       queue: UseTurnQueueResult;
       composer?: undefined;
       readOnly: true;
-    };
+    });
 
 /** @internal Pure policy seam for queue/composer embedding tests. */
 export function queueComposerCheckoutEnabled(
@@ -62,11 +68,17 @@ export function queueComposerCheckoutEnabled(
   return !readOnly && composer !== undefined && composer.draftPersistence !== "disabled";
 }
 
-export function QueueSurface({ queue, composer, readOnly = false }: QueueSurfaceProps) {
+export function QueueSurface({
+  queue,
+  composer,
+  readOnly = false,
+  onRequestComposerFocus,
+}: QueueSurfaceProps) {
   const [open, setOpen] = useState(false);
   const [replaceDraftFor, setReplaceDraftFor] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   const [draggedTurnId, setDraggedTurnId] = useState<string | null>(null);
+  const surfaceRef = useRef<HTMLDivElement | null>(null);
   const [keyboardDrag, setKeyboardDrag] = useState<{
     turnId: string;
     projectedIndex: number;
@@ -101,7 +113,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
           ? `Queued prompt moved to position ${boundedIndex + 1}.`
           : "The queue changed before that prompt could be moved. Refreshed server order.",
       );
-      if (moved) focusQueueTurn(turnId);
+      if (moved) focusQueueTurn(surfaceRef.current, turnId);
     },
     [queue],
   );
@@ -188,6 +200,10 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
       setReplaceDraftFor(null);
       setAnnouncement("Queued prompt moved back to the composer for editing.");
       window.requestAnimationFrame(() => {
+        if (onRequestComposerFocus) {
+          onRequestComposerFocus();
+          return;
+        }
         const input = document.querySelector<HTMLTextAreaElement>(
           'textarea[aria-label="Message the agent"]',
         );
@@ -195,7 +211,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
         input?.focus();
       });
     },
-    [canEditInComposer, composer, queue],
+    [canEditInComposer, composer, onRequestComposerFocus, queue],
   );
 
   const requestEdit = useCallback(
@@ -220,6 +236,7 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
 
   return (
     <div
+      ref={surfaceRef}
       className="mx-auto mb-2 w-full max-w-3xl shrink-0 px-4 sm:px-6"
       data-testid="queue-surface"
     >
@@ -322,7 +339,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                             ? "Queued prompt is now the next direction."
                             : "That prompt changed before it could be steered.",
                         );
-                        if (steered) focusAfterQueueRemoval(index);
+                        if (steered) {
+                          focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
+                        }
                       });
                     }}
                     onDelete={() => {
@@ -332,7 +351,9 @@ export function QueueSurface({ queue, composer, readOnly = false }: QueueSurface
                             ? "Queued prompt deleted."
                             : "That prompt changed before it could be deleted.",
                         );
-                        if (removed) focusAfterQueueRemoval(index);
+                        if (removed) {
+                          focusAfterQueueRemoval(surfaceRef.current, index, onRequestComposerFocus);
+                        }
                       });
                     }}
                     onDisclosureChange={(expanded) =>
@@ -989,20 +1010,28 @@ function SortableQueueRow({
 
 const verticalOnly: Modifier = ({ transform }) => ({ ...transform, x: 0 });
 
-function focusQueueTurn(turnId: string): void {
+function focusQueueTurn(surface: HTMLElement | null, turnId: string): void {
   window.requestAnimationFrame(() => {
-    document
-      .querySelector<HTMLElement>(`[data-queue-turn-id="${turnId}"] [data-queue-handle]`)
+    surface
+      ?.querySelector<HTMLElement>(`[data-queue-turn-id="${turnId}"] [data-queue-handle]`)
       ?.focus();
   });
 }
 
-function focusAfterQueueRemoval(previousIndex: number): void {
+function focusAfterQueueRemoval(
+  surface: HTMLElement | null,
+  previousIndex: number,
+  onRequestComposerFocus?: (() => void) | undefined,
+): void {
   window.requestAnimationFrame(() => {
-    const handles = document.querySelectorAll<HTMLElement>("[data-queue-handle]");
+    const handles = surface?.querySelectorAll<HTMLElement>("[data-queue-handle]") ?? [];
     const nearest = handles[Math.min(previousIndex, Math.max(0, handles.length - 1))];
     if (nearest) {
       nearest.focus();
+      return;
+    }
+    if (onRequestComposerFocus) {
+      onRequestComposerFocus();
       return;
     }
     document

@@ -1,7 +1,9 @@
 import {
   buildTimeline,
+  type HumanInputSessionClientLike,
   type SessionClientLike,
   useComposer,
+  useHumanInputRequests,
   useSessionControl,
   useSessionEvents,
   useTurnQueue,
@@ -32,10 +34,19 @@ export const sessionClient = {
   sendApprovalDecision: unused,
 } satisfies SessionClientLike;
 
+export const humanInputSessionClient = {
+  ...sessionClient,
+  listHumanInputRequests: unused,
+  getHumanInputRequest: unused,
+  submitHumanInputResponse: unused,
+} satisfies HumanInputSessionClientLike;
+
 export const sessionSurface = [
   sessionClient,
+  humanInputSessionClient,
   buildTimeline,
   useComposer,
+  useHumanInputRequests,
   useSessionControl,
   useSessionEvents,
   useTurnQueue,

@@ -123,6 +123,60 @@ async function activeAgent(
 }
 
 describe("attempt-fenced Agent session commands", () => {
+  test("per-turn instructions are durable on the turn and absent from the visible user event", async () => {
+    const grant = await fixture();
+    const session = await makeSession(grant);
+    const instructions = "Current host context: record 42 is selected.";
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      grant.workspaceId!,
+      grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            sessionId: session.id,
+            subjectId: grant.subjectId,
+            actor: { type: "human", subjectId: grant.subjectId },
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "Use the selected record",
+            turnInstructions: instructions,
+            resources: [],
+            tools: [],
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+
+    const [turn] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          prompt: schema.sessionTurns.prompt,
+          turnInstructions: schema.sessionTurns.turnInstructions,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, submitted.turnId)),
+    );
+    const [event] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ payload: schema.sessionEvents.payload })
+        .from(schema.sessionEvents)
+        .where(eq(schema.sessionEvents.id, submitted.acceptedEventId)),
+    );
+
+    expect(turn).toEqual({
+      prompt: "Use the selected record",
+      turnInstructions: instructions,
+    });
+    expect(event?.payload).toMatchObject({ text: "Use the selected record" });
+    expect(event?.payload).not.toHaveProperty("turnInstructions");
+  });
+
   test("Agent Pause rejects self and every ancestor workstream with zero writes", async () => {
     const grant = await fixture();
     const parent = await makeSession(grant);

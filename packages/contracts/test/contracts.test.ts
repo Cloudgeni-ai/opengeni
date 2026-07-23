@@ -456,6 +456,14 @@ describe("contracts", () => {
     expect(payload.instructions?.length).toBe(32768);
   });
 
+  test("accepts trimmed system instructions scoped to only the initial turn", () => {
+    const payload = CreateSessionRequest.parse({
+      initialMessage: "inspect repo",
+      turnInstructions: "  Current host context: record 42 is selected.  ",
+    });
+    expect(payload.turnInstructions).toBe("Current host context: record 42 is selected.");
+  });
+
   test("accepts client config payloads", () => {
     const payload = ClientConfig.parse({
       apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
@@ -693,6 +701,7 @@ describe("contracts", () => {
       type: "user.message",
       payload: {
         text: "use this too",
+        turnInstructions: "  Current host context: record 42 is selected.  ",
         resources: [{ kind: "file", fileId }],
         tools: [{ kind: "mcp", id: "docs" }],
         model: "gpt-5.6-sol",
@@ -705,6 +714,7 @@ describe("contracts", () => {
     expect(payload.payload.tools).toEqual([{ kind: "mcp", id: "docs" }]);
     expect(payload.payload.model).toBe("gpt-5.6-sol");
     expect(payload.payload.reasoningEffort).toBe("xhigh");
+    expect(payload.payload.turnInstructions).toBe("Current host context: record 42 is selected.");
   });
 
   test("keeps text-only user messages compatible", () => {

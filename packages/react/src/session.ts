@@ -4,8 +4,14 @@
 // and their optional peers. Hosts keep OpenGeni's session semantics while
 // rendering their own product UI.
 
-export type { EmbeddedSessionClientLike as SessionClientLike } from "./client";
-export type { EmbeddedSessionClientOverride as ClientOverride } from "./session-context";
+export type {
+  EmbeddedHumanInputSessionClientLike as HumanInputSessionClientLike,
+  EmbeddedSessionClientLike as SessionClientLike,
+} from "./client";
+export type {
+  EmbeddedHumanInputClientOverride as HumanInputClientOverride,
+  EmbeddedSessionClientOverride as ClientOverride,
+} from "./session-context";
 
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {
@@ -35,6 +41,14 @@ export type {
 
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";
+
+export { humanInputRequestFromEvent, projectPendingHumanInputRequests } from "./human-input";
+export type { PendingHumanInputRequest } from "./human-input";
+export { isHumanInputEvent, useHumanInputRequests } from "./hooks/use-human-input";
+export type {
+  UseHumanInputRequestsOptions,
+  UseHumanInputRequestsResult,
+} from "./hooks/use-human-input";
 
 export {
   buildTimeline,

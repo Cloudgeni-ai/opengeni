@@ -8,7 +8,8 @@
  * This gate stages release-shaped tarballs, installs them twice (the second time
  * from the frozen Bun lock), typechecks with tsgo, builds the root and session
  * subpaths through Vite, verifies the packed runtime skill-library subpath, and
- * server-renders the real SandboxWorkspace export without a DOM.
+ * server-renders populated embedded host surfaces without a DOM. A second
+ * consumer installs only the session subpath's required peers.
  */
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -151,10 +152,12 @@ try {
   const stagingRoot = join(tempRoot, "packages");
   const tarballRoot = join(tempRoot, "tarballs");
   const consumerRoot = join(tempRoot, "consumer");
+  const minimalSessionRoot = join(tempRoot, "minimal-session-consumer");
   await Promise.all([
     mkdir(stagingRoot, { recursive: true }),
     mkdir(tarballRoot, { recursive: true }),
     mkdir(consumerRoot, { recursive: true }),
+    mkdir(minimalSessionRoot, { recursive: true }),
   ]);
 
   const versions = await workspaceVersions();
@@ -235,6 +238,7 @@ try {
           },
           include: [
             "browser.tsx",
+            "presentation.tsx",
             "runtime-proof.ts",
             "session.ts",
             "session.vite.config.ts",
@@ -264,11 +268,105 @@ try {
     ),
     writeFile(
       join(consumerRoot, "browser.tsx"),
-      'import "./app.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main>Clean consumer browser proof</main>} /></OpenGeniProvider></StrictMode>);\n',
+      'import "./app.css";\nimport { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { StrictMode } from "react";\nimport { createRoot } from "react-dom/client";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst root = document.getElementById("root");\nif (!root) throw new Error("missing #root");\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\ncreateRoot(root).render(<StrictMode><OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main><p>Clean consumer browser proof</p><HostEmbeddedSurfaces /></main>} /></OpenGeniProvider></StrictMode>);\n',
+    ),
+    writeFile(
+      join(consumerRoot, "presentation.tsx"),
+      [
+        'import { ApprovalSurface, HumanInputForm, MessageTimeline, QueueSurface, createDefaultToolRegistry, type QueueSurfaceProps, type ToolRendererProps, type UseTurnQueueResult } from "@opengeni/react";',
+        'import * as Composer from "@opengeni/react/composer";',
+        'import { useMemo, useRef, useState } from "react";',
+        "",
+        "function HostTool({ item }: ToolRendererProps) {",
+        '  return <button type="button" data-host-tool={item.name}>Open host entity</button>;',
+        "}",
+        "",
+        "function HostActionIcon() {",
+        '  return <svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2 8h12" /></svg>;',
+        "}",
+        "",
+        "export function HostEmbeddedSurfaces() {",
+        '  const [value, setValue] = useState("");',
+        "  const inputRef = useRef<HTMLTextAreaElement | null>(null);",
+        "  const delivery = useMemo<Composer.ComposerDelivery>(",
+        "    () => ({",
+        "      value,",
+        "      setValue,",
+        "      send: async () => true,",
+        "      steer: async () => true,",
+        "      sending: false,",
+        "      canSend: value.trim().length > 0,",
+        "      error: null,",
+        "      clearError: () => {},",
+        "    }),",
+        "    [value],",
+        "  );",
+        "  const controller = Composer.useChatComposerController({ delivery });",
+        "  const toolRegistry = useMemo(",
+        '    () => createDefaultToolRegistry({ entries: [{ match: "name", name: "host.entity", render: HostTool }] }),',
+        "    [],",
+        "  );",
+        "  const queueState = useMemo<UseTurnQueueResult>(",
+        "    () => ({",
+        "      snapshot: null,",
+        '      queue: [{ id: "turn-proof", workspaceId: "workspace-proof", sessionId: "session-proof", triggerEventId: "event-proof", temporalWorkflowId: "workflow-proof", status: "queued", source: "user", position: 1, prompt: "Review the queued host request", resources: [], tools: [], model: "host-model", reasoningEffort: "medium", sandboxBackend: "none", sandboxOs: null, metadata: {}, version: 1, executionGeneration: 0, activeAttemptId: null, lineage: {}, initiator: { kind: "service", subjectId: "host:proof" }, initiatorContext: {}, startedAt: null, finishedAt: null, createdAt: "2026-07-23T00:00:00.000Z", updatedAt: "2026-07-23T00:00:00.000Z" }],',
+        "      effectiveControl: null,",
+        "      stoppingPreviousAttempt: false,",
+        "      loading: false,",
+        "      error: null,",
+        "      refresh: async () => {},",
+        "      moveTurn: async () => true,",
+        "      editTurn: async () => null,",
+        "      steerTurn: async () => true,",
+        "      removeTurn: async () => true,",
+        "      pendingByTurn: {},",
+        "      mutationFor: () => null,",
+        "      mutating: false,",
+        "      mutationError: null,",
+        "      clearMutationError: () => {},",
+        "    }),",
+        "    [],",
+        "  );",
+        '  const requestComposerFocus: QueueSurfaceProps["onRequestComposerFocus"] = () => controller.focusInput();',
+        "",
+        "  return (",
+        "    <section>",
+        '      <MessageTimeline items={[{ kind: "tool-call", id: "tool-proof", turnId: "turn-proof", callId: "call-proof", name: "host.entity", arguments: { entityId: "entity-proof" }, output: { updated: true }, raw: null, status: "complete", occurredAt: "2026-07-23T00:00:00.000Z" }]} toolRegistry={toolRegistry} />',
+        "      <QueueSurface queue={queueState} readOnly onRequestComposerFocus={requestComposerFocus} />",
+        "      <ApprovalSurface",
+        '        approvals={[{ id: "approval-proof", name: "host.entity.update", arguments: { entityId: "entity-proof" } }]}',
+        "        onApprove={async () => {}}",
+        "        onReject={async () => {}}",
+        "      />",
+        "      <HumanInputForm",
+        '        request={{ id: "request-proof", questions: [{ id: "direction", kind: "text", prompt: "What should change?", options: [], required: true, allowOther: false }], allowSkip: true, expiresAt: null }}',
+        "        onSubmit={async () => {}}",
+        "        autoFocus={false}",
+        '        messages={{ submit: "Continue in host" }}',
+        "      />",
+        "      <Composer.Root controller={controller}>",
+        "        <Composer.Surface>",
+        "          <Composer.Input ref={inputRef} autoFocus data-host-input />",
+        "          <Composer.Footer>",
+        "            <Composer.Controls>",
+        '              <select aria-label="Host model selector"><option>Host model</option></select>',
+        '              <button type="button" onClick={requestComposerFocus}><HostActionIcon />Host action</button>',
+        "            </Composer.Controls>",
+        "            <Composer.Actions>",
+        "              <Composer.SendButton />",
+        "            </Composer.Actions>",
+        "          </Composer.Footer>",
+        "        </Composer.Surface>",
+        "      </Composer.Root>",
+        "    </section>",
+        "  );",
+        "}",
+        "",
+      ].join("\n"),
     ),
     writeFile(
       join(consumerRoot, "ssr.tsx"),
-      'import { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { renderToStaticMarkup } from "react-dom/server";\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\nconst markup = renderToStaticMarkup(<OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main>Clean consumer SSR proof</main>} collapsed /></OpenGeniProvider>);\nif (!markup.includes("Clean consumer SSR proof")) throw new Error("SSR output lost the primary pane");\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
+      'import { renderToStaticMarkup } from "react-dom/server";\nimport { HostEmbeddedSurfaces } from "./presentation";\nconst markup = renderToStaticMarkup(<HostEmbeddedSurfaces />);\nfor (const expected of ["Open host entity", "1 queued prompt", "entity-proof", "What should change?", "Host model"]) { if (!markup.includes(expected)) throw new Error(`SSR output lost populated host surface: ${expected}`); }\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
     ),
     writeFile(
       join(consumerRoot, "runtime-proof.ts"),
@@ -276,7 +374,68 @@ try {
     ),
     writeFile(
       join(consumerRoot, "session.ts"),
-      'import { buildTimeline, type SessionClientLike, useComposer, useSessionControl, useSessionEvents, useTurnQueue } from "@opengeni/react/session";\nconst unused = (..._input: unknown[]): never => { throw new Error("type-only session client fixture"); };\nexport const sessionClient = { getSession: unused, listEvents: unused, streamEvents: unused, getComposerDraft: unused, saveComposerDraft: unused, sendMessage: unused, steerMessage: unused, getQueue: unused, moveQueueItem: unused, editQueueItem: unused, steerQueueItem: unused, deleteQueueItem: unused, pauseSession: unused, resumeSession: unused, sendApprovalDecision: unused } satisfies SessionClientLike;\nexport const sessionSurface = [sessionClient, buildTimeline, useComposer, useSessionControl, useSessionEvents, useTurnQueue];\n',
+      'import { buildTimeline, type HumanInputSessionClientLike, type SessionClientLike, useComposer, useHumanInputRequests, useSessionControl, useSessionEvents, useTurnQueue } from "@opengeni/react/session";\nconst unused = (..._input: unknown[]): never => { throw new Error("type-only session client fixture"); };\nexport const sessionClient = { getSession: unused, listEvents: unused, streamEvents: unused, getComposerDraft: unused, saveComposerDraft: unused, sendMessage: unused, steerMessage: unused, getQueue: unused, moveQueueItem: unused, editQueueItem: unused, steerQueueItem: unused, deleteQueueItem: unused, pauseSession: unused, resumeSession: unused, sendApprovalDecision: unused } satisfies SessionClientLike;\nexport const humanInputSessionClient = { ...sessionClient, listHumanInputRequests: unused, getHumanInputRequest: unused, submitHumanInputResponse: unused } satisfies HumanInputSessionClientLike;\nexport const sessionSurface = [sessionClient, humanInputSessionClient, buildTimeline, useComposer, useHumanInputRequests, useSessionControl, useSessionEvents, useTurnQueue];\n',
+    ),
+  ]);
+
+  const minimalSessionManifest = {
+    name: "opengeni-minimal-session-proof",
+    version: "0.0.0",
+    private: true,
+    type: "module",
+    scripts: {
+      typecheck: "tsgo -p tsconfig.json --noEmit",
+      build: "vite build --logLevel warn",
+    },
+    dependencies: {
+      "@opengeni/react": `file:${react.tarball}`,
+      "@opengeni/sdk": sdkFile,
+      react: reactSource.peerDependencies?.react,
+      "react-dom": reactSource.peerDependencies?.["react-dom"],
+    },
+    devDependencies: {
+      "@types/node": "^24.10.1",
+      "@types/react": reactSource.devDependencies?.["@types/react"],
+      "@types/react-dom": reactSource.devDependencies?.["@types/react-dom"],
+      "@typescript/native-preview": rootManifest.devDependencies?.["@typescript/native-preview"],
+      vite: reactSource.devDependencies?.vite,
+    },
+    overrides: {
+      "@opengeni/sdk": sdkFile,
+    },
+  };
+  await Promise.all([
+    writeFile(
+      join(minimalSessionRoot, "package.json"),
+      `${JSON.stringify(minimalSessionManifest, null, 2)}\n`,
+    ),
+    writeFile(
+      join(minimalSessionRoot, "tsconfig.json"),
+      `${JSON.stringify(
+        {
+          compilerOptions: {
+            strict: true,
+            target: "ESNext",
+            lib: ["ESNext", "DOM", "DOM.Iterable"],
+            module: "ESNext",
+            moduleResolution: "Bundler",
+            skipLibCheck: false,
+            noEmit: true,
+            types: ["node"],
+          },
+          include: ["session.ts", "vite.config.ts"],
+        },
+        null,
+        2,
+      )}\n`,
+    ),
+    writeFile(
+      join(minimalSessionRoot, "vite.config.ts"),
+      'import { defineConfig } from "vite";\nexport default defineConfig({ build: { emptyOutDir: true, lib: { entry: "session.ts", formats: ["es"], fileName: "session" }, rollupOptions: { external: ["react", "@opengeni/sdk"] } } });\n',
+    ),
+    writeFile(
+      join(minimalSessionRoot, "session.ts"),
+      'import { buildTimeline, type HumanInputSessionClientLike, type SessionClientLike, useHumanInputRequests, useSessionEvents } from "@opengeni/react/session";\nconst unused = (..._input: unknown[]): never => { throw new Error("type-only minimal session fixture"); };\nexport const client = { getSession: unused, listEvents: unused, streamEvents: unused, getComposerDraft: unused, saveComposerDraft: unused, sendMessage: unused, steerMessage: unused, getQueue: unused, moveQueueItem: unused, editQueueItem: unused, steerQueueItem: unused, deleteQueueItem: unused, pauseSession: unused, resumeSession: unused, sendApprovalDecision: unused } satisfies SessionClientLike;\nexport const humanInputClient = { ...client, listHumanInputRequests: unused, getHumanInputRequest: unused, submitHumanInputResponse: unused } satisfies HumanInputSessionClientLike;\nexport const surface = [buildTimeline, useHumanInputRequests, useSessionEvents, client, humanInputClient];\n',
     ),
   ]);
 
@@ -290,6 +449,12 @@ try {
   await run(["bun", "run", "build:session"], consumerRoot);
   await run(["bun", "run", "ssr"], consumerRoot);
   await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
+  process.stdout.write("[publish-consumer] installing minimal session-only consumer\n");
+  await run(["bun", "install"], minimalSessionRoot);
+  await rm(join(minimalSessionRoot, "node_modules"), { recursive: true, force: true });
+  await run(["bun", "install", "--frozen-lockfile"], minimalSessionRoot);
+  await run(["bun", "run", "typecheck"], minimalSessionRoot);
+  await run(["bun", "run", "build"], minimalSessionRoot);
 
   const sessionBundle = await readFile(
     join(consumerRoot, "session-dist", "session-consumer.js"),
