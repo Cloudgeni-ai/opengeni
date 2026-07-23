@@ -1,9 +1,15 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const cli = join(import.meta.dir, "..", "bin", "ogtool.cjs");
+const packageVersion = (
+  JSON.parse(readFileSync(join(import.meta.dir, "..", "package.json"), "utf8")) as {
+    version: string;
+  }
+).version;
 const temporaryRoots: string[] = [];
 
 afterEach(async () => {
@@ -98,7 +104,7 @@ describe("ogtool CLI", () => {
   test("reports its package version without requiring Toolspace", async () => {
     const result = await run(["--version"]);
     expect(result.exitCode).toBe(0);
-    expect(result.stdout.trim()).toBe("0.0.0");
+    expect(result.stdout.trim()).toBe(packageVersion);
     expect(result.stderr).toBe("");
   });
 
