@@ -17,10 +17,10 @@ name: Release
 #      (Settings -> Secrets and variables -> Actions -> Variables).
 #   2. Claim the @opengeni npm org and set the NPM_TOKEN secret to an
 #      automation/granular token with publish rights (provenance via OIDC).
-#   3. Let the Version PR be opened: EITHER enable Settings -> Actions -> General
-#      -> "Allow GitHub Actions to create and approve pull requests", OR set a
-#      RELEASE_PAT secret (a PAT with repo + pull-requests scope) — this workflow
-#      prefers RELEASE_PAT over the default GITHUB_TOKEN for exactly that reason.
+#   3. Enable Settings -> Actions -> General -> "Allow GitHub Actions to create
+#      and approve pull requests". The scoped per-run GITHUB_TOKEN deliberately
+#      authors Version PRs as github-actions[bot], leaving exact-head approval to
+#      a distinct trusted human reviewer.
 #   - GHCR image publishing needs no extra secret (built-in GITHUB_TOKEN) and
 #     runs only when a release actually publishes.
 
@@ -81,6 +81,7 @@ jobs:
     permissions:
       contents: write # changesets commits package versions to its release branch
       pull-requests: write # changesets opens/updates the Version PR
+      actions: write # dispatch trusted main CI for the token-authored Version PR
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -136,6 +137,7 @@ jobs:
           fi
 
       - name: Create or update Version PR
+        id: changesets
         if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
         uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
         with:
@@ -143,10 +145,19 @@ jobs:
           commit: "chore: version packages"
           title: "chore: version packages"
         env:
-          # Prefer a PAT (repo + pull-requests scope) so the Version PR can be
-          # opened even if the org keeps "Actions may create PRs" disabled;
-          # falls back to the default token when the org setting is enabled.
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          # Keep the automation author distinct from the trusted human reviewer.
+          GITHUB_TOKEN: ${{ github.token }}
+
+      # GITHUB_TOKEN-created pull requests intentionally do not recursively
+      # trigger pull_request workflows. Dispatch the trusted CI definition from
+      # main instead; its admission job binds candidate execution and checks to
+      # the exact bot-authored head only after base-owned validation succeeds.
+      - name: Dispatch exact-head Version PR CI
+        if: ${{ steps.release_plan.outputs.has_releases == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION_PR_NUMBER: ${{ steps.changesets.outputs.pullRequestNumber }}
+        run: node scripts/check-release-pr-automation.mjs dispatch-version-ci
 
   publish:
     name: Publish verified release
@@ -155,6 +166,7 @@ jobs:
     permissions:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets creates and pushes immutable package tags
+      pull-requests: read # verify exact-head native approval before publication
     outputs:
       releaseReady: ${{ steps.registry.outputs.release_ready }}
       verifiedPackages: ${{ steps.registry.outputs.verified_packages }}
@@ -225,6 +237,12 @@ jobs:
             exit 1
           fi
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Verify exact-head approval provenance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+        run: node scripts/check-release-pr-automation.mjs verify-approved-merge
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
@@ -351,7 +369,7 @@ jobs:
           version: bun run changeset:version
           publish: bun run release:publish
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: "true"
 
