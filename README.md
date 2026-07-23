@@ -272,7 +272,7 @@ A Connected Machine is a first-class, co-equal alternative to the managed sandbo
 How a machine session differs from a managed sandbox:
 
 - **Runs directly on your machine.** A machine-targeted turn establishes the session on the enrolled machine directly — no cloud box is created or billed for that turn.
-- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni can inject independently scoped, short-lived repository-binding tokens for any mix of GitHub, GitLab, and Azure DevOps repositories; for a machine that injection is skipped.)
+- **Your own git auth.** OpenGeni does not mint or distribute a repository token to the machine. Commands run under the machine's own local environment and its own git credentials. (For a managed sandbox, OpenGeni can inject independently renewed repository-binding credentials for any mix of GitHub, GitLab, and Azure DevOps repositories: either a contained provider token or a host-owned exact HTTPS smart-Git broker bearer. For a machine that injection is skipped.)
 - **Your files, not a clone.** OpenGeni does not clone selected repositories onto the machine's real disk; the machine already owns its filesystem. The agent works in the per-session working folder you chose.
 - **Per-session working folder.** Each session names a working directory on the machine (the machine root, or a subdirectory); it is the cwd base for the agent's exec, terminal, and file dock.
 

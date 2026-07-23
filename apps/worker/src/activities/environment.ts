@@ -11,6 +11,7 @@ import {
   type ConnectionCredentialsPort,
   type GitCredentialProvider,
   type GitCredentialRepositoryRef,
+  type GitCredentialTransport,
   type GitCredentials,
   type ResourceRef,
   type SandboxSecrets,
@@ -48,6 +49,7 @@ export type GitCredentialBindingSeed = {
   credentialBindingId: string;
   provider: GitCredentialProvider;
   token: string;
+  transport?: GitCredentialTransport;
   expiresAt?: string;
   providerBindingCount?: number;
 };
@@ -397,6 +399,7 @@ async function mintRunGitTokensWithIdentity(
   let identity: { name: string; email: string } | null = null;
   for (const selection of selections) {
     let token: string | null = null;
+    let transport: GitCredentialTransport | undefined;
     let tokenExpiresAt: string | undefined;
     if (
       selection.provider === "github" &&
@@ -431,6 +434,7 @@ async function mintRunGitTokensWithIdentity(
         );
       }
       token = minted.token;
+      transport = validatedGitCredentialTransport(selection, minted);
       tokenExpiresAt = minted.expiresAt
         ? validatedGitCredentialExpiry(selection.provider, minted.expiresAt)
         : undefined;
@@ -455,6 +459,7 @@ async function mintRunGitTokensWithIdentity(
         credentialBindingId: selection.credentialBindingId,
         provider: selection.provider,
         token,
+        ...(transport ? { transport } : {}),
         ...(tokenExpiresAt ? { expiresAt: tokenExpiresAt } : {}),
       });
     }
@@ -467,6 +472,7 @@ async function mintRunGitTokensWithIdentity(
   }
   for (const binding of bindings) {
     binding.providerBindingCount = counts.get(binding.provider) ?? 1;
+    if (binding.transport?.kind === "http_broker") continue;
     if (counts.get(binding.provider) !== 1) continue;
     gitTokens[binding.provider] = binding.token;
     if (binding.expiresAt) expiresAt[binding.provider] = binding.expiresAt;
@@ -480,6 +486,128 @@ function validatedGitCredentialExpiry(provider: GitCredentialProvider, value: st
     throw new Error(`connection-credential provider (${provider}) returned an invalid expiresAt`);
   }
   return new Date(timestamp).toISOString();
+}
+
+const MAX_GIT_HTTP_BROKER_ROUTES = 256;
+const MAX_GIT_HTTP_BROKER_URI_LENGTH = 4_096;
+
+function validatedGitCredentialTransport(
+  selection: GitCredentialSelection,
+  minted: GitCredentials,
+): GitCredentialTransport | undefined {
+  const transport = minted.transport;
+  if (!transport) return undefined;
+
+  if (
+    typeof transport !== "object" ||
+    transport.kind !== "http_broker" ||
+    !Array.isArray(transport.repositories)
+  ) {
+    throw new Error(
+      `connection-credential provider (${selection.provider}) returned an invalid Git credential transport`,
+    );
+  }
+  const requestedUris = new Set(selection.repositoryRefs.map((repository) => repository.uri));
+  if (
+    requestedUris.size === 0 ||
+    requestedUris.size > MAX_GIT_HTTP_BROKER_ROUTES ||
+    transport.repositories.length !== requestedUris.size
+  ) {
+    throw new Error(
+      `connection-credential provider (${selection.provider}) returned an incomplete Git HTTP broker route set`,
+    );
+  }
+
+  const echoedUris = new Set<string>();
+  const brokerUris = new Set<string>();
+  const repositories = transport.repositories.map((route) => {
+    if (
+      !route ||
+      typeof route !== "object" ||
+      typeof route.repositoryUri !== "string" ||
+      typeof route.brokerUri !== "string"
+    ) {
+      throw new Error(
+        `connection-credential provider (${selection.provider}) returned an invalid Git HTTP broker route`,
+      );
+    }
+    if (!requestedUris.has(route.repositoryUri) || echoedUris.has(route.repositoryUri)) {
+      throw new Error(
+        `connection-credential provider (${selection.provider}) returned an unexpected Git HTTP broker repository`,
+      );
+    }
+    echoedUris.add(route.repositoryUri);
+    if (
+      route.brokerUri.length === 0 ||
+      route.brokerUri.length > MAX_GIT_HTTP_BROKER_URI_LENGTH ||
+      route.brokerUri.trim() !== route.brokerUri
+    ) {
+      throw new Error(
+        `connection-credential provider (${selection.provider}) returned an invalid Git HTTP broker URI`,
+      );
+    }
+    let brokerUrl: URL;
+    try {
+      brokerUrl = new URL(route.brokerUri);
+    } catch {
+      throw new Error(
+        `connection-credential provider (${selection.provider}) returned an invalid Git HTTP broker URI`,
+      );
+    }
+    if (
+      brokerUrl.protocol !== "https:" ||
+      brokerUrl.username ||
+      brokerUrl.password ||
+      brokerUrl.search ||
+      brokerUrl.hash ||
+      brokerUris.has(brokerUrl.href) ||
+      brokerUrl.href === route.repositoryUri
+    ) {
+      throw new Error(
+        `connection-credential provider (${selection.provider}) returned an unsafe Git HTTP broker URI`,
+      );
+    }
+    brokerUris.add(brokerUrl.href);
+    return {
+      repositoryUri: route.repositoryUri,
+      brokerUri: brokerUrl.href,
+    };
+  });
+
+  if ([...requestedUris].some((uri) => !echoedUris.has(uri))) {
+    throw new Error(
+      `connection-credential provider (${selection.provider}) returned an incomplete Git HTTP broker route set`,
+    );
+  }
+  return { kind: "http_broker", repositories };
+}
+
+export function assertGitCredentialRenewalTransportUnchanged(
+  initial: GitCredentialBindingSeed,
+  renewed: GitCredentialBindingSeed,
+): void {
+  if (!initial.transport && !renewed.transport) return;
+  if (
+    !initial.transport ||
+    !renewed.transport ||
+    initial.transport.kind !== renewed.transport.kind
+  ) {
+    throw new Error(
+      `renewed ${initial.provider} credential changed transport for binding ${initial.credentialBindingId}`,
+    );
+  }
+  const routeKey = (route: { repositoryUri: string; brokerUri: string }) =>
+    `${route.repositoryUri}\u0000${route.brokerUri}`;
+  const initialRoutes = initial.transport.repositories.map(routeKey).sort();
+  const renewedRoutes = renewed.transport.repositories.map(routeKey).sort();
+  if (
+    initialRoutes.length !== renewedRoutes.length ||
+    initialRoutes.some((route, index) => route !== renewedRoutes[index])
+  ) {
+    throw new Error(
+      `renewed ${initial.provider} credential changed Git HTTP broker routes for binding ${initial.credentialBindingId}`,
+    );
+  }
 }
 
 async function resolveRunGitIdentityWithSelections(

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
 import {
+  assertGitCredentialRenewalTransportUnchanged,
   gitCredentialAuthorityForTurn,
   mintRunGitCredentialBinding,
   mintRunGitCredentials,
@@ -285,6 +286,189 @@ describe("sandbox git credentials", () => {
     );
     expect(Object.values(result.environment)).not.toContain("gitlab-token");
     expect(Object.values(result.environment)).not.toContain("azure_devops-token");
+  });
+
+  test("accepts an exact HTTPS smart-Git broker without creating provider-token aliases", async () => {
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/one.git",
+        ref: "main",
+        provider: "gitlab",
+        credentialBindingId: "gitlab-primary",
+      },
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/two.git",
+        ref: "main",
+        provider: "gitlab",
+        credentialBindingId: "gitlab-primary",
+      },
+    ];
+    const result = await mintRunGitCredentials(provisionedSettings(), resources, {
+      scope,
+      authority,
+      gitCredentials: async (input) => ({
+        token: "short-lived-broker-bearer",
+        workspaceId: input.workspaceId,
+        credentialBindingId: input.credentialBindingId,
+        provider: input.provider,
+        providerHost: input.providerHost,
+        transport: {
+          kind: "http_broker",
+          repositories: [
+            {
+              repositoryUri: "https://gitlab.com/acme/two.git",
+              brokerUri: "https://broker.example.test/git/session/gitlab-primary/two.git",
+            },
+            {
+              repositoryUri: "https://gitlab.com/acme/one.git",
+              brokerUri: "https://broker.example.test/git/session/gitlab-primary/one.git",
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(result?.gitTokens).toEqual({});
+    expect(result?.bindings).toEqual([
+      {
+        credentialBindingId: "gitlab-primary",
+        provider: "gitlab",
+        providerBindingCount: 1,
+        token: "short-lived-broker-bearer",
+        transport: {
+          kind: "http_broker",
+          repositories: [
+            {
+              repositoryUri: "https://gitlab.com/acme/two.git",
+              brokerUri: "https://broker.example.test/git/session/gitlab-primary/two.git",
+            },
+            {
+              repositoryUri: "https://gitlab.com/acme/one.git",
+              brokerUri: "https://broker.example.test/git/session/gitlab-primary/one.git",
+            },
+          ],
+        },
+      },
+    ]);
+  });
+
+  test("rejects partial or credential-bearing Git HTTP broker routes", async () => {
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/one",
+        ref: "main",
+        provider: "azure_devops",
+        credentialBindingId: "azure-primary",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/two",
+        ref: "main",
+        provider: "azure_devops",
+        credentialBindingId: "azure-primary",
+      },
+    ];
+    await expect(
+      mintRunGitCredentials(provisionedSettings(), resources, {
+        scope,
+        authority,
+        gitCredentials: async (input) => ({
+          token: "must-not-reach-sandbox",
+          workspaceId: input.workspaceId,
+          credentialBindingId: input.credentialBindingId,
+          provider: input.provider,
+          providerHost: input.providerHost,
+          transport: {
+            kind: "http_broker",
+            repositories: [
+              {
+                repositoryUri: "https://dev.azure.com/acme/project/_git/one",
+                brokerUri: "https://broker.example.test/git/one",
+              },
+            ],
+          },
+        }),
+      }),
+    ).rejects.toThrow("incomplete Git HTTP broker route set");
+
+    await expect(
+      mintRunGitCredentials(provisionedSettings(), [resources[0]!], {
+        scope,
+        authority,
+        gitCredentials: async (input) => ({
+          token: "must-not-reach-sandbox",
+          workspaceId: input.workspaceId,
+          credentialBindingId: input.credentialBindingId,
+          provider: input.provider,
+          providerHost: input.providerHost,
+          transport: {
+            kind: "http_broker",
+            repositories: [
+              {
+                repositoryUri: "https://dev.azure.com/acme/project/_git/one",
+                brokerUri: "https://embedded-secret@broker.example.test/git/one",
+              },
+            ],
+          },
+        }),
+      }),
+    ).rejects.toThrow("unsafe Git HTTP broker URI");
+
+    await expect(
+      mintRunGitCredentials(provisionedSettings(), [resources[0]!], {
+        scope,
+        authority,
+        gitCredentials: async (input) => ({
+          token: "must-not-reach-sandbox",
+          workspaceId: input.workspaceId,
+          credentialBindingId: input.credentialBindingId,
+          provider: input.provider,
+          providerHost: input.providerHost,
+          transport: { kind: "future_transport" } as never,
+        }),
+      }),
+    ).rejects.toThrow("invalid Git credential transport");
+  });
+
+  test("renewal may rotate a broker bearer but cannot change its repository routes", () => {
+    const initial = {
+      credentialBindingId: "gitlab-primary",
+      provider: "gitlab" as const,
+      token: "one",
+      transport: {
+        kind: "http_broker" as const,
+        repositories: [
+          {
+            repositoryUri: "https://gitlab.com/acme/one.git",
+            brokerUri: "https://broker.example.test/git/one.git",
+          },
+        ],
+      },
+    };
+    expect(() =>
+      assertGitCredentialRenewalTransportUnchanged(initial, {
+        ...initial,
+        token: "two",
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertGitCredentialRenewalTransportUnchanged(initial, {
+        ...initial,
+        token: "two",
+        transport: {
+          kind: "http_broker",
+          repositories: [
+            {
+              repositoryUri: "https://gitlab.com/acme/one.git",
+              brokerUri: "https://broker.example.test/git/different.git",
+            },
+          ],
+        },
+      }),
+    ).toThrow("changed Git HTTP broker routes");
   });
 
   test("fails closed before calling a host broker when immutable authority is missing", async () => {

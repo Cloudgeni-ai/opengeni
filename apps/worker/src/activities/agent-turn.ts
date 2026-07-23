@@ -173,6 +173,7 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
+  assertGitCredentialRenewalTransportUnchanged,
   gitCredentialAuthorityForTurn,
   gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
@@ -3625,6 +3626,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   authorizeGitHubTokenMint,
                 },
               );
+              if (binding) {
+                assertGitCredentialRenewalTransportUnchanged(initialBinding, binding);
+              }
               pendingBinding = binding;
               return binding
                 ? {
