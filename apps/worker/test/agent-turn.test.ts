@@ -30,6 +30,7 @@ import {
   codexCredentialLeaseDeadlineExpired,
   computerToolModeForTurn,
   createTurnSandboxProvisioner,
+  drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   filterUnmaterializedSandboxFileDownloads,
@@ -1283,6 +1284,76 @@ describe("worker shutdown preemption", () => {
         failure: persistenceFailure,
       }),
     ).not.toThrow();
+  });
+
+  test("does not publish quiescence until tool and credential writers physically drain", async () => {
+    const steps: string[] = [];
+    let releaseTools!: () => void;
+    let releaseToolspaceWrite!: () => void;
+    let releaseRunCredentialWrite!: () => void;
+    const toolsDrained = new Promise<void>((resolve) => {
+      releaseTools = resolve;
+    });
+    const toolspaceWriteDrained = new Promise<void>((resolve) => {
+      releaseToolspaceWrite = resolve;
+    });
+    const runCredentialWriteDrained = new Promise<void>((resolve) => {
+      releaseRunCredentialWrite = resolve;
+    });
+
+    let receipts = 0;
+    const boundary = drainAttemptOwnedSandboxWriters({
+      toolCancellationFence: {
+        cancel: () => steps.push("tools-cancelled"),
+        waitForQuiescence: async () => {
+          steps.push("tools-draining");
+          await toolsDrained;
+          steps.push("tools-drained");
+        },
+      },
+      cancellationReason: new Error("STEER"),
+      toolspaceTokenRenewal: {
+        stop: async () => {
+          steps.push("toolspace-draining");
+          await toolspaceWriteDrained;
+          steps.push("toolspace-drained");
+        },
+      },
+      runCredentialRenewal: {
+        stop: async () => {
+          steps.push("run-credentials-draining");
+          await runCredentialWriteDrained;
+          steps.push("run-credentials-drained");
+        },
+      },
+    }).then(() => {
+      receipts += 1;
+      steps.push("receipt");
+    });
+
+    await Bun.sleep(0);
+    expect(steps).toEqual(["tools-cancelled", "tools-draining"]);
+    expect(receipts).toBe(0);
+
+    releaseTools();
+    await Bun.sleep(0);
+    expect(steps).toEqual([
+      "tools-cancelled",
+      "tools-draining",
+      "tools-drained",
+      "toolspace-draining",
+    ]);
+    expect(receipts).toBe(0);
+
+    releaseToolspaceWrite();
+    await Bun.sleep(0);
+    expect(steps.at(-1)).toBe("run-credentials-draining");
+    expect(receipts).toBe(0);
+
+    releaseRunCredentialWrite();
+    await boundary;
+    expect(steps.at(-1)).toBe("receipt");
+    expect(receipts).toBe(1);
   });
 
   test("retries one immutable quiescence proof after receipt exhaustion", async () => {

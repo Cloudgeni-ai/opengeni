@@ -203,13 +203,18 @@ heartbeat timeout and the activity's ten-second heartbeat timer.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
-quiesce, and immediately writes `session_turn_attempts.quiesced_at` before
-credential, cache, recording, provider, lease, or workspace housekeeping. The
+quiesce, stops and drains attempt-owned Toolspace and run-material renewal
+writes, and immediately writes `session_turn_attempts.quiesced_at` before
+attempt-qualified credential deletion, cache, recording, provider, lease, or
+workspace housekeeping. The
 receipt, its `session.queue.changed` event, the session queue/sequence update,
 and the exact `session_workflow_wake_outbox` revision commit in one retryable,
 idempotent transaction. Provider completion and batch flushes that ignore
 cancellation are detached with rejection handlers; all later housekeeping is
-attempt-fenced and detachable.
+attempt-fenced and detachable. While either logical interruption or the exact
+physical receipt remains pending, `effectiveControl.settlement` stays typed as
+`stopping` and reports `attemptCount`, `interruptionPendingCount`, and
+`quiescencePendingCount`; Resume does not clear or bypass that receipt gate.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
