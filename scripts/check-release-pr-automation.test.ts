@@ -127,11 +127,14 @@ function dispatchFixture(
     author?: Record<string, unknown>;
     headRepository?: string;
     mainSha?: string;
+    pullBases?: string[];
+    pullHeads?: string[];
     stalePullReads?: number;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
   let pullReads = 0;
+  let projectedHead = headSha;
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
@@ -142,15 +145,35 @@ function dispatchFixture(
     if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`)
       return response(mainRef(options.mainSha));
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`) {
+      const readIndex = pullReads;
       pullReads += 1;
+      const pullBases = options.pullBases;
+      const base = pullBases
+        ? pullBases[Math.min(readIndex, pullBases.length - 1)]
+        : pullReads <= (options.stalePullReads ?? 0)
+          ? "a".repeat(40)
+          : baseSha;
+      const pullHeads = options.pullHeads ?? [headSha];
+      projectedHead = pullHeads[Math.min(readIndex, pullHeads.length - 1)];
       return response(
         versionPull({
           author: options.author,
-          base: pullReads <= (options.stalePullReads ?? 0) ? "a".repeat(40) : baseSha,
+          base,
+          head: projectedHead,
           headRepository: options.headRepository,
         }),
       );
     }
+    if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/changeset-release/main`)
+      return response({
+        ref: "refs/heads/changeset-release/main",
+        object: { type: "commit", sha: projectedHead },
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${projectedHead}`)
+      return response({
+        sha: projectedHead,
+        parents: [{ sha: projectedHead === headSha ? baseSha : "7".repeat(40) }],
+      });
     if (method === "POST" && url.pathname === `${prefix}/actions/workflows/ci.yml/dispatches`)
       return response(null, 204);
     return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
@@ -215,13 +238,50 @@ describe("Version PR dispatch identity", () => {
     expect(fixture.requests.some((request) => request.method === "POST")).toBe(false);
   });
 
+  test("waits for the Version PR head and direct branch topology to converge", async () => {
+    const oldHeadSha = "8".repeat(40);
+    const fixture = dispatchFixture({
+      pullBases: ["9".repeat(40), baseSha, baseSha, baseSha],
+      pullHeads: [oldHeadSha, oldHeadSha, headSha, headSha],
+    });
+    const sleeps: number[] = [];
+    await expect(
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: fixture.fetchImpl,
+        logger: { log() {} },
+        projectionAttempts: 3,
+        projectionDelayMs: 7,
+        projectionSleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds);
+        },
+      }),
+    ).resolves.toEqual({ prNumber: pullNumber, headSha, baseSha });
+    expect(sleeps).toEqual([7, 7]);
+    expect(
+      fixture.requests.filter((request) => request.path.endsWith(`/pulls/${pullNumber}`)),
+    ).toHaveLength(4);
+    expect(fixture.requests.filter((request) => request.method === "POST")).toHaveLength(1);
+  });
+
   test("rejects a human-authored Version PR without dispatching", async () => {
     const fixture = dispatchFixture({
       author: { login: "jorgensandhaug", id: 55702375, type: "User" },
+      stalePullReads: 3,
     });
+    const sleeps: number[] = [];
     await expect(
-      validateVersionPrDispatch({ env: releasePushEnv(), fetchImpl: fixture.fetchImpl }),
+      validateVersionPrDispatch({
+        env: releasePushEnv(),
+        fetchImpl: fixture.fetchImpl,
+        projectionAttempts: 3,
+        projectionDelayMs: 7,
+        projectionSleep: async (milliseconds: number) => {
+          sleeps.push(milliseconds);
+        },
+      }),
     ).rejects.toThrow("Version PR author login changed");
+    expect(sleeps).toEqual([]);
     expect(fixture.requests.some((request) => request.method === "POST")).toBe(false);
   });
 
@@ -283,6 +343,11 @@ function admissionFixture(
         sha: headSha,
         tree: { sha: headTreeSha },
         parents: [{ sha: baseSha }],
+      });
+    if (url.pathname === `${prefix}/git/ref/heads/changeset-release/main`)
+      return response({
+        ref: "refs/heads/changeset-release/main",
+        object: { type: "commit", sha: headSha },
       });
     if (url.pathname === `${prefix}/compare/${baseSha}...${headSha}`)
       return response({
@@ -373,6 +438,13 @@ function checksFixture() {
       return response(mainRef());
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`)
       return response(versionPull());
+    if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/changeset-release/main`)
+      return response({
+        ref: "refs/heads/changeset-release/main",
+        object: { type: "commit", sha: headSha },
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${headSha}`)
+      return response({ sha: headSha, parents: [{ sha: baseSha }] });
     if (method === "GET" && url.pathname === `${prefix}/commits/${headSha}/check-runs`)
       return response({
         total_count: checks.length,
@@ -555,7 +627,9 @@ describe("workflow contracts", () => {
 
   test("keeps admission least-privilege and candidate execution exact-head-bound", () => {
     expect(ci.permissions).toEqual({ contents: "read" });
-    expect(ci.jobs["automation-admission"].permissions).toEqual({
+    const admission = ci.jobs["automation-admission"];
+    const report = ci.jobs["automation-report"];
+    expect(admission.permissions).toEqual({
       actions: "read",
       checks: "write",
       contents: "read",
@@ -567,7 +641,33 @@ describe("workflow contracts", () => {
       expect(
         ci.jobs[jobName].steps.find((step: any) => step.uses === "actions/checkout@v6").with.ref,
       ).toContain("inputs.automation_head_sha");
-    expect(ci.jobs["automation-admission"].steps[0].with.ref).toBe("${{ github.sha }}");
+    expect(admission.steps[0].uses).toBe(
+      "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10",
+    );
+    expect(admission.steps[0].with).toEqual(
+      expect.objectContaining({ ref: "${{ github.sha }}", "persist-credentials": false }),
+    );
+    expect(admission.steps.find((step: any) => step.name === "Set up Bun").uses).toBe(
+      "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6",
+    );
+    expect(report.steps[0].uses).toBe("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(report.steps[0].with["persist-credentials"]).toBe(false);
+    expect(admission.env).not.toHaveProperty("GITHUB_TOKEN");
+    expect(report.env).not.toHaveProperty("GITHUB_TOKEN");
+    expect(
+      admission.steps
+        .filter((step: any) => step.env?.GITHUB_TOKEN)
+        .map((step: any) => [step.name, step.env.GITHUB_TOKEN]),
+    ).toEqual([
+      ["Begin exact-head automation checks", "${{ github.token }}"],
+      ["Admit trusted dispatch and exact source tree", "${{ github.token }}"],
+      ["Complete exact-head source-admission check", "${{ github.token }}"],
+    ]);
+    expect(
+      report.steps
+        .filter((step: any) => step.env?.GITHUB_TOKEN)
+        .map((step: any) => [step.name, step.env.GITHUB_TOKEN]),
+    ).toEqual([["Complete exact-head automation CI check", "${{ github.token }}"]]);
   });
 
   test("binds explicit source-admission and aggregate reports to the exact head", () => {
