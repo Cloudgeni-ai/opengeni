@@ -433,6 +433,7 @@ export async function createAndStartSession(input: {
   accountId: string;
   workspaceId: string;
   initialMessage: string;
+  turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   clientEventId?: string;
@@ -523,6 +524,7 @@ export async function createAndStartSession(input: {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
       initialMessage: input.initialMessage,
+      initialTurnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
       tools: input.tools,
       metadata: sessionMetadata,
@@ -555,6 +557,7 @@ export async function createAndStartSession(input: {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
     initialMessage: input.initialMessage,
+    initialTurnInstructions: input.turnInstructions ?? null,
     resources: input.resources,
     tools: input.tools,
     metadata: sessionMetadata,
@@ -588,6 +591,7 @@ async function finishStartSession(
     bus: EventBus;
     workflowClient: SessionWorkflowClient;
     initialMessage: string;
+    turnInstructions?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
     clientEventId?: string;
@@ -795,6 +799,7 @@ export async function postUserMessageTurn(input: {
   workspaceId: string;
   sessionId: string;
   text: string;
+  turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   model?: string | null;
@@ -836,6 +841,7 @@ export async function postUserMessageTurn(input: {
           controlEtag: input.controlEtag ?? null,
           expectedDraftRevision: input.expectedDraftRevision ?? null,
           text: input.text,
+          turnInstructions: input.turnInstructions ?? null,
           resources: input.resources,
           tools: input.tools,
           model: requestedModel,
@@ -1313,6 +1319,7 @@ export async function createSessionForRequest(
       accountId: grant.accountId,
       workspaceId,
       initialMessage: payload.initialMessage,
+      turnInstructions: payload.turnInstructions ?? null,
       resources,
       tools,
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
@@ -1399,6 +1406,7 @@ export async function acceptSessionUserMessage(
   sessionId: string,
   input: {
     text: string;
+    turnInstructions?: string | null;
     resources?: ResourceRef[];
     tools?: ToolRef[];
     toolsProvided: boolean;
@@ -1467,6 +1475,7 @@ export async function acceptSessionUserMessage(
     workspaceId,
     sessionId,
     text: input.text,
+    turnInstructions: input.turnInstructions ?? null,
     resources: requestedResources,
     tools: requestedTools,
     model: input.model ?? null,

@@ -13,6 +13,40 @@ export type HumanInputAnswerDraft = {
   otherSelected: boolean;
 };
 
+export type HumanInputFormMessages = {
+  title: string;
+  description: string;
+  submit: string;
+  skip: string;
+  submitting: string;
+  other: string;
+  deadlineLabel: string;
+  formatDeadline: (value: string) => string;
+  required: string;
+  minLength: (count: number) => string;
+  maxLength: (count: number) => string;
+  otherRequired: string;
+  minSelections: (count: number) => string;
+  maxSelections: (count: number) => string;
+};
+
+export const defaultHumanInputFormMessages: HumanInputFormMessages = {
+  title: "Your input is needed",
+  description: "The agent is paused until you answer these questions.",
+  submit: "Continue",
+  skip: "Skip",
+  submitting: "Submitting…",
+  other: "Other",
+  deadlineLabel: "Respond before",
+  formatDeadline,
+  required: "This question is required.",
+  minLength: (count) => `Enter at least ${count} characters.`,
+  maxLength: (count) => `Enter no more than ${count} characters.`,
+  otherRequired: "Enter a value for Other.",
+  minSelections: (count) => `Choose at least ${count} option${count === 1 ? "" : "s"}.`,
+  maxSelections: (count) => `Choose no more than ${count} option${count === 1 ? "" : "s"}.`,
+};
+
 export type HumanInputFormProps = {
   request: Pick<SessionHumanInputRequest, "id" | "questions" | "allowSkip" | "expiresAt">;
   onSubmit: (response: SubmitHumanInputResponseRequest) => void | Promise<void>;
@@ -22,6 +56,8 @@ export type HumanInputFormProps = {
   description?: ReactNode;
   submitLabel?: string | undefined;
   skipLabel?: string | undefined;
+  messages?: Partial<HumanInputFormMessages> | undefined;
+  autoFocus?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -35,12 +71,19 @@ export function HumanInputForm({
   onSubmit,
   submitting = false,
   error,
-  title = "Your input is needed",
-  description = "The agent is paused until you answer these questions.",
-  submitLabel = "Continue",
-  skipLabel = "Skip",
+  title,
+  description,
+  submitLabel,
+  skipLabel,
+  messages: messageOverrides,
+  autoFocus = true,
   className,
 }: HumanInputFormProps) {
+  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
+  const resolvedTitle = title === undefined ? messages.title : title;
+  const resolvedDescription = description === undefined ? messages.description : description;
+  const resolvedSubmitLabel = submitLabel ?? messages.submit;
+  const resolvedSkipLabel = skipLabel ?? messages.skip;
   const formId = useId();
   const [drafts, setDrafts] = useState<Record<string, HumanInputAnswerDraft>>(() =>
     initialDrafts(request.questions),
@@ -99,7 +142,7 @@ export function HumanInputForm({
 
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const result = answersFromDrafts(request.questions, drafts);
+    const result = answersFromDrafts(request.questions, drafts, messages);
     if (Object.keys(result.errors).length > 0) {
       setValidationErrors(result.errors);
       return;
@@ -117,12 +160,14 @@ export function HumanInputForm({
       )}
     >
       <header>
-        <h2 className="text-og-md font-semibold text-og-fg">{title}</h2>
-        {description ? <div className="mt-1 text-og-sm text-og-fg-muted">{description}</div> : null}
+        <h2 className="text-og-md font-semibold text-og-fg">{resolvedTitle}</h2>
+        {resolvedDescription ? (
+          <div className="mt-1 text-og-sm text-og-fg-muted">{resolvedDescription}</div>
+        ) : null}
         {request.expiresAt ? (
           <p className="mt-1 text-og-xs text-og-fg-subtle">
-            Respond before{" "}
-            <time dateTime={request.expiresAt}>{formatDeadline(request.expiresAt)}</time>
+            {messages.deadlineLabel}{" "}
+            <time dateTime={request.expiresAt}>{messages.formatDeadline(request.expiresAt)}</time>
           </p>
         ) : null}
       </header>
@@ -170,6 +215,7 @@ export function HumanInputForm({
                   }
                   aria-invalid={Boolean(validationErrors[question.id])}
                   aria-describedby={describedBy}
+                  autoFocus={autoFocus && index === 0}
                   rows={3}
                   className="min-h-20 w-full resize-y rounded-og-md border border-og-border bg-og-surface-2 px-3 py-2 text-og-base text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent"
                 />
@@ -179,7 +225,7 @@ export function HumanInputForm({
                   aria-describedby={describedBy}
                   className="flex flex-col gap-2"
                 >
-                  {question.options.map((option) => {
+                  {question.options.map((option, optionIndex) => {
                     const checked = draft.values.includes(option.id);
                     return (
                       <label
@@ -189,6 +235,7 @@ export function HumanInputForm({
                         <input
                           type={question.kind === "single_select" ? "radio" : "checkbox"}
                           name={question.kind === "single_select" ? fieldId : undefined}
+                          autoFocus={autoFocus && index === 0 && optionIndex === 0}
                           checked={checked}
                           onChange={(event) =>
                             update(question.id, (current) => ({
@@ -227,6 +274,7 @@ export function HumanInputForm({
                         type={question.kind === "single_select" ? "radio" : "checkbox"}
                         name={question.kind === "single_select" ? fieldId : undefined}
                         checked={draft.otherSelected}
+                        autoFocus={autoFocus && index === 0 && question.options.length === 0}
                         onChange={(event) =>
                           update(question.id, (current) => ({
                             ...current,
@@ -239,7 +287,9 @@ export function HumanInputForm({
                         className="mt-2 accent-og-accent"
                       />
                       <span className="min-w-0 flex-1">
-                        <span className="block text-og-sm font-medium text-og-fg">Other</span>
+                        <span className="block text-og-sm font-medium text-og-fg">
+                          {messages.other}
+                        </span>
                         <input
                           type="text"
                           value={draft.other}
@@ -280,7 +330,7 @@ export function HumanInputForm({
             onClick={() => void submitResponse({ outcome: "skipped" })}
             className="rounded-og-md border border-og-border px-3 py-2 text-og-sm font-medium text-og-fg-muted hover:bg-og-surface-2 disabled:opacity-50"
           >
-            {skipLabel}
+            {resolvedSkipLabel}
           </button>
         ) : null}
         <button
@@ -288,7 +338,7 @@ export function HumanInputForm({
           disabled={busy}
           className="rounded-og-md bg-og-accent px-3 py-2 text-og-sm font-medium text-og-accent-fg hover:bg-og-accent-strong disabled:opacity-50"
         >
-          {busy ? "Submitting…" : submitLabel}
+          {busy ? messages.submitting : resolvedSubmitLabel}
         </button>
       </footer>
     </form>
@@ -298,7 +348,9 @@ export function HumanInputForm({
 export function answersFromDrafts(
   questions: HumanInputQuestion[],
   drafts: Record<string, HumanInputAnswerDraft>,
+  messageOverrides: Partial<HumanInputFormMessages> = {},
 ): { answers: HumanInputAnswer[]; errors: Record<string, string> } {
+  const messages = { ...defaultHumanInputFormMessages, ...messageOverrides };
   const answers: HumanInputAnswer[] = [];
   const errors: Record<string, string> = {};
   for (const question of questions) {
@@ -307,7 +359,7 @@ export function answersFromDrafts(
     const other = draft.otherSelected ? draft.other.trim() : "";
     const supplied = values.length + (other ? 1 : 0);
     if (question.required && supplied === 0) {
-      errors[question.id] = "This question is required.";
+      errors[question.id] = messages.required;
       continue;
     }
     if (question.kind === "text") {
@@ -317,26 +369,26 @@ export function answersFromDrafts(
         question.validation?.minLength != null &&
         value.length < question.validation.minLength
       ) {
-        errors[question.id] = `Enter at least ${question.validation.minLength} characters.`;
+        errors[question.id] = messages.minLength(question.validation.minLength);
         continue;
       }
       if (question.validation?.maxLength != null && value.length > question.validation.maxLength) {
-        errors[question.id] = `Enter no more than ${question.validation.maxLength} characters.`;
+        errors[question.id] = messages.maxLength(question.validation.maxLength);
         continue;
       }
     } else {
       if (draft.otherSelected && !other) {
-        errors[question.id] = "Enter a value for Other.";
+        errors[question.id] = messages.otherRequired;
         continue;
       }
       const min = question.validation?.minSelections;
       const max = question.kind === "single_select" ? 1 : question.validation?.maxSelections;
       if (min != null && supplied < min) {
-        errors[question.id] = `Choose at least ${min} option${min === 1 ? "" : "s"}.`;
+        errors[question.id] = messages.minSelections(min);
         continue;
       }
       if (max != null && supplied > max) {
-        errors[question.id] = `Choose no more than ${max} option${max === 1 ? "" : "s"}.`;
+        errors[question.id] = messages.maxSelections(max);
         continue;
       }
     }

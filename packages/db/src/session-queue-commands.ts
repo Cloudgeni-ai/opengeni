@@ -1131,6 +1131,7 @@ export async function submitHumanPromptInTransaction(
     controlEtag?: string | null;
     expectedDraftRevision?: number | null;
     text: string;
+    turnInstructions?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
     model?: string | null;
@@ -1159,6 +1160,7 @@ export async function submitHumanPromptInTransaction(
     controlEtag: input.controlEtag ?? null,
     expectedDraftRevision: input.expectedDraftRevision ?? null,
     text: input.text,
+    turnInstructions: input.turnInstructions ?? null,
     resources: input.resources,
     tools: input.tools,
     model: input.model ?? null,
@@ -1387,6 +1389,7 @@ export async function submitHumanPromptInTransaction(
       source: input.source,
       position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
       prompt: input.text,
+      turnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
       tools: input.tools,
       model: input.model ?? session.model,

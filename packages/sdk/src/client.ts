@@ -206,6 +206,8 @@ export type OpenGeniRequestOptions = {
 
 export type SendMessageInput = {
   text: string;
+  /** System instructions scoped to this exact turn; never visible timeline text. */
+  turnInstructions?: string;
   resources?: ResourceRef[];
   tools?: ToolRef[];
   model?: string;

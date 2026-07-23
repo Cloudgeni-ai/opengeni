@@ -11,7 +11,7 @@ const workspaceId = "00000000-0000-4000-8000-000000000017";
 const accountId = "00000000-0000-4000-8000-000000000018";
 const capabilityId = "skill:browser-focus";
 const evidenceDir = new URL("../../.agent/evidence/capabilities-focus/", import.meta.url).pathname;
-const apiContractRevision = "2026-07-human-input-v1";
+const apiContractRevision = "2026-07-turn-instructions-v1";
 
 type CapabilityState = {
   enabled: boolean;

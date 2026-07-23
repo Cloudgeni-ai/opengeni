@@ -1,6 +1,10 @@
 import type { StreamConnectionState, WorkspaceControlEvent } from "@opengeni/sdk";
 import { createContext, useContext } from "react";
-import type { EmbeddedSessionClientLike, SessionClientLike } from "./client";
+import type {
+  EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionClientLike,
+  SessionClientLike,
+} from "./client";
 
 export type OpenGeniContextValue = {
   client: SessionClientLike;
@@ -28,6 +32,11 @@ export type ClientOverride = {
 
 export type EmbeddedSessionClientOverride = {
   client?: EmbeddedSessionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedHumanInputClientOverride = {
+  client?: EmbeddedHumanInputSessionClientLike | undefined;
   workspaceId?: string | undefined;
 };
 
@@ -78,6 +87,33 @@ export function useEmbeddedSession(
     workspaceControlConnectionState: context?.workspaceControlConnectionState ?? "idle",
     registerSessionReconciler: context?.registerSessionReconciler ?? NOOP_REGISTER_RECONCILER,
     reconcileSession: context?.reconcileSession ?? NOOP_RECONCILE_SESSION,
+  };
+}
+
+/**
+ * Resolve the structured-input refinement without widening the baseline
+ * session-only proxy contract.
+ */
+export function useEmbeddedHumanInputSession(override: EmbeddedHumanInputClientOverride = {}): Omit<
+  EmbeddedSessionContextValue,
+  "client"
+> & {
+  client: EmbeddedHumanInputSessionClientLike;
+} {
+  const embedded = useEmbeddedSession(override);
+  const client = embedded.client as Partial<EmbeddedHumanInputSessionClientLike>;
+  if (
+    typeof client.listHumanInputRequests !== "function" ||
+    typeof client.getHumanInputRequest !== "function" ||
+    typeof client.submitHumanInputResponse !== "function"
+  ) {
+    throw new Error(
+      "@opengeni/react: useHumanInputRequests requires listHumanInputRequests, getHumanInputRequest, and submitHumanInputResponse.",
+    );
+  }
+  return {
+    ...embedded,
+    client: client as EmbeddedHumanInputSessionClientLike,
   };
 }
 

@@ -2940,6 +2940,7 @@ export type EnqueueSessionTurnInput = {
   temporalWorkflowId: string;
   source: SessionTurnSource;
   prompt: string;
+  turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
   model: string;
@@ -2952,6 +2953,14 @@ export type EnqueueSessionTurnInput = {
   initiatorContext?: TurnInitiatorContext;
   /** Steer inserts before all waiting prompts; Send appends after them. */
   placement?: "head" | "tail";
+};
+
+/**
+ * Worker-only turn projection. Host instructions are durable execution input,
+ * never part of the public SessionTurn/queue/HTTP contract.
+ */
+export type SessionTurnForExecution = SessionTurn & {
+  turnInstructions: string | null;
 };
 
 export async function createFileUpload(
@@ -11546,6 +11555,7 @@ export async function createSession(
     accountId: string;
     workspaceId: string;
     initialMessage: string;
+    initialTurnInstructions?: string | null;
     resources: ResourceRef[];
     tools?: ToolRef[];
     metadata: Record<string, unknown>;
@@ -11595,6 +11605,7 @@ export async function createSession(
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             initialMessage: input.initialMessage,
+            initialTurnInstructions: input.initialTurnInstructions ?? null,
             resources: input.resources,
             tools: input.tools ?? [],
             metadata: input.metadata,
@@ -11648,6 +11659,7 @@ export async function createSessionWithIdempotencyKey(
     accountId: string;
     workspaceId: string;
     initialMessage: string;
+    initialTurnInstructions?: string | null;
     resources: ResourceRef[];
     tools?: ToolRef[];
     metadata: Record<string, unknown>;
@@ -11690,6 +11702,7 @@ export async function createSessionWithIdempotencyKey(
             accountId: input.accountId,
             workspaceId: input.workspaceId,
             initialMessage: input.initialMessage,
+            initialTurnInstructions: input.initialTurnInstructions ?? null,
             resources: input.resources,
             tools: input.tools ?? [],
             metadata: input.metadata,
@@ -21490,6 +21503,7 @@ export async function initializeSessionStartAtomically(
               source: "user",
               position: queueTailPosition,
               prompt: session.initialMessage,
+              turnInstructions: session.initialTurnInstructions ?? null,
               resources: session.resources,
               tools: session.tools,
               model: session.model,
@@ -21636,6 +21650,7 @@ export async function enqueueSessionTurn(
             source: input.source,
             position,
             prompt: input.prompt,
+            turnInstructions: input.turnInstructions ?? null,
             resources: input.resources,
             tools: input.tools,
             model: input.model,
@@ -21691,7 +21706,7 @@ export type ClaimSessionWorkForAttemptInput = {
 };
 
 export type ClaimSessionWorkForAttemptResult =
-  | { action: "claimed"; turn: SessionTurn }
+  | { action: "claimed"; turn: SessionTurnForExecution }
   | {
       action: "unclaimed";
       reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
@@ -22031,7 +22046,7 @@ export async function claimSessionWorkForAttempt(
             parsedDispatch.attempt?.id === input.dispatchId
           ) {
             await registerAttempt(activeTurn);
-            return { action: "claimed", turn: mapSessionTurn(activeTurn) };
+            return { action: "claimed", turn: mapSessionTurnForExecution(activeTurn) };
           }
           if (activeTurn?.status === "requires_action") {
             if (input.trigger.kind !== "approval") {
@@ -22079,7 +22094,7 @@ export async function claimSessionWorkForAttempt(
               .set({ status: "running", updatedAt: now })
               .where(eq(schema.sessions.id, sessionId));
             await registerAttempt(resumed);
-            return { action: "claimed", turn: mapSessionTurn(resumed) };
+            return { action: "claimed", turn: mapSessionTurnForExecution(resumed) };
           }
           if (activeTurn?.status === "recovering" || activeTurn?.status === "waiting_capacity") {
             if (input.trigger.kind !== "next") {
@@ -22133,7 +22148,7 @@ export async function claimSessionWorkForAttempt(
               })
               .where(eq(schema.sessions.id, sessionId));
             await registerAttempt(resumed);
-            return { action: "claimed", turn: mapSessionTurn(resumed) };
+            return { action: "claimed", turn: mapSessionTurnForExecution(resumed) };
           }
           if (activeTurn?.status === "running") {
             return { action: "unclaimed", reason: "no-work" };
@@ -22377,7 +22392,7 @@ export async function claimSessionWorkForAttempt(
                   eq(schema.sessions.id, sessionId),
                 ),
               );
-            return { action: "claimed", turn: mapSessionTurn(compactionTurn) };
+            return { action: "claimed", turn: mapSessionTurnForExecution(compactionTurn) };
           }
 
           if (
@@ -22647,7 +22662,7 @@ export async function claimSessionWorkForAttempt(
             .where(
               and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
             );
-          return { action: "claimed", turn: mapSessionTurn(internalTurn) };
+          return { action: "claimed", turn: mapSessionTurnForExecution(internalTurn) };
         }
         const predecessorAttemptId = queuedSteerReplacementAttemptId(queuedTurn.metadata);
         if (predecessorAttemptId) {
@@ -22754,7 +22769,7 @@ export async function claimSessionWorkForAttempt(
           .where(
             and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
           );
-        return { action: "claimed", turn: mapSessionTurn(row) };
+        return { action: "claimed", turn: mapSessionTurnForExecution(row) };
       }),
   );
 }
@@ -25560,7 +25575,7 @@ export async function getSessionTurnForAttempt(
   workspaceId: string,
   sessionId: string,
   attemptId: string,
-): Promise<SessionTurn | null> {
+): Promise<SessionTurnForExecution | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select({ turn: schema.sessionTurns })
@@ -25603,7 +25618,7 @@ export async function getSessionTurnForAttempt(
         ),
       )
       .limit(1);
-    return row ? mapSessionTurn(row.turn) : null;
+    return row ? mapSessionTurnForExecution(row.turn) : null;
   });
 }
 
@@ -27444,6 +27459,15 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     finishedAt: row.finishedAt ? row.finishedAt.toISOString() : null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+function mapSessionTurnForExecution(
+  row: typeof schema.sessionTurns.$inferSelect,
+): SessionTurnForExecution {
+  return {
+    ...mapSessionTurn(row),
+    turnInstructions: row.turnInstructions ?? null,
   };
 }
 

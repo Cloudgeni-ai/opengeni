@@ -142,6 +142,7 @@ async function fixture() {
     workspaceId: grant.workspaceId,
     parentSessionId: root.id,
     initialMessage: "private child",
+    initialTurnInstructions: "host-only selected-record context",
     resources: [],
     metadata: {},
     model: "test-model",
@@ -171,6 +172,53 @@ async function fixture() {
 }
 
 describe("embedding host session authorization routes", () => {
+  test("public turn and queue reads omit host instructions while the worker claim retains them", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+      goal: null,
+    });
+    if (!started.turn) throw new Error("test session did not create an initial turn");
+    const app = appWith({
+      authorizeSession: async () => ({ allowed: true, relatedSessionAccess: "target" }),
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const headers = { authorization: value.authorization };
+    const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}`;
+
+    const turnsResponse = await app.request(`${base}/turns`, { headers });
+    expect(turnsResponse.status).toBe(200);
+    const turns = (await turnsResponse.json()) as Array<Record<string, unknown>>;
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).not.toHaveProperty("turnInstructions");
+
+    const queueResponse = await app.request(`${base}/queue`, { headers });
+    expect(queueResponse.status).toBe(200);
+    const queue = (await queueResponse.json()) as {
+      items: Array<Record<string, unknown>>;
+    };
+    expect(queue.items).toHaveLength(1);
+    expect(queue.items[0]).not.toHaveProperty("turnInstructions");
+
+    const claimed = await claimSessionWorkForAttempt(client.db, value.grant.workspaceId, {
+      sessionId: value.child.id,
+      workflowId: `session-${value.child.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claimed).toMatchObject({
+      action: "claimed",
+      turn: { turnInstructions: "host-only selected-record context" },
+    });
+  });
+
   test("enforces root-aware detail authorization and in-query list scope", async () => {
     if (!available) return;
     const value = await fixture();

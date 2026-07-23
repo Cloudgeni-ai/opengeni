@@ -174,6 +174,48 @@ describe("immutable session turn initiators", () => {
     );
   });
 
+  test("initial-turn repair uses the winning create instructions, not the retrying caller", async () => {
+    const grant = await fixture();
+    const idempotencyKey = crypto.randomUUID();
+    const first = await createSessionWithIdempotencyKey(client.db, {
+      ...sessionInput(grant),
+      initialTurnInstructions: "Use the winning host context.",
+      createIdempotencyKey: idempotencyKey,
+    });
+    expect(first.created).toBe(true);
+
+    const retry = await createSessionWithIdempotencyKey(client.db, {
+      ...sessionInput(grant),
+      initialTurnInstructions: "This retry must never replace the winner.",
+      createIdempotencyKey: idempotencyKey,
+    });
+    expect(retry.created).toBe(false);
+
+    const started = await initializeSessionStartAtomically(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: retry.session.id,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    if (!started.turn) throw new Error("initial turn was not created");
+    const [frozenTurn] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, started.turn!.id)),
+    );
+    expect(frozenTurn?.turnInstructions).toBe("Use the winning host context.");
+    expect(
+      (
+        started.events.find((event) => event.type === "user.message")?.payload as Record<
+          string,
+          unknown
+        >
+      ).turnInstructions,
+    ).toBeUndefined();
+  });
+
   test("Send and Steer capture their actor while queue Edit preserves the original actor", async () => {
     const grant = await fixture();
     const session = await createSession(client.db, sessionInput(grant));

@@ -112,6 +112,7 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
     const created = await client.createSession(WORKSPACE_ID, {
       initialMessage: "hello",
+      turnInstructions: "Host context for the initial turn.",
       sandboxBackend: "none",
     });
     expect(created).toEqual(session as never);
@@ -122,7 +123,11 @@ describe("OpenGeniClient", () => {
     expect(request.headers.authorization).toBe("Bearer og_test_key");
     expect(request.headers[OPENGENI_API_CONTRACT_HEADER]).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(request.headers["content-type"]).toBe("application/json");
-    expect(JSON.parse(request.body!)).toEqual({ initialMessage: "hello", sandboxBackend: "none" });
+    expect(JSON.parse(request.body!)).toEqual({
+      initialMessage: "hello",
+      turnInstructions: "Host context for the initial turn.",
+      sandboxBackend: "none",
+    });
   });
 
   test("getSession and listEvents hit the expected paths and query params", async () => {
@@ -231,6 +236,7 @@ describe("OpenGeniClient", () => {
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
     const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, {
       text: "do the thing",
+      turnInstructions: "Host context for this turn.",
       clientEventId: "ce-1",
     });
     expect(result.sequence).toBe(4);
@@ -241,7 +247,10 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(request.body!)).toEqual({
       type: "user.message",
       clientEventId: "ce-1",
-      payload: { text: "do the thing" },
+      payload: {
+        text: "do the thing",
+        turnInstructions: "Host context for this turn.",
+      },
     });
   });
 

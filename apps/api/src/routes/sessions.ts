@@ -951,6 +951,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = SteerSessionMessageRequest.parse(raw);
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
+      turnInstructions: payload.turnInstructions ?? null,
       resources: payload.resources,
       tools: payload.tools,
       toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
@@ -994,6 +995,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (event.type === "user.message") {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
+        turnInstructions: event.payload.turnInstructions ?? null,
         resources: event.payload.resources ?? [],
         tools: event.payload.tools ?? [],
         toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),

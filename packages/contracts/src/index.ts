@@ -6334,6 +6334,9 @@ export const CreateSessionRequest = withVariableSetIdAlias({
    */
   requestedSessionId: z.string().uuid().optional(),
   initialMessage: z.string().min(1),
+  // System-level host context for the initial turn only. Unlike `instructions`,
+  // this does not persist into later turns and is never emitted as a user event.
+  turnInstructions: z.string().trim().min(1).max(32768).optional(),
   // Per-session agent persona/system instructions (org-visible metadata, NOT a
   // secret). Rides the SAME system-level instructions channel the per-workspace
   // agentInstructions rides, composed AFTER the workspace persona so it refines
@@ -6605,6 +6608,9 @@ export const ClientSessionEvent = z.discriminatedUnion("type", [
     clientEventId: SessionOperationKey.optional(),
     payload: z.object({
       text: z.string().min(1),
+      // System-level host context for this exact turn only. Persisted on the
+      // turn for retry/recovery, never copied into the visible user message.
+      turnInstructions: z.string().trim().min(1).max(32768).optional(),
       resources: z.array(ResourceRef).default([]),
       tools: z.array(ToolRef).default([]),
       model: z.string().min(1).optional(),
@@ -6638,6 +6644,8 @@ export type ClientSessionEvent = z.infer<typeof ClientSessionEvent>;
 
 export const SteerSessionMessageRequest = z.object({
   text: z.string().min(1),
+  // Same per-turn system-level context as a queued user.message.
+  turnInstructions: z.string().trim().min(1).max(32768).optional(),
   resources: z.array(ResourceRef).default([]),
   tools: z.array(ToolRef).default([]),
   model: z.string().min(1).optional(),
@@ -7327,7 +7335,7 @@ export type ClientModel = z.infer<typeof ClientModel>;
  * that rollout boundary. Mutating clients send this value in
  * `x-opengeni-api-contract`; the API rejects any other value before routing.
  */
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-human-input-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 export const ClientConfig = z.object({

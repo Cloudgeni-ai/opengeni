@@ -559,6 +559,10 @@ export const sessions = pgTable(
       .references(() => workspaces.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("queued"),
     initialMessage: text("initial_message").notNull(),
+    // Invisible host context frozen with the winning session create. The
+    // initial turn copies this value so an idempotent repair can never adopt a
+    // retrying caller's different instructions.
+    initialTurnInstructions: text("initial_turn_instructions"),
     title: text("title"),
     titleSource: text("title_source"),
     // Per-session agent persona/system instructions supplied at create (the
@@ -1147,6 +1151,9 @@ export const sessionTurns = pgTable(
     source: text("source").notNull().default("user"),
     position: bigint("position", { mode: "number" }).notNull(),
     prompt: text("prompt").notNull(),
+    // Host context for this exact turn. System-level at runtime and deliberately
+    // separate from the visible prompt/event payload.
+    turnInstructions: text("turn_instructions"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
     model: text("model").notNull(),

@@ -4285,6 +4285,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
+        // Exact host context captured when this turn was accepted. It is
+        // system-level and disappears with the turn rather than entering chat.
+        ...(turn.turnInstructions ? { turnInstructions: turn.turnInstructions } : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential

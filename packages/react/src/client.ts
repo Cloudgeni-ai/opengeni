@@ -144,3 +144,10 @@ export type EmbeddedSessionClientLike = Pick<
 > & {
   setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
 };
+
+/** Session client refinement required only by structured human-input hooks. */
+export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionClientLike &
+  Pick<
+    OpenGeniClient,
+    "listHumanInputRequests" | "getHumanInputRequest" | "submitHumanInputResponse"
+  >;

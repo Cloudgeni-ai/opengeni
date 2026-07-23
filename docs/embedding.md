@@ -35,15 +35,29 @@ still reference the public Agents types, so the Agents packages remain declared
 dependencies, but OpenGeni's executable `dist` contains no external Agents or
 Zod import. The publish-closure guard enforces that boundary.
 
-### Agent persona: two levers
+### Agent instructions and exact-turn context
 
-A host that runs multiple agent personas has two composable, system-level instruction levers. Both ride the same authoritative instructions channel the agent obeys — neither is ever rendered as a user/timeline message — and they compose in a fixed order: **deployment default template → workspace persona → per-session instructions** (session-specific last), with the non-bypassable CORE (goal-loop ownership + variable set block) always substituted in.
+A host has three composable, system-level instruction scopes. None is rendered as
+a user/timeline message, and they compose in a fixed order: **deployment default
+template → workspace persona → per-session instructions → per-turn
+instructions**, with the non-bypassable CORE (goal-loop ownership + variable set
+block) always substituted in.
 
 - **Workspace `agentInstructions`** (`Workspace.agentInstructions`, set at workspace create/update) — the white-label persona for _every_ session in a workspace. Use it for stable, tenant-wide branding/behavior. It may embed the `{{core}}` marker to place the non-bypassable CORE; if it omits the marker, CORE is appended.
 - **Per-session `instructions`** (`CreateSessionRequest.instructions`) — an optional, per-_session_ refinement layered after the workspace persona. Use it to deliver a **per-agent-type prompt** (reviewer vs. planner vs. fixer) when many personas share one workspace, without minting a workspace per persona. It is org-visible metadata (returned on the session record, exposed like `title`/`goal`), **never** a timeline event, so internal prompt content does not leak to shared-session readers and carries full system-level authority.
+- **Per-turn `turnInstructions`** (`CreateSessionRequest.turnInstructions`,
+  `SendMessageInput.turnInstructions`) — optional host context for one exact
+  accepted turn. OpenGeni stores it separately from the visible prompt and keeps
+  it attached through queueing, steering, retry, approval resume, and worker
+  recovery. It does not carry into the next turn. Use it for submit-time route,
+  selection, or viewport context that must not be reconstructed later.
 - **Preallocated session identity** (`CreateSessionRequest.requestedSessionId`) — an optional UUID an embedding host may persist in its own projection before calling OpenGeni. OpenGeni creates that exact session and rejects collisions with `409`, so the initial worker claim cannot outrun the host link. Pair retries with the same workspace-scoped `idempotencyKey`; a replay that changes the UUID is rejected. The UUID is identity/correlation only and grants no access.
 
-Prefer `instructions` over stuffing persona text into `initialMessage`: `initialMessage` renders as visible timeline content, has weaker instruction authority, and is readable by anyone with the session. Reach for workspace `agentInstructions` when the persona is the same for the whole tenant; reach for session `instructions` when it varies per session. Omitting `instructions` is byte-identical to today's composition. It is trimmed, non-empty, and capped at 32768 characters.
+Do not stuff persona or host context into `initialMessage`/message text: those
+fields render as visible timeline content. Use workspace `agentInstructions` for
+tenant-wide behavior, session `instructions` for one durable persona, and
+`turnInstructions` for one submit-time context snapshot. Both optional request
+fields are trimmed, non-empty, and capped at 32768 characters.
 
 ## Ports
 
