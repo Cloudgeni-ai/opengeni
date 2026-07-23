@@ -1,5 +1,16 @@
 # @opengeni/core
 
+## 0.6.1
+
+### Patch Changes
+
+- 1f0ed18: Restore immutable concurrent-index migration history, stage populated-table migrations safely, and reject goal-bearing child sessions whose resulting first-party authority lacks `goals:manage`.
+- Updated dependencies [1f0ed18]
+- Updated dependencies [00e1cdc]
+  - @opengeni/db@0.9.1
+  - @opengeni/documents@0.2.17
+  - @opengeni/events@0.3.8
+
 ## 0.6.0
 
 ### Minor Changes
