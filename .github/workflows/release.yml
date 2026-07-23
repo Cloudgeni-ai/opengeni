@@ -424,7 +424,7 @@ jobs:
     needs: publish
     if: needs.publish.outputs.releaseReady == 'true'
     permissions:
-      contents: read
+      contents: write # publish the immutable source-SHA release BOM asset
       packages: write # publish the accepted chart and release images to GHCR
     steps:
       - name: Check out repository
@@ -607,10 +607,48 @@ jobs:
           OPENGENI_RELEASE_BOM_IMAGES="$images" \
           bun scripts/release-bom.ts
 
+      - name: Write release BOM checksum
+        env:
+          BOM_SHA256: ${{ steps.release-bom.outputs.sha256 }}
+        run: printf '%s  %s\n' "$BOM_SHA256" release-bom.json > evidence/release-bom.sha256
+
       - name: Upload complete release BOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-bom-${{ needs.publish.outputs.sourceSha }}
-          path: evidence/release-bom.json
+          path: |
+            evidence/release-bom.json
+            evidence/release-bom.sha256
           if-no-files-found: error
           retention-days: 90
+
+      - name: Publish immutable source-SHA release BOM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="opengeni-release-${SOURCE_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            [ "$resolved" = "$SOURCE_SHA" ] || {
+              echo "existing BOM release tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            }
+            mkdir -p /tmp/opengeni-release-bom-existing
+            gh release download "$tag" \
+              --dir /tmp/opengeni-release-bom-existing \
+              --pattern release-bom.json \
+              --pattern release-bom.sha256
+            cmp evidence/release-bom.json /tmp/opengeni-release-bom-existing/release-bom.json
+            cmp evidence/release-bom.sha256 /tmp/opengeni-release-bom-existing/release-bom.sha256
+          else
+            gh release create "$tag" \
+              evidence/release-bom.json \
+              evidence/release-bom.sha256 \
+              --target "$SOURCE_SHA" \
+              --title "OpenGeni release BOM ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
+              --notes "Immutable machine-readable package and image BOM for source ${SOURCE_SHA}." \
+              --latest=false
+          fi

@@ -194,8 +194,11 @@ emits `release-bom-<sha>` containing one deterministic `release-bom.json`: exact
 source SHA, release version, every publishable package version plus npm `gitHead`
 and SHA-512 integrity, and every release image's immutable SHA-256 digest. Hosts
 should consume this BOM as one unit and reject missing, extra, mutable-tag-only, or
-version-mismatched components. Ordinary pushes to `main` can open/update the
-Version PR but cannot publish.
+version-mismatched components. The same bytes and a SHA-256 sidecar are published
+once on the immutable GitHub release tag `opengeni-release-<full-source-sha>`; a
+retry compares the existing public assets byte for byte and fails instead of
+overwriting them. No moving BOM alias is created. Ordinary pushes to `main` can
+open/update the Version PR but cannot publish.
 
 The sandbox image remains separate:
 
