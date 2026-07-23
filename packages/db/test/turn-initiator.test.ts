@@ -206,14 +206,9 @@ describe("immutable session turn initiators", () => {
         .where(eq(schema.sessionTurns.id, started.turn!.id)),
     );
     expect(frozenTurn?.turnInstructions).toBe("Use the winning host context.");
-    expect(
-      (
-        started.events.find((event) => event.type === "user.message")?.payload as Record<
-          string,
-          unknown
-        >
-      ).turnInstructions,
-    ).toBeUndefined();
+    const userMessageEvent = started.events.find((event) => event.type === "user.message");
+    if (!userMessageEvent) throw new Error("visible user event was not created");
+    expect(userMessageEvent.payload).not.toHaveProperty("turnInstructions");
   });
 
   test("Send and Steer capture their actor while queue Edit preserves the original actor", async () => {
