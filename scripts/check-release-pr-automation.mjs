@@ -31,6 +31,10 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
 const shaPattern = /^[0-9a-f]{40}$/;
 const positiveIntegerPattern = /^[1-9][0-9]*$/;
 const decisiveReviewStates = new Set(["APPROVED", "CHANGES_REQUESTED", "DISMISSED"]);
+const retryableVersionProjectionErrors = new Set([
+  "Version PR base SHA changed",
+  "Version PR head SHA changed",
+]);
 const maximumPages = 30;
 const recordsPerPage = 100;
 
@@ -279,6 +283,42 @@ async function terminalVersionIdentity(api, context) {
   return pull;
 }
 
+async function convergedVersionHeadSha(api, context, options = {}) {
+  const attempts = options.attempts ?? 30;
+  const delayMs = options.delayMs ?? 1_000;
+  const sleep =
+    options.sleep ??
+    ((milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)));
+  invariant(
+    Number.isSafeInteger(attempts) && attempts > 0,
+    "Version PR projection attempts are invalid",
+  );
+  invariant(
+    Number.isSafeInteger(delayMs) && delayMs >= 0,
+    "Version PR projection delay is invalid",
+  );
+  invariant(typeof sleep === "function", "Version PR projection sleep is invalid");
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const [main, pull] = await Promise.all([
+      api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+      api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+    ]);
+    // A moving main is never eventual-consistency lag. Fail immediately instead
+    // of waiting against a source run that is no longer current.
+    assertMainRef(main, context.baseSha);
+    try {
+      return assertVersionPull(pull, context);
+    } catch (error) {
+      const retryable =
+        error instanceof Error && retryableVersionProjectionErrors.has(error.message);
+      if (!retryable || attempt === attempts) throw error;
+      await sleep(delayMs);
+    }
+  }
+  throw new Error("Version PR projection did not converge");
+}
+
 export async function validateVersionPrDispatch(options = {}) {
   const env = options.env ?? process.env;
   const logger = options.logger ?? console;
@@ -288,14 +328,20 @@ export async function validateVersionPrDispatch(options = {}) {
     "Version PR number",
   );
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
-  const [repository, main, pull] = await Promise.all([
-    api.get(repositoryPath("")),
-    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
-    api.get(repositoryPath(`/pulls/${prNumber}`)),
-  ]);
+  const repository = await api.get(repositoryPath(""));
   assertRepository(repository);
-  assertMainRef(main, context.sha);
-  const headSha = assertVersionPull(pull, { number: prNumber, baseSha: context.sha });
+  // changesets/action can finish updating the branch before GitHub's PR
+  // projection reflects the new base/head pair. Wait only for those two exact
+  // projection fields; every identity or ownership mismatch still fails fast.
+  const headSha = await convergedVersionHeadSha(
+    api,
+    { prNumber, baseSha: context.sha },
+    {
+      attempts: options.projectionAttempts,
+      delayMs: options.projectionDelayMs,
+      sleep: options.projectionSleep,
+    },
+  );
 
   await terminalVersionIdentity(api, {
     prNumber,

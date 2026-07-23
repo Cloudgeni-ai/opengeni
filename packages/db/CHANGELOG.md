@@ -1,5 +1,12 @@
 # @opengeni/db
 
+## 0.9.1
+
+### Patch Changes
+
+- 1f0ed18: Restore immutable concurrent-index migration history, stage populated-table migrations safely, and reject goal-bearing child sessions whose resulting first-party authority lacks `goals:manage`.
+- 00e1cdc: Enforce explicit session-event lock contracts and preserve sanitized PostgreSQL failure classification without replaying external effects.
+
 ## 0.9.0
 
 ### Minor Changes
