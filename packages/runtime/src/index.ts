@@ -170,6 +170,15 @@ import {
 } from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
+export {
+  getSkillLibraryEntry,
+  isSkillLibraryEntryId,
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
+  type SkillLibraryEntry,
+  type SkillLibraryFile,
+  type SkillLibrarySkill,
+} from "./skill-library";
 
 export type { RuntimeMetricsHooks } from "./metrics";
 export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
@@ -1186,6 +1195,30 @@ export type GitCredentialBindingSeed = {
 export type GitCredentialTokenWriterSession = SandboxSessionLike;
 export type ToolspaceTokenWriterSession = SandboxSessionLike;
 
+export type EffectiveSkillSelection = Readonly<{
+  id: string;
+  name: string;
+  source: "bundled" | "library" | "pack";
+  version: string | null;
+  contentSha256: string | null;
+  reason: string;
+}>;
+
+const agentSkillSelections = new WeakMap<object, readonly EffectiveSkillSelection[]>();
+const emptySkillSelections: readonly EffectiveSkillSelection[] = Object.freeze([]);
+
+/**
+ * Read-only, secret-free skill provenance for an already-built agent. This is
+ * intentionally separate from the model instructions and sandbox manifest so
+ * effective configuration inspection cannot accidentally expose credentials or
+ * turn skill activation into an authorization change.
+ */
+export function effectiveSkillSelectionsForAgent(
+  agent: object,
+): readonly EffectiveSkillSelection[] {
+  return agentSkillSelections.get(agent) ?? emptySkillSelections;
+}
+
 export type BuildAgentOptions = {
   model?: Model;
   /** Settled response for the one internal human-input interruption resumed by this run. */
@@ -1332,6 +1365,13 @@ export type BuildAgentOptions = {
   // skills in the sandbox skill index (mounted under .agents/) so
   // skills/<name> references resolve like any other indexed skill.
   packSkills?: PackSkill[];
+  // Explicitly selected, immutable curated-library skill content. These are
+  // separate from packSkills so repository-local/pack compatibility does not
+  // turn a curated entry into a mutable override.
+  skillLibrarySkills?: PackSkill[];
+  // Secret-free provenance for effective-configuration inspection. The worker
+  // resolves exact ids/versions/hashes before constructing the agent.
+  skillLibrarySelections?: EffectiveSkillSelection[];
   /**
    * Internal per-attempt cancellation boundary. The worker supplies Temporal's
    * signal so an in-flight shell process is interrupted immediately instead of
@@ -1750,6 +1790,9 @@ export function buildOpenGeniAgent(
     ),
     ...(runAs ? { runAs } : {}),
     capabilities: buildAgentCapabilities(settings, options.packSkills ?? [], {
+      ...(options.skillLibrarySkills?.length
+        ? { skillLibrarySkills: options.skillLibrarySkills }
+        : {}),
       ...(options.structuredToolTransport !== undefined
         ? { structuredToolTransport: options.structuredToolTransport }
         : {}),
@@ -1765,6 +1808,16 @@ export function buildOpenGeniAgent(
         : {}),
     }),
   });
+  agentSkillSelections.set(
+    agent,
+    Object.freeze(
+      effectiveSkillSelections(
+        options.skillLibrarySelections ?? [],
+        options.skillLibrarySkills ?? [],
+        options.packSkills ?? [],
+      ).map((selection) => Object.freeze(selection)),
+    ),
+  );
   if (options.genesisTitleHint) {
     agentsNeedingGenesisTitleDirective.add(agent);
   }
@@ -2058,6 +2111,7 @@ export function buildAgentCapabilities(
   settings: Settings,
   packSkills: PackSkill[],
   options: {
+    skillLibrarySkills?: PackSkill[];
     structuredToolTransport?: boolean;
     // EXPLICIT computer-use transport (see BuildAgentOptions.computerToolMode). When
     // present, computerUse() is handed the mode directly and its tools() obeys it
@@ -2094,7 +2148,11 @@ export function buildAgentCapabilities(
     filesystemCapability,
     shell({ ...(toolCancellation ? {} : { configureTools: withExecOpCorrelation }) }),
   ];
-  caps.push(skills({ lazyFrom: lazySkillSourceWithPackSkills(packSkills) }));
+  caps.push(
+    skills({
+      lazyFrom: lazySkillSourceWithPackSkills(packSkills, options.skillLibrarySkills ?? []),
+    }),
+  );
   // P4.3 computer-use: the agent drives the SAME :0 humans watch (xdotool/XTEST +
   // scrot), but only when the desktop tier is ON, computer-use is enabled, and the
   // backend is one whose image carries the X stack (descriptorgate — honest about
@@ -6584,26 +6642,46 @@ function isPathWithin(root: string, candidate: string): boolean {
 }
 
 /**
- * The skill source fed to the SDK Skills capability. Without pack skills this
- * is the plain bundled local-dir source, byte-for-byte the pre-pack behavior.
- * With pack skills it becomes a single in-memory dir source combining bundled
- * skill directories (as local_dir entries the SDK materializes lazily) with
- * pack skill directories built from manifest-carried file content — one skill
- * index, one `## Skills` instruction section, lazy `load_skill` for all of
- * them. A pack skill shadows a bundled skill with the same directory name.
+ * The skill source fed to the SDK Skills capability. Without pack or curated
+ * skills this is the plain bundled local-dir source, byte-for-byte the
+ * pre-pack behavior. With either selected source it becomes a single
+ * in-memory dir source combining bundled skill directories (as local_dir
+ * entries the SDK materializes lazily) with selected in-memory skill
+ * directories — one skill index, one `## Skills` instruction section, lazy
+ * `load_skill` for all of them. A pack skill shadows a bundled or curated
+ * skill with the same directory name, case-insensitively.
  */
-export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDirLazySkillSource {
+export function lazySkillSourceWithPackSkills(
+  packSkills: PackSkill[],
+  skillLibrarySkills: PackSkill[] = [],
+): LocalDirLazySkillSource {
   const bundledDir = bundledSkillsDir();
   const bundled = localDirLazySkillSource({ src: bundledDir });
-  if (packSkills.length === 0) {
+  if (packSkills.length === 0 && skillLibrarySkills.length === 0) {
     return bundled;
   }
   const children: Record<string, Entry> = {};
   for (const name of bundledSkillDirNames(bundledDir)) {
     children[name] = localDir({ src: join(bundledDir, name) });
   }
+  const libraryIndex: SkillIndexEntry[] = [];
+  const libraryNameKeys = new Set<string>();
+  for (const skill of skillLibrarySkills) {
+    assertSafePackSkillName(skill.name);
+    const key = skill.name.toLowerCase();
+    if (libraryNameKeys.has(key)) {
+      throw new Error(`Duplicate curated skill name: ${skill.name}`);
+    }
+    libraryNameKeys.add(key);
+    removeSkillChildByNameKey(children, key);
+    children[skill.name] = packSkillDirEntry(skill);
+    libraryIndex.push({
+      name: skill.name,
+      description: packSkillDescription(skill),
+      path: skill.name,
+    });
+  }
   const packIndex: SkillIndexEntry[] = [];
-  const packNames = new Set<string>();
   const packNameKeys = new Set<string>();
   for (const skill of packSkills) {
     assertSafePackSkillName(skill.name);
@@ -6611,7 +6689,7 @@ export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDir
       throw new Error(`Duplicate pack skill name: ${skill.name}`);
     }
     packNameKeys.add(skill.name.toLowerCase());
-    packNames.add(skill.name);
+    removeSkillChildByNameKey(children, skill.name.toLowerCase());
     children[skill.name] = packSkillDirEntry(skill);
     packIndex.push({
       name: skill.name,
@@ -6623,11 +6701,60 @@ export function lazySkillSourceWithPackSkills(packSkills: PackSkill[]): LocalDir
     source: dir({ children }),
     getIndex: (manifest, skillsPath) => [
       ...(bundled.getIndex?.(manifest, skillsPath) ?? []).filter(
-        (entry) => !packNames.has(entry.path ?? entry.name),
+        (entry) =>
+          !packNameKeys.has((entry.path ?? entry.name).toLowerCase()) &&
+          !libraryNameKeys.has((entry.path ?? entry.name).toLowerCase()),
+      ),
+      ...libraryIndex.filter(
+        (entry) => !packNameKeys.has((entry.path ?? entry.name).toLowerCase()),
       ),
       ...packIndex,
     ],
   };
+}
+
+function effectiveSkillSelections(
+  librarySelections: readonly EffectiveSkillSelection[],
+  librarySkills: readonly PackSkill[],
+  packSkills: readonly PackSkill[],
+): readonly EffectiveSkillSelection[] {
+  const defaultSelections = bundledSkillDirNames(bundledSkillsDir()).map((name) => ({
+    id: `bundled:${name}`,
+    name,
+    source: "bundled" as const,
+    version: null,
+    contentSha256: null,
+    reason: "deployment default skill bundle",
+  }));
+  const libraryNameKeys = new Set(librarySkills.map((skill) => skill.name.toLowerCase()));
+  const packNameKeys = new Set(packSkills.map((skill) => skill.name.toLowerCase()));
+  const selected = librarySelections.filter((selection) =>
+    libraryNameKeys.has(selection.name.toLowerCase()),
+  );
+  return [
+    ...defaultSelections.filter(
+      (selection) =>
+        !libraryNameKeys.has(selection.name.toLowerCase()) &&
+        !packNameKeys.has(selection.name.toLowerCase()),
+    ),
+    ...selected.filter((selection) => !packNameKeys.has(selection.name.toLowerCase())),
+    ...packSkills.map((skill) => ({
+      id: `pack:${skill.name}`,
+      name: skill.name,
+      source: "pack" as const,
+      version: null,
+      contentSha256: null,
+      reason: "enabled capability pack",
+    })),
+  ];
+}
+
+function removeSkillChildByNameKey(children: Record<string, Entry>, nameKey: string): void {
+  for (const name of Object.keys(children)) {
+    if (name.toLowerCase() === nameKey) {
+      delete children[name];
+    }
+  }
 }
 
 function bundledSkillDirNames(root: string): string[] {

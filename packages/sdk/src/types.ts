@@ -2661,6 +2661,7 @@ export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
 
 export type CapabilitySource =
   | "built_in"
+  | "library"
   | "configured"
   | "public_registry"
   | "registry"

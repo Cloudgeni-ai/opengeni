@@ -7,7 +7,8 @@
  * cross-tarball declaration drift, or a client-only global reached during SSR.
  * This gate stages release-shaped tarballs, installs them twice (the second time
  * from the frozen Bun lock), typechecks with tsgo, builds the root and session
- * subpaths through Vite, and server-renders the real root surface without a DOM.
+ * subpaths through Vite, verifies the packed runtime skill-library subpath, and
+ * server-renders the real SandboxWorkspace export without a DOM.
  */
 import { cp, mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
@@ -159,6 +160,21 @@ try {
   const versions = await workspaceVersions();
   const sdk = await stageTarball("packages/sdk", stagingRoot, tarballRoot, versions);
   const react = await stageTarball("packages/react", stagingRoot, tarballRoot, versions);
+  const runtime = await stageTarball("packages/runtime", stagingRoot, tarballRoot, versions);
+  const runtimeLocalDependencies = await Promise.all(
+    ["packages/agent-proto", "packages/codex", "packages/config", "packages/contracts"].map(
+      (directory) => stageTarball(directory, stagingRoot, tarballRoot, versions),
+    ),
+  );
+  const runtimeLocalDependencyFiles = Object.fromEntries(
+    runtimeLocalDependencies.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]),
+  );
+  const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
+  for (const artifact of ["package/dist/skill-library.js", "package/dist/skill-library.d.ts"]) {
+    if (!runtimeTarballContents.split("\n").includes(artifact)) {
+      throw new Error(`runtime tarball is missing ${artifact}`);
+    }
+  }
   const rootManifest = JSON.parse(
     await readFile(join(repoRoot, "package.json"), "utf8"),
   ) as PackageManifest;
@@ -182,6 +198,7 @@ try {
       ...(reactSource.peerDependencies ?? {}),
       "@opengeni/react": `file:${react.tarball}`,
       "@opengeni/sdk": sdkFile,
+      "@opengeni/runtime": `file:${runtime.tarball}`,
     },
     devDependencies: {
       "@tailwindcss/vite": reactSource.devDependencies?.["@tailwindcss/vite"],
@@ -193,7 +210,10 @@ try {
       tailwindcss: reactSource.devDependencies?.tailwindcss,
       vite: reactSource.devDependencies?.vite,
     },
-    overrides: { "@opengeni/sdk": sdkFile },
+    overrides: {
+      "@opengeni/sdk": sdkFile,
+      ...runtimeLocalDependencyFiles,
+    },
   };
 
   await Promise.all([
@@ -215,6 +235,7 @@ try {
           },
           include: [
             "browser.tsx",
+            "runtime-proof.ts",
             "session.ts",
             "session.vite.config.ts",
             "ssr.tsx",
@@ -250,6 +271,10 @@ try {
       'import { OpenGeniProvider, SandboxWorkspace } from "@opengeni/react";\nimport { OpenGeniClient } from "@opengeni/sdk";\nimport { renderToStaticMarkup } from "react-dom/server";\nconst client = new OpenGeniClient({ baseUrl: "https://api.example.invalid" });\nconst markup = renderToStaticMarkup(<OpenGeniProvider client={client} workspaceId="clean-consumer"><SandboxWorkspace sessionId="package-proof" events={[]} primary={<main>Clean consumer SSR proof</main>} collapsed /></OpenGeniProvider>);\nif (!markup.includes("Clean consumer SSR proof")) throw new Error("SSR output lost the primary pane");\nconsole.log(`SSR_OK bytes=${new TextEncoder().encode(markup).byteLength}`);\n',
     ),
     writeFile(
+      join(consumerRoot, "runtime-proof.ts"),
+      'import { getSkillLibraryEntry, listSkillLibraryEntries } from "@opengeni/runtime/skill-library";\nconst entry = getSkillLibraryEntry("azure-verified-modules", "1.0.0");\nif (!entry) throw new Error("packed runtime skill-library entry was not available");\nif (!listSkillLibraryEntries().some((candidate) => candidate.id === entry.id && candidate.version === entry.version)) throw new Error("packed runtime skill-library list did not include the entry");\nconsole.log(`RUNTIME_SKILL_LIBRARY_OK version=${entry.version} hash=${entry.contentSha256}`);\n',
+    ),
+    writeFile(
       join(consumerRoot, "session.ts"),
       'import { buildTimeline, type SessionClientLike, useComposer, useSessionControl, useSessionEvents, useTurnQueue } from "@opengeni/react/session";\nconst unused = (..._input: unknown[]): never => { throw new Error("type-only session client fixture"); };\nexport const sessionClient = { getSession: unused, listEvents: unused, streamEvents: unused, getComposerDraft: unused, saveComposerDraft: unused, sendMessage: unused, steerMessage: unused, getQueue: unused, moveQueueItem: unused, editQueueItem: unused, steerQueueItem: unused, deleteQueueItem: unused, pauseSession: unused, resumeSession: unused, sendApprovalDecision: unused } satisfies SessionClientLike;\nexport const sessionSurface = [sessionClient, buildTimeline, useComposer, useSessionControl, useSessionEvents, useTurnQueue];\n',
     ),
@@ -264,6 +289,7 @@ try {
   await run(["bun", "run", "build"], consumerRoot);
   await run(["bun", "run", "build:session"], consumerRoot);
   await run(["bun", "run", "ssr"], consumerRoot);
+  await run(["bun", "run", "runtime-proof.ts"], consumerRoot);
 
   const sessionBundle = await readFile(
     join(consumerRoot, "session-dist", "session-consumer.js"),
@@ -294,7 +320,7 @@ try {
 
   passed = true;
   process.stdout.write(
-    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version}; strict types, session-only bundle, browser CSS, and SSR are clean.\n`,
+    `[publish-consumer] PASS ${sdk.manifest.name}@${sdk.manifest.version} + ${react.manifest.name}@${react.manifest.version} + ${runtime.manifest.name}@${runtime.manifest.version}; strict types, session-only bundle, browser CSS, SSR, and packed skill-library imports are clean.\n`,
   );
 } finally {
   if (passed && !keepArtifacts) {

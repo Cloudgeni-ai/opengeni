@@ -69,6 +69,8 @@ export function capabilitySourceLabel(source: CapabilitySource | string): string
   switch (source) {
     case "built_in":
       return "Built in";
+    case "library":
+      return "Curated library";
     case "configured":
       return "Configured";
     case "public_registry":
@@ -79,6 +81,45 @@ export function capabilitySourceLabel(source: CapabilitySource | string): string
     default:
       return String(source).replaceAll("_", " ");
   }
+}
+
+export type CuratedSkillProvenance = {
+  libraryId: string | null;
+  version: string | null;
+  contentSha256: string | null;
+  sourceCommit: string | null;
+  provenance: string | null;
+  sourceUrl: string | null;
+  license: string | null;
+  documentationUrl: string | null;
+  artifactPath: string | null;
+  status: "enabled" | "not_enabled";
+  effectiveSelection: string;
+};
+
+/**
+ * Return the public, immutable identity and effective selection state for a
+ * curated skill. Credentials and other runtime configuration are deliberately
+ * not part of this projection.
+ */
+export function curatedSkillProvenance(item: CapabilityCatalogItem): CuratedSkillProvenance | null {
+  if (item.kind !== "skill" || item.source !== "library") {
+    return null;
+  }
+  const metadata = item.metadata;
+  return {
+    libraryId: stringValue(metadata.libraryId),
+    version: stringValue(metadata.version),
+    contentSha256: stringValue(metadata.contentSha256),
+    sourceCommit: stringValue(metadata.sourceCommit),
+    provenance: stringValue(metadata.provenance) ?? item.provenance,
+    sourceUrl: stringValue(metadata.sourceUrl),
+    license: stringValue(metadata.license),
+    documentationUrl: stringValue(metadata.documentationUrl),
+    artifactPath: stringValue(metadata.artifactPath),
+    status: item.enabled ? "enabled" : "not_enabled",
+    effectiveSelection: item.enabled ? (item.enabledReason ?? "enabled") : "not selected",
+  };
 }
 
 export type CapabilityFormState = {
@@ -195,7 +236,7 @@ export type CapabilityConnectPlan =
   | { mode: "api_key"; providerDomain: string; fields: RequiredHeaderField[] };
 
 export function capabilityConnectPlan(item: CapabilityCatalogItem): CapabilityConnectPlan {
-  // Non-runtime kinds and MCPs with no auth just enable/track directly.
+  // Non-runtime kinds and MCPs with no auth just enable directly.
   if (item.kind !== "mcp") {
     return { mode: "enable" };
   }
@@ -653,7 +694,7 @@ export function createInputFromCatalogItem(item: CapabilityCatalogItem): CreateC
 /**
  * Kind-aware validation for the "Add custom" dialog. Only MCP servers need an
  * endpoint URL — that field is hidden for every other kind (the user's explicit
- * complaint was being asked for an endpoint when tracking a skill).
+ * complaint was being asked for an endpoint when enabling a skill).
  */
 export function capabilityFormError(form: CapabilityFormState): string | null {
   if (!form.name.trim()) {
