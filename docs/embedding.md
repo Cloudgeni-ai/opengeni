@@ -279,6 +279,18 @@ plus `provider`, `repositoryId`, `installationId`, `projectId`, and
 `connectionId`; GitHub aliases remain accepted. `expiresAt` is per binding;
 without it OpenGeni uses a conservative bounded refresh cadence.
 
+When the provider cannot mint a token whose authority is contained to those
+selected repositories, the host may return `transport: { kind: "http_broker",
+repositories }`. Every route must echo exactly one requested `repositoryUri`
+and provide a unique, credential-free, canonical HTTPS `brokerUri`; the route
+set must cover the binding exactly. `token` is then a short-lived bearer for the
+host's smart-Git endpoint rather than a provider token. OpenGeni keeps the
+persisted remote canonical and installs selected-remote Git `insteadOf` rewrites in a
+replaceable include file. The path-aware helper supplies the bearer only to the
+returned broker URI. It rejects missing, extra, duplicate, non-HTTPS,
+credential-bearing, query-bearing, or fragment-bearing routes before sandbox
+setup.
+
 The worker never writes token values into the sandbox manifest or attach-time
 environment delta. The runtime stores each token at
 `OPENGENI_GIT_CREDENTIALS_DIR/<sha256(binding-id)>-token`, installs a Git
@@ -288,10 +300,14 @@ fall through to a sibling credential. Provider aliases (including
 `OPENGENI_GIT_TOKEN_FILE`) are written only while that provider has exactly one
 binding; they are removed when a second appears. `gh`, `glab`, and `az` select
 an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then
-a sole provider binding, and fail closed if selection remains ambiguous. Each
-binding renews independently, so one failed connection cannot block or replace
-a healthy sibling token. Renewal requires no model/MCP call and never mutates
-the manifest.
+a sole direct-provider binding, and fail closed if selection remains ambiguous.
+Broker bearers are never exported as provider tokens: a provider CLI selected
+for a brokered binding fails with guidance to use the configured provider MCP
+tools. Each binding renews independently, so one failed connection cannot block
+or replace a healthy sibling token. Renewal may rotate a broker bearer but may
+not change its exact routes during the admitted attempt; any route change fails
+closed and waits for a newer turn. Renewal requires no model/MCP call and never
+mutates the manifest.
 `sandboxSecrets` receives `{ accountId, workspaceId, variableSetId }` and returns
 plaintext variable set values plus the scoped `workspaceId`, with the same echo
 check before values are applied.

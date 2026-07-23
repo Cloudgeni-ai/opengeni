@@ -1737,11 +1737,39 @@ export type GitCredentialsRequest = {
   repositoryIds: number[];
 };
 
+/**
+ * One exact repository route exposed by a host-owned HTTPS smart-Git broker.
+ *
+ * `repositoryUri` must echo one URI from the request's `repositoryRefs`.
+ * `brokerUri` is a stable, credential-free HTTPS remote. The rotating bearer
+ * remains separate in `GitCredentials.token`, so it cannot leak through Git
+ * configuration, provider-CLI arguments, manifests, or repository metadata.
+ */
+export type GitHttpBrokerRepositoryRoute = {
+  repositoryUri: string;
+  brokerUri: string;
+};
+
+/**
+ * Optional transport override for credentials that cannot be safely narrowed
+ * into a provider token. Omission retains the provider-token behavior.
+ */
+export type GitCredentialTransport = {
+  kind: "http_broker";
+  repositories: GitHttpBrokerRepositoryRoute[];
+};
+
 export type GitCredentials = {
-  // The minted provider token. Required for purpose="token"; optional for
-  // purpose="identity" so hosts can return only stable git identity before lazy
-  // sandbox provision. The value never enters the manifest.
+  // The minted secret. For the default transport this is a provider token; for
+  // `http_broker` it is the broker bearer. Required for purpose="token";
+  // optional for purpose="identity" so hosts can return only stable git identity
+  // before lazy sandbox provision. The value never enters the manifest.
   token?: string;
+  // A host-owned exact smart-Git transport for providers whose available token
+  // cannot be constrained to the selected repositories. OpenGeni rewrites only
+  // the echoed repository remotes and never exposes this bearer to provider
+  // CLIs. Omitted means the token is a direct provider credential.
+  transport?: GitCredentialTransport;
   // workspace-scope cross-check echo: the workspace the provider scoped this token to. The activity
   // asserts `workspaceId === request.workspaceId` before injecting.
   workspaceId: string;

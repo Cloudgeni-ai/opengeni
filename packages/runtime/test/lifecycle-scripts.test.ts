@@ -120,6 +120,30 @@ describe("lifecycle scripts — real sh execution semantics", () => {
     ).toThrow("claimed by multiple credential bindings");
   });
 
+  test("fails closed on an unsupported credential transport", () => {
+    expect(() =>
+      repositoryCloneCommand(
+        [
+          {
+            kind: "repository",
+            uri: "https://gitlab.com/acme/repo.git",
+            ref: "main",
+            provider: "gitlab",
+            credentialBindingId: "gitlab-primary",
+          },
+        ],
+        [
+          {
+            credentialBindingId: "gitlab-primary",
+            provider: "gitlab",
+            token: "must-not-be-treated-as-provider-token",
+            transport: { kind: "future_transport" } as never,
+          },
+        ],
+      ),
+    ).toThrow("uses an unsupported transport");
+  });
+
   test("seed block: provider token files 600 + askpass/wrappers 755, atomic, askpass reads current provider token", () => {
     const root = mkdtempSync(join(tmpdir(), "opengeni-clone-"));
     try {
@@ -289,6 +313,277 @@ describe("lifecycle scripts — real sh execution semantics", () => {
         });
       expect(fill("acme/one.git")).toContain("password=gh-one");
       expect(fill("acme/two.git")).toContain("password=gh-two");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("HTTPS broker rewrites only selected remotes, rotates its bearer, and never authenticates provider CLIs", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-http-broker-"));
+    try {
+      const home = join(root, "home");
+      const realbin = join(root, "realbin");
+      const repo = join(root, "repo");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(realbin, { recursive: true });
+      mkdirSync(repo, { recursive: true });
+      execFileSync("git", ["init", repo]);
+      execFileSync("git", [
+        "-C",
+        repo,
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.com/acme/private.git",
+      ]);
+      writeFileSync(
+        join(realbin, "glab"),
+        "#!/usr/bin/env sh\nprintf 'GL=%s\\n' \"${GITLAB_TOKEN-unset}\"\n",
+        { mode: 0o755 },
+      );
+
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://gitlab.com/acme/private.git",
+          ref: "main",
+          provider: "gitlab" as const,
+          credentialBindingId: "gitlab/account-wide",
+        },
+      ];
+      const transport = {
+        kind: "http_broker" as const,
+        repositories: [
+          {
+            repositoryUri: "https://gitlab.com/acme/private.git",
+            brokerUri: "https://broker.example.test/git/session/binding/private.git",
+          },
+        ],
+      };
+      const initialBindings = [
+        {
+          credentialBindingId: "gitlab/account-wide",
+          provider: "gitlab" as const,
+          token: "broker-bearer-one",
+          transport,
+          providerBindingCount: 1,
+        },
+      ];
+      expect(
+        runScript(
+          `${gitCredentialBindingTokenRefreshCommand(initialBindings)}\n${setupScript(resources, initialBindings)}`,
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+
+      expect(
+        execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
+          env: { ...process.env, HOME: home },
+          encoding: "utf8",
+        }).trim(),
+      ).toBe("https://broker.example.test/git/session/binding/private.git");
+      const fill = (host = "broker.example.test", path = "git/session/binding/private.git") =>
+        execFileSync("git", ["credential", "fill"], {
+          env: {
+            ...process.env,
+            HOME: home,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_ASKPASS: join(home, ".opengeni", "askpass"),
+          },
+          input: `protocol=https\nhost=${host}\npath=${path}\n\n`,
+          encoding: "utf8",
+        });
+      expect(fill()).toContain("password=broker-bearer-one");
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
+      expect(
+        readFileSync(join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"), "utf8"),
+      ).not.toContain("broker-bearer-one");
+
+      expect(() =>
+        execFileSync("glab", [], {
+          cwd: repo,
+          env: {
+            ...process.env,
+            HOME: home,
+            GITLAB_TOKEN: "ambient-token-must-not-pass",
+            PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+          },
+          encoding: "utf8",
+        }),
+      ).toThrow();
+
+      const renewedBindings = [
+        {
+          ...initialBindings[0]!,
+          token: "broker-bearer-two",
+        },
+      ];
+      expect(
+        runScript(gitCredentialBindingTokenRefreshCommand(renewedBindings), { HOME: home }).status,
+      ).toBe(0);
+      expect(fill()).toContain("password=broker-bearer-two");
+      expect(
+        execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
+          env: { ...process.env, HOME: home },
+          encoding: "utf8",
+        }).trim(),
+      ).toBe("https://broker.example.test/git/session/binding/private.git");
+
+      const directBindings = [
+        {
+          credentialBindingId: "gitlab/account-wide",
+          provider: "gitlab" as const,
+          token: "direct-contained-token",
+          providerBindingCount: 1,
+        },
+      ];
+      expect(
+        runScript(
+          `${gitCredentialBindingTokenRefreshCommand(directBindings)}\n${setupScript(resources, directBindings)}`,
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+      expect(
+        execFileSync("git", ["-C", repo, "remote", "get-url", "origin"], {
+          env: { ...process.env, HOME: home },
+          encoding: "utf8",
+        }).trim(),
+      ).toBe("https://gitlab.com/acme/private.git");
+      expect(
+        readFileSync(join(home, ".opengeni", "git-credentials", "http-broker.gitconfig"), "utf8"),
+      ).toBe("");
+      expect(fill("gitlab.com", "acme/private.git")).toContain("password=direct-contained-token");
+      const staleBrokerFill = fill();
+      expect(staleBrokerFill).toContain("password=\n");
+      expect(staleBrokerFill).not.toContain("broker-bearer-one");
+      expect(staleBrokerFill).not.toContain("broker-bearer-two");
+      expect(staleBrokerFill).not.toContain("direct-contained-token");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("mixed direct and broker bindings for one provider select Git and provider CLI authority independently", () => {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-git-http-broker-mixed-"));
+    try {
+      const home = join(root, "home");
+      const realbin = join(root, "realbin");
+      const directRepo = join(root, "direct");
+      const brokeredRepo = join(root, "brokered");
+      mkdirSync(home, { recursive: true });
+      mkdirSync(realbin, { recursive: true });
+      mkdirSync(directRepo, { recursive: true });
+      mkdirSync(brokeredRepo, { recursive: true });
+      execFileSync("git", ["init", directRepo]);
+      execFileSync("git", ["init", brokeredRepo]);
+      execFileSync("git", [
+        "-C",
+        directRepo,
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.com/acme/direct.git",
+      ]);
+      execFileSync("git", [
+        "-C",
+        brokeredRepo,
+        "remote",
+        "add",
+        "origin",
+        "https://gitlab.com/acme/brokered.git",
+      ]);
+      writeFileSync(
+        join(realbin, "glab"),
+        "#!/usr/bin/env sh\nprintf 'GL=%s\\n' \"${GITLAB_TOKEN-unset}\"\n",
+        { mode: 0o755 },
+      );
+
+      const resources = [
+        {
+          kind: "repository" as const,
+          uri: "https://gitlab.com/acme/direct.git",
+          ref: "main",
+          provider: "gitlab" as const,
+          credentialBindingId: "gitlab/direct",
+        },
+        {
+          kind: "repository" as const,
+          uri: "https://gitlab.com/acme/brokered.git",
+          ref: "main",
+          provider: "gitlab" as const,
+          credentialBindingId: "gitlab/brokered",
+        },
+      ];
+      const bindings = [
+        {
+          credentialBindingId: "gitlab/direct",
+          provider: "gitlab" as const,
+          token: "direct-token",
+          providerBindingCount: 2,
+        },
+        {
+          credentialBindingId: "gitlab/brokered",
+          provider: "gitlab" as const,
+          token: "broker-bearer",
+          providerBindingCount: 2,
+          transport: {
+            kind: "http_broker" as const,
+            repositories: [
+              {
+                repositoryUri: "https://gitlab.com/acme/brokered.git",
+                brokerUri: "https://broker.example.test/git/session/brokered.git",
+              },
+            ],
+          },
+        },
+      ];
+      expect(
+        runScript(
+          `${gitCredentialBindingTokenRefreshCommand(bindings)}\n${setupScript(resources, bindings)}`,
+          { HOME: home },
+        ).status,
+      ).toBe(0);
+
+      const fill = (host: string, path: string) =>
+        execFileSync("git", ["credential", "fill"], {
+          env: {
+            ...process.env,
+            HOME: home,
+            GIT_TERMINAL_PROMPT: "0",
+            GIT_ASKPASS: join(home, ".opengeni", "askpass"),
+          },
+          input: `protocol=https\nhost=${host}\npath=${path}\n\n`,
+          encoding: "utf8",
+        });
+      expect(fill("gitlab.com", "acme/direct.git")).toContain("password=direct-token");
+      expect(fill("broker.example.test", "git/session/brokered.git")).toContain(
+        "password=broker-bearer",
+      );
+      expect(existsSync(join(home, ".opengeni", "git-credentials", "gitlab-token"))).toBe(false);
+
+      const env = {
+        ...process.env,
+        HOME: home,
+        GITLAB_TOKEN: "ambient-token-must-not-win",
+        PATH: `${join(home, ".opengeni", "bin")}:${realbin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
+      };
+      expect(execFileSync("glab", [], { cwd: directRepo, env, encoding: "utf8" })).toBe(
+        "GL=direct-token\n",
+      );
+      expect(() =>
+        execFileSync("glab", [], {
+          cwd: brokeredRepo,
+          env,
+          encoding: "utf8",
+        }),
+      ).toThrow();
+      expect(() =>
+        execFileSync("glab", [], {
+          cwd: root,
+          env: { ...env, OPENGENI_GIT_BINDING: "gitlab/brokered" },
+          encoding: "utf8",
+        }),
+      ).toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

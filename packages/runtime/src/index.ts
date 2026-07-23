@@ -27,6 +27,7 @@ import {
   signDelegatedAccessToken,
   RequestHumanInputToolInput,
   type GitCredentialProvider,
+  type GitCredentialTransport,
   type HumanInputResponse,
   type McpServerConnectionRef,
   type Permission,
@@ -1188,6 +1189,7 @@ export type GitCredentialBindingSeed = {
   credentialBindingId: string;
   provider: GitCredentialProvider;
   token: string;
+  transport?: GitCredentialTransport;
   expiresAt?: string;
   /** Total active bindings for this provider, used to suppress unsafe aliases. */
   providerBindingCount?: number;
@@ -5571,6 +5573,17 @@ type RuntimeGitBindingDescriptor = {
   uri: string;
 };
 
+type RuntimeGitHttpBrokerRouteDescriptor = {
+  provider: GitCredentialProvider;
+  credentialBindingId: string;
+  bindingHash: string;
+  repositoryUri: string;
+  brokerUri: string;
+  protocol: "https";
+  host: string;
+  path: string;
+};
+
 function runtimeGitBindingDescriptors(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
 ): RuntimeGitBindingDescriptor[] {
@@ -5614,6 +5627,115 @@ function runtimeGitBindingDescriptors(
   });
 }
 
+function gitCredentialBindingKey(
+  provider: GitCredentialProvider,
+  credentialBindingId: string,
+): string {
+  return `${provider}\u0000${credentialBindingId}`;
+}
+
+function brokeredGitCredentialBindingKeys(
+  bindings: GitCredentialBindingSeed[],
+): ReadonlySet<string> {
+  return new Set(
+    bindings
+      .filter((binding) => binding.transport?.kind === "http_broker")
+      .map((binding) => gitCredentialBindingKey(binding.provider, binding.credentialBindingId)),
+  );
+}
+
+function runtimeGitHttpBrokerRouteDescriptors(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
+): RuntimeGitHttpBrokerRouteDescriptor[] {
+  const resourceDescriptors = runtimeGitBindingDescriptors(resources);
+  const byBindingAndUri = new Map<string, RuntimeGitBindingDescriptor>();
+  for (const descriptor of resourceDescriptors) {
+    byBindingAndUri.set(
+      `${gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId)}\u0000${descriptor.uri}`,
+      descriptor,
+    );
+  }
+
+  const routes: RuntimeGitHttpBrokerRouteDescriptor[] = [];
+  const claimedRepositoryUris = new Set<string>();
+  const claimedBrokerUris = new Set<string>();
+  for (const binding of bindings) {
+    if (!binding.transport) continue;
+    if (
+      typeof binding.transport !== "object" ||
+      binding.transport.kind !== "http_broker" ||
+      !Array.isArray(binding.transport.repositories)
+    ) {
+      throw new Error(
+        `Git credential binding ${binding.credentialBindingId} uses an unsupported transport`,
+      );
+    }
+    const bindingKey = gitCredentialBindingKey(binding.provider, binding.credentialBindingId);
+    const expected = resourceDescriptors.filter(
+      (descriptor) =>
+        gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId) === bindingKey,
+    );
+    if (expected.length === 0 || binding.transport.repositories.length !== expected.length) {
+      throw new Error(
+        `Git HTTP broker binding ${binding.credentialBindingId} does not cover its exact repository set`,
+      );
+    }
+    for (const route of binding.transport.repositories) {
+      if (
+        !route ||
+        typeof route !== "object" ||
+        typeof route.repositoryUri !== "string" ||
+        typeof route.brokerUri !== "string"
+      ) {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an invalid repository route`,
+        );
+      }
+      const descriptor = byBindingAndUri.get(`${bindingKey}\u0000${route.repositoryUri}`);
+      if (!descriptor || claimedRepositoryUris.has(route.repositoryUri)) {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an unexpected repository route`,
+        );
+      }
+      let brokerUrl: URL;
+      try {
+        brokerUrl = new URL(route.brokerUri);
+      } catch {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an invalid broker URI`,
+        );
+      }
+      if (
+        brokerUrl.protocol !== "https:" ||
+        brokerUrl.username ||
+        brokerUrl.password ||
+        brokerUrl.search ||
+        brokerUrl.hash ||
+        brokerUrl.href !== route.brokerUri ||
+        claimedBrokerUris.has(brokerUrl.href)
+      ) {
+        throw new Error(
+          `Git HTTP broker binding ${binding.credentialBindingId} contains an unsafe broker URI`,
+        );
+      }
+      claimedRepositoryUris.add(route.repositoryUri);
+      claimedBrokerUris.add(brokerUrl.href);
+      routes.push({
+        provider: binding.provider,
+        credentialBindingId: binding.credentialBindingId,
+        bindingHash: gitCredentialBindingHash(binding.credentialBindingId),
+        repositoryUri: route.repositoryUri,
+        brokerUri: route.brokerUri,
+        protocol: "https",
+        host: brokerUrl.host.toLowerCase(),
+        path: brokerUrl.pathname.replace(/^\/+|\/+$/g, ""),
+      });
+    }
+  }
+  return routes;
+}
+
 function gitUsernameForProvider(provider: GitCredentialProvider): string {
   if (provider === "github") return "x-access-token";
   if (provider === "gitlab") return "oauth2";
@@ -5622,22 +5744,48 @@ function gitUsernameForProvider(provider: GitCredentialProvider): string {
 
 function gitCredentialHelperBindingCaseLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
 ): string[] {
-  return runtimeGitBindingDescriptors(resources).flatMap((descriptor) => {
+  const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  return runtimeGitBindingDescriptors(resources)
+    .filter(
+      (descriptor) =>
+        !brokeredBindings.has(
+          gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId),
+        ),
+    )
+    .flatMap((descriptor) => {
+      const paths = new Set([
+        descriptor.path,
+        descriptor.path.replace(/\.git$/, ""),
+        `${descriptor.path.replace(/\.git$/, "")}.git`,
+      ]);
+      return [...paths].map(
+        (path) =>
+          `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+      );
+    });
+}
+
+function gitCredentialHelperBrokerCaseLines(
+  routes: RuntimeGitHttpBrokerRouteDescriptor[],
+): string[] {
+  return routes.flatMap((route) => {
     const paths = new Set([
-      descriptor.path,
-      descriptor.path.replace(/\.git$/, ""),
-      `${descriptor.path.replace(/\.git$/, "")}.git`,
+      route.path,
+      route.path.replace(/\.git$/, ""),
+      `${route.path.replace(/\.git$/, "")}.git`,
     ]);
     return [...paths].map(
       (path) =>
-        `  ${shellQuote(`${descriptor.protocol}|${descriptor.host}|${path}`)}) username=${shellQuote(gitUsernameForProvider(descriptor.provider))}; token_file="$credential_dir/${descriptor.bindingHash}-token" ;;`,
+        `  ${shellQuote(`${route.protocol}|${route.host}|${path}`)}) username=opengeni; token_file="$credential_dir/${route.bindingHash}-token" ;;`,
     );
   });
 }
 
 function gitAskpassHostProviderCaseLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[],
+  brokerRoutes: RuntimeGitHttpBrokerRouteDescriptor[],
 ): string[] {
   const hosts = new Map<string, { provider: GitCredentialProvider; bindings: Set<string> }>();
   for (const descriptor of runtimeGitBindingDescriptors(resources)) {
@@ -5648,13 +5796,19 @@ function gitAskpassHostProviderCaseLines(
     entry.bindings.add(`${descriptor.provider}\u0000${descriptor.credentialBindingId}`);
     hosts.set(descriptor.host, entry);
   }
-  return [...hosts.entries()]
-    .filter(([, entry]) => entry.bindings.size === 1)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(
-      ([hostname, entry]) =>
-        `    ${shellQuote(hostname)}) printf '%s\\n' ${entry.provider}; return 0 ;;`,
-    );
+  const brokerHosts = [...new Set(brokerRoutes.map((route) => route.host))]
+    .sort((a, b) => a.localeCompare(b))
+    .map((hostname) => `    ${shellQuote(hostname)}) printf '\\n'; return 0 ;;`);
+  return [
+    ...brokerHosts,
+    ...[...hosts.entries()]
+      .filter(([, entry]) => entry.bindings.size === 1)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(
+        ([hostname, entry]) =>
+          `    ${shellQuote(hostname)}) printf '%s\\n' ${entry.provider}; return 0 ;;`,
+      ),
+  ];
 }
 
 function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed[] = []): string[] {
@@ -5664,7 +5818,7 @@ function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed
     const count = Math.max(1, binding.providerBindingCount ?? 1);
     const provider = binding.provider;
     const lines = [`write_git_binding_token ${shellQuote(hash)} "\${${seedEnv}:-}"`];
-    if (count === 1) {
+    if (count === 1 && binding.transport?.kind !== "http_broker") {
       lines.push(`write_git_provider_token ${shellQuote(provider)} "\${${seedEnv}:-}"`);
     } else {
       lines.push(`remove_git_provider_token ${shellQuote(provider)}`);
@@ -5726,14 +5880,45 @@ function gitCredentialTokenWriterCommandLines(bindings: GitCredentialBindingSeed
   ];
 }
 
+function gitHttpBrokerConfigCommandLines(routes: RuntimeGitHttpBrokerRouteDescriptor[]): string[] {
+  return [
+    'git_http_broker_config="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/http-broker.gitconfig"',
+    'mkdir -p "$(dirname "$git_http_broker_config")"',
+    'broker_umask="$(umask)"',
+    "umask 077",
+    ': > "$git_http_broker_config.tmp.$$"',
+    ...routes.map(
+      (route) =>
+        `git config --file "$git_http_broker_config.tmp.$$" --add ${shellQuote(`url.${route.brokerUri}.insteadOf`)} ${shellQuote(route.repositoryUri)}`,
+    ),
+    'mv -f "$git_http_broker_config.tmp.$$" "$git_http_broker_config"',
+    'umask "$broker_umask"',
+    'git config --global --unset-all include.path "$git_http_broker_config" >/dev/null 2>&1 || true',
+    'git config --global --add include.path "$git_http_broker_config"',
+  ];
+}
+
 function gitCredentialHelperCommandLines(
   resources: Extract<ResourceRef, { kind: "repository" }>[] = [],
   bindings: GitCredentialBindingSeed[] = [],
 ): string[] {
-  const hostProviderCases = gitAskpassHostProviderCaseLines(resources);
-  const bindingCases = gitCredentialHelperBindingCaseLines(resources);
+  const brokerRoutes = runtimeGitHttpBrokerRouteDescriptors(resources, bindings);
+  const hostProviderCases = gitAskpassHostProviderCaseLines(resources, brokerRoutes);
+  const bindingCases = [
+    ...gitCredentialHelperBindingCaseLines(resources, bindings),
+    ...gitCredentialHelperBrokerCaseLines(brokerRoutes),
+  ];
   const descriptors = runtimeGitBindingDescriptors(resources);
-  const wrapperDescriptors = bindings.length > 0 ? descriptors : [];
+  const brokeredBindings = brokeredGitCredentialBindingKeys(bindings);
+  const wrapperDescriptors =
+    bindings.length > 0
+      ? descriptors.filter(
+          (descriptor) =>
+            !brokeredBindings.has(
+              gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId),
+            ),
+        )
+      : [];
   const bindingProviders = new Map<GitCredentialProvider, Set<string>>();
   for (const descriptor of runtimeGitBindingDescriptors(resources)) {
     const ids = bindingProviders.get(descriptor.provider) ?? new Set<string>();
@@ -5766,6 +5951,31 @@ function gitCredentialHelperCommandLines(
           .filter(([, ids]) => ids.size > 1)
           .map(([provider]) => provider)
       : [];
+  const brokeredOriginCases = brokerRoutes.flatMap((route) => {
+    const base = route.repositoryUri.replace(/\.git$/, "");
+    return [...new Set([route.repositoryUri, base, `${base}.git`])].map(
+      (uri) => `    ${shellQuote(`${route.provider}|${uri}`)}) return 0 ;;`,
+    );
+  });
+  const brokeredBindingHashCases = bindings
+    .filter((binding) => binding.transport?.kind === "http_broker")
+    .map(
+      (binding) =>
+        `    ${shellQuote(`${binding.provider}|${gitCredentialBindingHash(binding.credentialBindingId)}`)}) return 0 ;;`,
+    );
+  const providerBindingKinds = new Map<
+    GitCredentialProvider,
+    { direct: number; brokered: number }
+  >();
+  for (const binding of bindings) {
+    const counts = providerBindingKinds.get(binding.provider) ?? { direct: 0, brokered: 0 };
+    if (binding.transport?.kind === "http_broker") counts.brokered += 1;
+    else counts.direct += 1;
+    providerBindingKinds.set(binding.provider, counts);
+  }
+  const brokerOnlyProviders = [...providerBindingKinds.entries()]
+    .filter(([, counts]) => counts.brokered > 0 && counts.direct === 0)
+    .map(([provider]) => provider);
   return [
     ...gitCredentialTokenWriterCommandLines(bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
@@ -5857,6 +6067,7 @@ function gitCredentialHelperCommandLines(
     "git config --global --add credential.helper ''",
     'git config --global --add credential.helper "$git_credential_helper"',
     "git config --global credential.useHttpPath true",
+    ...gitHttpBrokerConfigCommandLines(brokerRoutes),
     'wrapper_dir="${OPENGENI_GIT_CLI_WRAPPER_DIR:-$HOME/.opengeni/bin}"',
     'mkdir -p "$wrapper_dir"',
     "for opengeni_git_cli_tool in gh glab az; do",
@@ -5884,9 +6095,21 @@ function gitCredentialHelperCommandLines(
     "    *) return 1 ;;",
     "  esac",
     "}",
+    "binding_hash_is_brokered() {",
+    '  case "$provider|$1" in',
+    ...brokeredBindingHashCases,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
     "binding_hash_for_origin() {",
     '  case "$provider|$1" in',
     ...originWrapperHashes,
+    "    *) return 1 ;;",
+    "  esac",
+    "}",
+    "origin_is_brokered() {",
+    '  case "$provider|$1" in',
+    ...brokeredOriginCases,
     "    *) return 1 ;;",
     "  esac",
     "}",
@@ -5897,19 +6120,25 @@ function gitCredentialHelperCommandLines(
     "  esac",
     "}",
     `multi_binding_providers=${shellQuote(multiWrapperProviders.join(" "))}`,
+    `broker_only_providers=${shellQuote(brokerOnlyProviders.join(" "))}`,
     'if [ -n "$provider" ]; then',
     "  binding_hash=",
     '  if [ -n "${OPENGENI_GIT_BINDING:-}" ]; then',
     '    binding_hash="$(hash_binding_id "$OPENGENI_GIT_BINDING")"',
+    '    binding_hash_is_brokered "$binding_hash" && { printf \'%s\\n\' "$tool provider API authentication is host-brokered for OPENGENI_GIT_BINDING; use the configured provider MCP tools" >&2; exit 2; }',
     '    binding_hash_allowed "$binding_hash" || { printf \'%s\\n\' "OPENGENI_GIT_BINDING does not select a $provider credential attached to this session" >&2; exit 2; }',
     "  elif command -v git >/dev/null 2>&1; then",
     '    origin="$(git config --get remote.origin.url 2>/dev/null || true)"',
+    '    [ -z "$origin" ] || ! origin_is_brokered "$origin" || { printf \'%s\\n\' "$tool provider API authentication is host-brokered for this repository; use the configured provider MCP tools" >&2; exit 2; }',
     '    [ -z "$origin" ] || binding_hash="$(binding_hash_for_origin "$origin" 2>/dev/null || true)"',
     "  fi",
     '  [ -n "$binding_hash" ] || binding_hash="$(sole_binding_hash 2>/dev/null || true)"',
     '  if [ -n "$binding_hash" ]; then',
     '    token_file="${OPENGENI_GIT_CREDENTIALS_DIR:-$HOME/.opengeni/git-credentials}/$binding_hash-token"',
     "  else",
+    '    case " $broker_only_providers " in',
+    '      *" $provider "*) printf \'%s\\n\' "$tool provider API authentication is host-brokered for this session; use the configured provider MCP tools" >&2; exit 2 ;;',
+    "    esac",
     '    case " $multi_binding_providers " in',
     '      *" $provider "*) printf \'%s\\n\' "Unable to select one of multiple $provider credentials; run inside an attached repository or set OPENGENI_GIT_BINDING" >&2; exit 2 ;;',
     "    esac",
