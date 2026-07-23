@@ -678,4 +678,18 @@ describe("workflow contracts", () => {
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: automation-ci");
     expect(releaseText).toContain("verify-approved-merge");
   });
+
+  test("keeps the maintainer fast path explicit and evidence-honest", () => {
+    expect(releaseText).toContain("maintainer_fast_path:");
+    expect(releaseText).toContain("Download and validate the immutable release candidate");
+    expect(releaseText).toContain(
+      'mode: (if $fastPath == "true" then "maintainer-fast-path" else "production-canary" end)',
+    );
+    expect(releaseText).toContain(
+      'zeroKnownDefectsAndGapsConfirmed: (if $fastPath == "true" then null else true end)',
+    );
+    expect(releaseText).toContain("bun run typecheck");
+    expect(releaseText).toContain("bun run build:packages");
+    expect(releaseText).toContain("bun scripts/publish-closure-guard.ts");
+  });
 });

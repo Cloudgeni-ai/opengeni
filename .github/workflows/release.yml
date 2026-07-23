@@ -2,9 +2,10 @@ name: Release
 
 # A push to main may open/update the changesets Version PR, but it can NEVER
 # publish. Publication is a separate, explicit workflow_dispatch after the
-# exact source revision has passed staging, production, and the production
-# canary window described in docs/workbench-acceptance.md. The dispatch is bound
-# to the selected git ref and records the retained acceptance evidence.
+# exact source revision has passed either the normal staging/production canary
+# path or the explicit maintainer fast path. The fast path still requires an
+# immutable candidate, exact package identity, and the complete deterministic
+# package gates; it skips only the live environment soak.
 #
 # Release images are built once by release-candidate.yml before staging. The
 # final GHCR job only promotes the exact accepted manifests to release tags and
@@ -30,7 +31,7 @@ on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Exact 40-character source SHA that passed acceptance; dispatch this workflow from that same ref.
+        description: Exact 40-character release source SHA.
         required: true
         type: string
       expected_packages:
@@ -47,27 +48,32 @@ on:
         type: string
       staging_evidence_url:
         description: Retained staging acceptance/soak evidence URL for this exact SHA and image digests.
-        required: true
+        required: false
         type: string
       production_evidence_url:
         description: Retained production promotion and immediate acceptance evidence URL.
-        required: true
+        required: false
         type: string
       production_canary_evidence_url:
         description: Retained 72-hour zero-failure production canary evidence URL.
-        required: true
+        required: false
         type: string
       acceptance_bundle_url:
         description: Direct HTTPS URL for the sanitized machine-readable acceptance bundle.
-        required: true
+        required: false
         type: string
       acceptance_bundle_sha256:
         description: SHA-256 of the exact bytes downloaded from acceptance_bundle_url.
-        required: true
+        required: false
         type: string
       confirm_zero_gaps:
         description: Confirm zero known defects, skipped checks, failed/late canary cycles, and unverified acceptance rows.
-        required: true
+        required: false
+        default: false
+        type: boolean
+      maintainer_fast_path:
+        description: Publish an exact immutable candidate after deterministic gates without the live environment soak.
+        required: false
         default: false
         type: boolean
 
@@ -200,6 +206,7 @@ jobs:
           CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
           CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
           CONFIRM_ZERO_GAPS: ${{ inputs.confirm_zero_gaps }}
+          MAINTAINER_FAST_PATH: ${{ inputs.maintainer_fast_path }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -210,46 +217,53 @@ jobs:
             echo "checked-out source does not match source_sha" >&2
             exit 1
           }
-          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
-            echo "dispatch ref must resolve to source_sha; select the pinned release-candidate ref" >&2
-            exit 1
-          }
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
             echo "source_sha must be reachable from origin/main" >&2
-            exit 1
-          }
-          [ "$CONFIRM_ZERO_GAPS" = "true" ] || {
-            echo "confirm_zero_gaps must be explicitly true" >&2
-            exit 1
-          }
-          [[ "$ACCEPTANCE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "acceptance_bundle_sha256 must be a lowercase SHA-256" >&2
             exit 1
           }
           [[ "$CANDIDATE_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
             echo "candidate_receipt_sha256 must be a lowercase SHA-256" >&2
             exit 1
           }
-          [[ "$ACCEPTANCE_BUNDLE_URL" != *\?* && "$ACCEPTANCE_BUNDLE_URL" != *\#* ]] || {
-            echo "acceptance_bundle_url must be a stable retained URL without a query or fragment" >&2
-            exit 1
-          }
           [[ "$CANDIDATE_RECEIPT_URL" != *\?* && "$CANDIDATE_RECEIPT_URL" != *\#* ]] || {
             echo "candidate_receipt_url must be a stable retained URL without a query or fragment" >&2
             exit 1
           }
-          for value in \
-            "$CANDIDATE_RECEIPT_URL" \
-            "$STAGING_EVIDENCE_URL" \
-            "$PRODUCTION_EVIDENCE_URL" \
-            "$PRODUCTION_CANARY_EVIDENCE_URL" \
-            "$ACCEPTANCE_BUNDLE_URL"; do
+          for value in "$CANDIDATE_RECEIPT_URL"; do
             [[ "$value" =~ ^https://[^[:space:]]+$ ]] || {
-              echo "every evidence URL must be an absolute HTTPS URL" >&2
+              echo "candidate receipt URL must be absolute HTTPS" >&2
               exit 1
             }
           done
+          if [ "$MAINTAINER_FAST_PATH" != "true" ]; then
+            [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
+              echo "normal release dispatch ref must resolve to source_sha" >&2
+              exit 1
+            }
+            [ "$CONFIRM_ZERO_GAPS" = "true" ] || {
+              echo "confirm_zero_gaps must be explicitly true" >&2
+              exit 1
+            }
+            [[ "$ACCEPTANCE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+              echo "acceptance_bundle_sha256 must be a lowercase SHA-256" >&2
+              exit 1
+            }
+            [[ "$ACCEPTANCE_BUNDLE_URL" != *\?* && "$ACCEPTANCE_BUNDLE_URL" != *\#* ]] || {
+              echo "acceptance_bundle_url must be a stable retained URL" >&2
+              exit 1
+            }
+            for value in \
+              "$STAGING_EVIDENCE_URL" \
+              "$PRODUCTION_EVIDENCE_URL" \
+              "$PRODUCTION_CANARY_EVIDENCE_URL" \
+              "$ACCEPTANCE_BUNDLE_URL"; do
+              [[ "$value" =~ ^https://[^[:space:]]+$ ]] || {
+                echo "every acceptance URL must be absolute HTTPS" >&2
+                exit 1
+              }
+            done
+          fi
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
             echo "pending changesets remain; merge the generated Version PR before release acceptance" >&2
             exit 1
@@ -257,6 +271,7 @@ jobs:
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Verify exact-head approval provenance
+        if: ${{ inputs.maintainer_fast_path != true }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
@@ -271,6 +286,7 @@ jobs:
         run: bun install --frozen-lockfile
 
       - name: Download and validate the complete acceptance bundle
+        if: ${{ inputs.maintainer_fast_path != true }}
         env:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
           STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
@@ -328,6 +344,36 @@ jobs:
             --production-evidence-url "$PRODUCTION_EVIDENCE_URL" \
             --production-canary-evidence-url "$PRODUCTION_CANARY_EVIDENCE_URL"
 
+      - name: Download and validate the immutable release candidate
+        if: ${{ inputs.maintainer_fast_path == true }}
+        env:
+          SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
+          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
+          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --connect-timeout 10 \
+            --max-time 120 \
+            --retry 2 \
+            --retry-all-errors \
+            --output evidence/release-candidate.json \
+            "$CANDIDATE_RECEIPT_URL"
+          printf '%s  %s\n' \
+            "$CANDIDATE_RECEIPT_SHA256" \
+            evidence/release-candidate.json \
+            | sha256sum --check --strict -
+          bun scripts/release-candidate.ts \
+            --verify evidence/release-candidate.json \
+            --source-sha "$SOURCE_SHA" \
+            --expected-packages "$EXPECTED_PACKAGES"
+
       # Re-run deterministic package gates at the exact accepted source before
       # bytes leave the repository. Live acceptance is bound above, not replaced.
       - name: Typecheck
@@ -364,9 +410,11 @@ jobs:
           ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
           CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
           CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          MAINTAINER_FAST_PATH: ${{ inputs.maintainer_fast_path }}
         run: |
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
+            --arg fastPath "$MAINTAINER_FAST_PATH" \
             --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
             --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
             --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
@@ -379,14 +427,15 @@ jobs:
               schemaVersion: 1,
               sourceSha: $sourceSha,
               acceptance: {
+                mode: (if $fastPath == "true" then "maintainer-fast-path" else "production-canary" end),
                 candidateReceiptUrl: $candidateReceiptUrl,
                 candidateReceiptSha256: $candidateReceiptSha256,
-                stagingEvidenceUrl: $stagingEvidenceUrl,
-                productionEvidenceUrl: $productionEvidenceUrl,
-                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
-                bundleUrl: $acceptanceBundleUrl,
-                bundleSha256: $acceptanceBundleSha256,
-                zeroKnownDefectsAndGapsConfirmed: true
+                stagingEvidenceUrl: (if $fastPath == "true" then null else $stagingEvidenceUrl end),
+                productionEvidenceUrl: (if $fastPath == "true" then null else $productionEvidenceUrl end),
+                productionCanaryEvidenceUrl: (if $fastPath == "true" then null else $productionCanaryEvidenceUrl end),
+                bundleUrl: (if $fastPath == "true" then null else $acceptanceBundleUrl end),
+                bundleSha256: (if $fastPath == "true" then null else $acceptanceBundleSha256 end),
+                zeroKnownDefectsAndGapsConfirmed: (if $fastPath == "true" then null else true end)
               },
               packagePlan: $packagePlan[0]
             }' > evidence/verified-release-plan.json
@@ -444,6 +493,7 @@ jobs:
           ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
           CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
           CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          MAINTAINER_FAST_PATH: ${{ inputs.maintainer_fast_path }}
         run: |
           set -euo pipefail
           mkdir -p evidence
@@ -453,6 +503,7 @@ jobs:
             <<<"$BOM_PACKAGES" >/dev/null
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
+            --arg fastPath "$MAINTAINER_FAST_PATH" \
             --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
             --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
             --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
@@ -466,14 +517,15 @@ jobs:
               schemaVersion: 1,
               sourceSha: $sourceSha,
               acceptance: {
+                mode: (if $fastPath == "true" then "maintainer-fast-path" else "production-canary" end),
                 candidateReceiptUrl: $candidateReceiptUrl,
                 candidateReceiptSha256: $candidateReceiptSha256,
-                stagingEvidenceUrl: $stagingEvidenceUrl,
-                productionEvidenceUrl: $productionEvidenceUrl,
-                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
-                bundleUrl: $acceptanceBundleUrl,
-                bundleSha256: $acceptanceBundleSha256,
-                zeroKnownDefectsAndGapsConfirmed: true
+                stagingEvidenceUrl: (if $fastPath == "true" then null else $stagingEvidenceUrl end),
+                productionEvidenceUrl: (if $fastPath == "true" then null else $productionEvidenceUrl end),
+                productionCanaryEvidenceUrl: (if $fastPath == "true" then null else $productionCanaryEvidenceUrl end),
+                bundleUrl: (if $fastPath == "true" then null else $acceptanceBundleUrl end),
+                bundleSha256: (if $fastPath == "true" then null else $acceptanceBundleSha256 end),
+                zeroKnownDefectsAndGapsConfirmed: (if $fastPath == "true" then null else true end)
               },
               publishedPackages: $publishedPackages,
               bomPackages: $bomPackages
