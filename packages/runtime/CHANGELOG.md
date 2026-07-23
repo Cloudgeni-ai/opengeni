@@ -1,5 +1,18 @@
 # @opengeni/runtime
 
+## 0.10.0
+
+### Minor Changes
+
+- 136227e: Add an immutable, versioned curated skill library with explicit workspace selection and inspectable provenance, and preserve WCAG AA contrast for dark-theme primary actions.
+
+### Patch Changes
+
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/contracts@0.14.0
+  - @opengeni/config@0.6.1
+
 ## 0.9.0
 
 ### Minor Changes
