@@ -845,7 +845,12 @@ describe("QueueSurface", () => {
             blockers: [blocker],
             resumeOptions: [],
             override: null,
-            settlement: { state: "stopping", attemptCount: 1 },
+            settlement: {
+              state: "stopping",
+              attemptCount: 1,
+              interruptionPendingCount: 1,
+              quiescencePendingCount: 0,
+            },
           },
           stoppingPreviousAttempt: true,
         })}

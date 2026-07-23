@@ -481,6 +481,29 @@ export async function persistOrSignalSessionAttemptQuiescence(input: {
 }
 
 /**
+ * Cross the non-detachable physical boundary for one dying attempt. Temporal's
+ * cancellation signal is intentionally absent: cancellation is transport, not
+ * proof that sandbox tools and attempt-owned credential writers have drained.
+ * A replacement may be admitted only after this function resolves and the
+ * caller durably persists or signals the exact quiescence receipt.
+ */
+export async function drainAttemptOwnedSandboxWriters(input: {
+  toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
+  cancellationReason?: unknown;
+  toolspaceTokenRenewal: Pick<ToolspaceTokenRenewalController, "stop"> | null;
+  runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
+}): Promise<void> {
+  if (input.toolCancellationFence) {
+    input.toolCancellationFence.cancel(
+      input.cancellationReason ?? new Error("TURN_ATTEMPT_FENCED"),
+    );
+    await input.toolCancellationFence.waitForQuiescence();
+  }
+  await input.toolspaceTokenRenewal?.stop();
+  await input.runCredentialRenewal?.stop();
+}
+
+/**
  * Await a finalizer operation only while this Temporal activity still owns its
  * execution window. Once Pause/Steer cancellation arrives, the operation keeps
  * its own rejection handler and may finish its idempotent, attempt-scoped
@@ -6319,71 +6342,29 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
       try {
         const toolCancellationFence = toolCancellationFenceRef.current;
-        if (acknowledgeQuiescence && toolCancellationFence) {
-          // This is an AUTHORITATIVE safety wait, not best-effort housekeeping.
-          // It actively interrupts any turn-owned shell process and drains
-          // parallel filesystem/computer operations. Never race it against the
-          // already-aborted Temporal signal: the replacement queue may open only
-          // after the old attempt can no longer mutate the workspace.
-          toolCancellationFence.cancel(
-            cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FENCED"),
-          );
-          await toolCancellationFence.waitForQuiescence();
-          physicalToolQuiescenceConfirmed = true;
-        } else if (acknowledgeQuiescence) {
-          // A cancellation can arrive before sandbox-backed capabilities exist.
-          // At that boundary there are no tool calls to drain. Sandbox agent
-          // construction itself fails closed when a backend is present but no
-          // controller was installed.
-          physicalToolQuiescenceConfirmed = true;
-        }
-        // Toolspace renewal is attempt-owned. Stop it and drain a physical file
-        // replacement before any successor can be admitted.
+        // Toolspace and run-credential renewals are attempt-owned sandbox
+        // writers. Capture and close them before crossing the same authoritative
+        // boundary as tool calls; none of these drains may race the already-
+        // aborted Temporal signal.
         toolspaceTokenRenewalClosed = true;
         const toolspaceRenewalToStop =
           toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
         toolspaceTokenRenewal = null;
-        if (toolspaceRenewalToStop) {
-          await waitForTurnFinalizerStep(toolspaceRenewalToStop.stop(), finalizerSignal);
-        }
-        // Run credentials are attempt-owned sandbox state. Stop renewal, drain
-        // its last physical write, and remove only this attempt's generations
-        // BEFORE publishing quiescence (which can admit a successor). Cleanup
-        // deliberately bypasses the now-cancelled tool fence. Pointer mutation
-        // is serialized with activation, and the attempt-qualified check cannot
-        // erase a successor generation. Cleanup failure is recorded but must not
-        // skip the remaining finalizer chain or its quiescence proof.
         runCredentialRenewalClosed = true;
         const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
         runCredentialRenewal = null;
-        if (runRenewalToStop) {
-          await waitForTurnFinalizerStep(runRenewalToStop.stop(), finalizerSignal);
-        }
-        const credentialSessionToClear = runCredentialSession;
-        runCredentialSession = null;
-        if (credentialSessionToClear) {
-          const cleanup = clearRunCredentialsForAttempt(credentialSessionToClear, {
-            sessionId: input.sessionId,
-            attemptId: input.attemptId,
-            executionGeneration,
-          }).catch((error: unknown) => {
-            try {
-              observability.incrementCounter({
-                name: "opengeni_run_credential_cleanup_total",
-                help: "Attempt-owned run credential cleanup outcomes.",
-                labels: { outcome: "error" },
-              });
-              observability.warn("Attempt-owned run credential cleanup failed", {
-                sessionId: input.sessionId,
-                turnId,
-                attemptId: input.attemptId,
-                errorClass: error instanceof Error ? error.name : "UnknownError",
-              });
-            } catch {
-              // Cleanup observability must not own finalizer liveness.
-            }
-          });
-          await waitForTurnFinalizerStep(cleanup, finalizerSignal);
+        await drainAttemptOwnedSandboxWriters({
+          toolCancellationFence: acknowledgeQuiescence ? toolCancellationFence : null,
+          cancellationReason: cancellationSignal?.reason,
+          toolspaceTokenRenewal: toolspaceRenewalToStop,
+          runCredentialRenewal: runRenewalToStop,
+        });
+        if (acknowledgeQuiescence) {
+          // A cancellation before sandbox-backed capabilities exist still has
+          // no tool controller to drain. Sandbox agent construction fails closed
+          // when a backend exists but no controller was installed. Renewal
+          // writers, when present, were drained above in either case.
+          physicalToolQuiescenceConfirmed = true;
         }
         if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
           // This receipt is part of the hard cancellation boundary, not
@@ -6453,6 +6434,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "opengeni.activity_id": dispatchId,
             });
           }
+        }
+        // Deleting this attempt's credential generation is post-receipt
+        // housekeeping: pointer mutation is serialized with successor
+        // activation and the attempt-qualified check cannot erase a successor.
+        // It may therefore detach on cancellation without weakening the writer
+        // drain that gates the receipt above.
+        const credentialSessionToClear = runCredentialSession;
+        runCredentialSession = null;
+        if (credentialSessionToClear) {
+          const cleanup = clearRunCredentialsForAttempt(credentialSessionToClear, {
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            executionGeneration,
+          }).catch((error: unknown) => {
+            try {
+              observability.incrementCounter({
+                name: "opengeni_run_credential_cleanup_total",
+                help: "Attempt-owned run credential cleanup outcomes.",
+                labels: { outcome: "error" },
+              });
+              observability.warn("Attempt-owned run credential cleanup failed", {
+                sessionId: input.sessionId,
+                turnId,
+                attemptId: input.attemptId,
+                errorClass: error instanceof Error ? error.name : "UnknownError",
+              });
+            } catch {
+              // Cleanup observability must not own finalizer liveness.
+            }
+          });
+          await waitForTurnFinalizerStep(cleanup, finalizerSignal);
         }
         gitCredentialRenewalClosed = true;
         const renewalsToStop = gitCredentialRenewals;

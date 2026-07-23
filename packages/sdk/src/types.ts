@@ -1834,7 +1834,12 @@ export type EffectiveSessionControl = {
   blockers: EffectiveControlBlocker[];
   resumeOptions: EffectiveControlResumeOption[];
   override: { rootSessionId: string; revision: number } | null;
-  settlement: { state: "stopping"; attemptCount: number } | null;
+  settlement: {
+    state: "stopping";
+    attemptCount: number;
+    interruptionPendingCount: number;
+    quiescencePendingCount: number;
+  } | null;
 };
 
 export type SessionCommandReceipt = {

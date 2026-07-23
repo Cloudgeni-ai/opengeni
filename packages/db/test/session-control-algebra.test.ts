@@ -172,7 +172,12 @@ describe("recursive session control algebra", () => {
     expect(paused.interruptionCount).toBe(1);
     expect(paused.control).toMatchObject({
       state: "paused",
-      settlement: { state: "stopping", attemptCount: 1 },
+      settlement: {
+        state: "stopping",
+        attemptCount: 1,
+        interruptionPendingCount: 1,
+        quiescencePendingCount: 0,
+      },
     });
     const interruptions = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db
@@ -204,6 +209,18 @@ describe("recursive session control algebra", () => {
       attemptId,
       outcome: "interrupted_recoverable",
     });
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, value.grant.workspaceId!, value.child.id),
+      ),
+    ).toMatchObject({
+      settlement: {
+        state: "stopping",
+        attemptCount: 1,
+        interruptionPendingCount: 0,
+        quiescencePendingCount: 1,
+      },
+    });
     const [recovering] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
       db.select().from(schema.sessionTurns).where(eq(schema.sessionTurns.id, settled.turnId!)),
     );
@@ -232,6 +249,11 @@ describe("recursive session control algebra", () => {
       attemptId,
       temporalWorkflowId: `session-${value.child.id}`,
     });
+    expect(
+      await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+        evaluateSessionControl(db, value.grant.workspaceId!, value.child.id),
+      ),
+    ).toMatchObject({ settlement: null });
     const resumed = await claimSessionWorkForAttempt(
       client.db,
       value.grant.workspaceId!,
