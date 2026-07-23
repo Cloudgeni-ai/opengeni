@@ -15,6 +15,7 @@ import {
   UpdateKnowledgeMemoryRequest as ContractUpdateKnowledgeMemoryRequest,
   UpdateWorkspaceSettingsRequest as ContractUpdateWorkspaceSettingsRequest,
   Workspace as ContractWorkspace,
+  WorkspaceTranscriptionPolicy as ContractWorkspaceTranscriptionPolicy,
   WorkspaceMemorySearchRequest as ContractWorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse as ContractWorkspaceMemorySearchResponse,
   DESKTOP_STREAM_PORT,
@@ -33,6 +34,7 @@ import {
   SessionEvent as ContractSessionEventSchema,
   SessionMcpServerInput as ContractSessionMcpServerInput,
   SessionEventType as ContractSessionEventType,
+  TranscriptionEvent as ContractTranscriptionEvent,
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
@@ -118,6 +120,7 @@ import type {
   ViewerHolder,
   WorkspaceMember,
 } from "../src/types";
+import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
 
 // The SDK ships hand-written wire types so it carries zero runtime
 // dependencies. This suite pins them to `@opengeni/contracts`: if the public
@@ -364,11 +367,16 @@ describe("SDK / contracts parity", () => {
     // Server -> client: contract-produced shapes are assignable to the SDK mirrors.
     const acceptMemory = (value: z.infer<typeof ContractKnowledgeMemory>): KnowledgeMemory => value;
     const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
+    const acceptTranscriptionPolicy = (
+      value: z.infer<typeof ContractWorkspaceTranscriptionPolicy>,
+    ): WorkspaceTranscriptionPolicy => value;
     const acceptSearchResponse = (
       value: z.infer<typeof ContractWorkspaceMemorySearchResponse>,
     ): WorkspaceMemorySearchResponse => value;
     expect(
-      [acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function"),
+      [acceptMemory, acceptWorkspace, acceptTranscriptionPolicy, acceptSearchResponse].every(
+        (fn) => typeof fn === "function",
+      ),
     ).toBe(true);
 
     // Client -> server: SDK-sent bodies parse under the contract schemas.
@@ -382,6 +390,53 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    const transcription: WorkspaceTranscriptionPolicy = {
+      enabled: true,
+      acceptanceId: "11111111-1111-4111-8111-111111111111",
+      primary: {
+        provider: "fixture-speech",
+        model: "fixture-v1",
+        credentialMode: "byok",
+        credentialConnectionId: "22222222-2222-4222-8222-222222222222",
+        region: "eu-test-1",
+      },
+      language: "en-US",
+      autoDetectLanguage: false,
+      diarization: { enabled: false, maxSpeakers: null },
+      retention: { mode: "none", maxDays: null },
+      privacy: { allowProviderLogging: false, allowProviderTraining: false },
+      fallback: { mode: "disabled", targets: [] },
+      cost: { currency: "USD", maxPerHour: 1, maxPerMonth: 10 },
+    };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse({ transcription }).success).toBe(true);
+    const transcriptEvent: TranscriptionEvent = {
+      type: "transcript.final",
+      localSessionId: "local-session-1",
+      sequence: 3,
+      occurredAt: "2026-07-21T12:00:00.000Z",
+      segmentId: "segment-1",
+      text: "hello world",
+      providerAcceptanceId: "acceptance-1",
+      metadata: {
+        detectedLanguage: "en-US",
+        span: { startMilliseconds: 0, endMilliseconds: 800 },
+        confidence: 0.97,
+        speaker: { id: "speaker-1" },
+        words: [
+          {
+            text: "hello",
+            span: { startMilliseconds: 0, endMilliseconds: 350 },
+            confidence: 0.99,
+          },
+        ],
+      },
+    };
+    expect(ContractTranscriptionEvent.safeParse(transcriptEvent).success).toBe(true);
+    const contractToSdk = (value: z.infer<typeof ContractTranscriptionEvent>): TranscriptionEvent =>
+      value;
+    expect(contractToSdk(ContractTranscriptionEvent.parse(transcriptEvent))).toEqual(
+      transcriptEvent,
+    );
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.

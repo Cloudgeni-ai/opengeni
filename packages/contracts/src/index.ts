@@ -595,12 +595,297 @@ export const Workspace = z.object({
 });
 export type Workspace = z.infer<typeof Workspace>;
 
+export const WorkspaceTranscriptionTarget = z
+  .object({
+    provider: z.string().trim().min(1).max(128),
+    model: z.string().trim().min(1).max(256).nullable(),
+    credentialMode: z.enum(["managed", "byok"]),
+    // A workspace-scoped connection reference, never credential material.
+    credentialConnectionId: z.string().uuid().nullable(),
+    region: z.string().trim().min(1).max(128).nullable(),
+  })
+  .strict()
+  .superRefine((target, context) => {
+    if (target.provider === "azure-speech" && target.credentialMode !== "byok") {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialMode"],
+        message: "Azure Speech is supported only through workspace BYOK",
+      });
+    }
+    if (target.credentialMode === "byok" && target.credentialConnectionId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialConnectionId"],
+        message: "BYOK transcription targets require a workspace connection reference",
+      });
+    }
+    if (target.credentialMode === "managed" && target.credentialConnectionId !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["credentialConnectionId"],
+        message: "managed transcription targets cannot name a BYOK connection",
+      });
+    }
+  });
+export type WorkspaceTranscriptionTarget = z.infer<typeof WorkspaceTranscriptionTarget>;
+
+export const TranscriptionErrorCode = z.enum([
+  "permission_denied",
+  "not_supported",
+  "network",
+  "provider",
+  "policy_blocked",
+  "timeout",
+  "cancelled",
+  "unknown",
+]);
+export type TranscriptionErrorCode = z.infer<typeof TranscriptionErrorCode>;
+
+export const TranscriptionTimeSpan = z
+  .object({
+    startMilliseconds: z.number().finite().nonnegative(),
+    endMilliseconds: z.number().finite().nonnegative(),
+  })
+  .strict()
+  .superRefine((span, context) => {
+    if (span.endMilliseconds < span.startMilliseconds) {
+      context.addIssue({
+        code: "custom",
+        path: ["endMilliseconds"],
+        message: "transcription spans must not end before they start",
+      });
+    }
+  });
+export type TranscriptionTimeSpan = z.infer<typeof TranscriptionTimeSpan>;
+
+export const TranscriptionSpeaker = z
+  .object({
+    id: z.string().trim().min(1).max(128),
+    label: z.string().trim().min(1).max(128).optional(),
+  })
+  .strict();
+export type TranscriptionSpeaker = z.infer<typeof TranscriptionSpeaker>;
+
+export const TranscriptionWord = z
+  .object({
+    text: z.string().min(1).max(4096),
+    span: TranscriptionTimeSpan,
+    confidence: z.number().finite().min(0).max(1).optional(),
+    speaker: TranscriptionSpeaker.optional(),
+  })
+  .strict();
+export type TranscriptionWord = z.infer<typeof TranscriptionWord>;
+
+export const TranscriptionResultMetadata = z
+  .object({
+    detectedLanguage: z.string().trim().min(1).max(64).optional(),
+    span: TranscriptionTimeSpan.optional(),
+    confidence: z.number().finite().min(0).max(1).optional(),
+    speaker: TranscriptionSpeaker.optional(),
+    words: z.array(TranscriptionWord).max(10_000).optional(),
+  })
+  .strict()
+  .superRefine((metadata, context) => {
+    let previousStart = -1;
+    for (const [index, word] of (metadata.words ?? []).entries()) {
+      if (word.span.startMilliseconds < previousStart) {
+        context.addIssue({
+          code: "custom",
+          path: ["words", index, "span", "startMilliseconds"],
+          message: "transcription words must be ordered by start time",
+        });
+      }
+      previousStart = word.span.startMilliseconds;
+      if (
+        metadata.span &&
+        (word.span.startMilliseconds < metadata.span.startMilliseconds ||
+          word.span.endMilliseconds > metadata.span.endMilliseconds)
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["words", index, "span"],
+          message: "transcription word spans must fall within the result span",
+        });
+      }
+    }
+  });
+export type TranscriptionResultMetadata = z.infer<typeof TranscriptionResultMetadata>;
+
+const TranscriptionEventBase = z
+  .object({
+    localSessionId: z.string().min(1).max(256),
+    sequence: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    occurredAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+/** Strict provider-neutral event surface; provider payload bags are rejected. */
+export const TranscriptionEvent = z.discriminatedUnion("type", [
+  TranscriptionEventBase.extend({ type: z.literal("permission.requested") }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.opened"),
+    providerSessionId: z.string().min(1).max(512),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("transcript.partial"),
+    segmentId: z.string().min(1).max(512),
+    text: z.string().max(1_000_000),
+    metadata: TranscriptionResultMetadata.optional(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("transcript.final"),
+    segmentId: z.string().min(1).max(512),
+    text: z.string().max(1_000_000),
+    providerAcceptanceId: z.string().min(1).max(512),
+    metadata: TranscriptionResultMetadata.optional(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("usage"),
+    audioMilliseconds: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    costUsd: z.number().finite().nonnegative().max(1_000_000_000).nullable(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.reconnecting"),
+    attempt: z.number().int().nonnegative().max(10_000),
+    reason: z.string().min(1).max(256),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.error"),
+    code: TranscriptionErrorCode,
+    recoverable: z.boolean(),
+  }),
+  TranscriptionEventBase.extend({
+    type: z.literal("session.closed"),
+    reason: z.enum(["completed", "cancelled", "error", "replaced"]),
+  }),
+]);
+export type TranscriptionEvent = z.infer<typeof TranscriptionEvent>;
+
+/**
+ * Workspace-only policy for the distinct speech-to-text capability. It never
+ * authorizes a turn model/provider and contains connection references rather
+ * than secrets. `acceptanceId` changes whenever an admin accepts a new target
+ * set, so clients can bind a microphone session to one exact policy revision.
+ */
+export const WorkspaceTranscriptionPolicy = z
+  .object({
+    enabled: z.boolean(),
+    acceptanceId: z.string().uuid().nullable(),
+    primary: WorkspaceTranscriptionTarget.nullable(),
+    language: z.string().trim().min(1).max(64).nullable(),
+    autoDetectLanguage: z.boolean(),
+    diarization: z
+      .object({
+        enabled: z.boolean(),
+        maxSpeakers: z.number().int().min(2).max(100).nullable(),
+      })
+      .strict(),
+    retention: z
+      .object({
+        mode: z.enum(["none", "provider-policy"]),
+        maxDays: z.number().int().nonnegative().max(3650).nullable(),
+      })
+      .strict(),
+    privacy: z
+      .object({
+        allowProviderLogging: z.boolean(),
+        allowProviderTraining: z.boolean(),
+      })
+      .strict(),
+    fallback: z
+      .object({
+        mode: z.enum(["disabled", "explicit"]),
+        targets: z.array(WorkspaceTranscriptionTarget).max(8),
+      })
+      .strict(),
+    cost: z
+      .object({
+        currency: z.literal("USD"),
+        maxPerHour: z.number().finite().nonnegative().max(10_000).nullable(),
+        maxPerMonth: z.number().finite().nonnegative().max(1_000_000).nullable(),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    if (policy.enabled && policy.acceptanceId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["acceptanceId"],
+        message: "enabled transcription requires an accepted policy identity",
+      });
+    }
+    if (policy.enabled && policy.primary === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["primary"],
+        message: "enabled transcription requires a primary target",
+      });
+    }
+    if (policy.enabled && !policy.autoDetectLanguage && policy.language === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["language"],
+        message: "enabled transcription requires a language or accepted automatic detection",
+      });
+    }
+    if (policy.autoDetectLanguage && policy.language !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["language"],
+        message: "automatic language detection and a fixed language are mutually exclusive",
+      });
+    }
+    if (!policy.diarization.enabled && policy.diarization.maxSpeakers !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["diarization", "maxSpeakers"],
+        message: "disabled diarization cannot retain a speaker limit",
+      });
+    }
+    if (policy.fallback.mode === "disabled" && policy.fallback.targets.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "disabled fallback cannot retain accepted targets",
+      });
+    }
+    if (policy.fallback.mode === "explicit" && policy.fallback.targets.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "explicit fallback requires at least one accepted target",
+      });
+    }
+    const targetKeys = [policy.primary, ...policy.fallback.targets]
+      .filter((target): target is WorkspaceTranscriptionTarget => target !== null)
+      .map((target) =>
+        [
+          target.provider,
+          target.model ?? "",
+          target.credentialMode,
+          target.credentialConnectionId ?? "",
+          target.region ?? "",
+        ].join("\u0000"),
+      );
+    if (new Set(targetKeys).size !== targetKeys.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["fallback", "targets"],
+        message: "transcription targets must be unique",
+      });
+    }
+  });
+export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled gates Workspace Memory
-// V1 agent surfaces (turn injection + first-party memory tools); default false.
+// (future) keys rather than stripping them. memoryEnabled and transcription are
+// both default-off capabilities.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceTranscriptionPolicy.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -611,12 +896,13 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
-// PATCH body for workspace settings: a partial patch that deep-merges into the
-// stored bag. memoryEnabled is the only typed key today; passthrough carries
-// forward-compatible unknown keys through validation.
+// PATCH body for workspace settings: a partial top-level patch that merges into
+// the stored bag. Nested transcription policy updates are therefore full
+// replacements; passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    transcription: WorkspaceTranscriptionPolicy.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
