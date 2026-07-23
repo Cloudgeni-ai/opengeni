@@ -36,10 +36,10 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain("--prefer-index=false");
     expect(finalJob).toContain("evidence/release-candidate.json");
     expect(finalJob).toContain("bun scripts/release-bom.ts");
-    expect(finalJob).toContain("Publish official images for anonymous pull");
-    expect(finalJob).toContain("-f visibility=public");
+    expect(finalJob).toContain("Verify official images support anonymous pull");
     expect(finalJob).toContain("docker logout ghcr.io");
     expect(finalJob).toContain("docker buildx imagetools inspect");
+    expect(finalJob).not.toContain("--method PATCH");
     expect(finalJob).not.toContain("docker/build-push-action");
     expect(finalJob).not.toContain("docker build ");
     expect(finalJob).not.toContain("bake-agent.sh");

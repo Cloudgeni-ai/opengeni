@@ -671,20 +671,13 @@ jobs:
             done
           done
 
-      - name: Publish official images for anonymous pull
+      - name: Verify official images support anonymous pull
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
           org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          for role in api worker web relay sandbox; do
-            gh api \
-              --method PATCH \
-              "/orgs/${REPOSITORY_OWNER}/packages/container/opengeni-${role}" \
-              -f visibility=public
-          done
 
           # Remove the publishing credential before proving the documented
           # public-consumer path. Registry visibility can take a few seconds to
