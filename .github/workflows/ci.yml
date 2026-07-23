@@ -5,16 +5,131 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
+    inputs:
+      automation_pr_number:
+        description: Exact github-actions[bot] Version PR number.
+        required: true
+        type: string
+      automation_head_sha:
+        description: Exact Version PR head SHA to admit and test.
+        required: true
+        type: string
+      automation_base_sha:
+        description: Exact current main SHA from which the Version PR was generated.
+        required: true
+        type: string
+      source_release_run_id:
+        description: Push-triggered Release run that created or updated the Version PR.
+        required: true
+        type: string
+      source_release_run_attempt:
+        description: Exact attempt of the source Release run.
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-automation-{0}-{1}', inputs.automation_pr_number, inputs.automation_head_sha) || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
+  automation-admission:
+    name: Admit automation Version PR
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read # authenticate the exact push-triggered Release run
+      checks: write # publish idempotent checks on the candidate head SHA
+      contents: read # inspect immutable commits and direct Git trees
+      pull-requests: read # authenticate the bot PR and provider projection
+    env:
+      AUTOMATION_PR_NUMBER: ${{ inputs.automation_pr_number }}
+      AUTOMATION_HEAD_SHA: ${{ inputs.automation_head_sha }}
+      AUTOMATION_BASE_SHA: ${{ inputs.automation_base_sha }}
+      AUTOMATION_SOURCE_RUN_ID: ${{ inputs.source_release_run_id }}
+      AUTOMATION_SOURCE_RUN_ATTEMPT: ${{ inputs.source_release_run_attempt }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      # workflow_dispatch is sent to ref=main. Pin the checkout again so helper
+      # and dependency bytes are the exact trusted base, never candidate bytes.
+      - name: Check out trusted workflow source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Begin exact-head automation checks
+        run: node scripts/check-release-pr-automation.mjs begin-version-checks
+
+      - name: Admit trusted dispatch and exact source tree
+        id: admission
+        run: node scripts/check-release-pr-automation.mjs admit-version-ci
+
+      - name: Set up Bun
+        if: ${{ steps.admission.outcome == 'success' }}
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install trusted-base dependencies
+        if: ${{ steps.admission.outcome == 'success' }}
+        run: bun install --frozen-lockfile
+
+      # The Changesets action force-resets its branch from the source run SHA.
+      # Reproduce the version command using only admitted-base code and compare
+      # complete Git trees before any candidate checkout or script execution.
+      - name: Reproduce deterministic Version PR tree
+        id: version_tree
+        if: ${{ steps.admission.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_SHA" = "$AUTOMATION_BASE_SHA" ]
+          git fetch --no-tags origin "$AUTOMATION_HEAD_SHA"
+          [ "$(git rev-parse HEAD)" = "$AUTOMATION_BASE_SHA" ]
+
+          expected="$RUNNER_TEMP/changeset-version-expected"
+          git worktree add --detach "$expected" "$AUTOMATION_BASE_SHA"
+          trap 'git worktree remove --force "$expected"' EXIT
+          (
+            cd "$expected"
+            bun "$GITHUB_WORKSPACE/node_modules/@changesets/cli/bin.js" version
+            git add -A
+            git diff --cached --check
+          )
+
+          expected_tree="$(git -C "$expected" write-tree)"
+          actual_tree="$(git rev-parse "$AUTOMATION_HEAD_SHA^{tree}")"
+          if [ "$actual_tree" != "$expected_tree" ]; then
+            echo "::error::Version PR tree does not exactly reproduce 'changeset version' from admitted main"
+            git diff --stat "$expected_tree" "$actual_tree"
+            exit 1
+          fi
+
+      - name: Complete exact-head source-admission check
+        if: ${{ always() }}
+        env:
+          AUTOMATION_CHECK_KIND: source-admission
+          AUTOMATION_CHECK_CONCLUSION: ${{ steps.admission.outcome == 'success' && steps.version_tree.outcome == 'success' && 'success' || 'failure' }}
+        run: node scripts/check-release-pr-automation.mjs complete-version-check
+
   test:
     name: Typecheck and unit tests
+    needs: automation-admission
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -34,6 +149,9 @@ jobs:
 
       - name: Validate changeset release plan
         shell: bash
+        env:
+          AUTOMATION_BASE_SHA: ${{ inputs.automation_base_sha }}
+          AUTOMATION_HEAD_SHA: ${{ inputs.automation_head_sha }}
         run: |
           set -euo pipefail
           plan="$RUNNER_TEMP/changeset-status.json"
@@ -45,7 +163,15 @@ jobs:
           # gone. Prove that special branch by reproducing `changeset version`
           # from the exact base tree and comparing complete Git trees instead
           # of skipping release-plan validation.
+          is_version_pr=false
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "${GITHUB_HEAD_REF:-}" = "changeset-release/main" ]; then
+            is_version_pr=true
+          elif [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            [ "$(git rev-parse refs/remotes/origin/main)" = "$AUTOMATION_BASE_SHA" ]
+            [ "$(git rev-parse HEAD)" = "$AUTOMATION_HEAD_SHA" ]
+            is_version_pr=true
+          fi
+          if [ "$is_version_pr" = "true" ]; then
             expected="$RUNNER_TEMP/changeset-version-expected"
             git worktree add --detach "$expected" refs/remotes/origin/main
             trap 'git worktree remove --force "$expected"' EXIT
@@ -201,10 +327,15 @@ jobs:
 
   deployment:
     name: Deployment artifacts
+    needs: automation-admission
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
+          persist-credentials: false
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -299,6 +430,8 @@ jobs:
 
   images:
     name: Workload image builds
+    needs: automation-admission
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || needs.automation-admission.result == 'success') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -306,6 +439,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -355,3 +491,41 @@ jobs:
           platforms: linux/amd64
           push: false
           tags: opengeni-sandbox:ci
+
+      - name: Build relay image
+        uses: docker/build-push-action@v7.3.0
+        with:
+          context: agent
+          file: agent/crates/opengeni-relay/Dockerfile
+          platforms: linux/amd64
+          push: false
+          tags: opengeni-relay:ci
+
+  automation-report:
+    name: Report exact-head automation CI
+    needs: [automation-admission, test, deployment, images]
+    if: ${{ always() && github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    permissions:
+      checks: write
+      contents: read
+      pull-requests: read
+    env:
+      AUTOMATION_PR_NUMBER: ${{ inputs.automation_pr_number }}
+      AUTOMATION_HEAD_SHA: ${{ inputs.automation_head_sha }}
+      AUTOMATION_BASE_SHA: ${{ inputs.automation_base_sha }}
+      AUTOMATION_SOURCE_RUN_ID: ${{ inputs.source_release_run_id }}
+      AUTOMATION_SOURCE_RUN_ATTEMPT: ${{ inputs.source_release_run_attempt }}
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out trusted workflow source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Complete exact-head automation CI check
+        env:
+          AUTOMATION_CHECK_KIND: automation-ci
+          AUTOMATION_CHECK_CONCLUSION: ${{ needs.automation-admission.result == 'success' && needs.test.result == 'success' && needs.deployment.result == 'success' && needs.images.result == 'success' && 'success' || 'failure' }}
+        run: node scripts/check-release-pr-automation.mjs complete-version-check

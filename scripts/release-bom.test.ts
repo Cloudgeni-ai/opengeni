@@ -64,7 +64,7 @@ describe("release BOM", () => {
   });
 
   test("rejects mutable, incomplete, duplicate, or unpublished identities", () => {
-    const valid = {
+    const valid: Parameters<typeof buildReleaseBom>[0] = {
       sourceSha,
       releaseVersion: "0.16.0",
       packages: [
@@ -83,7 +83,7 @@ describe("release BOM", () => {
     expect(() =>
       buildReleaseBom({
         ...valid,
-        packages: [{ ...valid.packages[0]!, state: "pending" }],
+        packages: [{ ...valid.packages[0]!, state: "pending" } as any],
       }),
     ).toThrow("not published");
     expect(() =>
@@ -99,7 +99,19 @@ describe("release BOM", () => {
     ).toThrow("duplicate package");
     expect(() => buildReleaseBom({ ...valid, images: [] })).toThrow("images must not be empty");
     expect(() => buildReleaseBom({ ...valid, images: valid.images.slice(0, -1) })).toThrow(
-      "missing required image",
+      "must contain exactly",
     );
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        images: [
+          ...valid.images,
+          {
+            name: "ghcr.io/cloudgeni-ai/opengeni-desktop",
+            digest: `sha256:${"6".repeat(64)}`,
+          },
+        ],
+      }),
+    ).toThrow("must contain exactly");
   });
 });
