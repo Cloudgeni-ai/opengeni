@@ -302,6 +302,7 @@ jobs:
           mkdir -p evidence
           curl \
             --fail \
+            --location \
             --silent \
             --show-error \
             --proto '=https' \
@@ -313,6 +314,7 @@ jobs:
             "$ACCEPTANCE_BUNDLE_URL"
           curl \
             --fail \
+            --location \
             --silent \
             --show-error \
             --proto '=https' \
@@ -356,6 +358,7 @@ jobs:
           mkdir -p evidence
           curl \
             --fail \
+            --location \
             --silent \
             --show-error \
             --proto '=https' \
@@ -589,6 +592,7 @@ jobs:
           mkdir -p evidence
           curl \
             --fail \
+            --location \
             --silent \
             --show-error \
             --proto '=https' \
