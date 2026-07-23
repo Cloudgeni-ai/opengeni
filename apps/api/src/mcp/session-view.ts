@@ -13,17 +13,118 @@ import type {
   Rig,
   Session,
   SessionEvent,
+  SessionEventCompactResult,
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
 } from "@opengeni/contracts";
-import { measureSessionEventJson } from "@opengeni/contracts";
+import {
+  boundSessionEventPayload,
+  measureSessionEventJson,
+  sessionEventJsonBytes,
+} from "@opengeni/contracts";
 
 export const SESSION_EVENT_MCP_MAX_BYTES = 64 * 1024;
 export const SESSION_EVENT_MCP_FIELD_MAX_CHARS = 4_000;
 export const DEFAULT_SESSION_DETAIL_CHARS = 6_000;
 export const SESSION_DETAIL_MCP_MAX_BYTES = 64 * 1024;
 export const RIG_DETAIL_MCP_MAX_BYTES = 64 * 1024;
+
+/**
+ * Keep the single-result MCP response below the same pretty-JSON envelope as
+ * event pages. The contracts projection bounds each value independently for
+ * HTTP/SDK use; this second boundary accounts for the result identity,
+ * failure/truncation metadata, and MCP's pretty-printing overhead.
+ */
+export function boundSessionEventCompactResult(
+  result: SessionEventCompactResult,
+  maxBytes = SESSION_EVENT_MCP_MAX_BYTES,
+): SessionEventCompactResult {
+  const envelopeMaxBytes = Math.max(8 * 1024, maxBytes);
+
+  const project = (budget: number): SessionEventCompactResult => {
+    const noValues = budget <= 0;
+    const text =
+      noValues || result.text === null ? null : clampString(result.text, Math.max(128, budget));
+    const boundValue = (value: unknown): unknown =>
+      noValues || value === null
+        ? null
+        : boundSessionEventPayload(value, {
+            surface: "http_projection",
+            maxBytes: Math.max(1_024, budget),
+          });
+    const output = boundValue(result.output);
+    const resultValue = boundValue(result.result);
+    const checkpoint = boundValue(result.checkpoint);
+    const receipt = boundValue(result.receipt);
+    const failure =
+      noValues || result.failure === null
+        ? null
+        : {
+            error:
+              clampString(result.failure.error ?? "", Math.max(128, Math.floor(budget / 3))) ||
+              null,
+            code:
+              clampString(result.failure.code ?? "", Math.max(128, Math.floor(budget / 6))) || null,
+            retryable: result.failure.retryable,
+            recovery:
+              clampString(result.failure.recovery ?? "", Math.max(128, Math.floor(budget / 3))) ||
+              null,
+          };
+    const changed =
+      text !== result.text ||
+      output !== result.output ||
+      resultValue !== result.result ||
+      checkpoint !== result.checkpoint ||
+      receipt !== result.receipt ||
+      JSON.stringify(failure) !== JSON.stringify(result.failure);
+    // A compact result can inherit a source-payload boundary without any of
+    // its already-bounded slots changing at the MCP boundary. Keep that loss
+    // visible on the model-facing result, but do not manufacture a new byte
+    // count: the source projection owns the original/delivered accounting.
+    const inheritedSourceBoundary = result.truncation.fields.includes("payload");
+    const mcpBoundaryRecorded = changed || inheritedSourceBoundary;
+    const deliveredBytes = sessionEventJsonBytes({
+      text,
+      output,
+      result: resultValue,
+      failure,
+      checkpoint,
+      receipt,
+    });
+    return {
+      ...result,
+      text,
+      output,
+      result: resultValue,
+      failure,
+      checkpoint,
+      receipt,
+      truncation: {
+        ...result.truncation,
+        truncated: result.truncation.truncated || changed,
+        fields: mcpBoundaryRecorded
+          ? [...new Set([...result.truncation.fields, "mcp_envelope"])]
+          : result.truncation.fields,
+        originalBytes: changed
+          ? (result.truncation.originalBytes ?? result.truncation.deliveredBytes)
+          : result.truncation.originalBytes,
+        deliveredBytes,
+      },
+    };
+  };
+
+  // Start with a generous budget and tighten only if the full compact result
+  // would exceed MCP's envelope. This preserves as much result-bearing data
+  // as possible while guaranteeing a truthful bounded response.
+  for (const budget of [12_000, 8_000, 4_000, 2_000, 1_000, 0]) {
+    const candidate = project(budget);
+    if (prettyJsonBytes(candidate) <= envelopeMaxBytes) return candidate;
+  }
+  throw new RangeError(
+    `Session-event compact result exceeds its ${envelopeMaxBytes}-byte envelope`,
+  );
+}
 
 function safeStringify(value: unknown): string {
   if (typeof value === "string") return value;

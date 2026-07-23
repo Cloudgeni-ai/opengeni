@@ -226,6 +226,71 @@ describe("OpenGeniClient", () => {
     expect(requests).toHaveLength(1);
   });
 
+  test("listEventPage and getLatestEventResult consume compact results without another turn", async () => {
+    const compact = {
+      version: 1,
+      semanticClass: "terminal",
+      source: {
+        id: "00000000-0000-4000-8000-000000000042",
+        type: "turn.completed",
+        sequence: 42,
+        occurredAt: "2026-07-19T00:00:00.000Z",
+        turnId: null,
+        turnGeneration: 8,
+        turnAttemptId: null,
+        turnAssociation: "current",
+      },
+      id: "00000000-0000-4000-8000-000000000042",
+      type: "turn.completed",
+      sequence: 42,
+      occurredAt: "2026-07-19T00:00:00.000Z",
+      turnId: null,
+      turnGeneration: 8,
+      turnAttemptId: null,
+      turnAssociation: "current",
+      coveredSequence: { first: 42, last: 42 },
+      status: "completed",
+      text: null,
+      output: "done",
+      result: "done",
+      failure: null,
+      checkpoint: null,
+      receipt: null,
+      truncation: {
+        truncated: false,
+        fields: [],
+        originalBytes: null,
+        deliveredBytes: 20,
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(compact));
+
+    const result = await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      latest: "terminal",
+      resultMode: "compact",
+    });
+    expect(result?.result).toBe("done");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?resultMode=compact&latest=terminal`,
+    );
+
+    const recovered = await client.getLatestEventResult(WORKSPACE_ID, SESSION_ID);
+    expect(recovered?.sequence).toBe(42);
+    expect(requests[1]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?resultMode=compact&latest=terminal`,
+    );
+  });
+
+  test("compact latest preserves a truthful null when no matching event exists", async () => {
+    const { client } = makeClient(() => jsonResponse(null));
+    await expect(
+      client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+        latest: "receipt",
+        resultMode: "compact",
+      }),
+    ).resolves.toBeNull();
+  });
+
   test("sendMessage wraps text in a user.message control event", async () => {
     const accepted = makeEvent(4, "user.message", { text: "do the thing" });
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));

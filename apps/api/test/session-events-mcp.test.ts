@@ -174,6 +174,21 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
         payload: { result: "authoritative" },
       }),
     ]);
+
+    const compact = await callMcpTool<{
+      version: 1;
+      status: string;
+      sequence: number;
+      result: string;
+      coveredSequence: { first: number; last: number };
+    }>("session_events", { sessionId, latest: "terminal", resultMode: "compact" });
+    expect(compact).toMatchObject({
+      version: 1,
+      status: "completed",
+      sequence: 43,
+      result: "authoritative",
+      coveredSequence: { first: 43, last: 43 },
+    });
   });
 
   test("supports the bounded exact-type recovery input advertised by sessions_list", async () => {
@@ -272,5 +287,32 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
     expect(
       bounded.events.every((event) => event.id !== "00000000-0000-0000-0000-000000000000"),
     ).toBeTrue();
+  });
+
+  test("bounds a pathological compact result without dropping its identity", async () => {
+    await appendSessionEvents(client.db, workspaceId, sessionId, [
+      {
+        type: "turn.completed" as const,
+        payload: {
+          text: "\u0000".repeat(8_000),
+          output: "x".repeat(8_000),
+          result: { value: "y".repeat(8_000) },
+          checkpoint: { detail: "z".repeat(8_000) },
+          receipt: { detail: "r".repeat(8_000) },
+        },
+        turnGeneration: 9,
+      },
+    ]);
+    const compact = await callMcpTool<{
+      id: string;
+      sequence: number;
+      truncation: { truncated: boolean; fields: string[] };
+    }>("session_events", { sessionId, latest: "terminal", resultMode: "compact" });
+    const prettyBytes = Buffer.byteLength(JSON.stringify(compact, null, 2), "utf8");
+    expect(prettyBytes).toBeLessThanOrEqual(64 * 1024);
+    expect(compact.id).not.toBe("00000000-0000-0000-0000-000000000000");
+    expect(compact.sequence).toBeGreaterThan(44);
+    expect(compact.truncation.truncated).toBeTrue();
+    expect(compact.truncation.fields).toContain("mcp_envelope");
   });
 });

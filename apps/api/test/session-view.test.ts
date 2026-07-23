@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import type { Rig, Session, SessionEvent } from "@opengeni/contracts";
+import {
+  compactSessionEventResult,
+  type Rig,
+  type Session,
+  type SessionEvent,
+} from "@opengeni/contracts";
 import {
   boundRigDetailMcp,
+  boundSessionEventCompactResult,
   boundSessionDetailMcp,
   boundSessionEventMcpPage,
   capPayloadValue,
@@ -131,6 +137,32 @@ describe("boundSessionEventMcpPage", () => {
     expect(page.coveredSequence).toBeNull();
     expect(page.nextAfter).toBe(42);
     expect(page.events).toEqual([]);
+  });
+});
+
+describe("boundSessionEventCompactResult", () => {
+  test("keeps identity and exact pretty-JSON envelope bounds for pathological results", () => {
+    const compact = compactSessionEventResult(
+      {
+        ...event(77, {
+          text: "\u0000".repeat(20_000),
+          output: "x".repeat(20_000),
+          result: { value: "y".repeat(20_000) },
+          checkpoint: { detail: "z".repeat(20_000) },
+          receipt: { detail: "r".repeat(20_000) },
+        }),
+        type: "turn.completed",
+        turnGeneration: 3,
+      },
+      "terminal",
+    );
+    const bounded = boundSessionEventCompactResult(compact);
+    const bytes = Buffer.byteLength(JSON.stringify(bounded, null, 2), "utf8");
+    expect(bytes).toBeLessThanOrEqual(64 * 1024);
+    expect(bounded.id).toBe(compact.id);
+    expect(bounded.sequence).toBe(77);
+    expect(bounded.truncation.truncated).toBeTrue();
+    expect(bounded.truncation.fields).toContain("mcp_envelope");
   });
 });
 

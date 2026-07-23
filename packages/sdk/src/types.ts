@@ -768,9 +768,11 @@ export type SessionEventSemanticClass =
   | "checkpoint"
   | "tool_receipt"
   | "provider_account";
+export type SessionEventLatestClass = SessionEventSemanticClass | "receipt";
 export type SessionEventPayloadMode = "none" | "summary" | "full";
 export type SessionEventReadMode = "monitoring" | "forensic";
 export type SessionEventReadDirection = "after" | "before";
+export type SessionEventResultMode = "events" | "compact";
 
 type SessionEventListCommonOptions = {
   after?: number;
@@ -780,6 +782,7 @@ type SessionEventListCommonOptions = {
   mode?: SessionEventReadMode;
   direction?: SessionEventReadDirection;
   payloadMode?: SessionEventPayloadMode;
+  resultMode?: "events";
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &
@@ -793,13 +796,69 @@ export type SessionEventListOptions = SessionEventListCommonOptions &
       }
     | {
         /** Exclusive lookup for the newest event in exactly this semantic class. */
-        latest: SessionEventSemanticClass;
+        latest: SessionEventLatestClass;
         includeTypes?: never;
         excludeTypes?: never;
         includeClasses?: never;
         excludeClasses?: never;
       }
   );
+
+export type SessionEventCompactResult = {
+  version: 1;
+  semanticClass: SessionEventSemanticClass;
+  source: {
+    id: string;
+    type: SessionEventType;
+    sequence: number;
+    occurredAt: string;
+    turnId: string | null;
+    turnGeneration: number | null;
+    turnAttemptId: string | null;
+    turnAssociation: SessionEvent["turnAssociation"];
+  };
+  id: string;
+  type: SessionEventType;
+  sequence: number;
+  occurredAt: string;
+  turnId: string | null;
+  turnGeneration: number | null;
+  turnAttemptId: string | null;
+  turnAssociation: SessionEvent["turnAssociation"];
+  coveredSequence: { first: number; last: number };
+  status:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "superseded"
+    | "checkpoint"
+    | "receipt"
+    | "unknown";
+  text: string | null;
+  output: unknown;
+  result: unknown;
+  failure: {
+    error: string | null;
+    code: string | null;
+    retryable: boolean | null;
+    recovery: string | null;
+  } | null;
+  checkpoint: unknown;
+  receipt: unknown;
+  truncation: {
+    truncated: boolean;
+    fields: string[];
+    originalBytes: number | null;
+    deliveredBytes: number;
+  };
+};
+
+export type SessionEventCompactResultOptions = {
+  latest: SessionEventLatestClass;
+  resultMode: "compact";
+  mode?: SessionEventReadMode;
+  payloadMode?: SessionEventPayloadMode;
+};
 
 export type SessionEventPage = {
   events: SessionEvent[];

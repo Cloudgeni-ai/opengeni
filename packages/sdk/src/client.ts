@@ -90,6 +90,8 @@ import type {
   SessionListResponse,
   UpdateSessionPinRequest,
   SessionEvent,
+  SessionEventCompactResult,
+  SessionEventCompactResultOptions,
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
@@ -531,8 +533,18 @@ export class OpenGeniClient {
   async listEventPage(
     workspaceId: string,
     sessionId: string,
-    options: SessionEventListOptions = {},
-  ): Promise<SessionEventPage> {
+    options: SessionEventCompactResultOptions,
+  ): Promise<SessionEventCompactResult | null>;
+  async listEventPage(
+    workspaceId: string,
+    sessionId: string,
+    options?: SessionEventListOptions,
+  ): Promise<SessionEventPage>;
+  async listEventPage(
+    workspaceId: string,
+    sessionId: string,
+    options: SessionEventListOptions | SessionEventCompactResultOptions = {},
+  ): Promise<SessionEventPage | SessionEventCompactResult | null> {
     if (
       options.latest &&
       ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some((name) =>
@@ -541,22 +553,32 @@ export class OpenGeniClient {
     ) {
       throw new TypeError("latest cannot be combined with event filters");
     }
+    if (options.resultMode === "compact" && !options.latest) {
+      throw new TypeError("resultMode=compact requires latest");
+    }
+    const listOptions: SessionEventListOptions | null =
+      options.resultMode === "compact" ? null : options;
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
-        ...(options.after !== undefined ? { after: String(options.after) } : {}),
-        ...(options.before !== undefined ? { before: String(options.before) } : {}),
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(options.compact ? { compact: "1" } : {}),
+        ...(listOptions?.after !== undefined ? { after: String(listOptions.after) } : {}),
+        ...(listOptions?.before !== undefined ? { before: String(listOptions.before) } : {}),
+        ...(listOptions?.limit !== undefined ? { limit: String(listOptions.limit) } : {}),
+        ...(listOptions?.compact ? { compact: "1" } : {}),
         ...(options.mode ? { mode: options.mode } : {}),
-        ...(options.direction ? { direction: options.direction } : {}),
+        ...(listOptions?.direction ? { direction: listOptions.direction } : {}),
         ...(options.payloadMode ? { payloadMode: options.payloadMode } : {}),
-        ...(options.includeTypes?.length ? { includeTypes: options.includeTypes.join(",") } : {}),
-        ...(options.excludeTypes?.length ? { excludeTypes: options.excludeTypes.join(",") } : {}),
-        ...(options.includeClasses?.length
-          ? { includeClasses: options.includeClasses.join(",") }
+        ...(options.resultMode ? { resultMode: options.resultMode } : {}),
+        ...(listOptions?.includeTypes?.length
+          ? { includeTypes: listOptions.includeTypes.join(",") }
           : {}),
-        ...(options.excludeClasses?.length
-          ? { excludeClasses: options.excludeClasses.join(",") }
+        ...(listOptions?.excludeTypes?.length
+          ? { excludeTypes: listOptions.excludeTypes.join(",") }
+          : {}),
+        ...(listOptions?.includeClasses?.length
+          ? { includeClasses: listOptions.includeClasses.join(",") }
+          : {}),
+        ...(listOptions?.excludeClasses?.length
+          ? { excludeClasses: listOptions.excludeClasses.join(",") }
           : {}),
         ...(options.latest ? { latest: options.latest } : {}),
       }),
@@ -567,7 +589,11 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
-    const events = (await response.json()) as SessionEvent[];
+    const body = await response.json();
+    if (options.resultMode === "compact") {
+      return body as SessionEventCompactResult;
+    }
+    const events = body as SessionEvent[];
     const integerHeader = (name: string): number | null => {
       const raw = response.headers.get(name);
       if (raw === null) return null;
@@ -609,6 +635,22 @@ export class OpenGeniClient {
       nextBefore: integerHeader("X-OpenGeni-Next-Before"),
       forensicExact: response.headers.get("X-OpenGeni-Forensic-Exact") === "true",
     };
+  }
+
+  /**
+   * Fetch the authoritative newest-generation semantic result directly. This
+   * is the callback-loss recovery path: it reads one compact durable result and
+   * never creates a model turn. `latest: "receipt"` aliases `tool_receipt`.
+   */
+  async getLatestEventResult(
+    workspaceId: string,
+    sessionId: string,
+    options: Omit<SessionEventCompactResultOptions, "resultMode"> = { latest: "terminal" },
+  ): Promise<SessionEventCompactResult | null> {
+    return await this.listEventPage(workspaceId, sessionId, {
+      ...options,
+      resultMode: "compact",
+    });
   }
 
   /** POST a user/control event to the session. Returns the accepted event. */

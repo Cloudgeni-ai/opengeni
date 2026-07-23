@@ -2,11 +2,15 @@ import {
   CreateScheduledTaskRequest,
   defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventLatestClass,
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
+  SessionEventResultMode,
   SessionEventSemanticClass,
   SessionEventType,
+  compactSessionEventResult,
+  sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
   VariableSetVariableName,
   type AccessGrant,
@@ -120,6 +124,7 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
   boundRigDetailMcp,
@@ -1409,7 +1414,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the newest event in exactly one semantic class; it cannot be combined with type or class filters. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the authoritative newest generation in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),
@@ -1418,6 +1423,7 @@ function registerWorkspaceOrchestrationTools(
           direction: z4.enum(SessionEventReadDirection.options).optional(),
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
+          resultMode: z4.enum(SessionEventResultMode.options).optional(),
           includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
           excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
           includeClasses: z4
@@ -1428,7 +1434,7 @@ function registerWorkspaceOrchestrationTools(
             .array(z4.enum(SessionEventSemanticClass.options))
             .max(SessionEventSemanticClass.options.length)
             .optional(),
-          latest: z4.enum(SessionEventSemanticClass.options).optional(),
+          latest: z4.enum(SessionEventLatestClass.options).optional(),
         },
       },
       async ({
@@ -1439,6 +1445,7 @@ function registerWorkspaceOrchestrationTools(
         direction: requestedDirection,
         mode: requestedMode,
         payloadMode: requestedPayloadMode,
+        resultMode: requestedResultMode,
         includeTypes,
         excludeTypes,
         includeClasses,
@@ -1446,6 +1453,11 @@ function registerWorkspaceOrchestrationTools(
         latest,
       }) => {
         await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        const latestClass =
+          latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
+        if (requestedResultMode === "compact" && latestClass === undefined) {
+          throw new Error("resultMode=compact requires latest");
+        }
         await requireSession(deps.db, grant.workspaceId, sessionId);
         if (
           latest &&
@@ -1456,24 +1468,42 @@ function registerWorkspaceOrchestrationTools(
           throw new Error("latest cannot be combined with event filters");
         }
         const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
-        const direction = latest
+        const direction = latestClass
           ? "before"
           : (requestedDirection ??
             (before !== undefined ? "before" : after !== undefined ? "after" : "before"));
-        const payloadMode = requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full");
+        const payloadMode =
+          requestedResultMode === "compact"
+            ? "full"
+            : (requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full"));
         const dbPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
           after: after ?? 0,
           ...(before !== undefined ? { before } : {}),
           direction,
-          limit: latest ? 1 : boundedSessionEventMcpLimit(limit),
+          limit: latestClass ? 1 : boundedSessionEventMcpLimit(limit),
           payloadMode,
           includeTypes: includeTypes ?? [],
           excludeTypes: excludeTypes ?? [],
-          includeClasses: latest ? [latest] : (includeClasses ?? []),
+          includeClasses: latestClass ? [latestClass] : (includeClasses ?? []),
           excludeClasses: excludeClasses ?? [],
           ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+          ...(latestClass ? { authoritativeLatest: true } : {}),
           maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
         });
+        if (requestedResultMode === "compact") {
+          const event = dbPage.events[0];
+          return json(
+            event
+              ? boundSessionEventCompactResult(
+                  compactSessionEventResult(
+                    event,
+                    latestClass!,
+                    dbPage.coveredSequence ?? { first: event.sequence, last: event.sequence },
+                  ),
+                )
+              : null,
+          );
+        }
         return json(
           boundSessionEventMcpPage({
             events: dbPage.events,
