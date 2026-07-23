@@ -523,12 +523,21 @@ describe("canonical queue commands", () => {
         return row?.wakeRevision ?? 0;
       },
     );
-    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
-      workspaceId: value.grant.workspaceId!,
-      sessionId: value.session.id,
-      attemptId,
-      temporalWorkflowId: `session-${value.session.id}`,
-    });
+    const [quiescenceEvents, concurrentReplay] = await Promise.all([
+      markSessionAttemptQuiesced(client.db, {
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        attemptId,
+        temporalWorkflowId: `session-${value.session.id}`,
+      }),
+      markSessionAttemptQuiesced(client.db, {
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        attemptId,
+        temporalWorkflowId: `session-${value.session.id}`,
+      }),
+    ]);
+    expect(concurrentReplay).toEqual(quiescenceEvents);
     const wakeAfterQuiescence = await withWorkspaceRls(
       client.db,
       value.grant.workspaceId!,

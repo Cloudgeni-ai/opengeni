@@ -2889,6 +2889,8 @@ export const EffectiveSessionControl = z.object({
     .object({
       state: z.literal("stopping"),
       attemptCount: z.number().int().positive(),
+      interruptionPendingCount: z.number().int().nonnegative(),
+      quiescencePendingCount: z.number().int().nonnegative(),
     })
     .nullable(),
 });

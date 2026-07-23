@@ -65,7 +65,24 @@ export type EffectiveSessionControl = {
   blockers: EffectiveControlBlocker[];
   resumeOptions: EffectiveControlResumeOption[];
   override: { rootSessionId: string; revision: number } | null;
-  settlement: { state: "stopping"; attemptCount: number } | null;
+  settlement: {
+    state: "stopping";
+    attemptCount: number;
+    interruptionPendingCount: number;
+    quiescencePendingCount: number;
+  } | null;
+};
+
+type SettlementAttemptCounts = {
+  attemptCount: number;
+  interruptionPendingCount: number;
+  quiescencePendingCount: number;
+};
+
+const NO_SETTLEMENT_ATTEMPTS: SettlementAttemptCounts = {
+  attemptCount: 0,
+  interruptionPendingCount: 0,
+  quiescencePendingCount: 0,
 };
 
 export const SESSION_DISCOVERY_CONTROL_TITLE_MAX_CHARS = 200;
@@ -788,7 +805,7 @@ function projectEffectiveControl(
   workspace: WorkspaceControlRow,
   targetId: string,
   rows: AncestryRow[],
-  stoppingAttempts: number,
+  settlementAttempts: SettlementAttemptCounts,
 ): EffectiveSessionControl {
   assertCompleteAncestry(targetId, rows);
   const workspaceRevision = asSafeRevision(workspace.revision, "workspace control revision")!;
@@ -920,30 +937,61 @@ function projectEffectiveControl(
             rootSessionId: override.row.sessionId,
             revision: override.overrideRevision,
           },
-    settlement: stoppingAttempts > 0 ? { state: "stopping", attemptCount: stoppingAttempts } : null,
+    settlement:
+      settlementAttempts.attemptCount > 0 ? { state: "stopping", ...settlementAttempts } : null,
   };
 }
 
-async function unsettledAttemptCounts(
+async function settlementAttemptCounts(
   db: Database,
   workspaceId: string,
   sessionIds: string[],
-): Promise<Map<string, number>> {
+): Promise<Map<string, SettlementAttemptCounts>> {
   const rows = await db.execute<{
     sessionId: string;
-    count: number | string;
+    attemptCount: number | string;
+    interruptionPendingCount: number | string;
+    quiescencePendingCount: number | string;
   }>(sql`
     with recursive targets(id) as (values ${targetValues(sessionIds)}),
     interruptions as (
-      select interruption.session_id, interruption.attempt_id
+      select
+        interruption.session_id,
+        interruption.attempt_id,
+        bool_or(interruption.state in ('pending', 'delivered', 'acknowledged'))
+          as interruption_pending,
+        bool_or(
+          interruption.state in ('settled', 'rejected_stale')
+          and attempt.quiesced_at is null
+        ) as quiescence_pending
       from ${schema.sessionAttemptInterruptions} interruption
+      join ${schema.sessionTurnAttempts} attempt
+        on attempt.workspace_id = interruption.workspace_id
+       and attempt.id = interruption.attempt_id
       where interruption.workspace_id = ${workspaceId}
-        and interruption.state in ('pending', 'delivered', 'acknowledged')
-    ), interruption_ancestry(session_id, ancestor_id, attempt_id, depth, path) as (
+        and (
+          interruption.state in ('pending', 'delivered', 'acknowledged')
+          or (
+            interruption.state in ('settled', 'rejected_stale')
+            and attempt.quiesced_at is null
+          )
+        )
+      group by interruption.session_id, interruption.attempt_id
+    ), interruption_ancestry(
+      session_id,
+      ancestor_id,
+      attempt_id,
+      interruption_pending,
+      quiescence_pending,
+      depth,
+      path
+    ) as (
       select
         interruption.session_id,
         interruption.session_id,
         interruption.attempt_id,
+        interruption.interruption_pending,
+        interruption.quiescence_pending,
         0::integer,
         array[interruption.session_id]::uuid[]
       from interruptions interruption
@@ -952,6 +1000,8 @@ async function unsettledAttemptCounts(
         ancestry.session_id,
         current.parent_session_id,
         ancestry.attempt_id,
+        ancestry.interruption_pending,
+        ancestry.quiescence_pending,
         ancestry.depth + 1,
         ancestry.path || current.parent_session_id
       from interruption_ancestry ancestry
@@ -961,16 +1011,33 @@ async function unsettledAttemptCounts(
         and not current.parent_session_id = any(ancestry.path)
         and ancestry.depth < ${SESSION_ANCESTRY_LIMIT}
     )
-    select target.id as "sessionId", count(distinct ancestry.attempt_id)::integer as count
+    select
+      target.id as "sessionId",
+      count(distinct ancestry.attempt_id)::integer as "attemptCount",
+      count(distinct ancestry.attempt_id)
+        filter (where ancestry.interruption_pending)::integer as "interruptionPendingCount",
+      count(distinct ancestry.attempt_id)
+        filter (where ancestry.quiescence_pending)::integer as "quiescencePendingCount"
     from targets target
     join interruption_ancestry ancestry on ancestry.ancestor_id = target.id
     group by target.id
   `);
   return new Map(
-    rows.map((row: { sessionId: string; count: number | string }) => [
-      row.sessionId,
-      Number(row.count),
-    ]),
+    rows.map(
+      (row: {
+        sessionId: string;
+        attemptCount: number | string;
+        interruptionPendingCount: number | string;
+        quiescencePendingCount: number | string;
+      }) => [
+        row.sessionId,
+        {
+          attemptCount: Number(row.attemptCount),
+          interruptionPendingCount: Number(row.interruptionPendingCount),
+          quiescencePendingCount: Number(row.quiescencePendingCount),
+        },
+      ],
+    ),
   );
 }
 
@@ -996,7 +1063,7 @@ export async function evaluateSessionControls(
   const workspace =
     options.workspaceControl ??
     (await lockWorkspaceInferenceControl(db, workspaceId, options.lock ?? "share"));
-  const stopping = await unsettledAttemptCounts(db, workspaceId, uniqueIds);
+  const stopping = await settlementAttemptCounts(db, workspaceId, uniqueIds);
   const result = new Map<string, EffectiveSessionControl>();
   if (uniqueIds.length <= TARGET_PATH_PROJECTION_LIMIT) {
     // PostgreSQL's direct target-path plan is substantially faster for the
@@ -1015,7 +1082,7 @@ export async function evaluateSessionControls(
           workspace,
           sessionId,
           ancestryByTarget.get(sessionId) ?? [],
-          stopping.get(sessionId) ?? 0,
+          stopping.get(sessionId) ?? NO_SETTLEMENT_ATTEMPTS,
         ),
       );
     }
@@ -1033,7 +1100,7 @@ export async function evaluateSessionControls(
         workspace,
         sessionId,
         ancestryRowsForTarget(sessionId, ancestry),
-        stopping.get(sessionId) ?? 0,
+        stopping.get(sessionId) ?? NO_SETTLEMENT_ATTEMPTS,
       ),
     );
   }

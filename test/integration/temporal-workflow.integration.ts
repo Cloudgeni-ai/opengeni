@@ -736,7 +736,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "an exact quiescence proof survives signalWithStart and DB activity retry exhaustion",
+    "an exact quiescence proof survives signalWithStart, control-worker restart, and DB retries",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -755,7 +755,11 @@ describe("Temporal workflow integration", () => {
       let receiptAttempts = 0;
       let replacementRuns = 0;
       const persistedProofs: Array<typeof proof> = [];
-      const worker = await testWorker(nativeConnection, taskQueue, {
+      let firstReceiptAttempted!: () => void;
+      const firstReceiptAttempt = new Promise<void>((resolve) => {
+        firstReceiptAttempted = resolve;
+      });
+      const activities = {
         peekSessionWork: async () => {
           if (waitingForReceipt) {
             return { kind: "cancellation-wait", attemptId: proof.attemptId } as const;
@@ -767,6 +771,7 @@ describe("Temporal workflow integration", () => {
         persistSessionAttemptQuiescence: async (input: typeof proof) => {
           persistedProofs.push(input);
           receiptAttempts += 1;
+          if (receiptAttempts === 1) firstReceiptAttempted();
           // Fail multiple real Temporal activity attempts. The workflow's
           // unbounded control-activity retry must retain the signal-owned proof
           // and may not peek/admit replacement work until this succeeds.
@@ -784,8 +789,12 @@ describe("Temporal workflow integration", () => {
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
         settleSessionInterruptions: async () => ({ action: "continue" as const }),
-      });
-      const run = worker.run();
+      };
+      const firstWorker = await testWorker(nativeConnection, taskQueue, activities);
+      const firstRun = firstWorker.run();
+      let restartedWorker: Awaited<ReturnType<typeof testWorker>> | undefined;
+      let restartedRun: Promise<void> | undefined;
+      let firstWorkerStopped = false;
       try {
         const client = new Client({ connection });
         const handle = await client.workflow.signalWithStart("sessionWorkflow", {
@@ -796,6 +805,16 @@ describe("Temporal workflow integration", () => {
           signal: "sessionAttemptQuiesced",
           signalArgs: [proof],
         });
+        // The proof is already accepted into durable workflow history. Stop the
+        // worker after its first DB activity attempt fails, leave the workflow
+        // briefly without a poller, then let a fresh worker execute the exact
+        // retained proof's remaining retries.
+        await firstReceiptAttempt;
+        firstWorker.shutdown();
+        await firstRun;
+        firstWorkerStopped = true;
+        restartedWorker = await testWorker(nativeConnection, taskQueue, activities);
+        restartedRun = restartedWorker.run();
         // A duplicate transport signal in the same run is coalesced; the
         // control activity's own retries still execute until the DB succeeds.
         await handle.signal("sessionAttemptQuiesced", proof);
@@ -805,8 +824,9 @@ describe("Temporal workflow integration", () => {
         expect(persistedProofs).toEqual([proof, proof, proof]);
         expect(replacementRuns).toBe(1);
       } finally {
-        worker.shutdown();
-        await run;
+        if (!firstWorkerStopped) firstWorker.shutdown();
+        restartedWorker?.shutdown();
+        await Promise.all([firstWorkerStopped ? undefined : firstRun, restartedRun]);
       }
     },
     temporalWorkflowTestTimeoutMs,

@@ -3181,7 +3181,12 @@ describe("clean session control plane", () => {
       ),
     ).toMatchObject({
       state: "active",
-      settlement: { state: "stopping", attemptCount: 1 },
+      settlement: {
+        state: "stopping",
+        attemptCount: 1,
+        interruptionPendingCount: 1,
+        quiescencePendingCount: 0,
+      },
     });
   });
 

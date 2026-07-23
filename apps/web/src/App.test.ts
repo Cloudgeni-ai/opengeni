@@ -1927,6 +1927,13 @@ function pausedControl(
         impactCopy: "This workstream can run.",
       },
     ],
-    settlement: stopping ? { state: "stopping", attemptCount: 1 } : null,
+    settlement: stopping
+      ? {
+          state: "stopping",
+          attemptCount: 1,
+          interruptionPendingCount: 1,
+          quiescencePendingCount: 0,
+        }
+      : null,
   };
 }
