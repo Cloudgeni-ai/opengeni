@@ -671,6 +671,40 @@ jobs:
             done
           done
 
+      - name: Publish official images for anonymous pull
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          for role in api worker web relay sandbox; do
+            gh api \
+              --method PATCH \
+              "/orgs/${REPOSITORY_OWNER}/packages/container/opengeni-${role}" \
+              -f visibility=public
+          done
+
+          # Remove the publishing credential before proving the documented
+          # public-consumer path. Registry visibility can take a few seconds to
+          # converge, so retry only the read-only manifest inspection.
+          docker logout ghcr.io
+          for role in api worker web relay sandbox; do
+            image="ghcr.io/${org}/opengeni-${role}:${RELEASE_VERSION}"
+            expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
+            resolved=""
+            for attempt in 1 2 3 4 5; do
+              resolved="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+              [ "$resolved" = "$expected" ] && break
+              sleep "$((attempt * 2))"
+            done
+            [ "$resolved" = "$expected" ] || {
+              echo "anonymous pull proof failed for ${image}: resolved ${resolved:-nothing}, expected ${expected}" >&2
+              exit 1
+            }
+          done
+
       - name: Write complete release BOM
         id: release-bom
         env:
