@@ -18,6 +18,7 @@ const assistant = (text: string) => ({
   role: "assistant",
   content: [{ type: "output_text", text }],
 });
+const sha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
 const file = (
   id: string,
@@ -41,16 +42,19 @@ const file = (
 
 describe("modelAttachmentContentForFiles", () => {
   test("reads supported images and documents in finalized attachment order", async () => {
-    const image = file("00000000-0000-4000-8000-000000000010", "image/png", 5, "diagram.png");
-    const pdf = file(
-      "00000000-0000-4000-8000-000000000011",
-      "application/pdf",
-      3,
-      "requirements.pdf",
-    );
+    const imageBytes = new TextEncoder().encode("image");
+    const pdfBytes = new TextEncoder().encode("pdf");
+    const image = {
+      ...file("00000000-0000-4000-8000-000000000010", "image/png", 5, "diagram.png"),
+      sha256: sha256(imageBytes),
+    };
+    const pdf = {
+      ...file("00000000-0000-4000-8000-000000000011", "application/pdf", 3, "requirements.pdf"),
+      sha256: sha256(pdfBytes),
+    };
     const bytesById = new Map([
-      [image.id, new TextEncoder().encode("image")],
-      [pdf.id, new TextEncoder().encode("pdf")],
+      [image.id, imageBytes],
+      [pdf.id, pdfBytes],
     ]);
 
     const content = await modelAttachmentContentForFiles(
@@ -77,16 +81,18 @@ describe("modelAttachmentContentForFiles", () => {
   });
 
   test("normalizes MIME parameters before constructing a data URL", async () => {
-    const image = file(
-      "00000000-0000-4000-8000-000000000012",
-      "IMAGE/PNG; charset=binary",
-      5,
-      "diagram.png",
-    );
+    const imageBytes = new TextEncoder().encode("image");
+    const image = {
+      ...file(
+        "00000000-0000-4000-8000-000000000012",
+        "IMAGE/PNG; charset=binary",
+        5,
+        "diagram.png",
+      ),
+      sha256: sha256(imageBytes),
+    };
 
-    expect(
-      await modelAttachmentContentForFiles([image], async () => new TextEncoder().encode("image")),
-    ).toEqual([
+    expect(await modelAttachmentContentForFiles([image], async () => imageBytes)).toEqual([
       expect.objectContaining({
         contentType: "image/png",
         dataUrl: "data:image/png;base64,aW1hZ2U=",
@@ -100,6 +106,8 @@ describe("modelAttachmentContentForFiles", () => {
       file("00000000-0000-4000-8000-000000000021", "text/html", 1, "active.html"),
       file("00000000-0000-4000-8000-000000000022", "application/javascript", 1, "active.js"),
       file("00000000-0000-4000-8000-000000000023", "application/octet-stream", 1, "unknown.bin"),
+      file("00000000-0000-4000-8000-000000000024", "application/xml", 1, "generic.xml"),
+      file("00000000-0000-4000-8000-000000000025", "text/xml", 1, "generic-text.xml"),
     ];
     let reads = 0;
 
@@ -113,18 +121,26 @@ describe("modelAttachmentContentForFiles", () => {
   });
 
   test("enforces the aggregate byte bound before object-storage reads", async () => {
-    const first = file(
-      "00000000-0000-4000-8000-000000000030",
-      "text/plain",
-      MAX_INLINE_MODEL_ATTACHMENT_BYTES,
-      "full.txt",
-    );
-    const overflow = file("00000000-0000-4000-8000-000000000031", "image/png", 1, "overflow.png");
+    const firstBytes = new Uint8Array(MAX_INLINE_MODEL_ATTACHMENT_BYTES);
+    const first = {
+      ...file(
+        "00000000-0000-4000-8000-000000000030",
+        "text/plain",
+        MAX_INLINE_MODEL_ATTACHMENT_BYTES,
+        "full.txt",
+      ),
+      sha256: sha256(firstBytes),
+    };
+    const overflowBytes = new Uint8Array([1]);
+    const overflow = {
+      ...file("00000000-0000-4000-8000-000000000031", "image/png", 1, "overflow.png"),
+      sha256: sha256(overflowBytes),
+    };
     const reads: string[] = [];
 
     const content = await modelAttachmentContentForFiles([first, overflow], async (entry) => {
       reads.push(entry.id);
-      return new Uint8Array(entry.sizeBytes);
+      return firstBytes;
     });
 
     expect(content).toHaveLength(1);
@@ -133,8 +149,14 @@ describe("modelAttachmentContentForFiles", () => {
   });
 
   test("omits a byte-length mismatch and a failed storage read without rejecting the prompt", async () => {
-    const mismatch = file("00000000-0000-4000-8000-000000000040", "image/png", 2, "mismatch.png");
-    const failed = file("00000000-0000-4000-8000-000000000041", "application/pdf", 2, "failed.pdf");
+    const mismatch = {
+      ...file("00000000-0000-4000-8000-000000000040", "image/png", 2, "mismatch.png"),
+      sha256: "0".repeat(64),
+    };
+    const failed = {
+      ...file("00000000-0000-4000-8000-000000000041", "application/pdf", 2, "failed.pdf"),
+      sha256: "0".repeat(64),
+    };
     const error = spyOn(console, "error").mockImplementation(() => {});
     try {
       const content = await modelAttachmentContentForFiles([mismatch, failed], async (entry) => {
@@ -165,6 +187,21 @@ describe("modelAttachmentContentForFiles", () => {
       ),
       sha256: "0".repeat(64),
     };
+    const missingHash = file(
+      "00000000-0000-4000-8000-000000000045",
+      "text/plain",
+      bytes.byteLength,
+      "missing-hash.txt",
+    );
+    const malformedHash = {
+      ...file(
+        "00000000-0000-4000-8000-000000000046",
+        "text/plain",
+        bytes.byteLength,
+        "malformed-hash.txt",
+      ),
+      sha256: "not-a-sha256",
+    };
     const pending = {
       ...file(
         "00000000-0000-4000-8000-000000000044",
@@ -173,12 +210,13 @@ describe("modelAttachmentContentForFiles", () => {
         "pending.txt",
       ),
       status: "pending_upload" as const,
+      sha256: expectedHash,
     };
     const reads: string[] = [];
     const error = spyOn(console, "error").mockImplementation(() => {});
     try {
       const content = await modelAttachmentContentForFiles(
-        [ready, wrongHash, pending],
+        [ready, wrongHash, missingHash, malformedHash, pending],
         async (entry) => {
           reads.push(entry.id);
           return bytes;
@@ -319,7 +357,11 @@ describe("withCurrentUserAttachmentContent", () => {
 
 describe("turnInput attachment projection", () => {
   test("keeps sandbox path context and adds object bytes to the model-only user row", async () => {
-    const image = file("00000000-0000-4000-8000-000000000050", "image/png", 5, "diagram.png");
+    const imageBytes = new TextEncoder().encode("image");
+    const image = {
+      ...file("00000000-0000-4000-8000-000000000050", "image/png", 5, "diagram.png"),
+      sha256: sha256(imageBytes),
+    };
     const storedUser = user("inspect the diagram");
     let preparedInput: AgentSegmentInput | undefined;
     const requireFile = spyOn(opengeniDb, "requireFile").mockResolvedValue(image);
@@ -358,7 +400,7 @@ describe("turnInput attachment projection", () => {
         { currentCodexCredentialId: null },
         {
           turnId: "00000000-0000-4000-8000-000000000053",
-          readFileBytesForModel: async () => new TextEncoder().encode("image"),
+          readFileBytesForModel: async () => imageBytes,
         },
       );
 

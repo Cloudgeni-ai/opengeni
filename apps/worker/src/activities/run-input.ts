@@ -165,12 +165,19 @@ const MODEL_IMAGE_CONTENT_TYPES = new Set(["image/gif", "image/jpeg", "image/png
 const MODEL_FILE_CONTENT_TYPES = new Set([
   "application/json",
   "application/pdf",
-  "application/xml",
   "application/x-yaml",
   "application/yaml",
 ]);
 
-const ACTIVE_TEXT_CONTENT_TYPES = new Set(["text/css", "text/html", "text/javascript", "text/xml"]);
+// Generic XML has equivalent application/* and text/* registrations. Keep both
+// aliases on the sandbox-path fallback until a provider parser boundary is
+// explicitly supported and verified; MIME spelling must not bypass the fence.
+const BLOCKED_TEXT_CONTENT_TYPES = new Set([
+  "text/css",
+  "text/html",
+  "text/javascript",
+  "text/xml",
+]);
 
 function modelAttachmentDescriptor(
   contentType: string,
@@ -181,7 +188,7 @@ function modelAttachmentDescriptor(
   }
   if (
     MODEL_FILE_CONTENT_TYPES.has(normalized) ||
-    (normalized.startsWith("text/") && !ACTIVE_TEXT_CONTENT_TYPES.has(normalized))
+    (normalized.startsWith("text/") && !BLOCKED_TEXT_CONTENT_TYPES.has(normalized))
   ) {
     return { kind: "file", contentType: normalized };
   }
@@ -196,7 +203,15 @@ export async function modelAttachmentContentForFiles(
   let remainingBytes = MAX_INLINE_MODEL_ATTACHMENT_BYTES;
   for (const file of files) {
     const descriptor = modelAttachmentDescriptor(file.contentType);
-    if (file.status !== "ready" || !descriptor || file.sizeBytes > remainingBytes) continue;
+    const checksum = file.sha256?.trim().toLowerCase() ?? "";
+    if (
+      file.status !== "ready" ||
+      !descriptor ||
+      file.sizeBytes > remainingBytes ||
+      !/^[a-f0-9]{64}$/.test(checksum)
+    ) {
+      continue;
+    }
     try {
       const bytes = await readFileBytes(file);
       if (bytes.byteLength !== file.sizeBytes || bytes.byteLength > remainingBytes) {
@@ -207,10 +222,7 @@ export async function modelAttachmentContentForFiles(
         });
         continue;
       }
-      if (
-        file.sha256 &&
-        createHash("sha256").update(bytes).digest("hex") !== file.sha256.toLowerCase()
-      ) {
+      if (createHash("sha256").update(bytes).digest("hex") !== checksum) {
         console.error("model attachment checksum did not match finalized metadata", {
           fileId: file.id,
         });

@@ -385,6 +385,7 @@ describe("OpenGeniClient files", () => {
       filename: "notes.txt",
       contentType: "text/plain",
       sizeBytes: 11,
+      sha256: "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9",
     });
     const put = requests[1]!;
     expect(put.method).toBe("PUT");
@@ -400,6 +401,74 @@ describe("OpenGeniClient files", () => {
     expect(put.headers.authorization).toBeUndefined();
     expect(put.body).toBe("hello world");
     expect(requests[2]!.url).toContain(`/files/uploads/${UPLOAD_ID}/complete`);
+  });
+
+  test("uploadFile preserves a caller-supplied checksum", async () => {
+    const suppliedSha256 = "A".repeat(64);
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/supplied",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 1,
+          },
+          201,
+        );
+      }
+      if (request.url.startsWith("https://storage.example.test/")) {
+        return new Response(null, { status: 200 });
+      }
+      return jsonResponse({ file: { id: FILE_ID, status: "ready" } });
+    });
+
+    await client.uploadFile(WORKSPACE_ID, {
+      filename: "a",
+      contentType: "text/plain",
+      data: "x",
+      sha256: suppliedSha256,
+    });
+
+    expect(JSON.parse(requests[0]!.body!).sha256).toBe(suppliedSha256);
+  });
+
+  test("uploadFile snapshots an ArrayBuffer before hashing and uploading it", async () => {
+    const data = new ArrayBuffer(5);
+    new Uint8Array(data).set(new TextEncoder().encode("hello"));
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        new Uint8Array(data).fill("x".charCodeAt(0));
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/snapshot",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 5,
+          },
+          201,
+        );
+      }
+      if (request.url.startsWith("https://storage.example.test/")) {
+        return new Response(null, { status: 200 });
+      }
+      return jsonResponse({ file: { id: FILE_ID, status: "ready" } });
+    });
+
+    await client.uploadFile(WORKSPACE_ID, {
+      filename: "snapshot.txt",
+      contentType: "text/plain",
+      data,
+    });
+
+    expect(JSON.parse(requests[0]!.body!).sha256).toBe(
+      "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    );
+    expect(requests[1]!.body).toBe("hello");
   });
 
   test("uploadFile surfaces a failed signed PUT as OpenGeniApiError without completing", async () => {
