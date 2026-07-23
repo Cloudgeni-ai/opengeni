@@ -344,10 +344,10 @@ describe("useNewSessionDraft", () => {
     expect(flushed).not.toBeNull();
     expect(requests).toHaveLength(1);
 
-    const marked = await actRun(() =>
-      flushed ? hook.result.current.draft.markConsumed(flushed) : false,
+    const acknowledged = await actRun(() =>
+      flushed ? hook.result.current.draft.acknowledgeConsumed(flushed) : null,
     );
-    expect(marked).toBe(true);
+    expect(acknowledged).toEqual({ kind: "consumed" });
     await actRun(() => hook.result.current.setValue(editable()));
     // Navigation may take longer than the normal autosave debounce. The clear
     // must remain UI-only after the accepted row was consumed server-side.
@@ -357,8 +357,16 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("markConsumed rejects an acknowledged snapshot after a newer edit", async () => {
-    const hook = await renderDraftHook(client());
+  test("preserves a newer post-create edit against absent-row revision zero", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
     await flush();
     await actRun(() => hook.result.current.setValue(editable({ text: "submitted" })));
     const flushed = await actRun(() => hook.result.current.draft.flush());
@@ -366,8 +374,87 @@ describe("useNewSessionDraft", () => {
     if (!flushed) throw new Error("Expected the submitted draft to flush");
 
     await actRun(() => hook.result.current.setValue(editable({ text: "newer local edit" })));
-    expect(hook.result.current.draft.markConsumed(flushed)).toBe(false);
-    expect(hook.result.current.draft.revision).toBe(flushed.revision);
+    const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
+
+    expect(acknowledged).toEqual({
+      kind: "preserved",
+      flushed: expect.objectContaining({ revision: 1 }),
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({ expectedRevision: 0, text: "newer local edit" });
+    expect(hook.result.current.draft.revision).toBe(1);
+    expect(hook.result.current.draft.conflict).toBeNull();
+    await hook.unmount();
+  });
+
+  test("keeps a sibling-tab revision-zero winner as a visible conflict", async () => {
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (requests.length === 2) throw conflict();
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "submitted" })));
+    const flushed = await actRun(() => hook.result.current.draft.flush());
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+
+    await actRun(() => hook.result.current.setValue(editable({ text: "keep this local" })));
+    const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
+
+    expect(acknowledged).toBeNull();
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({ expectedRevision: 0, text: "keep this local" });
+    expect(hook.result.current.value.text).toBe("keep this local");
+    expect(hook.result.current.draft.revision).toBe(0);
+    expect(hook.result.current.draft.conflict?.message).toContain("draft changed");
+    await hook.unmount();
+  });
+
+  test("invalidates an in-flight old-revision autosave before preserving the newer value", async () => {
+    const staleAutosave = deferred<NewSessionDraft>();
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (requests.length === 2) return await staleAutosave.promise;
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "submitted" })));
+    const flushed = await actRun(() => hook.result.current.draft.flush());
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+
+    await actRun(() => hook.result.current.setValue(editable({ text: "newer local edit" })));
+    await flush(520);
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({ expectedRevision: 1, text: "newer local edit" });
+
+    let acknowledgement!: ReturnType<(typeof hook.result.current.draft)["acknowledgeConsumed"]>;
+    await actRun(() => {
+      acknowledgement = hook.result.current.draft.acknowledgeConsumed(flushed);
+    });
+    expect(requests).toHaveLength(2);
+
+    const acknowledged = await actRun(async () => {
+      staleAutosave.reject(conflict());
+      return await acknowledgement;
+    });
+    expect(acknowledged).toEqual({
+      kind: "preserved",
+      flushed: expect.objectContaining({ revision: 1 }),
+    });
+    expect(requests).toHaveLength(3);
+    expect(requests[2]).toMatchObject({ expectedRevision: 0, text: "newer local edit" });
+    expect(hook.result.current.draft.conflict).toBeNull();
+    expect(hook.result.current.draft.error).toBeNull();
     await hook.unmount();
   });
 

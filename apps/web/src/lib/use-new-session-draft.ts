@@ -27,6 +27,10 @@ export type FlushedNewSessionDraft = {
   signature: string;
 };
 
+export type AcknowledgeConsumedNewSessionDraftResult =
+  | { kind: "consumed" }
+  | { kind: "preserved"; flushed: FlushedNewSessionDraft };
+
 export type UseNewSessionDraftResult = {
   draft: NewSessionDraft | null;
   revision: number;
@@ -37,10 +41,12 @@ export type UseNewSessionDraftResult = {
   flush: () => Promise<FlushedNewSessionDraft | null>;
   isCurrentSignature: (signature: string) => boolean;
   /**
-   * Fence the exact acknowledged snapshot after session creation consumes it.
-   * Returns false when a newer local edit or save won the race.
+   * Fence the exact acknowledged snapshot after session creation consumes it,
+   * preserving a genuinely newer local value against the now-absent row.
    */
-  markConsumed: (flushed: FlushedNewSessionDraft) => boolean;
+  acknowledgeConsumed: (
+    flushed: FlushedNewSessionDraft,
+  ) => Promise<AcknowledgeConsumedNewSessionDraftResult | null>;
   reload: () => Promise<void>;
   resolveConflict: (choice: "keep_mine" | "use_remote") => Promise<void>;
   clearError: () => void;
@@ -74,6 +80,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const draftRef = useRef<NewSessionDraft | null>(null);
   const lastSavedSignature = useRef<string | null>(null);
   const targetGeneration = useRef(0);
+  const persistenceEpoch = useRef(0);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const conflictRef = useRef<Error | null>(null);
@@ -176,6 +183,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       targetKeyRef.current = targetKey;
     }
     targetGeneration.current += 1;
+    persistenceEpoch.current += 1;
     draftRef.current = null;
     lastSavedSignature.current = null;
     saveChain.current = Promise.resolve();
@@ -196,9 +204,12 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
   const persistSnapshot = useCallback(
     (snapshot: NewSessionDraftEditable): Promise<FlushedNewSessionDraft | null> => {
       const generation = targetGeneration.current;
+      const epoch = persistenceEpoch.current;
       const signature = draftSignature(snapshot);
       const run = async (): Promise<FlushedNewSessionDraft | null> => {
-        if (generation !== targetGeneration.current) return null;
+        if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+          return null;
+        }
         const current = draftRef.current;
         if (!current) return null;
         if (signature === lastSavedSignature.current) {
@@ -210,7 +221,9 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
             ...snapshot,
             expectedRevision: current.revision,
           });
-          if (generation !== targetGeneration.current) return null;
+          if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+            return null;
+          }
           draftRef.current = saved;
           lastSavedSignature.current = signature;
           setDraft(saved);
@@ -218,13 +231,17 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           setError(null);
           return { revision: saved.revision, signature };
         } catch (cause) {
-          if (generation !== targetGeneration.current) return null;
+          if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+            return null;
+          }
           const problem = asError(cause);
           if (isNewSessionDraftConflict(cause)) setCurrentConflict(problem);
           setError(problem);
           return null;
         } finally {
-          if (generation === targetGeneration.current) setSaving(false);
+          if (generation === targetGeneration.current && epoch === persistenceEpoch.current) {
+            setSaving(false);
+          }
         }
       };
       const operation = saveChain.current.then(run, run);
@@ -270,27 +287,103 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     [],
   );
 
-  const markConsumed = useCallback((flushed: FlushedNewSessionDraft): boolean => {
-    const current = draftRef.current;
-    if (
-      !current ||
-      current.revision !== flushed.revision ||
-      lastSavedSignature.current !== flushed.signature ||
-      draftSignature(valueRef.current) !== flushed.signature
-    ) {
-      return false;
-    }
-    if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
-    autosaveTimer.current = null;
-    // The server consumed this row in the same transaction that initialized the
-    // session. Drop local persistence authority before the route clears its
-    // controlled fields: otherwise a delayed navigation can debounce-save that
-    // cleared projection as a brand-new revision-zero row.
-    draftRef.current = null;
-    lastSavedSignature.current = null;
-    setDraft(null);
-    return true;
-  }, []);
+  const acknowledgeConsumed = useCallback(
+    async (
+      flushed: FlushedNewSessionDraft,
+    ): Promise<AcknowledgeConsumedNewSessionDraftResult | null> => {
+      const current = draftRef.current;
+      if (
+        !current ||
+        current.revision !== flushed.revision ||
+        lastSavedSignature.current !== flushed.signature
+      ) {
+        return null;
+      }
+
+      if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
+      autosaveTimer.current = null;
+
+      const generation = targetGeneration.current;
+      const epoch = persistenceEpoch.current + 1;
+      persistenceEpoch.current = epoch;
+      const snapshot = cloneEditable(valueRef.current);
+      const signature = draftSignature(snapshot);
+
+      // Session creation consumed this exact server revision. Invalidate every
+      // save that captured the old row as its OCC base before inspecting the
+      // current browser value; a late response from that epoch must not restore
+      // stale persistence authority or surface its expected conflict.
+      draftRef.current = null;
+      lastSavedSignature.current = null;
+      setDraft(null);
+      setCurrentConflict(null);
+      setError(null);
+
+      if (signature === flushed.signature) {
+        setSaving(false);
+        return { kind: "consumed" };
+      }
+
+      const run = async (): Promise<AcknowledgeConsumedNewSessionDraftResult | null> => {
+        if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+          return null;
+        }
+        setSaving(true);
+        try {
+          // The accepted revision no longer exists. A same-tab edit therefore
+          // rebases onto the API's absent-row revision zero. If a sibling tab
+          // inserts first, this remains a typed OCC conflict and never overwrites
+          // that newer remote value.
+          const saved = await client.saveNewSessionDraft(workspaceId, {
+            ...snapshot,
+            expectedRevision: 0,
+          });
+          if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+            return null;
+          }
+          draftRef.current = saved;
+          lastSavedSignature.current = signature;
+          setDraft(saved);
+          setCurrentConflict(null);
+          setError(null);
+          return {
+            kind: "preserved",
+            flushed: { revision: saved.revision, signature },
+          };
+        } catch (cause) {
+          if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+            return null;
+          }
+          // Revision zero is the API's explicit logical baseline for no row.
+          // Retain it after a failed insert so an explicit retry can safely use
+          // expectedRevision=0; it is not treated as a durable acknowledgement.
+          const absentBaseline: NewSessionDraft = {
+            revision: 0,
+            ...snapshot,
+            updatedAt: null,
+          };
+          draftRef.current = absentBaseline;
+          setDraft(absentBaseline);
+          const problem = asError(cause);
+          if (isNewSessionDraftConflict(cause)) setCurrentConflict(problem);
+          setError(problem);
+          return null;
+        } finally {
+          if (generation === targetGeneration.current && epoch === persistenceEpoch.current) {
+            setSaving(false);
+          }
+        }
+      };
+
+      const operation = saveChain.current.then(run, run);
+      saveChain.current = operation.then(
+        () => undefined,
+        () => undefined,
+      );
+      return await operation;
+    },
+    [client, setCurrentConflict, workspaceId],
+  );
 
   const resolveConflict = useCallback(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
@@ -331,7 +424,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     error,
     flush,
     isCurrentSignature,
-    markConsumed,
+    acknowledgeConsumed,
     reload,
     resolveConflict,
     clearError: useCallback(() => {

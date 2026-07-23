@@ -210,17 +210,17 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
           },
         );
         if (!created) return false;
-        // A programmatic edit (or another committed local change) made while
-        // create was in flight was not submitted and must not be cleared or
-        // abandoned when this route unmounts. Persist it before navigation;
-        // if the accepted revision was consumed first, the resulting OCC
-        // conflict remains visible here for an explicit keep-mine/use-remote
-        // choice instead of silently losing the newer value.
-        if (newSessionDraft.markConsumed(flushed)) {
+        // A programmatic edit made while create was in flight was not submitted
+        // and must not be abandoned when this route unmounts. The accepted row
+        // is gone, so the hook rebases that newer value onto revision zero while
+        // preserving the normal cross-tab OCC fence.
+        const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+        if (!acknowledged) return false;
+        if (acknowledged.kind === "consumed") {
           setMessage("");
           setDraft(emptySessionDraft());
           attachments.clear();
-        } else {
+        } else if (!newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)) {
           const preserved = await newSessionDraft.flush();
           if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) return false;
         }
