@@ -692,4 +692,8 @@ describe("workflow contracts", () => {
     expect(releaseText).toContain("bun run build:packages");
     expect(releaseText).toContain("bun scripts/publish-closure-guard.ts");
   });
+
+  test("follows immutable release-asset redirects before hashing", () => {
+    expect(releaseText.match(/--location/g)).toHaveLength(4);
+  });
 });
