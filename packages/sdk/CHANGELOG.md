@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.20.0
+
+### Minor Changes
+
+- 9f84cc9: Add durable host-provided per-turn instructions, headless structured-input hooks, host-local queue
+  focus, and reusable approval and human-input surfaces for embedded session consumers.
+
 ## 0.19.0
 
 ### Minor Changes

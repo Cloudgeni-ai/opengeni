@@ -1,5 +1,23 @@
 # @opengeni/core
 
+## 0.8.0
+
+### Minor Changes
+
+- 9f84cc9: Add durable host-provided per-turn instructions, headless structured-input hooks, host-local queue
+  focus, and reusable approval and human-input surfaces for embedded session consumers.
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+  - @opengeni/db@0.9.3
+  - @opengeni/runtime@0.11.0
+  - @opengeni/config@0.6.2
+  - @opengeni/documents@0.2.19
+  - @opengeni/events@0.3.10
+  - @opengeni/storage@0.2.15
+
 ## 0.7.0
 
 ### Minor Changes
