@@ -89,7 +89,7 @@ beforeAll(async () => {
       (${fixture.accountId}, ${workspaceId}, ${sessionId}, 200005,
         'turn.completed', ${shared.admin.json({ result: "authoritative" })}, 7),
       (${fixture.accountId}, ${workspaceId}, ${sessionId}, 200006,
-        'machine.op.failed', ${shared.admin.json({ code: "NEWER_UNRELATED_FAILURE" })}, 7)`;
+        'agent.model.usage', ${shared.admin.json({ sourceKey: "canonical-provider-response" })}, 7)`;
   await shared.admin`
     insert into session_events (
       account_id, workspace_id, session_id, sequence, type, payload
@@ -270,6 +270,82 @@ describe("session event monitoring (real PostgreSQL)", () => {
       sequence: 200005,
       turnGeneration: 7,
       payload: { result: "authoritative" },
+    });
+
+    const [session] = await shared.admin<Array<{ accountId: string }>>`
+      select account_id as "accountId" from sessions where id = ${sessionId}`;
+    const [canonicalProvider] = await shared.admin<Array<{ id: string }>>`
+      select id from session_events
+      where session_id = ${sessionId} and sequence = 200006`;
+    await shared.admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload,
+        turn_generation, turn_association, duplicate_of_event_id, duplicate_reason
+      ) values
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 200007,
+          'turn.completed', ${shared.admin.json({ result: "older-generation-later-sequence" })}, 6, 'current', null, null),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 200008,
+          'turn.completed', ${shared.admin.json({ result: "late-rejected-newer" })}, 99, 'late_rejected', null, null),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 200009,
+          'agent.model.usage', ${shared.admin.json({ sourceKey: "canonical-provider-response" })}, 100, 'duplicate',
+          ${canonicalProvider!.id}, 'duplicate_provider_response_usage'),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 200010,
+          'agent.message.completed', ${shared.admin.json({ text: "newest-authoritative-message" })}, 8, 'current', null, null),
+        (${session!.accountId}, ${workspaceId}, ${sessionId}, 200011,
+          'goal.completed', ${shared.admin.json({ status: "completed" })}, null, 'current', null, null)`;
+
+    const generationFirst = await listSessionEventPage(client.db, workspaceId, sessionId, {
+      direction: "before",
+      limit: 1,
+      includeTypes: ["turn.completed"],
+      payloadMode: "full",
+      authoritativeLatest: true,
+    });
+    expect(generationFirst.events[0]).toMatchObject({
+      sequence: 200005,
+      turnGeneration: 7,
+      payload: { result: "authoritative" },
+    });
+
+    const providerAccount = await listSessionEventPage(client.db, workspaceId, sessionId, {
+      direction: "before",
+      limit: 1,
+      includeClasses: ["provider_account"],
+      payloadMode: "full",
+      authoritativeLatest: true,
+    });
+    expect(providerAccount.events[0]).toMatchObject({
+      sequence: 200006,
+      turnGeneration: 7,
+      payload: { sourceKey: "canonical-provider-response" },
+      turnAssociation: null,
+    });
+
+    const authoritative = await listSessionEventPage(client.db, workspaceId, sessionId, {
+      direction: "before",
+      limit: 1,
+      includeClasses: ["terminal"],
+      payloadMode: "full",
+      authoritativeLatest: true,
+    });
+    expect(authoritative.events[0]).toMatchObject({
+      sequence: 200010,
+      turnGeneration: 8,
+      payload: { text: "newest-authoritative-message" },
+      turnAssociation: "current",
+    });
+
+    const nullGenerationFallback = await listSessionEventPage(client.db, workspaceId, sessionId, {
+      direction: "before",
+      limit: 1,
+      includeTypes: ["goal.completed"],
+      payloadMode: "none",
+      authoritativeLatest: true,
+    });
+    expect(nullGenerationFallback.events[0]).toMatchObject({
+      sequence: 200011,
+      turnGeneration: null,
+      turnAssociation: "current",
     });
 
     const leaked = await withWorkspaceRls(client.db, workspaceId, async (scopedDb) =>

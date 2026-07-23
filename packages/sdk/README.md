@@ -56,10 +56,25 @@ the requested class. It cannot be combined with any type or class include/exclud
 filter, so an unrelated newer event cannot displace the requested result and an
 exclusion cannot remove it.
 
+For callback-loss recovery, `latest` selects authoritative current/legacy rows
+by `turnGeneration` first and `sequence` second; explicit `late_rejected` and
+`duplicate` callbacks never compete with current truth. Use
+`resultMode: "compact"` to receive one bounded result-bearing completion,
+failure, checkpoint, or receipt without creating another model turn. The
+`receipt` spelling aliases `tool_receipt`, and a missing event returns `null`.
+The compact result includes exact source/generation/covered-sequence facts and
+bounded text/output/result/failure/checkpoint/receipt values. Retained-output
+storage and full-evidence retrieval are separate contracts from this event
+projection.
+
 ```ts
 const terminal = await client.listEventPage(workspaceId, sessionId, {
   latest: "terminal",
   payloadMode: "summary",
+});
+
+const recovered = await client.getLatestEventResult(workspaceId, sessionId, {
+  latest: "terminal",
 });
 
 const older = await client.listEventPage(workspaceId, sessionId, {
