@@ -156,13 +156,26 @@ export function safeDatabaseErrorFacts(error: unknown): SafeDatabaseErrorFacts {
   return facts;
 }
 
+/** Public-safe cause that preserves database classification without driver data. */
+export class SanitizedDatabasePersistenceCause extends Error {
+  readonly name = "SanitizedDatabasePersistenceCause";
+
+  constructor(
+    readonly sqlState: string | null,
+    readonly database: SafeDatabaseErrorFacts,
+  ) {
+    super(sqlState === null ? "Database driver failure" : `PostgreSQL failure ${sqlState}`);
+  }
+}
+
 /**
- * Public-safe replacement for a raw Drizzle/postgres-js failure. It deliberately
- * has no `cause`: driver causes can contain the full SQL statement and bound
- * parameters, which must never enter a session event or operator log payload.
+ * Public-safe replacement for a raw Drizzle/postgres-js failure. Its `cause`
+ * is a newly constructed sanitized projection; the original driver cause can
+ * contain full SQL and bound parameters and is never retained.
  */
 export class SessionEventPersistenceError extends Error {
   readonly name = "SessionEventPersistenceError";
+  readonly cause: SanitizedDatabasePersistenceCause;
 
   constructor(readonly details: PersistenceFailureDetails) {
     const label =
@@ -172,6 +185,7 @@ export class SessionEventPersistenceError extends Error {
           ? "Database serialization failure"
           : "Database failure";
     super(`${label} while persisting ${details.eventTypes.join(", ") || "session events"}`);
+    this.cause = new SanitizedDatabasePersistenceCause(details.sqlState, details.database);
   }
 
   get code(): DatabaseFailureCode {
