@@ -27,8 +27,12 @@ import {
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
+  SessionEventLatestClass,
+  SessionEventResultMode,
   SessionEventSemanticClass,
   SessionEventType,
+  compactSessionEventResult,
+  sessionEventLatestClassToSemanticClass,
   SaveComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
@@ -597,12 +601,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       "mode",
       explicitReplay ? "forensic" : "monitoring",
     );
-    const latestClass = eventEnumValue(
+    const latestRequested = eventEnumValue(
       c.req.query("latest"),
-      SessionEventSemanticClass,
+      SessionEventLatestClass,
       "latest",
       undefined,
     );
+    const latestClass =
+      latestRequested === undefined
+        ? undefined
+        : sessionEventLatestClassToSemanticClass(latestRequested);
+    const resultMode = eventEnumValue(
+      c.req.query("resultMode") ?? c.req.query("result"),
+      SessionEventResultMode,
+      "resultMode",
+      "events",
+    );
+    if (resultMode === "compact" && latestClass === undefined) {
+      throw new HTTPException(400, {
+        message: "resultMode=compact requires latest",
+      });
+    }
     if (
       latestClass &&
       ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some(
@@ -660,19 +679,39 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           compact ? 5000 : mode === "monitoring" ? 250 : 2000,
           mode === "monitoring" ? 40 : 500,
         );
+    const dbPayloadMode = resultMode === "compact" ? ("full" as const) : payloadMode;
     const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
       direction,
-      payloadMode,
+      payloadMode: dbPayloadMode,
       includeTypes,
       excludeTypes,
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+      ...(latestClass ? { authoritativeLatest: true } : {}),
     });
     const events = dbPage.events;
+    if (resultMode === "compact") {
+      const event = events[0];
+      c.header("X-OpenGeni-Event-Result-Mode", "compact");
+      c.header("X-OpenGeni-Event-Result", event ? "found" : "not_found");
+      c.header("X-OpenGeni-Event-Mode", mode);
+      c.header("X-OpenGeni-Event-Direction", direction);
+      c.header("X-OpenGeni-Payload-Mode", "full");
+      c.header("X-OpenGeni-Forensic-Exact", "false");
+      if (!event) return c.json(null, 200);
+      const result = compactSessionEventResult(
+        event,
+        latestClass!,
+        dbPage.coveredSequence ?? { first: event.sequence, last: event.sequence },
+      );
+      c.header("X-OpenGeni-Covered-First", String(result.coveredSequence.first));
+      c.header("X-OpenGeni-Covered-Last", String(result.coveredSequence.last));
+      return c.json(result);
+    }
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
     const page = boundSessionEventHttpPage(projected, {
       direction,

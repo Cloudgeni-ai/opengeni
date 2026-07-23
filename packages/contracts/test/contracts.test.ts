@@ -37,6 +37,8 @@ import {
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
+  SessionEvent,
+  compactSessionEventResult,
   ToolAuthNeededPayload,
   CredentialAuthNeededPayload,
   defaultRepositoryMountPath,
@@ -46,6 +48,73 @@ import {
 } from "../src";
 
 describe("contracts", () => {
+  const sessionEventFixture = (
+    type:
+      | "agent.message.completed"
+      | "turn.completed"
+      | "turn.failed"
+      | "session.context.compacted"
+      | "artifact.created",
+    payload: unknown,
+  ) =>
+    SessionEvent.parse({
+      id: "00000000-0000-4000-8000-000000000020",
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      sequence: 42,
+      type,
+      payload,
+      occurredAt: "2026-07-19T00:00:00.000Z",
+      turnId: "00000000-0000-4000-8000-000000000003",
+      turnGeneration: 8,
+      turnAttemptId: null,
+      turnAssociation: "current",
+    });
+
+  test("projects bounded terminal, checkpoint, failure, and receipt facts without inference", () => {
+    const completion = compactSessionEventResult(
+      sessionEventFixture("agent.message.completed", { text: "done", output: "" }),
+      "terminal",
+    );
+    expect(completion).toMatchObject({
+      status: "completed",
+      text: "done",
+      output: "",
+      result: "done",
+    });
+
+    const failure = compactSessionEventResult(
+      sessionEventFixture("turn.failed", {
+        error: "provider unavailable",
+        code: "upstream_unavailable",
+        retryable: true,
+        recovery: "retry later",
+      }),
+      "failure",
+    );
+    expect(failure.failure).toEqual({
+      error: "provider unavailable",
+      code: "upstream_unavailable",
+      retryable: true,
+      recovery: "retry later",
+    });
+
+    const checkpoint = compactSessionEventResult(
+      sessionEventFixture("session.context.compacted", { revision: 9, retained: true }),
+      "checkpoint",
+    );
+    expect(checkpoint.checkpoint).toEqual({ revision: 9, retained: true });
+
+    const receipt = compactSessionEventResult(
+      sessionEventFixture("artifact.created", { receipt: { status: "ready", value: "done" } }),
+      "tool_receipt",
+    );
+    expect(receipt).toMatchObject({
+      status: "receipt",
+      receipt: { status: "ready", value: "done" },
+    });
+  });
+
   test("models provider-neutral MCP bindings with exact selected repository scope", () => {
     const binding = McpServerConnectionRef.parse({
       connectionId: "host:github:one",

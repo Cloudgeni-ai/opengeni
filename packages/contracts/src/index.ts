@@ -4812,8 +4812,34 @@ export const SessionEventSemanticClass = z.enum([
 ]);
 export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass>;
 
+/**
+ * The semantic classes accepted by an exclusive latest lookup. `receipt` is
+ * the concise public spelling for the historical `tool_receipt` class; the
+ * latter remains accepted everywhere for backwards compatibility.
+ */
+export const SessionEventLatestClass = z.enum([
+  "control",
+  "terminal",
+  "failure",
+  "checkpoint",
+  "tool_receipt",
+  "provider_account",
+  "receipt",
+]);
+export type SessionEventLatestClass = z.infer<typeof SessionEventLatestClass>;
+
+export function sessionEventLatestClassToSemanticClass(
+  value: SessionEventLatestClass,
+): SessionEventSemanticClass {
+  return value === "receipt" ? "tool_receipt" : value;
+}
+
 export const SessionEventPayloadMode = z.enum(["none", "summary", "full"]);
 export type SessionEventPayloadMode = z.infer<typeof SessionEventPayloadMode>;
+
+/** Select the compact semantic-result projection instead of an event array. */
+export const SessionEventResultMode = z.enum(["events", "compact"]);
+export type SessionEventResultMode = z.infer<typeof SessionEventResultMode>;
 
 export const SessionEventReadMode = z.enum(["monitoring", "forensic"]);
 export type SessionEventReadMode = z.infer<typeof SessionEventReadMode>;
@@ -4855,6 +4881,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   ],
   terminal: [
     "turn.completed",
+    "agent.message.completed",
     "turn.failed",
     "turn.cancelled",
     "turn.superseded",
@@ -5707,6 +5734,354 @@ export const SessionEvent = z.object({
   duplicateReason: z.string().min(1).max(1024).nullable().optional(),
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
+
+export type SessionEventCompactResult = {
+  version: 1;
+  semanticClass: SessionEventSemanticClass;
+  source: {
+    id: string;
+    type: SessionEventType;
+    sequence: number;
+    occurredAt: string;
+    turnId: string | null;
+    turnGeneration: number | null;
+    turnAttemptId: string | null;
+    turnAssociation: SessionEvent["turnAssociation"];
+  };
+  // These identity fields are repeated at the top level intentionally: an
+  // MCP caller can act on the result without unpacking the source envelope.
+  id: string;
+  type: SessionEventType;
+  sequence: number;
+  occurredAt: string;
+  turnId: string | null;
+  turnGeneration: number | null;
+  turnAttemptId: string | null;
+  turnAssociation: SessionEvent["turnAssociation"];
+  coveredSequence: { first: number; last: number };
+  status:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "superseded"
+    | "checkpoint"
+    | "receipt"
+    | "unknown";
+  text: string | null;
+  output: unknown;
+  result: unknown;
+  failure: {
+    error: string | null;
+    code: string | null;
+    retryable: boolean | null;
+    recovery: string | null;
+  } | null;
+  checkpoint: unknown;
+  receipt: unknown;
+  truncation: {
+    truncated: boolean;
+    fields: string[];
+    originalBytes: number | null;
+    deliveredBytes: number;
+  };
+};
+
+const SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES = 12 * 1024;
+// Five independently bounded slots plus identity/metadata must fit below the
+// 64 KiB MCP envelope even when a pathological producer supplies every slot.
+const SESSION_EVENT_COMPACT_RESULT_VALUE_MAX_BYTES = 8 * 1024;
+
+type CompactValue = {
+  value: unknown;
+  truncated: boolean;
+  originalBytes: number | null;
+};
+
+type JsonRecord = Record<string, unknown>;
+
+/**
+ * Build the bounded semantic result used by `latest + result=compact`.
+ *
+ * This is intentionally a pure projection over one already-authoritative
+ * event. It never reads history, invokes a model, follows a URL, or stores an
+ * artifact. The DB/API/MCP layers decide which event is authoritative; this
+ * helper only extracts the small result facts that can cross a client boundary.
+ */
+export function compactSessionEventResult(
+  event: SessionEvent,
+  semanticClass: SessionEventSemanticClass,
+  coveredSequence: { first: number; last: number } = {
+    first: event.sequence,
+    last: event.sequence,
+  },
+): SessionEventCompactResult {
+  const payload = isSessionEventJsonRecord(event.payload) ? event.payload : {};
+  const fields: string[] = [];
+  let originalBytes = 0;
+
+  const textCandidate = typeof payload.text === "string" ? payload.text : null;
+  const outputCandidate = Object.prototype.hasOwnProperty.call(payload, "output")
+    ? payload.output
+    : null;
+  const resultCandidate = Object.prototype.hasOwnProperty.call(payload, "result")
+    ? payload.result
+    : undefined;
+  const textValue = textCandidate ?? (typeof outputCandidate === "string" ? outputCandidate : null);
+  const text = textValue === null ? null : compactResultText(textValue);
+  if (text && text.truncated) {
+    fields.push("text");
+    originalBytes += text.originalBytes ?? 0;
+  }
+
+  const output = compactResultValue(outputCandidate);
+  if (outputCandidate !== null && output.truncated) {
+    fields.push("output");
+    originalBytes += output.originalBytes ?? 0;
+  }
+
+  const result = compactResultValue(
+    resultCandidate === undefined ? (textValue ?? outputCandidate) : resultCandidate,
+  );
+  if (resultCandidate !== undefined && result.truncated) {
+    fields.push("result");
+    originalBytes += result.originalBytes ?? 0;
+  }
+
+  const checkpointField = firstOwnPayloadValue(payload, ["checkpoint", "summary", "snapshot"]);
+  const checkpointCandidate =
+    checkpointField !== undefined
+      ? checkpointField
+      : semanticClass === "checkpoint"
+        ? payload
+        : null;
+  const checkpoint = compactResultValue(checkpointCandidate);
+  if (checkpointCandidate !== null && checkpoint.truncated) {
+    fields.push("checkpoint");
+    originalBytes += checkpoint.originalBytes ?? 0;
+  }
+
+  const receiptCandidate = firstOwnPayloadValue(payload, ["receipt", "receiptData"]);
+  const receipt = compactResultValue(
+    receiptCandidate !== undefined
+      ? receiptCandidate
+      : semanticClass === "tool_receipt"
+        ? payload
+        : null,
+  );
+  if (receipt.truncated) {
+    fields.push("receipt");
+    originalBytes += receipt.originalBytes ?? 0;
+  }
+
+  const failure = compactFailure(payload, event.type);
+  if (failure.truncated) {
+    fields.push("failure");
+    originalBytes += failure.originalBytes ?? 0;
+  }
+
+  if (isSessionEventJsonRecord(payload.truncation) && payload.truncation.truncated === true) {
+    fields.push("payload");
+  }
+
+  const source = {
+    id: event.id,
+    type: event.type,
+    sequence: event.sequence,
+    occurredAt: event.occurredAt,
+    turnId: event.turnId ?? null,
+    turnGeneration: event.turnGeneration ?? null,
+    turnAttemptId: event.turnAttemptId ?? null,
+    turnAssociation: event.turnAssociation ?? null,
+  };
+  const status = compactResultStatus(event.type, semanticClass, payload);
+  const outputValue = outputCandidate === null ? null : output.value;
+  const resultValue = result.value;
+  const checkpointValue = checkpointCandidate === null ? null : checkpoint.value;
+  const receiptValue =
+    receiptCandidate === null && semanticClass !== "tool_receipt" ? null : receipt.value;
+  const compact: SessionEventCompactResult = {
+    version: 1,
+    semanticClass,
+    source,
+    id: source.id,
+    type: source.type,
+    sequence: source.sequence,
+    occurredAt: source.occurredAt,
+    turnId: source.turnId,
+    turnGeneration: source.turnGeneration,
+    turnAttemptId: source.turnAttemptId,
+    turnAssociation: source.turnAssociation,
+    coveredSequence,
+    status,
+    text: text?.value ?? null,
+    output: outputValue,
+    result: resultValue,
+    failure: failure.value,
+    checkpoint: checkpointValue,
+    receipt: receiptValue,
+    truncation: {
+      truncated: fields.length > 0,
+      fields: [...new Set(fields)],
+      originalBytes: fields.length > 0 ? originalBytes || null : null,
+      deliveredBytes: sessionEventJsonBytes({
+        text: text?.value ?? null,
+        output: outputValue,
+        result: resultValue,
+        failure: failure.value,
+        checkpoint: checkpointValue,
+        receipt: receiptValue,
+      }),
+    },
+  };
+  return compact;
+}
+
+function isSessionEventJsonRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function firstOwnPayloadValue(payload: JsonRecord, keys: readonly string[]): unknown | undefined {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) return payload[key];
+  }
+  return undefined;
+}
+
+function compactResultText(value: string): CompactValue & { value: string } {
+  const originalBytes = new TextEncoder().encode(value).byteLength;
+  if (originalBytes <= SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES) {
+    return { value, truncated: false, originalBytes };
+  }
+  let omittedBytes = originalBytes - SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES;
+  let projected = value;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const marker = `…[${omittedBytes} UTF-8 bytes omitted from compact result]…`;
+    const budget = Math.max(0, SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES - utf8Bytes(marker));
+    const head = utf8PrefixForResult(value, Math.floor(budget * 0.7));
+    const tail = utf8SuffixForResult(value, budget - utf8Bytes(head));
+    projected = `${head}${marker}${tail}`;
+    const nextOmitted = Math.max(0, originalBytes - utf8Bytes(head) - utf8Bytes(tail));
+    if (nextOmitted === omittedBytes) break;
+    omittedBytes = nextOmitted;
+  }
+  return { value: projected, truncated: true, originalBytes };
+}
+
+function compactResultValue(value: unknown): CompactValue {
+  if (value === null || value === undefined) {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  const measurement = measureSessionEventJson(value);
+  const bounded = boundSessionEventPayload(value, {
+    surface: "http_projection",
+    maxBytes: SESSION_EVENT_COMPACT_RESULT_VALUE_MAX_BYTES,
+  });
+  const deliveredBytes = measureSessionEventJson(bounded).bytes;
+  return {
+    value: bounded,
+    truncated:
+      measurement.bytes === null || deliveredBytes === null || measurement.bytes !== deliveredBytes,
+    originalBytes: measurement.bytes,
+  };
+}
+
+function compactFailure(
+  payload: JsonRecord,
+  eventType: SessionEventType,
+): CompactValue & {
+  value: SessionEventCompactResult["failure"];
+} {
+  const isFailure =
+    eventType === "turn.failed" ||
+    eventType === "turn.cancelled" ||
+    eventType === "turn.superseded";
+  const hasFailureField = ["error", "code", "retryable", "recovery"].some((key) =>
+    Object.prototype.hasOwnProperty.call(payload, key),
+  );
+  if (!isFailure && !hasFailureField) {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  const error = compactResultStringField(payload.error);
+  const code = compactResultStringField(payload.code);
+  const recovery = compactResultStringField(payload.recovery);
+  const retryable = typeof payload.retryable === "boolean" ? payload.retryable : null;
+  const value = { error: error.value, code: code.value, retryable, recovery: recovery.value };
+  const originalBytes = [error, code, recovery]
+    .map((field) => field.originalBytes ?? 0)
+    .reduce((sum, bytes) => sum + bytes, 0);
+  return {
+    value,
+    truncated: error.truncated || code.truncated || recovery.truncated,
+    originalBytes: originalBytes || null,
+  };
+}
+
+function compactResultStringField(value: unknown): CompactValue & { value: string | null } {
+  if (typeof value !== "string") {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  return compactResultText(value);
+}
+
+function compactResultStatus(
+  eventType: SessionEventType,
+  semanticClass: SessionEventSemanticClass,
+  payload: JsonRecord,
+): SessionEventCompactResult["status"] {
+  if (eventType === "turn.failed") return "failed";
+  if (eventType === "turn.cancelled") return "cancelled";
+  if (eventType === "turn.superseded") return "superseded";
+  if (eventType === "turn.completed" || eventType === "agent.message.completed") {
+    return "completed";
+  }
+  if (semanticClass === "checkpoint") return "checkpoint";
+  if (
+    semanticClass === "tool_receipt" ||
+    eventType === "artifact.created" ||
+    eventType === "recording.available"
+  ) {
+    return "receipt";
+  }
+  if (payload.status === "failed") return "failed";
+  if (payload.status === "completed") return "completed";
+  return "unknown";
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function utf8PrefixForResult(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let index = 0;
+  while (index < value.length) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    const next = utf8Bytes(character);
+    if (bytes + next > maxBytes) break;
+    bytes += next;
+    index += character.length;
+  }
+  return value.slice(0, index);
+}
+
+function utf8SuffixForResult(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let index = value.length;
+  while (index > 0) {
+    const width =
+      index > 1 && value.charCodeAt(index - 1) >= 0xdc00 && value.charCodeAt(index - 1) <= 0xdfff
+        ? 2
+        : 1;
+    const character = value.slice(index - width, index);
+    const next = utf8Bytes(character);
+    if (bytes + next > maxBytes) break;
+    bytes += next;
+    index -= width;
+  }
+  return value.slice(index);
+}
 
 // --- Durable host export ------------------------------------------------------
 
