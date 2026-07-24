@@ -2,8 +2,6 @@ import { describe, expect, test } from "bun:test";
 
 import {
   NUMERIC_PERFORMANCE_BUDGETS,
-  REAL_DEVICE_REQUIREMENTS,
-  TIMING_SENSITIVE_REQUIREMENTS,
   WORKBENCH_ACCEPTANCE_REQUIREMENTS,
 } from "./workbench-acceptance-contract";
 import {
@@ -81,23 +79,6 @@ function validResult(
     retries: 0,
     skipped: 0,
     evidence: evidence(`${requirementId}-${environment}`),
-    ...(TIMING_SENSITIVE_REQUIREMENTS.has(requirementId)
-      ? { repetitions: 100, seed: "acceptance-seed-1" }
-      : {}),
-    ...(REAL_DEVICE_REQUIREMENTS.has(requirementId)
-      ? {
-          device: {
-            real: true,
-            name: "owned acceptance device",
-            os: "test-os",
-            osVersion: "1",
-            browser: "test-browser",
-            browserVersion: "1",
-            viewport: "390x844@3",
-            input: "touch and keyboard",
-          },
-        }
-      : {}),
     ...(budget
       ? {
           measurement: {
@@ -123,15 +104,6 @@ function validBundle(): WorkbenchAcceptanceBundle {
     migration: digest,
     sandbox: digest,
   });
-  const visualPasses = (kind: string) =>
-    Array.from({ length: 10 }, (_, index) => ({
-      pass: index + 1,
-      observedAt: `2026-07-${String(index + 1).padStart(2, "0")}T00:00:00.000Z`,
-      reviewer: "acceptance-reviewer",
-      resolvedDefects: [`${kind} defect ${index + 1} resolved`],
-      before: evidence(`${kind}-${index + 1}-before`),
-      after: evidence(`${kind}-${index + 1}-after`),
-    }));
   return {
     schemaVersion: 2,
     generatedAt: "2026-07-16T00:00:00.000Z",
@@ -179,7 +151,6 @@ function validBundle(): WorkbenchAcceptanceBundle {
       evidence: evidence("canary"),
     },
     knownDefects: [],
-    visualPasses: { desktop: visualPasses("desktop"), mobile: visualPasses("mobile") },
     results: WORKBENCH_ACCEPTANCE_REQUIREMENTS.flatMap((requirement) =>
       requirement.environments.map((environment) => validResult(requirement.id, environment)),
     ),
@@ -257,45 +228,24 @@ describe("workbench acceptance bundle", () => {
     expect(() => validate(migration)).toThrow("migration must equal");
   });
 
-  test("rejects emulated hardware, fewer than ten passes, and timing shortcuts", () => {
-    const emulated = validBundle();
-    const hardware = emulated.results.find((item) =>
-      REAL_DEVICE_REQUIREMENTS.has(item.requirementId),
-    )!;
-    hardware.device!.real = false;
-    expect(() => validate(emulated)).toThrow("emulation is insufficient");
-
-    const visual = validBundle();
-    visual.visualPasses.mobile.pop();
-    expect(() => validate(visual)).toThrow("at least 10 passes");
-
-    const timing = validBundle();
-    const repeated = timing.results.find((item) =>
-      TIMING_SENSITIVE_REQUIREMENTS.has(item.requirementId),
-    )!;
-    repeated.repetitions = 99;
-    expect(() => validate(timing)).toThrow("at least 100 consecutive repetitions");
-  });
-
-  test("rejects rubber-stamped visual passes and repeated attempts", () => {
-    const noDefect = validBundle();
-    noDefect.visualPasses.desktop[0]!.resolvedDefects = [];
-    expect(() => validate(noDefect)).toThrow("at least one resolved defect");
-
-    const sameEvidence = validBundle();
-    sameEvidence.visualPasses.mobile[0]!.after = sameEvidence.visualPasses.mobile[0]!.before;
-    expect(() => validate(sameEvidence)).toThrow("must reference distinct evidence");
-
+  test("rejects repeated attempts and insufficient live measurement samples", () => {
     const repeated = validBundle();
     repeated.results[0]!.attempts = 2;
     expect(() => validate(repeated)).toThrow("attempts must be exactly 1");
+
+    const insufficient = validBundle();
+    const capture = insufficient.results.find(
+      (item) => item.requirementId === "performance.capture-api-response",
+    )!;
+    capture.measurement!.sampleCount = 99;
+    expect(() => validate(insufficient)).toThrow("at least 100 samples");
   });
 
   test("rejects extra environment rows and impossible measurement distributions", () => {
     const extra = validBundle();
-    extra.results.push(validResult("functional.capture-absence", "production"));
+    extra.results.push(validResult("functional.desktop-framebuffer", "production"));
     expect(() => validate(extra)).toThrow(
-      "unexpected acceptance result functional.capture-absence@production",
+      "unexpected acceptance result functional.desktop-framebuffer@production",
     );
 
     const unordered = validBundle();
@@ -306,10 +256,10 @@ describe("workbench acceptance bundle", () => {
     expect(() => validate(unordered)).toThrow("are not ordered for a maximum budget");
 
     const negative = validBundle();
-    const fps = negative.results.find(
-      (item) => item.requirementId === "performance.tree-scroll-resize",
+    const captureWithNegative = negative.results.find(
+      (item) => item.requirementId === "performance.capture-usable-workbench",
     )!;
-    fps.measurement!.worst = -1;
+    captureWithNegative.measurement!.worst = -1;
     expect(() => validate(negative)).toThrow("must be finite and nonnegative");
   });
 

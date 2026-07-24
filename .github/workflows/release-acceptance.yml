@@ -148,16 +148,16 @@ jobs:
             | sha256sum --check --strict -
           mapfile -t entries < <(unzip -Z1 "$zip" | sort)
           expected=(
-            "evidence/workbench-acceptance.json"
-            "evidence/workbench-acceptance.sha256"
+            "workbench-acceptance.json"
+            "workbench-acceptance.sha256"
           )
           test "${#entries[@]}" -eq "${#expected[@]}"
           for index in "${!expected[@]}"; do
             test "${entries[$index]}" = "${expected[$index]}"
           done
-          unzip -p "$zip" evidence/workbench-acceptance.json \
+          unzip -p "$zip" workbench-acceptance.json \
             > .release/operator/workbench-acceptance.json
-          unzip -p "$zip" evidence/workbench-acceptance.sha256 \
+          unzip -p "$zip" workbench-acceptance.sha256 \
             > .release/operator/workbench-acceptance.sha256
           operator_sha="$(sha256sum .release/operator/workbench-acceptance.json | awk '{print $1}')"
           test "$operator_sha" = "$(awk 'NF { print $1; exit }' .release/operator/workbench-acceptance.sha256)"

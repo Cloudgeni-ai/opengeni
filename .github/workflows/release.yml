@@ -299,7 +299,7 @@ jobs:
             echo "candidate chart bytes do not match the receipt" >&2
             exit 1
           }
-          cp .release/acceptance-artifact/files/evidence/workbench-acceptance.json evidence/workbench-acceptance.json
+          cp .release/acceptance-artifact/files/workbench-acceptance.json evidence/workbench-acceptance.json
           acceptance_bundle_sha256="$(sha256sum evidence/workbench-acceptance.json | awk '{print $1}')"
           jq -e \
             --arg sourceSha "$SOURCE_SHA" \

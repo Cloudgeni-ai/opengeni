@@ -97,6 +97,13 @@ describe("release image workflow contract", () => {
     expect(acceptance).not.toContain("operator_artifact_url:");
     expect(acceptance).not.toContain("operator_artifact_sha256:");
     expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");
+    expect(acceptance).toContain('"workbench-acceptance.json"');
+    expect(acceptance).not.toContain('"evidence/workbench-acceptance.json"');
+    const release = await workflow("release.yml");
+    expect(release).toContain(".release/acceptance-artifact/files/workbench-acceptance.json");
+    expect(release).not.toContain(
+      ".release/acceptance-artifact/files/evidence/workbench-acceptance.json",
+    );
   });
 
   test("ordinary CI builds the same five physical image roles", async () => {

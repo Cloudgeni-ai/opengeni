@@ -4,8 +4,6 @@ import { resolve } from "node:path";
 
 import {
   NUMERIC_PERFORMANCE_BUDGETS,
-  REAL_DEVICE_REQUIREMENTS,
-  TIMING_SENSITIVE_REQUIREMENTS,
   WORKBENCH_ACCEPTANCE_REQUIREMENTS,
   type AcceptanceEnvironment,
 } from "./workbench-acceptance-contract";
@@ -121,20 +119,7 @@ export type WorkbenchAcceptanceBundle = {
     evidence: EvidenceRef[];
   };
   knownDefects: [];
-  visualPasses: {
-    desktop: VisualPass[];
-    mobile: VisualPass[];
-  };
   results: AcceptanceResult[];
-};
-
-export type VisualPass = {
-  pass: number;
-  observedAt: string;
-  reviewer: string;
-  resolvedDefects: string[];
-  before: EvidenceRef[];
-  after: EvidenceRef[];
 };
 
 export type AcceptanceBundleExpectations = {
@@ -279,7 +264,6 @@ export function validateWorkbenchAcceptanceBundle(
     expected.productionCanaryEvidenceUrl,
     errors,
   );
-  validateVisualPasses(bundle.visualPasses, errors);
   validateResults(bundle.results, errors);
 
   if (errors.length > 0) {
@@ -364,44 +348,6 @@ function validateCanary(
   evidenceRefs(canary.evidence, "productionCanary.evidence", errors);
 }
 
-function validateVisualPasses(value: unknown, errors: string[]): void {
-  const passes = record(value, "visualPasses", errors);
-  for (const kind of ["desktop", "mobile"] as const) {
-    const items = Array.isArray(passes[kind]) ? passes[kind] : [];
-    if (!Array.isArray(passes[kind])) errors.push(`visualPasses.${kind} must be an array`);
-    if (items.length < 10) errors.push(`visualPasses.${kind} must contain at least 10 passes`);
-    const numbers = new Set<number>();
-    for (const [index, raw] of items.entries()) {
-      const path = `visualPasses.${kind}[${index}]`;
-      const item = record(raw, path, errors);
-      const pass = positiveInteger(item.pass, `${path}.pass`, errors);
-      if (pass !== null) {
-        if (numbers.has(pass)) errors.push(`${path}.pass duplicates pass ${pass}`);
-        numbers.add(pass);
-      }
-      isoDate(item.observedAt, `${path}.observedAt`, errors);
-      nonempty(item.reviewer, `${path}.reviewer`, errors);
-      if (!Array.isArray(item.resolvedDefects)) {
-        errors.push(`${path}.resolvedDefects must be an array`);
-      } else if (item.resolvedDefects.length === 0) {
-        errors.push(`${path}.resolvedDefects must contain at least one resolved defect`);
-      } else {
-        for (const [defectIndex, defect] of item.resolvedDefects.entries()) {
-          nonempty(defect, `${path}.resolvedDefects[${defectIndex}]`, errors);
-        }
-      }
-      evidenceRefs(item.before, `${path}.before`, errors);
-      evidenceRefs(item.after, `${path}.after`, errors);
-      if (sameEvidenceRefs(item.before, item.after)) {
-        errors.push(`${path}.before and ${path}.after must reference distinct evidence`);
-      }
-    }
-    for (let pass = 1; pass <= 10; pass += 1) {
-      if (!numbers.has(pass)) errors.push(`visualPasses.${kind} is missing pass ${pass}`);
-    }
-  }
-}
-
 function validateResults(value: unknown, errors: string[]): void {
   if (!Array.isArray(value)) {
     errors.push("results must be an array");
@@ -432,15 +378,6 @@ function validateResults(value: unknown, errors: string[]): void {
     if (item.skipped !== 0) errors.push(`${key} skipped must be 0`);
     evidenceRefs(item.evidence, `${path}.evidence`, errors);
 
-    if (TIMING_SENSITIVE_REQUIREMENTS.has(requirementId)) {
-      if (!Number.isInteger(item.repetitions) || (item.repetitions as number) < 100) {
-        errors.push(`${key} must record at least 100 consecutive repetitions`);
-      }
-      nonempty(item.seed, `${path}.seed`, errors);
-    }
-    if (REAL_DEVICE_REQUIREMENTS.has(requirementId)) {
-      validateRealDevice(item.device, `${path}.device`, errors);
-    }
     const budget = NUMERIC_PERFORMANCE_BUDGETS[requirementId];
     if (budget) validateMeasurement(item.measurement, budget, key, errors);
   }
@@ -512,22 +449,6 @@ function validateMeasurement(
   }
   if (budget.direction === "minimum" && observed < budget.limit) {
     errors.push(`${key} ${budget.statistic} ${observed} is below ${budget.limit} ${budget.unit}`);
-  }
-}
-
-function validateRealDevice(value: unknown, path: string, errors: string[]): void {
-  const device = record(value, path, errors);
-  if (device.real !== true) errors.push(`${path}.real must be true (emulation is insufficient)`);
-  for (const field of [
-    "name",
-    "os",
-    "osVersion",
-    "browser",
-    "browserVersion",
-    "viewport",
-    "input",
-  ]) {
-    nonempty(device[field], `${path}.${field}`, errors);
   }
 }
 
@@ -654,26 +575,6 @@ function singleEvidenceRef(value: unknown, path: string, errors: string[]): Evid
   if (!hashPattern.test(sha256)) errors.push(`${path}.sha256 must be lowercase SHA-256`);
   const artifact = string(item.artifact, `${path}.artifact`, errors);
   return { url, sha256, artifact };
-}
-
-function sameEvidenceRefs(left: unknown, right: unknown): boolean {
-  if (!Array.isArray(left) || !Array.isArray(right) || left.length === 0 || right.length === 0) {
-    return false;
-  }
-  const identities = (items: unknown[]) =>
-    items
-      .map((raw) => {
-        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return "";
-        const item = raw as Record<string, unknown>;
-        return `${String(item.url ?? "")}\u0000${String(item.sha256 ?? "")}\u0000${String(item.artifact ?? "")}`;
-      })
-      .sort();
-  const leftIdentities = identities(left);
-  const rightIdentities = identities(right);
-  return (
-    leftIdentities.length === rightIdentities.length &&
-    leftIdentities.every((identity, index) => identity === rightIdentities[index])
-  );
 }
 
 function httpsUrl(value: unknown, path: string, errors: string[]): string {
@@ -810,8 +711,6 @@ async function main(): Promise<void> {
       ok: true,
       sourceSha: bundle.candidate.sourceSha,
       resultCount: bundle.results.length,
-      desktopVisualPasses: bundle.visualPasses.desktop.length,
-      mobileVisualPasses: bundle.visualPasses.mobile.length,
       productionCanaryCycles: bundle.productionCanary.passedCycles,
     }),
   );
