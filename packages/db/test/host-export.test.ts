@@ -178,7 +178,7 @@ describe("durable host export (real PostgreSQL)", () => {
       createdEventPayload: {},
       goal: null,
     });
-    const [childCompleted, childLegacyUnresolved] = await appendSessionEvents(
+    const [childCompleted, childSecondCompleted] = await appendSessionEvents(
       app.db,
       active.grant.workspaceId!,
       child.id,
@@ -190,18 +190,11 @@ describe("durable host export (real PostgreSQL)", () => {
         },
         {
           type: "agent.message.completed",
-          payload: { text: "legacy child export" },
+          payload: { text: "second child export" },
           turnId: childStarted.turn!.id,
         },
       ],
     );
-    // Model one unresolved pre-lineage row for the same session. Root lookup is
-    // cursor-bound, not session-bound: this legacy null must not erase or borrow
-    // the root captured by the adjacent current row.
-    await shared.admin`
-      update host_export_outbox
-      set root_session_id = null
-      where source_id = ${childLegacyUnresolved!.id}::uuid`;
     await recordUsageEvent(app.db, {
       accountId: active.grant.accountId,
       workspaceId: active.grant.workspaceId!,
@@ -235,11 +228,11 @@ describe("durable host export (real PostgreSQL)", () => {
     const childExport = eventBatch?.events.find((item) => item.event.id === childCompleted?.id);
     expect(childExport?.event.sessionId).toBe(child.id);
     expect(childExport?.rootSessionId).toBe(active.session.id);
-    const unresolvedChildExport = eventBatch?.events.find(
-      (item) => item.event.id === childLegacyUnresolved?.id,
+    const secondChildExport = eventBatch?.events.find(
+      (item) => item.event.id === childSecondCompleted?.id,
     );
-    expect(unresolvedChildExport?.event.sessionId).toBe(child.id);
-    expect(unresolvedChildExport?.rootSessionId).toBeNull();
+    expect(secondChildExport?.event.sessionId).toBe(child.id);
+    expect(secondChildExport?.rootSessionId).toBe(active.session.id);
     expect(
       eventBatch?.events.every(
         (item, index, items) =>
