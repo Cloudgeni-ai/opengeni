@@ -13,7 +13,42 @@ async function action(name: string): Promise<string> {
   return readFile(resolve(root, ".github/actions", name, "action.yml"), "utf8");
 }
 
+function ghApiCommands(source: string): string[] {
+  const commands: string[] = [];
+  let command = "";
+
+  for (const line of source.split("\n")) {
+    const start = line.search(/\bgh api\b/);
+    if (!command && start >= 0) command = line.slice(start);
+    else if (command) command += `\n${line}`;
+
+    if (command && !/\\\s*$/.test(line)) {
+      commands.push(command);
+      command = "";
+    }
+  }
+
+  if (command) commands.push(command);
+  return commands;
+}
+
 describe("release image workflow contract", () => {
+  test("downloads artifact ZIPs through portable gh api stdout redirection", async () => {
+    const workflows = await Promise.all(
+      ["release-acceptance.yml", "release.yml", "release-embedded.yml"].map(workflow),
+    );
+    const commands = workflows.flatMap(ghApiCommands);
+    expect(commands.filter((command) => command.includes("--output"))).toHaveLength(0);
+    const artifactDownloads = commands.filter(
+      (command) => command.includes("/actions/artifacts/") && command.includes("/zip"),
+    );
+
+    expect(artifactDownloads).toHaveLength(5);
+    for (const command of artifactDownloads) {
+      expect(command).toMatch(/\/zip["']?\s*\\?\s*(?:\n\s*)?>\s*[^\s]+/);
+    }
+  });
+
   test("candidate builds every physical image and freezes a full-SHA receipt", async () => {
     const candidate = await workflow("release-candidate.yml");
 

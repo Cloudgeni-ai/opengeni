@@ -117,8 +117,7 @@ jobs:
           zip=".release/candidate/artifact.zip"
           gh api \
             --header 'Accept: application/vnd.github+json' \
-            --output "$zip" \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip"
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip" > "$zip"
           printf '%s  %s\n' "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" "$zip" \
             | sha256sum --check --strict -
           mapfile -t receipts < <(unzip -Z1 "$zip" | grep -E '(^|/)release-candidate\.json$')
@@ -142,8 +141,7 @@ jobs:
           zip=".release/operator/artifact.zip"
           gh api \
             --header 'Accept: application/vnd.github+json' \
-            --output "$zip" \
-            "/repos/${OPERATOR_REPOSITORY}/actions/artifacts/${OPERATOR_ARTIFACT_ID}/zip"
+            "/repos/${OPERATOR_REPOSITORY}/actions/artifacts/${OPERATOR_ARTIFACT_ID}/zip" > "$zip"
           printf '%s  %s\n' "${OPERATOR_ARTIFACT_DIGEST#sha256:}" "$zip" \
             | sha256sum --check --strict -
           mapfile -t entries < <(unzip -Z1 "$zip" | sort)
