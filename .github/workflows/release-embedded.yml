@@ -1,0 +1,295 @@
+name: Release embedded distribution
+
+# Publish an exact OpenGeni SDK/runtime distribution for self-hosted embedding
+# consumers. This path deliberately does not claim hosted Workbench acceptance:
+# it promotes only bytes already built by release-candidate.yml after exact-head
+# package CI, and it never updates the hosted deployment's `latest` image tags.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact versioned main SHA used to build the immutable candidate.
+        required: true
+        type: string
+      expected_packages:
+        description: Exact comma-separated @opengeni package@version set.
+        required: true
+        type: string
+      candidate_receipt_url:
+        description: Direct HTTPS URL for the immutable release-candidate.json asset.
+        required: true
+        type: string
+      candidate_receipt_sha256:
+        description: SHA-256 of the exact candidate receipt bytes.
+        required: true
+        type: string
+      confirm_distribution:
+        description: Confirm this exact candidate is ready for public embedded/self-hosted use.
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-embedded-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Publish packages and promote exact images
+    runs-on: ubuntu-latest
+    if: ${{ vars.RELEASE_ENABLED == 'true' && inputs.confirm_distribution }}
+    permissions:
+      contents: write
+      id-token: write
+      packages: write
+    steps:
+      - name: Check out evidence-bound source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate exact released source
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
+          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "source_sha must be a 40-character lowercase git SHA" >&2
+            exit 1
+          }
+          [[ "$CANDIDATE_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "candidate_receipt_sha256 must be a lowercase SHA-256" >&2
+            exit 1
+          }
+          [[ "$CANDIDATE_RECEIPT_URL" =~ ^https://[^[:space:]?#]+$ ]] || {
+            echo "candidate_receipt_url must be a stable absolute HTTPS URL" >&2
+            exit 1
+          }
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
+            echo "checked-out source does not match source_sha" >&2
+            exit 1
+          }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "source_sha must be reachable from current main" >&2
+            exit 1
+          }
+          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
+            echo "pending changesets remain; merge the generated Version PR first" >&2
+            exit 1
+          fi
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Download and validate immutable candidate
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
+          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --proto '=https' \
+            --connect-timeout 10 \
+            --max-time 120 \
+            --retry 2 \
+            --retry-all-errors \
+            --output evidence/release-candidate.json \
+            "$CANDIDATE_RECEIPT_URL"
+          printf '%s  %s\n' \
+            "$CANDIDATE_RECEIPT_SHA256" \
+            evidence/release-candidate.json \
+            | sha256sum --check --strict -
+          bun scripts/release-candidate.ts \
+            --verify evidence/release-candidate.json \
+            --source-sha "$SOURCE_SHA" \
+            --expected-packages "$EXPECTED_PACKAGES"
+
+      - name: Re-run public package gates
+        run: |
+          set -euo pipefail
+          bun run typecheck
+          bun run build:packages
+          (cd packages/sdk && bun test test/contract-parity.test.ts)
+          bun scripts/publish-closure-guard.ts
+          bun run test:runtime-embedding-consumer
+          bun run test:publish-consumer
+
+      - name: Plan exact package publication
+        id: package-plan
+        env:
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: plan
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-plan.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Set up Node for npm provenance
+        if: steps.package-plan.outputs.needs_publish == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish source-bound packages
+        if: steps.package-plan.outputs.needs_publish == 'true'
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1
+        with:
+          publish: bun run release:publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Reconcile npm package identity
+        id: registry
+        env:
+          OPENGENI_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+          OPENGENI_EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
+          OPENGENI_RELEASE_PACKAGE_PHASE: verify
+          OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
+        run: bun scripts/verify-release-packages.ts
+
+      - name: Resolve distribution version
+        id: meta
+        env:
+          VERIFIED_PACKAGES: ${{ steps.registry.outputs.verified_packages }}
+        run: |
+          set -euo pipefail
+          version="$(printf '%s' "$VERIFIED_PACKAGES" \
+            | jq -er '(map(select(.name == "@opengeni/sdk")) + sort_by(.name))[0].version')"
+          [ "$(jq -er .releaseVersion evidence/release-candidate.json)" = "$version" ] || {
+            echo "candidate release version differs from published packages" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Promote exact candidate manifests
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          for role in api worker web relay sandbox; do
+            name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
+            digest="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
+            source="${name}@${digest}"
+            docker buildx imagetools create \
+              --prefer-index=false \
+              --tag "${name}:${RELEASE_VERSION}" \
+              --tag "${name}:sha-${SOURCE_SHA}" \
+              "$source"
+            for tag in "${RELEASE_VERSION}" "sha-${SOURCE_SHA}"; do
+              promoted="$(docker buildx imagetools inspect "${name}:${tag}" --format '{{.Manifest.Digest}}')"
+              [ "$promoted" = "$digest" ] || {
+                echo "${name}:${tag} resolved to ${promoted}, expected ${digest}" >&2
+                exit 1
+              }
+            done
+          done
+
+      - name: Verify anonymous image pulls
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          docker logout ghcr.io
+          for role in api worker web relay sandbox; do
+            name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
+            expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
+            resolved=""
+            for attempt in 1 2 3 4 5; do
+              resolved="$(docker buildx imagetools inspect "${name}:${RELEASE_VERSION}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+              [ "$resolved" = "$expected" ] && break
+              sleep "$((attempt * 2))"
+            done
+            [ "$resolved" = "$expected" ] || {
+              echo "anonymous pull failed for ${name}:${RELEASE_VERSION}" >&2
+              exit 1
+            }
+          done
+
+      - name: Write complete source-bound BOM
+        id: release-bom
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          BOM_PACKAGES: ${{ steps.registry.outputs.bom_packages }}
+        run: |
+          images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
+          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
+          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
+          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
+          OPENGENI_RELEASE_BOM_IMAGES="$images" \
+          bun scripts/release-bom.ts
+
+      - name: Write release BOM checksum
+        env:
+          BOM_SHA256: ${{ steps.release-bom.outputs.sha256 }}
+        run: printf '%s  %s\n' "$BOM_SHA256" release-bom.json > evidence/release-bom.sha256
+
+      - name: Upload release BOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7
+        with:
+          name: embedded-release-bom-${{ inputs.source_sha }}
+          path: |
+            release-bom.json
+            evidence/release-bom.sha256
+            evidence/release-candidate.json
+            evidence/release-packages-verified.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Publish immutable source-bound release receipt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="opengeni-embedded-release-${SOURCE_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            [ "$resolved" = "$SOURCE_SHA" ] || {
+              echo "existing release tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            }
+          else
+            gh release create "$tag" \
+              release-bom.json \
+              evidence/release-bom.sha256 \
+              --target "$SOURCE_SHA" \
+              --title "OpenGeni embedded distribution ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
+              --notes "Source-bound npm packages and self-hosted images for embedded consumers." \
+              --latest=false
+          fi

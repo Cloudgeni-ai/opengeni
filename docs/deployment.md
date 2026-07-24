@@ -195,6 +195,14 @@ five image packages anonymously before writing its receipt; final promotion
 also proves the newly published official chart and every release image
 anonymously against the accepted bytes and digests.
 
+Self-hosted embedding consumers have a narrower distribution boundary:
+`.github/workflows/release-embedded.yml` publishes only an exact versioned
+source that already has an immutable candidate receipt. It re-runs the public
+package gates, verifies npm `gitHead` and integrity, and promotes the receipt's
+unchanged manifests to version and full-source-SHA tags. It deliberately does
+not create or update `latest`, and its release receipt makes no hosted
+Workbench, staging, production, or canary claim.
+
 After staging, production, and the 72-hour canary have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
