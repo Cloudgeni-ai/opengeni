@@ -30,6 +30,15 @@ locals {
   availability_test_url                 = try(var.observability.availability_test_url, null)
   observability_action_group_short_name = try(var.observability.action_group_short_name, "opengenialrt")
   observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
+  aks_auto_scaling_enabled              = coalesce(try(var.managed_aks_capacity.auto_scaling_enabled, null), var.aks.auto_scaling_enabled)
+  aks_max_count                         = local.aks_auto_scaling_enabled ? coalesce(try(var.managed_aks_capacity.max_count, null), var.aks.max_count) : null
+  aks_max_pods                          = try(var.managed_aks_capacity.max_pods, null) != null ? var.managed_aks_capacity.max_pods : var.aks.max_pods
+  aks_min_count                         = local.aks_auto_scaling_enabled ? coalesce(try(var.managed_aks_capacity.min_count, null), var.aks.min_count) : null
+  aks_node_count                        = var.managed_aks_capacity != null ? var.managed_aks_capacity.node_count : var.aks.node_count
+  aks_os_disk_size_gb                   = try(var.managed_aks_capacity.os_disk_size_gb, null) != null ? var.managed_aks_capacity.os_disk_size_gb : var.aks.os_disk_size_gb
+  aks_os_disk_type                      = try(var.managed_aks_capacity.os_disk_type, null) != null ? var.managed_aks_capacity.os_disk_type : var.aks.os_disk_type
+  aks_temporary_name_for_rotation       = try(var.managed_aks_capacity.temporary_name_for_rotation, null) != null ? var.managed_aks_capacity.temporary_name_for_rotation : var.aks.temporary_name_for_rotation
+  aks_vm_size                           = coalesce(try(var.managed_aks_capacity.vm_size, null), var.aks.vm_size)
   dns_zone_contributor_principals = {
     for item in flatten([
       for assignment_name, assignment in var.dns_zone_contributor_assignments : [
@@ -82,9 +91,16 @@ resource "azurerm_kubernetes_cluster" "this" {
   tags                      = local.tags
 
   default_node_pool {
-    name       = "system"
-    node_count = var.managed_aks_capacity != null ? var.managed_aks_capacity.node_count : var.aks.node_count
-    vm_size    = var.aks.vm_size
+    name                        = "system"
+    auto_scaling_enabled        = local.aks_auto_scaling_enabled
+    max_count                   = local.aks_max_count
+    max_pods                    = local.aks_max_pods
+    min_count                   = local.aks_min_count
+    node_count                  = local.aks_node_count
+    os_disk_size_gb             = local.aks_os_disk_size_gb
+    os_disk_type                = local.aks_os_disk_type
+    temporary_name_for_rotation = local.aks_temporary_name_for_rotation
+    vm_size                     = local.aks_vm_size
 
     upgrade_settings {
       drain_timeout_in_minutes      = var.aks.node_pool_upgrade_drain_timeout_minutes
@@ -119,6 +135,16 @@ resource "azurerm_kubernetes_cluster" "this" {
     ignore_changes = [
       microsoft_defender[0].log_analytics_workspace_id,
     ]
+
+    precondition {
+      condition = !local.aks_auto_scaling_enabled || (
+        local.aks_min_count != null &&
+        local.aks_max_count != null &&
+        local.aks_min_count <= local.aks_node_count &&
+        local.aks_node_count <= local.aks_max_count
+      )
+      error_message = "AKS autoscaling requires min_count <= node_count <= max_count."
+    }
   }
 }
 

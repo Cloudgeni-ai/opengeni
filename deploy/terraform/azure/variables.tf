@@ -50,6 +50,13 @@ variable "aks" {
     kubernetes_version                            = optional(string)
     node_count                                    = optional(number, 2)
     vm_size                                       = optional(string, "Standard_D4ds_v5")
+    auto_scaling_enabled                          = optional(bool, false)
+    min_count                                     = optional(number)
+    max_count                                     = optional(number)
+    max_pods                                      = optional(number)
+    os_disk_size_gb                               = optional(number)
+    os_disk_type                                  = optional(string)
+    temporary_name_for_rotation                   = optional(string)
     dns_prefix                                    = optional(string)
     node_pool_upgrade_max_surge                   = optional(string, "10%")
     node_pool_upgrade_drain_timeout_minutes       = optional(number, 0)
@@ -57,12 +64,76 @@ variable "aks" {
     microsoft_defender_log_analytics_workspace_id = optional(string)
   })
   default = {}
+
+  validation {
+    condition = (
+      var.aks.node_count >= 1 &&
+      var.aks.node_count <= 1000 &&
+      floor(var.aks.node_count) == var.aks.node_count
+    )
+    error_message = "aks.node_count must be a whole number between 1 and 1000."
+  }
+
+  validation {
+    condition = var.aks.auto_scaling_enabled ? (
+      var.aks.min_count != null &&
+      var.aks.max_count != null &&
+      var.aks.min_count >= 1 &&
+      var.aks.min_count <= var.aks.node_count &&
+      var.aks.node_count <= var.aks.max_count &&
+      var.aks.max_count <= 1000 &&
+      floor(var.aks.min_count) == var.aks.min_count &&
+      floor(var.aks.max_count) == var.aks.max_count
+      ) : (
+      var.aks.min_count == null && var.aks.max_count == null
+    )
+    error_message = "aks autoscaling requires whole-number min_count <= node_count <= max_count; fixed pools must omit min_count and max_count."
+  }
+
+  validation {
+    condition = var.aks.max_pods == null ? true : (
+      var.aks.max_pods >= 10 &&
+      var.aks.max_pods <= 250 &&
+      floor(var.aks.max_pods) == var.aks.max_pods
+    )
+    error_message = "aks.max_pods must be a whole number between 10 and 250."
+  }
+
+  validation {
+    condition = var.aks.os_disk_size_gb == null ? true : (
+      var.aks.os_disk_size_gb >= 30 &&
+      var.aks.os_disk_size_gb <= 2048 &&
+      floor(var.aks.os_disk_size_gb) == var.aks.os_disk_size_gb
+    )
+    error_message = "aks.os_disk_size_gb must be a whole number between 30 and 2048."
+  }
+
+  validation {
+    condition     = var.aks.os_disk_type == null ? true : contains(["Ephemeral", "Managed"], var.aks.os_disk_type)
+    error_message = "aks.os_disk_type must be Ephemeral or Managed."
+  }
+
+  validation {
+    condition = var.aks.temporary_name_for_rotation == null ? true : (
+      can(regex("^[a-z][a-z0-9]{0,11}$", var.aks.temporary_name_for_rotation)) &&
+      var.aks.temporary_name_for_rotation != "system"
+    )
+    error_message = "aks.temporary_name_for_rotation must be a different 1-12 character lowercase alphanumeric pool name."
+  }
 }
 
 variable "managed_aks_capacity" {
-  description = "Optional non-secret capacity policy for the managed AKS system pool. Production automation can pin live node capacity without duplicating the rest of the environment configuration."
+  description = "Optional non-secret capacity policy for the managed AKS system pool. Automation can pin node count, SKU, autoscaling, pod density, disk, and safe rotation without duplicating the rest of the environment configuration."
   type = object({
-    node_count = number
+    node_count                  = number
+    vm_size                     = optional(string)
+    auto_scaling_enabled        = optional(bool)
+    min_count                   = optional(number)
+    max_count                   = optional(number)
+    max_pods                    = optional(number)
+    os_disk_size_gb             = optional(number)
+    os_disk_type                = optional(string)
+    temporary_name_for_rotation = optional(string)
   })
   default  = null
   nullable = true
@@ -74,6 +145,62 @@ variable "managed_aks_capacity" {
       floor(var.managed_aks_capacity.node_count) == var.managed_aks_capacity.node_count
     )
     error_message = "managed_aks_capacity.node_count must be a whole number between 1 and 1000."
+  }
+
+  validation {
+    condition = var.managed_aks_capacity == null ? true : (
+      try(var.managed_aks_capacity.auto_scaling_enabled, null) == null ? (
+        try(var.managed_aks_capacity.min_count, null) == null &&
+        try(var.managed_aks_capacity.max_count, null) == null
+        ) : try(var.managed_aks_capacity.auto_scaling_enabled, false) ? (
+        try(var.managed_aks_capacity.min_count, null) != null &&
+        try(var.managed_aks_capacity.max_count, null) != null &&
+        try(var.managed_aks_capacity.min_count, 0) >= 1 &&
+        try(var.managed_aks_capacity.min_count, 0) <= var.managed_aks_capacity.node_count &&
+        var.managed_aks_capacity.node_count <= try(var.managed_aks_capacity.max_count, 0) &&
+        try(var.managed_aks_capacity.max_count, 1001) <= 1000 &&
+        floor(try(var.managed_aks_capacity.min_count, 0.5)) == try(var.managed_aks_capacity.min_count, 0) &&
+        floor(try(var.managed_aks_capacity.max_count, 0.5)) == try(var.managed_aks_capacity.max_count, 0)
+        ) : (
+        try(var.managed_aks_capacity.min_count, null) == null &&
+        try(var.managed_aks_capacity.max_count, null) == null
+      )
+    )
+    error_message = "managed_aks_capacity autoscaling requires whole-number min_count <= node_count <= max_count; fixed overrides must omit min_count and max_count."
+  }
+
+  validation {
+    condition = var.managed_aks_capacity == null || try(var.managed_aks_capacity.max_pods, null) == null ? true : (
+      try(var.managed_aks_capacity.max_pods, 0) >= 10 &&
+      try(var.managed_aks_capacity.max_pods, 251) <= 250 &&
+      floor(try(var.managed_aks_capacity.max_pods, 0.5)) == try(var.managed_aks_capacity.max_pods, 0)
+    )
+    error_message = "managed_aks_capacity.max_pods must be a whole number between 10 and 250."
+  }
+
+  validation {
+    condition = var.managed_aks_capacity == null || try(var.managed_aks_capacity.os_disk_size_gb, null) == null ? true : (
+      try(var.managed_aks_capacity.os_disk_size_gb, 0) >= 30 &&
+      try(var.managed_aks_capacity.os_disk_size_gb, 2049) <= 2048 &&
+      floor(try(var.managed_aks_capacity.os_disk_size_gb, 0.5)) == try(var.managed_aks_capacity.os_disk_size_gb, 0)
+    )
+    error_message = "managed_aks_capacity.os_disk_size_gb must be a whole number between 30 and 2048."
+  }
+
+  validation {
+    condition = var.managed_aks_capacity == null || try(var.managed_aks_capacity.os_disk_type, null) == null ? true : contains(
+      ["Ephemeral", "Managed"],
+      try(var.managed_aks_capacity.os_disk_type, "")
+    )
+    error_message = "managed_aks_capacity.os_disk_type must be Ephemeral or Managed."
+  }
+
+  validation {
+    condition = var.managed_aks_capacity == null || try(var.managed_aks_capacity.temporary_name_for_rotation, null) == null ? true : (
+      can(regex("^[a-z][a-z0-9]{0,11}$", try(var.managed_aks_capacity.temporary_name_for_rotation, ""))) &&
+      try(var.managed_aks_capacity.temporary_name_for_rotation, "system") != "system"
+    )
+    error_message = "managed_aks_capacity.temporary_name_for_rotation must be a different 1-12 character lowercase alphanumeric pool name."
   }
 }
 
