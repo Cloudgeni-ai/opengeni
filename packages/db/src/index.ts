@@ -24729,6 +24729,7 @@ export async function applySessionTurnSettlement(
               effectiveSessionStatus !== input.sessionStatus
               ? { ...payload, status: effectiveSessionStatus }
               : payload,
+            { fullEvidence: event.retainedOutputEvidence },
           ),
           clientEventId: event.clientEventId ?? null,
           turnId: input.turnId,
