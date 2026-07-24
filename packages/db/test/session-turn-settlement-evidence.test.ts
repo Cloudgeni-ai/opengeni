@@ -5,6 +5,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  initializeSessionStartAtomically,
   type ApplySessionTurnSettlementInput,
   withWorkspaceRls,
 } from "../src/index";
@@ -50,6 +51,14 @@ async function fixture() {
     model: "scripted-model",
     sandboxBackend: "none",
   });
+  const started = await initializeSessionStartAtomically(client.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId!,
+    sessionId: session.id,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  if (!started.turn) throw new Error("initial turn was not created");
   const attemptId = crypto.randomUUID();
   const claim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
     sessionId: session.id,
