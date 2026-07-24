@@ -22,8 +22,8 @@ name: Release
 #      a distinct trusted human reviewer.
 #   4. Set the api, worker, web, relay, and sandbox GHCR container packages to
 #      Public once in each package's settings. GitHub has no supported REST API
-#      for changing package visibility; the workflow verifies anonymous access
-#      after promotion and fails closed while any package remains private.
+#      for changing package visibility; candidate publication and final
+#      promotion both fail closed while any package remains private.
 #   - GHCR image publishing needs no extra secret (built-in GITHUB_TOKEN) and
 #     runs only when a release actually publishes.
 

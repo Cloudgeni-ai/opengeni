@@ -25,6 +25,16 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("opengeni-candidate-${SOURCE_SHA}");
     expect(candidate).toContain("evidence/release-candidate.json");
     expect(candidate).toContain("cmp evidence/release-candidate.json");
+    const anonymousGate = candidate.indexOf("Verify candidate images support anonymous pull");
+    const receiptWrite = candidate.indexOf("Write immutable candidate receipt");
+    const receiptPublish = candidate.indexOf("Publish immutable source-SHA candidate receipt");
+    expect(anonymousGate).toBeGreaterThan(-1);
+    expect(anonymousGate).toBeLessThan(receiptWrite);
+    expect(anonymousGate).toBeLessThan(receiptPublish);
+    expect(candidate.slice(anonymousGate, receiptWrite)).toContain("docker logout ghcr.io");
+    expect(candidate.slice(anonymousGate, receiptWrite)).toContain(
+      "docker buildx imagetools inspect",
+    );
   });
 
   test("final release promotes accepted manifests and has no image build boundary", async () => {
