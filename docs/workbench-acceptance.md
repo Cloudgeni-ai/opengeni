@@ -70,11 +70,14 @@ publishes an immutable `opengeni-candidate-<sourceSha>` receipt. A retry reuses
 an already-present manifest instead of rebuilding it.
 
 The protected `release-acceptance.yml` workflow is the canonical acceptance
-producer. The checked-in workflow is intentionally fail-closed until the
-operator-owned live harness is installed in its protected environment; it cannot
-produce a successful acceptance artifact from a prose summary or caller-supplied
-evidence file. Once installed, its successful run must be bound to the exact
-source SHA, source tree, workflow path, run attempt, and unexpired
+producer. Its protected environment pins the trusted operator repository and
+workflow path and supplies the narrow credential required to read that private
+run's artifact. The workflow takes an operator run ID—not an evidence URL or
+hash—then verifies the successful main-branch workflow identity, current-main
+ancestry, exact source-named artifact ownership, expiry, and provider digest.
+It imports only the sanitized bundle and sidecar, replaces candidate and public
+producer authority with independently verified OpenGeni metadata, and validates
+the complete schema-v2 bundle before it can emit the canonical
 `release-acceptance-<sourceSha>` artifact. The pre-publication release workflow
 accepts only the candidate and acceptance workflow run IDs, resolves their
 canonical artifacts through the GitHub API, verifies the provider artifact digests, and validates the bundle against
@@ -88,8 +91,8 @@ evidence. A checkbox or prose summary is never accepted in place of the parsed
 bundle.
 
 Staging and production evidence MUST identify the same source SHA, source tree,
-image digests, chart version, and chart byte hash as the candidate receipt. The final release
-job is gated by the protected `production-release` environment. It compares the
+image digests, chart version, and chart byte hash as the candidate receipt. The
+final release job is gated by the protected `production-release` environment. It compares the
 existing immutable BOM before creating any version, full-SHA, or `latest` alias;
 any mismatch stops with no alias mutation. It then verifies every alias and the
 anonymous OCI chart pull against the candidate bytes and writes the resulting

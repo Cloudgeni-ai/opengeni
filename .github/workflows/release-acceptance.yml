@@ -19,6 +19,10 @@ on:
         description: Canonical release-candidate workflow run that produced this source.
         required: true
         type: string
+      operator_run_id:
+        description: Protected operator workflow run that produced the complete sanitized acceptance input.
+        required: true
+        type: string
 
 concurrency:
   group: release-acceptance-${{ inputs.source_sha }}
@@ -51,6 +55,13 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          case "$GITHUB_WORKFLOW_REF" in
+            "$GITHUB_REPOSITORY/.github/workflows/release-acceptance.yml@"*) ;;
+            *)
+              echo "unexpected acceptance workflow identity: $GITHUB_WORKFLOW_REF" >&2
+              exit 1
+              ;;
+          esac
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || exit 1
           [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || exit 1
@@ -63,6 +74,7 @@ jobs:
           bun-version: 1.3.14
 
       - name: Verify the candidate producer before acceptance
+        id: candidate
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ inputs.source_sha }}
@@ -74,19 +86,97 @@ jobs:
             --kind candidate \
             --source-sha "$SOURCE_SHA" \
             --run-id "$CANDIDATE_RUN_ID" \
-            --output evidence/candidate-provenance.json
+            --output evidence/candidate-provenance.json \
+            --output-prefix candidate
 
-      # The protected environment owner installs the real live acceptance
-      # harness here. The checked-in contract never fabricates matrix rows from
-      # a prose summary or accepts a caller-provided evidence file/URL. Leaving
-      # this marker unresolved keeps the producer unsuccessful and therefore
-      # unusable by release.yml.
-      - name: Require the operator-controlled acceptance harness
+      - name: Verify the protected operator acceptance producer
+        id: operator
+        env:
+          OPERATOR_GITHUB_TOKEN: ${{ secrets.RELEASE_ACCEPTANCE_OPERATOR_TOKEN }}
+          OPERATOR_REPOSITORY: ${{ vars.RELEASE_ACCEPTANCE_OPERATOR_REPOSITORY }}
+          OPERATOR_WORKFLOW_PATH: ${{ vars.RELEASE_ACCEPTANCE_OPERATOR_WORKFLOW_PATH }}
+          OPERATOR_RUN_ID: ${{ inputs.operator_run_id }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          echo "No protected acceptance harness is configured for this repository." >&2
-          echo "Install the operator-owned harness before enabling RELEASE_ACCEPTANCE_ENABLED." >&2
-          exit 1
+          bun scripts/verify-operator-acceptance-provenance.ts \
+            --repository "$OPERATOR_REPOSITORY" \
+            --workflow-path "$OPERATOR_WORKFLOW_PATH" \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$OPERATOR_RUN_ID" \
+            --output evidence/operator-provenance.json
+
+      - name: Download the exact candidate receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.candidate_artifact_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release/candidate
+          zip=".release/candidate/artifact.zip"
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --output "$zip" \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip"
+          printf '%s  %s\n' "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" "$zip" \
+            | sha256sum --check --strict -
+          mapfile -t receipts < <(unzip -Z1 "$zip" | grep -E '(^|/)release-candidate\.json$')
+          mapfile -t sidecars < <(unzip -Z1 "$zip" | grep -E '(^|/)release-candidate\.sha256$')
+          test "${#receipts[@]}" -eq 1 -a "${#sidecars[@]}" -eq 1
+          unzip -p "$zip" "${receipts[0]}" > evidence/release-candidate.json
+          unzip -p "$zip" "${sidecars[0]}" > evidence/release-candidate.sha256
+          receipt_sha="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          test "$receipt_sha" = "$(awk 'NF { print $1; exit }' evidence/release-candidate.sha256)"
+          echo "CANDIDATE_RECEIPT_SHA256=$receipt_sha" >> "$GITHUB_ENV"
+
+      - name: Download the exact sanitized operator bundle
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_ACCEPTANCE_OPERATOR_TOKEN }}
+          OPERATOR_REPOSITORY: ${{ steps.operator.outputs.repository }}
+          OPERATOR_ARTIFACT_ID: ${{ steps.operator.outputs.artifact_id }}
+          OPERATOR_ARTIFACT_DIGEST: ${{ steps.operator.outputs.artifact_digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release/operator
+          zip=".release/operator/artifact.zip"
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --output "$zip" \
+            "/repos/${OPERATOR_REPOSITORY}/actions/artifacts/${OPERATOR_ARTIFACT_ID}/zip"
+          printf '%s  %s\n' "${OPERATOR_ARTIFACT_DIGEST#sha256:}" "$zip" \
+            | sha256sum --check --strict -
+          mapfile -t entries < <(unzip -Z1 "$zip" | sort)
+          expected=(
+            "evidence/workbench-acceptance.json"
+            "evidence/workbench-acceptance.sha256"
+          )
+          test "${#entries[@]}" -eq "${#expected[@]}"
+          for index in "${!expected[@]}"; do
+            test "${entries[$index]}" = "${expected[$index]}"
+          done
+          unzip -p "$zip" evidence/workbench-acceptance.json \
+            > .release/operator/workbench-acceptance.json
+          unzip -p "$zip" evidence/workbench-acceptance.sha256 \
+            > .release/operator/workbench-acceptance.sha256
+          operator_sha="$(sha256sum .release/operator/workbench-acceptance.json | awk '{print $1}')"
+          test "$operator_sha" = "$(awk 'NF { print $1; exit }' .release/operator/workbench-acceptance.sha256)"
+
+      - name: Assemble and validate the canonical acceptance bundle
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          bun scripts/assemble-release-acceptance.ts \
+            --operator-bundle .release/operator/workbench-acceptance.json \
+            --candidate-receipt evidence/release-candidate.json \
+            --candidate-provenance evidence/candidate-provenance.json \
+            --candidate-receipt-sha256 "$CANDIDATE_RECEIPT_SHA256" \
+            --source-sha "$SOURCE_SHA" \
+            --acceptance-run-id "$GITHUB_RUN_ID" \
+            --acceptance-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --output evidence/workbench-acceptance.json \
+            --sha-output evidence/workbench-acceptance.sha256
 
       - name: Upload the complete acceptance artifact
         if: ${{ success() }}

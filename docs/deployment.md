@@ -199,9 +199,16 @@ After staging, production, and the 72-hour canary have consumed those exact
 digests and chart bytes, the protected operator-controlled
 `.github/workflows/release-acceptance.yml` workflow produces the sanitized
 schema-v2 acceptance bundle. Its `production-acceptance` environment is the
-canonical acceptance boundary; the checked-in workflow fails closed until the
-operator-owned live harness is installed, so a prose summary or caller-supplied
-evidence file can never become a successful producer artifact.
+canonical acceptance boundary. That environment pins the operator repository
+and canonical workflow path and holds a narrow artifact-read credential. A
+dispatcher supplies only the operator run ID: OpenGeni requires a successful
+`workflow_dispatch` run from the configured operator `main`, proves that run's
+head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
+and its provider digest, and accepts only the two expected sanitized files.
+OpenGeni then replaces all operator-supplied candidate/public-producer authority
+with its independently verified candidate and current acceptance-run metadata
+before validating every schema-v2 row. No dispatcher can select an evidence
+URL, hash, repository, workflow path, or artifact name.
 
 Public release is then an explicit dispatch of `.github/workflows/release.yml`
 from a ref pinned to the accepted source SHA. Evidence admission accepts the

@@ -83,12 +83,19 @@ describe("release image workflow contract", () => {
     }
   });
 
-  test("acceptance is a protected canonical producer and stays fail-closed without its harness", async () => {
+  test("acceptance imports only an exact protected operator artifact", async () => {
     const acceptance = await workflow("release-acceptance.yml");
     expect(acceptance).toContain(".github/workflows/release-acceptance.yml");
     expect(acceptance).toContain("name: production-acceptance");
-    expect(acceptance).toContain("Require the operator-controlled acceptance harness");
-    expect(acceptance).toContain("exit 1");
+    expect(acceptance).toContain("operator_run_id:");
+    expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_REPOSITORY");
+    expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_WORKFLOW_PATH");
+    expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_TOKEN");
+    expect(acceptance).toContain("verify-operator-acceptance-provenance.ts");
+    expect(acceptance).toContain("assemble-release-acceptance.ts");
+    expect(acceptance).toContain("OPERATOR_ARTIFACT_DIGEST#sha256:");
+    expect(acceptance).not.toContain("operator_artifact_url:");
+    expect(acceptance).not.toContain("operator_artifact_sha256:");
     expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");
   });
 
