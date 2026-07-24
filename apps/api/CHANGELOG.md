@@ -1,5 +1,21 @@
 # @opengeni/api-router
 
+## 0.8.2
+
+### Patch Changes
+
+- ff23da5: Keep oversized event previews bounded while optionally linking them to integrity-addressed workspace-file evidence, and expose access-controlled metadata plus capped provider-native range retrieval through the API and SDK.
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/db@0.10.2
+  - @opengeni/events@0.3.14
+  - @opengeni/storage@0.2.18
+  - @opengeni/config@0.6.5
+  - @opengeni/core@0.9.2
+  - @opengeni/documents@0.2.23
+  - @opengeni/github@0.3.6
+  - @opengeni/runtime@0.12.2
+
 ## 0.8.1
 
 ### Patch Changes

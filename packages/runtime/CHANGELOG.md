@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 0.12.2
+
+### Patch Changes
+
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/config@0.6.5
+
 ## 0.12.1
 
 ### Patch Changes

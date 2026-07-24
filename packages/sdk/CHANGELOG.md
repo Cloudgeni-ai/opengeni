@@ -1,5 +1,11 @@
 # @opengeni/sdk
 
+## 0.21.1
+
+### Patch Changes
+
+- ff23da5: Keep oversized event previews bounded while optionally linking them to integrity-addressed workspace-file evidence, and expose access-controlled metadata plus capped provider-native range retrieval through the API and SDK.
+
 ## 0.21.0
 
 ### Minor Changes
