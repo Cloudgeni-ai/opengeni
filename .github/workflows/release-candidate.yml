@@ -311,6 +311,39 @@ jobs:
           [ -z "$BUILT_DIGEST" ] || [ "$digest" = "$BUILT_DIGEST" ] || exit 1
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      - name: Verify candidate images support anonymous pull
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          API_DIGEST: ${{ steps.api.outputs.digest }}
+          WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
+          WEB_DIGEST: ${{ steps.web.outputs.digest }}
+          RELAY_DIGEST: ${{ steps.relay.outputs.digest }}
+          SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
+        run: |
+          set -euo pipefail
+          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+
+          # Candidate receipts are public deployment authority. Drop the
+          # publishing credential before creating one so a private package can
+          # never produce a receipt that the ordinary release operator cannot
+          # consume.
+          docker logout ghcr.io
+          for role in api worker web relay sandbox; do
+            digest_var="$(printf '%s_DIGEST' "$role" | tr '[:lower:]' '[:upper:]')"
+            expected="${!digest_var}"
+            image="ghcr.io/${org}/opengeni-${role}@${expected}"
+            resolved=""
+            for attempt in 1 2 3 4 5; do
+              resolved="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+              [ "$resolved" = "$expected" ] && break
+              sleep "$((attempt * 2))"
+            done
+            [ "$resolved" = "$expected" ] || {
+              echo "anonymous candidate pull proof failed for ${image}: resolved ${resolved:-nothing}, expected ${expected}" >&2
+              exit 1
+            }
+          done
+
       - name: Write immutable candidate receipt
         id: receipt
         env:
