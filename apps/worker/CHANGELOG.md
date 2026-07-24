@@ -1,5 +1,29 @@
 # @opengeni/worker-bundle
 
+## 0.9.0
+
+### Minor Changes
+
+- b9cec61: Let embedding hosts return exact HTTPS smart-Git broker transports for repository
+  bindings whose provider credentials cannot be contained to the selected
+  repositories. Keep broker bearers off manifests, Git configuration, repository
+  metadata, and provider CLIs; renew bearers independently without changing the
+  admitted route set.
+
+### Patch Changes
+
+- Updated dependencies [b9cec61]
+- Updated dependencies [c978676]
+  - @opengeni/contracts@0.16.0
+  - @opengeni/runtime@0.12.0
+  - @opengeni/config@0.6.3
+  - @opengeni/core@0.8.1
+  - @opengeni/db@0.9.4
+  - @opengeni/documents@0.2.20
+  - @opengeni/events@0.3.11
+  - @opengeni/github@0.3.4
+  - @opengeni/storage@0.2.16
+
 ## 0.8.3
 
 ### Patch Changes

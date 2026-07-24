@@ -1,5 +1,14 @@
 # @opengeni/config
 
+## 0.6.3
+
+### Patch Changes
+
+- c978676: Cut a release checkpoint that requires staging, production, and the complete
+  72-hour canary evidence chain before public package and image publication.
+- Updated dependencies [b9cec61]
+  - @opengeni/contracts@0.16.0
+
 ## 0.6.2
 
 ### Patch Changes
