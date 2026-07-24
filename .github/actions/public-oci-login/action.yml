@@ -6,7 +6,7 @@ inputs:
     description: Registry host plus optional repository namespace.
     required: true
   auth:
-    description: Authentication mode: github or azure-oidc.
+    description: "Authentication mode: github or azure-oidc."
     required: true
   github-username:
     description: GitHub registry username when auth is github.
