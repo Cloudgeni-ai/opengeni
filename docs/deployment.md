@@ -197,11 +197,14 @@ anonymously against the accepted bytes and digests.
 
 Self-hosted embedding consumers have a narrower distribution boundary:
 `.github/workflows/release-embedded.yml` publishes only an exact versioned
-source that already has an immutable candidate receipt. It re-runs the public
-package gates, verifies npm `gitHead` and integrity, and promotes the receipt's
-unchanged manifests to version and full-source-SHA tags. It deliberately does
-not create or update `latest`, and its release receipt makes no hosted
-Workbench, staging, production, or canary claim.
+source that already has an immutable candidate receipt from the canonical
+candidate workflow. Its dispatcher supplies the trusted candidate run ID, not a
+caller-selected receipt URL or digest. The workflow re-runs the public package
+gates, verifies npm `gitHead` and integrity, publishes or reconciles the exact
+candidate chart, promotes the receipt's unchanged manifests to version and
+full-source-SHA tags, and writes one source-bound package/image/chart BOM. It
+deliberately does not create or update `latest`, and its immutable distribution
+receipt makes no hosted Workbench, staging, production, or canary claim.
 
 After staging, production, and the 72-hour canary have consumed those exact
 digests and chart bytes, the protected operator-controlled
@@ -226,9 +229,15 @@ GitHub API and requires the canonical repository/workflow, a completed
 successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
 owned unexpired Actions artifact with its provider digest, and the expected
 artifact name. URLs and archive digests are derived only after those checks. The
-same exact expected package set and an explicit zero-gap confirmation are still
-required; the selected dispatch ref, `source_sha`, checked-out commit, and a
-commit reachable from `main` must identify the same revision.
+same exact expected package set (including an empty set for an application-only
+release) and an explicit zero-gap confirmation are still required. The product
+release identity comes from the exact SemVer `version`/`appVersion` pair
+committed in `deploy/helm/opengeni/Chart.yaml`; it is independent of whichever
+npm packages changed. The selected dispatch ref, `source_sha`, checked-out
+commit, and a commit reachable from `main` must identify the same revision.
+Candidate admission rejects a product version already occupied by any official
+image or chart. A final-release retry permits only aliases that already resolve
+to the exact accepted digest.
 
 The dispatch downloads the validated candidate and acceptance artifacts,
 verifies their provider ZIP digests and retained sidecars, rejects any changed,
@@ -303,10 +312,12 @@ helm upgrade --install opengeni oci://ghcr.io/cloudgeni-ai/charts/opengeni \
 
 Use the repo checkout chart path only for development, chart edits, local
 rendering, or smoke tests against locally built images. `deploy/helm/opengeni`
-keeps a source-tree `Chart.yaml` version for development; releases do not commit
-Chart.yaml bumps. If you install from a clone instead of the OCI chart, set
-`api.image.tag`, `worker.image.tag`, `web.image.tag`, `migrations.image.tag`,
-and, when enabled, `relay.image.tag` to the image tag you intend to run.
+keeps the canonical product release identity in the exact SemVer
+`version`/`appVersion` pair in `Chart.yaml`; bump both together before producing
+a candidate for a new product release, even when no npm package changed. If you
+install from a clone instead of the OCI chart, set `api.image.tag`,
+`worker.image.tag`, `web.image.tag`, `migrations.image.tag`, and, when enabled,
+`relay.image.tag` to the image tag you intend to run.
 
 Render the development chart path with an existing secret:
 

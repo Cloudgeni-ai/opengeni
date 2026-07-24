@@ -13,15 +13,12 @@ on:
         required: true
         type: string
       expected_packages:
-        description: Exact comma-separated @opengeni package@version set.
-        required: true
+        description: Exact comma-separated @opengeni package@version set, or empty for an application-only release.
+        required: false
+        default: ""
         type: string
-      candidate_receipt_url:
-        description: Direct HTTPS URL for the immutable release-candidate.json asset.
-        required: true
-        type: string
-      candidate_receipt_sha256:
-        description: SHA-256 of the exact candidate receipt bytes.
+      candidate_run_id:
+        description: Completed run ID of the canonical release-candidate workflow for source_sha.
         required: true
         type: string
       confirm_distribution:
@@ -39,13 +36,14 @@ permissions:
 
 jobs:
   release:
-    name: Publish packages and promote exact images
+    name: Publish exact packages, chart, images, and BOM
     runs-on: ubuntu-latest
     if: ${{ vars.RELEASE_ENABLED == 'true' && inputs.confirm_distribution }}
     permissions:
       contents: write
       id-token: write
       packages: write
+      actions: read
     steps:
       - name: Check out evidence-bound source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -57,24 +55,23 @@ jobs:
       - name: Validate exact released source
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
             echo "source_sha must be a 40-character lowercase git SHA" >&2
             exit 1
           }
-          [[ "$CANDIDATE_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "candidate_receipt_sha256 must be a lowercase SHA-256" >&2
-            exit 1
-          }
-          [[ "$CANDIDATE_RECEIPT_URL" =~ ^https://[^[:space:]?#]+$ ]] || {
-            echo "candidate_receipt_url must be a stable absolute HTTPS URL" >&2
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
+            echo "candidate_run_id must be a positive workflow run ID" >&2
             exit 1
           }
           [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || {
             echo "checked-out source does not match source_sha" >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
+            echo "dispatch ref must resolve to source_sha" >&2
             exit 1
           }
           git fetch --no-tags origin main
@@ -95,35 +92,71 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Resolve trusted candidate provenance
+        id: candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          bun scripts/verify-release-provenance.ts \
+            --kind candidate \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --output evidence/candidate-provenance.json \
+            --output-prefix candidate
+
       - name: Download and validate immutable candidate
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.candidate.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.candidate.outputs.candidate_artifact_digest }}
+          CANDIDATE_SOURCE_TREE_SHA: ${{ steps.candidate.outputs.candidate_source_tree_sha }}
         run: |
           set -euo pipefail
-          mkdir -p evidence
-          curl \
-            --fail \
-            --location \
-            --silent \
-            --show-error \
-            --proto '=https' \
-            --connect-timeout 10 \
-            --max-time 120 \
-            --retry 2 \
-            --retry-all-errors \
-            --output evidence/release-candidate.json \
-            "$CANDIDATE_RECEIPT_URL"
+          mkdir -p evidence .release/candidate-artifact .release
+          gh api \
+            --header 'Accept: application/vnd.github+json' \
+            --output .release/candidate-artifact.zip \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip"
           printf '%s  %s\n' \
-            "$CANDIDATE_RECEIPT_SHA256" \
-            evidence/release-candidate.json \
+            "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" \
+            .release/candidate-artifact.zip \
             | sha256sum --check --strict -
+          unzip -q .release/candidate-artifact.zip -d .release/candidate-artifact
+          candidate_path="$(find .release/candidate-artifact -type f -name release-candidate.json -print -quit)"
+          receipt_sidecar_path="$(find .release/candidate-artifact -type f -name release-candidate.sha256 -print -quit)"
+          chart_sidecar_path="$(find .release/candidate-artifact -type f -name release-chart.sha256 -print -quit)"
+          test -n "$candidate_path" -a -n "$receipt_sidecar_path" -a -n "$chart_sidecar_path"
+          cp "$candidate_path" evidence/release-candidate.json
+          chart_artifact="$(jq -er '.chart.artifact' evidence/release-candidate.json)"
+          chart_path="$(find .release/candidate-artifact -type f -name "$chart_artifact" -print -quit)"
+          test -n "$chart_path"
+          cp "$chart_path" ".release/$chart_artifact"
+          receipt_sha256="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          [ "$(awk 'NF { print $1; exit }' "$receipt_sidecar_path")" = "$receipt_sha256" ]
+          chart_sha256="$(sha256sum ".release/$chart_artifact" | awk '{print $1}')"
+          [ "$(awk 'NF { print $1; exit }' "$chart_sidecar_path")" = "$chart_sha256" ]
+          [ "$chart_sha256" = "$(jq -er '.chart.bytesSha256' evidence/release-candidate.json)" ]
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "$CANDIDATE_SOURCE_TREE_SHA" \
+            --slurpfile producer evidence/candidate-provenance.json \
+            '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .producer == $producer[0].producer' \
+            evidence/release-candidate.json >/dev/null
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
             --source-sha "$SOURCE_SHA" \
             --expected-packages "$EXPECTED_PACKAGES"
+          release_version="$(jq -er '.releaseVersion' evidence/release-candidate.json)"
+          [ "$release_version" = "$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)" ] || {
+            echo "candidate release version differs from the source-controlled chart version" >&2
+            exit 1
+          }
 
       - name: Re-run public package gates
         run: |
@@ -134,6 +167,73 @@ jobs:
           bun scripts/publish-closure-guard.ts
           bun run test:runtime-embedding-consumer
           bun run test:publish-consumer
+
+      - name: Resolve distribution version
+        id: meta
+        run: |
+          set -euo pipefail
+          version="$(jq -er .releaseVersion evidence/release-candidate.json)"
+          [ "$version" = "$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)" ] || {
+            echo "candidate release version differs from the source-controlled chart version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reconcile existing distribution aliases before publication
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          for role in api worker web relay sandbox; do
+            name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
+            expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
+            for tag in "$RELEASE_VERSION" "sha-${SOURCE_SHA}"; do
+              resolved="$(bun scripts/resolve-optional-oci-manifest.ts "${name}:${tag}")"
+              if [ -n "$resolved" ] && [ "$resolved" != "$expected" ]; then
+                echo "${name}:${tag} resolves to ${resolved}, not accepted ${expected}" >&2
+                exit 1
+              fi
+            done
+          done
+
+      - name: Reconcile an existing distribution chart before publication
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USERNAME: ${{ github.actor }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          echo "$GHCR_TOKEN" | helm registry login ghcr.io \
+            --username "$GHCR_USERNAME" \
+            --password-stdin
+          chart_ref="ghcr.io/cloudgeni-ai/charts/opengeni:${RELEASE_VERSION}"
+          chart_oci="oci://ghcr.io/cloudgeni-ai/charts/opengeni"
+          chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
+          resolved="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          if [ -n "$resolved" ]; then
+            mkdir -p .release/chart-preflight
+            helm pull "$chart_oci" \
+              --version "$RELEASE_VERSION" \
+              --destination .release/chart-preflight
+            cmp "$chart_path" ".release/chart-preflight/opengeni-${RELEASE_VERSION}.tgz" || {
+              echo "existing distribution chart bytes differ from the accepted candidate" >&2
+              exit 1
+            }
+          fi
 
       - name: Plan exact package publication
         id: package-plan
@@ -170,29 +270,113 @@ jobs:
           OPENGENI_RELEASE_PACKAGE_RECEIPT: evidence/release-packages-verified.json
         run: bun scripts/verify-release-packages.ts
 
-      - name: Resolve distribution version
-        id: meta
+      - name: Verify complete package evidence
         env:
           VERIFIED_PACKAGES: ${{ steps.registry.outputs.verified_packages }}
+          BOM_PACKAGES: ${{ steps.registry.outputs.bom_packages }}
         run: |
           set -euo pipefail
-          version="$(printf '%s' "$VERIFIED_PACKAGES" \
-            | jq -er '(map(select(.name == "@opengeni/sdk")) + sort_by(.name))[0].version')"
-          [ "$(jq -er .releaseVersion evidence/release-candidate.json)" = "$version" ] || {
-            echo "candidate release version differs from published packages" >&2
+          jq -e 'type == "array" and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
+            <<<"$VERIFIED_PACKAGES" >/dev/null
+          jq -e 'type == "array" and length > 0 and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
+            <<<"$BOM_PACKAGES" >/dev/null
+
+      - name: Publish or reconcile the exact candidate chart
+        id: release-chart
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          chart_ref="ghcr.io/cloudgeni-ai/charts/opengeni:${RELEASE_VERSION}"
+          chart_oci="oci://ghcr.io/cloudgeni-ai/charts/opengeni"
+          chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
+          expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
+          printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
+          resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          if [ -n "$resolved_manifest" ]; then
+            mkdir -p .release/chart-reconcile
+            helm pull "$chart_oci" \
+              --version "$RELEASE_VERSION" \
+              --destination .release/chart-reconcile
+            cmp "$chart_path" ".release/chart-reconcile/opengeni-${RELEASE_VERSION}.tgz"
+          else
+            helm push "$chart_path" "$chart_oci"
+            resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          fi
+          [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "official OCI chart manifest digest was not resolved" >&2
             exit 1
           }
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          chart_json="$(jq -cn \
+            --arg version "$RELEASE_VERSION" \
+            --arg manifestDigest "$resolved_manifest" \
+            --arg bytesSha256 "$expected_bytes" \
+            --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
+            '{reference:"oci://ghcr.io/cloudgeni-ai/charts/opengeni",version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
+          {
+            echo 'json<<RELEASE_CHART_JSON'
+            echo "$chart_json"
+            echo 'RELEASE_CHART_JSON'
+            echo "manifest_digest=$resolved_manifest"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Write complete source-bound BOM
+        id: release-bom
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          BOM_PACKAGES: ${{ steps.registry.outputs.bom_packages }}
+          RELEASE_CHART: ${{ steps.release-chart.outputs.json }}
+        run: |
+          set -euo pipefail
+          images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
+          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
+          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
+          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
+          OPENGENI_RELEASE_BOM_IMAGES="$images" \
+          OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART" \
+          bun scripts/release-bom.ts
+          printf '%s  %s\n' \
+            "$(sha256sum evidence/release-bom.json | awk '{print $1}')" \
+            release-bom.json \
+            > evidence/release-bom.sha256
 
-      - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compare an existing immutable distribution before image mutation
+        id: release-preflight
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="opengeni-embedded-release-${SOURCE_SHA}"
+          mkdir -p .release/existing-release
+          if gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
+            > .release/existing-release/metadata.json \
+            2> .release/existing-release/error.log; then
+            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            [ "$resolved" = "$SOURCE_SHA" ] || {
+              echo "existing release tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            }
+            gh release download "$tag" \
+              --dir .release/existing-release/assets \
+              --pattern release-bom.json \
+              --pattern release-bom.sha256 \
+              --pattern "opengeni-${RELEASE_VERSION}.tgz"
+            cmp evidence/release-bom.json .release/existing-release/assets/release-bom.json
+            cmp evidence/release-bom.sha256 .release/existing-release/assets/release-bom.sha256
+            cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
+              ".release/existing-release/assets/opengeni-${RELEASE_VERSION}.tgz"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -q 'HTTP 404' .release/existing-release/error.log; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            cat .release/existing-release/error.log >&2
+            echo "failed to determine whether the immutable distribution exists" >&2
+            exit 1
+          fi
 
       - name: Promote exact candidate manifests
         env:
@@ -218,55 +402,52 @@ jobs:
             done
           done
 
-      - name: Verify anonymous image pulls
+      - name: Verify anonymous distribution pulls
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CHART_MANIFEST_DIGEST: ${{ steps.release-chart.outputs.manifest_digest }}
         run: |
           set -euo pipefail
           docker logout ghcr.io
           for role in api worker web relay sandbox; do
             name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
-            resolved=""
-            for attempt in 1 2 3 4 5; do
-              resolved="$(docker buildx imagetools inspect "${name}:${RELEASE_VERSION}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
-              [ "$resolved" = "$expected" ] && break
-              sleep "$((attempt * 2))"
+            for tag in "$RELEASE_VERSION" "sha-${SOURCE_SHA}"; do
+              resolved=""
+              for attempt in 1 2 3 4 5; do
+                resolved="$(docker buildx imagetools inspect "${name}:${tag}" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+                [ "$resolved" = "$expected" ] && break
+                sleep "$((attempt * 2))"
+              done
+              [ "$resolved" = "$expected" ] || {
+                echo "anonymous pull failed for ${name}:${tag}" >&2
+                exit 1
+              }
             done
-            [ "$resolved" = "$expected" ] || {
-              echo "anonymous pull failed for ${name}:${RELEASE_VERSION}" >&2
-              exit 1
-            }
           done
-
-      - name: Write complete source-bound BOM
-        id: release-bom
-        env:
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-          BOM_PACKAGES: ${{ steps.registry.outputs.bom_packages }}
-        run: |
-          images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
-          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
-          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
-          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
-          OPENGENI_RELEASE_BOM_IMAGES="$images" \
-          bun scripts/release-bom.ts
-
-      - name: Write release BOM checksum
-        env:
-          BOM_SHA256: ${{ steps.release-bom.outputs.sha256 }}
-        run: printf '%s  %s\n' "$BOM_SHA256" release-bom.json > evidence/release-bom.sha256
+          helm registry logout ghcr.io
+          mkdir -p .release/anonymous-chart
+          helm pull "oci://ghcr.io/cloudgeni-ai/charts/opengeni" \
+            --version "$RELEASE_VERSION" \
+            --destination .release/anonymous-chart
+          cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
+            ".release/anonymous-chart/opengeni-${RELEASE_VERSION}.tgz"
+          [ "$(docker buildx imagetools inspect \
+            "ghcr.io/cloudgeni-ai/charts/opengeni:${RELEASE_VERSION}" \
+            --format '{{.Manifest.Digest}}')" = "$CHART_MANIFEST_DIGEST" ]
 
       - name: Upload release BOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0 # v7
         with:
           name: embedded-release-bom-${{ inputs.source_sha }}
           path: |
-            release-bom.json
+            evidence/release-bom.json
             evidence/release-bom.sha256
             evidence/release-candidate.json
+            evidence/candidate-provenance.json
             evidence/release-packages-verified.json
+            .release/opengeni-${{ steps.meta.outputs.version }}.tgz
           if-no-files-found: error
           retention-days: 90
 
@@ -275,21 +456,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_EXISTS: ${{ steps.release-preflight.outputs.exists }}
         run: |
           set -euo pipefail
           tag="opengeni-embedded-release-${SOURCE_SHA}"
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if [ "$RELEASE_EXISTS" = "true" ]; then
             resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
             [ "$resolved" = "$SOURCE_SHA" ] || {
               echo "existing release tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
               exit 1
             }
-          else
+          elif [ "$RELEASE_EXISTS" = "false" ]; then
             gh release create "$tag" \
-              release-bom.json \
+              evidence/release-bom.json \
               evidence/release-bom.sha256 \
+              ".release/opengeni-${RELEASE_VERSION}.tgz" \
               --target "$SOURCE_SHA" \
               --title "OpenGeni embedded distribution ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
-              --notes "Source-bound npm packages and self-hosted images for embedded consumers." \
+              --notes "Source-bound npm packages, Helm chart, images, and BOM for embedded consumers." \
               --latest=false
+          else
+            echo "immutable distribution preflight produced an invalid state" >&2
+            exit 1
           fi

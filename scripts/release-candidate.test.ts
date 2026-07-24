@@ -35,6 +35,20 @@ const producer = buildReleaseProducerMetadata({
 });
 
 describe("release candidate receipt", () => {
+  test("uses the product chart version independently of the npm package plan", () => {
+    const receipt = buildReleaseCandidateReceipt({
+      sourceSha,
+      sourceTreeSha,
+      packages: [],
+      imageDigests,
+      chart,
+      producer,
+    });
+    expect(receipt.releaseVersion).toBe(chart.version);
+    expect(receipt.packages).toEqual([]);
+    expect(validateReleaseCandidateReceipt(receipt, { packages: [] })).toEqual(receipt);
+  });
+
   test("normalizes the exact package and physical image inventory", () => {
     const receipt = buildReleaseCandidateReceipt({
       sourceSha,
@@ -92,7 +106,10 @@ describe("release candidate receipt", () => {
     expect(() => validateReleaseCandidateReceipt(missing)).toThrow("exactly");
 
     const extra = structuredClone(valid) as any;
-    extra.images.desktop = { name: "ghcr.io/example/desktop", digest: imageDigests.api };
+    extra.images.desktop = {
+      name: "ghcr.io/example/desktop",
+      digest: imageDigests.api,
+    };
     expect(() => validateReleaseCandidateReceipt(extra)).toThrow("exactly");
 
     const mutable = structuredClone(valid) as any;
@@ -144,7 +161,7 @@ describe("release candidate receipt", () => {
 
     const wrongVersion = structuredClone(valid) as any;
     wrongVersion.releaseVersion = "0.19.0";
-    expect(() => validateReleaseCandidateReceipt(wrongVersion)).toThrow("package plan");
+    expect(() => validateReleaseCandidateReceipt(wrongVersion)).toThrow("chart version");
 
     const wrongAlias = structuredClone(valid) as any;
     wrongAlias.aliases.migration = "worker";

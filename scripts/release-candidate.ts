@@ -54,19 +54,6 @@ const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
 
-export function resolveReleaseVersion(packages: PublishablePackage[]): string {
-  if (packages.length === 0) {
-    throw new Error("release candidate packages must not be empty");
-  }
-  const preferred =
-    packages.find((pkg) => pkg.name === "@opengeni/sdk") ??
-    [...packages].sort((left, right) => left.name.localeCompare(right.name))[0]!;
-  if (!versionPattern.test(preferred.version)) {
-    throw new Error(`release candidate version is invalid: ${preferred.version}`);
-  }
-  return preferred.version;
-}
-
 export function buildReleaseCandidateReceipt(input: {
   sourceSha: string;
   sourceTreeSha: string;
@@ -87,12 +74,9 @@ export function buildReleaseCandidateReceipt(input: {
   if (input.producer.sourceTreeSha !== input.sourceTreeSha) {
     throw new Error("release candidate producer sourceTreeSha must equal sourceTreeSha");
   }
-  const packages = normalizePackages(input.packages);
-  const releaseVersion = resolveReleaseVersion(packages);
   const chart = normalizeChart(input.chart);
-  if (chart.version !== releaseVersion) {
-    throw new Error("release candidate chart version must equal releaseVersion");
-  }
+  const releaseVersion = chart.version;
+  const packages = normalizePackages(input.packages);
   const images = {} as Record<ReleaseImageRole, ReleaseCandidateImage>;
   for (const role of RELEASE_IMAGE_ROLES) {
     const digest = input.imageDigests[role];
@@ -158,10 +142,6 @@ export function validateReleaseCandidateReceipt(
   }
 
   const packages = normalizePackages(receipt.packages);
-  const releaseVersion = resolveReleaseVersion(packages);
-  if (receipt.releaseVersion !== releaseVersion) {
-    throw new Error("release candidate releaseVersion does not match its package plan");
-  }
 
   const rawImages = object(receipt.images, "release candidate images");
   exactKeys(rawImages, RELEASE_IMAGE_ROLES, "release candidate images");
@@ -242,8 +222,8 @@ export function releaseBomImages(receipt: ReleaseCandidateReceipt): ReleaseCandi
 }
 
 function normalizePackages(value: unknown): PublishablePackage[] {
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new Error("release candidate packages must be a non-empty array");
+  if (!Array.isArray(value)) {
+    throw new Error("release candidate packages must be an array");
   }
   const specs = value.map((item, index) => {
     const pkg = object(item, `release candidate packages[${index}]`);
@@ -364,7 +344,11 @@ function parseArgs(values: string[]): {
   sourceSha: string;
   expectedPackages: string;
 } {
-  const output = { verifyPath: null as string | null, sourceSha: "", expectedPackages: "" };
+  const output = {
+    verifyPath: null as string | null,
+    sourceSha: "",
+    expectedPackages: "",
+  };
   for (let index = 0; index < values.length; index += 1) {
     const flag = values[index];
     const next = () => {
@@ -374,11 +358,14 @@ function parseArgs(values: string[]): {
     };
     if (flag === "--verify") output.verifyPath = next();
     else if (flag === "--source-sha") output.sourceSha = next();
-    else if (flag === "--expected-packages") output.expectedPackages = next();
-    else throw new Error(`unknown argument: ${flag}`);
+    else if (flag === "--expected-packages") {
+      const value = values[++index];
+      if (value === undefined) throw new Error(`${flag} requires a value`);
+      output.expectedPackages = value;
+    } else throw new Error(`unknown argument: ${flag}`);
   }
-  if (output.verifyPath && (!output.sourceSha || !output.expectedPackages)) {
-    throw new Error("--verify requires --source-sha and --expected-packages");
+  if (output.verifyPath && !output.sourceSha) {
+    throw new Error("--verify requires --source-sha");
   }
   return output;
 }

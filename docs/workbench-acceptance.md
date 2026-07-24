@@ -74,7 +74,10 @@ kubeconfigs, customer data, conversation content outside the deterministic
 fixture, or unredacted provider responses.
 
 The manually dispatched release-candidate workflow accepts the exact package
-plan, requires the current versioned `main` SHA with no pending changesets,
+plan (which is empty for an application-only release), takes the product release
+version from the source-controlled Helm chart rather than inferring it from an
+unrelated npm package version, requires the current versioned `main` SHA with no
+pending changesets,
 builds each physical image at most once under a full-SHA candidate tag, and
 publishes an immutable `opengeni-candidate-<sourceSha>` receipt. A retry reuses
 an already-present manifest instead of rebuilding it.

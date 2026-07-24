@@ -30,10 +30,6 @@ export function parseExpectedPackages(value: string): PublishablePackage[] {
     .map((item) => item.trim())
     .filter(Boolean);
 
-  if (specs.length === 0) {
-    throw new Error("expected_packages must name at least one @opengeni package version");
-  }
-
   const seen = new Set<string>();
   return specs.map((spec) => {
     const separator = spec.lastIndexOf("@");
@@ -121,7 +117,12 @@ export function reconcileReleasePackages(options: {
     if (!remote.integrity?.startsWith("sha512-")) {
       throw new Error(`registry integrity is missing or invalid for ${item.name}@${item.version}`);
     }
-    return { ...item, state: "published", gitHead: remote.gitHead, integrity: remote.integrity };
+    return {
+      ...item,
+      state: "published",
+      gitHead: remote.gitHead,
+      integrity: remote.integrity,
+    };
   };
 
   const bomPackages = [...publishable]

@@ -36,6 +36,9 @@ describe("release image workflow contract", () => {
       "docker buildx imagetools inspect",
     );
     expect(candidate).toContain("bun scripts/package-release-chart.ts");
+    expect(candidate).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
+    expect(candidate).not.toContain('map(select(.name == "@opengeni/sdk"))');
+    expect(candidate).toContain("Refuse an occupied product release version");
     expect(candidate.match(/bun scripts\/package-release-chart\.ts/g)).toHaveLength(2);
     expect(candidate).not.toContain("helm push");
     expect(candidate).toContain("release-chart.sha256");
@@ -53,6 +56,15 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain("--prefer-index=false");
     expect(finalJob).toContain("evidence/release-candidate.json");
     expect(finalJob).toContain("bun scripts/release-bom.ts");
+    expect(finalJob).toContain("release_version=\"$(jq -er '.releaseVersion'");
+    expect(finalJob).toContain(
+      'source_release_version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"',
+    );
+    expect(finalJob).not.toContain("PUBLISHED_PACKAGES:");
+    expect(finalJob).toContain("Reconcile existing product image aliases before mutation");
+    expect(
+      finalJob.indexOf("Reconcile existing product image aliases before mutation"),
+    ).toBeLessThan(finalJob.indexOf("Publish or reconcile the exact accepted Helm chart"));
     expect(finalJob).toContain("Verify official images support anonymous pull");
     expect(finalJob).toContain("docker logout ghcr.io");
     expect(finalJob).toContain("docker buildx imagetools inspect");
@@ -109,24 +121,48 @@ describe("release image workflow contract", () => {
   test("embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
     const release = await workflow("release-embedded.yml");
     const registryReconcile = release.indexOf("Reconcile npm package identity");
+    const existingReleasePreflight = release.indexOf(
+      "Compare an existing immutable distribution before image mutation",
+    );
     const imagePromotion = release.indexOf("Promote exact candidate manifests");
 
+    expect(release).toContain("candidate_run_id:");
+    expect(release).toContain("bun scripts/verify-release-provenance.ts");
+    expect(release).toContain("CANDIDATE_ARTIFACT_ID:");
+    expect(release).toContain("CANDIDATE_ARTIFACT_DIGEST:");
+    expect(release).toContain("CANDIDATE_SOURCE_TREE_SHA:");
     expect(release).toContain("bun scripts/release-candidate.ts");
+    expect(release).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
+    expect(release).not.toContain('map(select(.name == "@opengeni/sdk"))');
     expect(release).toContain("bun run test:runtime-embedding-consumer");
     expect(release).toContain("bun run test:publish-consumer");
     expect(release).toContain("uses: changesets/action@");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(release).toContain("Publish or reconcile the exact candidate chart");
+    expect(release).toContain('OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"');
     expect(release).toContain("bun scripts/release-bom.ts");
+    expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain("docker logout ghcr.io");
     expect(registryReconcile).toBeGreaterThan(-1);
+    expect(existingReleasePreflight).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(registryReconcile);
+    expect(imagePromotion).toBeGreaterThan(existingReleasePreflight);
+    expect(release.slice(0, imagePromotion)).toContain(
+      "Reconcile existing distribution aliases before publication",
+    );
+    expect(release.slice(0, imagePromotion)).toContain(
+      "Reconcile an existing distribution chart before publication",
+    );
     expect(release.slice(imagePromotion)).toContain('--tag "${name}:${RELEASE_VERSION}"');
     expect(release.slice(imagePromotion)).toContain('--tag "${name}:sha-${SOURCE_SHA}"');
     expect(release.slice(imagePromotion)).not.toContain('--tag "${name}:latest"');
+    expect(release).not.toContain("candidate_receipt_url:");
+    expect(release).not.toContain("candidate_receipt_sha256:");
     expect(release).not.toContain("staging_evidence_url");
     expect(release).not.toContain("production_canary_evidence_url");
     expect(release).not.toContain("docker/build-push-action");
     expect(release).not.toContain("docker build ");
+    expect(release).not.toContain('--tag "${name}:latest"');
   });
 
   test("ordinary CI builds the same five physical image roles", async () => {

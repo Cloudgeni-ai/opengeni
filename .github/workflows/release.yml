@@ -38,8 +38,9 @@ on:
         required: true
         type: string
       expected_packages:
-        description: Exact comma-separated package set, for example @opengeni/react@0.15.0.
-        required: true
+        description: Exact comma-separated package set, or empty when this release publishes no npm package changes.
+        required: false
+        default: ""
         type: string
       candidate_run_id:
         description: Completed run ID of the canonical release-candidate workflow for source_sha.
@@ -443,7 +444,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence
-          jq -e 'type == "array" and length > 0 and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
+          jq -e 'type == "array" and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
             <<<"$VERIFIED_PACKAGES" >/dev/null
           jq -e 'type == "array" and length > 0 and all(.[]; .state == "published" and (.integrity | startswith("sha512-")))' \
             <<<"$BOM_PACKAGES" >/dev/null
@@ -498,19 +499,8 @@ jobs:
         with:
           bun-version: 1.3.14
 
-      - name: Resolve image version
-        id: meta
-        env:
-          PUBLISHED_PACKAGES: ${{ needs.publish.outputs.verifiedPackages }}
-          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
-        run: |
-          # Resolve the same package-plan version frozen into the candidate
-          # receipt: prefer SDK and otherwise use the first expected package.
-          version="$(printf '%s' "$PUBLISHED_PACKAGES" \
-            | jq -er '(map(select(.name == "@opengeni/sdk")) + sort_by(.name))[0].version')"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-
       - name: Download and validate accepted candidate receipt
+        id: meta
         env:
           GITHUB_TOKEN: ${{ github.token }}
           CANDIDATE_ARTIFACT_ID: ${{ needs.publish.outputs.candidateArtifactId }}
@@ -519,7 +509,6 @@ jobs:
           CANDIDATE_SOURCE_TREE_SHA: ${{ needs.publish.outputs.candidateSourceTreeSha }}
           SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
           EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
-          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p evidence .release/candidate-artifact
@@ -548,15 +537,22 @@ jobs:
             --verify evidence/release-candidate.json \
             --source-sha "$SOURCE_SHA" \
             --expected-packages "$EXPECTED_PACKAGES"
+          release_version="$(jq -er '.releaseVersion' evidence/release-candidate.json)"
+          source_release_version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"
+          [ "$release_version" = "$source_release_version" ] || {
+            echo "candidate release version differs from the source-controlled chart version" >&2
+            exit 1
+          }
           jq -e \
             --arg sourceSha "$SOURCE_SHA" \
             --arg sourceTreeSha "$CANDIDATE_SOURCE_TREE_SHA" \
-            --arg releaseVersion "$RELEASE_VERSION" \
-            '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .chart.version == $releaseVersion' \
+            --arg releaseVersion "$release_version" \
+            '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .releaseVersion == $releaseVersion and .chart.version == $releaseVersion' \
             evidence/release-candidate.json >/dev/null || {
-            echo "candidate release version differs from the published package plan" >&2
+            echo "candidate release identity is inconsistent" >&2
             exit 1
           }
+          echo "version=$release_version" >> "$GITHUB_OUTPUT"
 
       - name: Set up Helm
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
@@ -570,6 +566,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Reconcile existing product image aliases before mutation
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          for role in api worker web relay sandbox; do
+            name="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json)"
+            expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
+            resolved="$(bun scripts/resolve-optional-oci-manifest.ts "${name}:${RELEASE_VERSION}")"
+            if [ -n "$resolved" ] && [ "$resolved" != "$expected" ]; then
+              echo "${name}:${RELEASE_VERSION} resolves to ${resolved}, not accepted ${expected}" >&2
+              exit 1
+            fi
+          done
 
       - name: Publish or reconcile the exact accepted Helm chart
         id: release-chart
@@ -591,8 +602,7 @@ jobs:
           mkdir -p .release/chart-pull
           chart_ref="ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://ghcr.io/${org}/charts/opengeni"
-          resolved_manifest="$(docker buildx imagetools inspect \
-            "$chart_ref" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             helm pull "$chart_oci" \
               --version "$RELEASE_VERSION" \
