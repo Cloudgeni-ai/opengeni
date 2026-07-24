@@ -1,5 +1,13 @@
 # @opengeni/react
 
+## 0.21.1
+
+### Patch Changes
+
+- bd46c89: Mount long session timelines progressively so the newest activity paints first and low-end browsers remain responsive while older groups hydrate.
+- Updated dependencies [ff23da5]
+  - @opengeni/sdk@0.21.1
+
 ## 0.21.0
 
 ### Minor Changes
