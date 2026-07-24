@@ -5,6 +5,7 @@ import {
   deploymentImageDigests,
   RELEASE_IMAGE_NAMES,
   RELEASE_IMAGE_ROLES,
+  releaseImageNames,
   releaseBomImages,
   validateReleaseCandidateReceipt,
   type ReleaseCandidateReceipt,
@@ -89,6 +90,32 @@ describe("release candidate receipt", () => {
         digest: imageDigests[role],
       })),
     );
+  });
+
+  test("binds every image to one configurable public OCI prefix", () => {
+    const ociPrefix = "registry.example/open-source";
+    const receipt = buildReleaseCandidateReceipt({
+      sourceSha,
+      sourceTreeSha,
+      packages,
+      imageDigests,
+      chart,
+      producer,
+      ociPrefix,
+    });
+
+    expect(receipt.images).toEqual(
+      Object.fromEntries(
+        RELEASE_IMAGE_ROLES.map((role) => [
+          role,
+          { name: releaseImageNames(ociPrefix)[role], digest: imageDigests[role] },
+        ]),
+      ),
+    );
+    expect(validateReleaseCandidateReceipt(receipt, { ociPrefix })).toEqual(receipt);
+    expect(() =>
+      validateReleaseCandidateReceipt(receipt, { ociPrefix: "registry.example/other" }),
+    ).toThrow("image must be");
   });
 
   test("rejects missing, extra, mutable, or provider-drifted image identities", () => {

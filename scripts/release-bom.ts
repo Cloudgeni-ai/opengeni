@@ -2,10 +2,15 @@ import { createHash } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
-  RELEASE_IMAGE_NAMES,
   RELEASE_IMAGE_ROLES,
+  releaseImageNames,
   type ReleaseChartIdentity,
 } from "./release-candidate";
+import {
+  isExactSha256Digest,
+  normalizeReleaseOciPrefix,
+  releaseChartReference,
+} from "./release-registry";
 
 export type ReleaseBomPackage = {
   name: string;
@@ -32,9 +37,7 @@ const packageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9._-]*$/;
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 const integrityPattern = /^sha512-[A-Za-z0-9+/=]+$/;
-const imageNamePattern = /^ghcr\.io\/[a-z0-9._/-]+$/;
 const imageDigestPattern = /^sha256:[0-9a-f]{64}$/;
-const requiredReleaseImages = RELEASE_IMAGE_ROLES.map((role) => RELEASE_IMAGE_NAMES[role]).sort();
 
 function uniqueBy<T>(items: T[], key: (item: T) => string, label: string): void {
   const seen = new Set<string>();
@@ -75,11 +78,15 @@ export function buildReleaseBom(input: {
     }
   }
   for (const image of input.images) {
-    if (!imageNamePattern.test(image.name) || !imageDigestPattern.test(image.digest)) {
+    if (typeof image.name !== "string" || !imageDigestPattern.test(image.digest)) {
       throw new Error(`invalid release BOM image identity: ${image.name}@${image.digest}`);
     }
   }
-  const chart = normalizeChart(input.chart, input.releaseVersion);
+  const ociPrefix = inferReleaseOciPrefix(input.images);
+  const requiredReleaseImages = RELEASE_IMAGE_ROLES.map(
+    (role) => releaseImageNames(ociPrefix)[role],
+  ).sort();
+  const chart = normalizeChart(input.chart, input.releaseVersion, ociPrefix);
 
   uniqueBy(input.packages, (pkg) => pkg.name, "package");
   uniqueBy(input.images, (image) => image.name, "image");
@@ -105,7 +112,11 @@ export function buildReleaseBom(input: {
   };
 }
 
-function normalizeChart(value: unknown, releaseVersion: string): ReleaseChartIdentity {
+function normalizeChart(
+  value: unknown,
+  releaseVersion: string,
+  ociPrefix: string,
+): ReleaseChartIdentity {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("release BOM chart must be an object");
   }
@@ -119,7 +130,8 @@ function normalizeChart(value: unknown, releaseVersion: string): ReleaseChartIde
   ) {
     throw new Error(`release BOM chart must contain exactly: ${canonicalKeys.join(", ")}`);
   }
-  if (chart.reference !== "oci://ghcr.io/cloudgeni-ai/charts/opengeni") {
+  const expectedChartReference = releaseChartReference(ociPrefix);
+  if (chart.reference !== expectedChartReference) {
     throw new Error("release BOM chart reference is not the official OCI chart");
   }
   if (chart.version !== releaseVersion) {
@@ -131,10 +143,7 @@ function normalizeChart(value: unknown, releaseVersion: string): ReleaseChartIde
   ) {
     throw new Error("release BOM chart version must be an exact semver version");
   }
-  if (
-    typeof chart.manifestDigest !== "string" ||
-    !/^sha256:[0-9a-f]{64}$/.test(chart.manifestDigest)
-  ) {
+  if (!isExactSha256Digest(chart.manifestDigest)) {
     throw new Error("release BOM chart manifestDigest must be an exact sha256 digest");
   }
   if (typeof chart.bytesSha256 !== "string" || !/^[0-9a-f]{64}$/.test(chart.bytesSha256)) {
@@ -144,12 +153,24 @@ function normalizeChart(value: unknown, releaseVersion: string): ReleaseChartIde
     throw new Error("release BOM chart artifact must match releaseVersion");
   }
   return {
-    reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni",
+    reference: expectedChartReference,
     version: chart.version,
     manifestDigest: chart.manifestDigest,
     bytesSha256: chart.bytesSha256 as string,
     artifact: chart.artifact as string,
   };
+}
+
+function inferReleaseOciPrefix(images: ReleaseBomImage[]): string {
+  const apiImages = images.filter((image) => image.name.endsWith("/opengeni-api"));
+  if (apiImages.length !== 1) {
+    throw new Error("release BOM must contain one opengeni-api image");
+  }
+  const apiImage = apiImages[0];
+  if (!apiImage) {
+    throw new Error("release BOM opengeni-api image disappeared during validation");
+  }
+  return normalizeReleaseOciPrefix(apiImage.name.slice(0, -"/opengeni-api".length));
 }
 
 function parseJsonArray<T>(name: string, value: string): T[] {

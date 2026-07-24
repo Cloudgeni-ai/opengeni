@@ -72,6 +72,71 @@ describe("release BOM", () => {
     });
   });
 
+  test("supports a coherent non-GHCR public registry identity", () => {
+    const prefix = "registry.example/open-source";
+    const portableImages = images.map((image) => ({
+      ...image,
+      name: image.name.replace("ghcr.io/cloudgeni-ai", prefix),
+    }));
+    const portableChart = {
+      ...chart,
+      reference: `oci://${prefix}/charts/opengeni`,
+    };
+
+    const bom = buildReleaseBom({
+      sourceSha,
+      releaseVersion: "0.16.0",
+      packages: [
+        {
+          name: "@opengeni/sdk",
+          version: "0.16.0",
+          gitHead: sourceSha,
+          integrity,
+          state: "published",
+        },
+      ],
+      images: portableImages,
+      chart: portableChart,
+    });
+
+    expect(bom.images).toEqual([...portableImages].sort((a, b) => a.name.localeCompare(b.name)));
+    expect(bom.chart.reference).toBe(portableChart.reference);
+  });
+
+  test("rejects image or chart registry drift", () => {
+    const valid: Parameters<typeof buildReleaseBom>[0] = {
+      sourceSha,
+      releaseVersion: "0.16.0",
+      packages: [
+        {
+          name: "@opengeni/sdk",
+          version: "0.16.0",
+          gitHead: sourceSha,
+          integrity,
+          state: "published",
+        },
+      ],
+      images,
+      chart,
+    };
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        images: valid.images.map((image) =>
+          image.name.endsWith("/opengeni-worker")
+            ? { ...image, name: image.name.replace("ghcr.io/cloudgeni-ai", "registry.example") }
+            : image,
+        ),
+      }),
+    ).toThrow("missing required image");
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        chart: { ...chart, reference: "oci://registry.example/charts/opengeni" },
+      }),
+    ).toThrow("official OCI chart");
+  });
+
   test("rejects mutable, incomplete, duplicate, or unpublished identities", () => {
     const valid: Parameters<typeof buildReleaseBom>[0] = {
       sourceSha,

@@ -80,7 +80,10 @@ unrelated npm package version, requires the current versioned `main` SHA with no
 pending changesets,
 builds each physical image at most once under a full-SHA candidate tag, and
 publishes an immutable `opengeni-candidate-<sourceSha>` receipt. A retry reuses
-an already-present manifest instead of rebuilding it.
+an already-present manifest instead of rebuilding it. Image and chart
+repositories derive from the validated `OPENGENI_RELEASE_OCI_PREFIX`; the
+portable login boundary supports built-in GitHub auth or short-lived Azure
+OIDC and always drops registry credentials before the anonymous-pull proof.
 
 The protected `release-acceptance.yml` workflow is the canonical acceptance
 producer. Its protected environment pins the trusted operator repository and
@@ -348,7 +351,8 @@ The release sequence is linear and fail-closed:
    versions and no pending changesets.
 3. Dispatch `release-candidate.yml` from that exact current `main` SHA and
    package plan. Build the five physical images once, record their digests, and
-   record `migration → api`.
+   record `migration → api`. The selected public OCI prefix must remain
+   identical through candidate, embedded/final promotion, and BOM publication.
 4. Deploy those exact receipt digests to staging.
 5. Pass the complete authenticated live matrix on staging.
 6. Run a failure-free staging soak long enough to cover sandbox expiry,
