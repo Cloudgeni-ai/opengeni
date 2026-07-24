@@ -556,7 +556,7 @@ Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
 `packages/db/src/index.ts`, migrations `0097_host_export_outbox.sql` and
 `0103_host_export_root_session.sql`, the immutable maintenance backfill in
 `0104_host_export_root_session_backfill.sql`, the forward-only validation and
-registration repair in `0105_host_export_lineage_contract.sql`, and
+registration repair in `0107_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
@@ -617,10 +617,10 @@ sessionless fact has a `null` root. The rolling schema contract rejects a sessio
 fails validation on unexpected drift for explicit operator disposition; neither migrations nor
 consumers guess lineage from mutable current data. Published migration `0104` remains an immutable
 maintenance-class history entry: its legacy backfill used then-current session ancestry and cannot
-universally prove source-transaction provenance. Forward migration `0105` never rewrites that
+universally prove source-transaction provenance. Forward migration `0107` never rewrites that
 history or outbox data. It rejects a session-bound row that predates the `0103` ledger boundary (even
 when `0104` populated a non-null root) until an operator performs a separate evidence-backed
-maintenance disposition, while installations with no suspect population can apply `0105` through
+maintenance disposition, while installations with no suspect population can apply `0107` through
 the bounded rolling path. Child lifecycle remains child lifecycle—the root id is attribution
 context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.

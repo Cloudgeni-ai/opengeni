@@ -10,7 +10,11 @@ const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle"
 const migration0097 = "0097_host_export_outbox.sql";
 const migration0103 = "0103_host_export_root_session.sql";
 const migration0104 = "0104_host_export_root_session_backfill.sql";
-const migration0105 = "0105_host_export_lineage_contract.sql";
+const currentMainMigrations = [
+  "0105_session_turn_instructions.sql",
+  "0106_session_attempt_mcp_approval_policies.sql",
+] as const;
+const migration0107 = "0107_host_export_lineage_contract.sql";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 const publishedHashes = {
@@ -23,10 +27,10 @@ let availabilityProbe: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  availabilityProbe = await acquireBlankTestDatabase("migration-0105-availability");
+  availabilityProbe = await acquireBlankTestDatabase("migration-0107-availability");
   if (!availabilityProbe) {
     if (requireRealDatabase) {
-      throw new Error("[migration-0105] real PostgreSQL harness is unavailable");
+      throw new Error("[migration-0107] real PostgreSQL harness is unavailable");
     }
     available = false;
   }
@@ -36,14 +40,14 @@ afterAll(async () => {
   await availabilityProbe?.release();
 });
 
-describe("0105 forward-only host-export lineage contract", () => {
+describe("0107 forward-only host-export lineage contract", () => {
   test("preserves published history and declares bounded, data-read-only repair", async () => {
     for (const [file, expected] of Object.entries(publishedHashes)) {
       const bytes = await readFile(join(migrationsDir, file));
       expect(createHash("sha256").update(bytes).digest("hex")).toBe(expected);
     }
 
-    const forward = await readFile(join(migrationsDir, migration0105), "utf8");
+    const forward = await readFile(join(migrationsDir, migration0107), "utf8");
     expect(forward.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");
     expect(forward).toContain("SET LOCAL lock_timeout = '5s'");
     expect(forward).toContain("SET LOCAL statement_timeout = '5min'");
@@ -52,19 +56,53 @@ describe("0105 forward-only host-export lineage contract", () => {
     expect(forward).not.toMatch(/\b(?:UPDATE|DELETE|TRUNCATE)\s+"?host_export_outbox\b/i);
   });
 
+  test("keeps current-main migration slots ahead of the repair without duplicates", async () => {
+    const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql"));
+    const currentMainPresent = currentMainMigrations.filter((file) => files.includes(file));
+    const lineageSlots = files.filter((file) => /^010[3-7]_/.test(file)).sort();
+
+    expect(currentMainPresent).toEqual(
+      currentMainPresent.length === 0 ? [] : [...currentMainMigrations],
+    );
+    expect(new Set(files).size).toBe(files.length);
+    expect(lineageSlots).toEqual([
+      migration0103,
+      migration0104,
+      ...currentMainPresent,
+      migration0107,
+    ]);
+  });
+
+  test("applies the repair after every migration present on current main", async () => {
+    const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql"));
+    const currentMainPresent = currentMainMigrations.filter((file) => files.includes(file));
+
+    await withBlankDatabase("migration-0107-current-main-chain", async (sql) => {
+      await applyThrough(sql, migration0104);
+      await applyRange(sql, migration0104, migration0107);
+
+      const applied = await sql<Array<{ name: string }>>`
+        select name from schema_migrations
+        where name > ${migration0104} and name <= ${migration0107}
+        order by name`;
+      const expected = [...currentMainPresent, migration0107].sort();
+      expect(applied.map((row) => row.name)).toEqual(expected);
+    });
+  }, 180_000);
+
   test("upgrades the zero-population published chain and replays after a ledger-write crash", async () => {
-    await withBlankDatabase("migration-0105-zero", async (sql) => {
+    await withBlankDatabase("migration-0107-zero", async (sql) => {
       await applyThrough(sql, migration0104);
       const [before] = await sql<Array<{ count: number }>>`
         select count(*)::integer as count from host_export_outbox`;
       expect(before?.count).toBe(0);
 
-      const forward = await migrationSql(migration0105);
+      const forward = await migrationSql(migration0107);
       await sql.unsafe(forward);
       // The canonical runner commits SQL before inserting the filename into its
       // ledger. Replaying the committed schema must be safe after that crash.
       await sql.unsafe(forward);
-      await recordMigration(sql, migration0105);
+      await recordMigration(sql, migration0107);
 
       const [constraint] = await sql<Array<{ validated: boolean; expression: string }>>`
         select c.convalidated as validated,
@@ -108,7 +146,7 @@ describe("0105 forward-only host-export lineage contract", () => {
   }, 180_000);
 
   test("rejects non-null roots produced by the old backfill without immutable provenance", async () => {
-    await withBlankDatabase("migration-0105-old-ledger", async (sql) => {
+    await withBlankDatabase("migration-0107-old-ledger", async (sql) => {
       await applyThrough(sql, migration0097);
       const scope = await seedScope(sql, "old-ledger");
       const sourceId = crypto.randomUUID();
@@ -130,7 +168,7 @@ describe("0105 forward-only host-export lineage contract", () => {
 
       let provenanceError: unknown;
       try {
-        await sql.unsafe(await migrationSql(migration0105));
+        await sql.unsafe(await migrationSql(migration0107));
       } catch (error) {
         provenanceError = error;
       }
@@ -149,7 +187,7 @@ describe("0105 forward-only host-export lineage contract", () => {
   }, 180_000);
 
   test("accepts post-0103 capture and linearizes first-consumer registration", async () => {
-    await withBlankDatabase("migration-0105-concurrency", async (sql, databaseUrl) => {
+    await withBlankDatabase("migration-0107-concurrency", async (sql, databaseUrl) => {
       await applyThrough(sql, migration0103);
       const scope = await seedScope(sql, "concurrency");
       const existingSourceId = crypto.randomUUID();
@@ -160,9 +198,9 @@ describe("0105 forward-only host-export lineage contract", () => {
         key: "post-0103-child",
       });
       await applyRange(sql, migration0103, migration0104);
-      await applyRange(sql, migration0104, migration0105);
+      await applyRange(sql, migration0104, migration0107);
 
-      const sourceApplication = `migration-0105-source-${crypto.randomUUID()}`;
+      const sourceApplication = `migration-0107-source-${crypto.randomUUID()}`;
       const source = postgres(databaseUrl, {
         max: 1,
         prepare: false,
@@ -186,7 +224,7 @@ describe("0105 forward-only host-export lineage contract", () => {
         await registration.unsafe("begin");
         registrationOpen = true;
         await registration`select opengeni_host_export.register_host_export_consumer(
-          'session_event', 'migration-0105-concurrent'
+          'session_event', 'migration-0107-concurrent'
         )`;
 
         let sourceSettled = false;
@@ -227,7 +265,7 @@ describe("0105 forward-only host-export lineage contract", () => {
   }, 180_000);
 
   test("bounds scale and lock contention and rejects incompatible partial state", async () => {
-    await withBlankDatabase("migration-0105-bounds", async (sql, databaseUrl) => {
+    await withBlankDatabase("migration-0107-bounds", async (sql, databaseUrl) => {
       await applyThrough(sql, migration0104);
       const scope = await seedScope(sql, "bounds");
       await sql.unsafe(
@@ -243,7 +281,7 @@ describe("0105 forward-only host-export lineage contract", () => {
         [scope.accountId, scope.workspaceId],
       );
 
-      const forward = await migrationSql(migration0105);
+      const forward = await migrationSql(migration0107);
       await sql.unsafe(forward);
       const [scaled] = await sql<Array<{ count: number }>>`
         select count(*)::integer as count from host_export_outbox`;
@@ -319,7 +357,7 @@ async function withBlankDatabase(
 ): Promise<void> {
   if (!available) return;
   const blank = await acquireBlankTestDatabase(label);
-  if (!blank) throw new Error(`[migration-0105] lost real PostgreSQL harness for ${label}`);
+  if (!blank) throw new Error(`[migration-0107] lost real PostgreSQL harness for ${label}`);
   const sql = postgres(blank.databaseUrl, { max: 1, prepare: false });
   try {
     await sql.unsafe(`CREATE TABLE schema_migrations (
@@ -380,10 +418,10 @@ async function seedScope(
   childId: string;
 }> {
   const [account] = await sql<Array<{ id: string }>>`
-    insert into managed_accounts (name) values (${`migration-0105-${label}-account`}) returning id`;
+    insert into managed_accounts (name) values (${`migration-0107-${label}-account`}) returning id`;
   const [workspace] = await sql<Array<{ id: string }>>`
     insert into workspaces (account_id, name)
-    values (${account!.id}, ${`migration-0105-${label}-workspace`}) returning id`;
+    values (${account!.id}, ${`migration-0107-${label}-workspace`}) returning id`;
   const rootId = crypto.randomUUID();
   const childId = crypto.randomUUID();
   await sql`

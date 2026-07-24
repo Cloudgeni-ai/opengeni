@@ -59,9 +59,31 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const contract = await buildSchemaContract();
     const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    const currentMainMigrations = [
+      "0105_session_turn_instructions.sql",
+      "0106_session_attempt_mcp_approval_policies.sql",
+    ].filter((file) => migrations.has(file));
 
-    expect(contract.fileCount).toBe(96);
-    expect(contract.latestMigration).toBe("0105_host_export_lineage_contract.sql");
+    expect(currentMainMigrations).toEqual(
+      currentMainMigrations.length === 0
+        ? []
+        : ["0105_session_turn_instructions.sql", "0106_session_attempt_mcp_approval_policies.sql"],
+    );
+    expect(contract.fileCount).toBe(96 + currentMainMigrations.length);
+    expect(contract.latestMigration).toBe("0107_host_export_lineage_contract.sql");
+    expect(
+      contract.migrations
+        .map((migration) => migration.path)
+        .filter((path) => /^010[3-7]_/.test(path)),
+    ).toEqual([
+      "0103_host_export_root_session.sql",
+      "0104_host_export_root_session_backfill.sql",
+      ...currentMainMigrations,
+      "0107_host_export_lineage_contract.sql",
+    ]);
+    expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
+      contract.fileCount,
+    );
     expect(migrations.get("0097_host_export_outbox.sql")).toMatchObject({
       sha256: "918763f2438efd06232f221305db6acac76e2bee5fa436e9665a860794c43d03",
       deploymentMode: "rolling",
@@ -75,8 +97,8 @@ describe("release schema contract", () => {
       deploymentMode: "maintenance",
     });
 
-    expect(migrations.get("0105_host_export_lineage_contract.sql")).toMatchObject({
-      sha256: "a7b1a905f5567fcb562aa140571d4979321cef92cd36a62b17dc6b192f3c66c0",
+    expect(migrations.get("0107_host_export_lineage_contract.sql")).toMatchObject({
+      sha256: "82dfa0f18f59d6a6c65c02bdfca72d4e728cc67d12fb075a85b2233d7affe091",
       deploymentMode: "rolling",
     });
   });

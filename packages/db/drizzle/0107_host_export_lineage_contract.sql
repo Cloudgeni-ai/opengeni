@@ -301,9 +301,9 @@ BEGIN
   WHERE m.name = '0103_host_export_root_session.sql';
 
   IF capture_ledger_rows <> 1 OR capture_applied_at IS NULL THEN
-    RAISE EXCEPTION '0105 requires the exact 0103 schema-migration ledger boundary'
+    RAISE EXCEPTION '0107 requires the exact 0103 schema-migration ledger boundary'
       USING ERRCODE = '55000',
-        HINT = 'Apply migrations through immutable 0104 with the canonical runner before retrying 0105.';
+        HINT = 'Apply migrations through immutable 0104 with the canonical runner before retrying 0107.';
   END IF;
 
   SELECT o.source_id
@@ -318,9 +318,9 @@ BEGIN
   LIMIT 1;
 
   IF suspect_source_id IS NOT NULL THEN
-    RAISE EXCEPTION '0105 found host-export lineage without immutable-capture provenance'
+    RAISE EXCEPTION '0107 found host-export lineage without immutable-capture provenance'
       USING ERRCODE = '23514',
-        HINT = 'Do not derive lineage from current sessions; use an evidence-backed maintenance disposition, then retry 0105.';
+        HINT = 'Do not derive lineage from current sessions; use an evidence-backed maintenance disposition, then retry 0107.';
   END IF;
 END $migration$;
 
@@ -375,7 +375,7 @@ BEGIN
     VALIDATE CONSTRAINT "host_export_outbox_root_session_check";
 EXCEPTION
   WHEN check_violation THEN
-    RAISE EXCEPTION '0105 cannot validate host-export lineage without historical provenance'
+    RAISE EXCEPTION '0107 cannot validate host-export lineage without historical provenance'
       USING ERRCODE = '23514',
-        HINT = 'Do not derive lineage from current sessions; use an evidence-backed maintenance disposition, then retry 0105.';
+        HINT = 'Do not derive lineage from current sessions; use an evidence-backed maintenance disposition, then retry 0107.';
 END $migration$;
