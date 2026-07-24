@@ -584,13 +584,17 @@ write them into a sandbox.
 Canonical sources: the `HostEventSink` / `HostUsageSink` contracts in
 `packages/contracts/src/index.ts`, the host-export repository API in
 `packages/db/src/index.ts`, migrations `0097_host_export_outbox.sql` and
-`0103_host_export_root_session.sql`, and
+`0103_host_export_root_session.sql`, the immutable maintenance backfill in
+`0104_host_export_root_session_backfill.sql`, the forward-only validation and
+registration repair in `0105_host_export_lineage_contract.sql`, and
 `createHostExportPump(options)` in `apps/worker/src/host-export-pump.ts`.
 
 An embedded host can project OpenGeni's bounded durable session events and exact usage facts into
 its own business store without polling tenant routes or treating NATS as a durable log. This surface
 is optional. With no registered consumer, both export gates default to false and source transactions
-write zero outbox rows, preserving standalone behavior.
+write zero outbox rows, preserving standalone behavior. First-consumer registration and deferred
+source capture lock the same configuration row, so their commit order is the enable boundary: a
+source transaction ordered after registration cannot observe the old disabled state and skip export.
 
 Provision the projection identity **after the first migration run**. It is deliberately not the
 normal `opengeni_app` role: an exporter reads a cross-workspace stream, while the app role is
@@ -637,10 +641,18 @@ stable across sessions but deliberately not claimed to be causal. High-volume ra
 are excluded from the host stream; their completed semantic events remain. Event types are bounded
 but forward-tolerant so an older consumer can carry a newer writer's event during a rolling upgrade.
 Each session-bound event and usage fact also carries the immutable lineage `rootSessionId` captured
-with the outbox row. A host can therefore retain the immediate child id for audit while attributing
-usage or host-owned business signals to one root binding. An unresolved pre-lineage legacy row uses
-`null`; consumers must fail closed rather than guess. Child lifecycle remains child lifecycle—the
-root id is attribution context, not permission to settle a root run.
+with the outbox row in the source transaction. A host can therefore retain the immediate child id
+for audit while attributing usage or host-owned business signals to one root binding. Only a
+sessionless fact has a `null` root. The rolling schema contract rejects a session-bound null and
+fails validation on unexpected drift for explicit operator disposition; neither migrations nor
+consumers guess lineage from mutable current data. Published migration `0104` remains an immutable
+maintenance-class history entry: its legacy backfill used then-current session ancestry and cannot
+universally prove source-transaction provenance. Forward migration `0105` never rewrites that
+history or outbox data. It rejects a session-bound row that predates the `0103` ledger boundary (even
+when `0104` populated a non-null root) until an operator performs a separate evidence-backed
+maintenance disposition, while installations with no suspect population can apply `0105` through
+the bounded rolling path. Child lifecycle remains child lifecycle—the root id is attribution
+context, not permission to settle a root run.
 Execution IDs on usage rows are validated soft references: deletion never rewrites the frozen fact.
 Usage field limits are enforced only when the optional usage export is enabled; an unrepresentable
 new fact fails its source transaction instead of committing a poison export row, while standalone

@@ -206,7 +206,14 @@ describe("0097 durable host export migration (real PostgreSQL)", () => {
       for (const applied of files.filter((entry) => entry.localeCompare(migration) <= 0)) {
         await sql`insert into schema_migrations (name) values (${applied}) on conflict do nothing`;
       }
-      await migrate(blank.databaseUrl);
+      let lineageError: unknown;
+      try {
+        await migrate(blank.databaseUrl);
+      } catch (error) {
+        lineageError = error;
+      }
+      expect(lineageError).toBeInstanceOf(Error);
+      expect((lineageError as Error).message).toContain("without immutable-capture provenance");
       const [recoveredIndex] = await sql<
         Array<{ valid: boolean; ready: boolean; definition: string }>
       >`
