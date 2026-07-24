@@ -182,6 +182,10 @@ describe("release image workflow contract", () => {
     const release = await workflow("release.yml");
     const embedded = await workflow("release-embedded.yml");
     const login = await action("public-oci-login");
+    const loginManifest = Bun.YAML.parse(login) as {
+      name?: unknown;
+      runs?: { using?: unknown; steps?: unknown };
+    };
 
     for (const source of [candidate, release, embedded]) {
       expect(source).toContain("uses: ./.github/actions/public-oci-login");
@@ -189,6 +193,9 @@ describe("release image workflow contract", () => {
       expect(source).toContain("OPENGENI_RELEASE_REGISTRY_AUTH");
       expect(source).toContain("id-token: write");
     }
+    expect(loginManifest.name).toBe("Public OCI registry login");
+    expect(loginManifest.runs?.using).toBe("composite");
+    expect(Array.isArray(loginManifest.runs?.steps)).toBe(true);
     expect(login).toContain("azure-oidc");
     expect(login).toContain("github");
     expect(login).toContain("azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43");
