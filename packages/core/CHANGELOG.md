@@ -1,5 +1,28 @@
 # @opengeni/core
 
+## 0.9.0
+
+### Minor Changes
+
+- d1dee7a: Let embedding hosts read and update an existing session MCP server's approval
+  policy through the public API, SDK, and React session hook. Each claimed
+  attempt freezes its policy under the session lock, so updates affect the next
+  attempt without reinterpreting work already running; model MCP and
+  Toolspace/Code Mode consume the same exact snapshot. Toolspace tokens and
+  side-effect receipts bind every proxied call to the exact active attempt, so
+  Pause, Steer, recovery, and late outputs preserve one authoritative owner.
+
+### Patch Changes
+
+- Updated dependencies [d1dee7a]
+  - @opengeni/contracts@0.17.0
+  - @opengeni/config@0.6.4
+  - @opengeni/db@0.10.0
+  - @opengeni/documents@0.2.21
+  - @opengeni/events@0.3.12
+  - @opengeni/runtime@0.12.1
+  - @opengeni/storage@0.2.17
+
 ## 0.8.1
 
 ### Patch Changes
