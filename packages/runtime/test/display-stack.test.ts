@@ -519,7 +519,66 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(command).toContain("OPENGENI_DISPLAY_TIMEOUT");
   });
 
-  test("(8b) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
+  test("(8a) a timed-out provider call is fenced before a retry can issue work", async () => {
+    let resolveFirst!: (result: { output: string; exitCode: number }) => void;
+    let calls = 0;
+    const events: string[] = [];
+    const session = {
+      exec: async ({ signal }: { signal?: AbortSignal }) => {
+        calls += 1;
+        if (calls === 1) {
+          signal?.addEventListener("abort", () => events.push("provider-aborted"), {
+            once: true,
+          });
+          return await new Promise<{ output: string; exitCode: number }>((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        events.push("retry-issued");
+        return {
+          output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+          exitCode: 0,
+        };
+      },
+    };
+
+    await expect(
+      ensureDisplayStack(session, {
+        timeoutMs: 30,
+        onTelemetry: (event) => events.push(event.stage),
+      }),
+    ).rejects.toMatchObject({ stage: "timeout" });
+    expect(events).toContain("provider-aborted");
+
+    const retry = ensureDisplayStack(session, { timeoutMs: 500 });
+    await Bun.sleep(20);
+    expect(calls).toBe(1);
+    expect(events).not.toContain("retry-issued");
+
+    resolveFirst({ output: "late stale result", exitCode: 0 });
+    await retry;
+    expect(calls).toBe(2);
+    expect(events.indexOf("retry-issued")).toBeGreaterThan(events.indexOf("provider-aborted"));
+  });
+
+  test("(8b) a wall-clock jump cannot extend the monotonic provider deadline", async () => {
+    const originalDateNow = Date.now;
+    const session = {
+      exec: async () => await new Promise<never>(() => undefined),
+    };
+    Date.now = () => originalDateNow() + 86_400_000;
+    const started = performance.now();
+    try {
+      await expect(ensureDisplayStack(session, { timeoutMs: 60 })).rejects.toMatchObject({
+        stage: "timeout",
+      });
+    } finally {
+      Date.now = originalDateNow;
+    }
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  test("(8c) the in-box deadline kills a waiting flock tree before it can launch later", async () => {
     const root = await mkdtemp(join(tmpdir(), "display-stack-timeout-"));
     const bin = join(root, "bin");
     const lock = join(root, "outer.lock");
@@ -586,7 +645,24 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     }
   });
 
-  test("(8c) a kill-after escalation retains typed timeout attribution", async () => {
+  test("(8d) exit 137 is unknown without positive timeout evidence", async () => {
+    const session = {
+      exec: async () => ({ output: "provider terminated the process", exitCode: 137 }),
+    };
+
+    let thrown: unknown;
+    try {
+      await ensureDisplayStack(session, { timeoutMs: 2_000 });
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(DisplayStackError);
+    expect((thrown as DisplayStackError).exitCode).toBe(137);
+    expect((thrown as DisplayStackError).stage).toBe("unknown");
+  });
+
+  test("(8e) a kill-after escalation retains typed timeout attribution", async () => {
     const session = {
       exec: async () => ({
         output: "OPENGENI_DISPLAY_TIMEOUT elapsed_ms=1000",

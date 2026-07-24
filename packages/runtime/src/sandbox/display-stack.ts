@@ -153,17 +153,20 @@ type ExecCapableSession = {
     cmd: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike>;
   execCommand?: (args: {
     cmd: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }) => Promise<string>;
   writeStdin?: (args: {
     sessionId: number;
     chars: string;
     yieldTimeMs?: number;
     maxOutputTokens?: number;
+    signal?: AbortSignal;
   }) => Promise<ExecResultLike | string>;
 };
 
@@ -365,15 +368,92 @@ function boundedDisplayStackCommand(command: string, timeoutMs: number): string 
     // after the caller has already failed.
     `timeout --signal=TERM --kill-after=${killAfterSeconds}s ${commandTimeoutSeconds}s ` +
     `bash -c ${shellQuote(command)}; rc=$?; ` +
-    `if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then ` +
+    // Exit 137 is also a normal SIGKILL/OOM/provider-termination result. Only
+    // attach timeout attribution to the exit code that this wrapper positively
+    // knows GNU timeout emitted for its own deadline. A kill-after escalation
+    // may still be reported as 137, but it is not safe to infer that here.
+    `if [ "$rc" -eq 124 ]; then ` +
     `echo "OPENGENI_DISPLAY_TIMEOUT elapsed_ms=${commandTimeoutMs}"; fi; exit "$rc"`
   );
 }
 
 class DisplayStackWallTimeoutError extends Error {}
+class DisplayStackOperationFencedError extends Error {}
 
-async function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
-  const remainingMs = deadline - Date.now();
+type DisplayStackOperationState = {
+  /** Incremented before a timed-out operation is reported to its caller. */
+  epoch: number;
+  /** Raw provider calls from fenced operations; retries wait for these to settle. */
+  inFlight: Set<Promise<unknown>>;
+  drain: Promise<void> | null;
+};
+
+const displayStackOperationStates = new WeakMap<object, DisplayStackOperationState>();
+
+function operationState(session: unknown): DisplayStackOperationState | null {
+  if ((typeof session !== "object" || session === null) && typeof session !== "function") {
+    return null;
+  }
+  const key = session as object;
+  let state = displayStackOperationStates.get(key);
+  if (!state) {
+    state = { epoch: 0, inFlight: new Set(), drain: null };
+    displayStackOperationStates.set(key, state);
+  }
+  return state;
+}
+
+function monotonicNow(): number {
+  return performance.now();
+}
+
+async function waitForFencedOperation(state: DisplayStackOperationState): Promise<void> {
+  const drain = state.drain;
+  if (!drain) return;
+  await drain;
+  if (state.drain === drain) state.drain = null;
+}
+
+function trackProviderCall<T>(
+  state: DisplayStackOperationState | null,
+  promise: Promise<T>,
+): Promise<T> {
+  if (!state) return promise;
+  state.inFlight.add(promise);
+  void promise.then(
+    () => state.inFlight.delete(promise),
+    () => state.inFlight.delete(promise),
+  );
+  return promise;
+}
+
+function fenceOperation(
+  state: DisplayStackOperationState | null,
+  epoch: number,
+  abortController: AbortController,
+): void {
+  abortController.abort(new DisplayStackWallTimeoutError());
+  if (!state || state.epoch !== epoch) return;
+
+  // Advance the ownership epoch BEFORE the timeout error is surfaced. Any
+  // completion from this operation is now stale, and the next retry cannot
+  // issue a provider call until every raw call from the old epoch settles.
+  state.epoch += 1;
+  const pending = [...state.inFlight];
+  const drain = Promise.allSettled(pending).then(() => undefined);
+  state.drain = state.drain ? Promise.all([state.drain, drain]).then(() => undefined) : drain;
+}
+
+function assertCurrentOperation(state: DisplayStackOperationState | null, epoch: number): void {
+  if (state && state.epoch !== epoch) throw new DisplayStackOperationFencedError();
+}
+
+async function beforeDeadline<T>(
+  promise: Promise<T>,
+  deadline: number,
+  now: () => number = monotonicNow,
+): Promise<T> {
+  const remainingMs = deadline - now();
   if (remainingMs <= 0) throw new DisplayStackWallTimeoutError();
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -393,7 +473,11 @@ function requestId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function telemetryReporter(options: EnsureDisplayStackOptions, started: number) {
+function telemetryReporter(
+  options: EnsureDisplayStackOptions,
+  started: number,
+  now: () => number = monotonicNow,
+) {
   const id = requestId();
   const context = options.telemetryContext;
   const sink =
@@ -420,7 +504,7 @@ function telemetryReporter(options: EnsureDisplayStackOptions, started: number) 
       requestId: id,
       stage,
       status,
-      elapsedMs: fields.elapsedMs ?? Date.now() - started,
+      elapsedMs: fields.elapsedMs ?? now() - started,
       source: fields.source ?? "host",
       classification: fields.classification ?? "unknown",
       callerKind: context?.callerKind ?? "unknown",
@@ -518,21 +602,47 @@ export async function ensureDisplayStack(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new RangeError("ensureDisplayStack timeoutMs must be a positive finite number");
   }
-  const started = Date.now();
+  const started = monotonicNow();
   const deadline = started + timeoutMs;
-  const telemetry = telemetryReporter(options, started);
+  const telemetry = telemetryReporter(options, started, monotonicNow);
   const cmd = boundedDisplayStackCommand(buildDisplayStackScript({ geometry, port }), timeoutMs);
   const outputParts: string[] = [];
+  const state = operationState(session);
+  if (state?.drain) {
+    // A retry after a timeout must not start while the previous provider call
+    // is still capable of completing. This is the local ownership fence for
+    // providers that cannot offer a cancellation primitive.
+    await waitForFencedOperation(state);
+  }
+  const epoch = state?.epoch ?? 0;
+  const abortController = new AbortController();
   telemetry.emit("request_entry", "started");
   telemetry.emit("exec_issued", "started");
 
   try {
     const initialYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_YIELD_MS, timeoutMs - 1));
-    const initialExec: Promise<ExecResultLike | string> =
-      typeof s.exec === "function"
-        ? s.exec({ cmd, yieldTimeMs: initialYieldMs, maxOutputTokens: 20_000 })
-        : s.execCommand!({ cmd, yieldTimeMs: initialYieldMs, maxOutputTokens: 20_000 });
-    let result: ExecResultLike | string = await beforeDeadline(initialExec, deadline);
+    const initialExec: Promise<ExecResultLike | string> = trackProviderCall<
+      ExecResultLike | string
+    >(
+      state,
+      Promise.resolve(
+        typeof s.exec === "function"
+          ? s.exec({
+              cmd,
+              yieldTimeMs: initialYieldMs,
+              maxOutputTokens: 20_000,
+              signal: abortController.signal,
+            })
+          : s.execCommand!({
+              cmd,
+              yieldTimeMs: initialYieldMs,
+              maxOutputTokens: 20_000,
+              signal: abortController.signal,
+            }),
+      ),
+    );
+    let result: ExecResultLike | string = await beforeDeadline(initialExec, deadline, monotonicNow);
+    assertCurrentOperation(state, epoch);
     let chunk = execResultOutput(result);
     outputParts.push(chunk);
     telemetry.emitSandboxStages(chunk);
@@ -547,18 +657,25 @@ export async function ensureDisplayStack(
           `${outputParts.join("\n")}\nprovider yielded process ${providerSessionId} but exposes no writeStdin poll surface`,
         );
       }
-      const remainingMs = deadline - Date.now();
+      assertCurrentOperation(state, epoch);
+      const remainingMs = deadline - monotonicNow();
       if (remainingMs <= 1) throw new DisplayStackWallTimeoutError();
       const pollYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_POLL_MS, remainingMs - 1));
       result = await beforeDeadline(
-        s.writeStdin({
-          sessionId: providerSessionId,
-          chars: "",
-          yieldTimeMs: pollYieldMs,
-          maxOutputTokens: 20_000,
-        }),
+        trackProviderCall(
+          state,
+          s.writeStdin({
+            sessionId: providerSessionId,
+            chars: "",
+            yieldTimeMs: pollYieldMs,
+            maxOutputTokens: 20_000,
+            signal: abortController.signal,
+          }),
+        ),
         deadline,
+        monotonicNow,
       );
+      assertCurrentOperation(state, epoch);
       chunk = execResultOutput(result);
       outputParts.push(chunk);
       telemetry.emitSandboxStages(chunk);
@@ -576,7 +693,11 @@ export async function ensureDisplayStack(
     telemetry.emit("readiness_complete", "completed");
     return { port, geometry, marker };
   } catch (error) {
-    if (error instanceof DisplayStackWallTimeoutError) {
+    if (
+      error instanceof DisplayStackWallTimeoutError ||
+      error instanceof DisplayStackOperationFencedError
+    ) {
+      fenceOperation(state, epoch, abortController);
       const output = `${outputParts.join("\n")}\nOPENGENI_DISPLAY_TIMEOUT wall_ms=${timeoutMs}`;
       telemetry.emit("wall_deadline", "failed");
       throw new DisplayStackError(124, output);
