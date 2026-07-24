@@ -3,11 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
-import {
-  deploymentImageDigests,
-  validateReleaseCandidateReceipt,
-  type ReleaseCandidateReceipt,
-} from "./release-candidate";
+import { deploymentImageDigests, validateReleaseCandidateReceipt } from "./release-candidate";
 import {
   buildReleaseProducerMetadata,
   validateReleaseProducerMetadata,
