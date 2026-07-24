@@ -187,6 +187,14 @@ closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
+For Agent Steer, accepting that signal is not an admission acknowledgement: if
+effective control is active while the newest `agent_steer_instruction` remains
+pending, the delivery path leaves its coalesced workflow-wake revision
+unacknowledged. The bounded outbox dispatcher can therefore redeliver across a
+workflow close or `continueAsNew`; the attempt-fenced Postgres claim consumes
+the newest instruction once, so duplicate signals cannot duplicate inference.
+A real Pause is the truthful blocker and may acknowledge the old revision;
+Resume commits a fresh revision for the preserved pending instruction.
 
 Control settlement and physical cancellation are deliberately separate
 boundaries. A receipt-gated v2 workflow first atomically settles the exact
