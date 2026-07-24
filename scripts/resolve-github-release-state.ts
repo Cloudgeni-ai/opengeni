@@ -54,7 +54,10 @@ export async function resolveGitHubReleaseState(input: {
       throw new Error("GitHub tag commit response has an invalid SHA");
     }
     tagSha = value.sha;
-  } else if (commit.status === 404) {
+  } else if (
+    commit.status === 404 ||
+    (commit.status === 422 && isExactMissingCommitResponse(commit.body, input.tag))
+  ) {
     if (releaseExists) {
       throw new Error("GitHub release exists without a resolvable tag commit");
     }
@@ -71,6 +74,12 @@ function record(value: unknown, label: string): Record<string, unknown> {
     throw new Error(`${label} response must be an object`);
   }
   return value as Record<string, unknown>;
+}
+
+function isExactMissingCommitResponse(value: unknown, tag: string): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  return response.message === `No commit found for SHA: ${tag}` && response.status === "422";
 }
 
 function githubApi(token: string, baseUrl: string): GitHubReleaseApi {
