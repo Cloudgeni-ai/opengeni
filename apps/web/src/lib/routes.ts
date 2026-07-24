@@ -18,6 +18,11 @@ export function workspaceSessionPath(workspaceId: string, sessionId: string): st
   return `${workspaceSessionsPath(workspaceId)}/${encodeURIComponent(sessionId)}`;
 }
 
+/** First-class durable workspace memory surface. */
+export function workspaceMemoryPath(workspaceId: string): string {
+  return `${workspacePath(workspaceId)}/memory`;
+}
+
 /** Workspace settings: workspace name, API keys, environments link, danger zone. */
 export function workspaceSettingsPath(workspaceId: string): string {
   return `${workspacePath(workspaceId)}/settings`;

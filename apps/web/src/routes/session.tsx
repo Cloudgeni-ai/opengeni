@@ -381,7 +381,7 @@ export function SessionRoute({
       }
       onMemoryClick={(memoryId) =>
         void navigate({
-          to: "/workspaces/$workspaceId/documents",
+          to: "/workspaces/$workspaceId/memory",
           params: { workspaceId },
           search: { memory: memoryId },
         })
@@ -510,7 +510,7 @@ function SessionChatPane(props: {
   /** Reset the local timeline view (the /clear-view command target). */
   onClearView: () => void;
   onOpenSession: (sessionId: string) => void;
-  /** Deep-link a timeline memory step to its record in the Documents memory pane. */
+  /** Deep-link a timeline memory step to its first-class workspace Memory record. */
   onMemoryClick: (memoryId: string) => void;
   onNewSession: () => void;
   onApprove: (approvalId: string) => Promise<void>;

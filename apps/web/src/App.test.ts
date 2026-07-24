@@ -20,6 +20,7 @@ import {
   orgSettingsPath,
   parseCheckoutOutcome,
   workspaceAgentPath,
+  workspaceMemoryPath,
   workspaceSessionPath,
   workspaceSessionsPath,
   workspaceSettingsPath,
@@ -89,6 +90,7 @@ describe("workspace route helpers", () => {
     expect(workspaceSessionPath("workspace-1", "session-1")).toBe(
       "/workspaces/workspace-1/sessions/session-1",
     );
+    expect(workspaceMemoryPath("workspace-1")).toBe("/workspaces/workspace-1/memory");
   });
 
   test("the legacy agent home maps onto the sessions index", () => {

@@ -241,6 +241,13 @@ jobs:
           OPENGENI_REQUIRE_REAL_DB: "1"
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/session-pins.browser.e2e.ts
 
+      - name: Responsive knowledge surfaces browser acceptance
+        env:
+          # This gate traverses the public configured-principal API and must fail
+          # rather than skip when its real PostgreSQL boundary is unavailable.
+          OPENGENI_REQUIRE_REAL_DB: "1"
+        run: bun test --max-concurrency=1 --timeout 300000 ./test/e2e/knowledge-surfaces.browser.e2e.ts
+
       - name: Workbench browser acceptance
         id: workbench_browser
         run: bun test --max-concurrency=1 --timeout 180000 ./test/e2e/workbench.browser.e2e.ts
@@ -267,6 +274,23 @@ jobs:
             /tmp/sessionpin-session-pin-desktop-dark.png
             /tmp/sessionpin-session-pin-mobile-light.png
             /tmp/sessionpin-session-pin-mobile-dark.png
+
+      - name: Upload responsive knowledge-surface evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: responsive-knowledge-surface-evidence
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            /tmp/knowledge-surfaces-320-light-memory.png
+            /tmp/knowledge-surfaces-320-dark-memory.png
+            /tmp/knowledge-surfaces-375-light-variable-sets.png
+            /tmp/knowledge-surfaces-375-dark-variable-sets.png
+            /tmp/knowledge-surfaces-768-light-documents.png
+            /tmp/knowledge-surfaces-768-dark-documents.png
+            /tmp/knowledge-surfaces-desktop-light-memory.png
+            /tmp/knowledge-surfaces-desktop-dark-memory.png
 
       - name: Upload workbench visual evidence
         if: >-

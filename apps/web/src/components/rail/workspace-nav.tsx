@@ -1,10 +1,11 @@
 // Workspace configuration nav: the four config surfaces (Variable sets,
-// Capabilities, Schedules, Documents) as individual items, then a slightly
+// Capabilities, Schedules, Documents, Memory) as individual items, then a slightly
 // separated Settings (Workspace settings). Collapsed → centered icons with
 // tooltips. Active route gets a left accent bar + subtle surface tint.
 import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
+  BrainCircuitIcon,
   CalendarClockIcon,
   FileSearchIcon,
   LaptopIcon,
@@ -26,6 +27,7 @@ type NavTarget =
   | "/workspaces/$workspaceId/capabilities"
   | "/workspaces/$workspaceId/schedules"
   | "/workspaces/$workspaceId/documents"
+  | "/workspaces/$workspaceId/memory"
   | "/workspaces/$workspaceId/settings";
 
 const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; description: string }> =
@@ -65,6 +67,12 @@ const CONFIG_ITEMS: Array<{ to: NavTarget; icon: LucideIcon; label: string; desc
       icon: FileSearchIcon,
       label: "Documents",
       description: "Indexed knowledge for agents",
+    },
+    {
+      to: "/workspaces/$workspaceId/memory",
+      icon: BrainCircuitIcon,
+      label: "Memory",
+      description: "Durable facts agents carry across sessions",
     },
   ];
 

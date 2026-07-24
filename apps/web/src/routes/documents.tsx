@@ -12,11 +12,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
-import { MemoryPane } from "@/components/knowledge/memory-pane";
 import { Button } from "@/components/ui/button";
+import { ContentPage, FormField, FormGrid } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { listViewState } from "@/lib/load-state";
@@ -40,19 +41,10 @@ const sourceKindOptions: KnowledgeSourceKind[] = [
   "other",
 ];
 
-export function DocumentsRoute({
-  workspaceId,
-  focusMemoryId,
-}: {
-  workspaceId: string;
-  focusMemoryId?: string | undefined;
-}) {
+export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const client = context.client;
   const fileUploadsEnabled = context.clientConfig.fileUploads.enabled === true;
-  const memoryEnabled =
-    context.workspaces.find((workspace) => workspace.id === workspaceId)?.settings
-      ?.memoryEnabled === true;
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [basesLoading, setBasesLoading] = useState(true);
   const [basesError, setBasesError] = useState<Error | null>(null);
@@ -291,20 +283,21 @@ export function DocumentsRoute({
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage>
       <section className="flex min-h-0 flex-1 flex-col text-left">
         <PageHeader
           icon={<FileSearchIcon className="size-4" />}
           title="Documents"
           description="Indexed document bases the agent can search."
           actions={
-            <div className="flex min-w-0 gap-2">
+            <div className="grid w-full min-w-0 gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto] lg:w-auto">
               <Input
                 ref={nameInputRef}
+                aria-label="New document base name"
                 value={name}
                 onChange={(event) => setName(event.target.value)}
                 placeholder="New base name"
-                className="h-8 min-w-0 text-xs"
+                className="h-8 min-w-0 text-xs pointer-coarse:min-h-10"
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void handleCreateBase();
                 }}
@@ -327,13 +320,21 @@ export function DocumentsRoute({
           }
         />
 
-        <div className="mt-5 grid min-h-0 flex-1 gap-4 lg:grid-cols-[240px_minmax(0,1fr)_360px]">
-          <aside className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4">
+        <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_20rem]">
+          <aside
+            aria-labelledby="document-bases-heading"
+            className="min-w-0 border-b border-border pb-4 lg:border-b-0 lg:border-r lg:pr-4"
+          >
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-xs font-medium uppercase text-fg-subtle">Bases</div>
+              <h2
+                id="document-bases-heading"
+                className="text-xs font-medium uppercase text-fg-subtle"
+              >
+                Bases
+              </h2>
               <div className="text-2xs text-fg-subtle">{bases.length}</div>
             </div>
-            <div className="space-y-1">
+            <div className="grid auto-cols-[minmax(10rem,80%)] grid-flow-col gap-1 overflow-x-auto overscroll-x-contain pb-1 lg:block lg:space-y-1 lg:overflow-visible lg:pb-0">
               {basesView === "loading" ? (
                 <div className="flex items-center gap-2 rounded-lg border border-border p-3 text-xs text-fg-muted">
                   <Loader2Icon className="size-3.5 animate-spin" />
@@ -356,13 +357,15 @@ export function DocumentsRoute({
                     type="button"
                     onClick={() => setSelectedBaseId(base.id)}
                     className={cn(
-                      "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs",
+                      "flex w-full items-center justify-between gap-2 rounded-lg border px-3 py-2 text-left text-xs pointer-coarse:min-h-10",
                       selectedBaseId === base.id
                         ? "border-brand/40 bg-brand/10 text-fg"
                         : "border-border bg-bg/25 text-fg-muted hover:bg-surface-2",
                     )}
                   >
-                    <span className="truncate">{base.name}</span>
+                    <span className="min-w-0 break-words" title={base.name}>
+                      {base.name}
+                    </span>
                     {selectedBaseId === base.id ? (
                       <CheckIcon className="size-3.5 shrink-0" />
                     ) : null}
@@ -395,7 +398,7 @@ export function DocumentsRoute({
                       size="sm"
                       disabled={uploading || !fileUploadsEnabled}
                       onClick={() => fileInputRef.current?.click()}
-                      className="h-8"
+                      className="h-8 pointer-coarse:min-h-10"
                     >
                       {uploading ? (
                         <Loader2Icon className="size-3.5 animate-spin" />
@@ -410,7 +413,7 @@ export function DocumentsRoute({
                       size="sm"
                       disabled={retryingAll || failedDocuments.length === 0}
                       onClick={() => void handleRetryFailedDocuments()}
-                      className="h-8"
+                      className="h-8 pointer-coarse:min-h-10"
                     >
                       {retryingAll ? (
                         <Loader2Icon className="size-3.5 animate-spin" />
@@ -422,60 +425,58 @@ export function DocumentsRoute({
                   </div>
                 </div>
 
-                <div className="mt-4 grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/25 p-3 sm:grid-cols-2 xl:grid-cols-5">
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    Source
-                    <select
+                <FormGrid
+                  columns="three"
+                  className="mt-4 rounded-lg border border-border bg-surface/25 p-3 xl:grid-cols-5"
+                >
+                  <FormField label="Source">
+                    <Select
                       value={uploadSourceKind}
                       onChange={(event) =>
                         setUploadSourceKind(event.target.value as KnowledgeSourceKind)
                       }
-                      className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                     >
                       {sourceKindOptions.map((kind) => (
                         <option key={kind} value={kind}>
                           {formatToken(kind)}
                         </option>
                       ))}
-                    </select>
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    URI
+                    </Select>
+                  </FormField>
+                  <FormField label="URI">
                     <Input
                       value={uploadSourceUri}
                       onChange={(event) => setUploadSourceUri(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="https://..."
                     />
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    Title
+                  </FormField>
+                  <FormField label="Title">
                     <Input
                       value={uploadSourceTitle}
                       onChange={(event) => setUploadSourceTitle(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="Source title"
                     />
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    Author
+                  </FormField>
+                  <FormField label="Author">
                     <Input
                       value={uploadSourceAuthor}
                       onChange={(event) => setUploadSourceAuthor(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="Owner"
                     />
-                  </label>
-                  <label className="grid gap-1 text-[11px] font-medium text-[color:var(--color-fg-subtle)]">
-                    ACL tags
+                  </FormField>
+                  <FormField label="ACL tags">
                     <Input
                       value={uploadAclTags}
                       onChange={(event) => setUploadAclTags(event.target.value)}
-                      className="h-8 text-xs"
+                      className="h-8 text-xs pointer-coarse:min-h-10"
                       placeholder="team, confidential"
                     />
-                  </label>
-                </div>
+                  </FormField>
+                </FormGrid>
 
                 <div className="mt-4 space-y-2">
                   {pollFailed ? (
@@ -546,7 +547,9 @@ export function DocumentsRoute({
                         className="flex items-start justify-between gap-3 rounded-lg border border-border bg-surface/35 px-3 py-2.5"
                       >
                         <div className="min-w-0">
-                          <div className="truncate text-sm font-medium">{document.title}</div>
+                          <div className="break-words text-sm font-medium" title={document.title}>
+                            {document.title}
+                          </div>
                           <div className="mt-1 text-2xs text-fg-subtle">
                             {document.status} · {document.chunkCount} chunks · {document.parser}
                           </div>
@@ -618,39 +621,48 @@ export function DocumentsRoute({
             )}
           </div>
 
-          <aside className="min-w-0 border-t border-border pt-4 lg:border-t-0 lg:border-l lg:pl-4 lg:pt-0">
-            <div className="flex items-center gap-2 text-sm font-medium">
+          <aside
+            aria-labelledby="document-search-heading"
+            className="min-w-0 border-t border-border pt-4 lg:col-span-2 xl:col-span-1 xl:border-l xl:border-t-0 xl:pl-4 xl:pt-0"
+          >
+            <h2
+              id="document-search-heading"
+              className="flex items-center gap-2 text-sm font-medium"
+            >
               <FileSearchIcon className="size-4 text-brand" />
               Search
-            </div>
+            </h2>
             <div className="mt-3 grid gap-2">
               <Input
+                aria-label="Search indexed documents"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Search indexed documents"
-                className="h-9 text-sm"
+                className="h-9 text-sm pointer-coarse:min-h-10"
                 disabled={!selectedBaseId}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void handleSearch();
                 }}
               />
-              <div className="grid grid-cols-2 gap-2">
-                <select
+              <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-2">
+                <Select
+                  aria-label="Search mode"
                   value={searchMode}
                   onChange={(event) => setSearchMode(event.target.value as DocumentSearchMode)}
-                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
                   disabled={!selectedBaseId}
                 >
                   <option value="hybrid">Hybrid</option>
                   <option value="vector">Vector</option>
                   <option value="keyword">Keyword</option>
-                </select>
-                <select
+                </Select>
+                <Select
+                  aria-label="Source kind"
                   value={searchSourceKind}
                   onChange={(event) =>
                     setSearchSourceKind(event.target.value as KnowledgeSourceKind | "")
                   }
-                  className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
                   disabled={!selectedBaseId}
                 >
                   <option value="">All sources</option>
@@ -659,21 +671,23 @@ export function DocumentsRoute({
                       {formatToken(kind)}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
-              <Input
-                value={searchAclTags}
-                onChange={(event) => setSearchAclTags(event.target.value)}
-                placeholder="ACL tags"
-                className="h-8 text-xs"
-                disabled={!selectedBaseId}
-              />
+              <FormField label="ACL tags">
+                <Input
+                  value={searchAclTags}
+                  onChange={(event) => setSearchAclTags(event.target.value)}
+                  placeholder="team, confidential"
+                  className="h-8 text-xs pointer-coarse:min-h-10"
+                  disabled={!selectedBaseId}
+                />
+              </FormField>
               <Button
                 type="button"
                 size="sm"
                 onClick={() => void handleSearch()}
                 disabled={searching || !selectedBaseId || !query.trim()}
-                className="h-9"
+                className="h-9 pointer-coarse:min-h-10"
               >
                 {searching ? (
                   <Loader2Icon className="size-3.5 animate-spin" />
@@ -692,7 +706,9 @@ export function DocumentsRoute({
                     className="rounded-lg border border-border bg-surface/35 p-3"
                   >
                     <div className="flex items-center justify-between gap-2 text-xs">
-                      <span className="truncate font-medium text-fg">{result.title}</span>
+                      <span className="min-w-0 break-words font-medium text-fg">
+                        {result.title}
+                      </span>
                       <span className="shrink-0 text-fg-subtle">
                         {result.matchType} · {Math.round(result.score * 100)}%
                       </span>
@@ -716,16 +732,10 @@ export function DocumentsRoute({
                 </div>
               )}
             </div>
-
-            <MemoryPane
-              workspaceId={workspaceId}
-              memoryEnabled={memoryEnabled}
-              focusMemoryId={focusMemoryId}
-            />
           </aside>
         </div>
       </section>
-    </div>
+    </ContentPage>
   );
 }
 
