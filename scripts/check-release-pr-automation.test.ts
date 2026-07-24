@@ -685,13 +685,14 @@ describe("workflow contracts", () => {
     expect(releaseText).toContain("Download and validate the complete acceptance bundle");
     expect(releaseText).toContain("bun scripts/verify-workbench-acceptance-bundle.ts");
     expect(releaseText).toContain("confirm_zero_gaps must be explicitly true");
-    expect(releaseText).toContain("zeroKnownDefectsAndGapsConfirmed: true");
     expect(releaseText).toContain("bun run typecheck");
     expect(releaseText).toContain("bun run build:packages");
     expect(releaseText).toContain("bun scripts/publish-closure-guard.ts");
   });
 
-  test("follows immutable release-asset redirects before hashing", () => {
-    expect(releaseText.match(/--location/g)).toHaveLength(3);
+  test("hashes immutable GitHub artifact downloads before extraction", () => {
+    expect(releaseText).toContain("/actions/artifacts/${artifact_id}/zip");
+    expect(releaseText).toContain("sha256sum --check --strict");
+    expect(releaseText).toContain('unzip -q "$zip"');
   });
 });

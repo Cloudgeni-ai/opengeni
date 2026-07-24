@@ -173,55 +173,89 @@ the exact expected package set (for example, `@opengeni/react@0.15.0`). It
 builds API, worker, web, relay, and stock headless-sandbox images under
 full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
 Each manifest is built at most once; retries reuse existing partial results.
-The immutable GitHub release tag `opengeni-candidate-<full-source-sha>` retains
-`release-candidate.json` plus its SHA-256 sidecar.
+Before acceptance, the same workflow packages the Helm chart twice through the
+deterministic release packager, requires byte-for-byte equality, and freezes the
+resulting `.tgz` and SHA-256 in the candidate Actions artifact. It does **not**
+occupy the official OCI version yet. The immutable GitHub release tag
+`opengeni-candidate-<full-source-sha>` retains `release-candidate.json`, its
+SHA-256 sidecar, and the chart assets. Retries that fail before this immutable
+boundary reconcile existing image state and regenerate the same deterministic
+chart bytes; once the candidate release exists, the workflow refuses to rerun
+because its producer run-attempt binding is itself immutable. Release admission
+must use the original successful candidate run ID instead of trying to rewrite
+that release.
 
 Before the first public image release, an organization package administrator
 must set the `opengeni-api`, `opengeni-worker`, `opengeni-web`,
-`opengeni-relay`, and `opengeni-sandbox` container packages to **Public** in
-their GitHub package settings. GitHub does not expose a supported REST endpoint
-for changing package visibility. The release workflow therefore treats this as
-one-time operator setup: after promotion it removes its GHCR login and fails
-closed unless every public release tag resolves anonymously to the exact
-candidate digest.
+`opengeni-relay`, `opengeni-sandbox`, and `charts/opengeni` container packages
+to **Public** in their GitHub package settings. GitHub does not expose a
+supported REST endpoint for changing package visibility. The release workflow
+therefore treats this as one-time operator setup: candidate creation proves the
+five image packages anonymously before writing its receipt; final promotion
+also proves the newly published official chart and every release image
+anonymously against the accepted bytes and digests.
 
 After staging, production, and the 72-hour canary have consumed those exact
-digests, public release is an explicit dispatch of
-`.github/workflows/release.yml` from a ref pinned to the accepted source SHA.
-The dispatch fails closed unless it receives the candidate receipt's direct
-HTTPS URL and SHA-256, retained staging/production/canary evidence URLs, the
-sanitized schema-v2 acceptance bundle's direct HTTPS URL and SHA-256, the same
-exact expected package set, and an explicit confirmation that there are zero
-known defects, skipped/late cycles, or unverified acceptance rows. The selected
-dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
-`main` must all identify the same revision.
+digests and chart bytes, the protected operator-controlled
+`.github/workflows/release-acceptance.yml` workflow produces the sanitized
+schema-v2 acceptance bundle. Its `production-acceptance` environment is the
+canonical acceptance boundary. That environment pins the operator repository
+and canonical workflow path and holds a narrow artifact-read credential. A
+dispatcher supplies only the operator run ID: OpenGeni requires a successful
+`workflow_dispatch` run from the configured operator `main`, proves that run's
+head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
+and its provider digest, and accepts only the two expected sanitized files.
+OpenGeni then replaces all operator-supplied candidate/public-producer authority
+with its independently verified candidate and current acceptance-run metadata
+before validating every schema-v2 row. No dispatcher can select an evidence
+URL, hash, repository, workflow path, or artifact name.
 
-The dispatch downloads the exact candidate receipt and acceptance JSON,
-verifies both digests, rejects any changed, missing, or extra image role,
-requires migration to equal API, and validates every machine-readable contract
-row before re-running the package typecheck, builds, SDK parity test, and
-publish closure guard. Before touching npm it rejects any unlisted unpublished package,
+Public release is then an explicit dispatch of `.github/workflows/release.yml`
+from a ref pinned to the accepted source SHA. Evidence admission accepts the
+candidate and acceptance **run IDs**, not caller-controlled URLs, hashes,
+workflow paths, or repository identities. The provenance verifier queries the
+GitHub API and requires the canonical repository/workflow, a completed
+successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
+owned unexpired Actions artifact with its provider digest, and the expected
+artifact name. URLs and archive digests are derived only after those checks. The
+same exact expected package set and an explicit zero-gap confirmation are still
+required; the selected dispatch ref, `source_sha`, checked-out commit, and a
+commit reachable from `main` must identify the same revision.
+
+The dispatch downloads the validated candidate and acceptance artifacts,
+verifies their provider ZIP digests and retained sidecars, rejects any changed,
+missing, or extra image role, requires migration to equal API, requires the
+candidate/staging/production chart version and packaged-byte hash to match, and
+validates every machine-readable contract row
+before re-running the package typecheck, builds, SDK parity test, and publish
+closure guard. Before touching npm it rejects any unlisted unpublished package,
 rejects local version drift or an occupied version from another git source, and
 retains a pre-publication plan. Afterward it requires every expected registry
-entry to bind the accepted source through `gitHead` and a SHA-512 integrity
-value before release image aliases can be promoted. That reconciliation also
-makes an interrupted post-publication run safely resumable. The final
-`verified-release-receipt-<sha>` binds the source, acceptance evidence, bundle
-digest, changed-package registry identities, and the complete publishable package
-inventory. The workflow then creates version, full-SHA, and `latest` aliases
-for the already-accepted manifests and verifies that every alias still resolves
-to the receipt digest. It never invokes a Docker build after acceptance.
+entry to bind the accepted source through `gitHead` and a SHA-512 integrity value
+before release image aliases can be promoted. That reconciliation also makes an
+interrupted post-publication run safely resumable. The final
+`verified-release-receipt-<sha>` binds the source, trusted producer provenance,
+candidate/acceptance artifact identities, accepted chart bytes, registry identities,
+and complete publishable package inventory. The final job is protected by the
+`production-release` environment, compares any existing immutable BOM before
+mutating version, full-SHA, or `latest` aliases, then verifies every alias and
+the anonymous OCI chart pull against the accepted bytes. The final job publishes
+or reconciles that exact accepted archive under the official chart version,
+records its resulting OCI manifest digest in the BOM, and never rebuilds an
+image or repackages the chart after acceptance.
 
 The workflow emits `release-bom-<sha>` containing one deterministic
 `release-bom.json`: exact
 source SHA, release version, every publishable package version plus npm `gitHead`
-and SHA-512 integrity, and every release image's immutable SHA-256 digest. Hosts
-should consume this BOM as one unit and reject missing, extra, mutable-tag-only, or
-version-mismatched components. The same bytes and a SHA-256 sidecar are published
-once on the immutable GitHub release tag `opengeni-release-<full-source-sha>`; a
-retry compares the existing public assets byte for byte and fails instead of
-overwriting them. No moving BOM alias is created. Ordinary pushes to `main` can
-open/update the Version PR but cannot publish.
+and SHA-512 integrity, every release image's immutable SHA-256 digest, and the
+official chart reference/version, OCI manifest digest, exact `.tgz` byte hash,
+and artifact name. Hosts should consume this BOM as one unit and reject missing,
+extra, mutable-tag-only, or version-mismatched components. The same bytes and a
+SHA-256 sidecar are published once on the immutable GitHub release tag
+`opengeni-release-<full-source-sha>`; a retry compares the existing public assets
+byte for byte and fails instead of overwriting them. No moving BOM alias is
+created. Ordinary pushes to `main` can open/update the Version PR but cannot
+publish.
 
 The stock sandbox remains a separate workload image, but the public release publishes it and
 binds its immutable digest in the same BOM:

@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import { RELEASE_IMAGE_NAMES, RELEASE_IMAGE_ROLES } from "./release-candidate";
+import {
+  RELEASE_IMAGE_NAMES,
+  RELEASE_IMAGE_ROLES,
+  type ReleaseChartIdentity,
+} from "./release-candidate";
 
 export type ReleaseBomPackage = {
   name: string;
@@ -16,11 +20,12 @@ export type ReleaseBomImage = {
 };
 
 export type ReleaseBom = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   sourceSha: string;
   releaseVersion: string;
   packages: ReleaseBomPackage[];
   images: ReleaseBomImage[];
+  chart: ReleaseChartIdentity;
 };
 
 const packageNamePattern = /^@opengeni\/[a-z0-9][a-z0-9._-]*$/;
@@ -45,6 +50,7 @@ export function buildReleaseBom(input: {
   releaseVersion: string;
   packages: Array<ReleaseBomPackage & { state: "published" }>;
   images: ReleaseBomImage[];
+  chart: ReleaseChartIdentity;
 }): ReleaseBom {
   if (!sourceShaPattern.test(input.sourceSha)) {
     throw new Error("release BOM sourceSha must be 40 lowercase hexadecimal characters");
@@ -73,6 +79,7 @@ export function buildReleaseBom(input: {
       throw new Error(`invalid release BOM image identity: ${image.name}@${image.digest}`);
     }
   }
+  const chart = normalizeChart(input.chart, input.releaseVersion);
 
   uniqueBy(input.packages, (pkg) => pkg.name, "package");
   uniqueBy(input.images, (image) => image.name, "image");
@@ -87,13 +94,61 @@ export function buildReleaseBom(input: {
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceSha: input.sourceSha,
     releaseVersion: input.releaseVersion,
     packages: input.packages
       .map(({ name, version, gitHead, integrity }) => ({ name, version, gitHead, integrity }))
       .sort((a, b) => a.name.localeCompare(b.name)),
     images: [...input.images].sort((a, b) => a.name.localeCompare(b.name)),
+    chart,
+  };
+}
+
+function normalizeChart(value: unknown, releaseVersion: string): ReleaseChartIdentity {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("release BOM chart must be an object");
+  }
+  const chart = value as Record<string, unknown>;
+  const expectedKeys = ["reference", "version", "manifestDigest", "bytesSha256", "artifact"];
+  const canonicalKeys = [...expectedKeys].sort();
+  const actualKeys = Object.keys(chart).sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== canonicalKeys[index])
+  ) {
+    throw new Error(`release BOM chart must contain exactly: ${canonicalKeys.join(", ")}`);
+  }
+  if (chart.reference !== "oci://ghcr.io/cloudgeni-ai/charts/opengeni") {
+    throw new Error("release BOM chart reference is not the official OCI chart");
+  }
+  if (chart.version !== releaseVersion) {
+    throw new Error("release BOM chart version must equal releaseVersion");
+  }
+  if (
+    typeof chart.version !== "string" ||
+    !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(chart.version)
+  ) {
+    throw new Error("release BOM chart version must be an exact semver version");
+  }
+  if (
+    typeof chart.manifestDigest !== "string" ||
+    !/^sha256:[0-9a-f]{64}$/.test(chart.manifestDigest)
+  ) {
+    throw new Error("release BOM chart manifestDigest must be an exact sha256 digest");
+  }
+  if (typeof chart.bytesSha256 !== "string" || !/^[0-9a-f]{64}$/.test(chart.bytesSha256)) {
+    throw new Error("release BOM chart bytesSha256 must be lowercase SHA-256");
+  }
+  if (chart.artifact !== `opengeni-${releaseVersion}.tgz`) {
+    throw new Error("release BOM chart artifact must match releaseVersion");
+  }
+  return {
+    reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni",
+    version: chart.version,
+    manifestDigest: chart.manifestDigest,
+    bytesSha256: chart.bytesSha256 as string,
+    artifact: chart.artifact as string,
   };
 }
 
@@ -108,6 +163,14 @@ function parseJsonArray<T>(name: string, value: string): T[] {
   return parsed as T[];
 }
 
+function parseJson<T>(name: string, value: string): T {
+  try {
+    return JSON.parse(value) as T;
+  } catch {
+    throw new Error(`${name} must be valid JSON`);
+  }
+}
+
 async function main(): Promise<void> {
   const bom = buildReleaseBom({
     sourceSha: process.env.OPENGENI_RELEASE_BOM_SOURCE_SHA ?? "",
@@ -119,6 +182,10 @@ async function main(): Promise<void> {
     images: parseJsonArray<ReleaseBomImage>(
       "OPENGENI_RELEASE_BOM_IMAGES",
       process.env.OPENGENI_RELEASE_BOM_IMAGES ?? "",
+    ),
+    chart: parseJson<ReleaseChartIdentity>(
+      "OPENGENI_RELEASE_BOM_CHART",
+      process.env.OPENGENI_RELEASE_BOM_CHART ?? "",
     ),
   });
   const serialized = `${JSON.stringify(bom, null, 2)}\n`;

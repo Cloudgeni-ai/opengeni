@@ -32,6 +32,7 @@ jobs:
     permissions:
       contents: write
       packages: write
+      attestations: write
     steps:
       - name: Check out candidate source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -67,6 +68,29 @@ jobs:
             exit 1
           fi
 
+      # The receipt includes the exact producer run attempt. Once the immutable
+      # candidate release exists, a later rerun cannot safely rewrite that
+      # receipt with a different attempt while retaining the same source-SHA
+      # release tag. Use the original successful run ID for release admission;
+      # only retries that failed before this immutable boundary may reconcile
+      # partial registry state.
+      - name: Refuse to rerun a completed immutable candidate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          tag="opengeni-candidate-${SOURCE_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            [ "$resolved" = "$SOURCE_SHA" ] || {
+              echo "existing candidate tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            }
+            echo "immutable candidate ${tag} already exists; use its original successful producer run ID" >&2
+            exit 1
+          fi
+
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
@@ -94,6 +118,7 @@ jobs:
           }
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "candidate_tag=candidate-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "source_tree_sha=$(git rev-parse "$SOURCE_SHA^{tree}")" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
@@ -343,11 +368,73 @@ jobs:
               exit 1
             }
           done
+      - name: Set up Helm for the immutable chart candidate
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
+      - name: Package the deterministic immutable Helm chart candidate
+        id: chart
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release/charts .release/chart-proof
+          chart_path=".release/charts/opengeni-${RELEASE_VERSION}.tgz"
+          bun scripts/package-release-chart.ts \
+            --chart deploy/helm/opengeni \
+            --output "$chart_path" \
+            --version "$RELEASE_VERSION" \
+            --app-version "$RELEASE_VERSION"
+          chart_bytes_sha256="$(sha256sum "$chart_path" | awk '{print $1}')"
+          bun scripts/package-release-chart.ts \
+            --chart deploy/helm/opengeni \
+            --output .release/chart-proof/opengeni.tgz \
+            --version "$RELEASE_VERSION" \
+            --app-version "$RELEASE_VERSION"
+          cmp "$chart_path" .release/chart-proof/opengeni.tgz
+          helm lint "$chart_path"
+          test "$(helm show chart "$chart_path" | awk '$1 == "version:" { print $2 }')" = "$RELEASE_VERSION"
+          test "$(helm show chart "$chart_path" | awk '$1 == "appVersion:" { print $2 }')" = "$RELEASE_VERSION"
+          printf '%s  %s\n' "$chart_bytes_sha256" "$chart_path" > evidence/release-chart.sha256
+          echo "bytes_sha256=$chart_bytes_sha256" >> "$GITHUB_OUTPUT"
+          echo "artifact=opengeni-${RELEASE_VERSION}.tgz" >> "$GITHUB_OUTPUT"
+          chart_json="$(jq -cn \
+            --arg version "$RELEASE_VERSION" \
+            --arg bytesSha256 "$chart_bytes_sha256" \
+            --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
+            '{version:$version,bytesSha256:$bytesSha256,artifact:$artifact}')"
+          {
+            echo 'json<<RELEASE_CHART_JSON'
+            echo "$chart_json"
+            echo 'RELEASE_CHART_JSON'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Freeze candidate producer identity
+        id: producer
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_TREE_SHA: ${{ steps.meta.outputs.source_tree_sha }}
+        run: |
+          set -euo pipefail
+          producer="$(jq -cn \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "$SOURCE_TREE_SHA" \
+            --arg runUrl "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --argjson runId "$GITHUB_RUN_ID" \
+            --argjson runAttempt "$GITHUB_RUN_ATTEMPT" \
+            '{repository:$repository,workflowPath:".github/workflows/release-candidate.yml",runId:$runId,runAttempt:$runAttempt,event:"workflow_dispatch",conclusion:"success",sourceSha:$sourceSha,sourceTreeSha:$sourceTreeSha,runUrl:$runUrl}')"
+          {
+            echo 'json<<RELEASE_PRODUCER_JSON'
+            echo "$producer"
+            echo 'RELEASE_PRODUCER_JSON'
+          } >> "$GITHUB_OUTPUT"
       - name: Write immutable candidate receipt
         id: receipt
         env:
           OPENGENI_RELEASE_CANDIDATE_SOURCE_SHA: ${{ inputs.source_sha }}
+          OPENGENI_RELEASE_CANDIDATE_SOURCE_TREE_SHA: ${{ steps.meta.outputs.source_tree_sha }}
+          OPENGENI_RELEASE_CANDIDATE_PRODUCER: ${{ steps.producer.outputs.json }}
+          OPENGENI_RELEASE_CANDIDATE_CHART: ${{ steps.chart.outputs.json }}
           API_DIGEST: ${{ steps.api.outputs.digest }}
           WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
@@ -378,6 +465,8 @@ jobs:
           path: |
             evidence/release-candidate.json
             evidence/release-candidate.sha256
+            evidence/release-chart.sha256
+            .release/charts/opengeni-${{ steps.meta.outputs.version }}.tgz
             evidence/release-packages-plan.json
           if-no-files-found: error
           retention-days: 90
@@ -400,13 +489,24 @@ jobs:
             gh release download "$tag" \
               --dir /tmp/opengeni-release-candidate-existing \
               --pattern release-candidate.json \
-              --pattern release-candidate.sha256
+              --pattern release-candidate.sha256 \
+              --pattern release-chart.sha256 \
+              --pattern 'opengeni-*.tgz'
             cmp evidence/release-candidate.json /tmp/opengeni-release-candidate-existing/release-candidate.json
             cmp evidence/release-candidate.sha256 /tmp/opengeni-release-candidate-existing/release-candidate.sha256
+            cmp evidence/release-chart.sha256 /tmp/opengeni-release-candidate-existing/release-chart.sha256
+            cmp ".release/charts/opengeni-${RELEASE_VERSION}.tgz" "/tmp/opengeni-release-candidate-existing/opengeni-${RELEASE_VERSION}.tgz"
           else
+            existing_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+            if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$SOURCE_SHA" ]; then
+              echo "existing candidate tag resolves to ${existing_tag_sha}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            fi
             gh release create "$tag" \
               evidence/release-candidate.json \
               evidence/release-candidate.sha256 \
+              evidence/release-chart.sha256 \
+              ".release/charts/opengeni-${RELEASE_VERSION}.tgz" \
               --target "$SOURCE_SHA" \
               --title "OpenGeni release candidate ${RELEASE_VERSION} (${SOURCE_SHA::12})" \
               --notes "Immutable image candidate receipt for source ${SOURCE_SHA}. Deploy every role by the recorded digest." \

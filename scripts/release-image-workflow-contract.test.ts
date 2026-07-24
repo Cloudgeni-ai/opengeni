@@ -35,6 +35,13 @@ describe("release image workflow contract", () => {
     expect(candidate.slice(anonymousGate, receiptWrite)).toContain(
       "docker buildx imagetools inspect",
     );
+    expect(candidate).toContain("bun scripts/package-release-chart.ts");
+    expect(candidate.match(/bun scripts\/package-release-chart\.ts/g)).toHaveLength(2);
+    expect(candidate).not.toContain("helm push");
+    expect(candidate).toContain("release-chart.sha256");
+    expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
+    expect(candidate).toContain("use its original successful producer run ID");
+    expect(candidate).toContain("existing_tag_sha");
   });
 
   test("final release promotes accepted manifests and has no image build boundary", async () => {
@@ -54,6 +61,49 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("docker/build-push-action");
     expect(finalJob).not.toContain("docker build ");
     expect(finalJob).not.toContain("bake-agent.sh");
+    expect(finalJob).not.toContain("helm package");
+    expect(finalJob).toContain("Publish or reconcile the exact accepted Helm chart");
+    expect(finalJob).toContain("helm push");
+    expect(finalJob).toContain("name: production-release");
+    expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
+      finalJob.indexOf("Promote exact accepted manifests"),
+    );
+    expect(finalJob).toContain("existing_tag_sha");
+    expect(release).toContain("candidate_run_id:");
+    expect(release).toContain("acceptance_run_id:");
+    for (const forbidden of [
+      "candidate_receipt_url:",
+      "candidate_receipt_sha256:",
+      "acceptance_bundle_url:",
+      "acceptance_bundle_sha256:",
+      "staging_evidence_url:",
+      "production_evidence_url:",
+    ]) {
+      expect(release).not.toContain(forbidden);
+    }
+  });
+
+  test("acceptance imports only an exact protected operator artifact", async () => {
+    const acceptance = await workflow("release-acceptance.yml");
+    expect(acceptance).toContain(".github/workflows/release-acceptance.yml");
+    expect(acceptance).toContain("name: production-acceptance");
+    expect(acceptance).toContain("operator_run_id:");
+    expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_REPOSITORY");
+    expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_WORKFLOW_PATH");
+    expect(acceptance).toContain("RELEASE_ACCEPTANCE_OPERATOR_TOKEN");
+    expect(acceptance).toContain("verify-operator-acceptance-provenance.ts");
+    expect(acceptance).toContain("assemble-release-acceptance.ts");
+    expect(acceptance).toContain("OPERATOR_ARTIFACT_DIGEST#sha256:");
+    expect(acceptance).not.toContain("operator_artifact_url:");
+    expect(acceptance).not.toContain("operator_artifact_sha256:");
+    expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");
+    expect(acceptance).toContain('"workbench-acceptance.json"');
+    expect(acceptance).not.toContain('"evidence/workbench-acceptance.json"');
+    const release = await workflow("release.yml");
+    expect(release).toContain(".release/acceptance-artifact/files/workbench-acceptance.json");
+    expect(release).not.toContain(
+      ".release/acceptance-artifact/files/evidence/workbench-acceptance.json",
+    );
   });
 
   test("ordinary CI builds the same five physical image roles", async () => {
