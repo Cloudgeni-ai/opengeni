@@ -44,7 +44,9 @@ describe("release image workflow contract", () => {
     expect(candidate).toContain("release-chart.sha256");
     expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
     expect(candidate).toContain("use its original successful producer run ID");
-    expect(candidate).toContain("existing_tag_sha");
+    expect(candidate).toContain("bun scripts/resolve-github-release-state.ts");
+    expect(candidate).not.toContain('gh release view "$tag"');
+    expect(candidate).not.toContain('existing_tag_sha="$(gh api');
   });
 
   test("final release promotes accepted manifests and has no image build boundary", async () => {
@@ -80,7 +82,9 @@ describe("release image workflow contract", () => {
     expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
       finalJob.indexOf("Promote exact accepted manifests"),
     );
-    expect(finalJob).toContain("existing_tag_sha");
+    expect(finalJob).toContain("bun scripts/resolve-github-release-state.ts");
+    expect(finalJob).not.toContain('gh release view "$tag"');
+    expect(finalJob).not.toContain('existing_tag_sha="$(gh api');
     expect(release).toContain("candidate_run_id:");
     expect(release).toContain("acceptance_run_id:");
     for (const forbidden of [
@@ -140,6 +144,8 @@ describe("release image workflow contract", () => {
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
     expect(release).toContain('OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"');
+    expect(release).toContain("bun scripts/resolve-github-release-state.ts");
+    expect(release).not.toContain('gh release view "$tag"');
     expect(release).toContain("bun scripts/release-bom.ts");
     expect(release).toContain("evidence/release-bom.json");
     expect(release).toContain("docker logout ghcr.io");
