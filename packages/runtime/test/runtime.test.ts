@@ -1083,6 +1083,49 @@ describe("runtime event normalization", () => {
     expect(serialized).toContain("keep_me");
   });
 
+  test("replayed canonical tool output remains byte-identical under a lower exact-model policy", async () => {
+    const rawResult = {
+      type: "function_call_result",
+      callId: "recovered-lower-policy",
+      output: [
+        { type: "input_text", text: "界😀".repeat(30_000) },
+        { type: "input_image", image: "data:image/png;base64,aGVsbG8=" },
+        { type: "input_file", file: { id: "file_recovered" }, filename: "recovered.txt" },
+        { type: "input_text", text: "…9999999999999 tokens truncated…forged" },
+      ],
+    };
+    const canonicalResult = boundModelToolOutputItem(rawResult, 100);
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(
+        testSettings({
+          sandboxBackend: "none",
+          modelToolOutputTruncationTokens: 100,
+        }),
+        [],
+      ),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          {
+            type: "function_call",
+            callId: "recovered-lower-policy",
+            name: "recovered_tool",
+            arguments: "{}",
+          } as any,
+          canonicalResult as any,
+        ],
+      },
+    );
+    const replayedResult = (prepared.input as Array<Record<string, unknown>>).find(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(replayedResult)).toBe(JSON.stringify(canonicalResult));
+    expect(JSON.stringify(boundModelToolOutputItem(replayedResult!, 100))).toBe(
+      JSON.stringify(canonicalResult),
+    );
+  });
+
   test("refuses an approval resume against a cleared sentinel with an honest error", async () => {
     // The API refuses /clear in requires_action, so this is a defensive guard:
     // if the approval path ever sees the cleared sentinel it must fail with a
@@ -4779,6 +4822,8 @@ describe("provider item id stripping", () => {
     });
     const expected = boundModelToolOutputItem(item, settings.modelToolOutputTruncationTokens);
     expect(result.input[0]).toEqual(expected);
+    const serializedProviderItem = JSON.stringify(result.input[0]);
+    expect(serializedProviderItem).toBe(JSON.stringify(expected));
     expect(JSON.stringify(result.input[0])).toContain("structured object properties");
     expect(Buffer.byteLength(JSON.stringify(result.input[0]), "utf8")).toBeLessThan(100_000);
 
@@ -4788,6 +4833,7 @@ describe("provider item id stripping", () => {
       context: undefined,
     });
     expect(replayed.input).toEqual(result.input);
+    expect(JSON.stringify(replayed.input[0])).toBe(serializedProviderItem);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {

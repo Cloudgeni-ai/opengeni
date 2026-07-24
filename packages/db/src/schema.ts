@@ -2100,6 +2100,7 @@ export const sessionPendingToolCalls = pgTable(
     callId: text("call_id").notNull(),
     callType: text("call_type").notNull(),
     callItem: jsonb("call_item").$type<Record<string, unknown>>().notNull(),
+    modelToolOutputTruncationTokens: integer("model_tool_output_truncation_tokens"),
     resultItem: jsonb("result_item").$type<Record<string, unknown>>(),
     resultRecordedAt: timestamp("result_recorded_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
