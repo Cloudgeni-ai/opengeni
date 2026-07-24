@@ -57,6 +57,20 @@ export const CODEX_CLIENT_VERSION = "0.144.6";
 export const CODEX_REFRESH_WINDOW_MS = 5 * 60 * 1000; // proactive refresh when within 5 min of exp (spec §1.1)
 export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when exp is unparseable
 
+// Codex Responses transport deadlines. The OpenAI SDK's own timeout only covers
+// the wait for response headers and erases the underlying timeout class into the
+// bare `Request timed out.` error. Keep the provider-specific budgets here so
+// the transport can enforce and durably report them without enabling the SDK's
+// blind request replay.
+export const CODEX_RESPONSE_HEADERS_TIMEOUT_MS = 4 * 60_000;
+export const CODEX_RESPONSE_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+export const CODEX_RESPONSE_WHOLE_TIMEOUT_MS = 30 * 60_000;
+export const CODEX_RESPONSE_NO_BYTE_RETRIES = 1;
+export const CODEX_RESPONSE_RETRY_BACKOFF_MS = 1_000;
+// Must exceed the transport-owned whole-response deadline. This SDK guard is a
+// last-resort envelope; the inner transport emits the typed/durable failure.
+export const CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS = 35 * 60_000;
+
 // ── Apps / connectors MCP (spec §1.10, §E) ───────────────────────────────────
 // One server-side MCP exposes ALL the user's ChatGPT/Codex connectors
 // (gmail/github/linear/slack/sentry/drive/calendar/…). Streamable HTTP, always.

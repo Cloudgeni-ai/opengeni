@@ -118,6 +118,7 @@ import {
   CODEX_APPS_MCP_SERVER_ID,
   CODEX_MODEL_ID_PREFIX,
   CODEX_ORIGINATOR,
+  CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
   boundModelToolOutputItems,
   codexAppsSanitizingFetch,
   codexRequestStorage,
@@ -565,6 +566,10 @@ export function buildProviderClient(provider: ResolvedModelProvider, settings: S
           // SDK retries on network/5xx/partial streams can replay provider work
           // or external tool side effects without a durable checkpoint.
           maxRetries: 0,
+          // The Codex transport owns finer headers/idle/whole deadlines and
+          // emits typed durable evidence. Keep the SDK's opaque envelope beyond
+          // that whole-response budget so `Request timed out.` cannot win first.
+          timeout: CODEX_RESPONSE_SDK_OUTER_TIMEOUT_MS,
           fetch: codexSubscriptionFetch(instrumentedModelFetch(provider.id, globalThis.fetch)),
         })
       : // ResolvedModelProvider.apiKey is already the resolved key (configuredProviders

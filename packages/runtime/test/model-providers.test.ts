@@ -459,7 +459,7 @@ describe("buildProviderClient", () => {
     expect(buildProviderClient(provider, settings)).toBe(client);
   });
 
-  test("Codex disables blind SDK retries and leaves retry classification to its transport", () => {
+  test("Codex disables blind SDK retries and leaves timeout ownership to its transport", () => {
     const settings = multiProviderSettings();
     const provider: ResolvedModelProvider = {
       id: "codex-subscription-no-retry-test",
@@ -473,6 +473,7 @@ describe("buildProviderClient", () => {
     const client = buildProviderClient(provider, settings);
     expect(settings.openaiMaxRetries).toBeGreaterThan(0);
     expect(client.maxRetries).toBe(0);
+    expect(client.timeout).toBe(35 * 60_000);
   });
 });
 
