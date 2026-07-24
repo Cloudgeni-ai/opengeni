@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { ReasoningEffort, ResourceRef, ToolRef } from "@opengeni/contracts";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
@@ -10,12 +11,15 @@ import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
   evaluateSessionControl,
+  getSessionTurn,
   getSessionQueueSnapshot,
+  listSessionTurns,
   markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
   peekSessionWork,
   QueueCommandConflictError,
+  saveComposerDraftInTransaction,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   settleSessionAttemptInterruptions,
@@ -256,6 +260,229 @@ describe("canonical queue commands", () => {
         .where(eq(schema.sessionTurns.id, value.turns[1]!.id)),
     );
     expect(withdrawn).toEqual({ status: "withdrawn_for_edit", reason: "withdrawn_for_edit" });
+  });
+
+  test("Edit then Send copies private source instructions without exposing them or accepting an override", async () => {
+    const value = await fixture();
+    const privateInstructions = "host-only record context: source-42";
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ turnInstructions: privateInstructions })
+        .where(eq(schema.sessionTurns.id, value.turns[1]!.id));
+    });
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: value.turns[1]!.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: value.turns[1]!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+    const savedEdit = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          saveComposerDraftInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            expectedRevision: edited.draft.revision,
+            text: "edited prompt with replacement content",
+            resources: [],
+            tools: [],
+            model: "edited-model",
+            reasoningEffort: "medium",
+          }),
+        ),
+    );
+    const command = {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+      actor: value.actor,
+      operationKey: crypto.randomUUID(),
+      delivery: "send" as const,
+      expectedDraftRevision: savedEdit.revision,
+      text: savedEdit.text,
+      resources: savedEdit.resources as ResourceRef[],
+      tools: savedEdit.tools as ToolRef[],
+      model: savedEdit.model,
+      reasoningEffort: savedEdit.reasoningEffort as ReasoningEffort,
+      reasoningEffortFallback: "medium" as const,
+      source: "user" as const,
+      turnInstructions: "client must not replace source instructions",
+    };
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+    );
+    const [stored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select({
+          turnInstructions: schema.sessionTurns.turnInstructions,
+          prompt: schema.sessionTurns.prompt,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, submitted.turnId)),
+    );
+    expect(stored).toEqual({
+      turnInstructions: privateInstructions,
+      prompt: savedEdit.text,
+    });
+
+    const publicTurn = await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId);
+    expect(publicTurn).not.toHaveProperty("turnInstructions");
+    const publicTurns = await listSessionTurns(
+      client.db,
+      value.grant.workspaceId!,
+      value.session.id,
+    );
+    expect(publicTurns.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
+      "turnInstructions",
+    );
+    const queue = await getSessionQueueSnapshot(
+      client.db,
+      value.grant.workspaceId!,
+      value.session.id,
+    );
+    expect(queue?.items.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
+      "turnInstructions",
+    );
+    const events = await storedEvents(value.grant.workspaceId!, submitted.eventIds);
+    expect(
+      events.every((event) => !JSON.stringify(event.payload).includes(privateInstructions)),
+    ).toBe(true);
+    expect(
+      events.every(
+        (event) =>
+          typeof event.payload !== "object" ||
+          event.payload === null ||
+          !Object.hasOwn(event.payload, "turnInstructions"),
+      ),
+    ).toBe(true);
+
+    const replay = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+    );
+    expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+  });
+
+  test("an edited source must still be the exact withdrawn revision, while direct Send keeps explicit instructions", async () => {
+    const value = await fixture();
+    const direct = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "direct prompt",
+            turnInstructions: "direct explicit context",
+            resources: [],
+            tools: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const [directStored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, direct.turnId)),
+    );
+    expect(directStored?.turnInstructions).toBe("direct explicit context");
+
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: value.turns[1]!.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: value.turns[1]!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ status: "queued" })
+        .where(eq(schema.sessionTurns.id, value.turns[1]!.id));
+    });
+    await expect(
+      withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            expectedDraftRevision: edited.draft.revision,
+            text: edited.draft.text,
+            resources: edited.draft.resources as ResourceRef[],
+            tools: edited.draft.tools as ToolRef[],
+            model: edited.draft.model,
+            reasoningEffort: edited.draft.reasoningEffort as ReasoningEffort,
+            reasoningEffortFallback: "medium",
+            source: "user",
+            turnInstructions: "must be ignored",
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "EDIT_SOURCE_CHANGED" });
+    const [draft] = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db
+          .select({ revision: schema.composerDrafts.revision })
+          .from(schema.composerDrafts)
+          .where(eq(schema.composerDrafts.sessionId, value.session.id)),
+    );
+    expect(draft?.revision).toBe(edited.draft.revision);
   });
 
   test("Edit never overwrites a dirty draft without exact replacement consent", async () => {
