@@ -39,7 +39,8 @@ export type QueueCommandConflictCode =
   | "QUEUE_ANCHOR_CHANGED"
   | "PROMPT_CHANGED"
   | "DRAFT_CHANGED"
-  | "DRAFT_NOT_EMPTY";
+  | "DRAFT_NOT_EMPTY"
+  | "EDIT_SOURCE_CHANGED";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -1293,6 +1294,52 @@ export async function submitHumanPromptInTransaction(
     }
   }
 
+  let editedSourceTurn: QueuedTurnRow | undefined;
+  let editedSourceTurnInstructions: string | null | undefined;
+  if (draft?.sourceTurnId) {
+    const sourceLocks = await lockSessionEventWriteRows(db, {
+      workspaceId: input.workspaceId,
+      controlLock: "already_locked",
+      workspaceLock: "already_locked",
+      turnIds: [draft.sourceTurnId],
+    });
+    const sourceTurn = sourceLocks.turns[0];
+    const sourceTurnVersion = draft.sourceTurnVersion;
+    const sourceMetadata = sourceTurn?.metadata ?? {};
+    const sourceIsExactWithdrawnRevision =
+      sourceTurn !== undefined &&
+      sourceTurn.accountId === input.accountId &&
+      sourceTurn.workspaceId === input.workspaceId &&
+      sourceTurn.sessionId === input.sessionId &&
+      (sourceTurn.source === "user" || sourceTurn.source === "api") &&
+      sourceTurn.status === "withdrawn_for_edit" &&
+      sourceTurnVersion !== null &&
+      sourceTurn.version === sourceTurnVersion + 1 &&
+      sourceTurn.cancelledBy === input.subjectId &&
+      sourceTurn.cancelReason === "withdrawn_for_edit" &&
+      sourceTurn.activeAttemptId === null &&
+      sourceMetadata.delivery !== "steer";
+    if (!sourceIsExactWithdrawnRevision) {
+      throw new QueueCommandConflictError(
+        "EDIT_SOURCE_CHANGED",
+        "Edited prompt source changed or is no longer withdrawn for edit",
+        {
+          queueVersion: session.queueVersion,
+          draftRevision: draft.revision,
+          ...(sourceTurn ? { turnVersion: sourceTurn.version } : {}),
+        },
+      );
+    }
+    // This is the sole private-instruction source for an edited replacement.
+    // It is deliberately held separately from the public draft and event
+    // projections below. The public draft is expected to differ after editing;
+    // source identity is fenced by its exact withdrawn row version, not by
+    // comparing the replacement content with the old prompt. A client-supplied
+    // instruction value must never override the private source value.
+    editedSourceTurn = sourceTurn;
+    editedSourceTurnInstructions = sourceTurn.turnInstructions ?? null;
+  }
+
   for (const update of input.mcpCredentialUpdates ?? []) {
     const [server] = await db
       .update(schema.sessionMcpServers)
@@ -1315,22 +1362,7 @@ export async function submitHumanPromptInTransaction(
   const now = new Date();
   let frozenInitiator: FrozenTurnInitiator;
   if (input.delivery === "send" && draft?.sourceTurnId) {
-    const [sourceTurn] = await db
-      .select({
-        sessionId: schema.sessionTurns.sessionId,
-        initiatorKind: schema.sessionTurns.initiatorKind,
-        initiatorSubjectId: schema.sessionTurns.initiatorSubjectId,
-        initiatorContext: schema.sessionTurns.initiatorContext,
-      })
-      .from(schema.sessionTurns)
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, input.workspaceId),
-          eq(schema.sessionTurns.sessionId, input.sessionId),
-          eq(schema.sessionTurns.id, draft.sourceTurnId),
-        ),
-      )
-      .limit(1);
+    const sourceTurn = editedSourceTurn;
     if (!sourceTurn) {
       throw new SessionControlInvariantError("Edited prompt source turn is missing");
     }
@@ -1389,7 +1421,10 @@ export async function submitHumanPromptInTransaction(
       source: input.source,
       position: input.delivery === "steer" ? 0 : existingQueued.length + 1,
       prompt: input.text,
-      turnInstructions: input.turnInstructions ?? null,
+      turnInstructions:
+        editedSourceTurnInstructions !== undefined
+          ? editedSourceTurnInstructions
+          : (input.turnInstructions ?? null),
       resources: input.resources,
       tools: input.tools,
       model: input.model ?? session.model,
