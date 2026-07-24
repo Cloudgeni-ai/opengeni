@@ -18,6 +18,7 @@
 // gVisor harness (V2 PASSED live on Modal: XTEST input read-back under runsc).
 
 import { DESKTOP_STREAM_PORT } from "@opengeni/contracts";
+import { parseExecResponseBanner } from "./exec-banner";
 
 // Re-export under the canonical name the module spec uses (STREAM_PORT) while
 // keeping DESKTOP_STREAM_PORT as the single source of truth (contracts).
@@ -30,6 +31,14 @@ export const STREAM_PORT = DESKTOP_STREAM_PORT;
 // warm-up on a cold gVisor box. 90s gives headroom over the spike's observed ~5-10s
 // warm path AND the cold-box paint warm-up without masking a genuine wedge.
 export const DISPLAY_STACK_TIMEOUT_MS = 90_000;
+
+// Provider exec APIs use `yieldTimeMs` as an output-yield window, not a process
+// deadline. Poll often enough to surface stage telemetry while the command keeps
+// running, but let the in-box `timeout(1)` own termination (see
+// `boundedDisplayStackCommand`).
+const DISPLAY_STACK_PROVIDER_YIELD_MS = 15_000;
+const DISPLAY_STACK_PROVIDER_POLL_MS = 5_000;
+const DISPLAY_STACK_TERMINATION_GRACE_MS = 5_000;
 
 // PAINTABLE-FRAME gate: poll scrot up to this many times, this many seconds apart,
 // waiting for an actually-PAINTED frame before declaring the stack "up" (~30s worst case).
@@ -93,7 +102,7 @@ export const DEFAULT_DESKTOP_GEOMETRY: DesktopGeometry = { width: 1280, height: 
  *  value to viewers by the caller; this error is for diagnostics. */
 export class DisplayStackError extends Error {
   readonly exitCode: number;
-  readonly stage: "xvfb" | "x11vnc" | "websockify" | "paint" | "unknown";
+  readonly stage: "xvfb" | "x11vnc" | "websockify" | "paint" | "lock" | "timeout" | "unknown";
 
   constructor(exitCode: number, output: string) {
     const stage =
@@ -105,7 +114,11 @@ export class DisplayStackError extends Error {
             ? "websockify"
             : exitCode === 14
               ? "paint"
-              : "unknown";
+              : exitCode === 15
+                ? "lock"
+                : exitCode === 124 || /OPENGENI_DISPLAY_TIMEOUT/u.test(output)
+                  ? "timeout"
+                  : "unknown";
     super(
       `desktop display stack failed at stage "${stage}" (exit ${exitCode})${output ? `:\n${output}` : ""}`,
     );
@@ -132,6 +145,8 @@ type ExecResultLike = {
   stdout?: string;
   stderr?: string;
   exitCode?: number | null;
+  sessionId?: number;
+  session_id?: number;
 };
 type ExecCapableSession = {
   exec?: (args: {
@@ -144,14 +159,50 @@ type ExecCapableSession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }) => Promise<string>;
+  writeStdin?: (args: {
+    sessionId: number;
+    chars: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }) => Promise<ExecResultLike | string>;
+};
+
+export type DisplayStackCallerKind = "viewer" | "computer" | "unknown";
+export type DisplayStackClassification = "cold" | "already_ready" | "contention" | "unknown";
+export type DisplayStackTelemetryStatus = "started" | "waiting" | "completed" | "failed";
+
+/** Secret-free, bounded-cardinality stage observation. Provider/sandbox IDs are
+ * log correlation fields, never metric labels. */
+export type DisplayStackTelemetryEvent = {
+  type: "display_stack.stage";
+  requestId: string;
+  stage: string;
+  status: DisplayStackTelemetryStatus;
+  elapsedMs: number;
+  source: "host" | "sandbox";
+  classification: DisplayStackClassification;
+  callerKind: DisplayStackCallerKind;
+  sandboxId?: string;
+  leaseEpoch?: number;
+  providerSessionId?: number;
+};
+
+export type DisplayStackTelemetryContext = {
+  callerKind: DisplayStackCallerKind;
+  sandboxId?: string;
+  leaseEpoch?: number;
 };
 
 export type EnsureDisplayStackOptions = {
   geometry?: DesktopGeometry;
   /** The exposed stream port; defaults to 6080. */
   port?: number;
-  /** Per-exec timeout; defaults to DISPLAY_STACK_TIMEOUT_MS. */
+  /** Whole-operation wall-clock timeout; defaults to DISPLAY_STACK_TIMEOUT_MS. */
   timeoutMs?: number;
+  /** Caller correlation. Supplying it enables the default structured log sink. */
+  telemetryContext?: DisplayStackTelemetryContext;
+  /** Optional non-blocking telemetry sink (tests/embedders may replace logging). */
+  onTelemetry?: (event: DisplayStackTelemetryEvent) => void | Promise<void>;
 };
 
 export type EnsureDisplayStackResult = {
@@ -214,16 +265,30 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
   // — an already-up display paints on the first probe). Lives in the runtime-built script
   // (not the baked image up-script) so it ships with the worker/api, no image rebuild —
   // and its size floor holds against the currently-deployed image too.
+  const lockedLauncher =
+    `ds_started=$1; fw=$2; ds_class=cold; ` +
+    `ds_stage() { ds_now=$(date +%s%3N); echo "OPENGENI_DISPLAY_STAGE stage=$1 elapsed_ms=$((ds_now-ds_started)) classification=$ds_class"; }; ` +
+    `fa=$(date +%s%3N); fd=$((fa-fw)); [ "$fd" -ge 50 ] && ds_class=contention; ` +
+    `ds_stage outer_flock_acquired; ds_stage launcher_issued; ` +
+    `env ${env} opengeni-desktop-up; urc=$?; ds_stage launcher_complete; exit "$urc"`;
   const bringUp =
     `if nc -z 127.0.0.1 ${port} >/dev/null 2>&1 && nc -z 127.0.0.1 5900 >/dev/null 2>&1; then ` +
+    `ds_class=already_ready; ds_stage precheck_ready; ` +
     `echo "OPENGENI_DESKTOP_UP port=${port} geometry=${geometry.width}x${geometry.height} dpi=${geometry.dpi} (precheck)"; ` +
     `else ` +
-    `mkdir -p /tmp/opengeni-desktop && ` +
-    `flock -w 45 /tmp/opengeni-desktop/up.outer.lock ` +
-    `env ${env} opengeni-desktop-up; ` +
+    `ds_class=cold; ds_stage precheck_miss; ` +
+    `mkdir -p /tmp/opengeni-desktop; ` +
+    `ds_stage outer_flock_wait; fw=$(date +%s%3N); ` +
+    // Command-mode flock is the supervisor: it retains the lock until the launcher
+    // exits, while --close prevents Xvfb/XFCE/x11vnc/websockify from inheriting the
+    // lock descriptor when the launcher intentionally detaches them.
+    `flock --close --conflict-exit-code 75 --wait 45 /tmp/opengeni-desktop/up.outer.lock ` +
+    `bash -c ${shellQuote(lockedLauncher)} _ "$ds_started" "$fw"; frc=$?; ` +
+    `if [ "$frc" -eq 75 ]; then ds_stage outer_flock_timeout; echo "OPENGENI_DESKTOP_LOCK_TIMEOUT"; exit 15; fi; ` +
+    `if [ "$frc" -ne 0 ]; then exit "$frc"; fi; ` +
     `fi`;
   const paintProbe =
-    `p=/tmp/opengeni-desktop/paint-probe.png; prev=0; ` +
+    `ds_stage paint_probe_started; p=/tmp/opengeni-desktop/paint-probe.png; prev=0; ` +
     `for i in $(seq 1 ${PAINT_PROBE_ATTEMPTS}); do ` +
     // Capture, then measure the PNG byte-size. `wc -c < "$p"` yields a bare integer; a
     // failed scrot leaves sz=0. A frame at/above PAINT_MIN_BYTES is a real painted desktop.
@@ -234,14 +299,18 @@ export function buildDisplayStackScript(options: EnsureDisplayStackOptions = {})
     // growing (the full desktop, panel + icons included, is up), not merely crossed the
     // floor mid-paint on a staged gVisor boot. ($sz/$prev/$d are bare shell — no ${}
     // braces — so JS leaves them for bash; ${PAINT_*} ARE JS constants and interpolate.)
-    `if [ "$sz" -ge ${PAINT_MIN_BYTES} ] && [ "$prev" -ge ${PAINT_MIN_BYTES} ]; then d=$((sz-prev)); [ "$d" -lt 0 ] && d=$((0-d)); [ "$d" -le ${PAINT_SETTLE_DELTA_BYTES} ] && break; fi; ` +
+    `if [ "$sz" -ge ${PAINT_MIN_BYTES} ] && [ "$prev" -ge ${PAINT_MIN_BYTES} ]; then d=$((sz-prev)); [ "$d" -lt 0 ] && d=$((0-d)); if [ "$d" -le ${PAINT_SETTLE_DELTA_BYTES} ]; then ds_stage paint_ready; break; fi; fi; ` +
     `prev=$sz; ` +
     // NOTE: NOT_PAINTING goes to STDOUT (not stderr): Modal is execCommand-only, so the
     // caller infers the outcome by string-matching the output — stdout is always captured.
-    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then echo "OPENGENI_DESKTOP_NOT_PAINTING scrot below ${PAINT_MIN_BYTES}B or unsettled after warmup (last=$sz)"; exit 14; fi; ` +
+    `if [ "$i" = "${PAINT_PROBE_ATTEMPTS}" ]; then ds_stage paint_failed; echo "OPENGENI_DESKTOP_NOT_PAINTING scrot below ${PAINT_MIN_BYTES}B or unsettled after warmup (last=$sz)"; exit 14; fi; ` +
     `sleep ${PAINT_PROBE_INTERVAL_S}; ` +
     `done`;
-  return `mkdir -p /tmp/opengeni-desktop; { ${bringUp} ; } && { ${paintProbe} ; }`;
+  const trace =
+    `ds_started=$(date +%s%3N); ds_class=unknown; ` +
+    `ds_stage() { ds_now=$(date +%s%3N); echo "OPENGENI_DISPLAY_STAGE stage=$1 elapsed_ms=$((ds_now-ds_started)) classification=$ds_class"; }; ` +
+    `ds_stage script_entry`;
+  return `${trace}; mkdir -p /tmp/opengeni-desktop; { ${bringUp} ; } && { ${paintProbe} ; }`;
 }
 
 function execResultOutput(result: ExecResultLike | string): string {
@@ -255,9 +324,135 @@ function execResultOutput(result: ExecResultLike | string): string {
 
 function execResultExitCode(result: ExecResultLike | string): number | null {
   if (typeof result === "string") {
-    return null; // execCommand returns a bare string — no exit code available.
+    const banner = parseExecResponseBanner(result);
+    if (banner.kind === "exited") return banner.exitCode;
+    // A malformed/truncated SDK response must not fall through to command-body
+    // marker inference, because its real terminal status is unknowable.
+    return banner.kind === "invalid" ? -1 : null;
   }
   return typeof result.exitCode === "number" ? result.exitCode : null;
+}
+
+function execResultSessionId(result: ExecResultLike | string): number | null {
+  if (typeof result === "string") {
+    const banner = parseExecResponseBanner(result);
+    return banner.kind === "running" ? banner.sessionId : null;
+  }
+  const value = result.sessionId ?? result.session_id;
+  return typeof value === "number" ? value : null;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+/** The provider yield is not a deadline. Bound the actual lock-owning process in
+ * the box, leaving time for TERM/KILL cleanup and the final exit result to reach
+ * the caller before the outer JavaScript deadline. */
+function boundedDisplayStackCommand(command: string, timeoutMs: number): string {
+  const graceMs = Math.min(
+    DISPLAY_STACK_TERMINATION_GRACE_MS,
+    Math.max(20, Math.floor(timeoutMs / 4)),
+  );
+  const commandTimeoutMs = Math.max(1, timeoutMs - graceMs);
+  const killAfterMs = Math.max(1, Math.floor(graceMs / 2));
+  const commandTimeoutSeconds = (commandTimeoutMs / 1_000).toFixed(3);
+  const killAfterSeconds = (killAfterMs / 1_000).toFixed(3);
+  return (
+    // Do not use timeout --foreground here. The display command contains flock
+    // supervisors and launcher children; default process-group mode is required
+    // so a deadline cannot leave a waiter alive to acquire the lock and launch
+    // after the caller has already failed.
+    `timeout --signal=TERM --kill-after=${killAfterSeconds}s ${commandTimeoutSeconds}s ` +
+    `bash -c ${shellQuote(command)}; rc=$?; ` +
+    `if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then ` +
+    `echo "OPENGENI_DISPLAY_TIMEOUT elapsed_ms=${commandTimeoutMs}"; fi; exit "$rc"`
+  );
+}
+
+class DisplayStackWallTimeoutError extends Error {}
+
+async function beforeDeadline<T>(promise: Promise<T>, deadline: number): Promise<T> {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw new DisplayStackWallTimeoutError();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new DisplayStackWallTimeoutError()), remainingMs);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function requestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function telemetryReporter(options: EnsureDisplayStackOptions, started: number) {
+  const id = requestId();
+  const context = options.telemetryContext;
+  const sink =
+    options.onTelemetry ??
+    (context
+      ? (event: DisplayStackTelemetryEvent) =>
+          console.info(`[display-stack] ${JSON.stringify(event)}`)
+      : undefined);
+  const emittedSandboxStages = new Set<string>();
+
+  const emit = (
+    stage: string,
+    status: DisplayStackTelemetryStatus,
+    fields: {
+      source?: "host" | "sandbox";
+      elapsedMs?: number;
+      classification?: DisplayStackClassification;
+      providerSessionId?: number;
+    } = {},
+  ) => {
+    if (!sink) return;
+    const event: DisplayStackTelemetryEvent = {
+      type: "display_stack.stage",
+      requestId: id,
+      stage,
+      status,
+      elapsedMs: fields.elapsedMs ?? Date.now() - started,
+      source: fields.source ?? "host",
+      classification: fields.classification ?? "unknown",
+      callerKind: context?.callerKind ?? "unknown",
+      ...(context?.sandboxId ? { sandboxId: context.sandboxId } : {}),
+      ...(context?.leaseEpoch !== undefined ? { leaseEpoch: context.leaseEpoch } : {}),
+      ...(fields.providerSessionId !== undefined
+        ? { providerSessionId: fields.providerSessionId }
+        : {}),
+    };
+    try {
+      void Promise.resolve(sink(event)).catch(() => undefined);
+    } catch {
+      // Telemetry must never affect display readiness.
+    }
+  };
+
+  const emitSandboxStages = (output: string) => {
+    for (const match of output.matchAll(
+      /OPENGENI_(?:DISPLAY|DESKTOP)_STAGE stage=([a-z0-9_]+) elapsed_ms=(\d+)(?: classification=(cold|already_ready|contention|unknown))?/gu,
+    )) {
+      const [line, stage, elapsed, classification] = match;
+      if (!stage || !elapsed || emittedSandboxStages.has(line)) continue;
+      emittedSandboxStages.add(line);
+      emit(stage, "completed", {
+        source: "sandbox",
+        elapsedMs: Number(elapsed),
+        classification: (classification as DisplayStackClassification | undefined) ?? "unknown",
+      });
+    }
+  };
+
+  return { emit, emitSandboxStages };
 }
 
 // Parse the exit code the up-script signals via its trailing marker. When we ran
@@ -265,6 +460,12 @@ function execResultExitCode(result: ExecResultLike | string): number | null {
 // bare string), we infer success from the OPENGENI_DESKTOP_UP marker and infer
 // the failing stage from the stage-failure message the script prints to stderr.
 function inferExitFromOutput(output: string): number {
+  if (/OPENGENI_DISPLAY_TIMEOUT/.test(output)) {
+    return 124;
+  }
+  if (/OPENGENI_DESKTOP_LOCK_TIMEOUT/.test(output)) {
+    return 15;
+  }
   // Check the PAINTABLE-FRAME failure FIRST: on that path the up-script already
   // printed OPENGENI_DESKTOP_UP (bring-up succeeded) and THEN the paint gate failed,
   // so both markers are present — the NOT_PAINTING one is the authoritative outcome.
@@ -314,22 +515,75 @@ export async function ensureDisplayStack(
   const geometry = options.geometry ?? DEFAULT_DESKTOP_GEOMETRY;
   const port = options.port ?? DESKTOP_STREAM_PORT;
   const timeoutMs = options.timeoutMs ?? DISPLAY_STACK_TIMEOUT_MS;
-  const cmd = buildDisplayStackScript({ geometry, port });
-
-  const result =
-    typeof s.exec === "function"
-      ? await s.exec({ cmd, yieldTimeMs: timeoutMs, maxOutputTokens: 20_000 })
-      : await s.execCommand!({ cmd, yieldTimeMs: timeoutMs, maxOutputTokens: 20_000 });
-
-  const output = execResultOutput(result);
-  const exitCode = execResultExitCode(result) ?? inferExitFromOutput(output);
-
-  if (exitCode !== 0) {
-    throw new DisplayStackError(exitCode, output);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new RangeError("ensureDisplayStack timeoutMs must be a positive finite number");
   }
+  const started = Date.now();
+  const deadline = started + timeoutMs;
+  const telemetry = telemetryReporter(options, started);
+  const cmd = boundedDisplayStackCommand(buildDisplayStackScript({ geometry, port }), timeoutMs);
+  const outputParts: string[] = [];
+  telemetry.emit("request_entry", "started");
+  telemetry.emit("exec_issued", "started");
 
-  const marker = (output.match(/OPENGENI_DESKTOP_UP[^\n]*/) ?? [""])[0];
-  return { port, geometry, marker };
+  try {
+    const initialYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_YIELD_MS, timeoutMs - 1));
+    const initialExec: Promise<ExecResultLike | string> =
+      typeof s.exec === "function"
+        ? s.exec({ cmd, yieldTimeMs: initialYieldMs, maxOutputTokens: 20_000 })
+        : s.execCommand!({ cmd, yieldTimeMs: initialYieldMs, maxOutputTokens: 20_000 });
+    let result: ExecResultLike | string = await beforeDeadline(initialExec, deadline);
+    let chunk = execResultOutput(result);
+    outputParts.push(chunk);
+    telemetry.emitSandboxStages(chunk);
+    telemetry.emit("provider_first_result", "completed");
+
+    let providerSessionId = execResultSessionId(result);
+    while (providerSessionId !== null) {
+      telemetry.emit("provider_yield", "waiting", { providerSessionId });
+      if (typeof s.writeStdin !== "function") {
+        throw new DisplayStackError(
+          -1,
+          `${outputParts.join("\n")}\nprovider yielded process ${providerSessionId} but exposes no writeStdin poll surface`,
+        );
+      }
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 1) throw new DisplayStackWallTimeoutError();
+      const pollYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_POLL_MS, remainingMs - 1));
+      result = await beforeDeadline(
+        s.writeStdin({
+          sessionId: providerSessionId,
+          chars: "",
+          yieldTimeMs: pollYieldMs,
+          maxOutputTokens: 20_000,
+        }),
+        deadline,
+      );
+      chunk = execResultOutput(result);
+      outputParts.push(chunk);
+      telemetry.emitSandboxStages(chunk);
+      providerSessionId = execResultSessionId(result);
+    }
+
+    const output = outputParts.join("\n");
+    const exitCode = execResultExitCode(result) ?? inferExitFromOutput(output);
+    telemetry.emit("process_complete", exitCode === 0 ? "completed" : "failed");
+    if (exitCode !== 0) {
+      throw new DisplayStackError(exitCode, output);
+    }
+
+    const marker = (output.match(/OPENGENI_DESKTOP_UP[^\n]*/) ?? [""])[0];
+    telemetry.emit("readiness_complete", "completed");
+    return { port, geometry, marker };
+  } catch (error) {
+    if (error instanceof DisplayStackWallTimeoutError) {
+      const output = `${outputParts.join("\n")}\nOPENGENI_DISPLAY_TIMEOUT wall_ms=${timeoutMs}`;
+      telemetry.emit("wall_deadline", "failed");
+      throw new DisplayStackError(124, output);
+    }
+    telemetry.emit("request_failed", "failed");
+    throw error;
+  }
 }
 
 /** Tear the stack down (down-script). Best-effort; never throws on a missing
