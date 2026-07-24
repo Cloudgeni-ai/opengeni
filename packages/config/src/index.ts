@@ -305,6 +305,10 @@ const SettingsSchema = z.object({
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  // Experimental full-duplex session voice. This is an independent kill
+  // switch and remains fail-closed while the Codex subscription audio protocol
+  // is unverified; enabling it never permits a Platform/Azure fallback.
+  codexRealtimeVoiceEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_REALTIME_VOICE_ENABLED
   codexProductSku: z.string().optional(), // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
   // Progressive connector disclosure (Codex-CLI-style tool_search): on a codex
   // turn, flag the ~217 codex_apps connector tools `defer_loading:true` (dropping
@@ -1107,6 +1111,7 @@ export function getSettings(): Settings {
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    codexRealtimeVoiceEnabled: optional("OPENGENI_CODEX_REALTIME_VOICE_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),

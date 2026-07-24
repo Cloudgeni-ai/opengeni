@@ -1,3 +1,4 @@
+import type { WorkspaceRealtimeVoicePolicy } from "./realtime-voice";
 import type { WorkspaceTranscriptionPolicy } from "./transcription";
 
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
@@ -1694,12 +1695,14 @@ export type Workspace = {
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
+  realtimeVoice?: WorkspaceRealtimeVoicePolicy | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
+  realtimeVoice?: WorkspaceRealtimeVoicePolicy | undefined;
   [key: string]: unknown;
 };
 

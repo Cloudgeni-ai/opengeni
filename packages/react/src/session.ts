@@ -29,6 +29,13 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useRealtimeVoice } from "./hooks/use-realtime-voice";
+export type {
+  RealtimeVoiceController,
+  RealtimeVoiceState,
+  RealtimeVoiceStatus,
+  UseRealtimeVoiceOptions,
+} from "./hooks/use-realtime-voice";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,

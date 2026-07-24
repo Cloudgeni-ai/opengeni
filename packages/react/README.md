@@ -286,6 +286,20 @@ per-tool renderers, and the rendering primitives (`ActivityDisclosure`,
 `ScreenshotFigure`, `TermBlock`, `LightboxProvider`, …) compose custom rows with
 the same semantics.
 
+## Session realtime voice
+
+`useRealtimeVoice` and `RealtimeVoiceOrb` bind a provider-neutral full-duplex
+media session to one existing durable OpenGeni session. Accepted finals use the
+ordinary composer Send callback, barge-in stops playback without cancelling
+accepted work, and only completed durable assistant messages are spoken.
+`createBrowserRealtimeVoiceAdapter` requests microphone access only after the
+API returns an available capability and short-lived OpenGeni WSS grant.
+
+Production currently fails closed because no authorized Codex-subscription
+audio/realtime protocol or OpenGeni gateway has been proven. See the canonical
+[session realtime voice guide](../../docs/realtime-voice.md) for authorization,
+security, lifecycle, provider evidence, and activation requirements.
+
 ## Sandbox surfacing
 
 An opt-in workbench that surfaces a session's live sandbox — files, terminal,
@@ -370,4 +384,6 @@ what the surfaces you mount need:
 `bun run demo` (from this package) serves a harness that drives the real hooks
 and components against a scripted mock client — a manager ops-channel narrative
 with streaming, tool calls, and a worker spawn, plus fleet and scheduled-task
-views and a dark/light toggle. `bun run demo:build` is part of the repo gate.
+views and a dark/light toggle. Dedicated transcription and realtime-voice pages
+provide deterministic, explicitly non-live browser fixtures. `bun run demo:build`
+is part of the repo gate.

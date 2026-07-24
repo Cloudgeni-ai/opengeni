@@ -4,6 +4,12 @@ Voice transcription is a distinct, provider-agnostic capability for turning host
 into editable composer text. It is not a turn-model feature, does not authorize a coding model, and
 does not send a message by itself.
 
+It is also distinct from [session realtime voice](realtime-voice.md). Realtime voice maintains an
+active conversation with one existing session and submits accepted utterances through ordinary
+Send; composer transcription only edits the draft and waits for the user to send it. The two
+capabilities have separate workspace policies and acceptance IDs, so authorization never leaks
+between them.
+
 ## Product contract
 
 - The ordinary composer presents **one microphone control** and **one editable draft**. Provider,

@@ -8,6 +8,7 @@ import {
   streamWorkspaceControlEvents,
   type WorkspaceControlStreamTransport,
 } from "./workspace-control-stream";
+import type { CreateSessionVoiceGrantResponse, SessionVoiceCapability } from "./realtime-voice";
 import type {
   AccessContext,
   AddWorkspaceMemberRequest,
@@ -665,6 +666,29 @@ export class OpenGeniClient {
       ...(clientEventId !== undefined ? { clientEventId } : {}),
       payload,
     });
+  }
+
+  /** Read the fail-closed realtime voice capability for this exact session. */
+  async getSessionVoiceCapability(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionVoiceCapability> {
+    return await this.requestJson<SessionVoiceCapability>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/voice/capability`,
+    );
+  }
+
+  /** Request a short-lived, session-bound OpenGeni gateway grant. */
+  async createSessionVoiceGrant(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<CreateSessionVoiceGrantResponse> {
+    return await this.requestJson<CreateSessionVoiceGrantResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/voice/grants`,
+      {},
+    );
   }
 
   async pauseSession(

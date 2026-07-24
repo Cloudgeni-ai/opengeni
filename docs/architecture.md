@@ -206,6 +206,27 @@ The web bundle ships no production adapter and therefore fails closed.
 > `packages/contracts/src/index.ts`, `packages/sdk/src/transcription.ts`,
 > `packages/react/src/hooks/use-transcription.ts`.
 
+### 3.12 Realtime voice is ephemeral media over one normal durable session
+
+The session page may mount one compact full-duplex voice orb bound to that exact existing session.
+It does not create a voice-specific thread, runtime, history, or authorization model. Accepted final
+utterances use ordinary composer Send, the target session retains its normal tools/memory/children/
+approvals/queue/control semantics, and only completed durable assistant messages are eligible for
+speech. Partial transcripts, provider audio, playback, and reconnect state remain ephemeral.
+Barge-in stops playback only and never cancels accepted durable work. The text composer remains
+available in every state.
+
+The public browser receives only a short-lived target-bound OpenGeni WSS grant; Codex subscription
+credentials remain server-side. Production fails closed behind both protocol-evidence and gateway-
+availability gates because the existing subscription integration proves HTTP Responses, catalog,
+usage, and connector MCP paths but no authorized audio WebSocket/WebRTC protocol. There is no
+silent public Platform API or Azure fallback. Realtime voice has a separate workspace acceptance
+from composer transcription.
+
+> Canonical: [`realtime-voice.md`](realtime-voice.md),
+> `packages/codex/src/realtime.ts`, `apps/api/src/routes/sessions.ts`,
+> `packages/react/src/hooks/use-realtime-voice.ts`.
+
 ---
 
 ## 4. System architecture

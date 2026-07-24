@@ -100,6 +100,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     }),
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
+    codexRealtimeVoiceEnabled: false,
     codexToolSearchEnabled: false,
     codexCredentialLeasingEnabled: false,
     codexProductSku: undefined,

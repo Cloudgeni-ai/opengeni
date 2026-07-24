@@ -135,6 +135,23 @@ await client.resumeSession(workspaceId, sessionId, {
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
+## Session realtime voice
+
+The experimental realtime-voice boundary is session-bound and provider-neutral:
+
+```ts
+const capability = await client.getSessionVoiceCapability(workspaceId, sessionId);
+if (capability.status === "available") {
+  const { grant } = await client.createSessionVoiceGrant(workspaceId, sessionId);
+  // Give only the opaque, target-bound OpenGeni grant to a RealtimeVoiceAdapter.
+}
+```
+
+The SDK types contain no provider credential fields. Production currently
+returns a typed unavailable capability because the Codex-subscription audio
+protocol and OpenGeni server gateway are unverified/unimplemented; there is no
+public Platform API or Azure fallback. See [session realtime voice](../../docs/realtime-voice.md).
+
 ## Goals
 
 ```ts

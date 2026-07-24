@@ -59,6 +59,20 @@ export {
   resolveWorkspaceTranscriptionPolicy,
 } from "./transcription";
 export type {
+  CreateSessionVoiceGrantResponse,
+  RealtimeVoiceAdapter,
+  RealtimeVoiceAdapterEvent,
+  RealtimeVoiceAdapterSession,
+  RealtimeVoiceCapabilityStatus,
+  RealtimeVoiceMode,
+  RealtimeVoiceProvider,
+  RealtimeVoiceTarget,
+  RealtimeVoiceUnavailableReason,
+  SessionVoiceCapability,
+  SessionVoiceGrant,
+  WorkspaceRealtimeVoicePolicy,
+} from "./realtime-voice";
+export type {
   TranscriptionAdapter,
   TranscriptionAdapterDescriptor,
   TranscriptionAdapterStartContext,

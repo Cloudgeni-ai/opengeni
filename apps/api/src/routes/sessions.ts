@@ -23,6 +23,9 @@ import {
   PtyResizeRequest,
   PtyWriteRequest,
   SessionControlRequest,
+  SessionVoiceCapability,
+  CreateSessionVoiceGrantResponse,
+  WorkspaceSettingsSchema,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
   SessionEventReadDirection,
@@ -49,6 +52,7 @@ import {
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
 } from "@opengeni/contracts";
+import { CODEX_REALTIME_VOICE_LIMITS, codexRealtimeAvailability } from "@opengeni/codex";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
@@ -91,6 +95,7 @@ import {
   SessionContextBusyError,
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
+  requireWorkspace,
   workspaceCaptureAtRevision,
   type AppendEventInput,
 } from "@opengeni/db";
@@ -273,6 +278,35 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/voice/capability", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const workspace = await requireWorkspace(db, workspaceId);
+    return c.json(
+      buildSessionVoiceCapability(settings, workspace.settings, workspaceId, sessionId),
+    );
+  });
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/voice/grants", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const workspace = await requireWorkspace(db, workspaceId);
+    const capability = buildSessionVoiceCapability(
+      settings,
+      workspace.settings,
+      workspaceId,
+      sessionId,
+    );
+    // No Codex-subscription audio endpoint/protocol is mechanically verified.
+    // A POST therefore returns a typed unavailable result and never resolves a
+    // credential or silently falls back to Azure/public Platform billing.
+    return c.json(CreateSessionVoiceGrantResponse.parse({ capability, grant: null }));
   });
 
   // Personal pin only: this is organization state for the authenticated member,
@@ -2055,6 +2089,8 @@ export function sessionAuthorizationOperationForHttp(
     return "session.mcp.approval_policy.write";
   }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
+  if (suffix === "/voice/capability" && verb === "GET") return "session.read";
+  if (suffix === "/voice/grants" && verb === "POST") return "session.append";
   if (suffix === "/codex-account" && verb === "POST") {
     return "session.codex_account.write";
   }
@@ -2114,6 +2150,46 @@ export function sessionAuthorizationOperationForHttp(
     return "session.terminal.control";
   }
   return null;
+}
+
+export function buildSessionVoiceCapability(
+  settings: { codexRealtimeVoiceEnabled: boolean; codexSubscriptionEnabled: boolean },
+  rawWorkspaceSettings: unknown,
+  workspaceId: string,
+  sessionId: string,
+) {
+  const parsedSettings = WorkspaceSettingsSchema.safeParse(rawWorkspaceSettings ?? {});
+  const realtimeVoice = parsedSettings.success ? parsedSettings.data.realtimeVoice : undefined;
+  const workspacePolicyAccepted = Boolean(
+    realtimeVoice?.enabled &&
+    realtimeVoice.acceptanceId &&
+    realtimeVoice.provider === "codex-subscription" &&
+    realtimeVoice.credentialMode === "managed",
+  );
+  const availability = codexRealtimeAvailability({
+    featureEnabled: settings.codexRealtimeVoiceEnabled,
+    subscriptionEnabled: settings.codexSubscriptionEnabled,
+    workspacePolicyAccepted,
+  });
+  return SessionVoiceCapability.parse({
+    target: { workspaceId, sessionId },
+    provider: "codex-subscription",
+    mode: "full-duplex",
+    experimental: true,
+    status: availability.status,
+    reason: availability.reason,
+    retryAt: null,
+    checks: {
+      feature: availability.feature,
+      subscription: availability.subscription,
+      workspacePolicy: availability.workspacePolicy,
+      protocol: availability.protocol,
+      gateway: availability.gateway,
+      credential: "not_evaluated",
+      capacity: "not_evaluated",
+    },
+    limits: CODEX_REALTIME_VOICE_LIMITS,
+  });
 }
 
 function sessionAuthorizationHttpError(error: unknown): HTTPException {

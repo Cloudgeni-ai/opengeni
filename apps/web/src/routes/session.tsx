@@ -23,7 +23,7 @@ import {
 } from "@opengeni/react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
@@ -40,7 +40,6 @@ import {
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
-import { SessionInspector } from "@/components/session/inspector";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -57,6 +56,11 @@ import {
 import { buildTools } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const RealtimeVoiceSessionControl = lazy(
+  () => import("@/components/session/realtime-voice-session-control"),
+);
+const SessionInspector = lazy(() => import("@/components/session/inspector"));
 
 export function SessionRoute({
   workspaceId,
@@ -457,11 +461,13 @@ function SessionDock(props: {
     id: "debug",
     label: "Debug",
     content: (
-      <SessionInspector
-        session={props.session}
-        events={props.events}
-        connectionState={props.connectionState}
-      />
+      <Suspense fallback={<LoadingPanel label="Loading debug inspector…" />}>
+        <SessionInspector
+          session={props.session}
+          events={props.events}
+          connectionState={props.connectionState}
+        />
+      </Suspense>
     ),
   };
 
@@ -592,7 +598,6 @@ function SessionChatPane(props: {
     onDraftApplied: applyComposerSettings,
     onSent: () => attachments.clear(),
   });
-
   // Slash-command palette context: the operator controls (/goal, /clear,
   // /compact, /help) act on THIS session. Permissions come from the workspace
   // grant so the palette hides commands the operator can't run.
@@ -774,9 +779,24 @@ function SessionChatPane(props: {
       {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
       <GoalSurface session={props.session} goal={props.goal} />
       <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
+      {!terminal ? (
+        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-1 sm:px-6">
+          <Suspense fallback={null}>
+            <RealtimeVoiceSessionControl
+              client={context.client}
+              workspaceId={props.session.workspaceId}
+              sessionId={props.session.id}
+              sessionStatus={props.session.status}
+              sessionTitle={props.session.title}
+              timeline={props.timeline}
+              onFinalTranscript={composer.send}
+            />
+          </Suspense>
+        </div>
+      ) : null}
 
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
-        <div className="mx-auto w-full max-w-3xl">
+        <div className="mx-auto w-full max-w-3xl" data-session-text-composer>
           <ConsoleComposer
             workspaceId={props.session.workspaceId}
             composer={composer}

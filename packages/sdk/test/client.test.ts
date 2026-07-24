@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiContractMismatchError, OpenGeniApiError } from "../src/errors";
+import type { SessionVoiceCapability } from "../src/realtime-voice";
 import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
@@ -150,6 +151,47 @@ describe("OpenGeniClient", () => {
     expect(requests[1]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`,
     );
+  });
+
+  test("reads capability and requests a session-bound realtime voice grant", async () => {
+    const capability: SessionVoiceCapability = {
+      target: { workspaceId: WORKSPACE_ID, sessionId: SESSION_ID },
+      provider: "codex-subscription",
+      mode: "full-duplex",
+      experimental: true,
+      status: "unavailable",
+      reason: "codex_realtime_protocol_unverified",
+      retryAt: null,
+      checks: {
+        feature: "enabled",
+        subscription: "enabled",
+        workspacePolicy: "accepted",
+        protocol: "unverified",
+        gateway: "unavailable",
+        credential: "not_evaluated",
+        capacity: "not_evaluated",
+      },
+      limits: {
+        grantTtlSeconds: 60,
+        maxSessionSeconds: 900,
+        maxInputAudioBytes: 33_554_432,
+      },
+    };
+    const { client, requests } = makeClient((request) =>
+      request.method === "GET"
+        ? jsonResponse(capability)
+        : jsonResponse({ capability, grant: null }),
+    );
+    expect(await client.getSessionVoiceCapability(WORKSPACE_ID, SESSION_ID)).toEqual(capability);
+    expect(await client.createSessionVoiceGrant(WORKSPACE_ID, SESSION_ID)).toEqual({
+      capability,
+      grant: null,
+    });
+    const base = `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/voice`;
+    expect(requests.map(({ method, url, body }) => ({ method, url, body }))).toEqual([
+      { method: "GET", url: `${base}/capability`, body: null },
+      { method: "POST", url: `${base}/grants`, body: "{}" },
+    ]);
   });
 
   test("updates an existing session MCP approval policy through the dedicated route", async () => {

@@ -44,6 +44,14 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useRealtimeVoice } from "./hooks/use-realtime-voice";
+export type {
+  RealtimeVoiceController,
+  RealtimeVoiceState,
+  RealtimeVoiceStatus,
+  UseRealtimeVoiceOptions,
+} from "./hooks/use-realtime-voice";
+export { createBrowserRealtimeVoiceAdapter } from "./realtime-voice/browser-adapter";
 export {
   INITIAL_TRANSCRIPTION_CONTROL_STATE,
   appendFinalTranscript,
@@ -344,6 +352,8 @@ export type { CommandPaletteProps } from "./components/command-palette";
 export { ChatComposer } from "./components/chat-composer";
 export type { ChatComposerProps } from "./components/chat-composer";
 export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
+export { RealtimeVoiceOrb } from "./components/realtime-voice-orb";
+export type { RealtimeVoiceOrbProps } from "./components/realtime-voice-orb";
 export type {
   ComposerTranscriptionControlProps,
   ComposerTranscriptionMessages,

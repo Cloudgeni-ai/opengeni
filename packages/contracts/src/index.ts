@@ -903,13 +903,166 @@ export const WorkspaceTranscriptionPolicy = z
   });
 export type WorkspaceTranscriptionPolicy = z.infer<typeof WorkspaceTranscriptionPolicy>;
 
+/**
+ * First-class realtime voice is session-bound: media is ephemeral, while
+ * accepted utterances and assistant results use the ordinary session APIs.
+ * These public shapes intentionally contain no provider credential material.
+ */
+export const RealtimeVoiceProvider = z.literal("codex-subscription");
+export type RealtimeVoiceProvider = z.infer<typeof RealtimeVoiceProvider>;
+
+export const RealtimeVoiceMode = z.literal("full-duplex");
+export type RealtimeVoiceMode = z.infer<typeof RealtimeVoiceMode>;
+
+export const RealtimeVoiceCapabilityStatus = z.enum(["available", "disabled", "unavailable"]);
+export type RealtimeVoiceCapabilityStatus = z.infer<typeof RealtimeVoiceCapabilityStatus>;
+
+export const RealtimeVoiceUnavailableReason = z.enum([
+  "feature_disabled",
+  "codex_subscription_disabled",
+  "codex_realtime_protocol_unverified",
+  "realtime_voice_policy_unaccepted",
+  "credential_unavailable",
+  "capacity_exhausted",
+  "policy_blocked",
+  "gateway_unavailable",
+]);
+export type RealtimeVoiceUnavailableReason = z.infer<typeof RealtimeVoiceUnavailableReason>;
+
+export const RealtimeVoiceTarget = z
+  .object({
+    workspaceId: z.string().uuid(),
+    sessionId: z.string().uuid(),
+  })
+  .strict();
+export type RealtimeVoiceTarget = z.infer<typeof RealtimeVoiceTarget>;
+
+export const SessionVoiceCapability = z
+  .object({
+    target: RealtimeVoiceTarget,
+    provider: RealtimeVoiceProvider,
+    mode: RealtimeVoiceMode,
+    experimental: z.literal(true),
+    status: RealtimeVoiceCapabilityStatus,
+    reason: RealtimeVoiceUnavailableReason.nullable(),
+    retryAt: z.string().datetime({ offset: true }).nullable(),
+    checks: z
+      .object({
+        feature: z.enum(["enabled", "disabled"]),
+        subscription: z.enum(["enabled", "disabled"]),
+        workspacePolicy: z.enum(["accepted", "unaccepted"]),
+        protocol: z.enum(["verified", "unverified"]),
+        gateway: z.enum(["available", "unavailable"]),
+        credential: z.enum(["available", "unavailable", "not_evaluated"]),
+        capacity: z.enum(["available", "exhausted", "not_evaluated"]),
+      })
+      .strict(),
+    limits: z
+      .object({
+        grantTtlSeconds: z.number().int().positive().max(300),
+        maxSessionSeconds: z.number().int().positive().max(3600),
+        maxInputAudioBytes: z.number().int().positive().max(1_000_000_000),
+      })
+      .strict(),
+  })
+  .strict()
+  .superRefine((capability, context) => {
+    if (capability.status === "available" && capability.reason !== null) {
+      context.addIssue({
+        code: "custom",
+        path: ["reason"],
+        message: "available voice capability cannot carry an unavailable reason",
+      });
+    }
+    if (capability.status !== "available" && capability.reason === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["reason"],
+        message: "unavailable voice capability requires a controlled reason",
+      });
+    }
+  });
+export type SessionVoiceCapability = z.infer<typeof SessionVoiceCapability>;
+
+export const SessionVoiceGrant = z
+  .object({
+    id: z.string().uuid(),
+    target: RealtimeVoiceTarget,
+    provider: RealtimeVoiceProvider,
+    mode: RealtimeVoiceMode,
+    experimental: z.literal(true),
+    protocol: z.literal("opengeni.realtime.v1"),
+    gatewayUrl: z
+      .string()
+      .url()
+      .refine((value) => value.startsWith("wss://"), {
+        message: "voice gateway URL must use wss",
+      }),
+    expiresAt: z.string().datetime({ offset: true }),
+  })
+  .strict();
+export type SessionVoiceGrant = z.infer<typeof SessionVoiceGrant>;
+
+export const CreateSessionVoiceGrantResponse = z
+  .object({
+    capability: SessionVoiceCapability,
+    grant: SessionVoiceGrant.nullable(),
+  })
+  .strict()
+  .superRefine((response, context) => {
+    if ((response.capability.status === "available") !== (response.grant !== null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["grant"],
+        message: "voice grants are present exactly when the capability is available",
+      });
+    }
+    if (
+      response.grant &&
+      (response.grant.target.workspaceId !== response.capability.target.workspaceId ||
+        response.grant.target.sessionId !== response.capability.target.sessionId)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["grant", "target"],
+        message: "voice grant target must match its capability target",
+      });
+    }
+  });
+export type CreateSessionVoiceGrantResponse = z.infer<typeof CreateSessionVoiceGrantResponse>;
+
+/**
+ * Workspace consent for first-class realtime voice. This is deliberately
+ * separate from composer transcription: enabling speech-to-text never grants
+ * a persistent full-duplex media session, and vice versa.
+ */
+export const WorkspaceRealtimeVoicePolicy = z
+  .object({
+    enabled: z.boolean(),
+    acceptanceId: z.string().uuid().nullable(),
+    provider: RealtimeVoiceProvider,
+    credentialMode: z.literal("managed"),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    if (policy.enabled && policy.acceptanceId === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["acceptanceId"],
+        message: "enabled realtime voice requires explicit workspace acceptance",
+      });
+    }
+  });
+export type WorkspaceRealtimeVoicePolicy = z.infer<typeof WorkspaceRealtimeVoicePolicy>;
+
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
-// (future) keys rather than stripping them. memoryEnabled and transcription are
-// both default-off capabilities.
+// (future) keys rather than stripping them. memoryEnabled, transcription, and
+// realtime voice are all default-off capabilities.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
+    realtimeVoice: WorkspaceRealtimeVoicePolicy.optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -921,12 +1074,13 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
 }
 
 // PATCH body for workspace settings: a partial top-level patch that merges into
-// the stored bag. Nested transcription policy updates are therefore full
+// the stored bag. Nested capability policy updates are therefore full
 // replacements; passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
+    realtimeVoice: WorkspaceRealtimeVoicePolicy.optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;

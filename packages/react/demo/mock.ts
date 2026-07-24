@@ -15,6 +15,7 @@ import type {
   CapabilityPack,
   ClientConfig,
   ComposerDraft,
+  CreateSessionVoiceGrantResponse,
   CreateWorkspaceEnvironmentRequest,
   CreateVariableSetRequest,
   CreateRigRequest,
@@ -58,6 +59,7 @@ import type {
   SessionControlResponse,
   SessionStatus,
   SessionTurn,
+  SessionVoiceCapability,
   SteerMessageResult,
   StreamSessionEventsOptions,
   SubmitHumanInputResponseRequest,
@@ -92,6 +94,32 @@ let nextDemoUuid = 0;
 function demoUuid(): string {
   nextDemoUuid += 1;
   return `00000000-0000-4000-8000-${String(nextDemoUuid).padStart(12, "0")}`;
+}
+
+function demoVoiceCapability(workspaceId: string, sessionId: string): SessionVoiceCapability {
+  return {
+    target: { workspaceId, sessionId },
+    provider: "codex-subscription",
+    mode: "full-duplex",
+    experimental: true,
+    status: "disabled",
+    reason: "feature_disabled",
+    retryAt: null,
+    checks: {
+      feature: "disabled",
+      subscription: "disabled",
+      workspacePolicy: "unaccepted",
+      protocol: "unverified",
+      gateway: "unavailable",
+      credential: "not_evaluated",
+      capacity: "not_evaluated",
+    },
+    limits: {
+      grantTtlSeconds: 60,
+      maxSessionSeconds: 900,
+      maxInputAudioBytes: 32 * 1024 * 1024,
+    },
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -184,6 +212,20 @@ export class MockOpenGeniClient implements SessionClientLike {
       this.bus(sessionId).status,
       "Ops channel — manager session",
     );
+  }
+
+  async getSessionVoiceCapability(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<SessionVoiceCapability> {
+    return demoVoiceCapability(workspaceId, sessionId);
+  }
+
+  async createSessionVoiceGrant(
+    workspaceId: string,
+    sessionId: string,
+  ): Promise<CreateSessionVoiceGrantResponse> {
+    return { capability: demoVoiceCapability(workspaceId, sessionId), grant: null };
   }
 
   async getSessionLineage(

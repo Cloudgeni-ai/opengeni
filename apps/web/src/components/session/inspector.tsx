@@ -18,7 +18,7 @@ import { withOccurrenceKeys } from "@/lib/react-key";
 import { repositoryDisplayName } from "@/lib/session-tools";
 import type { Session, SessionEvent } from "@/types";
 
-export function SessionInspector(props: {
+export default function SessionInspector(props: {
   session: Session;
   events: SessionEvent[];
   connectionState: SessionEventsConnectionState;

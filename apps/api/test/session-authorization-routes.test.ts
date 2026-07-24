@@ -189,10 +189,10 @@ describe("embedding host session authorization routes", () => {
         },
       ],
     });
-    const decisions: Array<{ operation: string; surface: string }> = [];
+    const decisions: Array<{ sessionId: string; operation: string; surface: string }> = [];
     const app = appWith({
-      authorizeSession: async ({ operation, surface }) => {
-        decisions.push({ operation, surface });
+      authorizeSession: async ({ operation, target, surface }) => {
+        decisions.push({ sessionId: target.sessionId, operation, surface });
         return { allowed: true, relatedSessionAccess: "root" };
       },
       resolveListScope: async () => ({ kind: "all" }),
@@ -218,10 +218,12 @@ describe("embedding host session authorization routes", () => {
       effectiveFrom: "next_attempt",
     });
     expect(decisions).toContainEqual({
+      sessionId: value.child.id,
       operation: "session.mcp.approval_policy.write",
       surface: "http",
     });
     expect(decisions).toContainEqual({
+      sessionId: value.child.id,
       operation: "session.mcp.approval_policy.write",
       surface: "core",
     });
@@ -725,6 +727,43 @@ describe("embedding host session authorization routes", () => {
     const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}`;
     expect((await app.request(base, { headers })).status).toBe(503);
     expect((await app.request(`${base}/future-surface`, { headers })).status).toBe(503);
+  });
+
+  test("authorizes realtime voice through the target session's normal read and append operations", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const decisions: Array<{ operation: string; sessionId: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, sessionId, surface }) => {
+        decisions.push({ operation, sessionId, surface });
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.root.id}/voice`;
+    const headers = { authorization: value.authorization };
+
+    const capability = await app.request(`${base}/capability`, { headers });
+    expect(capability.status).toBe(200);
+    expect(await capability.json()).toMatchObject({
+      target: { workspaceId: value.grant.workspaceId, sessionId: value.root.id },
+      status: "disabled",
+      reason: "feature_disabled",
+    });
+
+    const grant = await app.request(`${base}/grants`, { method: "POST", headers });
+    expect(grant.status).toBe(200);
+    expect(await grant.json()).toMatchObject({
+      capability: {
+        target: { workspaceId: value.grant.workspaceId, sessionId: value.root.id },
+        status: "disabled",
+      },
+      grant: null,
+    });
+    expect(decisions).toEqual([
+      { operation: "session.read", sessionId: value.root.id, surface: "http" },
+      { operation: "session.append", sessionId: value.root.id, surface: "http" },
+    ]);
   });
 
   test("preserves standalone workspace behavior when no port is bound", async () => {
