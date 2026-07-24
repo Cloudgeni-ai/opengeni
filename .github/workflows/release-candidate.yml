@@ -371,58 +371,37 @@ jobs:
       - name: Set up Helm for the immutable chart candidate
         uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
 
-      - name: Package and publish the immutable Helm chart candidate
+      - name: Package the deterministic immutable Helm chart candidate
         id: chart
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USERNAME: ${{ github.actor }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          chart_ref="ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}"
-          chart_oci="oci://ghcr.io/${org}/charts/opengeni"
-          echo "$GHCR_TOKEN" | helm registry login ghcr.io --username "$GHCR_USERNAME" --password-stdin
-          mkdir -p .release/charts .release/chart-existing
-          helm package deploy/helm/opengeni \
-            --destination .release/charts \
+          mkdir -p .release/charts .release/chart-proof
+          chart_path=".release/charts/opengeni-${RELEASE_VERSION}.tgz"
+          bun scripts/package-release-chart.ts \
+            --chart deploy/helm/opengeni \
+            --output "$chart_path" \
             --version "$RELEASE_VERSION" \
             --app-version "$RELEASE_VERSION"
-          chart_path=".release/charts/opengeni-${RELEASE_VERSION}.tgz"
           chart_bytes_sha256="$(sha256sum "$chart_path" | awk '{print $1}')"
-          existing_manifest="$(docker buildx imagetools inspect "$chart_ref" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
-          if [[ "$existing_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            helm pull "$chart_oci" --version "$RELEASE_VERSION" --destination .release/chart-existing
-            cmp "$chart_path" ".release/chart-existing/opengeni-${RELEASE_VERSION}.tgz" || {
-              echo "existing OCI chart bytes differ from this source candidate" >&2
-              exit 1
-            }
-            chart_manifest="$existing_manifest"
-          else
-            helm push "$chart_path" "$chart_oci"
-            chart_manifest="$(docker buildx imagetools inspect "$chart_ref" --format '{{.Manifest.Digest}}')"
-            [[ "$chart_manifest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-              echo "OCI chart manifest digest was not resolved" >&2
-              exit 1
-            }
-            helm pull "$chart_oci" --version "$RELEASE_VERSION" --destination .release/chart-existing
-            cmp "$chart_path" ".release/chart-existing/opengeni-${RELEASE_VERSION}.tgz" || {
-              echo "OCI chart bytes changed immediately after publication" >&2
-              exit 1
-            }
-          fi
+          bun scripts/package-release-chart.ts \
+            --chart deploy/helm/opengeni \
+            --output .release/chart-proof/opengeni.tgz \
+            --version "$RELEASE_VERSION" \
+            --app-version "$RELEASE_VERSION"
+          cmp "$chart_path" .release/chart-proof/opengeni.tgz
+          helm lint "$chart_path"
+          test "$(helm show chart "$chart_path" | awk '$1 == "version:" { print $2 }')" = "$RELEASE_VERSION"
+          test "$(helm show chart "$chart_path" | awk '$1 == "appVersion:" { print $2 }')" = "$RELEASE_VERSION"
           printf '%s  %s\n' "$chart_bytes_sha256" "$chart_path" > evidence/release-chart.sha256
-          echo "manifest_digest=$chart_manifest" >> "$GITHUB_OUTPUT"
           echo "bytes_sha256=$chart_bytes_sha256" >> "$GITHUB_OUTPUT"
           echo "artifact=opengeni-${RELEASE_VERSION}.tgz" >> "$GITHUB_OUTPUT"
           chart_json="$(jq -cn \
             --arg version "$RELEASE_VERSION" \
-            --arg manifestDigest "$chart_manifest" \
             --arg bytesSha256 "$chart_bytes_sha256" \
             --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
-            '{reference:"oci://ghcr.io/cloudgeni-ai/charts/opengeni",version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
+            '{version:$version,bytesSha256:$bytesSha256,artifact:$artifact}')"
           {
             echo 'json<<RELEASE_CHART_JSON'
             echo "$chart_json"

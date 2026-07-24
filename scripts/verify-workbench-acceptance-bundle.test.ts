@@ -13,7 +13,7 @@ import {
 } from "./verify-workbench-acceptance-bundle";
 import {
   buildReleaseCandidateReceipt,
-  type ReleaseChartIdentity,
+  type ReleaseChartCandidate,
   type ReleaseImageRole,
 } from "./release-candidate";
 import { buildReleaseProducerMetadata } from "./release-provenance";
@@ -28,10 +28,8 @@ const canaryEvidenceUrl = "https://evidence.example/canary.json";
 const candidateReceiptUrl =
   "https://github.com/example/opengeni/releases/download/opengeni-candidate-a/release-candidate.json";
 const candidateReceiptSha256 = "d".repeat(64);
-const chart: ReleaseChartIdentity = {
-  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni",
+const chart: ReleaseChartCandidate = {
   version: "0.18.0",
-  manifestDigest: `sha256:${"9".repeat(64)}`,
   bytesSha256: "8".repeat(64),
   artifact: "opengeni-0.18.0.tgz",
 };
@@ -232,8 +230,8 @@ describe("workbench acceptance bundle", () => {
     expect(() => validate(short)).toThrow("at least 72 hours");
 
     const chartDrift = validBundle();
-    chartDrift.production.chart.manifestDigest = `sha256:${"e".repeat(64)}`;
-    expect(() => validate(chartDrift)).toThrow("chart manifestDigest differs");
+    chartDrift.production.chart.bytesSha256 = "e".repeat(64);
+    expect(() => validate(chartDrift)).toThrow("chart bytesSha256 differs");
 
     const chartBytesDrift = validBundle();
     chartBytesDrift.staging.chart.bytesSha256 = "f".repeat(64);

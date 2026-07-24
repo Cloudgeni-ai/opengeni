@@ -35,10 +35,10 @@ describe("release image workflow contract", () => {
     expect(candidate.slice(anonymousGate, receiptWrite)).toContain(
       "docker buildx imagetools inspect",
     );
-    expect(candidate).toContain("helm package deploy/helm/opengeni");
-    expect(candidate).toContain("helm push");
+    expect(candidate).toContain("bun scripts/package-release-chart.ts");
+    expect(candidate.match(/bun scripts\/package-release-chart\.ts/g)).toHaveLength(2);
+    expect(candidate).not.toContain("helm push");
     expect(candidate).toContain("release-chart.sha256");
-    expect(candidate).toContain("manifestDigest");
     expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
     expect(candidate).toContain("use its original successful producer run ID");
     expect(candidate).toContain("existing_tag_sha");
@@ -62,7 +62,8 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("docker build ");
     expect(finalJob).not.toContain("bake-agent.sh");
     expect(finalJob).not.toContain("helm package");
-    expect(finalJob).not.toContain("helm push");
+    expect(finalJob).toContain("Publish or reconcile the exact accepted Helm chart");
+    expect(finalJob).toContain("helm push");
     expect(finalJob).toContain("name: production-release");
     expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
       finalJob.indexOf("Promote exact accepted manifests"),

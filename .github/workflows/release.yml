@@ -571,7 +571,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify exact candidate Helm chart bytes and manifest
+      - name: Publish or reconcile the exact accepted Helm chart
+        id: release-chart
         env:
           GHCR_TOKEN: ${{ github.token }}
           GHCR_USERNAME: ${{ github.actor }}
@@ -585,39 +586,67 @@ jobs:
             --password-stdin
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
-          expected_manifest="$(jq -er .chart.manifestDigest evidence/release-candidate.json)"
           printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
+          rm -rf .release/chart-pull
+          mkdir -p .release/chart-pull
+          chart_ref="ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}"
+          chart_oci="oci://ghcr.io/${org}/charts/opengeni"
           resolved_manifest="$(docker buildx imagetools inspect \
-            "ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}" \
-            --format '{{.Manifest.Digest}}')"
-          [ "$resolved_manifest" = "$expected_manifest" ] || {
-            echo "candidate chart manifest drifted before promotion" >&2
-            exit 1
-          }
+            "$chart_ref" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            helm pull "$chart_oci" \
+              --version "$RELEASE_VERSION" \
+              --destination .release/chart-pull
+            cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz" || {
+              echo "existing official chart bytes differ from the accepted candidate" >&2
+              exit 1
+            }
+          else
+            helm push "$chart_path" "$chart_oci"
+            resolved_manifest="$(docker buildx imagetools inspect \
+              "$chart_ref" --format '{{.Manifest.Digest}}')"
+            [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+              echo "official OCI chart manifest digest was not resolved" >&2
+              exit 1
+            }
+          fi
+          rm -rf .release/chart-pull
           mkdir -p .release/chart-pull
           helm pull "oci://ghcr.io/${org}/charts/opengeni" \
             --version "$RELEASE_VERSION" \
             --destination .release/chart-pull
           cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz"
+          chart_json="$(jq -cn \
+            --arg version "$RELEASE_VERSION" \
+            --arg manifestDigest "$resolved_manifest" \
+            --arg bytesSha256 "$expected_bytes" \
+            --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
+            '{reference:"oci://ghcr.io/cloudgeni-ai/charts/opengeni",version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
+          echo "manifest_digest=$resolved_manifest" >> "$GITHUB_OUTPUT"
+          {
+            echo 'json<<RELEASE_CHART_JSON'
+            echo "$chart_json"
+            echo 'RELEASE_CHART_JSON'
+          } >> "$GITHUB_OUTPUT"
 
-      # The immutable BOM is the rerun fence. Compare it before any moving
-      # image alias is touched; a failed comparison must have zero registry
-      # mutation as its observable effect.
+      # The immutable BOM is the rerun fence for moving image aliases. Exact
+      # package and chart versions may already have converged idempotently, but
+      # a BOM mismatch must be discovered before any moving alias is touched.
       - name: Write expected release BOM before alias mutation
         id: release-bom
         env:
           SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           BOM_PACKAGES: ${{ needs.publish.outputs.bomPackages }}
+          RELEASE_CHART: ${{ steps.release-chart.outputs.json }}
         run: |
           set -euo pipefail
           images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
-          chart="$(jq -c '.chart' evidence/release-candidate.json)"
           OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
           OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
           OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
           OPENGENI_RELEASE_BOM_IMAGES="$images" \
-          OPENGENI_RELEASE_BOM_CHART="$chart" \
+          OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART" \
           bun scripts/release-bom.ts
           printf '%s  %s\n' "$(sha256sum evidence/release-bom.json | awk '{print $1}')" evidence/release-bom.json > evidence/release-bom.sha256
 
@@ -704,7 +733,7 @@ jobs:
           chart_digest="$(docker buildx imagetools inspect \
             "ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}" \
             --format '{{.Manifest.Digest}}')"
-          expected_chart_digest="$(jq -er .chart.manifestDigest evidence/release-candidate.json)"
+          expected_chart_digest="${{ steps.release-chart.outputs.manifest_digest }}"
           [ "$chart_digest" = "$expected_chart_digest" ] || {
             echo "anonymous chart manifest resolved to ${chart_digest}, expected ${expected_chart_digest}" >&2
             exit 1

@@ -44,8 +44,9 @@ Every live evidence bundle MUST bind:
 - API, worker, web, relay, and stock headless-sandbox image digests, with
   migrations explicitly aliased to the API manifest;
 - package versions and package tarball integrity hashes;
-- the official OCI Helm chart reference/version, manifest digest, exact
-  packaged-byte SHA-256, and candidate chart artifact;
+- the candidate Helm chart version, exact packaged-byte SHA-256, and immutable
+  chart artifact; the final BOM additionally binds the official OCI reference
+  and manifest digest created from those accepted bytes;
 - deployment environment and workflow run URL;
 - browser name/version, operating system, viewport, device scale factor, input
   modality, color scheme, contrast preference, and reduced-motion preference;
@@ -87,12 +88,13 @@ evidence. A checkbox or prose summary is never accepted in place of the parsed
 bundle.
 
 Staging and production evidence MUST identify the same source SHA, source tree,
-image digests, and chart identity as the candidate receipt. The final release
+image digests, chart version, and chart byte hash as the candidate receipt. The final release
 job is gated by the protected `production-release` environment. It compares the
 existing immutable BOM before creating any version, full-SHA, or `latest` alias;
 any mismatch stops with no alias mutation. It then verifies every alias and the
-anonymous OCI chart pull against the candidate bytes and writes the BOM from the
-receipt. It never rebuilds images or repackages the chart after acceptance.
+anonymous OCI chart pull against the candidate bytes and writes the resulting
+official chart manifest identity into the BOM. It never rebuilds images or
+repackages the chart after acceptance.
 
 ## 3. Dedicated live fixture
 

@@ -22,9 +22,7 @@ const imageDigests = Object.fromEntries(
   RELEASE_IMAGE_ROLES.map((role, index) => [role, `sha256:${String(index + 1).repeat(64)}`]),
 ) as Record<ReleaseImageRole, string>;
 const chart = {
-  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni" as const,
   version: "0.18.0",
-  manifestDigest: `sha256:${"9".repeat(64)}`,
   bytesSha256: "8".repeat(64),
   artifact: "opengeni-0.18.0.tgz",
 };
@@ -104,6 +102,11 @@ describe("release candidate receipt", () => {
     const drifted = structuredClone(valid) as any;
     drifted.images.worker.name = "ghcr.io/example/worker";
     expect(() => validateReleaseCandidateReceipt(drifted)).toThrow(RELEASE_IMAGE_NAMES.worker);
+
+    const prematurelyPublishedChart = structuredClone(valid) as any;
+    prematurelyPublishedChart.chart.reference = "oci://ghcr.io/cloudgeni-ai/charts/opengeni";
+    prematurelyPublishedChart.chart.manifestDigest = `sha256:${"9".repeat(64)}`;
+    expect(() => validateReleaseCandidateReceipt(prematurelyPublishedChart)).toThrow("exactly");
   });
 
   test("binds source, package plan, release version, and migration alias", () => {

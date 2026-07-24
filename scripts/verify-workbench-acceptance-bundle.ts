@@ -12,7 +12,7 @@ import {
 import {
   deploymentImageDigests,
   validateReleaseCandidateReceipt,
-  type ReleaseChartIdentity,
+  type ReleaseChartCandidate,
   type ReleaseCandidateReceipt,
 } from "./release-candidate";
 import {
@@ -86,7 +86,7 @@ export type WorkbenchAcceptanceBundle = {
     sourceSha: string;
     sourceTreeSha: string;
     imageDigests: ImageDigests;
-    chart: ReleaseChartIdentity;
+    chart: ReleaseChartCandidate;
     producer: ReleaseProducerMetadata;
     receipt: EvidenceRef;
   };
@@ -94,7 +94,7 @@ export type WorkbenchAcceptanceBundle = {
     sourceSha: string;
     sourceTreeSha: string;
     imageDigests: ImageDigests;
-    chart: ReleaseChartIdentity;
+    chart: ReleaseChartCandidate;
     deploymentUrl: string;
     evidenceUrl: string;
   };
@@ -102,7 +102,7 @@ export type WorkbenchAcceptanceBundle = {
     sourceSha: string;
     sourceTreeSha: string;
     imageDigests: ImageDigests;
-    chart: ReleaseChartIdentity;
+    chart: ReleaseChartCandidate;
     deploymentUrl: string;
     evidenceUrl: string;
   };
@@ -300,7 +300,7 @@ function environmentBinding(
   sourceSha: string;
   sourceTreeSha: string;
   imageDigests: ImageDigests | null;
-  chart: ReleaseChartIdentity | null;
+  chart: ReleaseChartCandidate | null;
   evidenceUrl: string;
 } | null {
   const item = record(value, name, errors);
@@ -568,9 +568,9 @@ function chartIdentity(
   value: unknown,
   path: string,
   errors: string[],
-): ReleaseChartIdentity | null {
+): ReleaseChartCandidate | null {
   const chart = record(value, path, errors);
-  const expectedKeys = ["reference", "version", "manifestDigest", "bytesSha256", "artifact"];
+  const expectedKeys = ["version", "bytesSha256", "artifact"];
   const canonicalKeys = [...expectedKeys].sort();
   const actualKeys = Object.keys(chart).sort();
   if (
@@ -579,19 +579,11 @@ function chartIdentity(
   ) {
     errors.push(`${path} must contain exactly: ${canonicalKeys.join(", ")}`);
   }
-  const reference = string(chart.reference, `${path}.reference`, errors);
   const version = string(chart.version, `${path}.version`, errors);
-  const manifestDigest = string(chart.manifestDigest, `${path}.manifestDigest`, errors);
   const bytesSha256 = string(chart.bytesSha256, `${path}.bytesSha256`, errors);
   const artifact = string(chart.artifact, `${path}.artifact`, errors);
-  if (reference !== "oci://ghcr.io/cloudgeni-ai/charts/opengeni") {
-    errors.push(`${path}.reference must be the official OCI chart`);
-  }
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
     errors.push(`${path}.version must be an exact semver version`);
-  }
-  if (!digestPattern.test(manifestDigest)) {
-    errors.push(`${path}.manifestDigest must be a sha256 chart manifest digest`);
   }
   if (!hashPattern.test(bytesSha256)) {
     errors.push(`${path}.bytesSha256 must be lowercase SHA-256`);
@@ -600,27 +592,19 @@ function chartIdentity(
     errors.push(`${path}.artifact must match its chart version`);
   }
   return {
-    reference: reference as ReleaseChartIdentity["reference"],
     version,
-    manifestDigest,
     bytesSha256,
     artifact,
   };
 }
 
 function sameChart(
-  left: ReleaseChartIdentity,
-  right: ReleaseChartIdentity,
+  left: ReleaseChartCandidate,
+  right: ReleaseChartCandidate,
   label: string,
   errors: string[],
 ): void {
-  for (const field of [
-    "reference",
-    "version",
-    "manifestDigest",
-    "bytesSha256",
-    "artifact",
-  ] as const) {
+  for (const field of ["version", "bytesSha256", "artifact"] as const) {
     if (left[field] !== right[field]) errors.push(`${label} chart ${field} differs`);
   }
 }

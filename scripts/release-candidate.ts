@@ -24,12 +24,15 @@ export type ReleaseCandidateImage = {
   digest: string;
 };
 
-export type ReleaseChartIdentity = {
-  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni";
+export type ReleaseChartCandidate = {
   version: string;
-  manifestDigest: string;
   bytesSha256: string;
   artifact: string;
+};
+
+export type ReleaseChartIdentity = ReleaseChartCandidate & {
+  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni";
+  manifestDigest: string;
 };
 
 export type ReleaseCandidateReceipt = {
@@ -39,7 +42,7 @@ export type ReleaseCandidateReceipt = {
   releaseVersion: string;
   packages: PublishablePackage[];
   images: Record<ReleaseImageRole, ReleaseCandidateImage>;
-  chart: ReleaseChartIdentity;
+  chart: ReleaseChartCandidate;
   producer: ReleaseProducerMetadata;
   aliases: {
     migration: "api";
@@ -50,7 +53,6 @@ const sourceShaPattern = /^[0-9a-f]{40}$/;
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const hashPattern = /^[0-9a-f]{64}$/;
-const chartReference = "oci://ghcr.io/cloudgeni-ai/charts/opengeni" as const;
 
 export function resolveReleaseVersion(packages: PublishablePackage[]): string {
   if (packages.length === 0) {
@@ -70,7 +72,7 @@ export function buildReleaseCandidateReceipt(input: {
   sourceTreeSha: string;
   packages: PublishablePackage[];
   imageDigests: Record<ReleaseImageRole, string>;
-  chart: ReleaseChartIdentity;
+  chart: ReleaseChartCandidate;
   producer: ReleaseProducerMetadata;
 }): ReleaseCandidateReceipt {
   if (!sourceShaPattern.test(input.sourceSha)) {
@@ -256,21 +258,11 @@ function normalizePackages(value: unknown): PublishablePackage[] {
   );
 }
 
-function normalizeChart(value: unknown): ReleaseChartIdentity {
+function normalizeChart(value: unknown): ReleaseChartCandidate {
   const chart = object(value, "release candidate chart");
-  exactKeys(
-    chart,
-    ["reference", "version", "manifestDigest", "bytesSha256", "artifact"],
-    "release candidate chart",
-  );
-  if (chart.reference !== chartReference) {
-    throw new Error(`release candidate chart reference must be ${chartReference}`);
-  }
+  exactKeys(chart, ["version", "bytesSha256", "artifact"], "release candidate chart");
   if (typeof chart.version !== "string" || !versionPattern.test(chart.version)) {
     throw new Error("release candidate chart version must be an exact semver version");
-  }
-  if (typeof chart.manifestDigest !== "string" || !digestPattern.test(chart.manifestDigest)) {
-    throw new Error("release candidate chart manifestDigest must be an exact sha256 digest");
   }
   if (typeof chart.bytesSha256 !== "string" || !hashPattern.test(chart.bytesSha256)) {
     throw new Error("release candidate chart bytesSha256 must be lowercase SHA-256");
@@ -279,9 +271,7 @@ function normalizeChart(value: unknown): ReleaseChartIdentity {
     throw new Error("release candidate chart artifact must match its version");
   }
   return {
-    reference: chartReference,
     version: chart.version,
-    manifestDigest: chart.manifestDigest,
     bytesSha256: chart.bytesSha256,
     artifact: chart.artifact,
   };
@@ -326,7 +316,7 @@ async function writeReceiptFromEnvironment(): Promise<void> {
       "OPENGENI_RELEASE_CANDIDATE_IMAGE_DIGESTS",
       process.env.OPENGENI_RELEASE_CANDIDATE_IMAGE_DIGESTS ?? "",
     ),
-    chart: parseJson<ReleaseChartIdentity>(
+    chart: parseJson<ReleaseChartCandidate>(
       "OPENGENI_RELEASE_CANDIDATE_CHART",
       process.env.OPENGENI_RELEASE_CANDIDATE_CHART ?? "",
     ),
