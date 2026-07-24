@@ -350,16 +350,15 @@ jobs:
         run: |
           set -euo pipefail
           tag="opengeni-embedded-release-${SOURCE_SHA}"
-          mkdir -p .release/existing-release
-          if gh api \
-            "repos/${GITHUB_REPOSITORY}/releases/tags/${tag}" \
-            > .release/existing-release/metadata.json \
-            2> .release/existing-release/error.log; then
-            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
-            [ "$resolved" = "$SOURCE_SHA" ] || {
-              echo "existing release tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
-              exit 1
-            }
+          state="$(bun scripts/resolve-github-release-state.ts "$tag")"
+          release_exists="$(jq -er .releaseExists <<<"$state")"
+          tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
+          [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
+            echo "existing release tag resolves to ${tag_sha}, expected ${SOURCE_SHA}" >&2
+            exit 1
+          }
+          if [ "$release_exists" = "true" ]; then
+            mkdir -p .release/existing-release
             gh release download "$tag" \
               --dir .release/existing-release/assets \
               --pattern release-bom.json \
@@ -370,11 +369,10 @@ jobs:
             cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
               ".release/existing-release/assets/opengeni-${RELEASE_VERSION}.tgz"
             echo "exists=true" >> "$GITHUB_OUTPUT"
-          elif grep -q 'HTTP 404' .release/existing-release/error.log; then
+          elif [ "$release_exists" = "false" ]; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
           else
-            cat .release/existing-release/error.log >&2
-            echo "failed to determine whether the immutable distribution exists" >&2
+            echo "GitHub release-state resolver returned an invalid state" >&2
             exit 1
           fi
 

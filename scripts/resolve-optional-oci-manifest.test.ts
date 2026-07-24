@@ -27,6 +27,7 @@ describe("optional OCI manifest resolution", () => {
       "manifest unknown",
       "code: MANIFEST_UNKNOWN",
       "unexpected status: 404 Not Found",
+      "ERROR: registry.example/image:1.0.0: not found",
     ]) {
       await expect(
         resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({

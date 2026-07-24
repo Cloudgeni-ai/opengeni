@@ -69,6 +69,11 @@ jobs:
             exit 1
           fi
 
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
       # The receipt includes the exact producer run attempt. Once the immutable
       # candidate release exists, a later rerun cannot safely rewrite that
       # receipt with a different attempt while retaining the same source-SHA
@@ -82,20 +87,17 @@ jobs:
         run: |
           set -euo pipefail
           tag="opengeni-candidate-${SOURCE_SHA}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
-            [ "$resolved" = "$SOURCE_SHA" ] || {
-              echo "existing candidate tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
-              exit 1
-            }
+          state="$(bun scripts/resolve-github-release-state.ts "$tag")"
+          release_exists="$(jq -er .releaseExists <<<"$state")"
+          tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
+          [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
+            echo "existing candidate tag resolves to ${tag_sha}, expected ${SOURCE_SHA}" >&2
+            exit 1
+          }
+          if [ "$release_exists" = "true" ]; then
             echo "immutable candidate ${tag} already exists; use its original successful producer run ID" >&2
             exit 1
           fi
-
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.14
 
       - name: Plan exact package publication
         id: package-plan
@@ -496,12 +498,14 @@ jobs:
         run: |
           set -euo pipefail
           tag="opengeni-candidate-${SOURCE_SHA}"
-          if gh release view "$tag" >/dev/null 2>&1; then
-            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
-            [ "$resolved" = "$SOURCE_SHA" ] || {
-              echo "existing candidate tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
-              exit 1
-            }
+          state="$(bun scripts/resolve-github-release-state.ts "$tag")"
+          release_exists="$(jq -er .releaseExists <<<"$state")"
+          tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
+          [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
+            echo "existing candidate tag resolves to ${tag_sha}, expected ${SOURCE_SHA}" >&2
+            exit 1
+          }
+          if [ "$release_exists" = "true" ]; then
             mkdir -p /tmp/opengeni-release-candidate-existing
             gh release download "$tag" \
               --dir /tmp/opengeni-release-candidate-existing \
@@ -514,11 +518,6 @@ jobs:
             cmp evidence/release-chart.sha256 /tmp/opengeni-release-candidate-existing/release-chart.sha256
             cmp ".release/charts/opengeni-${RELEASE_VERSION}.tgz" "/tmp/opengeni-release-candidate-existing/opengeni-${RELEASE_VERSION}.tgz"
           else
-            existing_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
-            if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$SOURCE_SHA" ]; then
-              echo "existing candidate tag resolves to ${existing_tag_sha}, expected ${SOURCE_SHA}" >&2
-              exit 1
-            fi
             gh release create "$tag" \
               evidence/release-candidate.json \
               evidence/release-candidate.sha256 \

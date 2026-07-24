@@ -32,7 +32,10 @@ export async function resolveOptionalOciManifest(
     }
     return digest;
   }
-  if (missingPattern.test(result.stderr)) {
+  if (
+    missingPattern.test(result.stderr) ||
+    result.stderr.trim() === `ERROR: ${reference}: not found`
+  ) {
     return null;
   }
   throw new Error(
