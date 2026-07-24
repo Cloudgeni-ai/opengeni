@@ -30,6 +30,7 @@ describe("release package evidence", () => {
   });
 
   test("parses a bounded comma/newline package set and rejects duplicates", () => {
+    expect(parseExpectedPackages("")).toEqual([]);
     expect(parseExpectedPackages("@opengeni/react@0.14.0,\n@opengeni/sdk@0.13.0")).toEqual([
       react,
       sdk,
@@ -38,6 +39,38 @@ describe("release package evidence", () => {
       "duplicate expected package",
     );
     expect(() => parseExpectedPackages("react@latest")).toThrow("invalid expected package spec");
+  });
+
+  test("supports an application-only release with a complete published package BOM", () => {
+    const result = reconcileReleasePackages({
+      sourceSha: sha,
+      phase: "verify",
+      publishable: [react, sdk],
+      expected: [],
+      registry: new Map([
+        [react.name, published(react, "b".repeat(40))],
+        [sdk.name, published(sdk, "c".repeat(40))],
+      ]),
+    });
+    expect(result).toEqual({
+      needsPublish: false,
+      releaseReady: true,
+      packages: [],
+      bomPackages: [
+        {
+          ...react,
+          state: "published",
+          gitHead: "b".repeat(40),
+          integrity: "sha512-release-integrity",
+        },
+        {
+          ...sdk,
+          state: "published",
+          gitHead: "c".repeat(40),
+          integrity: "sha512-release-integrity",
+        },
+      ],
+    });
   });
 
   test("plans exactly the declared missing package and ignores unchanged published packages", () => {
@@ -117,7 +150,11 @@ describe("release package evidence", () => {
     });
     expect(result.needsPublish).toBe(false);
     expect(result.releaseReady).toBe(true);
-    expect(result.packages[0]).toMatchObject({ ...react, state: "published", gitHead: sha });
+    expect(result.packages[0]).toMatchObject({
+      ...react,
+      state: "published",
+      gitHead: sha,
+    });
     expect(result.bomPackages).toHaveLength(2);
     expect(result.bomPackages.every((pkg) => pkg.state === "published")).toBe(true);
   });

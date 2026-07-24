@@ -36,6 +36,9 @@ describe("release image workflow contract", () => {
       "docker buildx imagetools inspect",
     );
     expect(candidate).toContain("bun scripts/package-release-chart.ts");
+    expect(candidate).toContain("bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml");
+    expect(candidate).not.toContain('map(select(.name == "@opengeni/sdk"))');
+    expect(candidate).toContain("Refuse an occupied product release version");
     expect(candidate.match(/bun scripts\/package-release-chart\.ts/g)).toHaveLength(2);
     expect(candidate).not.toContain("helm push");
     expect(candidate).toContain("release-chart.sha256");
@@ -53,6 +56,15 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain("--prefer-index=false");
     expect(finalJob).toContain("evidence/release-candidate.json");
     expect(finalJob).toContain("bun scripts/release-bom.ts");
+    expect(finalJob).toContain("release_version=\"$(jq -er '.releaseVersion'");
+    expect(finalJob).toContain(
+      'source_release_version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"',
+    );
+    expect(finalJob).not.toContain("PUBLISHED_PACKAGES:");
+    expect(finalJob).toContain("Reconcile existing product image aliases before mutation");
+    expect(
+      finalJob.indexOf("Reconcile existing product image aliases before mutation"),
+    ).toBeLessThan(finalJob.indexOf("Publish or reconcile the exact accepted Helm chart"));
     expect(finalJob).toContain("Verify official images support anonymous pull");
     expect(finalJob).toContain("docker logout ghcr.io");
     expect(finalJob).toContain("docker buildx imagetools inspect");

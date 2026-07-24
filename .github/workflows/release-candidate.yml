@@ -13,8 +13,9 @@ on:
         required: true
         type: string
       expected_packages:
-        description: Exact comma-separated package set intended for the evidence-bound npm release.
-        required: true
+        description: Exact comma-separated package set intended for npm publication; leave empty for an application-only release.
+        required: false
+        default: ""
         type: string
 
 concurrency:
@@ -111,11 +112,7 @@ jobs:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          version="$(jq -er '((.packages | map(select(.name == "@opengeni/sdk"))) + (.packages | sort_by(.name)))[0].version' evidence/release-packages-plan.json)"
-          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]] || {
-            echo "resolved release version is not exact semver: $version" >&2
-            exit 1
-          }
+          version="$(bun scripts/release-version.ts deploy/helm/opengeni/Chart.yaml)"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "candidate_tag=candidate-$SOURCE_SHA" >> "$GITHUB_OUTPUT"
           echo "source_tree_sha=$(git rev-parse "$SOURCE_SHA^{tree}")" >> "$GITHUB_OUTPUT"
@@ -130,13 +127,33 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Refuse an occupied product release version
+        env:
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          for role in api worker web relay sandbox; do
+            ref="ghcr.io/cloudgeni-ai/opengeni-${role}:${RELEASE_VERSION}"
+            digest="$(bun scripts/resolve-optional-oci-manifest.ts "$ref")"
+            if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "product release version ${RELEASE_VERSION} is already occupied by ${ref}" >&2
+              exit 1
+            fi
+          done
+          chart_ref="ghcr.io/cloudgeni-ai/charts/opengeni:${RELEASE_VERSION}"
+          chart_digest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+          if [[ "$chart_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "product release version ${RELEASE_VERSION} is already occupied by ${chart_ref}" >&2
+            exit 1
+          fi
+
       - name: Resolve existing API candidate
         id: existing-api
         env:
           IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
           if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -191,7 +208,7 @@ jobs:
           IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
           if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -230,7 +247,7 @@ jobs:
           IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
           if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -270,7 +287,7 @@ jobs:
           IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
           if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
@@ -306,7 +323,7 @@ jobs:
           IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
-          digest="$(docker buildx imagetools inspect "$IMAGE_REF" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
+          digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
           if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else

@@ -226,9 +226,15 @@ GitHub API and requires the canonical repository/workflow, a completed
 successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
 owned unexpired Actions artifact with its provider digest, and the expected
 artifact name. URLs and archive digests are derived only after those checks. The
-same exact expected package set and an explicit zero-gap confirmation are still
-required; the selected dispatch ref, `source_sha`, checked-out commit, and a
-commit reachable from `main` must identify the same revision.
+same exact expected package set (including an empty set for an application-only
+release) and an explicit zero-gap confirmation are still required. The product
+release identity comes from the exact SemVer `version`/`appVersion` pair
+committed in `deploy/helm/opengeni/Chart.yaml`; it is independent of whichever
+npm packages changed. The selected dispatch ref, `source_sha`, checked-out
+commit, and a commit reachable from `main` must identify the same revision.
+Candidate admission rejects a product version already occupied by any official
+image or chart. A final-release retry permits only aliases that already resolve
+to the exact accepted digest.
 
 The dispatch downloads the validated candidate and acceptance artifacts,
 verifies their provider ZIP digests and retained sidecars, rejects any changed,
