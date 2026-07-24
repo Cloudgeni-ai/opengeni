@@ -14,9 +14,11 @@ import {
   type ResourceRef,
   type Session,
   type SessionEvent,
+  SessionMcpApprovalPolicy,
   type SessionMcpCredentialUpdateInput,
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
+  type UpdateSessionMcpApprovalPolicyResponse,
   type SessionAuthorizationPort,
   type SessionTurn,
   type ToolRef,
@@ -47,6 +49,7 @@ import {
   listSessionMcpServersForChildInheritance,
   requireSession,
   submitHumanPromptInTransaction,
+  appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitle as updateSessionTitleRow,
   withWorkspaceSubjectRls,
   type CreateSessionMcpServerInput,
@@ -265,6 +268,7 @@ function mcpServerConfigFromMetadata(
     ...(server.name ? { name: server.name } : {}),
     url: server.url,
     cacheToolsList: false,
+    requireApproval: server.requireApproval,
     ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
   };
 }
@@ -340,6 +344,7 @@ function validateSessionMcpServersForCreate(
       url: server.url,
       headerNames: Object.keys(headersEncrypted).sort(),
       credentialVersion: 1,
+      requireApproval: server.requireApproval ?? false,
       connectionRef: server.connectionRef ?? null,
     });
   }
@@ -383,6 +388,7 @@ function validateInheritedSessionMcpServersForCreate(
       url: server.url,
       headerNames: Object.keys(server.headersEncrypted ?? {}).sort(),
       credentialVersion: 1,
+      requireApproval: server.requireApproval ?? false,
       connectionRef: server.connectionRef ?? null,
     })),
   };
@@ -1568,6 +1574,68 @@ export async function updateSessionTitle(
   return {
     ...result,
     relatedSessionAccess: authorization?.relatedSessionAccess ?? "root",
+  };
+}
+
+/**
+ * Update one existing session MCP server's approval policy. The database
+ * serializes this write with attempt claim under the session lock: an already
+ * claimed attempt retains its immutable snapshot, while the next claim captures
+ * this value. No attempt is cancelled, restarted, or reinterpreted.
+ */
+export async function updateSessionMcpApprovalPolicy(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  serverId: string,
+  requireApproval: SessionMcpApprovalPolicy,
+): Promise<UpdateSessionMcpApprovalPolicyResponse> {
+  const normalizedPolicy = SessionMcpApprovalPolicy.parse(requireApproval);
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.mcp.approval_policy.write",
+    surface: "core",
+  });
+  requirePermission(grant, "sessions:control");
+
+  const outcome: { server?: SessionMcpServerMetadata } = {};
+  const events = await appendSessionEventsWithLockedSessionUpdate(
+    deps.db,
+    grant.workspaceId,
+    sessionId,
+    async (_session, context) => {
+      const result = await context.updateSessionMcpApprovalPolicy(serverId, normalizedPolicy);
+      if (!result.server) {
+        throw new HTTPException(404, { message: "session MCP server not found" });
+      }
+      outcome.server = result.server;
+      return {
+        events: result.changed
+          ? [
+              {
+                type: "session.mcp.approval_policy.updated" as const,
+                payload: {
+                  serverId,
+                  effectiveFrom: "next_attempt",
+                },
+              },
+            ]
+          : [],
+      };
+    },
+  );
+  const updatedServer = outcome.server;
+  if (!updatedServer) {
+    throw new Error("session MCP approval policy update returned no server");
+  }
+  await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  return {
+    server: updatedServer,
+    effectiveFrom: "next_attempt",
   };
 }
 

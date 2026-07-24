@@ -3017,6 +3017,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         db,
         input.workspaceId,
         input.sessionId,
+        input.attemptId,
         baseRunSettings,
       );
       // Multi-provider per-turn routing → the provider gating (compaction mode,
@@ -3554,6 +3555,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turn,
             })
           : undefined;
+      const toolspaceAuthority = {
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
+      };
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
@@ -3577,8 +3584,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
-            sessionId: input.sessionId,
-            runId: turnId,
+            toolspaceAuthority,
           },
         ),
         cancellationSignal,
@@ -3699,7 +3705,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (toolspaceTokenRenewalClosed) return;
 
         const mint = async () =>
-          await mintSandboxToolspaceToken(runSettings, connectionScope, input.sessionId, turn.id);
+          await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority);
         const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
           const runAs = sandboxRunAs(runSettings);
           await refreshToolspaceTokenFile(tokenSession, material.token, {
@@ -4346,12 +4352,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
             const lazyToolspaceToken = sandboxToolspaceToken
-              ? await mintSandboxToolspaceToken(
-                  runSettings,
-                  connectionScope,
-                  input.sessionId,
-                  turn.id,
-                )
+              ? await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority)
               : undefined;
             const provisioned = await resumeBoxForTurn(
               {

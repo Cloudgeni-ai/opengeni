@@ -285,6 +285,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         url: "https://mcp.example.test/private",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        requireApproval: false,
         connectionRef: null,
       },
       {
@@ -293,6 +294,7 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         url: "https://mcp.example.test/github",
         headerNames: [],
         credentialVersion: 1,
+        requireApproval: ["create_comment"],
         connectionRef: {
           connectionId: "github-primary",
           providerDomain: "github.com",
@@ -300,10 +302,21 @@ describe("P1.4 shared-sandbox create resolution (real createSessionForRequest + 
         },
       },
     ]);
+    const attemptId = crypto.randomUUID();
+    const claim = await claimSessionWorkForAttempt(db, workspaceId, {
+      sessionId: child.id,
+      workflowId: child.temporalWorkflowId,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(claim.action).toBe("claimed");
     const inheritedForRun = await listSessionMcpServersForRun(
       db,
       workspaceId,
       child.id,
+      attemptId,
       Buffer.alloc(32, 7),
     );
     expect([...inheritedForRun].sort((a, b) => a.id.localeCompare(b.id))).toEqual([

@@ -33,6 +33,9 @@ import {
   SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
   SessionMcpServerInput as ContractSessionMcpServerInput,
+  SessionMcpServerMetadata as ContractSessionMcpServerMetadata,
+  UpdateSessionMcpApprovalPolicyRequest as ContractUpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse as ContractUpdateSessionMcpApprovalPolicyResponse,
   SessionEventType as ContractSessionEventType,
   TranscriptionEvent as ContractTranscriptionEvent,
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
@@ -108,11 +111,14 @@ import type {
   SessionEvent,
   SessionHumanInputRequest,
   SessionMcpServerInput,
+  SessionMcpServerMetadata,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
   SubmitHumanInputResponseRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   StreamUrlRotatedPayload,
   UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
@@ -203,6 +209,15 @@ describe("SDK / contracts parity", () => {
     const acceptMcpServer = (
       value: z.infer<typeof ContractSessionMcpServerInput>,
     ): SessionMcpServerInput => value;
+    const acceptMcpMetadata = (
+      value: z.infer<typeof ContractSessionMcpServerMetadata>,
+    ): SessionMcpServerMetadata => value;
+    const acceptMcpPolicyResponse = (
+      value: z.infer<typeof ContractUpdateSessionMcpApprovalPolicyResponse>,
+    ): UpdateSessionMcpApprovalPolicyResponse => value;
+    const acceptMcpPolicyRequest = (
+      value: UpdateSessionMcpApprovalPolicyRequest,
+    ): z.input<typeof ContractUpdateSessionMcpApprovalPolicyRequest> => value;
     const sdkMcpServer: SessionMcpServerInput = {
       id: "host_tools",
       url: "https://example.com/mcp",
@@ -220,6 +235,9 @@ describe("SDK / contracts parity", () => {
       acceptClientEvent,
       acceptHumanInputResponse,
       acceptMcpServer,
+      acceptMcpMetadata,
+      acceptMcpPolicyResponse,
+      acceptMcpPolicyRequest,
     ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
     expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);

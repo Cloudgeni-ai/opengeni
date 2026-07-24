@@ -330,6 +330,7 @@ describe("DB integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        requireApproval: false,
         connectionRef: null,
       },
     ]);
@@ -350,10 +351,22 @@ describe("DB integration", () => {
     );
     expect(Number(raw.credential_version)).toBe(1);
 
+    await submitTestHumanPrompt(dbClient.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      subjectId: grant.subjectId,
+      text: "run the session MCP",
+      resources: [],
+      tools: [{ kind: "mcp", id: "crm" }],
+      reasoningEffortFallback: "medium",
+    });
+    const execution = await claimRegisteredExecution(dbClient.db, grant, session.id);
     const forRun = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
       session.id,
+      execution.attemptId,
       encryptionKey,
     );
     expect(forRun).toEqual([
@@ -367,6 +380,7 @@ describe("DB integration", () => {
         headerNames: ["Authorization"],
         headers: { Authorization: "Bearer create-secret" },
         credentialVersion: 1,
+        requireApproval: false,
         connectionRef: null,
       },
     ]);
@@ -392,6 +406,7 @@ describe("DB integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization", "X-Session"],
         credentialVersion: 2,
+        requireApproval: false,
         connectionRef: null,
       },
     ]);
@@ -400,6 +415,7 @@ describe("DB integration", () => {
       dbClient.db,
       grant.workspaceId,
       session.id,
+      execution.attemptId,
       encryptionKey,
     );
     expect(afterRotation[0]?.headers).toEqual({

@@ -73,11 +73,17 @@ export type MintedSandboxToolspaceToken = {
   expiresAt: Date;
 };
 
+export type SandboxToolspaceAuthority = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
 export async function mintSandboxToolspaceToken(
   settings: Settings,
   scope: ConnectionScope,
-  sessionId: string,
-  runId: string,
+  authority: SandboxToolspaceAuthority,
   nowMs = Date.now(),
 ): Promise<MintedSandboxToolspaceToken | undefined> {
   if (!settings.toolspaceEnabled || !settings.delegationSecret) {
@@ -87,10 +93,13 @@ export async function mintSandboxToolspaceToken(
   const token = await signDelegatedAccessToken(settings.delegationSecret, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
-    subjectId: `sandbox:${runId}`,
+    subjectId: `sandbox:${authority.turnId}`,
     subjectLabel: "sandbox toolspace",
     permissions: ["toolspace:call"],
-    sessionId,
+    sessionId: authority.sessionId,
+    turnId: authority.turnId,
+    attemptId: authority.attemptId,
+    executionGeneration: authority.executionGeneration,
     exp: expiresAtSeconds,
   });
   return { token, expiresAt: new Date(expiresAtSeconds * 1000) };
@@ -199,8 +208,7 @@ export async function sandboxEnvironmentForRun(
   options: RunGitCredentialOptions & {
     skipGitHubToken?: boolean;
     deferGitHubToken?: boolean;
-    sessionId?: string;
-    runId?: string;
+    toolspaceAuthority?: SandboxToolspaceAuthority;
   } = {},
 ): Promise<{
   environment: Record<string, string>;
@@ -240,8 +248,8 @@ export async function sandboxEnvironmentForRun(
   // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
   const toolspaceScope = options.scope;
   const toolspaceToken =
-    toolspaceScope && options.sessionId && options.runId
-      ? await mintSandboxToolspaceToken(settings, toolspaceScope, options.sessionId, options.runId)
+    toolspaceScope && options.toolspaceAuthority
+      ? await mintSandboxToolspaceToken(settings, toolspaceScope, options.toolspaceAuthority)
       : undefined;
   if (toolspaceToken && toolspaceScope) {
     environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(

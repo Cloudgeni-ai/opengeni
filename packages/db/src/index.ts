@@ -57,6 +57,7 @@ import type {
   SessionGoalStatus,
   SessionHumanInputRequest,
   LineageNode,
+  SessionMcpApprovalPolicy,
   SessionMcpServerMetadata,
   SessionStatus,
   SessionTurn,
@@ -2909,7 +2910,7 @@ export type CreateSessionMcpServerInput = {
   allowedTools?: string[] | null;
   timeoutMs?: number | null;
   cacheToolsList?: boolean | null;
-  requireApproval?: boolean | string[] | null;
+  requireApproval?: SessionMcpApprovalPolicy | null;
   connectionRef?: McpServerConnectionRef | null;
   headersEncrypted?: Record<string, string>;
 };
@@ -2924,11 +2925,16 @@ export type UpdateSessionMcpServerCredentialsResult = {
   missingIds: string[];
 };
 
+export type UpdateSessionMcpApprovalPolicyResult = {
+  server: SessionMcpServerMetadata | null;
+  changed: boolean;
+};
+
 export type SessionMcpServerForRun = SessionMcpServerMetadata & {
   allowedTools?: string[];
   timeoutMs?: number;
   cacheToolsList?: boolean;
-  requireApproval?: boolean | string[];
+  requireApproval: SessionMcpApprovalPolicy;
   headers: Record<string, string>;
 };
 
@@ -11268,6 +11274,7 @@ function mapSessionMcpServerMetadata(
     url: row.url,
     headerNames: Object.keys(row.headersEncrypted ?? {}).sort(),
     credentialVersion: Number(row.credentialVersion),
+    requireApproval: row.requireApproval ?? false,
     connectionRef: row.connectionRef ?? null,
   };
 }
@@ -11453,13 +11460,98 @@ async function updateSessionMcpServerCredentialsInTransaction(
   return { servers, missingIds };
 }
 
+export async function updateSessionMcpApprovalPolicy(
+  db: Database,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    serverId: string;
+    requireApproval: SessionMcpApprovalPolicy;
+  },
+): Promise<UpdateSessionMcpApprovalPolicyResult> {
+  return await withWorkspaceRls(
+    db,
+    input.workspaceId,
+    async (scopedDb) =>
+      await scopedDb.transaction(
+        async (tx) => await updateSessionMcpApprovalPolicyInTransaction(tx, input),
+      ),
+  );
+}
+
+async function updateSessionMcpApprovalPolicyInTransaction(
+  tx: Pick<Database, "select" | "update">,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    serverId: string;
+    requireApproval: SessionMcpApprovalPolicy;
+  },
+): Promise<UpdateSessionMcpApprovalPolicyResult> {
+  const [existing] = await tx
+    .select()
+    .from(schema.sessionMcpServers)
+    .where(
+      and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, input.sessionId),
+        eq(schema.sessionMcpServers.serverId, input.serverId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!existing) {
+    return { server: null, changed: false };
+  }
+  const current = existing.requireApproval ?? false;
+  if (JSON.stringify(current) === JSON.stringify(input.requireApproval)) {
+    return { server: mapSessionMcpServerMetadata(existing), changed: false };
+  }
+  const [updated] = await tx
+    .update(schema.sessionMcpServers)
+    .set({
+      requireApproval: input.requireApproval,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, input.sessionId),
+        eq(schema.sessionMcpServers.serverId, input.serverId),
+      ),
+    )
+    .returning();
+  if (!updated) {
+    throw new Error(`Session MCP server disappeared during policy update: ${input.serverId}`);
+  }
+  return { server: mapSessionMcpServerMetadata(updated), changed: true };
+}
+
 export async function listSessionMcpServersForRun(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  attemptId: string,
   encryptionKey: Uint8Array | null,
 ): Promise<SessionMcpServerForRun[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [attempt] = await scopedDb
+      .select({
+        sessionId: schema.sessionTurnAttempts.sessionId,
+        mcpApprovalPolicies: schema.sessionTurnAttempts.mcpApprovalPolicies,
+      })
+      .from(schema.sessionTurnAttempts)
+      .where(
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, workspaceId),
+          eq(schema.sessionTurnAttempts.id, attemptId),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+        ),
+      )
+      .limit(1);
+    if (!attempt || attempt.sessionId !== sessionId) {
+      throw new Error(`session MCP policy snapshot is unavailable for attempt ${attemptId}`);
+    }
     const rows = await scopedDb
       .select()
       .from(schema.sessionMcpServers)
@@ -11471,6 +11563,11 @@ export async function listSessionMcpServersForRun(
       )
       .orderBy(asc(schema.sessionMcpServers.createdAt), asc(schema.sessionMcpServers.serverId));
     return rows.map((row) => {
+      if (!Object.hasOwn(attempt.mcpApprovalPolicies, row.serverId)) {
+        throw new Error(
+          `session MCP policy snapshot is missing server ${row.serverId} for attempt ${attemptId}`,
+        );
+      }
       let headers: Record<string, string>;
       try {
         if (!encryptionKey && Object.keys(row.headersEncrypted ?? {}).length > 0) {
@@ -11490,7 +11587,7 @@ export async function listSessionMcpServersForRun(
         ...(row.allowedTools ? { allowedTools: row.allowedTools } : {}),
         ...(row.timeoutMs ? { timeoutMs: row.timeoutMs } : {}),
         ...(row.cacheToolsList ? { cacheToolsList: row.cacheToolsList } : {}),
-        ...(row.requireApproval != null ? { requireApproval: row.requireApproval } : {}),
+        requireApproval: attempt.mcpApprovalPolicies[row.serverId]!,
         headers,
       };
     });
@@ -13956,7 +14053,9 @@ export async function listSessionEvents(
   });
 }
 
-export type ToolspaceCallReservation = { reserved: true; count: number } | { reserved: false };
+export type ToolspaceCallReservation =
+  | { reserved: true; count: number; turn: SessionTurnForExecution }
+  | { reserved: false; reason: TurnAttemptFenceRejectReason | "budget_exhausted" };
 
 /**
  * Atomically reserve one toolspace call against a turn's per-turn budget.
@@ -13965,33 +14064,73 @@ export type ToolspaceCallReservation = { reserved: true; count: number } | { res
  * below `limit` and returns the post-increment value. Concurrent reservations
  * for the same turn serialize on the row lock, so exactly `limit` of N
  * simultaneous callers observe `reserved: true` — closing the read-then-append
- * TOCTOU the event-count approach had. `reserved: false` means the turn is at or
- * over budget (or the turn row no longer exists).
+ * TOCTOU the event-count approach had. The returned attempt id is captured by
+ * that same UPDATE, so callers cannot accidentally execute under a successor
+ * attempt. `reserved: false` means the turn is not executable, at/over budget,
+ * or no longer exists.
  */
-export async function reserveToolspaceCallForTurn(
+export async function reserveToolspaceCallForAttempt(
   db: Database,
-  workspaceId: string,
-  sessionId: string,
-  turnId: string,
-  limit: number,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    turnId: string;
+    executionGeneration: number;
+    attemptId: string;
+    limit: number;
+  },
 ): Promise<ToolspaceCallReservation> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
-    const [row] = await scopedDb
-      .update(schema.sessionTurns)
-      .set({
-        toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1`,
-      })
-      .where(
-        and(
-          eq(schema.sessionTurns.workspaceId, workspaceId),
-          eq(schema.sessionTurns.sessionId, sessionId),
-          eq(schema.sessionTurns.id, turnId),
-          sql`${schema.sessionTurns.toolspaceCallCount} < ${limit}`,
-        ),
-      )
-      .returning({ count: schema.sessionTurns.toolspaceCallCount });
-    return row ? { reserved: true, count: Number(row.count) } : { reserved: false };
-  });
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) {
+          return { reserved: false, reason: fence.reason };
+        }
+        if (fence.turn.status !== "running") {
+          return { reserved: false, reason: "turn_terminal" };
+        }
+        if (Number(fence.turn.toolspaceCallCount) >= input.limit) {
+          return { reserved: false, reason: "budget_exhausted" };
+        }
+        const [row] = await tx
+          .update(schema.sessionTurns)
+          .set({
+            toolspaceCallCount: sql`${schema.sessionTurns.toolspaceCallCount} + 1`,
+          })
+          .where(
+            and(
+              eq(schema.sessionTurns.workspaceId, input.workspaceId),
+              eq(schema.sessionTurns.sessionId, input.sessionId),
+              eq(schema.sessionTurns.id, input.turnId),
+              eq(schema.sessionTurns.executionGeneration, input.executionGeneration),
+              eq(schema.sessionTurns.activeAttemptId, input.attemptId),
+              sql`${schema.sessionTurns.toolspaceCallCount} < ${input.limit}`,
+            ),
+          )
+          .returning({ count: schema.sessionTurns.toolspaceCallCount });
+        if (!row) {
+          throw new Error("Toolspace call reservation lost its locked turn");
+        }
+        return {
+          reserved: true,
+          count: Number(row.count),
+          turn: mapSessionTurnForExecution({
+            ...fence.turn,
+            toolspaceCallCount: Number(row.count),
+          }),
+        };
+      }),
+  );
 }
 
 function normalizeEventSequence(value: number | undefined, fallback: number): number {
@@ -14937,6 +15076,47 @@ export async function registerPendingSessionToolCall(
           })
           .returning({ id: schema.sessionPendingToolCalls.id });
         return { accepted: true, registered: inserted.length === 1 };
+      }),
+  );
+}
+
+/**
+ * Clear one completed Toolspace receipt after its attempt-fenced output event is
+ * durable. If control already replaced the attempt, its settlement transaction
+ * owns the receipt and will retain an explicit outcome-unknown or the durable
+ * output event instead.
+ */
+export async function clearPendingSessionToolspaceCall(
+  db: Database,
+  input: Omit<PendingSessionToolCallInput, "callType" | "callItem">,
+): Promise<{ accepted: boolean; cleared: boolean }> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const fence = await lockTurnAttemptWriteFenceTx(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+          executionGeneration: input.executionGeneration,
+          attemptId: input.attemptId,
+        });
+        if (!fence.allowed) return { accepted: false, cleared: false };
+        const deleted = await tx
+          .delete(schema.sessionPendingToolCalls)
+          .where(
+            and(
+              eq(schema.sessionPendingToolCalls.workspaceId, input.workspaceId),
+              eq(schema.sessionPendingToolCalls.sessionId, input.sessionId),
+              eq(schema.sessionPendingToolCalls.turnId, input.turnId),
+              eq(schema.sessionPendingToolCalls.attemptId, input.attemptId),
+              eq(schema.sessionPendingToolCalls.callId, input.callId),
+              eq(schema.sessionPendingToolCalls.callType, "toolspace_call"),
+            ),
+          )
+          .returning({ id: schema.sessionPendingToolCalls.id });
+        return { accepted: true, cleared: deleted.length === 1 };
       }),
   );
 }
@@ -21963,8 +22143,24 @@ export async function claimSessionWorkForAttempt(
         if (unquiescedInterruption) {
           return { action: "unclaimed", reason: "control-pending" };
         }
-        const registerAttempt = async (turn: typeof schema.sessionTurns.$inferSelect) =>
-          await registerSessionTurnAttemptClaim(tx as unknown as Database, {
+        const registerAttempt = async (turn: typeof schema.sessionTurns.$inferSelect) => {
+          const policyRows = await tx
+            .select({
+              serverId: schema.sessionMcpServers.serverId,
+              requireApproval: schema.sessionMcpServers.requireApproval,
+            })
+            .from(schema.sessionMcpServers)
+            .where(
+              and(
+                eq(schema.sessionMcpServers.workspaceId, workspaceId),
+                eq(schema.sessionMcpServers.sessionId, sessionId),
+              ),
+            )
+            .orderBy(asc(schema.sessionMcpServers.serverId));
+          const mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy> = Object.fromEntries(
+            policyRows.map((row) => [row.serverId, row.requireApproval ?? false]),
+          );
+          return await registerSessionTurnAttemptClaim(tx as unknown as Database, {
             id: input.attemptId,
             accountId: session.accountId,
             workspaceId,
@@ -21975,7 +22171,9 @@ export async function claimSessionWorkForAttempt(
             temporalWorkflowRunId: input.workflowRunId,
             temporalActivityId: input.dispatchId,
             verifiedControlRevision: Number(workspaceControl.revision),
+            mcpApprovalPolicies,
           });
+        };
         if (session.activeTurnId !== null) {
           const [activeTurnPreview] = await tx
             .select()
@@ -25570,6 +25768,57 @@ export async function getSessionTurn(
   });
 }
 
+/**
+ * Resolve the exact currently executable turn/attempt from authoritative
+ * pointers in one query. This avoids treating a stale session preview as proof
+ * that no attempt exists during an atomic claim transition.
+ */
+export async function getActiveSessionTurnForExecution(
+  db: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<SessionTurnForExecution | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({ turn: schema.sessionTurns })
+      .from(schema.sessions)
+      .innerJoin(
+        schema.sessionTurns,
+        and(
+          eq(schema.sessionTurns.workspaceId, schema.sessions.workspaceId),
+          eq(schema.sessionTurns.id, schema.sessions.activeTurnId),
+        ),
+      )
+      .innerJoin(
+        schema.sessionTurnAttempts,
+        and(
+          eq(schema.sessionTurnAttempts.workspaceId, schema.sessionTurns.workspaceId),
+          eq(schema.sessionTurnAttempts.id, schema.sessionTurns.activeAttemptId),
+        ),
+      )
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, workspaceId),
+          eq(schema.sessions.id, sessionId),
+          eq(schema.sessionTurns.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.sessionId, sessionId),
+          eq(schema.sessionTurnAttempts.turnId, schema.sessionTurns.id),
+          inArray(schema.sessionTurnAttempts.state, ["claimed", "running"]),
+          inArray(schema.sessionTurns.status, ["running", "recovering", "waiting_capacity"]),
+          sql`not exists (
+            select 1
+            from ${schema.sessionAttemptInterruptions} interruption
+            where interruption.workspace_id = ${workspaceId}
+              and interruption.attempt_id = ${schema.sessionTurnAttempts.id}
+              and interruption.state in ('pending', 'delivered', 'acknowledged')
+          )`,
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionTurnForExecution(row.turn) : null;
+  });
+}
+
 export async function getSessionTurnForAttempt(
   db: Database,
   workspaceId: string,
@@ -27166,6 +27415,10 @@ type LockedSessionUpdateContext = {
   updateSessionMcpServerCredentials: (
     updates: UpdateSessionMcpServerCredentialsInput[],
   ) => Promise<UpdateSessionMcpServerCredentialsResult>;
+  updateSessionMcpApprovalPolicy: (
+    serverId: string,
+    requireApproval: SessionMcpApprovalPolicy,
+  ) => Promise<UpdateSessionMcpApprovalPolicyResult>;
   listPendingSessionTurns: () => Promise<SessionTurn[]>;
 };
 
@@ -27217,6 +27470,13 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               workspaceId,
               sessionId,
               updates,
+            }),
+          updateSessionMcpApprovalPolicy: async (serverId, requireApproval) =>
+            await updateSessionMcpApprovalPolicyInTransaction(tx, {
+              workspaceId,
+              sessionId,
+              serverId,
+              requireApproval,
             }),
           listPendingSessionTurns: async () => {
             const rows = await tx

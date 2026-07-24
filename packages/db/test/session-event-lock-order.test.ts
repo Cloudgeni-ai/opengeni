@@ -134,10 +134,12 @@ async function seedRunningSession(
       insert into session_turn_attempts (
         id, account_id, workspace_id, session_id, turn_id,
         execution_generation, state, temporal_workflow_id,
-        temporal_workflow_run_id, temporal_activity_id, verified_control_revision
+        temporal_workflow_run_id, temporal_activity_id, verified_control_revision,
+        mcp_approval_policies
       ) values (
         ${attemptId}, ${owner.accountId}, ${owner.workspaceId}, ${sessionId}, ${turnId},
-        1, 'running', ${workflowId}, ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0
+        1, 'running', ${workflowId}, ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
+        '{}'::jsonb
       )
     `;
     await tx`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;

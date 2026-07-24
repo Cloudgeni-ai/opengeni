@@ -118,10 +118,11 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
       insert into session_turn_attempts (
         id, account_id, workspace_id, session_id, turn_id, execution_generation,
         state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision
+        verified_control_revision, mcp_approval_policies
       ) values (
         ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 0,
-        'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0
+        'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0,
+        '{}'::jsonb
       )`;
     await transaction`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
   });

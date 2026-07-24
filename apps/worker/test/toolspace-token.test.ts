@@ -6,6 +6,12 @@ import { mintSandboxToolspaceToken, sandboxEnvironmentForRun } from "../src/acti
 const accountId = "11111111-1111-4111-8111-111111111111";
 const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
+const authority = {
+  sessionId,
+  turnId: "44444444-4444-4444-8444-444444444444",
+  attemptId: "55555555-5555-4555-8555-555555555555",
+  executionGeneration: 1,
+};
 
 describe("toolspace token mint and sandbox delivery pointers", () => {
   test("renewal preserves frozen authority while advancing the signed expiry", async () => {
@@ -18,15 +24,13 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
     const first = await mintSandboxToolspaceToken(
       settings,
       { accountId, workspaceId },
-      sessionId,
-      "run-1",
+      authority,
       firstNow,
     );
     const second = await mintSandboxToolspaceToken(
       settings,
       { accountId, workspaceId },
-      sessionId,
-      "run-1",
+      authority,
       secondNow,
     );
 
@@ -56,8 +60,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 
@@ -79,8 +82,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 
@@ -100,10 +102,13 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
     expect(payload).toMatchObject({
       accountId,
       workspaceId,
-      subjectId: "sandbox:run-1",
+      subjectId: `sandbox:${authority.turnId}`,
       subjectLabel: "sandbox toolspace",
       permissions: ["toolspace:call"],
       sessionId,
+      turnId: authority.turnId,
+      attemptId: authority.attemptId,
+      executionGeneration: authority.executionGeneration,
     });
   });
 
@@ -126,8 +131,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 
@@ -157,8 +161,7 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
       {},
       {
         scope: { accountId, workspaceId },
-        sessionId,
-        runId: "run-1",
+        toolspaceAuthority: authority,
       },
     );
 

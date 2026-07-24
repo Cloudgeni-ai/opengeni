@@ -32,8 +32,13 @@ import {
   RepositoryResourceRef,
   ResourceRef,
   SessionBusMessage,
+  SESSION_MCP_APPROVAL_POLICY_MAX_BYTES,
+  SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES,
+  SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES,
+  SESSION_MCP_SERVERS_MAX,
   SessionMcpServerMetadata,
   SubmitHumanInputResponseRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
   isClearedRunStateBlob,
@@ -352,12 +357,69 @@ describe("contracts", () => {
       url: "https://crm.example/mcp",
       headerNames: ["Authorization"],
       credentialVersion: 2,
+      requireApproval: false,
       connectionRef: null,
     });
     expect(() =>
       SessionMcpServerMetadata.parse({
         ...metadata,
         headers: { Authorization: "Bearer must-not-echo" },
+      }),
+    ).toThrow();
+  });
+
+  test("canonicalizes and bounds large selective MCP approval policies", () => {
+    const requireApproval = Array.from({ length: 245 }, (_, index) => `write_tool_${index}`);
+    expect(
+      UpdateSessionMcpApprovalPolicyRequest.parse({ requireApproval }).requireApproval,
+    ).toEqual([...requireApproval].sort());
+    expect(
+      UpdateSessionMcpApprovalPolicyRequest.parse({
+        requireApproval: ["write_z", "write_a", "write_z"],
+      }).requireApproval,
+    ).toEqual(["write_a", "write_z"]);
+    expect(() =>
+      UpdateSessionMcpApprovalPolicyRequest.parse({
+        requireApproval: Array.from(
+          { length: SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES + 1 },
+          (_, index) => `tool_${index}`,
+        ),
+      }),
+    ).toThrow();
+    expect(() =>
+      UpdateSessionMcpApprovalPolicyRequest.parse({
+        requireApproval: ["x".repeat(SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES + 1)],
+      }),
+    ).toThrow();
+    const namesNeededToExceedPolicyBytes =
+      Math.floor(SESSION_MCP_APPROVAL_POLICY_MAX_BYTES / SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES) +
+      1;
+    expect(() =>
+      UpdateSessionMcpApprovalPolicyRequest.parse({
+        requireApproval: Array.from({ length: namesNeededToExceedPolicyBytes }, (_, index) =>
+          `${index}:`.padEnd(SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES, "x"),
+        ),
+      }),
+    ).toThrow();
+  });
+
+  test("bounds the number of per-session MCP servers", () => {
+    const server = (index: number) => ({
+      id: `server_${index}`,
+      url: `https://tools-${index}.example.test/mcp`,
+    });
+    expect(
+      CreateSessionRequest.parse({
+        initialMessage: "bounded server set",
+        mcpServers: Array.from({ length: SESSION_MCP_SERVERS_MAX }, (_, index) => server(index)),
+      }).mcpServers,
+    ).toHaveLength(SESSION_MCP_SERVERS_MAX);
+    expect(() =>
+      CreateSessionRequest.parse({
+        initialMessage: "too many servers",
+        mcpServers: Array.from({ length: SESSION_MCP_SERVERS_MAX + 1 }, (_, index) =>
+          server(index),
+        ),
       }),
     ).toThrow();
   });

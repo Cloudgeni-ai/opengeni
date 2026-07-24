@@ -134,11 +134,12 @@ intent. See [`context-compaction.md`](context-compaction.md).
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
 trigger, monotonic dispatch generation, verified control revision, and write
-lease. A real Temporal activity retry retains the activity id; a re-dispatch
-creates a new attempt. Every event, model-history write, run-state write,
-compaction transition, tool receipt, and terminal settlement must match that
-attempt. A typed schedule-to-start timeout is the only no-attempt recovery case
-because its activity never ran.
+lease. The same claim snapshots every per-session MCP approval policy under the
+session lock. A real Temporal activity retry retains the activity id; a
+re-dispatch creates a new attempt and captures the then-current policy. Every
+event, model-history write, run-state write, compaction transition, tool receipt,
+and terminal settlement must match that attempt. A typed schedule-to-start
+timeout is the only no-attempt recovery case because its activity never ran.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -269,7 +270,8 @@ envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
-run; a late result is retained only as rejected evidence. The workflow then
+run; this includes Toolspace calls, whose pending receipt is written before the
+remote request. A late result is retained only as rejected evidence. The workflow then
 creates a fresh attempt for that same turn on a healthy worker and reconstructs
 model input from durable model history and tool-call lineage. At most the
 single in-flight model step is lost, the same bound as a crash. This is an

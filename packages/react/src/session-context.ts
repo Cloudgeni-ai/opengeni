@@ -2,6 +2,7 @@ import type { StreamConnectionState, WorkspaceControlEvent } from "@opengeni/sdk
 import { createContext, useContext } from "react";
 import type {
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionMcpApprovalPolicyClientLike,
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
@@ -37,6 +38,11 @@ export type EmbeddedSessionClientOverride = {
 
 export type EmbeddedHumanInputClientOverride = {
   client?: EmbeddedHumanInputSessionClientLike | undefined;
+  workspaceId?: string | undefined;
+};
+
+export type EmbeddedSessionMcpApprovalPolicyClientOverride = {
+  client?: EmbeddedSessionMcpApprovalPolicyClientLike | undefined;
   workspaceId?: string | undefined;
 };
 
@@ -114,6 +120,25 @@ export function useEmbeddedHumanInputSession(override: EmbeddedHumanInputClientO
   return {
     ...embedded,
     client: client as EmbeddedHumanInputSessionClientLike,
+  };
+}
+
+/** Resolve the approval-policy refinement without widening session-only hosts. */
+export function useEmbeddedSessionMcpApprovalPolicy(
+  override: EmbeddedSessionMcpApprovalPolicyClientOverride = {},
+): Omit<EmbeddedSessionContextValue, "client"> & {
+  client: EmbeddedSessionMcpApprovalPolicyClientLike;
+} {
+  const embedded = useEmbeddedSession(override);
+  const client = embedded.client as Partial<EmbeddedSessionMcpApprovalPolicyClientLike>;
+  if (typeof client.updateSessionMcpApprovalPolicy !== "function") {
+    throw new Error(
+      "@opengeni/react: useSessionMcpApprovalPolicy requires updateSessionMcpApprovalPolicy.",
+    );
+  }
+  return {
+    ...embedded,
+    client: client as EmbeddedSessionMcpApprovalPolicyClientLike,
   };
 }
 

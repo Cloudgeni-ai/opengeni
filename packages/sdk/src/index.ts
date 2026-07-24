@@ -260,6 +260,7 @@ export type {
   SessionSummary,
   LineageNode,
   SessionMcpCredentialUpdateInput,
+  SessionMcpApprovalPolicy,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
   // Per-surface capability cell aliases (views of SessionCapabilities).
@@ -366,6 +367,8 @@ export type {
   UpdateKnowledgeMemoryRequest,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
   UpdateVariableSetRequest,

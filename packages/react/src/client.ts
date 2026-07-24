@@ -151,3 +151,7 @@ export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionClientLike &
     OpenGeniClient,
     "listHumanInputRequests" | "getHumanInputRequest" | "submitHumanInputResponse"
   >;
+
+/** Session client refinement required only by MCP approval-policy hooks. */
+export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionClientLike &
+  Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;

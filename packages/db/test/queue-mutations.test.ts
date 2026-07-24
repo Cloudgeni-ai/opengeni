@@ -337,6 +337,7 @@ describe("canonical queue commands", () => {
         temporalWorkflowRunId: `run-${attemptId}`,
         temporalActivityId: `activity-${attemptId}`,
         verifiedControlRevision: 0,
+        mcpApprovalPolicies: {},
       });
       await db
         .update(schema.sessions)

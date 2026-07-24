@@ -1,4 +1,4 @@
-import type { McpServerConnectionRef } from "@opengeni/contracts";
+import type { McpServerConnectionRef, SessionMcpApprovalPolicy } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
@@ -1230,6 +1230,10 @@ export const sessionTurnAttempts = pgTable(
     verifiedControlRevision: bigint("verified_control_revision", {
       mode: "number",
     }).notNull(),
+    // Immutable policy snapshot captured under the session lock at claim.
+    mcpApprovalPolicies: jsonb("mcp_approval_policies")
+      .$type<Record<string, SessionMcpApprovalPolicy>>()
+      .notNull(),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
     closedAt: timestamp("closed_at", { withTimezone: true }),

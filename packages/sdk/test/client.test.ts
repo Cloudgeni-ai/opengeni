@@ -152,6 +152,35 @@ describe("OpenGeniClient", () => {
     );
   });
 
+  test("updates an existing session MCP approval policy through the dedicated route", async () => {
+    const response = {
+      server: {
+        id: "external_tools",
+        name: "External tools",
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
+        requireApproval: ["write_record"],
+        connectionRef: null,
+      },
+      effectiveFrom: "next_attempt" as const,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(
+      await client.updateSessionMcpApprovalPolicy(WORKSPACE_ID, SESSION_ID, "external_tools", {
+        requireApproval: ["write_record"],
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PATCH");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/mcp-servers/external_tools/approval-policy`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      requireApproval: ["write_record"],
+    });
+  });
+
   test("listEventPage round-trips monitoring filters and exact page headers", async () => {
     const event = makeEvent(42, "turn.completed", { result: "authoritative" });
     const body = JSON.stringify([event]);
