@@ -486,10 +486,10 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
   });
 
   test("(8) provider wait has a real wall deadline and the in-box owner is independently bounded", async () => {
-    let command = "";
+    const commands: string[] = [];
     const session = {
       execCommand: async ({ cmd }: { cmd: string }) => {
-        command = cmd;
+        commands.push(cmd);
         return [
           "Chunk ID: abc123",
           "Wall time: 0.0100 seconds",
@@ -514,19 +514,23 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect((thrown as DisplayStackError).stage).toBe("timeout");
     expect(elapsed).toBeGreaterThanOrEqual(80);
     expect(elapsed).toBeLessThan(500);
-    expect(command).toContain("timeout --signal=TERM");
-    expect(command).not.toContain("timeout --foreground");
-    expect(command).toContain("OPENGENI_DISPLAY_TIMEOUT");
+    expect(commands[0]).toContain("timeout --signal=TERM");
+    expect(commands[0]).not.toContain("timeout --foreground");
+    expect(commands[0]).toContain("OPENGENI_DISPLAY_TIMEOUT");
   });
 
   test("(8a) a timed-out provider call is fenced before a retry can issue work", async () => {
     let resolveFirst!: (result: { output: string; exitCode: number }) => void;
-    let calls = 0;
+    let workCalls = 0;
     const events: string[] = [];
     const session = {
-      exec: async ({ signal }: { signal?: AbortSignal }) => {
-        calls += 1;
-        if (calls === 1) {
+      exec: async ({ cmd, signal }: { cmd: string; signal?: AbortSignal }) => {
+        if (cmd.includes("OPENGENI_DISPLAY_CLEANUP")) {
+          events.push("cleanup-issued");
+          return { output: "OPENGENI_DISPLAY_CLEANUP status=stopped", exitCode: 0 };
+        }
+        workCalls += 1;
+        if (workCalls === 1) {
           signal?.addEventListener("abort", () => events.push("provider-aborted"), {
             once: true,
           });
@@ -552,13 +556,50 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
 
     const retry = ensureDisplayStack(session, { timeoutMs: 500 });
     await Bun.sleep(20);
-    expect(calls).toBe(1);
-    expect(events).not.toContain("retry-issued");
+    expect(workCalls).toBe(2);
+    expect(events.indexOf("retry-issued")).toBeGreaterThan(events.indexOf("cleanup-issued"));
 
     resolveFirst({ output: "late stale result", exitCode: 0 });
     await retry;
-    expect(calls).toBe(2);
+    expect(workCalls).toBe(2);
     expect(events.indexOf("retry-issued")).toBeGreaterThan(events.indexOf("provider-aborted"));
+  });
+
+  test("(8a2) a fresh wrapper shares the physical fence and requires cleanup before retry", async () => {
+    const events: string[] = [];
+    let oldProcessAlive = true;
+
+    const makeSession = (wrapper: string) => ({
+      // This is the provider state identity, not the transient wrapper object.
+      state: { sandboxId: "stable-display-regression-box" },
+      exec: async ({ cmd, signal }: { cmd: string; signal?: AbortSignal }) => {
+        if (cmd.includes("OPENGENI_DISPLAY_CLEANUP")) {
+          oldProcessAlive = false;
+          events.push(`${wrapper}:cleanup`);
+          return { output: "OPENGENI_DISPLAY_CLEANUP status=stopped", exitCode: 0 };
+        }
+        events.push(`${wrapper}:work`);
+        if (wrapper === "first") {
+          signal?.addEventListener("abort", () => events.push("first:aborted"), { once: true });
+          return await new Promise<{ output: string; exitCode: number }>(() => undefined);
+        }
+        // The second wrapper is only safe to use after the first process-group
+        // cleanup has positively completed.
+        expect(oldProcessAlive).toBe(false);
+        return {
+          output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+          exitCode: 0,
+        };
+      },
+    });
+
+    await expect(ensureDisplayStack(makeSession("first"), { timeoutMs: 30 })).rejects.toMatchObject(
+      { stage: "timeout" },
+    );
+    expect(events).toContain("first:cleanup");
+
+    await ensureDisplayStack(makeSession("second"), { timeoutMs: 500 });
+    expect(events.indexOf("second:work")).toBeGreaterThan(events.indexOf("first:cleanup"));
   });
 
   test("(8b) a wall-clock jump cannot extend the monotonic provider deadline", async () => {
