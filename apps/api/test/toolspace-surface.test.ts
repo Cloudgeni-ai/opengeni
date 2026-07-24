@@ -32,6 +32,11 @@ import {
   createDb,
   createSession,
   createSessionMcpServers,
+  listSessionEvents,
+  mutateSessionControlInTransaction,
+  settleSessionAttemptInterruptions,
+  withWorkspaceRls,
+  type CreateSessionMcpServerInput,
   type Database,
   type DbClient,
 } from "@opengeni/db";
@@ -98,11 +103,14 @@ async function seedSession(input: {
   selects: string[];
   withActiveTurn: boolean;
   child?: boolean;
+  sessionMcpServers?: CreateSessionMcpServerInput[];
 }): Promise<{
   accountId: string;
   workspaceId: string;
   sessionId: string;
   rootSessionId: string;
+  turnId: string | null;
+  attemptId: string | null;
 }> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
@@ -132,38 +140,80 @@ async function seedSession(input: {
     sandboxBackend: "none",
     parentSessionId: root?.id ?? null,
   });
+  if (input.sessionMcpServers?.length) {
+    await createSessionMcpServers(db, {
+      accountId: account!.id,
+      workspaceId: workspace!.id,
+      sessionId: session.id,
+      servers: input.sessionMcpServers,
+    });
+  }
+  let attemptId: string | null = null;
+  let turnId: string | null = null;
   if (input.withActiveTurn) {
+    attemptId = crypto.randomUUID();
     const [turn] = await admin<{ id: string }[]>`
       insert into session_turns
         (account_id, workspace_id, session_id, trigger_event_id, temporal_workflow_id,
          status, position, prompt, model, reasoning_effort, sandbox_backend,
-         execution_generation, initiator_kind, initiator_subject_id, initiator_context)
+         execution_generation, initiator_kind, initiator_subject_id,
+         initiator_context)
       values
         (${account!.id}, ${workspace!.id}, ${session.id}, gen_random_uuid(), 'wf-1',
          'running', 0, 'hi', 'gpt-5.6-sol', 'medium', 'none',
          3, 'subject', 'host:user:77', '{"source":"host-test"}'::jsonb)
       returning id`;
-    await admin`update sessions set active_turn_id = ${turn!.id} where id = ${session.id}`;
+    turnId = turn!.id;
+    const policies = Object.fromEntries(
+      (input.sessionMcpServers ?? []).map((server) => [server.id, server.requireApproval ?? false]),
+    );
+    await admin`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) values (
+        ${attemptId}, ${account!.id}, ${workspace!.id}, ${session.id}, ${turn!.id}, 3,
+        'running', 'wf-1', ${`run-${attemptId}`}, ${`activity-${attemptId}`}, 0,
+        ${JSON.stringify(policies)}::jsonb
+      )`;
+    await admin`
+      update session_turns
+      set active_attempt_id = ${attemptId}
+      where id = ${turn!.id}`;
+    await admin`
+      update sessions
+      set active_turn_id = ${turn!.id}
+      where id = ${session.id}`;
   }
   return {
     accountId: account!.id,
     workspaceId: workspace!.id,
     sessionId: session.id,
     rootSessionId: root?.id ?? session.id,
+    turnId,
+    attemptId,
   };
 }
 
-function grantFor(
-  workspaceId: string,
-  sessionId: string,
-  accountId = crypto.randomUUID(),
-): AccessGrant {
+function grantFor(input: {
+  workspaceId: string;
+  sessionId: string;
+  accountId?: string;
+  turnId: string | null;
+  attemptId: string | null;
+}): AccessGrant {
   return {
-    workspaceId,
-    accountId,
+    workspaceId: input.workspaceId,
+    accountId: input.accountId ?? crypto.randomUUID(),
     subjectId: "sandbox:run-1",
     permissions: ["toolspace:call"],
-    metadata: { sessionId },
+    metadata: {
+      sessionId: input.sessionId,
+      turnId: input.turnId ?? crypto.randomUUID(),
+      attemptId: input.attemptId ?? crypto.randomUUID(),
+      executionGeneration: 3,
+    },
   } as AccessGrant;
 }
 
@@ -197,12 +247,7 @@ describe("prepareToolspaceMcpSurface", () => {
       selects: ["host-github"],
       withActiveTurn: true,
       child: true,
-    });
-    await createSessionMcpServers(db, {
-      accountId: seeded.accountId,
-      workspaceId: seeded.workspaceId,
-      sessionId: seeded.sessionId,
-      servers: [
+      sessionMcpServers: [
         {
           id: "host-github",
           url: server.url,
@@ -243,7 +288,7 @@ describe("prepareToolspaceMcpSurface", () => {
     } as unknown as ApiRouteDeps;
     const surface = await prepareToolspaceMcpSurface({
       deps,
-      grant: grantFor(seeded.workspaceId, seeded.sessionId, seeded.accountId),
+      grant: grantFor(seeded),
     });
     const tool = surface!.tools.find(
       (candidate) => candidate.name === "host-github__search_documents",
@@ -258,7 +303,7 @@ describe("prepareToolspaceMcpSurface", () => {
     expect(requests.every((request) => request.sessionId === seeded.sessionId)).toBe(true);
     expect(requests.every((request) => request.rootSessionId === seeded.rootSessionId)).toBe(true);
     expect(requests.every((request) => request.executionGeneration === 3)).toBe(true);
-    expect(requests.every((request) => request.attemptId === null)).toBe(true);
+    expect(requests.every((request) => request.attemptId === seeded.attemptId)).toBe(true);
     expect(requests.every((request) => request.callerSubjectId === "sandbox:run-1")).toBe(true);
     expect(
       requests.every(
@@ -277,13 +322,13 @@ describe("prepareToolspaceMcpSurface", () => {
 
   test("lists third-party tools but excludes first-party proxies from the surface", async () => {
     if (!available) return;
-    const { workspaceId, sessionId } = await seedSession({
+    const seeded = await seedSession({
       selects: ["thirdparty", "files", "opengeni"],
       withActiveTurn: true,
     });
     const surface = await prepareToolspaceMcpSurface({
       deps: makeDeps(200),
-      grant: grantFor(workspaceId, sessionId),
+      grant: grantFor(seeded),
     });
     expect(surface).not.toBeNull();
     const names = toolNames(surface!);
@@ -296,13 +341,13 @@ describe("prepareToolspaceMcpSurface", () => {
 
   test("does not dial upstreams (empty surface) when there is no active turn", async () => {
     if (!available) return;
-    const { workspaceId, sessionId } = await seedSession({
+    const seeded = await seedSession({
       selects: ["thirdparty"],
       withActiveTurn: false,
     });
     const surface = await prepareToolspaceMcpSurface({
       deps: makeDeps(200),
-      grant: grantFor(workspaceId, sessionId),
+      grant: grantFor(seeded),
     });
     expect(surface!.tools).toHaveLength(0);
     await surface!.close();
@@ -310,12 +355,12 @@ describe("prepareToolspaceMcpSurface", () => {
 
   test("distinguishes no-active-turn from budget-exhausted on call", async () => {
     if (!available) return;
-    const { workspaceId, sessionId } = await seedSession({
+    const seeded = await seedSession({
       selects: ["thirdparty"],
       withActiveTurn: true,
     });
     const deps = makeDeps(1);
-    const grant = grantFor(workspaceId, sessionId);
+    const grant = grantFor(seeded);
     const surface = await prepareToolspaceMcpSurface({ deps, grant });
     const tool = surface!.tools.find((t) => t.name === "thirdparty__search_documents")!;
     expect(tool).toBeDefined();
@@ -332,13 +377,156 @@ describe("prepareToolspaceMcpSurface", () => {
     );
 
     // Clear the active turn: the message flips to the no-active-turn variant.
-    await admin`update sessions set active_turn_id = null where id = ${sessionId}`;
+    await admin`update sessions set active_turn_id = null where id = ${seeded.sessionId}`;
     const noTurn = await tool.call({ query: "later" });
     expect(noTurn.isError).toBe(true);
     expect((noTurn.content?.[0] as { text?: string } | undefined)?.text).toContain(
       "no active turn",
     );
     await surface!.close();
+  }, 60_000);
+
+  test("a stale surface cannot spend or execute under a successor attempt", async () => {
+    if (!available) return;
+    const seeded = await seedSession({
+      selects: ["thirdparty"],
+      withActiveTurn: true,
+    });
+    const deps = makeDeps(200);
+    const staleSurface = await prepareToolspaceMcpSurface({
+      deps,
+      grant: grantFor(seeded),
+    });
+    const staleTool = staleSurface!.tools.find(
+      (tool) => tool.name === "thirdparty__search_documents",
+    );
+    expect(staleTool).toBeDefined();
+
+    const successorAttemptId = crypto.randomUUID();
+    await admin`
+      update session_turn_attempts
+      set state = 'closed', outcome = 'interrupted_recoverable', closed_at = now()
+      where id = ${seeded.attemptId}`;
+    await admin`
+      insert into session_turn_attempts (
+        id, account_id, workspace_id, session_id, turn_id, execution_generation,
+        state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
+        verified_control_revision, mcp_approval_policies
+      ) values (
+        ${successorAttemptId}, ${seeded.accountId}, ${seeded.workspaceId},
+        ${seeded.sessionId}, ${seeded.turnId}, 3, 'running', 'wf-1',
+        ${`run-${successorAttemptId}`}, ${`activity-${successorAttemptId}`}, 0,
+        '{}'::jsonb
+      )`;
+    await admin`
+      update session_turns
+      set active_attempt_id = ${successorAttemptId}
+      where id = ${seeded.turnId}`;
+
+    const callsBeforeStaleUse = upstream!.calls.length;
+    const rejected = await staleTool!.call({ query: "must not cross attempts" });
+    expect(rejected.isError).toBe(true);
+    expect((rejected.content?.[0] as { text?: string } | undefined)?.text).toContain(
+      "no active turn",
+    );
+    expect(upstream!.calls).toHaveLength(callsBeforeStaleUse);
+
+    const successorSurface = await prepareToolspaceMcpSurface({
+      deps,
+      grant: grantFor({ ...seeded, attemptId: successorAttemptId }),
+    });
+    const successorTool = successorSurface!.tools.find(
+      (tool) => tool.name === "thirdparty__search_documents",
+    );
+    const accepted = await successorTool!.call({ query: "successor owns this" });
+    expect(accepted.isError).toBeFalsy();
+    expect(upstream!.calls).toHaveLength(callsBeforeStaleUse + 1);
+    await staleSurface!.close();
+    await successorSurface!.close();
+  }, 60_000);
+
+  test("an interrupted in-flight call records unknown and rejects its late output", async () => {
+    if (!available) return;
+    let markStarted: (() => void) | null = null;
+    let releaseCall: (() => void) | null = null;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCall = resolve;
+    });
+    const server = startTestMcpServer({
+      beforeToolCall: async () => {
+        markStarted?.();
+        await gate;
+      },
+    });
+    const deps = {
+      settings: testSettings({
+        toolspaceEnabled: true,
+        toolspaceMaxCallsPerTurn: 200,
+        mcpServers: [{ id: "gated", url: server.url, cacheToolsList: false }],
+      }),
+      db,
+      bus: new MemoryEventBus(),
+      observability,
+    } as unknown as ApiRouteDeps;
+    const seeded = await seedSession({
+      selects: ["gated"],
+      withActiveTurn: true,
+    });
+    const surface = await prepareToolspaceMcpSurface({
+      deps,
+      grant: grantFor(seeded),
+    });
+    const tool = surface!.tools.find((candidate) => candidate.name === "gated__search_documents");
+    expect(tool).toBeDefined();
+
+    const pendingCall = tool!.call({ query: "in flight" });
+    await started;
+    const paused = await withWorkspaceRls(db, seeded.workspaceId, (scopedDb) =>
+      scopedDb.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as unknown as Database, {
+          accountId: seeded.accountId,
+          workspaceId: seeded.workspaceId,
+          sessionId: seeded.sessionId,
+          actor: { type: "human", subjectId: "host:user:77" },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+          reason: "test interruption",
+        }),
+      ),
+    );
+    expect(paused.interruptionCount).toBe(1);
+    const settlement = await settleSessionAttemptInterruptions(
+      db,
+      seeded.workspaceId,
+      seeded.sessionId,
+      seeded.attemptId!,
+    );
+    const unknownOutput = settlement.events.find((event) => event.type === "agent.toolCall.output");
+    expect(unknownOutput?.payload).toMatchObject({
+      recovery: {
+        interrupted: true,
+        outcome: "unknown",
+        reason: "session_pause",
+      },
+    });
+
+    releaseCall?.();
+    await pendingCall;
+    const events = await listSessionEvents(db, seeded.workspaceId, seeded.sessionId, 0, 100);
+    const authoritativeOutputs = events.filter((event) => event.type === "agent.toolCall.output");
+    expect(authoritativeOutputs).toHaveLength(1);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "turn.event.rejected_late" &&
+          (event.payload as { rejectedType?: unknown }).rejectedType === "agent.toolCall.output",
+      ),
+    ).toBe(true);
+    await surface!.close();
+    server.close();
   }, 60_000);
 
   test("returns a generic error (never the raw upstream error) when the upstream call fails", async () => {
@@ -355,13 +543,13 @@ describe("prepareToolspaceMcpSurface", () => {
       bus: new MemoryEventBus(),
       observability,
     } as unknown as ApiRouteDeps;
-    const { workspaceId, sessionId } = await seedSession({
+    const seeded = await seedSession({
       selects: ["flaky"],
       withActiveTurn: true,
     });
     const surface = await prepareToolspaceMcpSurface({
       deps,
-      grant: grantFor(workspaceId, sessionId),
+      grant: grantFor(seeded),
     });
     const tool = surface!.tools.find((t) => t.name === "flaky__search_documents")!;
     expect(tool).toBeDefined();

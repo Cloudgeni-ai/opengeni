@@ -40,6 +40,7 @@ import {
   recordUsageEvent,
   requireFile,
   requireSession,
+  saveRunState,
   setSessionGoalStatus,
   sumUsageQuantity,
   updateScheduledTask,
@@ -2621,10 +2622,23 @@ describe("API component integration", () => {
         mcpSettings,
         false,
       );
+      const attemptId = crypto.randomUUID();
+      const claimed = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
+        sessionId: session.id,
+        workflowId: `session-${session.id}`,
+        workflowRunId: crypto.randomUUID(),
+        attemptId,
+        dispatchId: `dispatch-${crypto.randomUUID()}`,
+        trigger: { kind: "next" },
+      });
+      if (claimed.action !== "claimed") {
+        throw new Error(`failed to claim connectionRef fixture: ${claimed.reason}`);
+      }
       const runSettings = await settingsWithSessionMcpServersForRun(
         dbClient.db,
         workspaceId,
         session.id,
+        attemptId,
         capabilitySettings,
       );
       const resolveCredential = buildConnectionTokenResolver(dbClient.db, runSettings);
@@ -2667,7 +2681,7 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
     });
-    const capabilityId = `skill:test-${crypto.randomUUID()}`;
+    const capabilityId = `custom-skill:test-${crypto.randomUUID()}`;
     const workspaceId = await defaultWorkspaceId(app);
     const created = await app.request(workspacePath(workspaceId, "/capabilities"), {
       method: "POST",
@@ -4008,6 +4022,19 @@ describe("API component integration", () => {
     if (approvalWaitClaim.action !== "claimed") {
       throw new Error(`failed to claim approval fixture: ${approvalWaitClaim.reason}`);
     }
+    const approvalSession = await requireSession(dbClient.db, workspaceId, session.id);
+    expect(
+      await saveRunState(dbClient.db, {
+        accountId: approvalSession.accountId,
+        workspaceId,
+        sessionId: session.id,
+        turnId: approvalWaitClaim.turn.id,
+        expectedExecutionGeneration: approvalWaitClaim.turn.executionGeneration,
+        expectedAttemptId: approvalWaitAttemptId,
+        serializedRunState: "api-integration-approval-state",
+        pendingApprovals: [{ id: "x" }],
+      }),
+    ).toBe(true);
     await applySessionTurnSettlement(dbClient.db, workspaceId, {
       sessionId: session.id,
       turnId: approvalWaitClaim.turn.id,
@@ -4720,11 +4747,14 @@ describe("API component integration", () => {
     expect(connectedSession.status).toBe(202);
     const connected = (await connectedSession.json()) as { id: string };
 
-    const refreshedContext = await defaultAccessContext(app);
-    const workspaceGrant = refreshedContext.workspaceGrants.find(
-      (candidate) => candidate.workspaceId === secondWorkspace.id,
+    const initialWorkspaceGrant = context.workspaceGrants.find(
+      (candidate) => candidate.workspaceId === firstWorkspaceId,
     );
-    expect(workspaceGrant).toBeTruthy();
+    expect(initialWorkspaceGrant).toBeTruthy();
+    const workspaceGrant = {
+      ...initialWorkspaceGrant!,
+      workspaceId: secondWorkspace.id,
+    };
     const tokenMcp = buildOpenGeniMcpServer(
       {
         settings,
@@ -4771,6 +4801,7 @@ describe("API component integration", () => {
     const delegationSecret = "test-configured-github-browser-delegation-secret";
     const grant = await bootstrapMcpGrant(dbClient.db);
     const authorization = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: grant.subjectId,
       permissions: [...grant.permissions, "github:manage"],
     });
     let authorizeUserCalls = 0;
@@ -7305,16 +7336,19 @@ describe("API component integration", () => {
         url: "https://crm.example/mcp",
         headerNames: ["Authorization"],
         credentialVersion: 1,
+        requireApproval: false,
         connectionRef: null,
       },
     ]);
     expect(session.mcpServers[0]?.headers).toBeUndefined();
 
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
+    const attemptId = await claimCreatedSessionForRun(dbClient.db, grant, session.id);
     const runServers = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
       session.id,
+      attemptId,
       key,
     );
     expect(runServers[0]?.headers).toEqual({ Authorization: createSecret });
@@ -7376,6 +7410,7 @@ describe("API component integration", () => {
       dbClient.db,
       grant.workspaceId,
       session.id,
+      attemptId,
       key,
     );
     expect(afterRotation[0]?.headers).toEqual({
@@ -7541,12 +7576,15 @@ describe("API component integration", () => {
     expect(hostSession.mcpServers[0]).toMatchObject({
       headerNames: [],
       credentialVersion: 1,
+      requireApproval: false,
       connectionRef: hostConnectionRef,
     });
+    const hostAttemptId = await claimCreatedSessionForRun(dbClient.db, grant, hostSession.id);
     const hostRunServers = await listSessionMcpServersForRun(
       dbClient.db,
       grant.workspaceId,
       hostSession.id,
+      hostAttemptId,
       null,
     );
     expect(hostRunServers[0]).toMatchObject({
@@ -7582,10 +7620,14 @@ describe("API component integration", () => {
     let toolspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     let workspaceClient: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
-      const { session, turnId } = await createToolspaceMcpSession(dbClient.db, grant, {
-        url: upstream.url,
-        headers: { authorization: requiredAuthorization },
-      });
+      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
+        dbClient.db,
+        grant,
+        {
+          url: upstream.url,
+          headers: { authorization: requiredAuthorization },
+        },
+      );
       await dbClient.db.execute(dbSql`
         update workspaces set settings = '{"memoryEnabled":true}'::jsonb where id = ${grant.workspaceId}
       `);
@@ -7594,6 +7636,9 @@ describe("API component integration", () => {
         subjectId: "sandbox:run-proxy",
         permissions: ["toolspace:call"],
         sessionId: session.id,
+        turnId,
+        attemptId,
+        executionGeneration,
       });
       toolspaceClient = await prepareToolspaceClient(mcpUrl, toolspaceAuth);
 
@@ -7751,15 +7796,22 @@ describe("API component integration", () => {
     });
     let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
-      const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
-        url: upstream.url,
-        requireApproval: ["search_documents"],
-      });
+      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
+        dbClient.db,
+        grant,
+        {
+          url: upstream.url,
+          requireApproval: ["search_documents"],
+        },
+      );
       const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
       const auth = await signDelegatedBearer(delegationSecret, grant, {
         subjectId: "sandbox:approval",
         permissions: ["toolspace:call"],
         sessionId: session.id,
+        turnId,
+        attemptId,
+        executionGeneration,
       });
       client = await prepareToolspaceClient(mcpUrl, auth);
       const listed = await client.mcpServers[0]!.listTools();
@@ -7806,14 +7858,21 @@ describe("API component integration", () => {
     });
     let client: Awaited<ReturnType<typeof prepareToolspaceClient>> | null = null;
     try {
-      const { session } = await createToolspaceMcpSession(dbClient.db, grant, {
-        url: upstream.url,
-      });
+      const { session, turnId, attemptId, executionGeneration } = await createToolspaceMcpSession(
+        dbClient.db,
+        grant,
+        {
+          url: upstream.url,
+        },
+      );
       const mcpUrl = `http://127.0.0.1:${server.port}/v1/workspaces/${grant.workspaceId}/mcp`;
       const auth = await signDelegatedBearer(delegationSecret, grant, {
         subjectId: "sandbox:budget",
         permissions: ["toolspace:call"],
         sessionId: session.id,
+        turnId,
+        attemptId,
+        executionGeneration,
       });
       client = await prepareToolspaceClient(mcpUrl, auth);
       expect(
@@ -7891,17 +7950,12 @@ describe("API component integration", () => {
     expect(created.status).toBe(202);
     const session = (await created.json()) as { id: string };
     const key = new Uint8Array(Buffer.from(environmentsTestKey, "base64"));
-    const beforeCredentials = await listSessionMcpServersForRun(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      key,
-    );
-    expect(beforeCredentials[0]?.headers).toEqual({
+    const beforeCredentials = await readStoredSessionMcpServer(dbClient.db, session.id, "crm", key);
+    expect(beforeCredentials?.headers).toEqual({
       Authorization: createSecret,
       "X-Initial": "1",
     });
-    expect(beforeCredentials[0]?.credentialVersion).toBe(1);
+    expect(beforeCredentials?.credentialVersion).toBe(1);
 
     await setSessionStatus(dbClient.db, grant.workspaceId, session.id, "cancelled", null);
     const beforeEvents = await listSessionEvents(
@@ -7944,17 +7998,12 @@ describe("API component integration", () => {
     expect(rejected.status).toBe(409);
     expect(await rejected.text()).toContain("Cancelled session cannot accept work");
 
-    const afterCredentials = await listSessionMcpServersForRun(
-      dbClient.db,
-      grant.workspaceId,
-      session.id,
-      key,
-    );
-    expect(afterCredentials[0]?.headers).toEqual({
+    const afterCredentials = await readStoredSessionMcpServer(dbClient.db, session.id, "crm", key);
+    expect(afterCredentials?.headers).toEqual({
       Authorization: createSecret,
       "X-Initial": "1",
     });
-    expect(afterCredentials[0]?.credentialVersion).toBe(1);
+    expect(afterCredentials?.credentialVersion).toBe(1);
     expect(
       await listSessionEvents(dbClient.db, grant.workspaceId, session.id, 0, 100),
     ).toHaveLength(beforeEvents.length);
@@ -8709,6 +8758,54 @@ async function bootstrapMcpGrant(db: ReturnType<typeof createDb>["db"]) {
 
 type TestWorkspaceGrant = AccessContext["workspaceGrants"][number];
 
+async function claimCreatedSessionForRun(
+  db: ReturnType<typeof createDb>["db"],
+  grant: TestWorkspaceGrant,
+  sessionId: string,
+): Promise<string> {
+  const attemptId = crypto.randomUUID();
+  const claimed = await claimSessionWorkForAttempt(db, grant.workspaceId, {
+    sessionId,
+    workflowId: `session-${sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `dispatch-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claimed.action !== "claimed") {
+    throw new Error(`failed to claim session ${sessionId}: ${claimed.reason}`);
+  }
+  return attemptId;
+}
+
+async function readStoredSessionMcpServer(
+  db: ReturnType<typeof createDb>["db"],
+  sessionId: string,
+  serverId: string,
+  encryptionKey: Uint8Array,
+): Promise<{ headers: Record<string, string>; credentialVersion: number } | null> {
+  const [row] = await db.execute<{
+    headers_encrypted: Record<string, string>;
+    credential_version: number;
+  }>(dbSql`
+    select headers_encrypted, credential_version
+    from session_mcp_servers
+    where session_id = ${sessionId} and server_id = ${serverId}
+    limit 1
+  `);
+  return row
+    ? {
+        headers: Object.fromEntries(
+          Object.entries(row.headers_encrypted).map(([name, value]) => [
+            name,
+            decryptEnvironmentValue(encryptionKey, value),
+          ]),
+        ),
+        credentialVersion: Number(row.credential_version),
+      }
+    : null;
+}
+
 async function signDelegatedBearer(
   secret: string,
   grant: TestWorkspaceGrant,
@@ -8716,6 +8813,9 @@ async function signDelegatedBearer(
     subjectId: string;
     permissions: Permission[];
     sessionId?: string;
+    turnId?: string;
+    attemptId?: string;
+    executionGeneration?: number;
   },
 ): Promise<string> {
   return `Bearer ${await signDelegatedAccessToken(secret, {
@@ -8725,6 +8825,9 @@ async function signDelegatedBearer(
     subjectLabel: input.subjectId,
     permissions: input.permissions,
     ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+    ...(input.executionGeneration ? { executionGeneration: input.executionGeneration } : {}),
     exp: Math.floor(Date.now() / 1000) + 300,
   })}`;
 }
@@ -8824,18 +8927,24 @@ async function createToolspaceMcpSession(
     delivery: "send",
     reasoningEffortFallback: "medium",
   });
+  const attemptId = crypto.randomUUID();
   const running = await claimSessionWorkForAttempt(db, grant.workspaceId, {
     sessionId: session.id,
     workflowId: `session-${session.id}`,
     workflowRunId: crypto.randomUUID(),
-    attemptId: crypto.randomUUID(),
+    attemptId,
     dispatchId: `dispatch-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
   });
   if (running.action !== "claimed" || running.turn.id !== queued.turn.id) {
     throw new Error("failed to claim the toolspace fixture turn");
   }
-  return { session, turnId: running.turn.id };
+  return {
+    session,
+    turnId: running.turn.id,
+    attemptId,
+    executionGeneration: running.turn.executionGeneration,
+  };
 }
 
 async function readSseEvents(

@@ -165,6 +165,7 @@ describe("recursive session control algebra", () => {
         temporalWorkflowRunId: `run-${attemptId}`,
         temporalActivityId: `activity-${attemptId}`,
         verifiedControlRevision: 0,
+        mcpApprovalPolicies: {},
       });
     });
 

@@ -37,6 +37,7 @@ import {
   handleAuthorizationRequest,
   type AuthCalloutDeps,
 } from "../../apps/api/src/sandbox/auth-callout";
+import { freePort } from "@opengeni/testing";
 
 // ── A minimal in-memory DB stand-in for getEnrollment ────────────────────────
 // The responder only calls db.getEnrollment via the @opengeni/db helper, which runs
@@ -100,7 +101,9 @@ function makeDeps(callout: {
   return {
     // The db is unused beyond getEnrollment (mocked above).
     db: {} as AuthCalloutDeps["db"],
-    settings: { enrollmentSigningSecret: SIGNING_SECRET } as AuthCalloutDeps["settings"],
+    settings: {
+      enrollmentSigningSecret: SIGNING_SECRET,
+    } as AuthCalloutDeps["settings"],
     callout,
   };
 }
@@ -124,7 +127,7 @@ interface RunningNats {
  */
 async function startNatsWithCallout(accountPublicKey: string): Promise<RunningNats> {
   const configDir = await mkdtemp(join(tmpdir(), "opengeni-authcallout-"));
-  const port = 14000 + Math.floor(Math.random() * 1000);
+  const [port, monitorPort] = await Promise.all([freePort(), freePort()]);
   // SINGLE-account (APP) server-config-mode auth_callout. THE load-bearing rule
   // (verified empirically against nats-server 2.10.x): every user in the callout
   // `account` that is NOT listed in `auth_users` is DELEGATED to the callout
@@ -143,7 +146,7 @@ async function startNatsWithCallout(accountPublicKey: string): Promise<RunningNa
   // permissions.
   const config = `
 port: ${port}
-http_port: ${port + 1}
+http_port: ${monitorPort}
 
 accounts {
   APP: {
@@ -183,7 +186,7 @@ authorization {
   let up = false;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://127.0.0.1:${port + 1}/healthz`);
+      const res = await fetch(`http://127.0.0.1:${monitorPort}/healthz`);
       if (res.ok) {
         up = true;
         break;
@@ -233,7 +236,12 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
 
     // Start the responder in-process as the callout `auth` user — the SAME
     // handleAuthorizationRequest the API boots, over a standalone connection.
-    const deps = makeDeps({ accountSeed, accountName: "APP", user: "auth", password: "auth" });
+    const deps = makeDeps({
+      accountSeed,
+      accountName: "APP",
+      user: "auth",
+      password: "auth",
+    });
     responder = await createResponderConnection(
       nats.url,
       { kind: "user-password", user: "auth", pass: "auth" },
@@ -256,7 +264,10 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
   //     agent.A.<id>.rpc, and a control-plane request/reply round-trips.
   test("(1) a valid bearer connects + round-trips agent.<ws>.<id>.rpc request/reply", async () => {
     const bearer = await bearerFor(WS_A, AGENT_A);
-    const agent: NatsConnection = await connect({ servers: nats.url, token: bearer });
+    const agent: NatsConnection = await connect({
+      servers: nats.url,
+      token: bearer,
+    });
     // The control plane connects as the privileged `auth` user (account-default
     // permissions — it may request agent.>).
     // The control plane connects as a REGULAR (non-callout) user in the SAME
@@ -306,7 +317,10 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
   //     workspace A is DENIED publish AND subscribe on workspace B's subtree.
   test("(2) ISOLATION: workspace A's agent is denied pub/sub on agent.B.>", async () => {
     const bearer = await bearerFor(WS_A, AGENT_A);
-    const agent: NatsConnection = await connect({ servers: nats.url, token: bearer });
+    const agent: NatsConnection = await connect({
+      servers: nats.url,
+      token: bearer,
+    });
     try {
       // PUBLISH to B's subject → a permissions violation (async error on the conn).
       const violations: string[] = [];
@@ -343,7 +357,9 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
       // connection observed a permissions violation OR the request fails.
       let reqErr: unknown;
       try {
-        await agent.request(foreignSubject, new TextEncoder().encode("x"), { timeout: 1_500 });
+        await agent.request(foreignSubject, new TextEncoder().encode("x"), {
+          timeout: 1_500,
+        });
       } catch (e) {
         reqErr = e;
       }
@@ -383,7 +399,11 @@ describe("NATS auth-callout tenancy boundary (real nats-server)", () => {
     expect(activeEnrollments.has(`${WS_A}:${revokedAgent}`)).toBe(false);
     let err: unknown;
     try {
-      const c = await connect({ servers: nats.url, token: bearer, timeout: 5_000 });
+      const c = await connect({
+        servers: nats.url,
+        token: bearer,
+        timeout: 5_000,
+      });
       await c.close();
     } catch (e) {
       err = e;

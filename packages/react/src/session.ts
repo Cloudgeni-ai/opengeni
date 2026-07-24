@@ -6,10 +6,12 @@
 
 export type {
   EmbeddedHumanInputSessionClientLike as HumanInputSessionClientLike,
+  EmbeddedSessionMcpApprovalPolicyClientLike as SessionMcpApprovalPolicyClientLike,
   EmbeddedSessionClientLike as SessionClientLike,
 } from "./client";
 export type {
   EmbeddedHumanInputClientOverride as HumanInputClientOverride,
+  EmbeddedSessionMcpApprovalPolicyClientOverride as SessionMcpApprovalPolicyClientOverride,
   EmbeddedSessionClientOverride as ClientOverride,
 } from "./session-context";
 
@@ -38,6 +40,14 @@ export type {
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
+export {
+  isSessionMcpApprovalPolicyEvent,
+  useSessionMcpApprovalPolicy,
+} from "./hooks/use-session-mcp-approval-policy";
+export type {
+  UseSessionMcpApprovalPolicyOptions,
+  UseSessionMcpApprovalPolicyResult,
+} from "./hooks/use-session-mcp-approval-policy";
 
 export { approvalsFromRequiresAction, projectPendingApprovals } from "./approvals";
 export type { PendingApproval } from "./approvals";

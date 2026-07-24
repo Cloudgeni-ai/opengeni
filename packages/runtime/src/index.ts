@@ -1909,14 +1909,17 @@ function maybeInstallCodexToolSearch(
 }
 
 /** True when the unprefixed tool `name` requires approval under `policy`. */
-function mcpToolRequiresApproval(policy: boolean | string[], unprefixedName: string): boolean {
-  return policy === true || (Array.isArray(policy) && policy.includes(unprefixedName));
+function mcpToolRequiresApproval(
+  policy: boolean | ReadonlySet<string>,
+  unprefixedName: string,
+): boolean {
+  return policy === true || (policy !== false && policy.has(unprefixedName));
 }
 
 /** A per-server approval policy keyed by the server's `<id>__` tool prefix. */
 type McpApprovalPolicy = {
   prefix: string;
-  requireApproval: boolean | string[];
+  requireApproval: boolean | ReadonlySet<string>;
 };
 
 /** The subset of the agent surface the approval wrap needs — including `clone`. */
@@ -2007,7 +2010,8 @@ function applyMcpApprovalPolicy(agent: Agent<any, any>, settings: Settings): voi
     )
     .map((server) => ({
       prefix: prefixedMcpToolName(server.id, ""),
-      requireApproval: server.requireApproval as boolean | string[],
+      requireApproval:
+        server.requireApproval === true ? true : new Set(server.requireApproval as string[]),
     }))
     .sort((a, b) => b.prefix.length - a.prefix.length);
   if (policies.length === 0) {

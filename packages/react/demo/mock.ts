@@ -63,6 +63,8 @@ import type {
   SubmitHumanInputResponseRequest,
   UploadFileInput,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionRequest,
   UpdateSessionPinRequest,
   UpdateWorkspaceEnvironmentRequest,
@@ -211,6 +213,26 @@ export class MockOpenGeniClient implements SessionClientLike {
       "Ops channel — manager session",
     );
     return { ...session, title: request.title, titleSource: "user" };
+  }
+
+  async updateSessionMcpApprovalPolicy(
+    _workspaceId: string,
+    _sessionId: string,
+    serverId: string,
+    request: UpdateSessionMcpApprovalPolicyRequest,
+  ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
+    return {
+      server: {
+        id: serverId,
+        name: serverId,
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
+        requireApproval: request.requireApproval,
+        connectionRef: null,
+      },
+      effectiveFrom: "next_attempt",
+    };
   }
 
   async updateSessionPin(

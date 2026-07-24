@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   boundWorkspaceControlEvent,
   workspaceControlUtf8Bytes,
+  type SessionMcpApprovalPolicy,
   type TurnInitiatorContext,
 } from "@opengeni/contracts";
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -512,6 +513,7 @@ export async function registerSessionTurnAttemptClaim(
     temporalWorkflowRunId: string;
     temporalActivityId: string;
     verifiedControlRevision: number;
+    mcpApprovalPolicies: Record<string, SessionMcpApprovalPolicy>;
   },
 ): Promise<typeof schema.sessionTurnAttempts.$inferSelect> {
   const [inserted] = await db

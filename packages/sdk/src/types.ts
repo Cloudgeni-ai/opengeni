@@ -288,13 +288,25 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type SessionMcpApprovalPolicy = boolean | string[];
+
 export type SessionMcpServerMetadata = {
   id: string;
   name: string | null;
   url: string;
   headerNames: string[];
   credentialVersion: number;
+  requireApproval: SessionMcpApprovalPolicy;
   connectionRef: McpServerConnectionRef | null;
+};
+
+export type UpdateSessionMcpApprovalPolicyRequest = {
+  requireApproval: SessionMcpApprovalPolicy;
+};
+
+export type UpdateSessionMcpApprovalPolicyResponse = {
+  server: SessionMcpServerMetadata;
+  effectiveFrom: "next_attempt";
 };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
@@ -703,6 +715,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.mcp.approval_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   // credential allocator metadata-only per-turn credential selection audit.

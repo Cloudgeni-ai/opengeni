@@ -7,7 +7,9 @@ import {
   commitWarmingToWarm,
   createDb,
   createSession,
+  createSessionMcpServers,
   initializeSessionStartAtomically,
+  listSessionEvents,
   mutateSessionControlInTransaction,
   withWorkspaceRls,
   type DbClient,
@@ -172,6 +174,135 @@ async function fixture() {
 }
 
 describe("embedding host session authorization routes", () => {
+  test("updates MCP approval policy with session-control authority and one durable event", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionMcpServers(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      servers: [
+        {
+          id: "external_tools",
+          url: "https://tools.example.test/mcp",
+          requireApproval: false,
+        },
+      ],
+    });
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const requireApproval = Array.from({ length: 245 }, (_, index) => `write_tool_${index}`);
+    const path =
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}` +
+      "/mcp-servers/external_tools/approval-policy";
+    const request = () =>
+      app.request(path, {
+        method: "PATCH",
+        headers: {
+          authorization: value.authorization,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ requireApproval }),
+      });
+
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      server: { id: "external_tools", requireApproval: [...requireApproval].sort() },
+      effectiveFrom: "next_attempt",
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.mcp.approval_policy.write",
+      surface: "http",
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.mcp.approval_policy.write",
+      surface: "core",
+    });
+
+    expect((await request()).status).toBe(200);
+    const policyEvents = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.mcp.approval_policy.updated");
+    expect(policyEvents).toHaveLength(1);
+    expect(policyEvents[0]?.payload).toEqual({
+      serverId: "external_tools",
+      effectiveFrom: "next_attempt",
+    });
+  });
+
+  test("classifies approval-policy requests before returning precise 400 and 404 responses", async () => {
+    if (!available) return;
+    const value = await fixture();
+    await createSessionMcpServers(client.db, {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId,
+      sessionId: value.child.id,
+      servers: [{ id: "external_tools", url: "https://tools.example.test/mcp" }],
+    });
+    const decisions: string[] = [];
+    const app = appWith({
+      authorizeSession: async ({ operation }) => {
+        decisions.push(operation);
+        return { allowed: true, relatedSessionAccess: "target" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const base = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/mcp-servers`;
+    const request = (path: string, body: string) =>
+      app.request(path, {
+        method: "PATCH",
+        headers: {
+          authorization: value.authorization,
+          "content-type": "application/json",
+        },
+        body,
+      });
+
+    expect((await request(`${base}/external_tools/approval-policy`, "{")).status).toBe(400);
+    expect(
+      (
+        await request(
+          `${base}/external_tools/approval-policy`,
+          JSON.stringify({ requireApproval: "sometimes" }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(
+          `${base}/${encodeURIComponent("bad server")}/approval-policy`,
+          JSON.stringify({ requireApproval: false }),
+        )
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(
+          `/v1/workspaces/${value.grant.workspaceId}/sessions/${crypto.randomUUID()}` +
+            "/mcp-servers/external_tools/approval-policy",
+          JSON.stringify({ requireApproval: false }),
+        )
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await request(
+          `${base}/missing_tools/approval-policy`,
+          JSON.stringify({ requireApproval: false }),
+        )
+      ).status,
+    ).toBe(404);
+    expect(decisions).toHaveLength(5);
+    expect(new Set(decisions)).toEqual(new Set(["session.mcp.approval_policy.write"]));
+  });
+
   test("public turn and queue reads omit host instructions while the worker claim retains them", async () => {
     if (!available) return;
     const value = await fixture();

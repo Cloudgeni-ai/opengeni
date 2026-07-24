@@ -14,6 +14,10 @@ credentials, without making those servers deployment-global.
 - `url`: HTTPS MCP endpoint.
 - `allowedTools`, `timeoutMs`, `cacheToolsList`: same runtime meaning as
   deployment MCP server settings.
+- `requireApproval`: `true` requires approval for every tool, `false` requires
+  none, and a string array requires approval only for those unprefixed tool
+  names. Selective policies are canonicalized as a sorted set and bounded to
+  2,048 names, 256 KiB total UTF-8, and 1 KiB UTF-8 per name.
 - `headers`: write-only credential headers.
 - `connectionRef`: optional non-secret opaque connection pointer. Standalone
   deployments resolve it through OpenGeni's connection store; embedded hosts
@@ -28,6 +32,7 @@ Session responses and session events expose only metadata:
   url: string;
   headerNames: string[];
   credentialVersion: number;
+  requireApproval: boolean | string[];
   connectionRef: McpServerConnectionRef | null;
 }
 ```
@@ -51,6 +56,31 @@ worker-signed grant and cannot be supplied in the request body. Explicit
 `mcpServers`, including an explicit empty array, never inherit and go through the
 ordinary attach permission check when non-empty. This delegates existing tool
 context without letting a child invent an endpoint or plaintext credential.
+
+### Approval-policy updates
+
+An authorized host can replace one attached server's policy without recreating
+the session:
+
+```http
+PATCH /v1/workspaces/:workspaceId/sessions/:sessionId/mcp-servers/:serverId/approval-policy
+Content-Type: application/json
+
+{ "requireApproval": ["create_record", "delete_record"] }
+```
+
+The route requires `sessions:control` and the
+`session.mcp.approval_policy.write` session-authorization operation. The SDK
+exposes `OpenGeniClient.updateSessionMcpApprovalPolicy`; React session embeds
+can use `useSessionMcpApprovalPolicy`.
+
+The response returns the updated safe server metadata and
+`effectiveFrom: "next_attempt"`. The update and attempt claim serialize under
+the session lock. A claimed attempt keeps the exact policy snapshot it started
+with; the next attempt captures the new policy. The update never cancels,
+restarts, or reinterprets current work. A small
+`session.mcp.approval_policy.updated` event tells other clients to reload the
+authoritative session metadata.
 
 ## Storage and rotation
 
@@ -114,10 +144,12 @@ event.
 
 `apps/worker/src/activities/agent-turn.ts` overlays session MCP servers after
 capability and Codex overlays, and before `runtime.prepareTools`. The worker-only
-DB accessor decrypts headers for that run path and carries the connection ref
-into the runtime settings. Normal model MCP and Toolspace/Code Mode then use the
-same request-time resolver, including forced refresh after a 401. Normal session
-reads return only safe metadata and the non-secret connection pointer.
+DB accessor decrypts headers for that run path, combines them with the exact
+attempt's approval-policy snapshot, and carries the connection ref into the
+runtime settings. Normal model MCP and Toolspace/Code Mode use that same
+attempt-fenced configuration and request-time resolver, including forced refresh
+after a 401. Normal session reads return only safe metadata and the non-secret
+connection pointer.
 
 ## Never-return-values invariant
 

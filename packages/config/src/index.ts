@@ -6,6 +6,7 @@ import {
   ProductAccessMode,
   ReasoningEffort,
   SandboxBackend,
+  SessionMcpApprovalPolicy,
   StaticUsageLimits,
   UsageLimitsMode,
 } from "@opengeni/contracts";
@@ -736,14 +737,8 @@ const SettingsSchema = z.object({
         allowedTools: z.array(z.string().min(1)).optional(),
         timeoutMs: z.number().int().positive().optional(),
         cacheToolsList: z.boolean().default(false),
-        /**
-         * Human-approval policy for this server's tools, overlaid per-run from a
-         * session MCP server row (never from OPENGENI_MCP_SERVERS). `true` = all
-         * tools require approval; a string[] = only the listed UNPREFIXED tool
-         * names do; absent = auto-run (the historical default). Enforced in the
-         * runtime by attaching `needsApproval` to the matching MCP tools.
-         */
-        requireApproval: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+        /** Runtime approval policy, overlaid from an attempt-frozen session snapshot. */
+        requireApproval: SessionMcpApprovalPolicy.optional(),
         /**
          * Extra request headers sent to this MCP server (credential injection
          * for workspace-enabled capability MCPs). Populated at runtime from

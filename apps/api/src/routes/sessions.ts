@@ -29,12 +29,14 @@ import {
   SessionEventReadMode,
   SessionEventSemanticClass,
   SessionEventType,
+  SessionMcpServerId,
   SaveComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
@@ -136,6 +138,7 @@ import {
   readSessionLineage,
   saveHumanComposerDraft,
   steerHumanQueuePrompt,
+  updateSessionMcpApprovalPolicy,
   updateSessionTitle,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -399,6 +402,32 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     }
     return c.json(session);
   });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-servers/:serverId/approval-policy",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
+      const payload = UpdateSessionMcpApprovalPolicyRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsedServerId.success || !payload.success) {
+        throw new HTTPException(400, { message: "invalid MCP approval-policy request" });
+      }
+      await assertSessionExists(db, workspaceId, sessionId);
+      return c.json(
+        await updateSessionMcpApprovalPolicy(
+          deps,
+          grant,
+          sessionId,
+          parsedServerId.data,
+          payload.data.requireApproval,
+        ),
+      );
+    },
+  );
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2022,6 +2051,9 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
+    return "session.mcp.approval_policy.write";
+  }
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/codex-account" && verb === "POST") {
     return "session.codex_account.write";

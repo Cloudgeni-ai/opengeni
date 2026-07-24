@@ -2632,6 +2632,8 @@ export const ToolRef = z.object({
 export type ToolRef = z.infer<typeof ToolRef>;
 
 const registryId = /^[A-Za-z0-9_-]+$/;
+export const SessionMcpServerId = z.string().min(1).regex(registryId);
+export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
 const httpsUrl = z
   .string()
   .url()
@@ -2646,19 +2648,54 @@ const httpsUrl = z
     { message: "URL must use https" },
   );
 
+/**
+ * Human-approval policy for one MCP server. `true` gates every tool, `false`
+ * gates none, and a list gates only those unprefixed names.
+ */
+export const SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES = 2_048;
+export const SESSION_MCP_APPROVAL_POLICY_MAX_BYTES = 256 * 1024;
+export const SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES = 1_024;
+export const SESSION_MCP_SERVERS_MAX = 64;
+
+const sessionMcpApprovalToolName = z
+  .string()
+  .min(1)
+  .superRefine((name, ctx) => {
+    if (new TextEncoder().encode(name).byteLength > SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `MCP approval tool names must be at most ${SESSION_MCP_APPROVAL_TOOL_NAME_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  });
+const selectiveSessionMcpApprovalPolicy = z
+  .array(sessionMcpApprovalToolName)
+  .max(SESSION_MCP_APPROVAL_POLICY_MAX_TOOL_NAMES)
+  .superRefine((names, ctx) => {
+    const bytes = names.reduce(
+      (total, name) => total + new TextEncoder().encode(name).byteLength,
+      0,
+    );
+    if (bytes > SESSION_MCP_APPROVAL_POLICY_MAX_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `MCP approval policies must be at most ${SESSION_MCP_APPROVAL_POLICY_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+  })
+  .transform((names) => [...new Set(names)].sort());
+export const SessionMcpApprovalPolicy = z.union([z.boolean(), selectiveSessionMcpApprovalPolicy]);
+export type SessionMcpApprovalPolicy = z.infer<typeof SessionMcpApprovalPolicy>;
+
 export const SessionMcpServerInput = z.object({
-  id: z.string().min(1).regex(registryId),
+  id: SessionMcpServerId,
   name: z.string().min(1).optional(),
   url: httpsUrl,
   allowedTools: z.array(z.string().min(1)).optional(),
   timeoutMs: z.number().int().positive().optional(),
   cacheToolsList: z.boolean().optional(),
-  // Human-approval policy for this server's tools. `true` = every tool of this
-  // server requires approval before it runs (a `session.requiresAction` pause
-  // the caller resolves with `user.approvalDecision`); a string[] = ONLY the
-  // listed UNPREFIXED tool names require approval (e.g. reads auto-run, writes
-  // ask); absent / `false` = auto-run everything (the historical default).
-  requireApproval: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+  // The caller resolves an approval pause with `user.approvalDecision`.
+  requireApproval: SessionMcpApprovalPolicy.optional(),
   // Write-only credential headers. Values are encrypted at rest and never
   // returned in session responses or events; response metadata exposes names.
   headers: z.record(z.string(), z.string()).optional(),
@@ -2669,22 +2706,42 @@ export const SessionMcpServerInput = z.object({
 export type SessionMcpServerInput = z.infer<typeof SessionMcpServerInput>;
 
 export const SessionMcpCredentialUpdateInput = z.object({
-  id: z.string().min(1).regex(registryId),
+  id: SessionMcpServerId,
   headers: z.record(z.string(), z.string()),
 });
 export type SessionMcpCredentialUpdateInput = z.infer<typeof SessionMcpCredentialUpdateInput>;
 
 export const SessionMcpServerMetadata = z
   .object({
-    id: z.string().min(1).regex(registryId),
+    id: SessionMcpServerId,
     name: z.string().min(1).nullable(),
     url: httpsUrl,
     headerNames: z.array(z.string()).default([]),
     credentialVersion: z.number().int().positive(),
+    requireApproval: SessionMcpApprovalPolicy.default(false),
     connectionRef: McpServerConnectionRef.nullable().default(null),
   })
   .strict();
 export type SessionMcpServerMetadata = z.infer<typeof SessionMcpServerMetadata>;
+
+export const UpdateSessionMcpApprovalPolicyRequest = z
+  .object({
+    requireApproval: SessionMcpApprovalPolicy,
+  })
+  .strict();
+export type UpdateSessionMcpApprovalPolicyRequest = z.infer<
+  typeof UpdateSessionMcpApprovalPolicyRequest
+>;
+
+export const UpdateSessionMcpApprovalPolicyResponse = z
+  .object({
+    server: SessionMcpServerMetadata,
+    effectiveFrom: z.literal("next_attempt"),
+  })
+  .strict();
+export type UpdateSessionMcpApprovalPolicyResponse = z.infer<
+  typeof UpdateSessionMcpApprovalPolicyResponse
+>;
 
 export class ResourceRefConflictError extends Error {
   constructor(message: string) {
@@ -3029,6 +3086,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.read",
   "session.human_input.write",
   "session.title.write",
+  "session.mcp.approval_policy.write",
   "session.goal.read",
   "session.goal.write",
   "session.child.create",
@@ -4747,6 +4805,7 @@ export const SessionEventType = z.enum([
   "terminal.pty.output.delta", // PTY stdout/stderr bytes (separate from command.output)
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
+  "session.mcp.approval_policy.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
@@ -4881,6 +4940,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "workspace.inference.resumed",
     "session.queue.changed",
     "session.queue.prompt.cancelled",
+    "session.mcp.approval_policy.updated",
   ],
   terminal: [
     "turn.completed",
@@ -6429,7 +6489,7 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // including [], are authoritative; non-empty explicit arrays require attach
   // permission. Credential headers are write-only: create responses and events
   // expose only SessionMcpServerMetadata.
-  mcpServers: z.array(SessionMcpServerInput).default([]),
+  mcpServers: z.array(SessionMcpServerInput).max(SESSION_MCP_SERVERS_MAX).default([]),
   // Shared-sandbox placement (addendum 05 §D.1). Three-way union; OMITTED ⇒
   // today's behavior (a context-dependent default resolved server-side: from
   // inside a session → "shared" with the creator's box, top-level → "new").

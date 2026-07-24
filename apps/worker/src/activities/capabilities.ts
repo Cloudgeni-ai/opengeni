@@ -41,6 +41,7 @@ export async function settingsWithSessionMcpServersForRun(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  attemptId: string,
   settings: Settings,
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
@@ -57,7 +58,7 @@ export async function settingsWithSessionMcpServersForRun(
   }
   return settingsWithSessionMcpServers(
     settings,
-    await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey ?? null),
+    await listSessionMcpServersForRun(db, workspaceId, sessionId, attemptId, encryptionKey ?? null),
   );
 }
 

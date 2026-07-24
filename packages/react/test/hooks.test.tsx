@@ -14,11 +14,14 @@ import type {
   SessionControlResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
+  SessionMcpApprovalPolicy,
+  SessionMcpServerMetadata,
   SessionTurn,
   WorkspaceEnvironment,
 } from "@opengeni/sdk";
 import { registerDom, renderHook, flush } from "./render-hook";
 import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake-client";
+import type { EmbeddedSessionMcpApprovalPolicyClientLike } from "../src/client";
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
@@ -29,6 +32,7 @@ import { usePacks } from "../src/hooks/use-packs";
 import { useWorkspaceSessions } from "../src/hooks/use-workspace-sessions";
 import { useSessionControl } from "../src/hooks/use-session-control";
 import { useSessionLineage } from "../src/hooks/use-session-lineage";
+import { useSessionMcpApprovalPolicy } from "../src/hooks/use-session-mcp-approval-policy";
 import { useTurnQueue } from "../src/hooks/use-turn-queue";
 import { useWorkspaces } from "../src/hooks/use-workspaces";
 
@@ -110,7 +114,12 @@ describe("useTurnQueue", () => {
     const turns = [fakeTurn({ id: "second", position: 2 }), fakeTurn({ id: "first", position: 1 })];
     const client = fakeClient({ getQueue: async () => queueSnapshot(turns) });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -133,7 +142,12 @@ describe("useTurnQueue", () => {
       },
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -198,7 +212,9 @@ describe("useTurnQueue", () => {
           while (true) {
             const event = await new Promise<SessionEvent | null>((resolve) => {
               push = resolve;
-              options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+              options?.signal?.addEventListener("abort", () => resolve(null), {
+                once: true,
+              });
             });
             if (!event) {
               return;
@@ -251,7 +267,9 @@ describe("useTurnQueue", () => {
             await options?.beforeLive?.();
           }
           const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
           });
           if (event) yield event;
         })(),
@@ -301,7 +319,9 @@ describe("useTurnQueue", () => {
           await options?.beforeLive?.();
           markHandoffComplete?.();
           const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
           });
           if (event) yield event;
         })(),
@@ -346,8 +366,14 @@ describe("useTurnQueue", () => {
   });
 
   test("move, Edit, Steer, and Delete bind the displayed versions and accept server order", async () => {
-    const first = fakeTurn({ id: "11111111-aaaa-4aaa-8aaa-111111111111", version: 2 });
-    const second = fakeTurn({ id: "22222222-bbbb-4bbb-8bbb-222222222222", version: 4 });
+    const first = fakeTurn({
+      id: "11111111-aaaa-4aaa-8aaa-111111111111",
+      version: 2,
+    });
+    const second = fakeTurn({
+      id: "22222222-bbbb-4bbb-8bbb-222222222222",
+      version: 4,
+    });
     let current = queueSnapshot([first, second], { version: 5 });
     const calls: Array<{ action: string; request: unknown }> = [];
     const response = (items: SessionTurn[], version: number, draft?: ComposerDraft) => ({
@@ -400,7 +426,12 @@ describe("useTurnQueue", () => {
       },
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -419,9 +450,18 @@ describe("useTurnQueue", () => {
     await flushing(async () => expect(await hook.result.current.steerTurn(first.id)).toBe(true));
     await flushing(async () => expect(await hook.result.current.removeTurn(first.id)).toBe(true));
     expect(calls.map((call) => call.action)).toEqual(["move", "edit", "steer", "delete"]);
-    expect(calls[0]?.request).toMatchObject({ expectedQueueVersion: 5, beforeTurnId: null });
-    expect(calls[1]?.request).toMatchObject({ expectedTurnVersion: 4, expectedDraftRevision: 2 });
-    expect(calls[2]?.request).toMatchObject({ expectedTurnVersion: 2, controlEtag: "control-3" });
+    expect(calls[0]?.request).toMatchObject({
+      expectedQueueVersion: 5,
+      beforeTurnId: null,
+    });
+    expect(calls[1]?.request).toMatchObject({
+      expectedTurnVersion: 4,
+      expectedDraftRevision: 2,
+    });
+    expect(calls[2]?.request).toMatchObject({
+      expectedTurnVersion: 2,
+      controlEtag: "control-3",
+    });
     expect(calls[3]?.request).toMatchObject({ expectedTurnVersion: 2 });
     await hook.unmount();
   });
@@ -453,7 +493,12 @@ describe("useTurnQueue", () => {
       }),
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -492,7 +537,12 @@ describe("useTurnQueue", () => {
         }),
     });
     const hook = await renderHook(
-      () => useTurnQueue(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useTurnQueue(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -530,8 +580,14 @@ describe("useTurnQueue", () => {
   test("a session switch hides the old queue and drops its delayed mutation settlement", async () => {
     const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
     const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
-    const turnA = fakeTurn({ id: "aaaaaaaa-0000-4000-8000-000000000001", prompt: "A PRIVATE" });
-    const turnB = fakeTurn({ id: "bbbbbbbb-0000-4000-8000-000000000001", prompt: "B PRIVATE" });
+    const turnA = fakeTurn({
+      id: "aaaaaaaa-0000-4000-8000-000000000001",
+      prompt: "A PRIVATE",
+    });
+    const turnB = fakeTurn({
+      id: "bbbbbbbb-0000-4000-8000-000000000001",
+      prompt: "B PRIVATE",
+    });
     let resolveBRead!: (snapshot: SessionQueueSnapshot) => void;
     let resolveAMutation!: (result: SessionQueueMutationResponse) => void;
     const client = fakeClient({
@@ -548,7 +604,11 @@ describe("useTurnQueue", () => {
     });
     const hook = await renderHook(
       (sessionId: string) =>
-        useTurnQueue(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+        useTurnQueue(sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       sessionA,
     );
     await flush();
@@ -604,7 +664,11 @@ describe("useSessionLineage", () => {
     });
     const hook = await renderHook(
       (events: SessionEvent[]) =>
-        useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
       [] as SessionEvent[],
     );
     await flush();
@@ -636,7 +700,11 @@ describe("useSessionLineage", () => {
     });
     const hook = await renderHook(
       (events: SessionEvent[]) =>
-        useSessionLineage(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+        useSessionLineage(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
       [] as SessionEvent[],
     );
     await flush();
@@ -695,7 +763,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -718,7 +791,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -746,7 +824,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -767,7 +850,12 @@ describe("useGoal", () => {
       },
     });
     const hook = await renderHook(
-      () => useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+      () =>
+        useGoal(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       undefined,
     );
     await flush();
@@ -822,7 +910,11 @@ describe("useGoal", () => {
     });
     const hook = await renderHook(
       (sessionId: string) =>
-        useGoal(sessionId, { client, workspaceId: WORKSPACE_ID, events: noEvents }),
+        useGoal(sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
       initialSessionId,
     );
     await flush();
@@ -836,6 +928,365 @@ describe("useGoal", () => {
     });
 
     expect(hook.result.current.goal).toBeNull();
+    await hook.unmount();
+  });
+});
+
+describe("useSessionMcpApprovalPolicy", () => {
+  test("updates optimistically and reconciles the authoritative policy event", async () => {
+    let reads = 0;
+    let currentPolicy: SessionMcpApprovalPolicy = false;
+    const metadata = (): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval: currentPolicy,
+      connectionRef: null,
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async () => {
+          reads += 1;
+          return {
+            id: SESSION_ID,
+            lastSequence: reads,
+            mcpServers: [metadata()],
+          } as never;
+        },
+      }),
+      updateSessionMcpApprovalPolicy: async (_workspaceId, _sessionId, serverId, request) => {
+        expect(serverId).toBe("external_tools");
+        currentPolicy = request.requireApproval;
+        return { server: metadata(), effectiveFrom: "next_attempt" };
+      },
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events,
+        }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(hook.result.current.policy).toBe(false);
+    expect(reads).toBe(1);
+
+    await flushing(async () => {
+      const response = await hook.result.current.update(["write_record"]);
+      expect(response?.effectiveFrom).toBe("next_attempt");
+    });
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+
+    currentPolicy = ["write_record", "delete_record"];
+    await hook.rerender([
+      makeEvent(1, "session.mcp.approval_policy.updated", {
+        serverId: "another_server",
+        requireApproval: true,
+        effectiveFrom: "next_attempt",
+      }),
+    ]);
+    await flush(200);
+    expect(reads).toBe(2);
+    await hook.rerender([
+      makeEvent(1, "session.mcp.approval_policy.updated", {
+        serverId: "another_server",
+        requireApproval: true,
+        effectiveFrom: "next_attempt",
+      }),
+      makeEvent(2, "session.mcp.approval_policy.updated", {
+        serverId: "external_tools",
+        requireApproval: currentPolicy,
+        effectiveFrom: "next_attempt",
+      }),
+    ]);
+    await flush(250);
+    expect(reads).toBe(3);
+    expect(hook.result.current.policy).toEqual(["write_record", "delete_record"]);
+    await hook.unmount();
+  });
+
+  test("a delayed pre-mutation read cannot clear the newer policy response", async () => {
+    const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval,
+      connectionRef: null,
+    });
+    let reads = 0;
+    let resolveInitialRead:
+      | ((session: {
+          id: string;
+          lastSequence: number;
+          mcpServers: SessionMcpServerMetadata[];
+        }) => void)
+      | null = null;
+    let resolveReconcileRead:
+      | ((session: {
+          id: string;
+          lastSequence: number;
+          mcpServers: SessionMcpServerMetadata[];
+        }) => void)
+      | null = null;
+    const initialRead = new Promise<{
+      id: string;
+      lastSequence: number;
+      mcpServers: SessionMcpServerMetadata[];
+    }>((resolve) => {
+      resolveInitialRead = resolve;
+    });
+    const reconcileRead = new Promise<{
+      id: string;
+      lastSequence: number;
+      mcpServers: SessionMcpServerMetadata[];
+    }>((resolve) => {
+      resolveReconcileRead = resolve;
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async () => {
+          reads += 1;
+          return (await (reads === 1 ? initialRead : reconcileRead)) as never;
+        },
+      }),
+      updateSessionMcpApprovalPolicy: async () => ({
+        server: metadata(["write_record"]),
+        effectiveFrom: "next_attempt" as const,
+      }),
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      () =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      undefined,
+    );
+    await flush();
+    expect(reads).toBe(1);
+
+    await flushing(async () => {
+      await hook.result.current.update(["write_record"]);
+    });
+    expect(reads).toBe(2);
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+
+    await flushing(() => {
+      resolveInitialRead?.({
+        id: SESSION_ID,
+        lastSequence: 1,
+        mcpServers: [metadata(false)],
+      });
+    });
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+
+    await flushing(() => {
+      resolveReconcileRead?.({
+        id: SESSION_ID,
+        lastSequence: 2,
+        mcpServers: [metadata(["write_record"])],
+      });
+    });
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+    await hook.unmount();
+  });
+
+  test("providerless stream handoff reconciles policy state before going live", async () => {
+    let reads = 0;
+    let currentPolicy: SessionMcpApprovalPolicy = false;
+    const metadata = (): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval: currentPolicy,
+      connectionRef: null,
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async () => {
+          reads += 1;
+          return {
+            id: SESSION_ID,
+            lastSequence: 41,
+            mcpServers: [metadata()],
+          } as never;
+        },
+        streamEvents: (_workspaceId, _sessionId, options) =>
+          (async function* () {
+            currentPolicy = ["write_record"];
+            await options?.beforeLive?.();
+            const event = await new Promise<SessionEvent | null>((resolve) => {
+              options?.signal?.addEventListener("abort", () => resolve(null), {
+                once: true,
+              });
+            });
+            if (event) yield event;
+          })(),
+      }),
+      updateSessionMcpApprovalPolicy: async () => ({
+        server: metadata(),
+        effectiveFrom: "next_attempt" as const,
+      }),
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      () =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+        }),
+      undefined,
+    );
+    await flush();
+
+    expect(reads).toBe(3);
+    expect(hook.result.current.policy).toEqual(["write_record"]);
+    await hook.unmount();
+  });
+
+  test("a target switch drops settlement from the previous policy mutation", async () => {
+    const initialSessionId: string = SESSION_ID;
+    const otherSessionId = "33333333-3333-4333-8333-333333333333";
+    const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval,
+      connectionRef: null,
+    });
+    let resolveMutation:
+      | ((response: { server: SessionMcpServerMetadata; effectiveFrom: "next_attempt" }) => void)
+      | null = null;
+    const mutation = new Promise<{
+      server: SessionMcpServerMetadata;
+      effectiveFrom: "next_attempt";
+    }>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const client = {
+      ...fakeClient({
+        getSession: async (_workspaceId, sessionId) =>
+          ({
+            id: sessionId,
+            lastSequence: 1,
+            mcpServers: [metadata(sessionId !== SESSION_ID)],
+          }) as never,
+      }),
+      updateSessionMcpApprovalPolicy: async () => await mutation,
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      (sessionId: string) =>
+        useSessionMcpApprovalPolicy(sessionId, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      initialSessionId,
+    );
+    await flush();
+    expect(hook.result.current.policy).toBe(false);
+
+    let pending: ReturnType<typeof hook.result.current.update> | null = null;
+    await flushing(() => {
+      pending = hook.result.current.update(["obsolete_write"]);
+    });
+    await hook.rerender(otherSessionId);
+    await flush();
+    expect(hook.result.current.policy).toBe(true);
+
+    await flushing(() => {
+      resolveMutation?.({
+        server: metadata(["obsolete_write"]),
+        effectiveFrom: "next_attempt",
+      });
+    });
+    expect(await pending).toBeNull();
+    expect(hook.result.current.policy).toBe(true);
+    await hook.unmount();
+  });
+
+  test("a client switch drops settlement from the previous policy mutation", async () => {
+    const metadata = (requireApproval: SessionMcpApprovalPolicy): SessionMcpServerMetadata => ({
+      id: "external_tools",
+      name: "External tools",
+      url: "https://tools.example.test/mcp",
+      headerNames: [],
+      credentialVersion: 1,
+      requireApproval,
+      connectionRef: null,
+    });
+    let resolveMutation:
+      | ((response: { server: SessionMcpServerMetadata; effectiveFrom: "next_attempt" }) => void)
+      | null = null;
+    const mutation = new Promise<{
+      server: SessionMcpServerMetadata;
+      effectiveFrom: "next_attempt";
+    }>((resolve) => {
+      resolveMutation = resolve;
+    });
+    const previousClient = {
+      ...fakeClient({
+        getSession: async () =>
+          ({
+            id: SESSION_ID,
+            lastSequence: 1,
+            mcpServers: [metadata(false)],
+          }) as never,
+      }),
+      updateSessionMcpApprovalPolicy: async () => await mutation,
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const nextClient = {
+      ...fakeClient({
+        getSession: async () =>
+          ({
+            id: SESSION_ID,
+            lastSequence: 2,
+            mcpServers: [metadata(true)],
+          }) as never,
+      }),
+      updateSessionMcpApprovalPolicy: async () => ({
+        server: metadata(true),
+        effectiveFrom: "next_attempt" as const,
+      }),
+    } satisfies EmbeddedSessionMcpApprovalPolicyClientLike;
+    const hook = await renderHook(
+      (client: EmbeddedSessionMcpApprovalPolicyClientLike) =>
+        useSessionMcpApprovalPolicy(SESSION_ID, "external_tools", {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: noEvents,
+        }),
+      previousClient,
+    );
+    await flush();
+    expect(hook.result.current.policy).toBe(false);
+
+    let pending: ReturnType<typeof hook.result.current.update> | null = null;
+    await flushing(() => {
+      pending = hook.result.current.update(["obsolete_write"]);
+    });
+    await hook.rerender(nextClient);
+    await flush();
+    expect(hook.result.current.policy).toBe(true);
+
+    await flushing(() => {
+      resolveMutation?.({
+        server: metadata(["obsolete_write"]),
+        effectiveFrom: "next_attempt",
+      });
+    });
+    expect(await pending).toBeNull();
+    expect(hook.result.current.policy).toBe(true);
     await hook.unmount();
   });
 });
@@ -1095,7 +1546,9 @@ describe("useComposer durable draft and control binding", () => {
         (async function* () {
           await options?.beforeLive?.();
           const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
           });
           if (event) yield event;
         })(),
@@ -1145,7 +1598,9 @@ describe("useComposer durable draft and control binding", () => {
           await options?.beforeLive?.();
           markHandoffComplete?.();
           const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
           });
           if (event) yield event;
         })(),
@@ -1201,7 +1656,9 @@ describe("useComposer durable draft and control binding", () => {
             await options?.beforeLive?.();
           }
           const event = await new Promise<SessionEvent | null>((resolve) => {
-            options?.signal?.addEventListener("abort", () => resolve(null), { once: true });
+            options?.signal?.addEventListener("abort", () => resolve(null), {
+              once: true,
+            });
           });
           if (event) yield event;
         })(),
@@ -1260,7 +1717,10 @@ describe("useComposer durable draft and control binding", () => {
       sourceTurnVersion: 1,
     };
     await hook.rerender([
-      makeEvent(1, "session.queue.changed", { operation: "edit", queueVersion: 2 }),
+      makeEvent(1, "session.queue.changed", {
+        operation: "edit",
+        queueVersion: 2,
+      }),
     ]);
     await flush();
     expect(reads).toBe(2);
@@ -1286,7 +1746,11 @@ describe("useComposer durable draft and control binding", () => {
       getComposerDraft: async () => initial,
       saveComposerDraft: async (_ws, _session, request) => {
         saved.push(request);
-        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+        return {
+          ...initial,
+          ...request,
+          revision: request.expectedRevision + 1,
+        };
       },
       sendMessage: async (_ws, _session, input) => {
         sent.push(input);
@@ -1307,7 +1771,10 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.value).toBe("restored text");
     await flushing(async () => hook.result.current.setValue("edited locally"));
     await flush(600);
-    expect(saved.at(-1)).toMatchObject({ expectedRevision: 4, text: "edited locally" });
+    expect(saved.at(-1)).toMatchObject({
+      expectedRevision: 4,
+      text: "edited locally",
+    });
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
     expect(sent.at(-1)).toMatchObject({
       text: "edited locally",
@@ -1656,7 +2123,10 @@ describe("session hook concurrent target ownership", () => {
         workspaceId: WORKSPACE_ID,
         events: noEvents,
       });
-      const control = useSessionControl(target, { client, workspaceId: WORKSPACE_ID });
+      const control = useSessionControl(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+      });
       if (target === sessionB) {
         renderedSessionB = true;
         throw suspended;
@@ -1705,13 +2175,17 @@ describe("session hook concurrent target ownership", () => {
 
 describe("useComposer file-only send", () => {
   test("canSend lights up with a ready resource even when the draft is empty", async () => {
-    const client = fakeClient({ sendMessage: async () => makeEvent(1, "user.message") });
+    const client = fakeClient({
+      sendMessage: async () => makeEvent(1, "user.message"),
+    });
     const hook = await renderHook(
       () =>
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "file-1" }],
+          }),
         }),
       undefined,
     );
@@ -1777,7 +2251,9 @@ describe("useComposer file-only send", () => {
         useComposer(SESSION_ID, {
           client,
           workspaceId: WORKSPACE_ID,
-          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+          sendExtras: () => ({
+            resources: [{ kind: "file", fileId: "file-1" }],
+          }),
         }),
       undefined,
     );
@@ -1943,7 +2419,12 @@ describe("useBillingUsage", () => {
       },
     });
     const hook = await renderHook(
-      () => useBillingUsage({ client, accountId: "acc-1", workspaceId: WORKSPACE_ID }),
+      () =>
+        useBillingUsage({
+          client,
+          accountId: "acc-1",
+          workspaceId: WORKSPACE_ID,
+        }),
       undefined,
     );
     await flush();
@@ -2006,7 +2487,9 @@ describe("useAvailableModels", () => {
   });
 
   test("starts with empty models and a null default before the config loads", async () => {
-    const client = fakeClient({ getClientConfig: async () => new Promise(() => {}) as never });
+    const client = fakeClient({
+      getClientConfig: async () => new Promise(() => {}) as never,
+    });
     const hook = await renderHook(() => useAvailableModels({ client }), undefined);
     expect(hook.result.current.loading).toBe(true);
     expect(hook.result.current.models).toEqual([]);

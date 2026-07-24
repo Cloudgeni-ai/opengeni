@@ -96,6 +96,8 @@ import type {
   SessionHumanInputRequest,
   SessionLineageResponse,
   SessionMcpCredentialUpdateInput,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   SessionQueueSnapshot,
   SessionQueueMutationResponse,
   ComposerDraft,
@@ -270,6 +272,24 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /**
+   * Replace one attached MCP server's approval policy. The change is captured
+   * by the next claimed attempt; already-claimed work keeps its immutable
+   * policy snapshot.
+   */
+  async updateSessionMcpApprovalPolicy(
+    workspaceId: string,
+    sessionId: string,
+    serverId: string,
+    request: UpdateSessionMcpApprovalPolicyRequest,
+  ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
+    return await this.requestJson<UpdateSessionMcpApprovalPolicyResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/mcp-servers/${encodeURIComponent(serverId)}/approval-policy`,
       request,
     );
   }

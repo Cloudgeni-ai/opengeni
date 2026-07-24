@@ -9,6 +9,7 @@
 
 export type {
   EmbeddedHumanInputSessionClientLike,
+  EmbeddedSessionMcpApprovalPolicyClientLike,
   EmbeddedSessionClientLike,
   SessionClientLike,
 } from "./client";
@@ -78,6 +79,14 @@ export type {
   UseSessionControlOptions,
   UseSessionControlResult,
 } from "./hooks/use-session-control";
+export {
+  isSessionMcpApprovalPolicyEvent,
+  useSessionMcpApprovalPolicy,
+} from "./hooks/use-session-mcp-approval-policy";
+export type {
+  UseSessionMcpApprovalPolicyOptions,
+  UseSessionMcpApprovalPolicyResult,
+} from "./hooks/use-session-mcp-approval-policy";
 export { useScheduledTasks } from "./hooks/use-scheduled-tasks";
 export type {
   UseScheduledTasksOptions,
