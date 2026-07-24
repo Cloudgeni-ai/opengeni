@@ -6,12 +6,15 @@ import {
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
+  failWarmingToCold,
   getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
   markSandboxFileResourcesMaterialized,
+  markWarmLeaseInstanceLost,
   persistDrainSnapshot,
   reapStaleLeaseHolders,
   reapStaleLeaseHoldersGlobal,
+  recordWarmingSandboxCreated,
   releaseLeaseHolder,
   SandboxImageConflictError,
   SandboxRigConflictError,
@@ -189,6 +192,153 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     const after = await readRow(workspaceId, groupId);
     expect(after?.liveness).toBe("warming");
     expect(after?.instance_id).toBeNull();
+  }, 60_000);
+
+  test("(1d) invalidated warming epochs fence a late create and its cleanup from a successor", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+
+    const old = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "old-create",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      warmingLeaseTtlMs: 600_000,
+    });
+    expect(old.role).toBe("spawner");
+    expect(old.lease.leaseEpoch).toBe(0);
+
+    // The provider create is still unresolved. Rollback closes epoch 0 before
+    // the next acquisition is allowed to spawn.
+    await failWarmingToCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: old.lease.leaseEpoch,
+    });
+    const afterRollback = await readRow(workspaceId, groupId);
+    expect(afterRollback?.liveness).toBe("cold");
+    expect(afterRollback?.lease_epoch).toBe(1);
+
+    const successor = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "successor-create",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      warmingLeaseTtlMs: 600_000,
+    });
+    expect(successor.role).toBe("spawner");
+    expect(successor.lease.leaseEpoch).toBe(1);
+
+    // Late old callbacks all carry epoch 0. None may attribute the old provider,
+    // commit it, roll back the successor, or clear the successor's provider.
+    const lateRecord = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "old-provider",
+      resumeBackendId: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(lateRecord.recorded).toBe(false);
+    const lateCommit = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+      instanceId: "old-provider",
+      leaseTtlMs: 45_000,
+    });
+    expect(lateCommit.committed).toBe(false);
+    await failWarmingToCold(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 0,
+    });
+
+    const successorCommit = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: successor.lease.leaseEpoch,
+      instanceId: "successor-provider",
+      leaseTtlMs: 45_000,
+    });
+    expect(successorCommit.committed).toBe(true);
+
+    // This mirrors the old verifier's cleanup pair: mark the old instance at
+    // oldEpoch+1 and fail oldEpoch. Both remain fenced after successor commit.
+    const lateCleanup = await markWarmLeaseInstanceLost(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: 1,
+      expectedInstanceId: "old-provider",
+    });
+    expect(lateCleanup.status).toBe("stale");
+    const final = await readRow(workspaceId, groupId);
+    expect(final?.liveness).toBe("warm");
+    expect(final?.lease_epoch).toBe(2);
+    expect(final?.instance_id).toBe("successor-provider");
+  }, 60_000);
+
+  test("(1e) the global warming-death reaper advances the epoch before retry", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const old = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "expired-create",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+      warmingLeaseTtlMs: 600_000,
+    });
+    expect(old.role).toBe("spawner");
+    await admin`
+      update sandbox_leases
+      set expires_at = now() - interval '1 second'
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
+
+    const drained = await reapStaleLeaseHoldersGlobal(db, {
+      viewerHolderTtlMs: 90_000,
+      turnHolderTtlMs: 0,
+      idleGraceMs: 45_000,
+    });
+    expect(drained.some((row) => row.sandboxGroupId === groupId)).toBe(false);
+    const reset = await readRow(workspaceId, groupId);
+    expect(reset?.liveness).toBe("cold");
+    expect(reset?.lease_epoch).toBe(old.lease.leaseEpoch + 1);
+
+    const successor = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "retry-create",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(successor.role).toBe("spawner");
+    expect(successor.lease.leaseEpoch).toBe(old.lease.leaseEpoch + 1);
+    const lateRecord = await recordWarmingSandboxCreated(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: old.lease.leaseEpoch,
+      instanceId: "late-expired-provider",
+      leaseTtlMs: 45_000,
+    });
+    expect(lateRecord.recorded).toBe(false);
   }, 60_000);
 
   test("(1c) SKIP-LOCKED counterfactual: a concurrent arrival is SKIPPED (no row), proving plain FOR UPDATE is load-bearing", async () => {
