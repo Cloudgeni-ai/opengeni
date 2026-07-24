@@ -93,7 +93,7 @@ jobs:
           set -euo pipefail
           tag="opengeni-candidate-${SOURCE_SHA}"
           state="$(bun scripts/resolve-github-release-state.ts "$tag")"
-          release_exists="$(jq -er .releaseExists <<<"$state")"
+          release_exists="$(jq -er '.releaseExists | if type == "boolean" then tostring else error("releaseExists must be boolean") end' <<<"$state")"
           tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
           [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
             echo "existing candidate tag resolves to ${tag_sha}, expected ${SOURCE_SHA}" >&2
@@ -509,7 +509,7 @@ jobs:
           set -euo pipefail
           tag="opengeni-candidate-${SOURCE_SHA}"
           state="$(bun scripts/resolve-github-release-state.ts "$tag")"
-          release_exists="$(jq -er .releaseExists <<<"$state")"
+          release_exists="$(jq -er '.releaseExists | if type == "boolean" then tostring else error("releaseExists must be boolean") end' <<<"$state")"
           tag_sha="$(jq -r '.tagSha // ""' <<<"$state")"
           [ -z "$tag_sha" ] || [ "$tag_sha" = "$SOURCE_SHA" ] || {
             echo "existing candidate tag resolves to ${tag_sha}, expected ${SOURCE_SHA}" >&2
