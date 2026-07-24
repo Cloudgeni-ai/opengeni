@@ -309,6 +309,9 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
       ...(range.contentRange ? { "Content-Range": range.contentRange } : {}),
     };
     if (range.kind === "empty") {
+      if (!(await objectStorage.fileExists(artifact.file))) {
+        return c.json(retainedArtifactUnavailable(artifactId, "missing_storage"), 410);
+      }
       return c.body(null, 200, headers);
     }
 

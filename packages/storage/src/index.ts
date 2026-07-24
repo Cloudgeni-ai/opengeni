@@ -48,6 +48,8 @@ export type ObjectStorage = {
     expiresInSeconds?: number;
   }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
+  /** Check provider existence without downloading object bytes. */
+  fileExists: (file: FileAsset) => Promise<boolean>;
   getFileBytes: (file: FileAsset) => Promise<Uint8Array>;
   /**
    * Fetch exactly one inclusive byte range without materializing the complete
@@ -181,6 +183,20 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         contentType: head.ContentType,
         metadata: head.Metadata,
       });
+    },
+    async fileExists(file) {
+      try {
+        await client.send(
+          new HeadObjectCommand({
+            Bucket: file.bucket,
+            Key: file.objectKey,
+          }),
+        );
+        return true;
+      } catch (error) {
+        if (isS3NotFound(error)) return false;
+        throw error;
+      }
     },
     async getFileBytes(file) {
       const result = await client.send(
@@ -346,6 +362,15 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         metadata: stringMetadata(metadata.metadata),
       });
     },
+    async fileExists(file) {
+      try {
+        await bucket.file(file.objectKey).getMetadata();
+        return true;
+      } catch (error) {
+        if (isGcsNotFound(error)) return false;
+        throw error;
+      }
+    },
     async getFileBytes(file) {
       const [bytes] = await bucket.file(file.objectKey).download();
       return bytes;
@@ -450,6 +475,15 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
       return azureHeadToObjectHead(
         await containerClient.getBlobClient(file.objectKey).getProperties(),
       );
+    },
+    async fileExists(file) {
+      try {
+        await containerClient.getBlobClient(file.objectKey).getProperties();
+        return true;
+      } catch (error) {
+        if (isAzureNotFound(error)) return false;
+        throw error;
+      }
     },
     async getFileBytes(file) {
       return await azureDownloadToBytes(

@@ -57,6 +57,7 @@ afterAll(async () => {
 function storageFixture() {
   const objects = new Map<string, Uint8Array>();
   const calls: StorageCall[] = [];
+  const existenceCalls: string[] = [];
   const unavailable = async (): Promise<never> => {
     throw new Error("unexpected object-storage operation");
   };
@@ -67,6 +68,10 @@ function storageFixture() {
     createPutUrl: unavailable,
     createGetUrl: unavailable,
     headFile: unavailable,
+    async fileExists(file) {
+      existenceCalls.push(file.id);
+      return objects.has(file.objectKey);
+    },
     getFileBytes: unavailable,
     async getFileRange(file, range) {
       calls.push({ fileId: file.id, ...range });
@@ -77,7 +82,7 @@ function storageFixture() {
     putObject: unavailable,
     deleteObject: unavailable,
   };
-  return { storage, objects, calls };
+  return { storage, objects, calls, existenceCalls };
 }
 
 function routeApp(objectStorage: ObjectStorage | null, db = client.db): Hono {
@@ -246,6 +251,37 @@ describe("retained artifact metadata and bounded content", () => {
     );
     expect(unsatisfiable.status).toBe(416);
     expect(unsatisfiable.headers.get("content-range")).toBe(`bytes */${bytes.byteLength}`);
+    expect(fixture.calls).toHaveLength(0);
+  });
+
+  test("verifies provider existence for present and missing zero-byte evidence", async () => {
+    if (!available) return;
+    const workspace = await workspaceFixture();
+    const fixture = storageFixture();
+    const empty = await createArtifact(workspace, { bytes: new Uint8Array(0) });
+    fixture.objects.set(empty.objectKey, new Uint8Array(0));
+    const app = routeApp(fixture.storage);
+
+    const present = await app.request(artifactUrl(workspace.workspaceId, empty.fileId, true), {
+      headers: { authorization: workspace.authorization },
+    });
+    expect(present.status).toBe(200);
+    expect(present.headers.get("content-length")).toBe("0");
+    expect(present.headers.get("accept-ranges")).toBe("bytes");
+    expect(new Uint8Array(await present.arrayBuffer())).toHaveLength(0);
+
+    const missing = await createArtifact(workspace, { bytes: new Uint8Array(0) });
+    const missingResponse = await app.request(
+      artifactUrl(workspace.workspaceId, missing.fileId, true),
+      { headers: { authorization: workspace.authorization } },
+    );
+    expect(missingResponse.status).toBe(410);
+    expect(await missingResponse.json()).toMatchObject({
+      available: false,
+      artifactId: missing.fileId,
+      reason: "missing_storage",
+    });
+    expect(fixture.existenceCalls).toEqual([empty.fileId, missing.fileId]);
     expect(fixture.calls).toHaveLength(0);
   });
 

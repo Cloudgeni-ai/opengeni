@@ -171,6 +171,57 @@ describe("getObjectBytes (S3-compatible)", () => {
   });
 });
 
+describe("fileExists (S3-compatible)", () => {
+  test("distinguishes a present zero-byte object from missing storage", async () => {
+    const fake = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const key = decodeURIComponent(
+          new URL(request.url).pathname.replace(/^\/test-bucket\//, ""),
+        );
+        if (key !== "retained/empty.bin") return new Response(null, { status: 404 });
+        return new Response(null, {
+          status: 200,
+          headers: { "content-length": "0" },
+        });
+      },
+    });
+    try {
+      const storage = withEnv(
+        {
+          OPENGENI_OBJECT_STORAGE_BACKEND: "s3-compatible",
+          OPENGENI_OBJECT_STORAGE_ENDPOINT: `http://127.0.0.1:${fake.port}`,
+          OPENGENI_OBJECT_STORAGE_BUCKET: "test-bucket",
+          OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true",
+          OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID: "test",
+          OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY: "test",
+        },
+        () => createObjectStorage(getSettings()),
+      );
+      const file = (objectKey: string): FileAsset => ({
+        id: "33333333-3333-4333-8333-333333333333",
+        workspaceId: "11111111-1111-4111-8111-111111111111",
+        status: "ready",
+        filename: "empty.bin",
+        safeFilename: "empty.bin",
+        contentType: "application/octet-stream",
+        sizeBytes: 0,
+        sha256: "a".repeat(64),
+        bucket: "test-bucket",
+        objectKey,
+        createdAt: "2026-07-21T00:00:00.000Z",
+        updatedAt: "2026-07-21T00:00:00.000Z",
+      });
+
+      expect(await storage!.fileExists(file("retained/empty.bin"))).toBe(true);
+      expect(await storage!.fileExists(file("retained/missing.bin"))).toBe(false);
+    } finally {
+      fake.stop(true);
+    }
+  });
+});
+
 describe("getFileRange (S3-compatible)", () => {
   function startRangeS3(
     objects: Record<string, Uint8Array>,
