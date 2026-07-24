@@ -57,6 +57,40 @@ describe("GitHub release state resolution", () => {
     ).resolves.toEqual({ releaseExists: false, tagSha: sha });
   });
 
+  test("accepts only GitHub's exact 422 missing-ref response as an absent tag", async () => {
+    const exactMissing = {
+      message: `No commit found for SHA: ${tag}`,
+      status: "422",
+    };
+    await expect(
+      resolveGitHubReleaseState({
+        repository,
+        tag,
+        api: api({
+          [releasePath]: { status: 404 },
+          [commitPath]: { status: 422, body: exactMissing },
+        }),
+      }),
+    ).resolves.toEqual({ releaseExists: false, tagSha: null });
+
+    for (const body of [
+      { ...exactMissing, message: "Validation Failed" },
+      { ...exactMissing, message: "No commit found for SHA: another-tag" },
+      { ...exactMissing, status: 422 },
+    ]) {
+      await expect(
+        resolveGitHubReleaseState({
+          repository,
+          tag,
+          api: api({
+            [releasePath]: { status: 404 },
+            [commitPath]: { status: 422, body },
+          }),
+        }),
+      ).rejects.toThrow("HTTP 422");
+    }
+  });
+
   test("fails closed on authorization, transport-shaped status, and malformed authority", async () => {
     for (const status of [401, 403, 429, 500]) {
       await expect(
@@ -89,15 +123,26 @@ describe("GitHub release state resolution", () => {
   });
 
   test("rejects an existing release whose tag cannot resolve to an exact commit", async () => {
-    await expect(
-      resolveGitHubReleaseState({
-        repository,
-        tag,
-        api: api({
-          [releasePath]: { status: 200, body: { tag_name: tag } },
-          [commitPath]: { status: 404 },
+    for (const commit of [
+      { status: 404 },
+      {
+        status: 422,
+        body: {
+          message: `No commit found for SHA: ${tag}`,
+          status: "422",
+        },
+      },
+    ]) {
+      await expect(
+        resolveGitHubReleaseState({
+          repository,
+          tag,
+          api: api({
+            [releasePath]: { status: 200, body: { tag_name: tag } },
+            [commitPath]: commit,
+          }),
         }),
-      }),
-    ).rejects.toThrow("without a resolvable tag commit");
+      ).rejects.toThrow("without a resolvable tag commit");
+    }
   });
 });
