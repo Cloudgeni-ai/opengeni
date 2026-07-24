@@ -56,6 +56,29 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("bake-agent.sh");
   });
 
+  test("embedded release publishes only a verified candidate without hosted acceptance claims", async () => {
+    const release = await workflow("release-embedded.yml");
+    const registryReconcile = release.indexOf("Reconcile npm package identity");
+    const imagePromotion = release.indexOf("Promote exact candidate manifests");
+
+    expect(release).toContain("bun scripts/release-candidate.ts");
+    expect(release).toContain("bun run test:runtime-embedding-consumer");
+    expect(release).toContain("bun run test:publish-consumer");
+    expect(release).toContain("uses: changesets/action@");
+    expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(release).toContain("bun scripts/release-bom.ts");
+    expect(release).toContain("docker logout ghcr.io");
+    expect(registryReconcile).toBeGreaterThan(-1);
+    expect(imagePromotion).toBeGreaterThan(registryReconcile);
+    expect(release.slice(imagePromotion)).toContain('--tag "${name}:${RELEASE_VERSION}"');
+    expect(release.slice(imagePromotion)).toContain('--tag "${name}:sha-${SOURCE_SHA}"');
+    expect(release.slice(imagePromotion)).not.toContain('--tag "${name}:latest"');
+    expect(release).not.toContain("staging_evidence_url");
+    expect(release).not.toContain("production_canary_evidence_url");
+    expect(release).not.toContain("docker/build-push-action");
+    expect(release).not.toContain("docker build ");
+  });
+
   test("ordinary CI builds the same five physical image roles", async () => {
     const ci = await workflow("ci.yml");
     const imagesJob = ci.slice(ci.indexOf("\n  images:\n"));

@@ -185,6 +185,14 @@ one-time operator setup: after promotion it removes its GHCR login and fails
 closed unless every public release tag resolves anonymously to the exact
 candidate digest.
 
+Self-hosted embedding consumers have a narrower distribution boundary:
+`.github/workflows/release-embedded.yml` publishes only an exact versioned
+source that already has an immutable candidate receipt. It re-runs the public
+package gates, verifies npm `gitHead` and integrity, and promotes the receipt's
+unchanged manifests to version and full-source-SHA tags. It deliberately does
+not create or update `latest`, and its release receipt makes no hosted
+Workbench, staging, production, or canary claim.
+
 After staging, production, and the 72-hour canary have consumed those exact
 digests, public release is an explicit dispatch of
 `.github/workflows/release.yml` from a ref pinned to the accepted source SHA.
