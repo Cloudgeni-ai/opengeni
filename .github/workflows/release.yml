@@ -7,7 +7,7 @@ name: Release
 # to the selected git ref and records the retained acceptance evidence.
 #
 # Release images are built once by release-candidate.yml before staging. The
-# final GHCR job only promotes the exact accepted manifests to release tags and
+# final OCI job only promotes the exact accepted manifests to release tags and
 # writes the BOM; it never rebuilds image bytes after acceptance.
 #
 # REQUIRED REPO/ORG SETUP. This workflow is DORMANT until activated, so it does
@@ -20,12 +20,12 @@ name: Release
 #      and approve pull requests". The scoped per-run GITHUB_TOKEN deliberately
 #      authors Version PRs as github-actions[bot], leaving exact-head approval to
 #      a distinct trusted human reviewer.
-#   4. Set the api, worker, web, relay, and sandbox GHCR container packages to
-#      Public once in each package's settings. GitHub has no supported REST API
-#      for changing package visibility; candidate publication and final
-#      promotion both fail closed while any package remains private.
-#   - GHCR image publishing needs no extra secret (built-in GITHUB_TOKEN) and
-#     runs only when a release actually publishes.
+#   4. Configure OPENGENI_RELEASE_OCI_PREFIX and
+#      OPENGENI_RELEASE_REGISTRY_AUTH when the public registry is not the
+#      default GHCR namespace. The generic Azure OIDC mode also requires the
+#      three public Azure authority variables and exact environment-scoped
+#      federated credentials. Every mode fails closed unless anonymous pulls
+#      resolve the accepted digests.
 
 on:
   push:
@@ -155,6 +155,9 @@ jobs:
     name: Publish verified release
     runs-on: ubuntu-latest
     if: ${{ github.event_name == 'workflow_dispatch' && vars.RELEASE_ENABLED == 'true' }}
+    env:
+      OPENGENI_RELEASE_OCI_PREFIX: ${{ vars.OPENGENI_RELEASE_OCI_PREFIX || 'ghcr.io/cloudgeni-ai' }}
+      OPENGENI_RELEASE_REGISTRY_AUTH: ${{ vars.OPENGENI_RELEASE_REGISTRY_AUTH || 'github' }}
     permissions:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets creates and pushes immutable package tags
@@ -474,7 +477,7 @@ jobs:
           retention-days: 90
 
   images:
-    name: Promote accepted GHCR images
+    name: Promote accepted OCI images
     runs-on: ubuntu-latest
     # Image bytes were already built and accepted through release-candidate.yml.
     # This job creates release aliases for those exact manifests, verifies every
@@ -483,8 +486,12 @@ jobs:
     if: needs.publish.outputs.releaseReady == 'true'
     permissions:
       contents: write # publish the immutable source-SHA release BOM asset
-      packages: write # publish the accepted chart and release images to GHCR
+      packages: write # publish via built-in GitHub auth when GHCR is configured
       actions: read # retrieve only the already-proven candidate artifact
+      id-token: write # mint a short-lived credential when OIDC registry auth is configured
+    env:
+      OPENGENI_RELEASE_OCI_PREFIX: ${{ vars.OPENGENI_RELEASE_OCI_PREFIX || 'ghcr.io/cloudgeni-ai' }}
+      OPENGENI_RELEASE_REGISTRY_AUTH: ${{ vars.OPENGENI_RELEASE_REGISTRY_AUTH || 'github' }}
     environment:
       name: production-release
     steps:
@@ -560,12 +567,17 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      - name: Log in to the public OCI registry
+        id: registry-auth
+        uses: ./.github/actions/public-oci-login
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          oci-prefix: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}
+          auth: ${{ env.OPENGENI_RELEASE_REGISTRY_AUTH }}
+          github-username: ${{ github.actor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Reconcile existing product image aliases before mutation
         env:
@@ -585,23 +597,16 @@ jobs:
       - name: Publish or reconcile the exact accepted Helm chart
         id: release-chart
         env:
-          GHCR_TOKEN: ${{ github.token }}
-          GHCR_USERNAME: ${{ github.actor }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           set -euo pipefail
-          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
-          echo "$GHCR_TOKEN" | helm registry login ghcr.io \
-            --username "$GHCR_USERNAME" \
-            --password-stdin
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
           printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
           rm -rf .release/chart-pull
           mkdir -p .release/chart-pull
-          chart_ref="ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}"
-          chart_oci="oci://ghcr.io/${org}/charts/opengeni"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
+          chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
           resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             helm pull "$chart_oci" \
@@ -622,7 +627,7 @@ jobs:
           fi
           rm -rf .release/chart-pull
           mkdir -p .release/chart-pull
-          helm pull "oci://ghcr.io/${org}/charts/opengeni" \
+          helm pull "$chart_oci" \
             --version "$RELEASE_VERSION" \
             --destination .release/chart-pull
           cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz"
@@ -631,7 +636,8 @@ jobs:
             --arg manifestDigest "$resolved_manifest" \
             --arg bytesSha256 "$expected_bytes" \
             --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
-            '{reference:"oci://ghcr.io/cloudgeni-ai/charts/opengeni",version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
+            --arg reference "$chart_oci" \
+            '{reference:$reference,version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
           echo "manifest_digest=$resolved_manifest" >> "$GITHUB_OUTPUT"
           {
             echo 'json<<RELEASE_CHART_JSON'
@@ -712,17 +718,16 @@ jobs:
       - name: Verify official images support anonymous pull
         env:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REGISTRY: ${{ steps.registry-auth.outputs.registry }}
         run: |
           set -euo pipefail
-          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
 
           # Remove the publishing credential before proving the documented
           # public-consumer path. Registry visibility can take a few seconds to
           # converge, so retry only the read-only manifest inspection.
-          docker logout ghcr.io
+          docker logout "$REGISTRY"
           for role in api worker web relay sandbox; do
-            image="ghcr.io/${org}/opengeni-${role}:${RELEASE_VERSION}"
+            image="$(jq -er --arg role "$role" '.images[$role].name' evidence/release-candidate.json):${RELEASE_VERSION}"
             expected="$(jq -er --arg role "$role" '.images[$role].digest' evidence/release-candidate.json)"
             resolved=""
             for attempt in 1 2 3 4 5; do
@@ -735,15 +740,15 @@ jobs:
               exit 1
             }
           done
-          helm registry logout ghcr.io
+          helm registry logout "$REGISTRY"
           mkdir -p .release/anonymous-chart
-          helm pull "oci://ghcr.io/${org}/charts/opengeni" \
+          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni" \
             --version "$RELEASE_VERSION" \
             --destination .release/anonymous-chart
           cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
             ".release/anonymous-chart/opengeni-${RELEASE_VERSION}.tgz"
           chart_digest="$(docker buildx imagetools inspect \
-            "ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}" \
+            "${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}" \
             --format '{{.Manifest.Digest}}')"
           expected_chart_digest="${{ steps.release-chart.outputs.manifest_digest }}"
           [ "$chart_digest" = "$expected_chart_digest" ] || {

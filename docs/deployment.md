@@ -185,15 +185,25 @@ because its producer run-attempt binding is itself immutable. Release admission
 must use the original successful candidate run ID instead of trying to rewrite
 that release.
 
-Before the first public image release, an organization package administrator
-must set the `opengeni-api`, `opengeni-worker`, `opengeni-web`,
-`opengeni-relay`, `opengeni-sandbox`, and `charts/opengeni` container packages
-to **Public** in their GitHub package settings. GitHub does not expose a
-supported REST endpoint for changing package visibility. The release workflow
-therefore treats this as one-time operator setup: candidate creation proves the
-five image packages anonymously before writing its receipt; final promotion
-also proves the newly published official chart and every release image
-anonymously against the accepted bytes and digests.
+The public OCI location is a release authority, not a hard-coded provider.
+`OPENGENI_RELEASE_OCI_PREFIX` is a registry host plus an optional repository
+namespace (default `ghcr.io/cloudgeni-ai`). `OPENGENI_RELEASE_REGISTRY_AUTH`
+selects either built-in `github` auth for that default host or `azure-oidc` for
+an Azure Container Registry. The Azure mode accepts only an `*.azurecr.io`
+host, uses the environment-scoped `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID` variables, pins the Azure actions and CLI version, and
+mints a short-lived data-plane token; no registry password is stored.
+Federated credentials must bind the exact `public-release`,
+`embedded-release`, and `production-release` GitHub environments, and the
+workload identity must have the narrow push role on the selected registry.
+
+Whichever registry is selected must permit anonymous pulls. Candidate creation
+logs out before it writes a receipt and proves all five image digests through
+the unauthenticated path. Embedded and final promotion repeat that proof for
+the published image aliases and chart bytes. A private or inconsistently
+configured registry therefore fails closed before becoming distribution
+authority. The candidate receipt records the full image repository names, and
+every later workflow verifies them against the same source-controlled prefix.
 
 Self-hosted embedding consumers have a narrower distribution boundary:
 `.github/workflows/release-embedded.yml` publishes only an exact versioned
@@ -295,15 +305,18 @@ and migration images are pinned.
 
 ## Helm
 
-Released OpenGeni charts are published to GHCR as OCI artifacts. For release
-installs, pin the chart version explicitly; the release pipeline packages the
-chart with `appVersion` set to the same OpenGeni version, and the default image
-tags resolve to that appVersion:
+Released OpenGeni charts are published as public OCI artifacts. The immutable
+release BOM is authoritative for the chart reference and manifest digest. For
+release installs, use that `chart.reference` and pin the chart version
+explicitly; the release pipeline packages the chart with `appVersion` set to
+the same OpenGeni version, and the default image tags resolve to that
+appVersion:
 
 ```bash
 OPENGENI_VERSION="<published-version>"
+OPENGENI_CHART_OCI="<release-bom chart.reference>"
 
-helm upgrade --install opengeni oci://ghcr.io/cloudgeni-ai/charts/opengeni \
+helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
   --namespace opengeni \
   --create-namespace \
   --version "$OPENGENI_VERSION" \

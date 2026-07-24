@@ -7,17 +7,33 @@ import {
   validateReleaseProducerMetadata,
   type ReleaseProducerMetadata,
 } from "./release-provenance";
+import {
+  DEFAULT_RELEASE_OCI_PREFIX,
+  isExactSha256Digest,
+  normalizeReleaseOciPrefix,
+  releaseImageName,
+  releaseOciPrefixFromEnvironment,
+} from "./release-registry";
 
 export const RELEASE_IMAGE_ROLES = ["api", "worker", "web", "relay", "sandbox"] as const;
 export type ReleaseImageRole = (typeof RELEASE_IMAGE_ROLES)[number];
 
 export const RELEASE_IMAGE_NAMES: Record<ReleaseImageRole, string> = {
-  api: "ghcr.io/cloudgeni-ai/opengeni-api",
-  worker: "ghcr.io/cloudgeni-ai/opengeni-worker",
-  web: "ghcr.io/cloudgeni-ai/opengeni-web",
-  relay: "ghcr.io/cloudgeni-ai/opengeni-relay",
-  sandbox: "ghcr.io/cloudgeni-ai/opengeni-sandbox",
+  api: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "api"),
+  worker: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "worker"),
+  web: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "web"),
+  relay: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "relay"),
+  sandbox: releaseImageName(DEFAULT_RELEASE_OCI_PREFIX, "sandbox"),
 };
+
+export function releaseImageNames(
+  ociPrefix: string = DEFAULT_RELEASE_OCI_PREFIX,
+): Record<ReleaseImageRole, string> {
+  const prefix = normalizeReleaseOciPrefix(ociPrefix);
+  return Object.fromEntries(
+    RELEASE_IMAGE_ROLES.map((role) => [role, releaseImageName(prefix, role)]),
+  ) as Record<ReleaseImageRole, string>;
+}
 
 export type ReleaseCandidateImage = {
   name: string;
@@ -31,7 +47,7 @@ export type ReleaseChartCandidate = {
 };
 
 export type ReleaseChartIdentity = ReleaseChartCandidate & {
-  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni";
+  reference: string;
   manifestDigest: string;
 };
 
@@ -61,6 +77,7 @@ export function buildReleaseCandidateReceipt(input: {
   imageDigests: Record<ReleaseImageRole, string>;
   chart: ReleaseChartCandidate;
   producer: ReleaseProducerMetadata;
+  ociPrefix?: string;
 }): ReleaseCandidateReceipt {
   if (!sourceShaPattern.test(input.sourceSha)) {
     throw new Error("release candidate sourceSha must be 40 lowercase hexadecimal characters");
@@ -77,13 +94,14 @@ export function buildReleaseCandidateReceipt(input: {
   const chart = normalizeChart(input.chart);
   const releaseVersion = chart.version;
   const packages = normalizePackages(input.packages);
+  const imageNames = releaseImageNames(input.ociPrefix);
   const images = {} as Record<ReleaseImageRole, ReleaseCandidateImage>;
   for (const role of RELEASE_IMAGE_ROLES) {
     const digest = input.imageDigests[role];
     if (!digestPattern.test(digest)) {
       throw new Error(`release candidate ${role} digest must be an exact sha256 digest`);
     }
-    images[role] = { name: RELEASE_IMAGE_NAMES[role], digest };
+    images[role] = { name: imageNames[role], digest };
   }
 
   return {
@@ -110,6 +128,7 @@ export function validateReleaseCandidateReceipt(
     sourceTreeSha?: string;
     packages?: PublishablePackage[];
     producer?: ReleaseProducerMetadata;
+    ociPrefix?: string;
   },
 ): ReleaseCandidateReceipt {
   const receipt = object(value, "release candidate receipt");
@@ -145,14 +164,18 @@ export function validateReleaseCandidateReceipt(
 
   const rawImages = object(receipt.images, "release candidate images");
   exactKeys(rawImages, RELEASE_IMAGE_ROLES, "release candidate images");
+  const inferredOciPrefix = inferReleaseOciPrefix(rawImages);
+  const expectedImageNames = releaseImageNames(
+    expected?.ociPrefix ? normalizeReleaseOciPrefix(expected.ociPrefix) : inferredOciPrefix,
+  );
   const imageDigests = {} as Record<ReleaseImageRole, string>;
   for (const role of RELEASE_IMAGE_ROLES) {
     const image = object(rawImages[role], `release candidate image ${role}`);
     exactKeys(image, ["name", "digest"], `release candidate image ${role}`);
-    if (image.name !== RELEASE_IMAGE_NAMES[role]) {
-      throw new Error(`release candidate ${role} image must be ${RELEASE_IMAGE_NAMES[role]}`);
+    if (image.name !== expectedImageNames[role]) {
+      throw new Error(`release candidate ${role} image must be ${expectedImageNames[role]}`);
     }
-    if (typeof image.digest !== "string" || !digestPattern.test(image.digest)) {
+    if (!isExactSha256Digest(image.digest)) {
       throw new Error(`release candidate ${role} digest must be an exact sha256 digest`);
     }
     imageDigests[role] = image.digest;
@@ -201,6 +224,7 @@ export function validateReleaseCandidateReceipt(
     imageDigests,
     chart,
     producer,
+    ociPrefix: inferredOciPrefix,
   });
 }
 
@@ -257,6 +281,14 @@ function normalizeChart(value: unknown): ReleaseChartCandidate {
   };
 }
 
+function inferReleaseOciPrefix(images: Record<string, unknown>): string {
+  const api = object(images.api, "release candidate image api");
+  if (typeof api.name !== "string" || !api.name.endsWith("/opengeni-api")) {
+    throw new Error("release candidate API image must use the opengeni-api repository");
+  }
+  return normalizeReleaseOciPrefix(api.name.slice(0, -"/opengeni-api".length));
+}
+
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -304,6 +336,7 @@ async function writeReceiptFromEnvironment(): Promise<void> {
       "OPENGENI_RELEASE_CANDIDATE_PRODUCER",
       process.env.OPENGENI_RELEASE_CANDIDATE_PRODUCER ?? "",
     ),
+    ociPrefix: releaseOciPrefixFromEnvironment(),
   });
   const outputPath = resolve(
     import.meta.dir,
@@ -334,6 +367,7 @@ async function verifyReceiptFile(args: {
     {
       sourceSha: args.sourceSha,
       packages: parseExpectedPackages(args.expectedPackages),
+      ociPrefix: releaseOciPrefixFromEnvironment(),
     },
   );
   console.log(JSON.stringify({ ok: true, receipt }));

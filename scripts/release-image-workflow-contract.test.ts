@@ -8,6 +8,10 @@ async function workflow(name: string): Promise<string> {
   return readFile(resolve(root, ".github/workflows", name), "utf8");
 }
 
+async function action(name: string): Promise<string> {
+  return readFile(resolve(root, ".github/actions", name, "action.yml"), "utf8");
+}
+
 describe("release image workflow contract", () => {
   test("candidate builds every physical image and freezes a full-SHA receipt", async () => {
     const candidate = await workflow("release-candidate.yml");
@@ -31,7 +35,7 @@ describe("release image workflow contract", () => {
     expect(anonymousGate).toBeGreaterThan(-1);
     expect(anonymousGate).toBeLessThan(receiptWrite);
     expect(anonymousGate).toBeLessThan(receiptPublish);
-    expect(candidate.slice(anonymousGate, receiptWrite)).toContain("docker logout ghcr.io");
+    expect(candidate.slice(anonymousGate, receiptWrite)).toContain('docker logout "$REGISTRY"');
     expect(candidate.slice(anonymousGate, receiptWrite)).toContain(
       "docker buildx imagetools inspect",
     );
@@ -68,9 +72,10 @@ describe("release image workflow contract", () => {
       finalJob.indexOf("Reconcile existing product image aliases before mutation"),
     ).toBeLessThan(finalJob.indexOf("Publish or reconcile the exact accepted Helm chart"));
     expect(finalJob).toContain("Verify official images support anonymous pull");
-    expect(finalJob).toContain("docker logout ghcr.io");
+    expect(finalJob).toContain('docker logout "$REGISTRY"');
     expect(finalJob).toContain("docker buildx imagetools inspect");
-    expect(release).toContain("GitHub has no supported REST API");
+    expect(release).toContain("OPENGENI_RELEASE_OCI_PREFIX");
+    expect(release).toContain("OPENGENI_RELEASE_REGISTRY_AUTH");
     expect(finalJob).not.toContain("--method PATCH");
     expect(finalJob).not.toContain("docker/build-push-action");
     expect(finalJob).not.toContain("docker build ");
@@ -148,7 +153,7 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain('gh release view "$tag"');
     expect(release).toContain("bun scripts/release-bom.ts");
     expect(release).toContain("evidence/release-bom.json");
-    expect(release).toContain("docker logout ghcr.io");
+    expect(release).toContain('docker logout "$REGISTRY"');
     expect(registryReconcile).toBeGreaterThan(-1);
     expect(existingReleasePreflight).toBeGreaterThan(registryReconcile);
     expect(imagePromotion).toBeGreaterThan(registryReconcile);
@@ -169,6 +174,29 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain("docker/build-push-action");
     expect(release).not.toContain("docker build ");
     expect(release).not.toContain('--tag "${name}:latest"');
+  });
+
+  test("public registry authentication is portable, short-lived, and version-bound", async () => {
+    const candidate = await workflow("release-candidate.yml");
+    const release = await workflow("release.yml");
+    const embedded = await workflow("release-embedded.yml");
+    const login = await action("public-oci-login");
+
+    for (const source of [candidate, release, embedded]) {
+      expect(source).toContain("uses: ./.github/actions/public-oci-login");
+      expect(source).toContain("OPENGENI_RELEASE_OCI_PREFIX");
+      expect(source).toContain("OPENGENI_RELEASE_REGISTRY_AUTH");
+      expect(source).toContain("id-token: write");
+    }
+    expect(login).toContain("azure-oidc");
+    expect(login).toContain("github");
+    expect(login).toContain("azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43");
+    expect(login).toContain("azure/cli@9eb25b8360668fb0ecbafa808d40e2197b2f5f52");
+    expect(login).toContain("azcliversion: 2.88.0");
+    expect(login).toContain('[ "$actual_version" = "2.88.0" ]');
+    expect(login).toContain("--expose-token");
+    expect(login).not.toContain("client-secret");
+    expect(login).not.toContain("admin-password");
   });
 
   test("ordinary CI builds the same five physical image roles", async () => {

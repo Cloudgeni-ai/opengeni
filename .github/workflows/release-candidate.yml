@@ -29,11 +29,16 @@ jobs:
   candidate:
     name: Build immutable release candidate
     runs-on: ubuntu-latest
+    environment: public-release
     if: ${{ vars.RELEASE_ENABLED == 'true' }}
+    env:
+      OPENGENI_RELEASE_OCI_PREFIX: ${{ vars.OPENGENI_RELEASE_OCI_PREFIX || 'ghcr.io/cloudgeni-ai' }}
+      OPENGENI_RELEASE_REGISTRY_AUTH: ${{ vars.OPENGENI_RELEASE_REGISTRY_AUTH || 'github' }}
     permissions:
       contents: write
       packages: write
       attestations: write
+      id-token: write
     steps:
       - name: Check out candidate source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -122,12 +127,20 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
 
-      - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+      - name: Set up Helm
+        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+
+      - name: Log in to the public OCI registry
+        id: registry
+        uses: ./.github/actions/public-oci-login
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          oci-prefix: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}
+          auth: ${{ env.OPENGENI_RELEASE_REGISTRY_AUTH }}
+          github-username: ${{ github.actor }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          azure-client-id: ${{ vars.AZURE_CLIENT_ID }}
+          azure-tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          azure-subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
       - name: Refuse an occupied product release version
         env:
@@ -135,14 +148,14 @@ jobs:
         run: |
           set -euo pipefail
           for role in api worker web relay sandbox; do
-            ref="ghcr.io/cloudgeni-ai/opengeni-${role}:${RELEASE_VERSION}"
+            ref="${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}:${RELEASE_VERSION}"
             digest="$(bun scripts/resolve-optional-oci-manifest.ts "$ref")"
             if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
               echo "product release version ${RELEASE_VERSION} is already occupied by ${ref}" >&2
               exit 1
             fi
           done
-          chart_ref="ghcr.io/cloudgeni-ai/charts/opengeni:${RELEASE_VERSION}"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
           chart_digest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$chart_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "product release version ${RELEASE_VERSION} is already occupied by ${chart_ref}" >&2
@@ -152,7 +165,7 @@ jobs:
       - name: Resolve existing API candidate
         id: existing-api
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
           digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
@@ -187,12 +200,12 @@ jobs:
           push: true
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
-          tags: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+          tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
 
       - name: Resolve API candidate digest
         id: api
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-api:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-api.outputs.digest }}
         run: |
           set -euo pipefail
@@ -207,7 +220,7 @@ jobs:
       - name: Resolve existing worker candidate
         id: existing-worker
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
           digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
@@ -229,12 +242,12 @@ jobs:
           push: true
           build-args: |
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
-          tags: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+          tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
 
       - name: Resolve worker candidate digest
         id: worker
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-worker:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-worker.outputs.digest }}
         run: |
           set -euo pipefail
@@ -246,7 +259,7 @@ jobs:
       - name: Resolve existing web candidate
         id: existing-web
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
           digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
@@ -269,12 +282,12 @@ jobs:
           build-args: |
             OPENGENI_DEPLOYMENT_REVISION=${{ steps.meta.outputs.version }}
             OPENGENI_SERVER_VERSION=${{ steps.meta.outputs.version }}
-          tags: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+          tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
 
       - name: Resolve web candidate digest
         id: web
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-web:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-web.outputs.digest }}
         run: |
           set -euo pipefail
@@ -286,7 +299,7 @@ jobs:
       - name: Resolve existing sandbox candidate
         id: existing-sandbox
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
           digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
@@ -305,12 +318,12 @@ jobs:
           file: docker/sandbox.Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+          tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
 
       - name: Resolve sandbox candidate digest
         id: sandbox
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-sandbox:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-sandbox.outputs.digest }}
         run: |
           set -euo pipefail
@@ -322,7 +335,7 @@ jobs:
       - name: Resolve existing relay candidate
         id: existing-relay
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
         run: |
           set -euo pipefail
           digest="$(bun scripts/resolve-optional-oci-manifest.ts "$IMAGE_REF")"
@@ -341,12 +354,12 @@ jobs:
           file: agent/crates/opengeni-relay/Dockerfile
           platforms: linux/amd64
           push: true
-          tags: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+          tags: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
 
       - name: Resolve relay candidate digest
         id: relay
         env:
-          IMAGE_REF: ghcr.io/cloudgeni-ai/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
+          IMAGE_REF: ${{ env.OPENGENI_RELEASE_OCI_PREFIX }}/opengeni-relay:${{ steps.meta.outputs.candidate_tag }}
           BUILT_DIGEST: ${{ steps.build-relay.outputs.digest }}
         run: |
           set -euo pipefail
@@ -357,7 +370,7 @@ jobs:
 
       - name: Verify candidate images support anonymous pull
         env:
-          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REGISTRY: ${{ steps.registry.outputs.registry }}
           API_DIGEST: ${{ steps.api.outputs.digest }}
           WORKER_DIGEST: ${{ steps.worker.outputs.digest }}
           WEB_DIGEST: ${{ steps.web.outputs.digest }}
@@ -365,17 +378,17 @@ jobs:
           SANDBOX_DIGEST: ${{ steps.sandbox.outputs.digest }}
         run: |
           set -euo pipefail
-          org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
 
           # Candidate receipts are public deployment authority. Drop the
           # publishing credential before creating one so a private package can
           # never produce a receipt that the ordinary release operator cannot
           # consume.
-          docker logout ghcr.io
+          docker logout "$REGISTRY"
+          helm registry logout "$REGISTRY"
           for role in api worker web relay sandbox; do
             digest_var="$(printf '%s_DIGEST' "$role" | tr '[:lower:]' '[:upper:]')"
             expected="${!digest_var}"
-            image="ghcr.io/${org}/opengeni-${role}@${expected}"
+            image="${OPENGENI_RELEASE_OCI_PREFIX}/opengeni-${role}@${expected}"
             resolved=""
             for attempt in 1 2 3 4 5; do
               resolved="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}' 2>/dev/null || true)"
@@ -387,9 +400,6 @@ jobs:
               exit 1
             }
           done
-      - name: Set up Helm for the immutable chart candidate
-        uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
-
       - name: Package the deterministic immutable Helm chart candidate
         id: chart
         env:
