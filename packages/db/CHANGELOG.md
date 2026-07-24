@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.10.1
+
+### Patch Changes
+
+- eed3438: Preserve private per-turn instructions when queue-edited prompts are resubmitted.
+
 ## 0.10.0
 
 ### Minor Changes
