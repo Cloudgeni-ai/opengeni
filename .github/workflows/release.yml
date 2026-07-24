@@ -272,8 +272,7 @@ jobs:
             local zip="$destination/artifact.zip"
             gh api \
               --header 'Accept: application/vnd.github+json' \
-              --output "$zip" \
-              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip"
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$zip"
             printf '%s  %s\n' "${digest#sha256:}" "$zip" | sha256sum --check --strict -
             unzip -q "$zip" -d "$destination/files"
           }
@@ -520,8 +519,8 @@ jobs:
           set -euo pipefail
           mkdir -p evidence .release/candidate-artifact
           gh api --header 'Accept: application/vnd.github+json' \
-            --output .release/candidate-artifact.zip \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip"
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip" \
+            > .release/candidate-artifact.zip
           printf '%s  %s\n' "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" .release/candidate-artifact.zip \
             | sha256sum --check --strict -
           unzip -q .release/candidate-artifact.zip -d .release/candidate-artifact

@@ -125,8 +125,8 @@ jobs:
           mkdir -p evidence .release/candidate-artifact .release
           gh api \
             --header 'Accept: application/vnd.github+json' \
-            --output .release/candidate-artifact.zip \
-            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip"
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip" \
+            > .release/candidate-artifact.zip
           printf '%s  %s\n' \
             "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" \
             .release/candidate-artifact.zip \
