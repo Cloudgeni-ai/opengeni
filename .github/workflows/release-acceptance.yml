@@ -1,0 +1,98 @@
+name: Release acceptance producer
+
+# This is the canonical, operator-controlled producer identity consumed by
+# release.yml. It is intentionally fail-closed until the deployment owner has
+# installed the real acceptance harness on the protected environment. A
+# workflow-dispatch input can select a source and candidate run, but it cannot
+# supply evidence URLs, hashes, workflow paths, or repository identities.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact source SHA deployed to staging and production.
+        required: true
+        type: string
+      candidate_run_id:
+        description: Canonical release-candidate workflow run that produced this source.
+        required: true
+        type: string
+
+concurrency:
+  group: release-acceptance-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  acceptance:
+    name: Produce trusted workbench acceptance bundle
+    runs-on: ubuntu-latest
+    if: ${{ vars.RELEASE_ACCEPTANCE_ENABLED == 'true' }}
+    environment:
+      name: production-acceptance
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Check out the exact accepted source
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate source identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          [ "$(git rev-parse HEAD)" = "$SOURCE_SHA" ] || exit 1
+          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || exit 1
+          git fetch --no-tags origin main
+          [ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ] || exit 1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
+      - name: Verify the candidate producer before acceptance
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          bun scripts/verify-release-provenance.ts \
+            --kind candidate \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --output evidence/candidate-provenance.json
+
+      # The protected environment owner installs the real live acceptance
+      # harness here. The checked-in contract never fabricates matrix rows from
+      # a prose summary or accepts a caller-provided evidence file/URL. Leaving
+      # this marker unresolved keeps the producer unsuccessful and therefore
+      # unusable by release.yml.
+      - name: Require the operator-controlled acceptance harness
+        run: |
+          set -euo pipefail
+          echo "No protected acceptance harness is configured for this repository." >&2
+          echo "Install the operator-owned harness before enabling RELEASE_ACCEPTANCE_ENABLED." >&2
+          exit 1
+
+      - name: Upload the complete acceptance artifact
+        if: ${{ success() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-acceptance-${{ inputs.source_sha }}
+          path: |
+            evidence/workbench-acceptance.json
+            evidence/workbench-acceptance.sha256
+          if-no-files-found: error
+          retention-days: 90

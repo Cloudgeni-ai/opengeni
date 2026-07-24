@@ -35,6 +35,13 @@ describe("release image workflow contract", () => {
     expect(candidate.slice(anonymousGate, receiptWrite)).toContain(
       "docker buildx imagetools inspect",
     );
+    expect(candidate).toContain("helm package deploy/helm/opengeni");
+    expect(candidate).toContain("helm push");
+    expect(candidate).toContain("release-chart.sha256");
+    expect(candidate).toContain("manifestDigest");
+    expect(candidate).toContain("Refuse to rerun a completed immutable candidate");
+    expect(candidate).toContain("use its original successful producer run ID");
+    expect(candidate).toContain("existing_tag_sha");
   });
 
   test("final release promotes accepted manifests and has no image build boundary", async () => {
@@ -54,6 +61,34 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("docker/build-push-action");
     expect(finalJob).not.toContain("docker build ");
     expect(finalJob).not.toContain("bake-agent.sh");
+    expect(finalJob).not.toContain("helm package");
+    expect(finalJob).not.toContain("helm push");
+    expect(finalJob).toContain("name: production-release");
+    expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
+      finalJob.indexOf("Promote exact accepted manifests"),
+    );
+    expect(finalJob).toContain("existing_tag_sha");
+    expect(release).toContain("candidate_run_id:");
+    expect(release).toContain("acceptance_run_id:");
+    for (const forbidden of [
+      "candidate_receipt_url:",
+      "candidate_receipt_sha256:",
+      "acceptance_bundle_url:",
+      "acceptance_bundle_sha256:",
+      "staging_evidence_url:",
+      "production_evidence_url:",
+    ]) {
+      expect(release).not.toContain(forbidden);
+    }
+  });
+
+  test("acceptance is a protected canonical producer and stays fail-closed without its harness", async () => {
+    const acceptance = await workflow("release-acceptance.yml");
+    expect(acceptance).toContain(".github/workflows/release-acceptance.yml");
+    expect(acceptance).toContain("name: production-acceptance");
+    expect(acceptance).toContain("Require the operator-controlled acceptance harness");
+    expect(acceptance).toContain("exit 1");
+    expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");
   });
 
   test("ordinary CI builds the same five physical image roles", async () => {

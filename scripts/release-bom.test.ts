@@ -10,6 +10,13 @@ const images = [
   { name: "ghcr.io/cloudgeni-ai/opengeni-web", digest: `sha256:${"4".repeat(64)}` },
   { name: "ghcr.io/cloudgeni-ai/opengeni-worker", digest: `sha256:${"5".repeat(64)}` },
 ];
+const chart = {
+  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni" as const,
+  version: "0.16.0",
+  manifestDigest: `sha256:${"6".repeat(64)}`,
+  bytesSha256: "7".repeat(64),
+  artifact: "opengeni-0.16.0.tgz",
+};
 
 describe("release BOM", () => {
   test("normalizes a complete immutable package and image inventory", () => {
@@ -34,9 +41,10 @@ describe("release BOM", () => {
           },
         ],
         images: [...images].reverse(),
+        chart,
       }),
     ).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       sourceSha,
       releaseVersion: "0.16.0",
       packages: [
@@ -60,6 +68,7 @@ describe("release BOM", () => {
         { name: "ghcr.io/cloudgeni-ai/opengeni-web", digest: `sha256:${"4".repeat(64)}` },
         { name: "ghcr.io/cloudgeni-ai/opengeni-worker", digest: `sha256:${"5".repeat(64)}` },
       ],
+      chart,
     });
   });
 
@@ -77,6 +86,7 @@ describe("release BOM", () => {
         },
       ],
       images,
+      chart,
     };
 
     expect(() => buildReleaseBom({ ...valid, sourceSha: "main" })).toThrow("sourceSha");
@@ -113,5 +123,17 @@ describe("release BOM", () => {
         ],
       }),
     ).toThrow("must contain exactly");
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        chart: { ...chart, bytesSha256: "0".repeat(64) },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      buildReleaseBom({
+        ...valid,
+        chart: { ...chart, version: "0.17.0" },
+      }),
+    ).toThrow("chart version must equal");
   });
 });

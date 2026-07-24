@@ -11,9 +11,15 @@ import {
   type AcceptanceResult,
   type WorkbenchAcceptanceBundle,
 } from "./verify-workbench-acceptance-bundle";
-import { buildReleaseCandidateReceipt, type ReleaseImageRole } from "./release-candidate";
+import {
+  buildReleaseCandidateReceipt,
+  type ReleaseChartIdentity,
+  type ReleaseImageRole,
+} from "./release-candidate";
+import { buildReleaseProducerMetadata } from "./release-provenance";
 
 const sourceSha = "a".repeat(40);
+const sourceTreeSha = "f".repeat(40);
 const digest = `sha256:${"b".repeat(64)}`;
 const artifactHash = "c".repeat(64);
 const stagingEvidenceUrl = "https://evidence.example/staging.json";
@@ -22,8 +28,30 @@ const canaryEvidenceUrl = "https://evidence.example/canary.json";
 const candidateReceiptUrl =
   "https://github.com/example/opengeni/releases/download/opengeni-candidate-a/release-candidate.json";
 const candidateReceiptSha256 = "d".repeat(64);
+const chart: ReleaseChartIdentity = {
+  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni",
+  version: "0.18.0",
+  manifestDigest: `sha256:${"9".repeat(64)}`,
+  bytesSha256: "8".repeat(64),
+  artifact: "opengeni-0.18.0.tgz",
+};
+const candidateProducer = buildReleaseProducerMetadata({
+  kind: "candidate",
+  runId: 123,
+  runAttempt: 1,
+  sourceSha,
+  sourceTreeSha,
+});
+const acceptanceProducer = buildReleaseProducerMetadata({
+  kind: "acceptance",
+  runId: 456,
+  runAttempt: 1,
+  sourceSha,
+  sourceTreeSha,
+});
 const candidateReceipt = buildReleaseCandidateReceipt({
   sourceSha,
+  sourceTreeSha,
   packages: [{ name: "@opengeni/sdk", version: "0.18.0" }],
   imageDigests: {
     api: digest,
@@ -32,6 +60,8 @@ const candidateReceipt = buildReleaseCandidateReceipt({
     relay: digest,
     sandbox: digest,
   } satisfies Record<ReleaseImageRole, string>,
+  chart,
+  producer: candidateProducer,
 });
 
 function evidence(name: string) {
@@ -107,9 +137,13 @@ function validBundle(): WorkbenchAcceptanceBundle {
   return {
     schemaVersion: 2,
     generatedAt: "2026-07-16T00:00:00.000Z",
+    producer: acceptanceProducer,
     candidate: {
       sourceSha,
+      sourceTreeSha,
       imageDigests: images(),
+      chart,
+      producer: candidateProducer,
       receipt: {
         url: candidateReceiptUrl,
         sha256: candidateReceiptSha256,
@@ -118,13 +152,17 @@ function validBundle(): WorkbenchAcceptanceBundle {
     },
     staging: {
       sourceSha,
+      sourceTreeSha,
       imageDigests: images(),
+      chart,
       deploymentUrl: "https://staging.example",
       evidenceUrl: stagingEvidenceUrl,
     },
     production: {
       sourceSha,
+      sourceTreeSha,
       imageDigests: images(),
+      chart,
       deploymentUrl: "https://production.example",
       evidenceUrl: productionEvidenceUrl,
     },
@@ -154,6 +192,8 @@ function validate(bundle: WorkbenchAcceptanceBundle) {
   return validateWorkbenchAcceptanceBundle(bundle, {
     sourceSha,
     candidateReceipt,
+    candidateProducer,
+    acceptanceProducer,
     candidateReceiptUrl,
     candidateReceiptSha256,
     stagingEvidenceUrl,
@@ -190,6 +230,14 @@ describe("workbench acceptance bundle", () => {
     const short = validBundle();
     short.productionCanary.endedAt = "2026-07-03T23:59:59.000Z";
     expect(() => validate(short)).toThrow("at least 72 hours");
+
+    const chartDrift = validBundle();
+    chartDrift.production.chart.manifestDigest = `sha256:${"e".repeat(64)}`;
+    expect(() => validate(chartDrift)).toThrow("chart manifestDigest differs");
+
+    const chartBytesDrift = validBundle();
+    chartBytesDrift.staging.chart.bytesSha256 = "f".repeat(64);
+    expect(() => validate(chartBytesDrift)).toThrow("chart bytesSha256 differs");
   });
 
   test("fails closed on candidate-receipt drift, missing/extra roles, or migration drift", () => {

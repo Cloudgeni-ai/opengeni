@@ -10,8 +10,10 @@ import {
   type ReleaseCandidateReceipt,
   type ReleaseImageRole,
 } from "./release-candidate";
+import { buildReleaseProducerMetadata } from "./release-provenance";
 
 const sourceSha = "a".repeat(40);
+const sourceTreeSha = "f".repeat(40);
 const packages = [
   { name: "@opengeni/react", version: "0.18.0" },
   { name: "@opengeni/sdk", version: "0.18.0" },
@@ -19,18 +21,36 @@ const packages = [
 const imageDigests = Object.fromEntries(
   RELEASE_IMAGE_ROLES.map((role, index) => [role, `sha256:${String(index + 1).repeat(64)}`]),
 ) as Record<ReleaseImageRole, string>;
+const chart = {
+  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni" as const,
+  version: "0.18.0",
+  manifestDigest: `sha256:${"9".repeat(64)}`,
+  bytesSha256: "8".repeat(64),
+  artifact: "opengeni-0.18.0.tgz",
+};
+const producer = buildReleaseProducerMetadata({
+  kind: "candidate",
+  runId: 123,
+  runAttempt: 1,
+  sourceSha,
+  sourceTreeSha,
+});
 
 describe("release candidate receipt", () => {
   test("normalizes the exact package and physical image inventory", () => {
     const receipt = buildReleaseCandidateReceipt({
       sourceSha,
+      sourceTreeSha,
       packages: [...packages].reverse(),
       imageDigests,
+      chart,
+      producer,
     });
 
     expect(receipt).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       sourceSha,
+      sourceTreeSha,
       releaseVersion: "0.18.0",
       packages,
       images: Object.fromEntries(
@@ -39,6 +59,8 @@ describe("release candidate receipt", () => {
           { name: RELEASE_IMAGE_NAMES[role], digest: imageDigests[role] },
         ]),
       ) as ReleaseCandidateReceipt["images"],
+      chart,
+      producer,
       aliases: { migration: "api" },
     });
     expect(deploymentImageDigests(receipt)).toEqual({
@@ -58,7 +80,14 @@ describe("release candidate receipt", () => {
   });
 
   test("rejects missing, extra, mutable, or provider-drifted image identities", () => {
-    const valid = buildReleaseCandidateReceipt({ sourceSha, packages, imageDigests });
+    const valid = buildReleaseCandidateReceipt({
+      sourceSha,
+      sourceTreeSha,
+      packages,
+      imageDigests,
+      chart,
+      producer,
+    });
 
     const missing = structuredClone(valid) as any;
     delete missing.images.relay;
@@ -78,16 +107,30 @@ describe("release candidate receipt", () => {
   });
 
   test("binds source, package plan, release version, and migration alias", () => {
-    const valid = buildReleaseCandidateReceipt({ sourceSha, packages, imageDigests });
+    const valid = buildReleaseCandidateReceipt({
+      sourceSha,
+      sourceTreeSha,
+      packages,
+      imageDigests,
+      chart,
+      producer,
+    });
     expect(
       validateReleaseCandidateReceipt(valid, {
         sourceSha,
+        sourceTreeSha,
         packages,
+        producer,
       }),
     ).toEqual(valid);
 
     expect(() =>
-      validateReleaseCandidateReceipt(valid, { sourceSha: "b".repeat(40), packages }),
+      validateReleaseCandidateReceipt(valid, {
+        sourceSha: "b".repeat(40),
+        sourceTreeSha,
+        packages,
+        producer,
+      }),
     ).toThrow("does not match");
     expect(() =>
       validateReleaseCandidateReceipt(valid, {
@@ -103,5 +146,10 @@ describe("release candidate receipt", () => {
     const wrongAlias = structuredClone(valid) as any;
     wrongAlias.aliases.migration = "worker";
     expect(() => validateReleaseCandidateReceipt(wrongAlias)).toThrow("alias the API");
+
+    const chartDrift = structuredClone(valid) as any;
+    chartDrift.chart.version = "0.19.0";
+    chartDrift.chart.artifact = "opengeni-0.19.0.tgz";
+    expect(() => validateReleaseCandidateReceipt(chartDrift)).toThrow("chart version");
   });
 });

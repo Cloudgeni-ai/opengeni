@@ -38,10 +38,14 @@ means reviewers failed to notice a problem.
 Every live evidence bundle MUST bind:
 
 - full 40-character OpenGeni source SHA;
-- the immutable `release-candidate.json` URL and SHA-256;
+- the canonical release-candidate workflow run and its unexpired immutable
+  Actions artifact identity/digest (the release workflow derives the download
+  URL from the validated artifact ID; dispatchers cannot choose a URL or hash);
 - API, worker, web, relay, and stock headless-sandbox image digests, with
   migrations explicitly aliased to the API manifest;
 - package versions and package tarball integrity hashes;
+- the official OCI Helm chart reference/version, manifest digest, exact
+  packaged-byte SHA-256, and candidate chart artifact;
 - deployment environment and workflow run URL;
 - browser name/version, operating system, viewport, device scale factor, input
   modality, color scheme, contrast preference, and reduced-motion preference;
@@ -64,9 +68,15 @@ builds each physical image at most once under a full-SHA candidate tag, and
 publishes an immutable `opengeni-candidate-<sourceSha>` receipt. A retry reuses
 an already-present manifest instead of rebuilding it.
 
-The pre-publication release workflow downloads both that candidate receipt and
-the sanitized schema-v2 acceptance bundle from their supplied HTTPS locations,
-verifies both SHA-256 values, and validates the bundle against
+The protected `release-acceptance.yml` workflow is the canonical acceptance
+producer. The checked-in workflow is intentionally fail-closed until the
+operator-owned live harness is installed in its protected environment; it cannot
+produce a successful acceptance artifact from a prose summary or caller-supplied
+evidence file. Once installed, its successful run must be bound to the exact
+source SHA, source tree, workflow path, run attempt, and unexpired
+`release-acceptance-<sourceSha>` artifact. The pre-publication release workflow
+accepts only the candidate and acceptance workflow run IDs, resolves their
+canonical artifacts through the GitHub API, verifies the provider artifact digests, and validates the bundle against
 [`scripts/workbench-acceptance-contract.ts`](../scripts/workbench-acceptance-contract.ts).
 The validator rejects a missing environment/requirement pair, retries, skips,
 known defects, changed/missing/extra image roles, a migration digest that does
@@ -76,11 +86,13 @@ mobile polish passes, a canary window shorter than 72 hours, and secret-bearing
 evidence. A checkbox or prose summary is never accepted in place of the parsed
 bundle.
 
-Staging and production evidence MUST identify the same source SHA and image
-digests as the candidate receipt. Final release promotion creates version,
-full-SHA, and `latest` aliases for those accepted manifests, verifies each alias
-still resolves to the accepted digest, and writes the BOM from the receipt. It
-never rebuilds them.
+Staging and production evidence MUST identify the same source SHA, source tree,
+image digests, and chart identity as the candidate receipt. The final release
+job is gated by the protected `production-release` environment. It compares the
+existing immutable BOM before creating any version, full-SHA, or `latest` alias;
+any mismatch stops with no alias mutation. It then verifies every alias and the
+anonymous OCI chart pull against the candidate bytes and writes the BOM from the
+receipt. It never rebuilds images or repackages the chart after acceptance.
 
 ## 3. Dedicated live fixture
 

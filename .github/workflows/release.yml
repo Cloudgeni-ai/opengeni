@@ -41,32 +41,12 @@ on:
         description: Exact comma-separated package set, for example @opengeni/react@0.15.0.
         required: true
         type: string
-      candidate_receipt_url:
-        description: Direct HTTPS URL for the immutable release-candidate.json asset.
+      candidate_run_id:
+        description: Completed run ID of the canonical release-candidate workflow for source_sha.
         required: true
         type: string
-      candidate_receipt_sha256:
-        description: SHA-256 of the exact bytes downloaded from candidate_receipt_url.
-        required: true
-        type: string
-      staging_evidence_url:
-        description: Retained staging acceptance/soak evidence URL for this exact SHA and image digests.
-        required: true
-        type: string
-      production_evidence_url:
-        description: Retained production promotion and immediate acceptance evidence URL.
-        required: true
-        type: string
-      production_canary_evidence_url:
-        description: Retained 72-hour zero-failure production canary evidence URL.
-        required: true
-        type: string
-      acceptance_bundle_url:
-        description: Direct HTTPS URL for the sanitized machine-readable acceptance bundle.
-        required: true
-        type: string
-      acceptance_bundle_sha256:
-        description: SHA-256 of the exact bytes downloaded from acceptance_bundle_url.
+      acceptance_run_id:
+        description: Completed run ID of the protected canonical release-acceptance workflow for source_sha.
         required: true
         type: string
       confirm_zero_gaps:
@@ -178,11 +158,16 @@ jobs:
       id-token: write # npm provenance (OIDC)
       contents: write # changesets creates and pushes immutable package tags
       pull-requests: read # verify exact-head native approval before publication
+      actions: read # resolve canonical producer runs and immutable artifact digests
     outputs:
       releaseReady: ${{ steps.registry.outputs.release_ready }}
       verifiedPackages: ${{ steps.registry.outputs.verified_packages }}
       bomPackages: ${{ steps.registry.outputs.bom_packages }}
       sourceSha: ${{ steps.preflight.outputs.source_sha }}
+      candidateArtifactId: ${{ steps.preflight.outputs.candidate_artifact_id }}
+      candidateArtifactDigest: ${{ steps.preflight.outputs.candidate_artifact_digest }}
+      candidateArtifactUrl: ${{ steps.preflight.outputs.candidate_artifact_url }}
+      candidateSourceTreeSha: ${{ steps.preflight.outputs.candidate_source_tree_sha }}
     steps:
       - name: Check out evidence-bound source
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -191,19 +176,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Set up Bun for provenance verification
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.3.14
+
       - name: Validate release identity and acceptance receipts
         id: preflight
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
-          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
-          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
-          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
-          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
-          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
+          ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
           CONFIRM_ZERO_GAPS: ${{ inputs.confirm_zero_gaps }}
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || {
@@ -227,37 +213,31 @@ jobs:
             echo "confirm_zero_gaps must be explicitly true" >&2
             exit 1
           }
-          [[ "$ACCEPTANCE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "acceptance_bundle_sha256 must be a lowercase SHA-256" >&2
+          [[ "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
+            echo "candidate_run_id must be a positive workflow run ID" >&2
             exit 1
           }
-          [[ "$CANDIDATE_RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]] || {
-            echo "candidate_receipt_sha256 must be a lowercase SHA-256" >&2
+          [[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || {
+            echo "acceptance_run_id must be a positive workflow run ID" >&2
             exit 1
           }
-          [[ "$ACCEPTANCE_BUNDLE_URL" != *\?* && "$ACCEPTANCE_BUNDLE_URL" != *\#* ]] || {
-            echo "acceptance_bundle_url must be a stable retained URL without a query or fragment" >&2
-            exit 1
-          }
-          [[ "$CANDIDATE_RECEIPT_URL" != *\?* && "$CANDIDATE_RECEIPT_URL" != *\#* ]] || {
-            echo "candidate_receipt_url must be a stable retained URL without a query or fragment" >&2
-            exit 1
-          }
-          for value in \
-            "$CANDIDATE_RECEIPT_URL" \
-            "$STAGING_EVIDENCE_URL" \
-            "$PRODUCTION_EVIDENCE_URL" \
-            "$PRODUCTION_CANARY_EVIDENCE_URL" \
-            "$ACCEPTANCE_BUNDLE_URL"; do
-            [[ "$value" =~ ^https://[^[:space:]]+$ ]] || {
-              echo "every evidence URL must be an absolute HTTPS URL" >&2
-              exit 1
-            }
-          done
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
             echo "pending changesets remain; merge the generated Version PR before release acceptance" >&2
             exit 1
           fi
+          mkdir -p evidence
+          bun scripts/verify-release-provenance.ts \
+            --kind candidate \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$CANDIDATE_RUN_ID" \
+            --output evidence/candidate-provenance.json \
+            --output-prefix candidate
+          bun scripts/verify-release-provenance.ts \
+            --kind acceptance \
+            --source-sha "$SOURCE_SHA" \
+            --run-id "$ACCEPTANCE_RUN_ID" \
+            --output evidence/acceptance-provenance.json \
+            --output-prefix acceptance
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Verify exact-head approval provenance
@@ -266,60 +246,67 @@ jobs:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
         run: node scripts/check-release-pr-automation.mjs verify-approved-merge
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: 1.3.14
-
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Download and validate the complete acceptance bundle
         env:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
-          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
-          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
-          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
-          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.preflight.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.candidate_artifact_digest }}
+          CANDIDATE_ARTIFACT_URL: ${{ steps.preflight.outputs.candidate_artifact_url }}
+          ACCEPTANCE_ARTIFACT_ID: ${{ steps.preflight.outputs.acceptance_artifact_id }}
+          ACCEPTANCE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.acceptance_artifact_digest }}
+          ACCEPTANCE_ARTIFACT_URL: ${{ steps.preflight.outputs.acceptance_artifact_url }}
           EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
         run: |
           set -euo pipefail
-          mkdir -p evidence
-          curl \
-            --fail \
-            --location \
-            --silent \
-            --show-error \
-            --proto '=https' \
-            --connect-timeout 10 \
-            --max-time 120 \
-            --retry 2 \
-            --retry-all-errors \
-            --output evidence/workbench-acceptance.json \
-            "$ACCEPTANCE_BUNDLE_URL"
-          curl \
-            --fail \
-            --location \
-            --silent \
-            --show-error \
-            --proto '=https' \
-            --connect-timeout 10 \
-            --max-time 120 \
-            --retry 2 \
-            --retry-all-errors \
-            --output evidence/release-candidate.json \
-            "$CANDIDATE_RECEIPT_URL"
-          printf '%s  %s\n' \
-            "$ACCEPTANCE_BUNDLE_SHA256" \
-            evidence/workbench-acceptance.json \
-            | sha256sum --check --strict -
-          printf '%s  %s\n' \
-            "$CANDIDATE_RECEIPT_SHA256" \
-            evidence/release-candidate.json \
-            | sha256sum --check --strict -
+          mkdir -p evidence .release/candidate-artifact .release/acceptance-artifact
+          download_artifact() {
+            local artifact_id="$1" digest="$2" destination="$3"
+            local zip="$destination/artifact.zip"
+            gh api \
+              --header 'Accept: application/vnd.github+json' \
+              --output "$zip" \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip"
+            printf '%s  %s\n' "${digest#sha256:}" "$zip" | sha256sum --check --strict -
+            unzip -q "$zip" -d "$destination/files"
+          }
+          download_artifact "$CANDIDATE_ARTIFACT_ID" "$CANDIDATE_ARTIFACT_DIGEST" .release/candidate-artifact
+          download_artifact "$ACCEPTANCE_ARTIFACT_ID" "$ACCEPTANCE_ARTIFACT_DIGEST" .release/acceptance-artifact
+          cp .release/candidate-artifact/files/evidence/release-candidate.json evidence/release-candidate.json
+          cp .release/candidate-artifact/files/evidence/release-candidate.sha256 evidence/release-candidate.sha256
+          cp .release/candidate-artifact/files/evidence/release-chart.sha256 evidence/release-chart.sha256
+          chart_artifact="$(jq -er '.chart.artifact' evidence/release-candidate.json)"
+          chart_path="$(find .release/candidate-artifact/files -type f -name "$chart_artifact" -print -quit)"
+          test -n "$chart_path"
+          cp "$chart_path" ".release/$chart_artifact"
+          receipt_sidecar="$(awk 'NF { print $1; exit }' evidence/release-candidate.sha256)"
+          receipt_sha256="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          [ "$receipt_sidecar" = "$receipt_sha256" ] || {
+            echo "candidate receipt sidecar does not match the downloaded receipt" >&2
+            exit 1
+          }
+          chart_sidecar="$(awk 'NF { print $1; exit }' evidence/release-chart.sha256)"
+          chart_sha256="$(sha256sum ".release/$chart_artifact" | awk '{print $1}')"
+          [ "$chart_sidecar" = "$chart_sha256" ] || {
+            echo "candidate chart sidecar does not match the downloaded chart" >&2
+            exit 1
+          }
+          expected_chart_sha256="$(jq -er '.chart.bytesSha256' evidence/release-candidate.json)"
+          [ "$chart_sha256" = "$expected_chart_sha256" ] || {
+            echo "candidate chart bytes do not match the receipt" >&2
+            exit 1
+          }
+          cp .release/acceptance-artifact/files/evidence/workbench-acceptance.json evidence/workbench-acceptance.json
+          acceptance_bundle_sha256="$(sha256sum evidence/workbench-acceptance.json | awk '{print $1}')"
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "${{ steps.preflight.outputs.candidate_source_tree_sha }}" \
+            --slurpfile producer evidence/candidate-provenance.json \
+            '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .producer == $producer[0].producer' \
+            evidence/release-candidate.json >/dev/null
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
             --source-sha "$SOURCE_SHA" \
@@ -328,11 +315,10 @@ jobs:
             --bundle evidence/workbench-acceptance.json \
             --source-sha "$SOURCE_SHA" \
             --candidate-receipt evidence/release-candidate.json \
-            --candidate-receipt-url "$CANDIDATE_RECEIPT_URL" \
-            --candidate-receipt-sha256 "$CANDIDATE_RECEIPT_SHA256" \
-            --staging-evidence-url "$STAGING_EVIDENCE_URL" \
-            --production-evidence-url "$PRODUCTION_EVIDENCE_URL" \
-            --production-canary-evidence-url "$PRODUCTION_CANARY_EVIDENCE_URL"
+            --candidate-producer evidence/candidate-provenance.json \
+            --acceptance-producer evidence/acceptance-provenance.json \
+            --candidate-receipt-url "$CANDIDATE_ARTIFACT_URL" \
+            --candidate-receipt-sha256 "$receipt_sha256"
 
       # Re-run deterministic package gates at the exact accepted source before
       # bytes leave the repository. Live acceptance is bound above.
@@ -363,37 +349,48 @@ jobs:
       - name: Write pre-publication release plan
         env:
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
-          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
-          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
-          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
-          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          CANDIDATE_ARTIFACT_URL: ${{ steps.preflight.outputs.candidate_artifact_url }}
+          CANDIDATE_ARTIFACT_ID: ${{ steps.preflight.outputs.candidate_artifact_id }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.candidate_artifact_digest }}
+          ACCEPTANCE_ARTIFACT_URL: ${{ steps.preflight.outputs.acceptance_artifact_url }}
+          ACCEPTANCE_ARTIFACT_ID: ${{ steps.preflight.outputs.acceptance_artifact_id }}
+          ACCEPTANCE_ARTIFACT_DIGEST: ${{ steps.preflight.outputs.acceptance_artifact_digest }}
         run: |
+          set -euo pipefail
+          candidate_receipt_sha256="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          acceptance_bundle_sha256="$(sha256sum evidence/workbench-acceptance.json | awk '{print $1}')"
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
-            --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
-            --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
-            --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
-            --arg acceptanceBundleUrl "$ACCEPTANCE_BUNDLE_URL" \
-            --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
-            --arg candidateReceiptUrl "$CANDIDATE_RECEIPT_URL" \
-            --arg candidateReceiptSha256 "$CANDIDATE_RECEIPT_SHA256" \
+            --arg candidateArtifactUrl "$CANDIDATE_ARTIFACT_URL" \
+            --arg candidateArtifactId "$CANDIDATE_ARTIFACT_ID" \
+            --arg candidateArtifactDigest "$CANDIDATE_ARTIFACT_DIGEST" \
+            --arg acceptanceArtifactUrl "$ACCEPTANCE_ARTIFACT_URL" \
+            --arg acceptanceArtifactId "$ACCEPTANCE_ARTIFACT_ID" \
+            --arg acceptanceArtifactDigest "$ACCEPTANCE_ARTIFACT_DIGEST" \
+            --arg acceptanceBundleSha256 "$acceptance_bundle_sha256" \
+            --arg candidateReceiptSha256 "$candidate_receipt_sha256" \
             --slurpfile packagePlan evidence/release-packages-plan.json \
+            --slurpfile candidateProvenance evidence/candidate-provenance.json \
+            --slurpfile acceptanceProvenance evidence/acceptance-provenance.json \
+            --slurpfile candidateReceipt evidence/release-candidate.json \
             '{
               schemaVersion: 1,
               sourceSha: $sourceSha,
-              acceptance: {
-                candidateReceiptUrl: $candidateReceiptUrl,
-                candidateReceiptSha256: $candidateReceiptSha256,
-                stagingEvidenceUrl: $stagingEvidenceUrl,
-                productionEvidenceUrl: $productionEvidenceUrl,
-                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
-                bundleUrl: $acceptanceBundleUrl,
-                bundleSha256: $acceptanceBundleSha256,
-                zeroKnownDefectsAndGapsConfirmed: true
+              provenance: {
+                candidate: $candidateProvenance[0],
+                acceptance: $acceptanceProvenance[0],
+                candidateArtifactId: $candidateArtifactId,
+                candidateArtifactDigest: $candidateArtifactDigest,
+                candidateArtifactUrl: $candidateArtifactUrl,
+                acceptanceArtifactId: $acceptanceArtifactId,
+                acceptanceArtifactDigest: $acceptanceArtifactDigest,
+                acceptanceArtifactUrl: $acceptanceArtifactUrl
               },
+              evidence: {
+                candidateReceiptSha256: $candidateReceiptSha256,
+                acceptanceBundleSha256: $acceptanceBundleSha256
+              },
+              chart: $candidateReceipt[0].chart,
               packagePlan: $packagePlan[0]
             }' > evidence/verified-release-plan.json
 
@@ -443,13 +440,6 @@ jobs:
           VERIFIED_PACKAGES: ${{ steps.registry.outputs.verified_packages }}
           BOM_PACKAGES: ${{ steps.registry.outputs.bom_packages }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
-          STAGING_EVIDENCE_URL: ${{ inputs.staging_evidence_url }}
-          PRODUCTION_EVIDENCE_URL: ${{ inputs.production_evidence_url }}
-          PRODUCTION_CANARY_EVIDENCE_URL: ${{ inputs.production_canary_evidence_url }}
-          ACCEPTANCE_BUNDLE_URL: ${{ inputs.acceptance_bundle_url }}
-          ACCEPTANCE_BUNDLE_SHA256: ${{ inputs.acceptance_bundle_sha256 }}
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p evidence
@@ -459,28 +449,14 @@ jobs:
             <<<"$BOM_PACKAGES" >/dev/null
           jq -n \
             --arg sourceSha "$SOURCE_SHA" \
-            --arg stagingEvidenceUrl "$STAGING_EVIDENCE_URL" \
-            --arg productionEvidenceUrl "$PRODUCTION_EVIDENCE_URL" \
-            --arg productionCanaryEvidenceUrl "$PRODUCTION_CANARY_EVIDENCE_URL" \
-            --arg acceptanceBundleUrl "$ACCEPTANCE_BUNDLE_URL" \
-            --arg acceptanceBundleSha256 "$ACCEPTANCE_BUNDLE_SHA256" \
-            --arg candidateReceiptUrl "$CANDIDATE_RECEIPT_URL" \
-            --arg candidateReceiptSha256 "$CANDIDATE_RECEIPT_SHA256" \
             --argjson publishedPackages "$VERIFIED_PACKAGES" \
             --argjson bomPackages "$BOM_PACKAGES" \
+            --slurpfile plan evidence/verified-release-plan.json \
             '{
               schemaVersion: 1,
               sourceSha: $sourceSha,
-              acceptance: {
-                candidateReceiptUrl: $candidateReceiptUrl,
-                candidateReceiptSha256: $candidateReceiptSha256,
-                stagingEvidenceUrl: $stagingEvidenceUrl,
-                productionEvidenceUrl: $productionEvidenceUrl,
-                productionCanaryEvidenceUrl: $productionCanaryEvidenceUrl,
-                bundleUrl: $acceptanceBundleUrl,
-                bundleSha256: $acceptanceBundleSha256,
-                zeroKnownDefectsAndGapsConfirmed: true
-              },
+              provenance: $plan[0].provenance,
+              chart: $plan[0].chart,
               publishedPackages: $publishedPackages,
               bomPackages: $bomPackages
             }' > evidence/verified-release.json
@@ -507,6 +483,9 @@ jobs:
     permissions:
       contents: write # publish the immutable source-SHA release BOM asset
       packages: write # publish the accepted chart and release images to GHCR
+      actions: read # retrieve only the already-proven candidate artifact
+    environment:
+      name: production-release
     steps:
       - name: Check out repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -533,35 +512,48 @@ jobs:
 
       - name: Download and validate accepted candidate receipt
         env:
-          CANDIDATE_RECEIPT_URL: ${{ inputs.candidate_receipt_url }}
-          CANDIDATE_RECEIPT_SHA256: ${{ inputs.candidate_receipt_sha256 }}
+          GITHUB_TOKEN: ${{ github.token }}
+          CANDIDATE_ARTIFACT_ID: ${{ needs.publish.outputs.candidateArtifactId }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ needs.publish.outputs.candidateArtifactDigest }}
+          CANDIDATE_ARTIFACT_URL: ${{ needs.publish.outputs.candidateArtifactUrl }}
+          CANDIDATE_SOURCE_TREE_SHA: ${{ needs.publish.outputs.candidateSourceTreeSha }}
           SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
           EXPECTED_PACKAGES: ${{ inputs.expected_packages }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p evidence
-          curl \
-            --fail \
-            --location \
-            --silent \
-            --show-error \
-            --proto '=https' \
-            --connect-timeout 10 \
-            --max-time 120 \
-            --retry 2 \
-            --retry-all-errors \
-            --output evidence/release-candidate.json \
-            "$CANDIDATE_RECEIPT_URL"
-          printf '%s  %s\n' \
-            "$CANDIDATE_RECEIPT_SHA256" \
-            evidence/release-candidate.json \
+          mkdir -p evidence .release/candidate-artifact
+          gh api --header 'Accept: application/vnd.github+json' \
+            --output .release/candidate-artifact.zip \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CANDIDATE_ARTIFACT_ID}/zip"
+          printf '%s  %s\n' "${CANDIDATE_ARTIFACT_DIGEST#sha256:}" .release/candidate-artifact.zip \
             | sha256sum --check --strict -
+          unzip -q .release/candidate-artifact.zip -d .release/candidate-artifact
+          candidate_path="$(find .release/candidate-artifact -type f -name release-candidate.json -print -quit)"
+          test -n "$candidate_path"
+          cp "$candidate_path" evidence/release-candidate.json
+          chart_artifact="$(jq -er '.chart.artifact' evidence/release-candidate.json)"
+          chart_path="$(find .release/candidate-artifact -type f -name "$chart_artifact" -print -quit)"
+          test -n "$chart_path"
+          cp "$chart_path" ".release/$chart_artifact"
+          receipt_sidecar_path="$(find .release/candidate-artifact -type f -name release-candidate.sha256 -print -quit)"
+          chart_sidecar_path="$(find .release/candidate-artifact -type f -name release-chart.sha256 -print -quit)"
+          test -n "$receipt_sidecar_path" -a -n "$chart_sidecar_path"
+          receipt_sha256="$(sha256sum evidence/release-candidate.json | awk '{print $1}')"
+          [ "$(awk 'NF { print $1; exit }' "$receipt_sidecar_path")" = "$receipt_sha256" ]
+          chart_sha256="$(sha256sum ".release/$chart_artifact" | awk '{print $1}')"
+          [ "$(awk 'NF { print $1; exit }' "$chart_sidecar_path")" = "$chart_sha256" ]
+          [ "$chart_sha256" = "$(jq -er '.chart.bytesSha256' evidence/release-candidate.json)" ]
           bun scripts/release-candidate.ts \
             --verify evidence/release-candidate.json \
             --source-sha "$SOURCE_SHA" \
             --expected-packages "$EXPECTED_PACKAGES"
-          [ "$(jq -er .releaseVersion evidence/release-candidate.json)" = "$RELEASE_VERSION" ] || {
+          jq -e \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg sourceTreeSha "$CANDIDATE_SOURCE_TREE_SHA" \
+            --arg releaseVersion "$RELEASE_VERSION" \
+            '.sourceSha == $sourceSha and .sourceTreeSha == $sourceTreeSha and .chart.version == $releaseVersion' \
+            evidence/release-candidate.json >/dev/null || {
             echo "candidate release version differs from the published package plan" >&2
             exit 1
           }
@@ -579,23 +571,77 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Package and push Helm chart
+      - name: Verify exact candidate Helm chart bytes and manifest
         env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ github.token }}
           GHCR_USERNAME: ${{ github.actor }}
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
+          set -euo pipefail
           org="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
           echo "$GHCR_TOKEN" | helm registry login ghcr.io \
             --username "$GHCR_USERNAME" \
             --password-stdin
-          mkdir -p .release/charts
-          helm package deploy/helm/opengeni \
-            --destination .release/charts \
+          chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
+          expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
+          expected_manifest="$(jq -er .chart.manifestDigest evidence/release-candidate.json)"
+          printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
+          resolved_manifest="$(docker buildx imagetools inspect \
+            "ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}" \
+            --format '{{.Manifest.Digest}}')"
+          [ "$resolved_manifest" = "$expected_manifest" ] || {
+            echo "candidate chart manifest drifted before promotion" >&2
+            exit 1
+          }
+          mkdir -p .release/chart-pull
+          helm pull "oci://ghcr.io/${org}/charts/opengeni" \
             --version "$RELEASE_VERSION" \
-            --app-version "$RELEASE_VERSION"
-          helm push ".release/charts/opengeni-${RELEASE_VERSION}.tgz" "oci://ghcr.io/${org}/charts"
+            --destination .release/chart-pull
+          cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz"
+
+      # The immutable BOM is the rerun fence. Compare it before any moving
+      # image alias is touched; a failed comparison must have zero registry
+      # mutation as its observable effect.
+      - name: Write expected release BOM before alias mutation
+        id: release-bom
+        env:
+          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
+          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
+          BOM_PACKAGES: ${{ needs.publish.outputs.bomPackages }}
+        run: |
+          set -euo pipefail
+          images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
+          chart="$(jq -c '.chart' evidence/release-candidate.json)"
+          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
+          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
+          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
+          OPENGENI_RELEASE_BOM_IMAGES="$images" \
+          OPENGENI_RELEASE_BOM_CHART="$chart" \
+          bun scripts/release-bom.ts
+          printf '%s  %s\n' "$(sha256sum evidence/release-bom.json | awk '{print $1}')" evidence/release-bom.json > evidence/release-bom.sha256
+
+      - name: Compare existing immutable BOM before aliases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
+        run: |
+          set -euo pipefail
+          tag="opengeni-release-${SOURCE_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            resolved="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha)"
+            [ "$resolved" = "$SOURCE_SHA" ] || {
+              echo "existing BOM release tag resolves to ${resolved}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            }
+            mkdir -p /tmp/opengeni-release-bom-existing
+            gh release download "$tag" \
+              --dir /tmp/opengeni-release-bom-existing \
+              --pattern release-bom.json \
+              --pattern release-bom.sha256
+            cmp evidence/release-bom.json /tmp/opengeni-release-bom-existing/release-bom.json
+            cmp evidence/release-bom.sha256 /tmp/opengeni-release-bom-existing/release-bom.sha256
+          fi
 
       - name: Promote exact accepted manifests
         env:
@@ -648,26 +694,21 @@ jobs:
               exit 1
             }
           done
-
-      - name: Write complete release BOM
-        id: release-bom
-        env:
-          SOURCE_SHA: ${{ needs.publish.outputs.sourceSha }}
-          RELEASE_VERSION: ${{ steps.meta.outputs.version }}
-          BOM_PACKAGES: ${{ needs.publish.outputs.bomPackages }}
-        run: |
-          set -euo pipefail
-          images="$(jq -c '[.images | to_entries[] | .value]' evidence/release-candidate.json)"
-          OPENGENI_RELEASE_BOM_SOURCE_SHA="$SOURCE_SHA" \
-          OPENGENI_RELEASE_BOM_VERSION="$RELEASE_VERSION" \
-          OPENGENI_RELEASE_BOM_PACKAGES="$BOM_PACKAGES" \
-          OPENGENI_RELEASE_BOM_IMAGES="$images" \
-          bun scripts/release-bom.ts
-
-      - name: Write release BOM checksum
-        env:
-          BOM_SHA256: ${{ steps.release-bom.outputs.sha256 }}
-        run: printf '%s  %s\n' "$BOM_SHA256" release-bom.json > evidence/release-bom.sha256
+          helm registry logout ghcr.io
+          mkdir -p .release/anonymous-chart
+          helm pull "oci://ghcr.io/${org}/charts/opengeni" \
+            --version "$RELEASE_VERSION" \
+            --destination .release/anonymous-chart
+          cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
+            ".release/anonymous-chart/opengeni-${RELEASE_VERSION}.tgz"
+          chart_digest="$(docker buildx imagetools inspect \
+            "ghcr.io/${org}/charts/opengeni:${RELEASE_VERSION}" \
+            --format '{{.Manifest.Digest}}')"
+          expected_chart_digest="$(jq -er .chart.manifestDigest evidence/release-candidate.json)"
+          [ "$chart_digest" = "$expected_chart_digest" ] || {
+            echo "anonymous chart manifest resolved to ${chart_digest}, expected ${expected_chart_digest}" >&2
+            exit 1
+          }
 
       - name: Upload complete release BOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -701,6 +742,11 @@ jobs:
             cmp evidence/release-bom.json /tmp/opengeni-release-bom-existing/release-bom.json
             cmp evidence/release-bom.sha256 /tmp/opengeni-release-bom-existing/release-bom.sha256
           else
+            existing_tag_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null || true)"
+            if [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$SOURCE_SHA" ]; then
+              echo "existing BOM tag resolves to ${existing_tag_sha}, expected ${SOURCE_SHA}" >&2
+              exit 1
+            fi
             gh release create "$tag" \
               evidence/release-bom.json \
               evidence/release-bom.sha256 \

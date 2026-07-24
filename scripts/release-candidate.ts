@@ -3,6 +3,10 @@ import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 import { parseExpectedPackages, type PublishablePackage } from "./verify-release-packages";
+import {
+  validateReleaseProducerMetadata,
+  type ReleaseProducerMetadata,
+} from "./release-provenance";
 
 export const RELEASE_IMAGE_ROLES = ["api", "worker", "web", "relay", "sandbox"] as const;
 export type ReleaseImageRole = (typeof RELEASE_IMAGE_ROLES)[number];
@@ -20,12 +24,23 @@ export type ReleaseCandidateImage = {
   digest: string;
 };
 
+export type ReleaseChartIdentity = {
+  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni";
+  version: string;
+  manifestDigest: string;
+  bytesSha256: string;
+  artifact: string;
+};
+
 export type ReleaseCandidateReceipt = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   sourceSha: string;
+  sourceTreeSha: string;
   releaseVersion: string;
   packages: PublishablePackage[];
   images: Record<ReleaseImageRole, ReleaseCandidateImage>;
+  chart: ReleaseChartIdentity;
+  producer: ReleaseProducerMetadata;
   aliases: {
     migration: "api";
   };
@@ -34,6 +49,8 @@ export type ReleaseCandidateReceipt = {
 const sourceShaPattern = /^[0-9a-f]{40}$/;
 const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
+const hashPattern = /^[0-9a-f]{64}$/;
+const chartReference = "oci://ghcr.io/cloudgeni-ai/charts/opengeni" as const;
 
 export function resolveReleaseVersion(packages: PublishablePackage[]): string {
   if (packages.length === 0) {
@@ -50,14 +67,30 @@ export function resolveReleaseVersion(packages: PublishablePackage[]): string {
 
 export function buildReleaseCandidateReceipt(input: {
   sourceSha: string;
+  sourceTreeSha: string;
   packages: PublishablePackage[];
   imageDigests: Record<ReleaseImageRole, string>;
+  chart: ReleaseChartIdentity;
+  producer: ReleaseProducerMetadata;
 }): ReleaseCandidateReceipt {
   if (!sourceShaPattern.test(input.sourceSha)) {
     throw new Error("release candidate sourceSha must be 40 lowercase hexadecimal characters");
   }
-
+  if (!sourceShaPattern.test(input.sourceTreeSha)) {
+    throw new Error("release candidate sourceTreeSha must be 40 lowercase hexadecimal characters");
+  }
+  if (input.producer.sourceSha !== input.sourceSha) {
+    throw new Error("release candidate producer sourceSha must equal sourceSha");
+  }
+  if (input.producer.sourceTreeSha !== input.sourceTreeSha) {
+    throw new Error("release candidate producer sourceTreeSha must equal sourceTreeSha");
+  }
   const packages = normalizePackages(input.packages);
+  const releaseVersion = resolveReleaseVersion(packages);
+  const chart = normalizeChart(input.chart);
+  if (chart.version !== releaseVersion) {
+    throw new Error("release candidate chart version must equal releaseVersion");
+  }
   const images = {} as Record<ReleaseImageRole, ReleaseCandidateImage>;
   for (const role of RELEASE_IMAGE_ROLES) {
     const digest = input.imageDigests[role];
@@ -68,11 +101,18 @@ export function buildReleaseCandidateReceipt(input: {
   }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     sourceSha: input.sourceSha,
-    releaseVersion: resolveReleaseVersion(packages),
+    sourceTreeSha: input.sourceTreeSha,
+    releaseVersion,
     packages,
     images,
+    chart,
+    producer: validateReleaseProducerMetadata(input.producer, {
+      kind: "candidate",
+      sourceSha: input.sourceSha,
+      sourceTreeSha: input.sourceTreeSha,
+    }),
     aliases: { migration: "api" },
   };
 }
@@ -81,27 +121,46 @@ export function validateReleaseCandidateReceipt(
   value: unknown,
   expected?: {
     sourceSha?: string;
+    sourceTreeSha?: string;
     packages?: PublishablePackage[];
+    producer?: ReleaseProducerMetadata;
   },
 ): ReleaseCandidateReceipt {
   const receipt = object(value, "release candidate receipt");
   exactKeys(
     receipt,
-    ["schemaVersion", "sourceSha", "releaseVersion", "packages", "images", "aliases"],
+    [
+      "schemaVersion",
+      "sourceSha",
+      "sourceTreeSha",
+      "releaseVersion",
+      "packages",
+      "images",
+      "chart",
+      "producer",
+      "aliases",
+    ],
     "release candidate receipt",
   );
-  if (receipt.schemaVersion !== 1) {
-    throw new Error("release candidate receipt schemaVersion must be 1");
+  if (receipt.schemaVersion !== 2) {
+    throw new Error("release candidate receipt schemaVersion must be 2");
   }
   if (typeof receipt.sourceSha !== "string" || !sourceShaPattern.test(receipt.sourceSha)) {
     throw new Error("release candidate sourceSha must be 40 lowercase hexadecimal characters");
+  }
+  if (
+    typeof receipt.sourceTreeSha !== "string" ||
+    !sourceShaPattern.test(receipt.sourceTreeSha)
+  ) {
+    throw new Error("release candidate sourceTreeSha must be 40 lowercase hexadecimal characters");
   }
   if (typeof receipt.releaseVersion !== "string" || !versionPattern.test(receipt.releaseVersion)) {
     throw new Error("release candidate releaseVersion must be an exact semver version");
   }
 
   const packages = normalizePackages(receipt.packages);
-  if (receipt.releaseVersion !== resolveReleaseVersion(packages)) {
+  const releaseVersion = resolveReleaseVersion(packages);
+  if (receipt.releaseVersion !== releaseVersion) {
     throw new Error("release candidate releaseVersion does not match its package plan");
   }
 
@@ -120,6 +179,16 @@ export function validateReleaseCandidateReceipt(
     imageDigests[role] = image.digest;
   }
 
+  const chart = normalizeChart(receipt.chart);
+  if (chart.version !== receipt.releaseVersion) {
+    throw new Error("release candidate chart version must equal releaseVersion");
+  }
+  const producer = validateReleaseProducerMetadata(receipt.producer, {
+    kind: "candidate",
+    sourceSha: receipt.sourceSha,
+    sourceTreeSha: receipt.sourceTreeSha,
+  });
+
   const aliases = object(receipt.aliases, "release candidate aliases");
   exactKeys(aliases, ["migration"], "release candidate aliases");
   if (aliases.migration !== "api") {
@@ -131,6 +200,14 @@ export function validateReleaseCandidateReceipt(
       `release candidate sourceSha ${receipt.sourceSha} does not match ${expected.sourceSha}`,
     );
   }
+  if (expected?.sourceTreeSha && receipt.sourceTreeSha !== expected.sourceTreeSha) {
+    throw new Error(
+      `release candidate sourceTreeSha ${receipt.sourceTreeSha} does not match ${expected.sourceTreeSha}`,
+    );
+  }
+  if (expected?.producer && JSON.stringify(producer) !== JSON.stringify(expected.producer)) {
+    throw new Error("release candidate producer provenance does not match the trusted run");
+  }
   if (expected?.packages) {
     const expectedPackages = normalizePackages(expected.packages);
     if (JSON.stringify(packages) !== JSON.stringify(expectedPackages)) {
@@ -140,8 +217,11 @@ export function validateReleaseCandidateReceipt(
 
   return buildReleaseCandidateReceipt({
     sourceSha: receipt.sourceSha,
+    sourceTreeSha: receipt.sourceTreeSha,
     packages,
     imageDigests,
+    chart,
+    producer,
   });
 }
 
@@ -179,6 +259,40 @@ function normalizePackages(value: unknown): PublishablePackage[] {
   );
 }
 
+function normalizeChart(value: unknown): ReleaseChartIdentity {
+  const chart = object(value, "release candidate chart");
+  exactKeys(
+    chart,
+    ["reference", "version", "manifestDigest", "bytesSha256", "artifact"],
+    "release candidate chart",
+  );
+  if (chart.reference !== chartReference) {
+    throw new Error(`release candidate chart reference must be ${chartReference}`);
+  }
+  if (typeof chart.version !== "string" || !versionPattern.test(chart.version)) {
+    throw new Error("release candidate chart version must be an exact semver version");
+  }
+  if (typeof chart.manifestDigest !== "string" || !digestPattern.test(chart.manifestDigest)) {
+    throw new Error("release candidate chart manifestDigest must be an exact sha256 digest");
+  }
+  if (typeof chart.bytesSha256 !== "string" || !hashPattern.test(chart.bytesSha256)) {
+    throw new Error("release candidate chart bytesSha256 must be lowercase SHA-256");
+  }
+  if (
+    typeof chart.artifact !== "string" ||
+    chart.artifact !== `opengeni-${chart.version}.tgz`
+  ) {
+    throw new Error("release candidate chart artifact must match its version");
+  }
+  return {
+    reference: chartReference,
+    version: chart.version,
+    manifestDigest: chart.manifestDigest,
+    bytesSha256: chart.bytesSha256,
+    artifact: chart.artifact,
+  };
+}
+
 function object(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error(`${label} must be an object`);
@@ -209,6 +323,7 @@ function parseJson<T>(label: string, value: string): T {
 async function writeReceiptFromEnvironment(): Promise<void> {
   const receipt = buildReleaseCandidateReceipt({
     sourceSha: process.env.OPENGENI_RELEASE_CANDIDATE_SOURCE_SHA ?? "",
+    sourceTreeSha: process.env.OPENGENI_RELEASE_CANDIDATE_SOURCE_TREE_SHA ?? "",
     packages: parseJson<PublishablePackage[]>(
       "OPENGENI_RELEASE_CANDIDATE_PACKAGES",
       process.env.OPENGENI_RELEASE_CANDIDATE_PACKAGES ?? "",
@@ -216,6 +331,14 @@ async function writeReceiptFromEnvironment(): Promise<void> {
     imageDigests: parseJson<Record<ReleaseImageRole, string>>(
       "OPENGENI_RELEASE_CANDIDATE_IMAGE_DIGESTS",
       process.env.OPENGENI_RELEASE_CANDIDATE_IMAGE_DIGESTS ?? "",
+    ),
+    chart: parseJson<ReleaseChartIdentity>(
+      "OPENGENI_RELEASE_CANDIDATE_CHART",
+      process.env.OPENGENI_RELEASE_CANDIDATE_CHART ?? "",
+    ),
+    producer: parseJson<ReleaseProducerMetadata>(
+      "OPENGENI_RELEASE_CANDIDATE_PRODUCER",
+      process.env.OPENGENI_RELEASE_CANDIDATE_PRODUCER ?? "",
     ),
   });
   const outputPath = resolve(
