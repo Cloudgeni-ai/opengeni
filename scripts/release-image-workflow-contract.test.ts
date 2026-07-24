@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
@@ -197,6 +198,48 @@ describe("release image workflow contract", () => {
     expect(login).toContain("--expose-token");
     expect(login).not.toContain("client-secret");
     expect(login).not.toContain("admin-password");
+  });
+
+  test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
+    const candidate = await workflow("release-candidate.yml");
+    const release = await workflow("release.yml");
+    const embedded = await workflow("release-embedded.yml");
+    const parser =
+      `release_exists="$(jq -er '.releaseExists | if type == "boolean" ` +
+      `then tostring else error("releaseExists must be boolean") end' <<<"$state")"`;
+
+    expect(candidate.match(/release_exists=/g)).toHaveLength(2);
+    expect(release.match(/release_exists=/g)).toHaveLength(2);
+    expect(embedded.match(/release_exists=/g)).toHaveLength(1);
+    for (const source of [candidate, release, embedded]) {
+      expect(source).toContain(parser);
+      expect(source).not.toContain("jq -er .releaseExists");
+    }
+
+    const falseResult = spawnSync(
+      "bash",
+      [
+        "-c",
+        `set -euo pipefail
+state='{"releaseExists":false}'
+${parser}
+test "$release_exists" = "false"`,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(falseResult.status, falseResult.stderr).toBe(0);
+
+    const invalidResult = spawnSync(
+      "bash",
+      [
+        "-c",
+        `set -euo pipefail
+state='{"releaseExists":"false"}'
+${parser}`,
+      ],
+      { encoding: "utf8" },
+    );
+    expect(invalidResult.status).not.toBe(0);
   });
 
   test("ordinary CI builds the same five physical image roles", async () => {
