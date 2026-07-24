@@ -1,5 +1,14 @@
 # @opengeni/events
 
+## 0.3.14
+
+### Patch Changes
+
+- ff23da5: Keep oversized event previews bounded while optionally linking them to integrity-addressed workspace-file evidence, and expose access-controlled metadata plus capped provider-native range retrieval through the API and SDK.
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/db@0.10.2
+
 ## 0.3.13
 
 ### Patch Changes
