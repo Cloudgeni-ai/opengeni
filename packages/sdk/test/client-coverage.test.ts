@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
-import type { ConnectionMetadata, SessionTurn } from "../src/types";
+import {
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  type ConnectionMetadata,
+  type SessionTurn,
+} from "../src/types";
 import { makeEvent, SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 const ENVIRONMENT_ID = "33333333-3333-4333-8333-333333333333";
@@ -442,6 +446,118 @@ describe("OpenGeniClient files", () => {
         `POST /v1/workspaces/${WORKSPACE_ID}/files/${FILE_ID}/download-url`,
       ],
     );
+  });
+
+  test("reads retained metadata and one authenticated bounded API range", async () => {
+    const metadata = {
+      available: true as const,
+      artifactId: FILE_ID,
+      kind: "tool_result" as const,
+      contentType: "application/json",
+      originalBytes: 5_000_000,
+      sha256: "a".repeat(64),
+      retainedAt: "2026-07-21T00:00:00.000Z",
+      retention: { policy: "workspace_file" as const, expiresAt: null },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${FILE_ID}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      },
+    };
+    const expected = new Uint8Array([4, 5, 6, 7]);
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith(`/artifacts/${FILE_ID}`)) return jsonResponse(metadata);
+      if (request.url.endsWith(`/artifacts/${FILE_ID}/content`)) {
+        return new Response(expected, {
+          status: 206,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Length": String(expected.byteLength),
+            "Content-Range": "bytes 4-7/5000000",
+            "Content-Type": "application/json",
+          },
+        });
+      }
+      throw new Error(`unexpected request: ${request.url}`);
+    });
+
+    expect(await client.getRetainedArtifact(WORKSPACE_ID, FILE_ID)).toEqual(metadata);
+    const content = await client.getRetainedArtifactContent(WORKSPACE_ID, FILE_ID, {
+      range: "bytes=4-7",
+    });
+    expect(content).toEqual({
+      bytes: expected,
+      status: 206,
+      contentType: "application/json",
+      contentLength: 4,
+      contentRange: "bytes 4-7/5000000",
+      acceptRanges: "bytes",
+    });
+    expect(requests.map((request) => new URL(request.url).pathname)).toEqual([
+      `/v1/workspaces/${WORKSPACE_ID}/artifacts/${FILE_ID}`,
+      `/v1/workspaces/${WORKSPACE_ID}/artifacts/${FILE_ID}/content`,
+    ]);
+    expect(requests[1]!.headers.range).toBe("bytes=4-7");
+    expect(requests[1]!.headers.authorization).toBe("Bearer og_test_key");
+    expect(requests.some((request) => request.url.includes("download-url"))).toBeFalse();
+  });
+
+  test("fails closed when retained content exceeds the SDK byte ceiling", async () => {
+    let cancelReason: unknown;
+    const oversized = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array(RETAINED_OUTPUT_MAX_PAGE_BYTES + 1));
+      },
+      cancel(reason) {
+        cancelReason = reason;
+      },
+    });
+    const { client } = makeClient(
+      () =>
+        new Response(oversized, {
+          status: 206,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Range": `bytes 0-${RETAINED_OUTPUT_MAX_PAGE_BYTES}/${RETAINED_OUTPUT_MAX_PAGE_BYTES + 1}`,
+          },
+        }),
+    );
+    const error = await client.getRetainedArtifactContent(WORKSPACE_ID, FILE_ID).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect((error as OpenGeniApiError).status).toBe(502);
+    expect((error as OpenGeniApiError).body).toContain("exceeds the SDK byte limit");
+    expect(cancelReason).toBe("retained artifact response exceeded the SDK byte limit");
+  });
+
+  test("cancels retained content rejected from response headers before reading bytes", async () => {
+    let cancelReason: unknown;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        controller.enqueue(new Uint8Array([1]));
+      },
+      cancel(reason) {
+        cancelReason = reason;
+      },
+    });
+    const { client } = makeClient(
+      () =>
+        new Response(body, {
+          status: 206,
+          headers: {
+            "Accept-Ranges": "bytes",
+            "Content-Length": String(RETAINED_OUTPUT_MAX_PAGE_BYTES + 1),
+          },
+        }),
+    );
+
+    await expect(client.getRetainedArtifactContent(WORKSPACE_ID, FILE_ID)).rejects.toThrow(
+      "exceeds the SDK byte limit",
+    );
+    expect(cancelReason).toBe("invalid retained artifact content-length");
   });
 });
 

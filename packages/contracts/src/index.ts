@@ -22,6 +22,30 @@ export {
   type SessionEventPayloadTruncation,
 } from "./event-preview";
 
+export {
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  RETAINED_OUTPUT_RECEIPT_MAX_BYTES,
+  RetainedArtifactMetadataSchema,
+  RetainedArtifactReferenceSchema,
+  RetainedArtifactUnavailableSchema,
+  RetainedOutputEvidenceSchema,
+  RetainedOutputKind,
+  RetainedOutputUnavailableReason,
+  retainedArtifactReferenceFromFile,
+  retainedOutputUnavailable,
+  resolveRetainedOutputRange,
+  validateRetainedOutputEvidence,
+  type RetainedArtifactFileInput,
+  type RetainedArtifactMetadata,
+  type RetainedArtifactReference,
+  type RetainedArtifactUnavailable,
+  type RetainedOutputAvailableEvidence,
+  type RetainedOutputEvidence,
+  type RetainedOutputRangeResolution,
+  type RetainedOutputResolvedRange,
+} from "./retained-output";
+
 export const SessionStatus = z.enum([
   "queued",
   "running",

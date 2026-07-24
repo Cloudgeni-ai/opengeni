@@ -85,6 +85,8 @@ export {
   KNOWN_USAGE_EVENT_TYPES,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
   SESSION_EVENT_TYPES,
 } from "./types";
 export type {
@@ -212,6 +214,13 @@ export type {
   Permission,
   ProductAccessMode,
   ReasoningEffort,
+  RetainedArtifactContent,
+  RetainedArtifactContentOptions,
+  RetainedArtifactMetadata,
+  RetainedArtifactReference,
+  RetainedArtifactUnavailable,
+  RetainedOutputKind,
+  RetainedOutputUnavailableReason,
   RecordingAvailablePayload,
   RecordingCodec,
   RecordingContentType,

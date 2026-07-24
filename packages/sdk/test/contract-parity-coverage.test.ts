@@ -27,6 +27,13 @@ import {
   EnablePackRequest as ContractEnablePackRequest,
   FileAsset as ContractFileAsset,
   FileStatus as ContractFileStatus,
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES as CONTRACT_RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES as CONTRACT_RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  RetainedArtifactMetadataSchema as ContractRetainedArtifactMetadata,
+  RetainedArtifactReferenceSchema as ContractRetainedArtifactReference,
+  RetainedArtifactUnavailableSchema as ContractRetainedArtifactUnavailable,
+  RetainedOutputKind as ContractRetainedOutputKind,
+  RetainedOutputUnavailableReason as ContractRetainedOutputUnavailableReason,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
   GitHubAppInfo as ContractGitHubAppInfo,
   GitHubInstallationBinding as ContractGitHubInstallationBinding,
@@ -57,7 +64,12 @@ import {
   WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import type { z } from "zod";
-import { KNOWN_PERMISSIONS, KNOWN_USAGE_EVENT_TYPES } from "../src/types";
+import {
+  KNOWN_PERMISSIONS,
+  KNOWN_USAGE_EVENT_TYPES,
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+} from "../src/types";
 import type {
   AccessGrant,
   AccessContext,
@@ -87,6 +99,11 @@ import type {
   EnablePackRequest,
   FileAsset,
   FileStatus,
+  RetainedArtifactMetadata,
+  RetainedArtifactReference,
+  RetainedArtifactUnavailable,
+  RetainedOutputKind,
+  RetainedOutputUnavailableReason,
   GitHubRepository,
   GitHubAppInfo,
   GitHubInstallationBinding,
@@ -167,6 +184,9 @@ describe("SDK / contracts parity (full coverage)", () => {
     const triggerTypes: readonly ScheduledTaskTriggerType[] =
       ContractScheduledTaskTriggerType.options;
     const fileStatuses: readonly FileStatus[] = ContractFileStatus.options;
+    const retainedKinds: readonly RetainedOutputKind[] = ContractRetainedOutputKind.options;
+    const unavailableReasons: readonly RetainedOutputUnavailableReason[] =
+      ContractRetainedOutputUnavailableReason.options;
     const documentStatuses: readonly DocumentStatus[] = ContractDocumentStatus.options;
     const packStatuses: readonly PackInstallationStatus[] = ContractPackInstallationStatus.options;
     const capabilityKinds: readonly CapabilityKind[] = ContractCapabilityKind.options;
@@ -177,6 +197,10 @@ describe("SDK / contracts parity (full coverage)", () => {
     expect(runStatuses).toEqual(ContractScheduledTaskRunStatus.options);
     expect(triggerTypes).toEqual(ContractScheduledTaskTriggerType.options);
     expect(fileStatuses).toEqual(ContractFileStatus.options);
+    expect(retainedKinds).toEqual(ContractRetainedOutputKind.options);
+    expect(unavailableReasons).toEqual(ContractRetainedOutputUnavailableReason.options);
+    expect(RETAINED_OUTPUT_DEFAULT_PAGE_BYTES).toBe(CONTRACT_RETAINED_OUTPUT_DEFAULT_PAGE_BYTES);
+    expect(RETAINED_OUTPUT_MAX_PAGE_BYTES).toBe(CONTRACT_RETAINED_OUTPUT_MAX_PAGE_BYTES);
     expect(documentStatuses).toEqual(ContractDocumentStatus.options);
     expect(packStatuses).toEqual(ContractPackInstallationStatus.options);
     expect(capabilityKinds).toEqual(ContractCapabilityKind.options);
@@ -194,6 +218,15 @@ describe("SDK / contracts parity (full coverage)", () => {
       value: z.infer<typeof ContractWorkspaceEnvironment>,
     ): WorkspaceEnvironment => value;
     const acceptFile = (value: z.infer<typeof ContractFileAsset>): FileAsset => value;
+    const acceptRetainedReference = (
+      value: z.infer<typeof ContractRetainedArtifactReference>,
+    ): RetainedArtifactReference => value;
+    const acceptRetainedUnavailable = (
+      value: z.infer<typeof ContractRetainedArtifactUnavailable>,
+    ): RetainedArtifactUnavailable => value;
+    const acceptRetainedMetadata = (
+      value: z.infer<typeof ContractRetainedArtifactMetadata>,
+    ): RetainedArtifactMetadata => value;
     const acceptUploadBegin = (
       value: z.infer<typeof ContractCreateFileUploadResponse>,
     ): CreateFileUploadResponse => value;
@@ -230,6 +263,9 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptRun,
       acceptEnvironment,
       acceptFile,
+      acceptRetainedReference,
+      acceptRetainedUnavailable,
+      acceptRetainedMetadata,
       acceptUploadBegin,
       acceptDocumentBase,
       acceptDocument,

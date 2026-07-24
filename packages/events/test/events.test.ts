@@ -7,6 +7,7 @@ import {
   WORKSPACE_CONTROL_NATS_MESSAGE_MAX_BYTES,
   boundSessionEventHttpPage,
   boundWorkspaceControlHttpPage,
+  createNatsEventBus,
   formatSessionEventSse,
   formatSse,
   formatWorkspaceControlEventSse,
@@ -15,6 +16,7 @@ import {
 } from "../src/index";
 import {
   boundSessionEvent,
+  boundSessionEventPayload,
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
   type SessionEvent,
@@ -152,6 +154,95 @@ describe("SSE formatting", () => {
 });
 
 describe("session event transport envelopes", () => {
+  test("preserves a trusted retained receipt across bounded transports and content-free telemetry", async () => {
+    const artifactId = "33333333-3333-4333-8333-333333333333";
+    const receipt = {
+      available: true as const,
+      artifactId,
+      kind: "tool_result" as const,
+      contentType: "application/json",
+      originalBytes: 4 * 1024 * 1024,
+      sha256: "a".repeat(64),
+      retainedAt: "2026-07-21T00:00:00.000Z",
+      retention: { policy: "workspace_file" as const, expiresAt: null },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${artifactId}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: 1024 * 1024,
+      },
+    };
+    const payload = boundSessionEventPayload(
+      { id: "tool-call", output: `HEAD-${"x".repeat(200_000)}-TAIL` },
+      { fullEvidence: receipt },
+    );
+    const retained = event(80, payload);
+
+    const batches = sessionEventBatchesByBytes(WORKSPACE_ID, SESSION_ID, [retained]);
+    const frame = formatSessionEventSse(retained);
+    const page = boundSessionEventHttpPage([retained], { direction: "after" });
+    for (const projected of [batches[0]![0]!, page.events[0]!]) {
+      expect(sessionEventPayloadTruncation(projected.payload)?.fullEvidence).toEqual(receipt);
+    }
+    const sseEvent = JSON.parse(
+      frame
+        .split("\n")
+        .find((line) => line.startsWith("data: "))!
+        .slice("data: ".length),
+    ) as SessionEvent;
+    expect(sessionEventPayloadTruncation(sseEvent.payload)?.fullEvidence).toEqual(receipt);
+    expect(encodedBatchBytes(batches[0]!)).toBeLessThanOrEqual(
+      SESSION_EVENT_NATS_MESSAGE_MAX_BYTES,
+    );
+    expect(new TextEncoder().encode(frame).byteLength).toBeLessThanOrEqual(
+      SESSION_EVENT_SSE_FRAME_MAX_BYTES,
+    );
+    expect(page.bytes).toBeLessThanOrEqual(SESSION_EVENT_HTTP_PAGE_MAX_BYTES);
+
+    const telemetry: Array<Record<string, unknown>> = [];
+    const emptyAsyncIterable = () => (async function* () {})();
+    const bus = await createNatsEventBus("nats://retained-output.test:4222", undefined, {
+      connect: async () =>
+        ({
+          status: emptyAsyncIterable,
+          subscribe: () => Object.assign(emptyAsyncIterable(), { unsubscribe() {} }),
+          publish() {},
+          async flush() {},
+          async drain() {},
+          async request() {
+            return { data: new Uint8Array() };
+          },
+          isClosed: () => false,
+          isDraining: () => false,
+        }) as never,
+      logger: {
+        debug(message, attributes) {
+          if (message === "Session event payload is a bounded audit preview" && attributes) {
+            telemetry.push(attributes);
+          }
+        },
+      },
+    });
+    await bus.publish(WORKSPACE_ID, SESSION_ID, [retained]);
+    await bus.close();
+    expect(telemetry).toEqual([
+      expect.objectContaining({
+        fullEvidenceAvailable: true,
+        retainedOutputKind: "tool_result",
+        originalBytes: expect.any(Number),
+        deliveredBytes: expect.any(Number),
+        estimatedOriginalTokens: expect.any(Number),
+        estimatedDeliveredTokens: expect.any(Number),
+      }),
+    ]);
+    const logged = JSON.stringify(telemetry);
+    expect(logged).not.toContain(artifactId);
+    expect(logged).not.toContain(WORKSPACE_ID);
+    expect(logged).not.toContain(SESSION_ID);
+    expect(logged).not.toContain("HEAD-");
+    expect(logged).not.toContain("TAIL");
+  });
+
   test("never invokes serializers or accessors while bounding adversarial complete events", () => {
     let serializerCalls = 0;
     let accessorCalls = 0;

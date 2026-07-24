@@ -2590,6 +2590,11 @@ export async function countScheduledTasksForWorkspace(
 export type AppendEventInput = {
   type: SessionEventType;
   payload?: unknown;
+  /**
+   * Server-created retained-output evidence for canonical audit truncation.
+   * Producer payload fields are never trusted as evidence.
+   */
+  retainedOutputEvidence?: unknown;
   clientEventId?: string;
   turnId?: string | null;
   turnGeneration?: number | null;
@@ -3059,6 +3064,49 @@ export async function requireFile(
     throw new Error(`File not found: ${fileId}`);
   }
   return file;
+}
+
+export type RetainedFileArtifact = {
+  file: FileAsset;
+  uploadStatus: FileUploadStatus | null;
+  uploadExpiresAt: Date | null;
+};
+
+/**
+ * RLS-scoped file lookup with just enough upload lifecycle truth to distinguish
+ * pending, failed, and expired artifact references. The bytes and provider
+ * location remain in the existing FileAsset/object-storage seam.
+ */
+export async function getRetainedFileArtifact(
+  db: Database,
+  workspaceId: string,
+  fileId: string,
+): Promise<RetainedFileArtifact | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select({
+        file: schema.files,
+        uploadStatus: schema.fileUploads.status,
+        uploadExpiresAt: schema.fileUploads.expiresAt,
+      })
+      .from(schema.files)
+      .leftJoin(
+        schema.fileUploads,
+        and(
+          eq(schema.fileUploads.workspaceId, schema.files.workspaceId),
+          eq(schema.fileUploads.fileId, schema.files.id),
+        ),
+      )
+      .where(and(eq(schema.files.workspaceId, workspaceId), eq(schema.files.id, fileId)))
+      .orderBy(desc(schema.fileUploads.createdAt))
+      .limit(1);
+    if (!row) return null;
+    return {
+      file: mapFile(row.file),
+      uploadStatus: row.uploadStatus as FileUploadStatus | null,
+      uploadExpiresAt: row.uploadExpiresAt,
+    };
+  });
 }
 
 export async function getFileUpload(
@@ -26888,7 +26936,9 @@ export async function appendSessionEvents(
         sessionId,
         sequence: ++sequence,
         type: input.type,
-        payload: sanitizeEventPayload(input.payload ?? {}),
+        payload: sanitizeEventPayload(input.payload ?? {}, {
+          fullEvidence: input.retainedOutputEvidence,
+        }),
         clientEventId: input.clientEventId ?? null,
         turnId: input.turnId ?? null,
         turnGeneration: input.turnGeneration ?? null,
@@ -27228,7 +27278,9 @@ export async function appendSessionEventsForTurnAttempt(
             sessionId,
             sequence: ++sequence,
             type: input.type,
-            payload: sanitizeEventPayload(input.payload ?? {}),
+            payload: sanitizeEventPayload(input.payload ?? {}, {
+              fullEvidence: input.retainedOutputEvidence,
+            }),
             clientEventId: input.clientEventId ?? null,
             turnId,
             turnGeneration: executionGeneration,
@@ -27302,7 +27354,9 @@ export async function appendSessionEventToSandboxGroup(
           sessionId: row.id,
           sequence: row.lastSequence + 1,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
+          payload: sanitizeEventPayload(input.payload ?? {}, {
+            fullEvidence: input.retainedOutputEvidence,
+          }),
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -27380,7 +27434,9 @@ export async function appendSessionEventsAndUpdateSession(
           sessionId,
           sequence: ++sequence,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
+          payload: sanitizeEventPayload(input.payload ?? {}, {
+            fullEvidence: input.retainedOutputEvidence,
+          }),
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,
@@ -27515,7 +27571,9 @@ export async function appendSessionEventsWithLockedSessionUpdate(
           sessionId,
           sequence: ++sequence,
           type: input.type,
-          payload: sanitizeEventPayload(input.payload ?? {}),
+          payload: sanitizeEventPayload(input.payload ?? {}, {
+            fullEvidence: input.retainedOutputEvidence,
+          }),
           clientEventId: input.clientEventId ?? null,
           turnId: input.turnId ?? null,
           turnGeneration: input.turnGeneration ?? null,

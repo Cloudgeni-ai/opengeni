@@ -82,6 +82,9 @@ import type {
   ListWorkspaceMembersResponse,
   PackInstallation,
   ReasoningEffort,
+  RetainedArtifactContent,
+  RetainedArtifactContentOptions,
+  RetainedArtifactMetadata,
   RegisterCapabilityPackRequest,
   ResourceRef,
   ScheduledTask,
@@ -179,7 +182,11 @@ import type {
   OAuthStartRequest,
   OAuthStartResponse,
 } from "./types";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+} from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -1898,6 +1905,80 @@ export class OpenGeniClient {
     );
   }
 
+  /** Read provider-neutral retained evidence metadata; never returns a storage location. */
+  async getRetainedArtifact(
+    workspaceId: string,
+    artifactId: string,
+  ): Promise<RetainedArtifactMetadata> {
+    return await this.requestJson<RetainedArtifactMetadata>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/artifacts/${artifactId}`,
+    );
+  }
+
+  /**
+   * Read at most one authenticated retained-evidence range from the API. This
+   * deliberately does not use the ordinary signed file-download URL.
+   */
+  async getRetainedArtifactContent(
+    workspaceId: string,
+    artifactId: string,
+    options: RetainedArtifactContentOptions = {},
+  ): Promise<RetainedArtifactContent> {
+    if (options.range && (options.range.length > 128 || /[^\x20-\x7e]/.test(options.range))) {
+      throw new RangeError("retained artifact range must be at most 128 printable ASCII bytes");
+    }
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`),
+      {
+        method: "GET",
+        headers: {
+          ...this.headers(),
+          Accept: "application/octet-stream",
+          ...(options.range ? { Range: options.range } : {}),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    try {
+      assertApiContractResponse(response);
+    } catch (error) {
+      await cancelResponseBody(response, "retained artifact API contract mismatch");
+      throw error;
+    }
+    if (!response.ok) {
+      throw new OpenGeniApiError(response.status, await safeBoundedText(response));
+    }
+    if (response.status !== 200 && response.status !== 206) {
+      await cancelResponseBody(response, "unexpected retained artifact response status");
+      throw new OpenGeniApiError(response.status, "unexpected retained artifact response status");
+    }
+    if (response.headers.get("accept-ranges") !== "bytes") {
+      await cancelResponseBody(response, "retained artifact response omitted byte-range support");
+      throw new OpenGeniApiError(502, "retained artifact response omitted byte-range support");
+    }
+    let declaredLength: number | null;
+    try {
+      declaredLength = parseBoundedContentLength(response.headers.get("content-length"));
+    } catch (error) {
+      await cancelResponseBody(response, "invalid retained artifact content-length");
+      throw error;
+    }
+    const bytes = await readBoundedResponseBytes(
+      response,
+      RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      declaredLength,
+    );
+    return {
+      bytes,
+      status: response.status,
+      contentType: response.headers.get("content-type") ?? "application/octet-stream",
+      contentLength: bytes.byteLength,
+      contentRange: response.headers.get("content-range"),
+      acceptRanges: "bytes",
+    };
+  }
+
   /** Mint a short-lived signed download URL for a ready file. */
   async createFileDownloadUrl(
     workspaceId: string,
@@ -2570,4 +2651,70 @@ async function safeText(response: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+async function safeBoundedText(response: Response): Promise<string> {
+  try {
+    return new TextDecoder().decode(await readBoundedResponseBytes(response, 64 * 1024, null));
+  } catch {
+    return "";
+  }
+}
+
+async function cancelResponseBody(response: Response, reason: string): Promise<void> {
+  await response.body?.cancel(reason).catch(() => undefined);
+}
+
+function parseBoundedContentLength(value: string | null): number | null {
+  if (value === null) return null;
+  if (!/^\d+$/.test(value)) {
+    throw new OpenGeniApiError(502, "invalid retained artifact content-length");
+  }
+  const length = Number(value);
+  if (!Number.isSafeInteger(length) || length > RETAINED_OUTPUT_MAX_PAGE_BYTES) {
+    throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+  }
+  return length;
+}
+
+async function readBoundedResponseBytes(
+  response: Response,
+  maxBytes: number,
+  expectedBytes: number | null,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    if (expectedBytes !== null && expectedBytes !== 0) {
+      throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+    }
+    return new Uint8Array();
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader
+          .cancel("retained artifact response exceeded the SDK byte limit")
+          .catch(() => undefined);
+        throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (expectedBytes !== null && totalBytes !== expectedBytes) {
+    throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }

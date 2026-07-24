@@ -7,6 +7,12 @@
  * realtime transports, SDK/React, and tests can share one wire contract.
  */
 
+import {
+  retainedOutputUnavailable,
+  validateRetainedOutputEvidence,
+  type RetainedOutputEvidence,
+} from "./retained-output";
+
 export const SESSION_EVENT_PAYLOAD_MAX_BYTES = 64 * 1024;
 
 const TARGET_PAYLOAD_BYTES = 60 * 1024;
@@ -62,10 +68,7 @@ export type SessionEventPayloadTruncation = {
   omittedBytes: number | null;
   estimatedOriginalTokens: number | null;
   estimatedDeliveredTokens: number;
-  fullEvidence: {
-    available: false;
-    reason: "not_retained";
-  };
+  fullEvidence: RetainedOutputEvidence;
   details: Array<{
     path: string;
     kind:
@@ -87,6 +90,11 @@ export type SessionEventPayloadTruncation = {
 export type BoundSessionEventPayloadOptions = {
   surface?: SessionEventBoundarySurface;
   maxBytes?: number;
+  /**
+   * Separately trusted durable receipt. Producer payload fields never populate
+   * this slot; invalid values fail closed to not_retained.
+   */
+  fullEvidence?: unknown;
 };
 
 export type SessionEventJsonMeasurement =
@@ -187,6 +195,8 @@ export function boundSessionEventPayload<T>(
 ): T {
   const maxBytes = Math.max(1024, Math.floor(options.maxBytes ?? SESSION_EVENT_PAYLOAD_MAX_BYTES));
   const surface = options.surface ?? "durable_audit";
+  const fullEvidence =
+    validateRetainedOutputEvidence(options.fullEvidence) ?? retainedOutputUnavailable();
   const originalMeasurement = measureJsonBytes(payload);
   const originalBytes = originalMeasurement.bytes;
 
@@ -197,13 +207,19 @@ export function boundSessionEventPayload<T>(
   }
 
   let reason = payloadTruncationReason(originalMeasurement, state);
-  let bounded = attachTruncation(preview, boundaryMetadata(surface, reason, originalBytes, state));
+  let bounded = attachTruncation(
+    preview,
+    boundaryMetadata(surface, reason, originalBytes, state, fullEvidence),
+  );
 
   if (sessionEventJsonBytes(bounded) > Math.min(maxBytes, TARGET_PAYLOAD_BYTES)) {
     state = previewState(RETRY_STRING_BYTES, RETRY_ARRAY_ENTRIES, RETRY_OBJECT_FIELDS);
     preview = previewValue(payload, state, "$", 0);
     reason = payloadTruncationReason(originalMeasurement, state);
-    bounded = attachTruncation(preview, boundaryMetadata(surface, reason, originalBytes, state));
+    bounded = attachTruncation(
+      preview,
+      boundaryMetadata(surface, reason, originalBytes, state, fullEvidence),
+    );
   }
 
   if (sessionEventJsonBytes(bounded) > maxBytes) {
@@ -219,7 +235,7 @@ export function boundSessionEventPayload<T>(
         ...identity,
         preview: "[event payload omitted: bounded audit preview exceeded the storage envelope]",
       },
-      boundaryMetadata(surface, reason, originalBytes, state),
+      boundaryMetadata(surface, reason, originalBytes, state, fullEvidence),
     );
   }
 
@@ -464,6 +480,7 @@ function boundaryMetadata(
   reason: SessionEventPayloadTruncation["reason"],
   originalBytes: number | null,
   state: PreviewState,
+  fullEvidence: RetainedOutputEvidence,
 ): SessionEventPayloadTruncation {
   return {
     truncated: true,
@@ -475,7 +492,7 @@ function boundaryMetadata(
     estimatedOriginalTokens:
       originalBytes === null ? null : approximateSessionEventTokens(originalBytes),
     estimatedDeliveredTokens: 0,
-    fullEvidence: { available: false, reason: "not_retained" },
+    fullEvidence,
     details: state.details,
   };
 }

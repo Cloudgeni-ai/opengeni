@@ -2262,6 +2262,67 @@ export type FileAsset = {
   updatedAt: string;
 };
 
+/** Mirrors the closed, provider-neutral retained-output contract. */
+export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
+export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
+
+export type RetainedOutputKind =
+  | "tool_result"
+  | "assistant_completion"
+  | "internal_update"
+  | "event_media"
+  | "file";
+
+export type RetainedOutputUnavailableReason =
+  | "not_retained"
+  | "pending"
+  | "failed"
+  | "expired"
+  | "deleted"
+  | "missing_storage"
+  | "storage_write_failed"
+  | "unsupported";
+
+export type RetainedArtifactReference = {
+  available: true;
+  artifactId: string;
+  kind: RetainedOutputKind;
+  contentType: string;
+  originalBytes: number;
+  sha256: string;
+  retainedAt: string;
+  retention: { policy: "workspace_file"; expiresAt: null };
+  retrieval: {
+    method: "GET";
+    path: string;
+    acceptRanges: "bytes";
+    maxRangeBytes: number;
+  };
+};
+
+export type RetainedArtifactUnavailable = {
+  available: false;
+  artifactId: string;
+  reason: RetainedOutputUnavailableReason;
+};
+
+export type RetainedArtifactMetadata = RetainedArtifactReference | RetainedArtifactUnavailable;
+
+export type RetainedArtifactContentOptions = {
+  /** One RFC-style bytes range, for example `bytes=1048576-2097151`. */
+  range?: string | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+export type RetainedArtifactContent = {
+  bytes: Uint8Array;
+  status: 200 | 206;
+  contentType: string;
+  contentLength: number;
+  contentRange: string | null;
+  acceptRanges: "bytes";
+};
+
 export type CreateFileUploadRequest = {
   filename: string;
   contentType: string;

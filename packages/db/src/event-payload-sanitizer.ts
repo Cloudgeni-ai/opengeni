@@ -88,12 +88,42 @@ export function sanitizeEventString(value: string): string {
  * combinations are traversed; non-string leaves pass through untouched. Object
  * keys are sanitized too -- they are jsonb-constrained the same as values.
  */
-export function sanitizeEventPayload<T>(payload: T): T {
+export type SanitizeEventPayloadOptions = {
+  /**
+   * Separately trusted, server-created retained-output evidence. Never populate
+   * this from a producer-controlled payload field.
+   */
+  fullEvidence?: unknown;
+};
+
+export function sanitizeEventPayload<T>(payload: T, options: SanitizeEventPayloadOptions = {}): T {
   // Bound first. The preview walker caps depth/container fan-out and replaces
   // inline media before this sanitizer allocates a deep clone. Reversing this
   // order lets a cyclic, deeply nested, or multi-megabyte tool result exhaust
   // the stack/heap before the durable 64 KiB event boundary can protect it.
-  return sanitizeEventPayloadDeep(boundSessionEventPayload(payload));
+  const bounded = boundSessionEventPayload(payload, {
+    fullEvidence: options.fullEvidence,
+  });
+  return sanitizeEventPayloadDeep(
+    bounded === payload ? removeProducerTruncationMetadata(bounded) : bounded,
+  );
+}
+
+/**
+ * `truncation` is reserved durable-boundary metadata. An ordinary payload that
+ * already fits the envelope otherwise returns by reference, so remove a
+ * producer-supplied value before persistence rather than allowing it to forge
+ * byte accounting or an available retained-artifact receipt. A payload changed
+ * by `boundSessionEventPayload` already carries freshly computed metadata and
+ * never reaches this helper.
+ */
+function removeProducerTruncationMetadata<T>(payload: T): T {
+  if (!isPlainObject(payload)) return payload;
+  const descriptor = Object.getOwnPropertyDescriptor(payload, "truncation");
+  if (!descriptor?.enumerable) return payload;
+  const cleaned = { ...payload };
+  delete cleaned.truncation;
+  return cleaned as T;
 }
 
 function sanitizeEventPayloadDeep<T>(payload: T): T {
