@@ -62,7 +62,8 @@ export async function verifyReleaseProvenance(input: {
     await input.api.get(`/repos/${RELEASE_REPOSITORY}/actions/runs/${requestedRunId}`),
   );
   const runId = positiveInteger(run.id, "workflow run id");
-  if (runId !== requestedRunId) throw new Error("workflow run response ID does not match the requested run");
+  if (runId !== requestedRunId)
+    throw new Error("workflow run response ID does not match the requested run");
   if (run.status !== "completed") throw new Error("release producer workflow is not completed");
   const headRepository = string(
     (run.head_repository as { full_name?: unknown } | undefined)?.full_name,
@@ -80,7 +81,8 @@ export async function verifyReleaseProvenance(input: {
   );
   const sourceTreeSha = string(sourceCommit.commit?.tree?.sha, "source tree SHA");
   const commitSha = string(sourceCommit.sha, "source commit SHA");
-  if (commitSha !== sourceSha) throw new Error("source commit response does not match workflow head SHA");
+  if (commitSha !== sourceSha)
+    throw new Error("source commit response does not match workflow head SHA");
 
   const producer = buildReleaseProducerMetadata({
     kind: input.kind,
@@ -88,7 +90,10 @@ export async function verifyReleaseProvenance(input: {
     runAttempt: run.run_attempt as number,
     sourceSha,
     sourceTreeSha,
-    repository: string((run.repository as { full_name?: unknown } | undefined)?.full_name, "run repository"),
+    repository: string(
+      (run.repository as { full_name?: unknown } | undefined)?.full_name,
+      "run repository",
+    ),
     workflowPath: string(run.path, "workflow path"),
     event: string(run.event, "workflow event"),
     conclusion: string(run.conclusion, "workflow conclusion"),
@@ -226,8 +231,10 @@ function parseArgs(values: string[]): {
   if (!/^[0-9a-f]{40}$/.test(output.sourceSha)) {
     throw new Error("--source-sha must be 40 lowercase hexadecimal characters");
   }
-  if (!/^[1-9][0-9]{0,19}$/.test(output.runId)) throw new Error("--run-id must be a positive integer");
-  if (expectedWorkflowPath(output.kind).length === 0) throw new Error("canonical workflow is missing");
+  if (!/^[1-9][0-9]{0,19}$/.test(output.runId))
+    throw new Error("--run-id must be a positive integer");
+  if (expectedWorkflowPath(output.kind).length === 0)
+    throw new Error("canonical workflow is missing");
   return output;
 }
 

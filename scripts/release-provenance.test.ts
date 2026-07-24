@@ -32,7 +32,9 @@ const artifact = {
   workflow_run: { id: 123 },
 };
 
-function api(overrides: { run?: Record<string, unknown>; artifact?: Record<string, unknown> } = {}) {
+function api(
+  overrides: { run?: Record<string, unknown>; artifact?: Record<string, unknown> } = {},
+) {
   return {
     async get(path: string): Promise<unknown> {
       if (path.endsWith("/actions/runs/123")) return { ...run, ...overrides.run };

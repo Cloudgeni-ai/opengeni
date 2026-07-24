@@ -212,11 +212,11 @@ export function validateTrustedReleaseArtifact(
     throw new Error("trusted release artifact is expired or has an invalid expiry");
   }
   const expectedName = expectedArtifactName(expected.kind, expected.sourceSha);
-  if (name !== expectedName) throw new Error(`trusted release artifact must be named ${expectedName}`);
+  if (name !== expectedName)
+    throw new Error(`trusted release artifact must be named ${expectedName}`);
   if (!digestPattern.test(digest)) throw new Error("trusted release artifact digest is invalid");
   const expectedUrl = `${githubServerUrl()}/${RELEASE_REPOSITORY}/actions/runs/${expected.runId}/artifacts/${id}`;
-  const expectedArchiveDownloadUrl =
-    `${githubApiUrl()}/repos/${RELEASE_REPOSITORY}/actions/artifacts/${id}/zip`;
+  const expectedArchiveDownloadUrl = `${githubApiUrl()}/repos/${RELEASE_REPOSITORY}/actions/artifacts/${id}/zip`;
   if (url !== expectedUrl) throw new Error("trusted release artifact URL is not canonical");
   if (archiveDownloadUrl !== expectedArchiveDownloadUrl) {
     throw new Error("trusted release artifact archive URL is not canonical");
@@ -245,7 +245,11 @@ function record(value: unknown, label: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[], label: string): void {
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+  label: string,
+): void {
   const actual = Object.keys(value).sort();
   const canonical = [...expected].sort();
   if (actual.length !== canonical.length || actual.some((key, index) => key !== canonical[index])) {

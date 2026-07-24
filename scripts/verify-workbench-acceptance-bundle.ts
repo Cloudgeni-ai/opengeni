@@ -206,8 +206,13 @@ export function validateWorkbenchAcceptanceBundle(
     );
   }
   const candidateChart = chartIdentity(candidate.chart, "candidate.chart", errors);
-  if (candidateChart && !sameChart(candidateChart, expectedCandidateReceipt.chart)) {
-    errors.push("candidate chart does not match the release candidate receipt");
+  if (candidateChart) {
+    sameChart(
+      candidateChart,
+      expectedCandidateReceipt.chart,
+      "candidate chart and receipt",
+      errors,
+    );
   }
   const candidateReceipt = singleEvidenceRef(candidate.receipt, "candidate.receipt", errors);
   if (candidateReceipt) {
@@ -609,7 +614,13 @@ function sameChart(
   label: string,
   errors: string[],
 ): void {
-  for (const field of ["reference", "version", "manifestDigest", "bytesSha256", "artifact"] as const) {
+  for (const field of [
+    "reference",
+    "version",
+    "manifestDigest",
+    "bytesSha256",
+    "artifact",
+  ] as const) {
     if (left[field] !== right[field]) errors.push(`${label} chart ${field} differs`);
   }
 }
@@ -784,7 +795,11 @@ async function main(): Promise<void> {
   const candidateReceipt = validateReleaseCandidateReceipt(candidateReceiptValue, {
     sourceSha: args.sourceSha,
   });
-  const candidateProvenance = await readProducer(args.candidateProducer, "candidate", args.sourceSha);
+  const candidateProvenance = await readProducer(
+    args.candidateProducer,
+    "candidate",
+    args.sourceSha,
+  );
   const acceptanceProvenance = await readProducer(
     args.acceptanceProducer,
     "acceptance",

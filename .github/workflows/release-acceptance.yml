@@ -1,5 +1,7 @@
 name: Release acceptance producer
 
+# Canonical workflow path: .github/workflows/release-acceptance.yml
+
 # This is the canonical, operator-controlled producer identity consumed by
 # release.yml. It is intentionally fail-closed until the deployment owner has
 # installed the real acceptance harness on the protected environment. A

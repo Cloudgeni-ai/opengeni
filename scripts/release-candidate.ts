@@ -148,10 +148,7 @@ export function validateReleaseCandidateReceipt(
   if (typeof receipt.sourceSha !== "string" || !sourceShaPattern.test(receipt.sourceSha)) {
     throw new Error("release candidate sourceSha must be 40 lowercase hexadecimal characters");
   }
-  if (
-    typeof receipt.sourceTreeSha !== "string" ||
-    !sourceShaPattern.test(receipt.sourceTreeSha)
-  ) {
+  if (typeof receipt.sourceTreeSha !== "string" || !sourceShaPattern.test(receipt.sourceTreeSha)) {
     throw new Error("release candidate sourceTreeSha must be 40 lowercase hexadecimal characters");
   }
   if (typeof receipt.releaseVersion !== "string" || !versionPattern.test(receipt.releaseVersion)) {
@@ -278,10 +275,7 @@ function normalizeChart(value: unknown): ReleaseChartIdentity {
   if (typeof chart.bytesSha256 !== "string" || !hashPattern.test(chart.bytesSha256)) {
     throw new Error("release candidate chart bytesSha256 must be lowercase SHA-256");
   }
-  if (
-    typeof chart.artifact !== "string" ||
-    chart.artifact !== `opengeni-${chart.version}.tgz`
-  ) {
+  if (typeof chart.artifact !== "string" || chart.artifact !== `opengeni-${chart.version}.tgz`) {
     throw new Error("release candidate chart artifact must match its version");
   }
   return {
