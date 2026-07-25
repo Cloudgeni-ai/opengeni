@@ -1,4 +1,4 @@
-import { proxyActivities } from "@temporalio/workflow";
+import { ActivityCancellationType, proxyActivities } from "@temporalio/workflow";
 import type * as activities from "../activities";
 import type { RigVerificationWorkflowInput } from "../activities/rig-verification";
 
@@ -6,6 +6,8 @@ const rigVerificationActivities = proxyActivities<
   Pick<typeof activities, "verifyRigChange" | "verifyRigVersion">
 >({
   startToCloseTimeout: "15 minutes",
+  heartbeatTimeout: "10 seconds",
+  cancellationType: ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
   retry: { maximumAttempts: 1 },
 });
 

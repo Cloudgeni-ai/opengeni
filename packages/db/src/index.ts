@@ -16870,8 +16870,9 @@ export async function acquireLease(
         // (2) Serialize ALL concurrent arrivals on this group's row. Plain FOR
         // UPDATE (block, do NOT skip) — unlike concurrent enrollment scans,
         // because we WANT the loser to block then attach, not skip and lose.
-        const rows = await tx.execute<LeaseRow>(sql`
-        select * from sandbox_leases
+        const rows = await tx.execute<LeaseRow & { draining_expired: boolean }>(sql`
+        select *, (liveness = 'draining' and expires_at <= now()) as draining_expired
+        from sandbox_leases
         where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
         for update
       `);
@@ -16879,6 +16880,16 @@ export async function acquireLease(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         let liveness = row.liveness;
+
+        // An expired DRAINING row is owned by the reaper's provider teardown,
+        // not by a new arrival. In particular, do this before image/rig conflict
+        // handling: a conflicting successor must not take the SOLO-recreate path
+        // and clear the attributed instance while the reaper/old creator still
+        // owns its termination. The row remains drainable until confirmDrainCold
+        // settles it, so callers fail closed and retry after the box is cold.
+        if (liveness === "draining" && row.draining_expired) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
 
         // -- SHARED STATE CONFLICT (B3 image + M3 rig): a LIVE box (warm/draining/warming)
         // was created under a specific image AND rig version. If this run resolves a
@@ -16942,7 +16953,9 @@ export async function acquireLease(
           liveness = "cold";
         }
 
-        // -- draining: late arrival re-arms (D1). Box still alive (grace open).
+        // -- draining: late arrival re-arms (D1) only while the grace is open.
+        // An expired row was fenced above because the reaper owns its provider
+        // teardown and must not lose the attributed instance race.
         if (liveness === "draining") {
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
@@ -16999,8 +17012,11 @@ export async function acquireLease(
   );
 }
 
-// §4.2 — the ONLY lease_epoch++ site. CAS on (warming AND lease_epoch=expected).
-// Folds the group box-envelope (resume_backend_id/resume_state) onto the lease.
+// §4.2 — warm commit and every warming invalidation are epoch-fenced transitions.
+// CAS on (warming AND lease_epoch=expected) folds the group box-envelope
+// (resume_backend_id/resume_state) onto the lease. A rollback/reset also bumps
+// the epoch before exposing cold/draining, permanently fencing any provider
+// create callback that is still unresolved from the invalidated acquisition.
 export async function commitWarmingToWarm(
   db: Database,
   input: {
@@ -17187,7 +17203,9 @@ export async function markWarmLeaseInstanceLost(
 
 // §4.3 — caught spawn failure: warming -> cold (W3). Holders are intentionally
 // left intact — the arrival that triggered the spawn still wants a box, so the
-// next acquireLease re-CAS cold->warming.
+// next acquireLease re-CAS cold->warming. The rollback increments the epoch in
+// the same CAS, so a non-abortable provider create from this invalidated
+// acquisition can never mutate a successor that reuses the lease row.
 //
 // ARCHIVE PRESERVATION (sandbox-file-persistence): when the cold lease that was
 // selected for re-warm carried a persisted /workspace archive on its resume_state
@@ -17217,6 +17235,7 @@ export async function failWarmingToCold(
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           data_plane_url = null, terminal_data_plane_url = null, updated_at = now(),
+          lease_epoch = lease_epoch + 1,
           resume_state = case
             when (resume_state #>> '{sessionState,workspaceArchive}') is not null
               then jsonb_build_object(
@@ -17486,21 +17505,24 @@ export async function reapStaleLeaseHolders(
       `);
 
         // (c1) WARMING-death before provider create returned: no instance_id was
-        // ever persisted, so there is no provider box to stop. Reset to cold so a
-        // queued turn can re-acquire and re-spawn.
+        // ever persisted, so there is no provider box to stop. Reset to cold and
+        // bump the epoch so any late provider callback is fenced before a queued
+        // turn can re-acquire and re-spawn.
         const warmingReset = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'cold', instance_id = null,
           resume_backend_id = null, resume_state = null,
-          data_plane_url = null, terminal_data_plane_url = null, updated_at = now()
+          data_plane_url = null, terminal_data_plane_url = null,
+          lease_epoch = lease_epoch + 1, updated_at = now()
         where workspace_id = ${input.workspaceId}
           and liveness = 'warming' and expires_at < now() and instance_id is null
         returning id
       `);
 
         // (c2) WARMING-death after provider create returned: instance_id is known,
-        // so do NOT drop it. Convert to immediately-drainable so the caller's
-        // provider terminate path stops the box before the lease goes cold.
+        // so do NOT drop it. Bump the epoch and convert to immediately-drainable
+        // so the caller's provider terminate path stops the box before the lease
+        // goes cold, while late creator callbacks are fenced.
         const warmingDrain = await tx.execute<{ id: string }>(sql`
         update sandbox_leases set
           liveness = 'draining',
@@ -17509,6 +17531,7 @@ export async function reapStaleLeaseHolders(
           viewer_holders = 0,
           data_plane_url = null,
           terminal_data_plane_url = null,
+          lease_epoch = lease_epoch + 1,
           expires_at = now() - interval '1 millisecond',
           updated_at = now()
         where workspace_id = ${input.workspaceId}
@@ -17762,6 +17785,7 @@ export async function reArmDrainingLease(
           updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining'
+          and expires_at > now()
         returning id
       `);
       return { rearmed: rows.length > 0 };
