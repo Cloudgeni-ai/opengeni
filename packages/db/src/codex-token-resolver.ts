@@ -55,27 +55,89 @@ import {
 const inflight = new Map<string, Promise<CodexTokenSnapshot>>();
 const CODEX_TOKEN_REFRESH_TIMEOUT_MS = 6_000;
 
-async function withCodexTokenDeadline<T>(operation: Promise<T>): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined;
-  const guarded = operation.then(
-    (value) => value,
-    (error) => {
-      throw error;
-    },
-  );
-  try {
-    return await Promise.race([
-      guarded,
-      new Promise<never>((_resolve, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error("Codex token refresh timed out")),
-          CODEX_TOKEN_REFRESH_TIMEOUT_MS,
-        );
-      }),
-    ]);
-  } finally {
-    if (timeout) clearTimeout(timeout);
+export type CodexTokenDeadlineClock = {
+  setTimeout: (callback: () => void, delayMs: number) => ReturnType<typeof globalThis.setTimeout>;
+  clearTimeout: (handle: ReturnType<typeof globalThis.setTimeout>) => void;
+};
+
+export type CodexTokenDeadlineOptions = {
+  timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
+  clock?: CodexTokenDeadlineClock | undefined;
+};
+
+const systemCodexTokenDeadlineClock: CodexTokenDeadlineClock = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle),
+};
+
+/**
+ * Bound a refresh promise without abandoning its rejection handler when the
+ * deadline or cancellation wins. The provider promise is observed exactly
+ * once, while the observer itself always fulfills, so a late provider failure
+ * cannot become an unhandled rejection or replace the authoritative outcome.
+ */
+export async function withCodexTokenDeadline<T>(
+  operation: Promise<T>,
+  options: CodexTokenDeadlineOptions = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? CODEX_TOKEN_REFRESH_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Codex token refresh timeout must be positive");
   }
+  const clock = options.clock ?? systemCodexTokenDeadlineClock;
+  const signal = options.signal;
+
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+
+    const cleanup = (): void => {
+      if (timeout !== undefined) {
+        clock.clearTimeout(timeout);
+        timeout = undefined;
+      }
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    const settle = (
+      outcome: { kind: "resolve"; value: T } | { kind: "reject"; error: unknown },
+    ) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (outcome.kind === "resolve") {
+        resolve(outcome.value);
+      } else {
+        reject(outcome.error);
+      }
+    };
+
+    const onAbort = (): void => {
+      settle({
+        kind: "reject",
+        error: signal?.reason ?? new Error("Codex token refresh cancelled"),
+      });
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timeout = clock.setTimeout(
+        () => settle({ kind: "reject", error: new Error("Codex token refresh timed out") }),
+        timeoutMs,
+      );
+    }
+
+    // Do not use Promise.race here. Its derived promise can obscure which
+    // branch owns settlement, while this fulfillment-only observer makes the
+    // losing provider branch explicitly consumed after timeout/cancellation.
+    void Promise.resolve(operation).then(
+      (value) => settle({ kind: "resolve", value }),
+      (error) => settle({ kind: "reject", error }),
+    );
+  });
 }
 
 // Dependencies are injectable so the lifecycle logic (single-flight, staleness,

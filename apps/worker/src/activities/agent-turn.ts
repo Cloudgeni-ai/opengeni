@@ -1759,11 +1759,11 @@ async function refreshCappedCodexUsageRows(
     >
   >
 > {
-  const nearPct = settings.codexRotationNearExhaustionPct;
   const stale = accounts.filter(
     (a) =>
       a.status === "active" &&
-      ((a.primaryUsedPercent ?? 0) >= nearPct || (a.secondaryUsedPercent ?? 0) >= nearPct),
+      ((a.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
+        (a.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT),
   );
   if (stale.length === 0) {
     return accounts;
