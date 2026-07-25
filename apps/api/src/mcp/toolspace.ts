@@ -3,7 +3,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
-import { prefixedMcpToolName, type AccessGrant, type ToolRef } from "@opengeni/contracts";
+import {
+  prefixedMcpToolName,
+  type AccessGrant,
+  type SessionTurn,
+  type ToolRef,
+} from "@opengeni/contracts";
 import {
   hasPermission,
   settingsWithEnabledCapabilityMcpServers,
@@ -11,13 +16,18 @@ import {
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
+  buildHostConnectionTokenResolver,
+  clearPendingSessionToolspaceCall,
+  getSessionRootId,
+  getSessionTurnForAttempt,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
+  registerPendingSessionToolCall,
   requireSession,
-  reserveToolspaceCallForTurn,
+  reserveToolspaceCallForAttempt,
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
 
 export type ToolspaceCallResult = CallToolResult;
 
@@ -73,11 +83,33 @@ type ToolListingEntry = {
   requireApproval: McpServerConfig["requireApproval"];
 };
 
+type ToolspaceAuthority = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+function toolspaceAuthorityForGrant(grant: AccessGrant): ToolspaceAuthority | null {
+  const sessionId = grant.metadata?.sessionId;
+  const turnId = grant.metadata?.turnId;
+  const attemptId = grant.metadata?.attemptId;
+  const executionGeneration = grant.metadata?.executionGeneration;
+  return typeof sessionId === "string" &&
+    typeof turnId === "string" &&
+    typeof attemptId === "string" &&
+    typeof executionGeneration === "number" &&
+    Number.isSafeInteger(executionGeneration) &&
+    executionGeneration > 0
+    ? { sessionId, turnId, attemptId, executionGeneration }
+    : null;
+}
+
 export function isToolspaceGrant(settings: ApiRouteDeps["settings"], grant: AccessGrant): boolean {
   return (
     settings.toolspaceEnabled &&
     hasPermission(grant.permissions, "toolspace:call") &&
-    typeof grant.metadata?.sessionId === "string"
+    toolspaceAuthorityForGrant(grant) !== null
   );
 }
 
@@ -89,8 +121,20 @@ export async function prepareToolspaceMcpSurface(input: {
   if (!isToolspaceGrant(deps.settings, grant)) {
     return null;
   }
-  const sessionId = grant.metadata!.sessionId as string;
+  const authority = toolspaceAuthorityForGrant(grant);
+  if (!authority) {
+    return null;
+  }
+  const { sessionId } = authority;
   const session = await requireSession(deps.db, grant.workspaceId, sessionId);
+  let rootSessionId = sessionId;
+  if (deps.connectionCredentials?.mcpCredentials) {
+    const resolvedRootSessionId = await getSessionRootId(deps.db, grant.workspaceId, sessionId);
+    if (!resolvedRootSessionId) {
+      throw new Error(`cannot resolve host MCP credentials for missing session ${sessionId}`);
+    }
+    rootSessionId = resolvedRootSessionId;
+  }
   const selectedIds = selectedMcpServerIds(
     session.tools,
     session.mcpServers.map((server) => server.id),
@@ -101,25 +145,46 @@ export async function prepareToolspaceMcpSurface(input: {
   if (proxyableIds.length === 0) {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
+  const activeTurn = await getSessionTurnForAttempt(
+    deps.db,
+    grant.workspaceId,
+    sessionId,
+    authority.attemptId,
+  );
+  if (
+    !activeTurn ||
+    activeTurn.id !== authority.turnId ||
+    activeTurn.executionGeneration !== authority.executionGeneration
+  ) {
+    return emptyToolspaceSurface(sessionId, grant.subjectId);
+  }
 
   // The registry (decrypted session servers + capability/pack expansion) is a
   // handful of DB reads with no upstream dials. Build it at most once per
   // request, and only when we actually need it (a cache-miss listing or a real
   // tools/call), so a cache-hit request does no registry work.
-  let registryPromise: Promise<Map<string, McpServerConfig>> | null = null;
-  const getRegistry = () =>
-    (registryPromise ??= buildToolspaceRegistry(deps, grant.workspaceId, sessionId));
+  const registryPromises = new Map<string, Promise<Map<string, McpServerConfig>>>();
+  const getRegistry = (attemptId: string) => {
+    const existing = registryPromises.get(attemptId);
+    if (existing) {
+      return existing;
+    }
+    const created = buildToolspaceRegistry(deps, grant.workspaceId, sessionId, attemptId);
+    registryPromises.set(attemptId, created);
+    return created;
+  };
 
   const listing = await resolveToolListing({
     deps,
     grant,
     sessionId,
+    rootSessionId,
     proxyableIds,
-    activeTurnId: session.activeTurnId ?? null,
-    getRegistry,
+    activeTurn,
+    getRegistry: () => getRegistry(authority.attemptId),
   });
   const tools = listing.map((entry) =>
-    toolspaceToolFor({ deps, grant, sessionId, entry, getRegistry }),
+    toolspaceToolFor({ deps, grant, authority, rootSessionId, entry, getRegistry }),
   );
 
   return {
@@ -140,6 +205,7 @@ async function buildToolspaceRegistry(
   deps: ApiRouteDeps,
   workspaceId: string,
   sessionId: string,
+  attemptId: string,
 ): Promise<Map<string, McpServerConfig>> {
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     deps.db,
@@ -150,6 +216,7 @@ async function buildToolspaceRegistry(
     deps,
     workspaceId,
     sessionId,
+    attemptId,
     runtimeSettings,
   );
   return new Map(withSessionServers.mcpServers.map((server) => [server.id, server]));
@@ -164,18 +231,24 @@ async function resolveToolListing(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
   sessionId: string;
+  rootSessionId: string;
   proxyableIds: string[];
-  activeTurnId: string | null;
+  activeTurn: SessionTurn;
   getRegistry: () => Promise<Map<string, McpServerConfig>>;
 }): Promise<ToolListingEntry[]> {
-  const { deps, grant, sessionId, proxyableIds, activeTurnId, getRegistry } = input;
-  const cacheKey = await toolListCacheKey(deps, grant.workspaceId, sessionId, proxyableIds);
+  const { deps, grant, sessionId, rootSessionId, proxyableIds, activeTurn, getRegistry } = input;
+  // Host credentials can be initiator-specific. A prior turn's tool list must
+  // never be reused under a different frozen authority in the same session.
+  const cacheKey = await toolListCacheKey(
+    deps,
+    grant.workspaceId,
+    sessionId,
+    proxyableIds,
+    activeTurn,
+  );
   const cached = readToolListCache(cacheKey);
   if (cached) {
     return cached;
-  }
-  if (!activeTurnId) {
-    return [];
   }
   const registry = await getRegistry();
   const entries: ToolListingEntry[] = [];
@@ -184,9 +257,14 @@ async function resolveToolListing(input: {
     if (!config || !toolspaceCanProxyServer(config)) {
       continue;
     }
-    const connection = await connectToolspaceServer({ deps, grant, config, sessionId }).catch(
-      () => null,
-    );
+    const connection = await connectToolspaceServer({
+      deps,
+      grant,
+      config,
+      sessionId,
+      rootSessionId,
+      turn: activeTurn,
+    }).catch(() => null);
     if (!connection) {
       continue;
     }
@@ -213,6 +291,7 @@ async function toolListCacheKey(
   workspaceId: string,
   sessionId: string,
   proxyableIds: string[],
+  turn: SessionTurn,
 ): Promise<string> {
   const metadata = await listSessionMcpServerMetadata(deps.db, workspaceId, sessionId);
   const versions = new Map(metadata.map((server) => [server.id, server.credentialVersion]));
@@ -221,7 +300,13 @@ async function toolListCacheKey(
     .sort()
     .map((id) => `${id}@${versions.get(id) ?? 0}`)
     .join(",");
-  return `${workspaceId}:${sessionId}:${signature}`;
+  const authority = JSON.stringify({
+    turnId: turn.id,
+    executionGeneration: turn.executionGeneration,
+    attemptId: turn.activeAttemptId,
+    initiator: turn.initiator,
+  });
+  return `${workspaceId}:${sessionId}:${signature}:${authority}`;
 }
 
 function readToolListCache(key: string): ToolListingEntry[] | null {
@@ -255,6 +340,7 @@ async function settingsWithSessionMcpServersForToolspace(
   deps: ApiRouteDeps,
   workspaceId: string,
   sessionId: string,
+  attemptId: string,
   settings: ApiRouteDeps["settings"],
 ): Promise<ApiRouteDeps["settings"]> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
@@ -263,9 +349,19 @@ async function settingsWithSessionMcpServersForToolspace(
     if (metadata.length === 0) {
       return settings;
     }
-    throw new Error("session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    if (metadata.some((server) => server.headerNames.length > 0)) {
+      throw new Error(
+        "session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+      );
+    }
   }
-  const servers = await listSessionMcpServersForRun(deps.db, workspaceId, sessionId, encryptionKey);
+  const servers = await listSessionMcpServersForRun(
+    deps.db,
+    workspaceId,
+    sessionId,
+    attemptId,
+    encryptionKey ?? null,
+  );
   if (servers.length === 0) {
     return settings;
   }
@@ -284,6 +380,7 @@ async function settingsWithSessionMcpServersForToolspace(
         ...(server.requireApproval !== undefined
           ? { requireApproval: server.requireApproval }
           : {}),
+        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         headers: server.headers,
       })),
     ],
@@ -295,6 +392,8 @@ async function connectToolspaceServer(input: {
   grant: AccessGrant;
   config: McpServerConfig;
   sessionId: string;
+  rootSessionId: string;
+  turn: SessionTurn;
 }): Promise<ConnectedToolspaceServer> {
   const baseFetch: FetchLike = input.config.connectionRef
     ? connectionBrokerFetch(globalThis.fetch, input)
@@ -322,11 +421,13 @@ async function connectToolspaceServer(input: {
 function toolspaceToolFor(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
-  sessionId: string;
+  authority: ToolspaceAuthority;
+  rootSessionId: string;
   entry: ToolListingEntry;
-  getRegistry: () => Promise<Map<string, McpServerConfig>>;
+  getRegistry: (attemptId: string) => Promise<Map<string, McpServerConfig>>;
 }): ToolspaceRegisteredTool {
-  const { deps, grant, sessionId, entry, getRegistry } = input;
+  const { deps, grant, authority, rootSessionId, entry, getRegistry } = input;
+  const { sessionId } = authority;
   const { serverId, tool } = entry;
   const name = prefixedMcpToolName(serverId, tool.name);
   const approvalRequired = mcpToolRequiresApproval(entry.requireApproval, tool.name);
@@ -338,10 +439,7 @@ function toolspaceToolFor(input: {
     ...(description ? { description } : {}),
     ...(tool.inputSchema ? { inputSchema: tool.inputSchema } : {}),
     call: async (args) => {
-      if (approvalRequired) {
-        return mcpError(APPROVAL_REQUIRED_MESSAGE);
-      }
-      const reservation = await reserveActiveTurnCall(deps, grant.workspaceId, sessionId);
+      const reservation = await reserveExactAttemptCall(deps, grant, authority);
       if (reservation.status === "no_active_turn") {
         return mcpError(TOOLSPACE_NO_ACTIVE_TURN_MESSAGE);
       }
@@ -350,11 +448,11 @@ function toolspaceToolFor(input: {
           `toolspace call budget exhausted (${deps.settings.toolspaceMaxCallsPerTurn}/turn)`,
         );
       }
-      const turnId = reservation.turnId;
+      const turnId = reservation.turn.id;
       // Dial only the ONE server this tool belongs to, from the freshly-built
-      // registry, and re-check policy against that live config (the listing may
-      // have been served from a slightly stale cache entry).
-      const registry = await getRegistry();
+      // exact-attempt registry. Listing policy is descriptive only; a stale MCP
+      // surface can never decide authorization for a successor attempt.
+      const registry = await getRegistry(authority.attemptId);
       const config = registry.get(serverId);
       if (!config || !toolspaceCanProxyServer(config) || !allowedByConfig(config, tool.name)) {
         return mcpError(`upstream tool failed: ${name}`);
@@ -362,47 +460,104 @@ function toolspaceToolFor(input: {
       if (mcpToolRequiresApproval(config.requireApproval, tool.name)) {
         return mcpError(APPROVAL_REQUIRED_MESSAGE);
       }
-      const connection = await connectToolspaceServer({ deps, grant, config, sessionId }).catch(
-        () => null,
-      );
+      const connection = await connectToolspaceServer({
+        deps,
+        grant,
+        config,
+        sessionId,
+        rootSessionId,
+        turn: reservation.turn,
+      }).catch(() => null);
       if (!connection) {
         return mcpError(`upstream tool failed: ${name}`);
       }
       try {
         const callId = crypto.randomUUID();
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "agent.toolCall.created",
-            turnId,
-            producerId: grant.subjectId,
-            payload: {
-              id: callId,
-              name,
-              arguments: args,
-              origin: "toolspace",
-              subjectId: grant.subjectId,
-              raw: {
-                type: "toolspace_call",
-                serverId,
-                toolName: tool.name,
+        const receipt = {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          sessionId,
+          turnId,
+          executionGeneration: authority.executionGeneration,
+          attemptId: authority.attemptId,
+          callId,
+        };
+        const registered = await registerPendingSessionToolCall(deps.db, {
+          ...receipt,
+          callType: "toolspace_call",
+          callItem: {
+            type: "toolspace_call",
+            id: callId,
+            name,
+            arguments: args,
+            serverId,
+            toolName: tool.name,
+          },
+        });
+        if (!registered.accepted || !registered.registered) {
+          return mcpError(TOOLSPACE_NO_ACTIVE_TURN_MESSAGE);
+        }
+        const created = await appendAndPublishTurnEventsFenced(
+          deps.db,
+          deps.bus,
+          grant.workspaceId,
+          sessionId,
+          turnId,
+          authority.executionGeneration,
+          authority.attemptId,
+          [
+            {
+              type: "agent.toolCall.created",
+              turnId,
+              turnGeneration: authority.executionGeneration,
+              turnAttemptId: authority.attemptId,
+              producerId: grant.subjectId,
+              payload: {
+                id: callId,
+                name,
+                arguments: args,
+                origin: "toolspace",
+                subjectId: grant.subjectId,
+                raw: {
+                  type: "toolspace_call",
+                  serverId,
+                  toolName: tool.name,
+                },
               },
             },
-          },
-        ]);
+          ],
+        );
+        if (!created.accepted) {
+          return mcpError(TOOLSPACE_NO_ACTIVE_TURN_MESSAGE);
+        }
         const output = await callRemoteTool(deps, connection, tool.name, args);
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "agent.toolCall.output",
-            turnId,
-            producerId: grant.subjectId,
-            payload: {
-              id: callId,
-              output,
-              origin: "toolspace",
-              subjectId: grant.subjectId,
+        const completed = await appendAndPublishTurnEventsFenced(
+          deps.db,
+          deps.bus,
+          grant.workspaceId,
+          sessionId,
+          turnId,
+          authority.executionGeneration,
+          authority.attemptId,
+          [
+            {
+              type: "agent.toolCall.output",
+              turnId,
+              turnGeneration: authority.executionGeneration,
+              turnAttemptId: authority.attemptId,
+              producerId: grant.subjectId,
+              payload: {
+                id: callId,
+                output,
+                origin: "toolspace",
+                subjectId: grant.subjectId,
+              },
             },
-          },
-        ]);
+          ],
+        );
+        if (completed.accepted) {
+          await clearPendingSessionToolspaceCall(deps.db, receipt);
+        }
         return output;
       } finally {
         await connection.close();
@@ -443,29 +598,30 @@ async function callRemoteTool(
 }
 
 type ToolspaceReservation =
-  | { status: "ok"; turnId: string }
+  | { status: "ok"; turn: SessionTurn }
   | { status: "no_active_turn" }
   | { status: "budget_exhausted" };
 
-async function reserveActiveTurnCall(
+async function reserveExactAttemptCall(
   deps: ApiRouteDeps,
-  workspaceId: string,
-  sessionId: string,
+  grant: AccessGrant,
+  authority: ToolspaceAuthority,
 ): Promise<ToolspaceReservation> {
-  const session = await requireSession(deps.db, workspaceId, sessionId);
-  if (!session.activeTurnId) {
-    return { status: "no_active_turn" };
+  const reservation = await reserveToolspaceCallForAttempt(deps.db, {
+    accountId: grant.accountId,
+    workspaceId: grant.workspaceId,
+    sessionId: authority.sessionId,
+    turnId: authority.turnId,
+    executionGeneration: authority.executionGeneration,
+    attemptId: authority.attemptId,
+    limit: deps.settings.toolspaceMaxCallsPerTurn,
+  });
+  if (!reservation.reserved) {
+    return reservation.reason === "budget_exhausted"
+      ? { status: "budget_exhausted" }
+      : { status: "no_active_turn" };
   }
-  const reservation = await reserveToolspaceCallForTurn(
-    deps.db,
-    workspaceId,
-    sessionId,
-    session.activeTurnId,
-    deps.settings.toolspaceMaxCallsPerTurn,
-  );
-  return reservation.reserved
-    ? { status: "ok", turnId: session.activeTurnId }
-    : { status: "budget_exhausted" };
+  return { status: "ok", turn: reservation.turn };
 }
 
 function selectedMcpServerIds(tools: ToolRef[], sessionServerIds: string[]): Set<string> {
@@ -543,13 +699,28 @@ function connectionBrokerFetch(
     grant: AccessGrant;
     config: McpServerConfig;
     sessionId: string;
+    rootSessionId: string;
+    turn: SessionTurn;
   },
 ): FetchLike {
   const connectionRef = input.config.connectionRef;
   if (!connectionRef) {
     return baseFetch;
   }
-  const resolveCredential = buildConnectionTokenResolver(input.deps.db, input.deps.settings);
+  const resolveCredential = input.deps.connectionCredentials?.mcpCredentials
+    ? buildHostConnectionTokenResolver(input.deps.connectionCredentials.mcpCredentials, {
+        accountId: input.grant.accountId,
+        workspaceId: input.grant.workspaceId,
+        sessionId: input.sessionId,
+        rootSessionId: input.rootSessionId,
+        turnId: input.turn.id,
+        attemptId: input.turn.activeAttemptId,
+        executionGeneration: input.turn.executionGeneration,
+        initiator: input.turn.initiator,
+        initiatorContext: input.turn.initiatorContext,
+        surface: "toolspace",
+      })
+    : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
   return async (requestInput, init) => {
     const request = await mcpRequestInfo(requestInput, init);
     const first = await resolveCredential({
@@ -557,7 +728,7 @@ function connectionBrokerFetch(
       serverId: input.config.id,
       connectionRef,
       forceRefresh: false,
-      ...(request.toolName ? { toolId: request.toolName } : {}),
+      ...(request.toolName ? { toolName: request.toolName } : {}),
       subjectId: input.grant.subjectId,
     });
     if (first.status === "auth_needed") {
@@ -573,7 +744,7 @@ function connectionBrokerFetch(
         serverId: input.config.id,
         connectionRef,
         forceRefresh: true,
-        ...(request.toolName ? { toolId: request.toolName } : {}),
+        ...(request.toolName ? { toolName: request.toolName } : {}),
         subjectId: input.grant.subjectId,
       });
       if (refreshed.status === "auth_needed") {
@@ -605,9 +776,13 @@ function authNeededFromStatus(
     status: "auth_needed",
     reason,
     providerDomain: connectionRef.providerDomain,
+    ...(connectionRef.provider ? { provider: connectionRef.provider } : {}),
     connectionId: first.connectionId,
     ...(connectionRef.scopes ? { scopes: connectionRef.scopes } : {}),
     ...(connectionRef.resource ? { resource: connectionRef.resource } : {}),
+    ...(connectionRef.selectedResources
+      ? { selectedResources: connectionRef.selectedResources }
+      : {}),
   };
 }
 
@@ -617,6 +792,7 @@ async function authNeededFetchResponse(
     grant: AccessGrant;
     config: McpServerConfig;
     sessionId: string;
+    turn: SessionTurn;
   },
   request: McpRequestInfo,
   auth: Extract<ResolveConnectionCredentialResult, { status: "auth_needed" }>,
@@ -634,10 +810,12 @@ async function authNeededFetchResponse(
           serverId: input.config.id,
           toolName: request.toolName ?? null,
           providerDomain: auth.providerDomain,
+          ...(auth.provider ? { provider: auth.provider } : {}),
           reason: auth.reason,
           ...(auth.connectionId ? { connectionId: auth.connectionId } : {}),
           ...(auth.scopes ? { scopes: auth.scopes } : {}),
           ...(auth.resource ? { resource: auth.resource } : {}),
+          ...(auth.selectedResources ? { selectedResources: auth.selectedResources } : {}),
           ...(auth.authorizationUrl ? { authorizationUrl: auth.authorizationUrl } : {}),
           subjectId: input.grant.subjectId,
         },

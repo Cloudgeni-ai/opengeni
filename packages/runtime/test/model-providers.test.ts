@@ -27,6 +27,7 @@ import {
   buildOpenAIClientFromSettings,
   buildProviderClient,
   CodexSubscriptionUnavailableError,
+  HUMAN_INPUT_TOOL_NAME,
   MultiProviderModelProvider,
   resolveTurnModel,
 } from "../src/index";
@@ -480,6 +481,33 @@ describe("resolveTurnModel", () => {
     expect(resolveTurnModel(multiProviderSettings(), "model-that-does-not-exist")).toBeNull();
   });
 
+  test("keeps the canonical product id in configuration while binding the provider model to the upstream slug", () => {
+    const settings = multiProviderSettings({
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "acme",
+          api: "responses",
+          baseUrl: "https://api.acme.test/v1",
+          apiKey: "acme-test-key",
+          models: [
+            {
+              id: "acme/product-model",
+              upstreamModelId: "provider-deployment-slug",
+            },
+          ],
+        },
+      ]),
+    });
+
+    const resolved = resolveTurnModel(settings, "acme/product-model");
+    expect(resolved).not.toBeNull();
+    expect(resolved!.configured.id).toBe("acme/product-model");
+    expect(resolved!.configured.upstreamModelId).toBe("provider-deployment-slug");
+    expect((resolved!.model as unknown as { _model: string })._model).toBe(
+      "provider-deployment-slug",
+    );
+  });
+
   test("resolves a registry model to its provider, client, chat Model, and configured shape", () => {
     const resolved = resolveTurnModel(multiProviderSettings(), FIREWORKS_MODEL);
     expect(resolved).not.toBeNull();
@@ -524,9 +552,12 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
     });
-    // hostedWebSearch off → no web_search tool and no explicit tools field at all.
+    // hostedWebSearch off removes only web search; structured human input is a
+    // provider-neutral built-in on every agent.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
-    expect((agent as { tools?: unknown[] }).tools ?? []).toHaveLength(0);
+    expect(
+      ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
+    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
     // encryptedReasoning off (chat wire API) → no providerData.include.
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,
@@ -849,9 +880,9 @@ describe("registry model shadowing is closed — the built-in never claims a nam
     expect(model).toBeInstanceOf(OpenAIChatCompletionsModel);
   });
 
-  test("a BARE id a registry merely redeclares (e.g. the built-in default) still resolves to the built-in — precedence preserved", () => {
-    // The registry below redeclares "gpt-5.6-sol"; the built-in must still win it
-    // (only namespaced `<provider>/<model>` ids are ceded to the registry).
+  test("fails loud when a registry redeclares a bare built-in product id", () => {
+    // Ambiguous canonical ownership must never depend on declaration order or
+    // silently choose a provider/billing path.
     const settings = multiProviderSettings({
       openaiProvider: "azure",
       azureOpenaiBaseUrl: "https://example.openai.azure.com/openai/v1",
@@ -866,8 +897,8 @@ describe("registry model shadowing is closed — the built-in never claims a nam
         },
       ]),
     });
-    const resolved = resolveTurnModel(settings, "gpt-5.6-sol")!;
-    expect(resolved.provider.builtin).toBe(true);
-    expect(resolved.provider.id).toBe("azure");
+    expect(() => resolveTurnModel(settings, "gpt-5.6-sol")).toThrow(
+      'model id "gpt-5.6-sol" is declared by both azure and shadow',
+    );
   });
 });

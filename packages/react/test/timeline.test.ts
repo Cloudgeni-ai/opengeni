@@ -199,34 +199,54 @@ describe("buildTimeline", () => {
     expect(projected).not.toContain("must-not-reach-the-view");
   });
 
-  test("accepts manager priority as a paced standard-work admission reason", () => {
+  test("accepts every typed admission reason with its matching event semantics", () => {
     reset();
-    const payload = fleetDecisionPayload();
-    payload.comparison = "different_outcome";
-    const replay = payload.replay as { decision: Record<string, unknown> };
-    replay.decision = {
-      ...replay.decision,
-      outcome: "paced",
-      selectedCandidateKey: null,
-      reason: "admission_paced",
-      admission: {
-        outcome: "pace",
-        reason: "manager_priority",
-        borrowedIdleCapacity: false,
-      },
-      borrowedOverlayCapacity: false,
-      strandedEligibleCount: 0,
-      scores: [],
-    };
+    const cases = [
+      { reason: "fenced_in_flight", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "pacing_disabled", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_unknown", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_available", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "work_conserving_borrow", outcome: "admit", borrowedIdleCapacity: true },
+      { reason: "manager_priority", outcome: "pace", borrowedIdleCapacity: false },
+      { reason: "standard_starvation_bound", outcome: "admit", borrowedIdleCapacity: false },
+      { reason: "capacity_saturated", outcome: "pace", borrowedIdleCapacity: false },
+      { reason: "emergency_fuse", outcome: "pace", borrowedIdleCapacity: false },
+    ] as const satisfies ReadonlyArray<{
+      reason: FleetDecisionItem["admissionReason"];
+      outcome: FleetDecisionItem["admissionOutcome"];
+      borrowedIdleCapacity: boolean;
+    }>;
 
-    const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
-    expect(item).toMatchObject({
-      kind: "fleet-decision",
-      shadowOutcome: "paced",
-      shadowReason: "admission_paced",
-      admissionOutcome: "pace",
-      admissionReason: "manager_priority",
-    });
+    for (const admissionCase of cases) {
+      const payload = fleetDecisionPayload();
+      const isPaced = admissionCase.outcome === "pace";
+      payload.comparison = isPaced ? "different_outcome" : "match";
+      const replay = payload.replay as { decision: Record<string, unknown> };
+      replay.decision = {
+        ...replay.decision,
+        outcome: isPaced ? "paced" : "selected",
+        selectedCandidateKey: isPaced ? null : "c00",
+        reason: isPaced ? "admission_paced" : "affinity_best",
+        admission: {
+          outcome: admissionCase.outcome,
+          reason: admissionCase.reason,
+          borrowedIdleCapacity: admissionCase.borrowedIdleCapacity,
+        },
+        borrowedOverlayCapacity: false,
+        strandedEligibleCount: 0,
+        scores: isPaced ? [] : (replay.decision.scores ?? []),
+      };
+
+      const [item] = buildTimeline([event("codex.fleet.decision", payload)]);
+      expect(item).toMatchObject({
+        kind: "fleet-decision",
+        shadowOutcome: isPaced ? "paced" : "selected",
+        shadowReason: isPaced ? "admission_paced" : "affinity_best",
+        admissionOutcome: admissionCase.outcome,
+        admissionReason: admissionCase.reason,
+        borrowedIdleCapacity: admissionCase.borrowedIdleCapacity,
+      });
+    }
   });
 
   test("caps score rows at 32 without reading an extra secret-shaped row", () => {
@@ -1353,6 +1373,31 @@ describe("buildTimeline", () => {
       resource: null,
       toolName: null,
       authorizationUrl: null,
+    });
+  });
+
+  test("credential.auth_needed reuses the reconnect card without inventing a tool", () => {
+    reset();
+    const items = buildTimeline([
+      event(
+        "credential.auth_needed",
+        {
+          credentialClass: "run",
+          providerDomain: "cloud.example",
+          connectionId: "host:connection:1",
+          reason: "expired",
+          authorizationUrl: "https://cloud.example/connect",
+        },
+        { turnId: "turn-1" },
+      ),
+    ]);
+    expect(items[0]).toMatchObject({
+      kind: "auth-needed",
+      turnId: "turn-1",
+      providerDomain: "cloud.example",
+      connectionId: "host:connection:1",
+      reason: "expired",
+      toolName: null,
     });
   });
 

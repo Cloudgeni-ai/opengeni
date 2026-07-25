@@ -12,6 +12,7 @@ import {
 function liveBody(over: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     plan_type: "pro",
+    rate_limit_reset_credits: { available_count: 2 },
     rate_limit: {
       allowed: true,
       limit_reached: false,
@@ -38,6 +39,10 @@ describe("normalizeCodexUsage", () => {
     expect(out.status).toBe("ok");
     expect(out.planType).toBe("pro");
     expect(out.limitReached).toBe(false);
+    expect(out.rateLimitResetCredits).toEqual({
+      availableCount: 2,
+      credits: null,
+    });
     expect(out.fiveHour).toEqual({
       used: 40,
       limit: 100,
@@ -55,7 +60,11 @@ describe("normalizeCodexUsage", () => {
     // primary carries the WEEKLY seconds and secondary the 5h seconds — swapped.
     const body = liveBody({
       rate_limit: {
-        primary_window: { used_percent: 5, reset_at: 1_700_600_000, limit_window_seconds: 604800 },
+        primary_window: {
+          used_percent: 5,
+          reset_at: 1_700_600_000,
+          limit_window_seconds: 604800,
+        },
         secondary_window: {
           used_percent: 70,
           reset_at: 1_700_000_000,
@@ -86,7 +95,12 @@ describe("normalizeCodexUsage", () => {
   test("a 200 carrying limit_reached:true is a limit_reached state (not assumed 404-only)", () => {
     const out = normalizeCodexUsage(
       200,
-      liveBody({ rate_limit: { ...(liveBody().rate_limit as object), limit_reached: true } }),
+      liveBody({
+        rate_limit: {
+          ...(liveBody().rate_limit as object),
+          limit_reached: true,
+        },
+      }),
     );
     expect(out.status).toBe("limit_reached");
     expect(out.limitReached).toBe(true);
@@ -95,7 +109,9 @@ describe("normalizeCodexUsage", () => {
   test("a 404 with a body normalizes to limit_reached", () => {
     const out = normalizeCodexUsage(
       404,
-      liveBody({ rate_limit: { ...(liveBody().rate_limit as object), allowed: false } }),
+      liveBody({
+        rate_limit: { ...(liveBody().rate_limit as object), allowed: false },
+      }),
     );
     expect(out.status).toBe("limit_reached");
     expect(out.limitReached).toBe(true);
@@ -111,11 +127,24 @@ describe("normalizeCodexUsage", () => {
     expect(out.status).toBe("no-data");
     expect(out.fiveHour).toBeNull();
     expect(out.weekly).toBeNull();
+    expect(out.rateLimitResetCredits).toBeNull();
+  });
+
+  test("malformed reset-credit summary is unknown without discarding valid quota windows", () => {
+    const out = normalizeCodexUsage(
+      200,
+      liveBody({ rate_limit_reset_credits: { available_count: -1 } }),
+    );
+    expect(out.status).toBe("ok");
+    expect(out.fiveHour?.percent).toBe(40);
+    expect(out.rateLimitResetCredits).toBeNull();
   });
 
   test("percent >= 100 forces limit_reached even when the flags are absent", () => {
     const out = normalizeCodexUsage(200, {
-      rate_limit: { primary_window: { used_percent: 100, limit_window_seconds: 18000 } },
+      rate_limit: {
+        primary_window: { used_percent: 100, limit_window_seconds: 18000 },
+      },
     });
     expect(out.status).toBe("limit_reached");
     expect(out.fiveHour?.remaining).toBe(0);

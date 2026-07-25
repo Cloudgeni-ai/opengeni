@@ -438,7 +438,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
-      case "tool.auth_needed": {
+      case "tool.auth_needed":
+      case "credential.auth_needed": {
         // Keep the whole structured payload — the renderer turns it into a clean
         // inline reconnect card, and the app starts the recovery flow off the
         // connectionId/resource. Losing it to a plain-text notice was the ugly
@@ -830,6 +831,7 @@ function isTurnExecutionEvidence(type: string): boolean {
     type === "turn.capacity_waiting" ||
     type === "session.requiresAction" ||
     type === "tool.auth_needed" ||
+    type === "credential.auth_needed" ||
     type.startsWith("rig.setup.") ||
     type === "codex.capacity.waiting" ||
     type === "codex.capacity.resumed" ||
@@ -1244,6 +1246,23 @@ const FLEET_ADMISSION_REASONS = [
   "capacity_saturated",
   "emergency_fuse",
 ] as const;
+const FLEET_ADMISSION_SEMANTICS: Record<
+  FleetDecisionItem["admissionReason"],
+  {
+    outcome: FleetDecisionItem["admissionOutcome"];
+    borrowedIdleCapacity: boolean;
+  }
+> = {
+  fenced_in_flight: { outcome: "admit", borrowedIdleCapacity: false },
+  pacing_disabled: { outcome: "admit", borrowedIdleCapacity: false },
+  capacity_unknown: { outcome: "admit", borrowedIdleCapacity: false },
+  capacity_available: { outcome: "admit", borrowedIdleCapacity: false },
+  work_conserving_borrow: { outcome: "admit", borrowedIdleCapacity: true },
+  manager_priority: { outcome: "pace", borrowedIdleCapacity: false },
+  standard_starvation_bound: { outcome: "admit", borrowedIdleCapacity: false },
+  capacity_saturated: { outcome: "pace", borrowedIdleCapacity: false },
+  emergency_fuse: { outcome: "pace", borrowedIdleCapacity: false },
+};
 const FLEET_REJECTION_REASONS = [
   "allocator_disabled",
   "unavailable",
@@ -1538,16 +1557,16 @@ function fleetDecisionSemanticsAreConsistent(input: {
         : ["fenced_candidate_missing", "no_eligible_candidate", "overlay_isolated_empty"].includes(
             input.shadowReason,
           );
-  const pacedAdmissionReason =
-    input.admissionReason === "manager_priority" ||
-    input.admissionReason === "capacity_saturated" ||
-    input.admissionReason === "emergency_fuse";
+  // Keep this mapping exhaustive so a newly accepted admission reason cannot
+  // silently be dropped from the paced/admitted event consistency check.
+  const admissionSemantics = FLEET_ADMISSION_SEMANTICS[input.admissionReason];
+  const pacedAdmissionReason = admissionSemantics.outcome === "pace";
   return (
     actualConsistent &&
     shadowConsistent &&
     (input.admissionOutcome === "pace") === pacedAdmissionReason &&
     (input.shadowOutcome === "paced") === (input.admissionOutcome === "pace") &&
-    input.borrowedIdleCapacity === (input.admissionReason === "work_conserving_borrow") &&
+    input.borrowedIdleCapacity === admissionSemantics.borrowedIdleCapacity &&
     (!input.borrowedOverlayCapacity ||
       (input.shadowOutcome === "selected" && input.strandedEligibleCount === 0))
   );
@@ -1558,6 +1577,8 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "expired",
   "insufficient_scope",
   "refresh_failed",
+  "unsupported_auth",
+  "resource_scope_unavailable",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {

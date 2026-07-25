@@ -103,10 +103,16 @@ describe("OpenGeniClient", () => {
   });
 
   test("createSession posts the request with bearer auth and strips the trailing base slash", async () => {
-    const session = { id: SESSION_ID, workspaceId: WORKSPACE_ID, status: "queued" };
+    const session = {
+      id: SESSION_ID,
+      workspaceId: WORKSPACE_ID,
+      status: "queued",
+      initialTurnId: "00000000-0000-4000-8000-000000000099",
+    };
     const { client, requests } = makeClient(() => jsonResponse(session, 202));
     const created = await client.createSession(WORKSPACE_ID, {
       initialMessage: "hello",
+      turnInstructions: "Host context for the initial turn.",
       sandboxBackend: "none",
     });
     expect(created).toEqual(session as never);
@@ -117,7 +123,11 @@ describe("OpenGeniClient", () => {
     expect(request.headers.authorization).toBe("Bearer og_test_key");
     expect(request.headers[OPENGENI_API_CONTRACT_HEADER]).toBe(OPENGENI_API_CONTRACT_REVISION);
     expect(request.headers["content-type"]).toBe("application/json");
-    expect(JSON.parse(request.body!)).toEqual({ initialMessage: "hello", sandboxBackend: "none" });
+    expect(JSON.parse(request.body!)).toEqual({
+      initialMessage: "hello",
+      turnInstructions: "Host context for the initial turn.",
+      sandboxBackend: "none",
+    });
   });
 
   test("getSession and listEvents hit the expected paths and query params", async () => {
@@ -140,6 +150,35 @@ describe("OpenGeniClient", () => {
     expect(requests[1]!.url).toBe(
       `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?after=2&before=9&limit=10&compact=1`,
     );
+  });
+
+  test("updates an existing session MCP approval policy through the dedicated route", async () => {
+    const response = {
+      server: {
+        id: "external_tools",
+        name: "External tools",
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
+        requireApproval: ["write_record"],
+        connectionRef: null,
+      },
+      effectiveFrom: "next_attempt" as const,
+    };
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(
+      await client.updateSessionMcpApprovalPolicy(WORKSPACE_ID, SESSION_ID, "external_tools", {
+        requireApproval: ["write_record"],
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PATCH");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/mcp-servers/external_tools/approval-policy`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      requireApproval: ["write_record"],
+    });
   });
 
   test("listEventPage round-trips monitoring filters and exact page headers", async () => {
@@ -221,11 +260,77 @@ describe("OpenGeniClient", () => {
     expect(requests).toHaveLength(1);
   });
 
+  test("listEventPage and getLatestEventResult consume compact results without another turn", async () => {
+    const compact = {
+      version: 1,
+      semanticClass: "terminal",
+      source: {
+        id: "00000000-0000-4000-8000-000000000042",
+        type: "turn.completed",
+        sequence: 42,
+        occurredAt: "2026-07-19T00:00:00.000Z",
+        turnId: null,
+        turnGeneration: 8,
+        turnAttemptId: null,
+        turnAssociation: "current",
+      },
+      id: "00000000-0000-4000-8000-000000000042",
+      type: "turn.completed",
+      sequence: 42,
+      occurredAt: "2026-07-19T00:00:00.000Z",
+      turnId: null,
+      turnGeneration: 8,
+      turnAttemptId: null,
+      turnAssociation: "current",
+      coveredSequence: { first: 42, last: 42 },
+      status: "completed",
+      text: null,
+      output: "done",
+      result: "done",
+      failure: null,
+      checkpoint: null,
+      receipt: null,
+      truncation: {
+        truncated: false,
+        fields: [],
+        originalBytes: null,
+        deliveredBytes: 20,
+      },
+    };
+    const { client, requests } = makeClient(() => jsonResponse(compact));
+
+    const result = await client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+      latest: "terminal",
+      resultMode: "compact",
+    });
+    expect(result?.result).toBe("done");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?resultMode=compact&latest=terminal`,
+    );
+
+    const recovered = await client.getLatestEventResult(WORKSPACE_ID, SESSION_ID);
+    expect(recovered?.sequence).toBe(42);
+    expect(requests[1]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/events?resultMode=compact&latest=terminal`,
+    );
+  });
+
+  test("compact latest preserves a truthful null when no matching event exists", async () => {
+    const { client } = makeClient(() => jsonResponse(null));
+    await expect(
+      client.listEventPage(WORKSPACE_ID, SESSION_ID, {
+        latest: "receipt",
+        resultMode: "compact",
+      }),
+    ).resolves.toBeNull();
+  });
+
   test("sendMessage wraps text in a user.message control event", async () => {
     const accepted = makeEvent(4, "user.message", { text: "do the thing" });
     const { client, requests } = makeClient(() => jsonResponse(accepted, 202));
     const result = await client.sendMessage(WORKSPACE_ID, SESSION_ID, {
       text: "do the thing",
+      turnInstructions: "Host context for this turn.",
       clientEventId: "ce-1",
     });
     expect(result.sequence).toBe(4);
@@ -236,7 +341,10 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(request.body!)).toEqual({
       type: "user.message",
       clientEventId: "ce-1",
-      payload: { text: "do the thing" },
+      payload: {
+        text: "do the thing",
+        turnInstructions: "Host context for this turn.",
+      },
     });
   });
 
@@ -257,6 +365,84 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(requests[1]!.body!)).toEqual({
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
+    });
+  });
+
+  test("lists, reads, and settles structured human-input requests", async () => {
+    const request = {
+      id: "33333333-3333-4333-8333-333333333333",
+      workspaceId: WORKSPACE_ID,
+      sessionId: SESSION_ID,
+      turnId: "44444444-4444-4444-8444-444444444444",
+      turnGeneration: 1,
+      creationAttemptId: "55555555-5555-4555-8555-555555555555",
+      toolCallId: "human-call-1",
+      status: "pending" as const,
+      questions: [
+        {
+          id: "choice",
+          kind: "single_select" as const,
+          prompt: "Choose",
+          options: [{ id: "staging", label: "Staging" }],
+          required: true,
+          allowOther: false,
+        },
+      ],
+      allowSkip: false,
+      response: null,
+      respondedBy: null,
+      respondedAt: null,
+      expiresAt: null,
+      createdAt: "2026-07-21T00:00:00.000Z",
+      updatedAt: "2026-07-21T00:00:00.000Z",
+    };
+    let call = 0;
+    const accepted = makeEvent(6, "user.humanInputResponse", {
+      requestId: request.id,
+      response: { outcome: "answered", answers: [{ questionId: "choice", values: ["staging"] }] },
+    });
+    const { client, requests } = makeClient(() => {
+      call += 1;
+      if (call === 1) return jsonResponse({ requests: [request] });
+      if (call === 2) return jsonResponse(request);
+      return jsonResponse(accepted, 202);
+    });
+
+    expect(
+      await client.listHumanInputRequests(WORKSPACE_ID, SESSION_ID, { status: "pending" }),
+    ).toEqual([request]);
+    expect(await client.getHumanInputRequest(WORKSPACE_ID, SESSION_ID, request.id)).toEqual(
+      request,
+    );
+    expect(
+      await client.submitHumanInputResponse(
+        WORKSPACE_ID,
+        SESSION_ID,
+        request.id,
+        {
+          outcome: "answered",
+          answers: [{ questionId: "choice", values: ["staging"] }],
+        },
+        { clientEventId: "human-response-1" },
+      ),
+    ).toEqual(accepted);
+
+    expect(requests[0]!.url).toEndWith(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/human-input-requests?status=pending`,
+    );
+    expect(requests[1]!.url).toEndWith(
+      `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/human-input-requests/${request.id}`,
+    );
+    expect(JSON.parse(requests[2]!.body!)).toEqual({
+      type: "user.humanInputResponse",
+      clientEventId: "human-response-1",
+      payload: {
+        requestId: request.id,
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "choice", values: ["staging"] }],
+        },
+      },
     });
   });
 

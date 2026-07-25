@@ -157,7 +157,7 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
     expect(forensic.nextAfter).toBe(40);
   });
 
-  test("returns the authoritative latest terminal generation directly", async () => {
+  test("returns the authoritative latest terminal sequence directly", async () => {
     const latest = await callMcpTool<{
       events: Array<{
         sequence: number;
@@ -174,6 +174,64 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
         payload: { result: "authoritative" },
       }),
     ]);
+
+    const compact = await callMcpTool<{
+      version: 1;
+      status: string;
+      sequence: number;
+      result: string;
+      coveredSequence: { first: number; last: number };
+    }>("session_events", { sessionId, latest: "terminal", resultMode: "compact" });
+    expect(compact).toMatchObject({
+      version: 1,
+      status: "completed",
+      sequence: 43,
+      result: "authoritative",
+      coveredSequence: { first: 43, last: 43 },
+    });
+  });
+
+  test("supports the bounded exact-type recovery input advertised by sessions_list", async () => {
+    const oversized = "界🙂".repeat(8_000);
+    await appendSessionEvents(client.db, workspaceId, sessionId, [
+      { type: "user.message", payload: { text: "older message" } },
+      { type: "agent.message.completed", payload: { text: oversized } },
+    ]);
+
+    const recovered = await callMcpTool<{
+      events: Array<{ type: string; payload: unknown }>;
+      bytes: number;
+      maxBytes: number;
+    }>("session_events", {
+      sessionId,
+      includeTypes: ["agent.message.completed"],
+      direction: "before",
+      limit: 1,
+      mode: "monitoring",
+      payloadMode: "summary",
+    });
+    expect(recovered.events).toHaveLength(1);
+    expect(recovered.events[0]).toMatchObject({ type: "agent.message.completed" });
+    expect(recovered.events[0]!.payload).toMatchObject({
+      _monitoring: {
+        payloadMode: "summary",
+        payloadTruncated: true,
+      },
+    });
+    expect(JSON.stringify(recovered)).not.toContain(oversized);
+    expect(recovered.bytes).toBe(Buffer.byteLength(JSON.stringify(recovered, null, 2), "utf8"));
+    expect(recovered.bytes).toBeLessThanOrEqual(recovered.maxBytes);
+
+    await expect(
+      callMcpTool("session_events", {
+        sessionId: crypto.randomUUID(),
+        includeTypes: ["agent.message.completed"],
+        direction: "before",
+        limit: 1,
+        mode: "monitoring",
+        payloadMode: "summary",
+      }),
+    ).rejects.toThrow("Session not found");
   });
 
   test("rejects filters that could displace or exclude an exclusive latest lookup", async () => {
@@ -229,5 +287,32 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
     expect(
       bounded.events.every((event) => event.id !== "00000000-0000-0000-0000-000000000000"),
     ).toBeTrue();
+  });
+
+  test("bounds a pathological compact result without dropping its identity", async () => {
+    await appendSessionEvents(client.db, workspaceId, sessionId, [
+      {
+        type: "turn.completed" as const,
+        payload: {
+          text: "\u0000".repeat(8_000),
+          output: "x".repeat(8_000),
+          result: { value: "y".repeat(8_000) },
+          checkpoint: { detail: "z".repeat(8_000) },
+          receipt: { detail: "r".repeat(8_000) },
+        },
+        turnGeneration: 9,
+      },
+    ]);
+    const compact = await callMcpTool<{
+      id: string;
+      sequence: number;
+      truncation: { truncated: boolean; fields: string[] };
+    }>("session_events", { sessionId, latest: "terminal", resultMode: "compact" });
+    const prettyBytes = Buffer.byteLength(JSON.stringify(compact, null, 2), "utf8");
+    expect(prettyBytes).toBeLessThanOrEqual(64 * 1024);
+    expect(compact.id).not.toBe("00000000-0000-0000-0000-000000000000");
+    expect(compact.sequence).toBeGreaterThan(44);
+    expect(compact.truncation.truncated).toBeTrue();
+    expect(compact.truncation.fields).toContain("mcp_envelope");
   });
 });

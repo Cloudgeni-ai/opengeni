@@ -187,6 +187,7 @@ const SELFHOSTED_MAX_EXEC_TIMEOUT_MS = 2_147_483_647 - SELFHOSTED_EXEC_REPLY_GRA
 const SELFHOSTED_EXEC_ENV_ALLOWLIST = [
   "OPENGENI_TOOLSPACE_URL",
   "OPENGENI_TOOLSPACE_TOKEN_FILE",
+  "OPENGENI_OGTOOL_PACKAGE_SPEC",
 ] as const;
 
 function selfhostedExecEnv(environment: Record<string, string>): Record<string, string> {
