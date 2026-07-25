@@ -15,12 +15,11 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
-  admitToolspaceTurnAttempt,
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
   clearPendingSessionToolspaceCall,
+  getActiveSessionTurnForExecution,
   getSessionRootId,
-  getSessionTurnForAttempt,
   listSessionMcpServerMetadata,
   listSessionMcpServersForRun,
   registerPendingSessionToolCall,
@@ -179,6 +178,9 @@ const toolListCache = new ToolspaceToolListCache();
 
 type ToolspaceAuthority = {
   sessionId: string;
+};
+
+type ToolspaceAttemptAuthority = ToolspaceAuthority & {
   turnId: string;
   attemptId: string;
   executionGeneration: number;
@@ -186,17 +188,7 @@ type ToolspaceAuthority = {
 
 function toolspaceAuthorityForGrant(grant: AccessGrant): ToolspaceAuthority | null {
   const sessionId = grant.metadata?.sessionId;
-  const turnId = grant.metadata?.turnId;
-  const attemptId = grant.metadata?.attemptId;
-  const executionGeneration = grant.metadata?.executionGeneration;
-  return typeof sessionId === "string" &&
-    typeof turnId === "string" &&
-    typeof attemptId === "string" &&
-    typeof executionGeneration === "number" &&
-    Number.isSafeInteger(executionGeneration) &&
-    executionGeneration > 0
-    ? { sessionId, turnId, attemptId, executionGeneration }
-    : null;
+  return typeof sessionId === "string" ? { sessionId } : null;
 }
 
 export function isToolspaceGrant(settings: ApiRouteDeps["settings"], grant: AccessGrant): boolean {
@@ -220,9 +212,19 @@ export async function prepareToolspaceMcpSurface(input: {
     return null;
   }
   const { sessionId } = authority;
-  if (!(await admitToolspaceTurnAttempt(deps.db, grant.workspaceId, authority))) {
+  const activeTurn = await getActiveSessionTurnForExecution(deps.db, grant.workspaceId, sessionId);
+  // Recovering/waiting-capacity attempts retain ownership pointers, but they
+  // are not currently executing model code. Do not even enumerate upstream
+  // tools until the turn has returned to the running state.
+  if (!activeTurn?.activeAttemptId || activeTurn.status !== "running") {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
+  const attemptAuthority: ToolspaceAttemptAuthority = {
+    sessionId,
+    turnId: activeTurn.id,
+    attemptId: activeTurn.activeAttemptId,
+    executionGeneration: activeTurn.executionGeneration,
+  };
   const session = await requireSession(deps.db, grant.workspaceId, sessionId);
   let rootSessionId = sessionId;
   if (deps.connectionCredentials?.mcpCredentials) {
@@ -243,20 +245,6 @@ export async function prepareToolspaceMcpSurface(input: {
   if (proxyableIds.length === 0) {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
-  const activeTurn = await getSessionTurnForAttempt(
-    deps.db,
-    grant.workspaceId,
-    sessionId,
-    authority.attemptId,
-  );
-  if (
-    !activeTurn ||
-    activeTurn.id !== authority.turnId ||
-    activeTurn.executionGeneration !== authority.executionGeneration
-  ) {
-    return emptyToolspaceSurface(sessionId, grant.subjectId);
-  }
-
   // The registry (decrypted session servers + capability/pack expansion) is a
   // handful of DB reads with no upstream dials. Build it at most once per
   // request, and only when we actually need it (a cache-miss listing or a real
@@ -279,10 +267,17 @@ export async function prepareToolspaceMcpSurface(input: {
     rootSessionId,
     proxyableIds,
     activeTurn,
-    getRegistry: () => getRegistry(authority.attemptId),
+    getRegistry: () => getRegistry(attemptAuthority.attemptId),
   });
   const tools = listing.map((entry) =>
-    toolspaceToolFor({ deps, grant, authority, rootSessionId, entry, getRegistry }),
+    toolspaceToolFor({
+      deps,
+      grant,
+      authority: attemptAuthority,
+      rootSessionId,
+      entry,
+      getRegistry,
+    }),
   );
 
   return {
@@ -531,7 +526,7 @@ async function connectToolspaceServer(input: {
 function toolspaceToolFor(input: {
   deps: ApiRouteDeps;
   grant: AccessGrant;
-  authority: ToolspaceAuthority;
+  authority: ToolspaceAttemptAuthority;
   rootSessionId: string;
   entry: ToolListingEntry;
   getRegistry: (attemptId: string) => Promise<Map<string, McpServerConfig>>;
@@ -743,7 +738,7 @@ type ToolspaceReservation =
 async function reserveExactAttemptCall(
   deps: ApiRouteDeps,
   grant: AccessGrant,
-  authority: ToolspaceAuthority,
+  authority: ToolspaceAttemptAuthority,
 ): Promise<ToolspaceReservation> {
   const reservation = await reserveToolspaceCallForAttempt(deps.db, {
     accountId: grant.accountId,

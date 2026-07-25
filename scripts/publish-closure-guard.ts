@@ -53,6 +53,7 @@ const SERVER_EMBED_PACKAGES = [
   "documents",
   "events",
   "github",
+  "network",
   "observability",
   "runtime",
   "storage",

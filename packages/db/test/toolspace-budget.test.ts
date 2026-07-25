@@ -120,7 +120,6 @@ function reservationInput(
 ): Parameters<typeof reserveToolspaceCallForAttempt>[1] {
   return {
     ...seed,
-    executionGeneration: 1,
     limit,
   };
 }

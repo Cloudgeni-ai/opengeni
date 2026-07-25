@@ -75,9 +75,6 @@ export type MintedSandboxToolspaceToken = {
 
 export type SandboxToolspaceAuthority = {
   sessionId: string;
-  turnId: string;
-  attemptId: string;
-  executionGeneration: number;
 };
 
 export async function mintSandboxToolspaceToken(
@@ -93,13 +90,10 @@ export async function mintSandboxToolspaceToken(
   const token = await signDelegatedAccessToken(settings.delegationSecret, {
     accountId: scope.accountId,
     workspaceId: scope.workspaceId,
-    subjectId: `sandbox:${authority.turnId}`,
+    subjectId: `sandbox:${authority.sessionId}`,
     subjectLabel: "sandbox toolspace",
     permissions: ["toolspace:call"],
     sessionId: authority.sessionId,
-    turnId: authority.turnId,
-    attemptId: authority.attemptId,
-    executionGeneration: authority.executionGeneration,
     exp: expiresAtSeconds,
   });
   return { token, expiresAt: new Date(expiresAtSeconds * 1000) };
@@ -242,9 +236,10 @@ export async function sandboxEnvironmentForRun(
   // backend, including a connected machine. Unlike platform git provider tokens
   // (inert on selfhosted → skipped above), the toolspace token is the machine's
   // only path to programmatic tool calling, and it grants no more than the
-  // machine owner's own authority (toolspace:call, own-session-bound, turn TTL,
-  // budgeted, approval-tools excluded). Delivery mirrors the docker path: the
-  // caller threads it OFF-MANIFEST as the seed the runtime writes to
+  // machine owner's own authority (toolspace:call, own-session-bound,
+  // short-lived and renewable, per-active-turn budgeted, approval-tools
+  // excluded). Delivery mirrors the docker path: the caller threads it
+  // OFF-MANIFEST as the seed the runtime writes to
   // $OPENGENI_TOOLSPACE_TOKEN_FILE over the box's exec channel.
   const toolspaceScope = options.scope;
   const toolspaceToken =

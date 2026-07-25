@@ -8,6 +8,7 @@ import {
 } from "@opengeni/config";
 import {
   CreateSessionRequest,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
@@ -454,7 +455,8 @@ export async function createAndStartSession(input: {
   resources: ResourceRef[];
   tools: ToolRef[];
   // Public admission always supplies provenance; optional keeps internal
-  // callers that predate OPE-16 source-compatible during the rolling deploy.
+  // callers that predate durable tool-policy provenance source-compatible
+  // during the rolling deploy.
   toolPolicy?: SessionToolPolicy;
   clientEventId?: string;
   model: string;
@@ -1144,8 +1146,30 @@ export async function createSessionForRequest(
   // normal worker defaults. A child omission inherits its creator's exact
   // effective grant, preserving a host/operator's narrowed capability boundary
   // through the whole session tree.
+  const parentFirstPartyMcpPermissions = parentSession
+    ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
+    : null;
+  if (
+    parentFirstPartyMcpPermissions &&
+    payload.firstPartyMcpPermissions?.some(
+      (permission) => !hasPermission(parentFirstPartyMcpPermissions, permission),
+    )
+  ) {
+    throw new HTTPException(403, {
+      message: "child first-party MCP permissions may only narrow the parent session grant",
+    });
+  }
+  // A worker-signed creator may itself carry less authority than its parent
+  // session (for example a narrowly delegated spawn token). Inherit the
+  // intersection in the shared canonical default order so null/default parent
+  // policies cannot expand when runtime signing resolves them.
   let firstPartyMcpPermissions =
-    payload.firstPartyMcpPermissions ?? (parentSessionId ? [...new Set(grant.permissions)] : null);
+    payload.firstPartyMcpPermissions ??
+    (parentFirstPartyMcpPermissions
+      ? parentFirstPartyMcpPermissions.filter((permission) =>
+          hasPermission(grant.permissions, permission),
+        )
+      : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -1511,6 +1535,12 @@ export async function acceptSessionUserMessage(
     expectedDraftRevision?: number | null;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  if (input.toolsProvided && !deps.settings.sessionTurnToolReplacementEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "explicit follow-up tool replacement is temporarily unavailable until provenance-aware turn workers finish rolling out; omit tools to inherit the session policy and retry",
+    });
+  }
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   await requireSessionAuthorization(deps, grant, {
     sessionId,

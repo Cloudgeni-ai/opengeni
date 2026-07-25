@@ -71,7 +71,9 @@ if (import.meta.main) {
   let fallbackInput: string | null = null;
   if (!args.inputPath && normalized.rows.length === 0) {
     fallbackInput = args.outputPath;
-    normalized = normalizeCatalogSnapshot(await readSnapshotFile(args.outputPath));
+    normalized = normalizeCatalogSnapshot(await readSnapshotFile(args.outputPath), {
+      allowUnprobedCandidates: true,
+    });
   }
   const probed = await probeCatalogSnapshot(normalized);
   await writeFile(
