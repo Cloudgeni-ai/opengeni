@@ -185,10 +185,10 @@ describe("nested-agent depth database admission", () => {
     });
     await delay(25);
 
-    const currentWriter = createSessionWithIdempotencyKeyResult(
-      db,
-      { ...sessionInput(workspace, "current writer"), createIdempotencyKey: key },
-    );
+    const currentWriter = createSessionWithIdempotencyKeyResult(db, {
+      ...sessionInput(workspace, "current writer"),
+      createIdempotencyKey: key,
+    });
     const [oldSessionId, replay] = await Promise.all([oldWriter, currentWriter]);
 
     expect(oldSessionId).not.toBeNull();
@@ -237,10 +237,10 @@ describe("nested-agent depth database admission", () => {
     });
     await delay(25);
 
-    const currentWriter = createSessionWithIdempotencyKeyResult(
-      db,
-      { ...sessionInput(workspace, "current writer"), createIdempotencyKey: key },
-    );
+    const currentWriter = createSessionWithIdempotencyKeyResult(db, {
+      ...sessionInput(workspace, "current writer"),
+      createIdempotencyKey: key,
+    });
     const [oldDenialId, replay] = await Promise.all([oldWriter, currentWriter]);
 
     expect(oldDenialId).not.toBeNull();
@@ -271,7 +271,10 @@ describe("nested-agent depth database admission", () => {
     const workspace = await freshWorkspace("db depth guard cleanup");
     const successKey = `guard-success-${crypto.randomUUID()}`;
     const denialKey = `guard-denial-${crypto.randomUUID()}`;
-    await createSession(db, sessionInput(workspace, "success", { createIdempotencyKey: successKey }));
+    await createSession(
+      db,
+      sessionInput(workspace, "success", { createIdempotencyKey: successKey }),
+    );
     const denial = await createSessionWithIdempotencyKeyResult(db, {
       ...sessionInput(workspace, "denied", { maxNestedAgentDepthOverride: 5 }),
       createIdempotencyKey: denialKey,
