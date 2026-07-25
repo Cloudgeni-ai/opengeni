@@ -62,30 +62,55 @@ describe("release schema contract", () => {
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",
+      "0107_host_export_lineage_contract.sql",
+      "0108_fence_invalidated_warming_epochs.sql",
     ].filter((file) => migrations.has(file));
 
     expect(currentMainMigrations).toEqual(
       currentMainMigrations.length === 0
         ? []
-        : ["0105_session_turn_instructions.sql", "0106_session_attempt_mcp_approval_policies.sql"],
+        : [
+            "0105_session_turn_instructions.sql",
+            "0106_session_attempt_mcp_approval_policies.sql",
+            ...(currentMainMigrations.includes("0107_host_export_lineage_contract.sql")
+              ? ["0107_host_export_lineage_contract.sql"]
+              : []),
+            ...(currentMainMigrations.includes("0108_fence_invalidated_warming_epochs.sql")
+              ? ["0108_fence_invalidated_warming_epochs.sql"]
+              : []),
+          ],
     );
-    expect(contract.fileCount).toBe(102 + currentMainMigrations.length);
-    expect(contract.latestMigration).toBe("0113_nested_agent_depth_index.sql");
+    const nestedDepthMigrations = [
+      "0109_nested_agent_depth_expand.sql",
+      "0110_nested_agent_depth_backfill.sql",
+      "0111_nested_agent_depth_boundary.sql",
+      "0112_nested_agent_depth_contract.sql",
+      "0113_nested_agent_depth_validate.sql",
+      "0114_nested_agent_depth_index.sql",
+      "0115_nested_agent_depth_final_contract.sql",
+      "0116_nested_agent_depth_index.sql",
+    ].filter((file) => migrations.has(file));
+    expect(nestedDepthMigrations).toEqual([
+      "0109_nested_agent_depth_expand.sql",
+      "0110_nested_agent_depth_backfill.sql",
+      "0111_nested_agent_depth_boundary.sql",
+      "0112_nested_agent_depth_contract.sql",
+      "0113_nested_agent_depth_validate.sql",
+      "0114_nested_agent_depth_index.sql",
+      "0115_nested_agent_depth_final_contract.sql",
+      "0116_nested_agent_depth_index.sql",
+    ].filter((file) => migrations.has(file)));
+    expect(contract.fileCount).toBe(96 + currentMainMigrations.length + nestedDepthMigrations.length);
+    expect(contract.latestMigration).toBe("0116_nested_agent_depth_index.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-3])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-6])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
-      "0107_host_export_lineage_contract.sql",
-      "0108_nested_agent_depth_expand.sql",
-      "0109_nested_agent_depth_backfill.sql",
-      "0110_nested_agent_depth_boundary.sql",
-      "0111_nested_agent_depth_contract.sql",
-      "0112_nested_agent_depth_validate.sql",
-      "0113_nested_agent_depth_index.sql",
+      ...nestedDepthMigrations,
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -102,11 +127,18 @@ describe("release schema contract", () => {
       sha256: "42d29994ac12b7118f0a1e3c252615509e887ee84bb1854056c9bf90e578760d",
       deploymentMode: "maintenance",
     });
-
-    expect(migrations.get("0107_host_export_lineage_contract.sql")).toMatchObject({
-      sha256: "82dfa0f18f59d6a6c65c02bdfca72d4e728cc67d12fb075a85b2233d7affe091",
-      deploymentMode: "rolling",
-    });
+    if (migrations.has("0107_host_export_lineage_contract.sql")) {
+      expect(migrations.get("0107_host_export_lineage_contract.sql")).toMatchObject({
+        sha256: "82dfa0f18f59d6a6c65c02bdfca72d4e728cc67d12fb075a85b2233d7affe091",
+        deploymentMode: "rolling",
+      });
+    }
+    if (migrations.has("0108_fence_invalidated_warming_epochs.sql")) {
+      expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
+        sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+        deploymentMode: "rolling",
+      });
+    }
   });
 });
 

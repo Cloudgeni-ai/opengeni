@@ -521,6 +521,15 @@ const SettingsSchema = z.object({
   // EnvBoolean (NOT z.coerce.boolean(), which would coerce "false" -> true and
   // turn the flag ON the moment anyone set the env var to disable it).
   sandboxOwnershipEnabled: EnvBoolean.default(false),
+  // --- standalone rig-verifier ownership rollout flag, default OFF ---
+  // Rig verification creates a throwaway provider sandbox outside the normal
+  // session-turn path. When enabled, that sandbox must first acquire the same
+  // durable lease lifecycle used by session boxes so the global orphan sweep
+  // recognizes its exact provider instance. Keep this separate from the general
+  // sandboxOwnershipEnabled rollout: every reaper worker must understand verifier
+  // leases before dispatch is enabled. When false the verifier fails closed before
+  // provider create; it never falls back to the legacy unowned path.
+  rigVerificationLeaseOwnershipEnabled: EnvBoolean.default(false),
   // --- lazy sandbox provisioning rollout flag, default OFF ---
   // Only effective when sandboxOwnershipEnabled is ALSO on (lazy provisioning is a
   // property of the owned path — the SDK never creates/resumes an injected session,
@@ -1192,6 +1201,9 @@ export function getSettings(): Settings {
     vercelTeamId: optional("OPENGENI_VERCEL_TEAM_ID"),
     vercelRuntime: optional("OPENGENI_VERCEL_RUNTIME"),
     sandboxOwnershipEnabled: optional("OPENGENI_SANDBOX_OWNERSHIP_ENABLED"),
+    rigVerificationLeaseOwnershipEnabled: optional(
+      "OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED",
+    ),
     sandboxLazyProvisionEnabled: optional("OPENGENI_SANDBOX_LAZY_PROVISION"),
     sandboxSelfhostedEnabled: optional("OPENGENI_SANDBOX_SELFHOSTED_ENABLED"),
     agentOpStreamEnabled: optional("OPENGENI_AGENT_OP_STREAM_ENABLED"),

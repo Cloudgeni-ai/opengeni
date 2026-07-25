@@ -1,5 +1,15 @@
 # @opengeni/api-router
 
+## 0.8.4
+
+### Patch Changes
+
+- 2174006: Bound Modal display startup ownership, parse terminal state only from trusted provider metadata, poll yielded processes to completion, and prevent detached desktop processes from retaining startup locks.
+- Updated dependencies [2174006]
+- Updated dependencies [4e16410]
+  - @opengeni/runtime@0.12.3
+  - @opengeni/core@0.9.4
+
 ## 0.8.3
 
 ### Patch Changes
