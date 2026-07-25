@@ -41,6 +41,7 @@ import {
   assertMcpServerSelectionWithinBounds,
   assertMcpToolListWithinBounds,
   boundedParallelMap,
+  cancelMcpResponseBody,
   guardedMcpFetch,
   mcpSerializedSizeBytes,
 } from "@opengeni/runtime/mcp-network";
@@ -135,9 +136,11 @@ export class ToolspaceToolListCache {
   }
 
   write(key: string, entries: ToolListingEntry[], now = Date.now()): boolean {
-    this.delete(key);
     const sizeBytes = Buffer.byteLength(key) + mcpSerializedSizeBytes(entries);
     if (sizeBytes > this.maxBytes) return false;
+    // A rejected replacement is a no-op: preserve the current safe value
+    // until the candidate has passed its own size check.
+    this.delete(key);
     for (const [existingKey, value] of this.values) {
       if (value.expiresAt <= now) this.delete(existingKey);
     }
@@ -835,7 +838,7 @@ function mcpRequestDestinationUrl(input: string | URL | Request): string {
   return new URL(input instanceof Request ? input.url : input.toString()).toString();
 }
 
-function connectionBrokerFetch(
+export function connectionBrokerFetch(
   baseFetch: FetchLike,
   input: {
     deps: ApiRouteDeps;
@@ -884,6 +887,7 @@ function connectionBrokerFetch(
       withConnectionHeaders(requestInput, init, first.headers),
     );
     if (response.status === 401) {
+      await cancelMcpResponseBody(response);
       const refreshed = await resolveCredential({
         workspaceId: input.grant.workspaceId,
         serverId: input.config.id,
@@ -896,12 +900,30 @@ function connectionBrokerFetch(
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(input, request, refreshed);
       }
-      return await baseFetch(
+      const retry = await baseFetch(
         fetchInputForAttempt(requestInput),
         withConnectionHeaders(requestInput, init, refreshed.headers),
       );
+      if (retry.status === 401) {
+        await cancelMcpResponseBody(retry);
+        return await authNeededFetchResponse(
+          input,
+          request,
+          authNeededFromStatus(input.config, refreshed, "expired"),
+        );
+      }
+      if (retry.status === 403) {
+        await cancelMcpResponseBody(retry);
+        return await authNeededFetchResponse(
+          input,
+          request,
+          authNeededFromStatus(input.config, refreshed, "insufficient_scope"),
+        );
+      }
+      return retry;
     }
     if (response.status === 403) {
+      await cancelMcpResponseBody(response);
       return await authNeededFetchResponse(
         input,
         request,

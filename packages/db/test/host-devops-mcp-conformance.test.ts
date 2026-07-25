@@ -142,6 +142,12 @@ describe("provider-neutral host DevOps MCP conformance", () => {
     expect(calls.map((request) => request.rootSessionId)).toEqual(
       Array.from({ length: 8 }, () => "session-root"),
     );
+    expect(
+      calls.every(
+        (request) =>
+          request.destinationUrl === `https://${request.connectionRef.providerDomain}/mcp`,
+      ),
+    ).toBe(true);
     expect(calls.every((request) => request.initiator.subjectId === "host:user:one")).toBe(true);
   });
 

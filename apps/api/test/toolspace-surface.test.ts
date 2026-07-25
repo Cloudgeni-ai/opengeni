@@ -26,7 +26,8 @@ import {
   type TestMcpServer,
 } from "@opengeni/testing";
 import type { Observability } from "@opengeni/observability";
-import type { AccessGrant, McpCredentialsRequest } from "@opengeni/contracts";
+import type { AccessGrant, McpCredentialsRequest, SessionTurn } from "@opengeni/contracts";
+import type { McpServerConfig } from "@opengeni/config";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   createDb,
@@ -42,6 +43,7 @@ import {
 } from "@opengeni/db";
 import {
   prepareToolspaceMcpSurface,
+  connectionBrokerFetch,
   ToolspaceToolListCache,
   toolspaceCanProxyServerId,
   type ToolspaceMcpSurface,
@@ -246,6 +248,125 @@ describe("ToolspaceToolListCache", () => {
     expect(cache.read("aggregate-failure")).toBeNull();
     expect(cache.snapshot()).toEqual({ entries: 0, bytes: 0, keys: [] });
   });
+
+  test("keeps a safe value when an oversized same-key replacement is rejected", () => {
+    const cache = new ToolspaceToolListCache(4, 256, 1_000);
+    const safe = [
+      {
+        serverId: "safe",
+        tool: { name: "small", description: "ok" },
+        requireApproval: false,
+      },
+    ];
+    const oversized = [
+      {
+        serverId: "unsafe",
+        tool: { name: "large", description: "x".repeat(512) },
+        requireApproval: false,
+      },
+    ];
+
+    expect(cache.write("same-key", safe)).toBe(true);
+    expect(cache.write("same-key", oversized)).toBe(false);
+    expect(cache.read("same-key")).toEqual(safe);
+  });
+});
+
+describe("connectionBrokerFetch response lifecycle", () => {
+  test("cancels superseded 401 bodies before refreshing and classifying auth", async () => {
+    const canceled: string[] = [];
+    const responseWithTrackedBody = (status: number, label: string): Response =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode(label));
+          },
+          cancel() {
+            canceled.push(label);
+          },
+        }),
+        { status },
+      );
+    let fetchCount = 0;
+    const baseFetch = async () => {
+      fetchCount += 1;
+      switch (fetchCount) {
+        case 1:
+          return responseWithTrackedBody(401, "initial-401");
+        case 2:
+          return responseWithTrackedBody(200, "retry-200");
+        case 3:
+          return responseWithTrackedBody(401, "initial-401-again");
+        case 4:
+          return responseWithTrackedBody(401, "retry-401");
+        default:
+          return responseWithTrackedBody(403, "initial-403");
+      }
+    };
+    const connectionRef = {
+      provider: "test-provider",
+      providerDomain: "example.com",
+      connectionId: "connection-1",
+    } as const;
+    const deps = {
+      connectionCredentials: {
+        mcpCredentials: async (request: McpCredentialsRequest) => ({
+          status: "ok" as const,
+          accountId: request.accountId,
+          workspaceId: request.workspaceId,
+          sessionId: request.sessionId,
+          headers: { Authorization: `Bearer ${request.forceRefresh ? "refresh" : "first"}` },
+          connectionId: "connection-1",
+          provider: "test-provider",
+          providerDomain: "example.com",
+        }),
+      },
+    } as unknown as ApiRouteDeps;
+    const broker = connectionBrokerFetch(baseFetch, {
+      deps,
+      grant: {
+        accountId: "account-1",
+        workspaceId: "workspace-1",
+        subjectId: "sandbox:test",
+        permissions: ["toolspace:call"],
+        metadata: {
+          sessionId: "session-1",
+          turnId: "turn-1",
+          attemptId: "attempt-1",
+          executionGeneration: 1,
+        },
+      } as AccessGrant,
+      config: {
+        id: "test-server",
+        url: "https://example.com/mcp",
+        cacheToolsList: false,
+        connectionRef,
+      } as McpServerConfig,
+      sessionId: "session-1",
+      rootSessionId: "session-1",
+      turn: {
+        id: "turn-1",
+        activeAttemptId: "attempt-1",
+        executionGeneration: 1,
+        initiator: { kind: "subject", subjectId: "host:test" },
+        initiatorContext: {},
+      } as SessionTurn,
+    });
+
+    const result = await broker("https://example.com/mcp", { method: "GET" });
+    expect(result.status).toBe(200);
+    const expired = await broker("https://example.com/mcp", { method: "GET" });
+    expect(expired.status).toBe(401);
+    const insufficient = await broker("https://example.com/mcp", { method: "GET" });
+    expect(insufficient.status).toBe(401);
+    expect(fetchCount).toBe(5);
+    expect(canceled).toEqual([
+      "initial-401",
+      "initial-401-again",
+      "retry-401",
+      "initial-403",
+    ]);
+  });
 });
 
 describe("prepareToolspaceMcpSurface", () => {
@@ -272,7 +393,7 @@ describe("prepareToolspaceMcpSurface", () => {
           connectionRef: {
             connectionId,
             provider: "github",
-            providerDomain: "github.com",
+            providerDomain: new URL(server.url).hostname,
             kind: "app_install",
             selectedResources: [{ kind: "repository", id: "9001" }],
           },
@@ -322,6 +443,9 @@ describe("prepareToolspaceMcpSurface", () => {
     expect(requests.every((request) => request.executionGeneration === 3)).toBe(true);
     expect(requests.every((request) => request.attemptId === seeded.attemptId)).toBe(true);
     expect(requests.every((request) => request.callerSubjectId === "sandbox:run-1")).toBe(true);
+    expect(
+      requests.every((request) => request.destinationUrl === new URL(server.url).toString()),
+    ).toBe(true);
     expect(
       requests.every(
         (request) =>

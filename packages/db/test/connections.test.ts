@@ -538,7 +538,7 @@ describe("buildHostConnectionTokenResolver", () => {
       workspaceId: "ws_1",
       subjectId: "worker:first-party-mcp",
       serverId: "github",
-      destinationUrl: "https://github.com/mcp",
+      destinationUrl: "https://GitHub.com/mcp/",
       toolName: "create_pull_request",
       connectionRef: {
         provider: "github",
@@ -559,6 +559,7 @@ describe("buildHostConnectionTokenResolver", () => {
       callerSubjectId: "worker:first-party-mcp",
       serverId: "github",
       toolName: "create_pull_request",
+      destinationUrl: "https://github.com/mcp",
       connectionRef: {
         provider: "github",
         providerDomain: "github.com",
@@ -604,6 +605,35 @@ describe("buildHostConnectionTokenResolver", () => {
         connectionRef: { providerDomain: "github.com" },
       }),
     ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
+  });
+
+  test("rejects a destination/provider mismatch before invoking the host", async () => {
+    let calls = 0;
+    const resolver = buildHostConnectionTokenResolver(
+      async () => {
+        calls += 1;
+        return {
+          status: "ok",
+          accountId: "acct_1",
+          workspaceId: "ws_1",
+          sessionId: "session_1",
+          headers: { Authorization: "Bearer must-not-escape" },
+          connectionId: "host-connection-7",
+          providerDomain: "github.com",
+        };
+      },
+      context,
+    );
+
+    await expect(
+      resolver({
+        workspaceId: "ws_1",
+        serverId: "github",
+        destinationUrl: "https://attacker.example/mcp",
+        connectionRef: { provider: "github", providerDomain: "github.com" },
+      }),
+    ).rejects.toBeInstanceOf(HostMcpCredentialBindingError);
+    expect(calls).toBe(0);
   });
 
   test("rejects host credential material routed from a different binding or repository set", async () => {

@@ -18,7 +18,7 @@ import { fakeClient, fakeGoal, fakeTurn, SESSION_ID, WORKSPACE_ID } from "./fake
 import { OpenGeniApiError } from "@opengeni/sdk";
 import { useAvailableModels } from "../src/hooks/use-available-models";
 import { useBillingUsage } from "../src/hooks/use-billing-usage";
-import { useComposer } from "../src/hooks/use-composer";
+import { FILE_ONLY_MESSAGE_TEXT, useComposer } from "../src/hooks/use-composer";
 import { useEnvironments } from "../src/hooks/use-environments";
 import { useGoal } from "../src/hooks/use-goal";
 import { usePacks } from "../src/hooks/use-packs";
@@ -905,15 +905,16 @@ describe("useComposer durable draft and control binding", () => {
     );
     await flush();
     expect(hook.result.current.value).toBe("restored text");
-    await flushing(async () => hook.result.current.setValue("edited locally"));
+    await flushing(async () => hook.result.current.setValue("  edited locally\n"));
     await flush(600);
-    expect(saved.at(-1)).toMatchObject({ expectedRevision: 4, text: "edited locally" });
+    expect(saved.at(-1)).toMatchObject({ expectedRevision: 4, text: "  edited locally\n" });
     await flushing(async () => expect(await hook.result.current.send()).toBe(true));
     expect(sent.at(-1)).toMatchObject({
-      text: "edited locally",
+      text: "  edited locally\n",
       expectedDraftRevision: 5,
       controlEtag: "control-3",
     });
+    expect((saved.at(-1) as { text: string }).text).toBe((sent.at(-1) as { text: string }).text);
     await hook.unmount();
   });
 
@@ -1020,6 +1021,151 @@ describe("useComposer durable draft and control binding", () => {
     expect(hook.result.current.draftConflict?.message).toContain("409");
     await hook.unmount();
   });
+
+  test("fences an old-session save and send after switching sessions", async () => {
+    const sessionA = "session-a";
+    const sessionB = "session-b";
+    const draftA: ComposerDraft = {
+      revision: 1,
+      text: "draft A",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const draftB = { ...draftA, revision: 7, text: "draft B" };
+    let markSaveStarted!: () => void;
+    let releaseSave!: (draft: ComposerDraft) => void;
+    const saveStarted = new Promise<void>((resolve) => {
+      markSaveStarted = resolve;
+    });
+    const saveResult = new Promise<ComposerDraft>((resolve) => {
+      releaseSave = resolve;
+    });
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      getComposerDraft: async (_ws, sessionId) => (sessionId === sessionA ? draftA : draftB),
+      saveComposerDraft: async (_ws, sessionId, request) => {
+        expect(sessionId).toBe(sessionA);
+        markSaveStarted();
+        return { ...(await saveResult), ...request };
+      },
+      sendMessage: async (_ws, _session, input) => {
+        sent.push(input);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    const pendingSend = hook.result.current.send("old-session message");
+    await saveStarted;
+    await hook.rerender(sessionB);
+    await flush();
+    expect(hook.result.current.value).toBe("draft B");
+
+    releaseSave({ ...draftA, revision: 2, text: "old-session message" });
+    await expect(pendingSend).resolves.toBe(false);
+    await flush();
+    expect(sent).toEqual([]);
+    expect(hook.result.current.value).toBe("draft B");
+    expect(hook.result.current.sending).toBe(false);
+    await hook.unmount();
+  });
+
+  test("fences an old-session pause settlement after switching sessions", async () => {
+    const sessionA = "session-a-pause";
+    const sessionB = "session-b-pause";
+    let markPauseStarted!: () => void;
+    let releasePause!: () => void;
+    const pauseStarted = new Promise<void>((resolve) => {
+      markPauseStarted = resolve;
+    });
+    const pauseResult = new Promise<void>((resolve) => {
+      releasePause = resolve;
+    });
+    const client = fakeClient({
+      pauseSession: async () => {
+        markPauseStarted();
+        await pauseResult;
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    const pendingPause = hook.result.current.pause("old-session pause");
+    await pauseStarted;
+    await hook.rerender(sessionB);
+    releasePause();
+    await pendingPause;
+    await flush();
+    expect(hook.result.current.pausing).toBe(false);
+    expect(hook.result.current.error).toBeNull();
+    await hook.unmount();
+  });
+
+  test("fences an old-session draft conflict read after switching sessions", async () => {
+    const sessionA = "session-a-conflict";
+    const sessionB = "session-b-conflict";
+    const draftA: ComposerDraft = {
+      revision: 1,
+      text: "draft A",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const draftB = { ...draftA, revision: 2, text: "draft B" };
+    let deferConflictRead = false;
+    let markConflictStarted!: () => void;
+    let releaseConflict!: (draft: ComposerDraft) => void;
+    const conflictStarted = new Promise<void>((resolve) => {
+      markConflictStarted = resolve;
+    });
+    const conflictResult = new Promise<ComposerDraft>((resolve) => {
+      releaseConflict = resolve;
+    });
+    const client = fakeClient({
+      getComposerDraft: async (_ws, sessionId) => {
+        if (sessionId === sessionA && deferConflictRead) {
+          markConflictStarted();
+          return await conflictResult;
+        }
+        return sessionId === sessionA ? draftA : draftB;
+      },
+    });
+    const hook = await renderHook(
+      (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
+      sessionA,
+    );
+    await flush();
+
+    deferConflictRead = true;
+    const pendingConflict = hook.result.current.resolveDraftConflict("use_remote");
+    await conflictStarted;
+    await hook.rerender(sessionB);
+    await flush();
+    releaseConflict({ ...draftA, revision: 9, text: "stale remote A" });
+    await pendingConflict;
+    await flush();
+    expect(hook.result.current.value).toBe("draft B");
+    expect(hook.result.current.draft?.text).toBe("draft B");
+    await hook.unmount();
+  });
 });
 
 describe("useComposer file-only send", () => {
@@ -1088,6 +1234,52 @@ describe("useComposer file-only send", () => {
     // Resources ride along, and the wire text is non-empty (contract: min(1)).
     expect(sent[0]!.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
     expect(sent[0]!.text.trim().length).toBeGreaterThan(0);
+    await hook.unmount();
+  });
+
+  test("persists the same file-only text that it submits", async () => {
+    const initial: ComposerDraft = {
+      revision: 3,
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+
+    expect(saved).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
     await hook.unmount();
   });
 });

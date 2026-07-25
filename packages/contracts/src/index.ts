@@ -2040,6 +2040,8 @@ export type McpCredentialsRequest = {
   /** Immediate technical caller, retained only as non-authoritative audit context. */
   callerSubjectId?: string;
   surface: "model" | "toolspace";
+  /** Canonical MCP destination that will receive the resolved headers. */
+  destinationUrl: string;
   serverId: string;
   toolName?: string;
   connectionRef: McpServerConnectionRef;

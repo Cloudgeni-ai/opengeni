@@ -92,7 +92,8 @@ export class HostMcpCredentialBindingError extends Error {
       | "connectionId"
       | "scopes"
       | "resource"
-      | "selectedResources",
+      | "selectedResources"
+      | "destinationUrl",
   ) {
     super(`host MCP credential ${field} binding mismatch`);
     this.name = "HostMcpCredentialBindingError";
@@ -113,6 +114,13 @@ export function buildHostConnectionTokenResolver(
     if (input.workspaceId !== context.workspaceId) {
       throw new HostMcpCredentialScopeError("workspaceId");
     }
+    const destinationUrl = canonicalHttpUrl(input.destinationUrl);
+    if (
+      !destinationUrl ||
+      !destinationHostMatchesProvider(destinationUrl, input.connectionRef.providerDomain)
+    ) {
+      throw new HostMcpCredentialBindingError("destinationUrl");
+    }
     const toolName = input.toolName ?? input.toolId;
     const request: McpCredentialsRequest = {
       accountId: context.accountId,
@@ -125,6 +133,7 @@ export function buildHostConnectionTokenResolver(
       initiator: context.initiator,
       initiatorContext: { ...context.initiatorContext },
       surface: context.surface,
+      destinationUrl,
       serverId: input.serverId,
       connectionRef: {
         providerDomain: input.connectionRef.providerDomain,
