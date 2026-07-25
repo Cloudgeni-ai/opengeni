@@ -44,8 +44,7 @@ describe("DNS-pinned outbound transport", () => {
     let agentCalls = 0;
     await expect(
       pinnedFetch("https://invalid-runtime-answer.example.test/", undefined, production, {
-        dnsLookup: async () =>
-          [{ address: "8.8.8.8", family: 6 }] as unknown as DnsAddress[],
+        dnsLookup: async () => [{ address: "8.8.8.8", family: 6 }] as unknown as DnsAddress[],
         agentFactory: () => {
           agentCalls += 1;
           return fakeDispatcher();

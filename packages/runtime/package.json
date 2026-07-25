@@ -52,8 +52,8 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
-    "debug": "4.4.3",
     "@opengeni/network": "workspace:*",
+    "debug": "4.4.3",
     "modal": "0.7.6",
     "openai": "6.47.0",
     "ws": "8.21.1"

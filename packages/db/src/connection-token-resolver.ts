@@ -355,6 +355,7 @@ const defaultDeps: ConnectionBrokerDeps = {
 
 const inflight = new Map<string, Promise<ConnectionCredentialForBroker>>();
 const REFRESH_WINDOW_MS = 60_000;
+const CONNECTION_REFRESH_TIMEOUT_MS = 10_000;
 
 export function buildConnectionTokenResolver(
   db: Database,
@@ -788,6 +789,7 @@ export async function refreshOAuthConnectionCredential(
       method: "POST",
       headers,
       body,
+      signal: AbortSignal.timeout(CONNECTION_REFRESH_TIMEOUT_MS),
     },
     settings,
     {

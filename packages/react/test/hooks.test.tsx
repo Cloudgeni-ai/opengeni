@@ -703,9 +703,22 @@ describe("useSessionControl", () => {
     expect(sent).toEqual([
       { kind: "pause", reason: "stop now" },
       { kind: "resume", reason: "continue" },
-      { kind: "decision", approvalId: "ap-1", decision: "approve", message: "looks safe" },
-      { kind: "decision", approvalId: "ap-2", decision: "reject" },
+      {
+        kind: "decision",
+        approvalId: "ap-1",
+        decision: "approve",
+        message: "looks safe",
+        clientEventId: expect.any(String),
+      },
+      {
+        kind: "decision",
+        approvalId: "ap-2",
+        decision: "reject",
+        clientEventId: expect.any(String),
+      },
     ]);
+    const decisions = sent.slice(2) as Array<{ clientEventId: string }>;
+    expect(decisions[0]?.clientEventId).not.toBe(decisions[1]?.clientEventId);
     expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });

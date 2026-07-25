@@ -41,7 +41,7 @@ describe("integrations.sh catalog import normalization", () => {
     ).toHaveLength(2);
     expect(normalized.skipped).toContainEqual({
       domain: "americanexpress.com",
-      mcpUrl: "https://apigw.americanexpress.com/dining/v1/mcp",
+      mcpUrl: null,
       reason: "auth_unknown",
     });
   });
@@ -110,7 +110,7 @@ describe("integrations.sh catalog import normalization", () => {
     expect(normalized.rows[0]?.mcpUrl).toBe("https://same.example/mcp");
     expect(normalized.skipped).toContainEqual({
       domain: "same.example",
-      mcpUrl: "https://same.example/mcp",
+      mcpUrl: null,
       reason: "probe_unverified:timeout",
     });
   });
@@ -133,12 +133,12 @@ describe("integrations.sh catalog import normalization", () => {
     expect(normalized.skipped).toEqual([
       {
         domain: "missing.example",
-        mcpUrl: "https://missing.example/mcp",
+        mcpUrl: null,
         reason: "probe_missing",
       },
       {
         domain: "key.example",
-        mcpUrl: "https://key.example/mcp",
+        mcpUrl: null,
         reason: "api_key_metadata_unactionable",
       },
     ]);
@@ -206,24 +206,27 @@ describe("integrations.sh catalog import normalization", () => {
   });
 
   test("rejects catalog query parameters and never retains rejected URLs", async () => {
-    const normalized = normalizeCatalogSnapshot({
-      generatedAt: "2026-07-03T00:00:00.000Z",
-      importRows: [
-        row({
-          domain: "safe.example",
-          mcpUrl: "https://safe.example/mcp",
-          credentialFacts: [{ generateUrl: "https://safe.example/settings?tab=api-keys#new" }],
-        }),
-        row({
-          domain: "query-credential.example",
-          mcpUrl: "https://query-credential.example/mcp?subscription-key=fixture-value",
-        }),
-        row({
-          domain: "userinfo.example",
-          mcpUrl: "https://fixture-user:fixture-password@userinfo.example/mcp",
-        }),
-      ],
-    });
+    const normalized = normalizeCatalogSnapshot(
+      {
+        generatedAt: "2026-07-03T00:00:00.000Z",
+        importRows: [
+          row({
+            domain: "safe.example",
+            mcpUrl: "https://safe.example/mcp",
+            credentialFacts: [{ generateUrl: "https://safe.example/settings?tab=api-keys#new" }],
+          }),
+          row({
+            domain: "query-credential.example",
+            mcpUrl: "https://query-credential.example/mcp?subscription-key=fixture-value",
+          }),
+          row({
+            domain: "userinfo.example",
+            mcpUrl: "https://fixture-user:fixture-password@userinfo.example/mcp",
+          }),
+        ],
+      },
+      { allowUnprobedCandidates: true },
+    );
 
     expect(normalized.rows.map((candidate) => candidate.domain)).toEqual(["safe.example"]);
     expect(normalized.rows[0]?.credentialFacts).toEqual([
@@ -262,14 +265,17 @@ describe("integrations.sh catalog import normalization", () => {
     "X-Amz-Signature",
     "unknown-routing-key",
   ])("rejects unapproved query parameter %s", (parameter) => {
-    const normalized = normalizeCatalogSnapshot({
-      importRows: [
-        row({
-          domain: "query.example",
-          mcpUrl: `https://query.example/mcp?${parameter}=fixture-value`,
-        }),
-      ],
-    });
+    const normalized = normalizeCatalogSnapshot(
+      {
+        importRows: [
+          row({
+            domain: "query.example",
+            mcpUrl: `https://query.example/mcp?${parameter}=fixture-value`,
+          }),
+        ],
+      },
+      { allowUnprobedCandidates: true },
+    );
 
     expect(normalized.rows).toEqual([]);
     expect(normalized.skipped).toEqual([
@@ -322,18 +328,21 @@ describe("integrations.sh catalog import normalization", () => {
   });
 
   test("rejects opaque path segments and never retains the rejected URL", () => {
-    const normalized = normalizeCatalogSnapshot({
-      importRows: [
-        row({
-          domain: "opaque-path.example",
-          mcpUrl: `https://opaque-path.example/mcp/${"a1".repeat(16)}`,
-        }),
-        row({
-          domain: "readable-path.example",
-          mcpUrl: "https://readable-path.example/public-mcp",
-        }),
-      ],
-    });
+    const normalized = normalizeCatalogSnapshot(
+      {
+        importRows: [
+          row({
+            domain: "opaque-path.example",
+            mcpUrl: `https://opaque-path.example/mcp/${"a1".repeat(16)}`,
+          }),
+          row({
+            domain: "readable-path.example",
+            mcpUrl: "https://readable-path.example/public-mcp",
+          }),
+        ],
+      },
+      { allowUnprobedCandidates: true },
+    );
 
     expect(normalized.rows.map((candidate) => candidate.domain)).toEqual(["readable-path.example"]);
     expect(normalized.skipped).toContainEqual({
@@ -652,7 +661,7 @@ describe("integrations.sh MCP endpoint probe", () => {
     ).resolves.toMatchObject({ status: "junk", reason: "connection_error" });
   });
 
-  test("filters junk rows while keeping unverified rows with probe metadata", async () => {
+  test("keeps only real MCP rows and records every non-real probe without its URL", async () => {
     const normalized = normalizeCatalogSnapshot(
       {
         generatedAt: "2026-07-03T00:00:00.000Z",
@@ -684,23 +693,21 @@ describe("integrations.sh MCP endpoint probe", () => {
       },
     });
 
-    expect(probed.rows.map((candidate) => candidate.domain)).toEqual([
-      "maybe.example",
-      "real.example",
-    ]);
+    expect(probed.rows.map((candidate) => candidate.domain)).toEqual(["real.example"]);
     expect(probed.probe).toMatchObject({
-      kept: 2,
-      dropped: 1,
+      kept: 1,
+      dropped: 2,
       real: 1,
       unverified: 1,
       googleapisDropped: 1,
     });
-    expect(
-      probed.rows.find((candidate) => candidate.domain === "maybe.example")?.probe,
-    ).toMatchObject({ status: "unverified", reason: "http_status", httpStatus: 503 });
     expect(probed.skipped.find((skip) => skip.domain === "gmail.googleapis.com")).toMatchObject({
       mcpUrl: null,
       reason: "probe_http_not_found",
+    });
+    expect(probed.skipped.find((skip) => skip.domain === "maybe.example")).toMatchObject({
+      mcpUrl: null,
+      reason: "probe_http_status",
     });
   });
 });
