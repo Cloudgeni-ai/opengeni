@@ -2106,8 +2106,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         try {
           await verifyWorkspaceMutationSettlement(db, {
             ...identity,
-            admissionId: admission.id,
-            admittedWorkspaceGeneration: admission.workspaceGeneration,
+            admission,
             outcome: "rejected",
           });
         } catch (settlementError) {
@@ -2122,8 +2121,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       try {
         await verifyWorkspaceMutationSettlement(db, {
           ...identity,
-          admissionId: admission.id,
-          admittedWorkspaceGeneration: admission.workspaceGeneration,
+          admission,
           outcome: "resolved",
         });
       } catch (settlementError) {

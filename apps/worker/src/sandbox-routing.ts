@@ -444,8 +444,7 @@ function afterPersistableHomeMutation(
       sandboxGroupId: home.sandboxGroupId,
       expectedEpoch: backend.leaseEpoch,
       expectedInstanceId: backend.providerInstanceId,
-      admissionId: exactAdmission.id,
-      admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
+      admission: exactAdmission,
       operation: op,
       outcome,
     });

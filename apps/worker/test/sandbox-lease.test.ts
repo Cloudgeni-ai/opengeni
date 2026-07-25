@@ -859,8 +859,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       sandboxGroupId: ids.groupId,
       expectedEpoch: 9,
       expectedInstanceId: "box-generation",
-      admissionId: generation.id,
-      admittedWorkspaceGeneration: generation.workspaceGeneration,
+      admission: generation,
       operation: "providerMutation",
       outcome: "resolved",
     });
@@ -947,8 +946,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       sandboxGroupId: ids.groupId,
       expectedEpoch: 10,
       expectedInstanceId: "box-settlement",
-      admissionId: rejected.id,
-      admittedWorkspaceGeneration: rejected.workspaceGeneration,
+      admission: rejected,
       operation: "providerRejected",
       outcome: "rejected",
     });

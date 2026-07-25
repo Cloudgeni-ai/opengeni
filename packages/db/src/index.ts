@@ -17780,7 +17780,7 @@ export async function listOpenPtySessions(
 // ============================================================================
 
 export type SandboxLeaseLiveness = "cold" | "warming" | "warm" | "draining";
-export type LeaseHolderKind = "turn" | "viewer";
+export type LeaseHolderKind = "turn" | "viewer" | "direct" | "process";
 
 export type SandboxProviderExistence =
   | "not_created"
@@ -18392,6 +18392,9 @@ export async function acquireLease(
   db: Database,
   input: AcquireLeaseInput,
 ): Promise<AcquireLeaseResult> {
+  if (input.kind === "process") {
+    throw new Error("Process lease holders are created only by atomic retained-process promotion");
+  }
   const { accountId, workspaceId, sandboxGroupId, kind, holderId, backend } = input;
   const os = input.os ?? "linux";
   const subjectId = input.subjectId ?? null;
@@ -19455,6 +19458,9 @@ export async function releaseLeaseHolder(
     idleGraceMs: number;
   },
 ): Promise<{ liveness: SandboxLeaseLiveness; refcount: number } | null> {
+  if (input.kind === "process") {
+    throw new Error("Process lease holders require exact retained-process settlement");
+  }
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -19524,6 +19530,7 @@ export async function heartbeatLeaseHolder(
     expectedEpoch: number;
   },
 ): Promise<boolean> {
+  if (input.kind === "process") return false;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -19574,6 +19581,7 @@ export async function touchLeaseHolder(
     holderId: string;
   },
 ): Promise<boolean> {
+  if (input.kind === "process") return false;
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -19620,6 +19628,7 @@ export async function reapStaleLeaseHolders(
   },
 ): Promise<{
   reapedViewers: number;
+  reapedDirect: number;
   reapedTurns: number;
   warmingReset: number;
   drained: ReapDrainable[];
@@ -19630,13 +19639,21 @@ export async function reapStaleLeaseHolders(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        // (a) Reap stale VIEWER holders.
-        const reaped = await tx.execute<{ lease_id: string }>(sql`
+        // (a) Reap stale short-lived VIEWER and DIRECT request holders. Process
+        // holders are deliberately absent: they have no TTL and leave only by
+        // exact retained-process exit/loss settlement.
+        const reaped = await tx.execute<{ lease_id: string; kind: string }>(sql`
         delete from sandbox_lease_holders
-        where workspace_id = ${input.workspaceId} and kind = 'viewer'
+        where workspace_id = ${input.workspaceId} and kind in ('viewer', 'direct')
           and last_heartbeat_at < now() - (${String(input.viewerHolderTtlMs)} || ' milliseconds')::interval
-        returning lease_id
+        returning lease_id, kind
       `);
+        const reapedViewers = reaped.filter(
+          (row: { lease_id: string; kind: string }) => row.kind === "viewer",
+        ).length;
+        const reapedDirect = reaped.filter(
+          (row: { lease_id: string; kind: string }) => row.kind === "direct",
+        ).length;
         // (a2) Reap DEAD-WORKER turn holders. A live holder is touched every 10s
         // from registration (the resumeBoxForTurn holder-liveness loop covers the
         // warmup; the turn heartbeat covers the run — legit multi-day turns
@@ -19775,7 +19792,8 @@ export async function reapStaleLeaseHolders(
         );
 
         return {
-          reapedViewers: reaped.length,
+          reapedViewers,
+          reapedDirect,
           reapedTurns: reapedTurnRows.length,
           warmingReset: warmingReset + warmingDrain.length,
           drained: drainable.map((r) => ({
@@ -20189,6 +20207,8 @@ export class SandboxWorkspaceMutationFencedError extends Error {
       | "attempt_fenced"
       | "holder_fenced"
       | "lease_fenced"
+      | "route_fenced"
+      | "process_fenced"
       | "admission_fenced"
       | "operation_invalid"
       | "generation_exhausted",
@@ -20200,17 +20220,134 @@ export class SandboxWorkspaceMutationFencedError extends Error {
 
 export type SandboxWorkspaceMutationAdmission = {
   id: string;
+  leaseId: string;
+  sandboxGroupId: string;
+  sessionId: string;
+  actorKind: "turn" | "direct" | "process";
+  actorId: string;
+  holderKind: "turn" | "direct" | "process";
+  holderId: string;
+  leaseEpoch: number;
+  providerBackend: string;
+  providerInstanceId: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
   workspaceGeneration: number;
 };
 
 export type SandboxWorkspaceMutationProviderOutcome = "resolved" | "rejected";
 
+export type SandboxRetainedProcessState = "active" | "exited" | "lost";
+
+export type SandboxRetainedProcess = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  leaseId: string;
+  sandboxGroupId: string;
+  parentAdmissionId: string;
+  holderId: string;
+  ownerActorKind: "turn" | "direct";
+  ownerActorId: string;
+  ownerTurnId: string | null;
+  ownerAttemptId: string | null;
+  ownerExecutionGeneration: number | null;
+  leaseEpoch: number;
+  providerBackend: string;
+  providerInstanceId: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+  providerSessionId: number;
+  state: SandboxRetainedProcessState;
+  exitCode: number | null;
+  settlementReason: string | null;
+  startedAt: string;
+  settledAt: string | null;
+};
+
 type SandboxWorkspaceMutationSettlementResult =
   | { failure: null }
   | {
-      failure: "admission_fenced" | "attempt_fenced" | "holder_fenced" | "lease_fenced";
+      failure:
+        | "admission_fenced"
+        | "attempt_fenced"
+        | "holder_fenced"
+        | "lease_fenced"
+        | "route_fenced"
+        | "process_fenced";
       detail: string;
     };
+
+type TurnWorkspaceMutationAuthority = {
+  kind: "turn";
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  executionGeneration: number;
+  attemptId: string;
+  holderId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  expectedInstanceId: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch?: number;
+};
+
+type DirectWorkspaceMutationAuthority = {
+  kind: "direct";
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  requestId: string;
+  holderId: string;
+  sandboxGroupId: string;
+  expectedEpoch: number;
+  expectedInstanceId: string;
+  routeKind: "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+};
+
+type ProcessWorkspaceMutationAuthority = {
+  kind: "process";
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  processId: string;
+};
+
+type WorkspaceMutationAuthority =
+  | TurnWorkspaceMutationAuthority
+  | DirectWorkspaceMutationAuthority
+  | ProcessWorkspaceMutationAuthority;
+
+type LockedWorkspaceMutationAuthority = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  sandboxGroupId: string;
+  actorKind: "turn" | "direct" | "process";
+  actorId: string;
+  turnId: string | null;
+  attemptId: string | null;
+  executionGeneration: number | null;
+  holderKind: "turn" | "direct" | "process";
+  holderId: string;
+  expectedLeaseId: string | null;
+  expectedEpoch: number;
+  expectedBackend: string | null;
+  expectedInstanceId: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+  session: typeof schema.sessions.$inferSelect;
+  retainedProcess: typeof schema.sandboxRetainedProcesses.$inferSelect | null;
+};
 
 function normalizeWorkspaceMutationOperation(operation: string): string {
   const normalized = operation.trim();
@@ -20222,6 +20359,382 @@ function normalizeWorkspaceMutationOperation(operation: string): string {
     );
   }
   return normalized;
+}
+
+function mapWorkspaceMutationAdmission(row: {
+  id: string;
+  lease_id: string;
+  sandbox_group_id: string;
+  session_id: string;
+  actor_kind: string;
+  actor_id: string;
+  holder_kind: string;
+  holder_id: string;
+  lease_epoch: number | string;
+  provider_backend: string;
+  provider_instance_id: string;
+  route_kind: string;
+  route_target_id: string | null;
+  route_epoch: number | string;
+  workspace_generation: number | string;
+}): SandboxWorkspaceMutationAdmission {
+  return {
+    id: row.id,
+    leaseId: row.lease_id,
+    sandboxGroupId: row.sandbox_group_id,
+    sessionId: row.session_id,
+    actorKind: row.actor_kind as SandboxWorkspaceMutationAdmission["actorKind"],
+    actorId: row.actor_id,
+    holderKind: row.holder_kind as SandboxWorkspaceMutationAdmission["holderKind"],
+    holderId: row.holder_id,
+    leaseEpoch: Number(row.lease_epoch),
+    providerBackend: row.provider_backend,
+    providerInstanceId: row.provider_instance_id,
+    routeKind: row.route_kind as SandboxWorkspaceMutationAdmission["routeKind"],
+    routeTargetId: row.route_target_id,
+    routeEpoch: Number(row.route_epoch),
+    workspaceGeneration: Number(row.workspace_generation),
+  };
+}
+
+function mapRetainedProcess(
+  row: typeof schema.sandboxRetainedProcesses.$inferSelect,
+): SandboxRetainedProcess {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    sessionId: row.sessionId,
+    leaseId: row.leaseId,
+    sandboxGroupId: row.sandboxGroupId,
+    parentAdmissionId: row.parentAdmissionId,
+    holderId: row.holderId,
+    ownerActorKind: row.ownerActorKind as "turn" | "direct",
+    ownerActorId: row.ownerActorId,
+    ownerTurnId: row.ownerTurnId ?? null,
+    ownerAttemptId: row.ownerAttemptId ?? null,
+    ownerExecutionGeneration: row.ownerExecutionGeneration ?? null,
+    leaseEpoch: row.leaseEpoch,
+    providerBackend: row.providerBackend,
+    providerInstanceId: row.providerInstanceId,
+    routeKind: row.routeKind as "home" | "active",
+    routeTargetId: row.routeTargetId ?? null,
+    routeEpoch: row.routeEpoch,
+    providerSessionId: row.providerSessionId,
+    state: row.state as SandboxRetainedProcessState,
+    exitCode: row.exitCode ?? null,
+    settlementReason: row.settlementReason ?? null,
+    startedAt: row.startedAt.toISOString(),
+    settledAt: row.settledAt?.toISOString() ?? null,
+  };
+}
+
+async function lockWorkspaceMutationSessionTx(
+  tx: Database,
+  workspaceId: string,
+  sessionId: string,
+): Promise<typeof schema.sessions.$inferSelect> {
+  const locks = await lockSessionEventWriteRows(tx, {
+    workspaceId,
+    controlLock: "share",
+    sessionIds: [sessionId],
+  });
+  const session = locks.sessions.find((row) => row.id === sessionId);
+  if (!session) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "attempt_fenced",
+      "Workspace mutation rejected because its session no longer exists",
+    );
+  }
+  return session;
+}
+
+async function lockWorkspaceMutationAuthorityTx(
+  tx: Database,
+  authority: WorkspaceMutationAuthority,
+): Promise<LockedWorkspaceMutationAuthority> {
+  if (authority.kind === "turn") {
+    const fence = await lockTurnAttemptWriteFenceTx(tx, {
+      workspaceId: authority.workspaceId,
+      sessionId: authority.sessionId,
+      turnId: authority.turnId,
+      executionGeneration: authority.executionGeneration,
+      attemptId: authority.attemptId,
+    });
+    if (!fence.allowed) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "attempt_fenced",
+        `Workspace mutation rejected by turn-attempt fence (${fence.reason})`,
+      );
+    }
+    if (
+      fence.session.accountId !== authority.accountId ||
+      fence.session.sandboxGroupId !== authority.sandboxGroupId
+    ) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "attempt_fenced",
+        "Workspace mutation rejected because the turn session does not own the sandbox group",
+      );
+    }
+    const routeEpoch = authority.routeEpoch ?? fence.session.activeEpoch;
+    if (
+      authority.routeKind === "active" &&
+      (fence.session.activeSandboxId !== authority.routeTargetId ||
+        fence.session.activeEpoch !== routeEpoch)
+    ) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "route_fenced",
+        "Workspace mutation rejected because its active route moved before admission",
+      );
+    }
+    return {
+      accountId: authority.accountId,
+      workspaceId: authority.workspaceId,
+      sessionId: authority.sessionId,
+      sandboxGroupId: authority.sandboxGroupId,
+      actorKind: "turn",
+      actorId: authority.attemptId,
+      turnId: authority.turnId,
+      attemptId: authority.attemptId,
+      executionGeneration: authority.executionGeneration,
+      holderKind: "turn",
+      holderId: authority.holderId,
+      expectedLeaseId: null,
+      expectedEpoch: authority.expectedEpoch,
+      expectedBackend: null,
+      expectedInstanceId: authority.expectedInstanceId,
+      routeKind: authority.routeKind,
+      routeTargetId: authority.routeKind === "home" ? null : authority.routeTargetId,
+      routeEpoch,
+      session: fence.session,
+      retainedProcess: null,
+    };
+  }
+
+  const session = await lockWorkspaceMutationSessionTx(
+    tx,
+    authority.workspaceId,
+    authority.sessionId,
+  );
+  if (session.accountId !== authority.accountId) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "attempt_fenced",
+      "Workspace mutation rejected because its session account changed",
+    );
+  }
+  if (authority.kind === "direct") {
+    if (session.sandboxGroupId !== authority.sandboxGroupId) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "attempt_fenced",
+        "Direct workspace mutation rejected because the session does not own the sandbox group",
+      );
+    }
+    if (
+      session.activeSandboxId !== authority.routeTargetId ||
+      session.activeEpoch !== authority.routeEpoch
+    ) {
+      throw new SandboxWorkspaceMutationFencedError(
+        "route_fenced",
+        "Direct workspace mutation rejected because its active route moved before admission",
+      );
+    }
+    return {
+      accountId: authority.accountId,
+      workspaceId: authority.workspaceId,
+      sessionId: authority.sessionId,
+      sandboxGroupId: authority.sandboxGroupId,
+      actorKind: "direct",
+      actorId: authority.requestId,
+      turnId: null,
+      attemptId: null,
+      executionGeneration: null,
+      holderKind: "direct",
+      holderId: authority.holderId,
+      expectedLeaseId: null,
+      expectedEpoch: authority.expectedEpoch,
+      expectedBackend: null,
+      expectedInstanceId: authority.expectedInstanceId,
+      routeKind: "active",
+      routeTargetId: authority.routeTargetId,
+      routeEpoch: authority.routeEpoch,
+      session,
+      retainedProcess: null,
+    };
+  }
+
+  const [process] = await tx
+    .select()
+    .from(schema.sandboxRetainedProcesses)
+    .where(
+      and(
+        eq(schema.sandboxRetainedProcesses.accountId, authority.accountId),
+        eq(schema.sandboxRetainedProcesses.workspaceId, authority.workspaceId),
+        eq(schema.sandboxRetainedProcesses.sessionId, authority.sessionId),
+        eq(schema.sandboxRetainedProcesses.id, authority.processId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!process || process.state !== "active") {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Workspace mutation rejected because the retained process is not active",
+    );
+  }
+  if (session.sandboxGroupId !== process.sandboxGroupId) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Workspace mutation rejected because the retained process scope is stale",
+    );
+  }
+  return {
+    accountId: authority.accountId,
+    workspaceId: authority.workspaceId,
+    sessionId: authority.sessionId,
+    sandboxGroupId: process.sandboxGroupId,
+    actorKind: "process",
+    actorId: process.id,
+    turnId: null,
+    attemptId: null,
+    executionGeneration: null,
+    holderKind: "process",
+    holderId: process.holderId,
+    expectedLeaseId: process.leaseId,
+    expectedEpoch: process.leaseEpoch,
+    expectedBackend: process.providerBackend,
+    expectedInstanceId: process.providerInstanceId,
+    routeKind: process.routeKind as "home" | "active",
+    routeTargetId: process.routeTargetId,
+    routeEpoch: process.routeEpoch,
+    session,
+    retainedProcess: process,
+  };
+}
+
+async function advanceWorkspaceGenerationForAuthority(
+  db: Database,
+  authority: WorkspaceMutationAuthority,
+  operationInput: string,
+): Promise<SandboxWorkspaceMutationAdmission> {
+  const operation = normalizeWorkspaceMutationOperation(operationInput);
+  return await withRlsContext(
+    db,
+    { accountId: authority.accountId, workspaceId: authority.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const locked = await lockWorkspaceMutationAuthorityTx(tx, authority);
+        const rows = await tx.execute<{
+          id: string;
+          lease_id: string;
+          sandbox_group_id: string;
+          session_id: string;
+          actor_kind: string;
+          actor_id: string;
+          holder_kind: string;
+          holder_id: string;
+          lease_epoch: number | string;
+          provider_backend: string;
+          provider_instance_id: string;
+          route_kind: string;
+          route_target_id: string | null;
+          route_epoch: number | string;
+          workspace_generation: number | string;
+        }>(sql`
+          with advanced as (
+            update sandbox_leases as lease set
+              workspace_generation = lease.workspace_generation + 1,
+              updated_at = now()
+            from sandbox_lease_holders as holder
+            where lease.account_id = ${locked.accountId}
+              and lease.workspace_id = ${locked.workspaceId}
+              and lease.sandbox_group_id = ${locked.sandboxGroupId}
+              and lease.liveness = 'warm'
+              and lease.lease_epoch = ${locked.expectedEpoch}
+              and lease.instance_id = ${locked.expectedInstanceId}
+              and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
+              and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
+              and lease.workspace_generation < 2147483647
+              and holder.lease_id = lease.id
+              and holder.account_id = ${locked.accountId}
+              and holder.workspace_id = ${locked.workspaceId}
+              and holder.kind = ${locked.holderKind}
+              and holder.holder_id = ${locked.holderId}
+              and holder.subject_id = ${locked.sessionId}
+            returning lease.id, lease.backend, lease.workspace_generation
+          )
+          insert into sandbox_workspace_mutation_admissions (
+            account_id, workspace_id, lease_id, sandbox_group_id, session_id,
+            actor_kind, actor_id, turn_id, attempt_id, execution_generation,
+            holder_kind, holder_id, lease_epoch, provider_backend,
+            provider_instance_id, route_kind, route_target_id, route_epoch,
+            workspace_generation, operation
+          )
+          select
+            ${locked.accountId}, ${locked.workspaceId}, advanced.id,
+            ${locked.sandboxGroupId}, ${locked.sessionId}, ${locked.actorKind},
+            ${locked.actorId}, ${locked.turnId}, ${locked.attemptId},
+            ${locked.executionGeneration}, ${locked.holderKind}, ${locked.holderId},
+            ${locked.expectedEpoch}, advanced.backend, ${locked.expectedInstanceId},
+            ${locked.routeKind}, ${locked.routeTargetId}, ${locked.routeEpoch},
+            advanced.workspace_generation, ${operation}
+          from advanced
+          returning id, lease_id, sandbox_group_id, session_id, actor_kind,
+            actor_id, holder_kind, holder_id, lease_epoch, provider_backend,
+            provider_instance_id, route_kind, route_target_id, route_epoch,
+            workspace_generation
+        `);
+        const row = rows[0];
+        if (!row) {
+          const current = await tx.execute<{
+            workspace_generation: number | string;
+            lease_current: boolean;
+            holder_current: boolean;
+          }>(sql`
+            select lease.workspace_generation,
+              (
+                lease.account_id = ${locked.accountId}
+                and lease.liveness = 'warm'
+                and lease.lease_epoch = ${locked.expectedEpoch}
+                and lease.instance_id = ${locked.expectedInstanceId}
+                and (${locked.expectedLeaseId}::uuid is null or lease.id = ${locked.expectedLeaseId}::uuid)
+                and (${locked.expectedBackend}::text is null or lease.backend = ${locked.expectedBackend}::text)
+              ) as lease_current,
+              exists (
+                select 1 from sandbox_lease_holders as holder
+                where holder.lease_id = lease.id
+                  and holder.account_id = ${locked.accountId}
+                  and holder.workspace_id = ${locked.workspaceId}
+                  and holder.kind = ${locked.holderKind}
+                  and holder.holder_id = ${locked.holderId}
+                  and holder.subject_id = ${locked.sessionId}
+              ) as holder_current
+            from sandbox_leases as lease
+            where lease.account_id = ${locked.accountId}
+              and lease.workspace_id = ${locked.workspaceId}
+              and lease.sandbox_group_id = ${locked.sandboxGroupId}
+            limit 1
+          `);
+          if (Number(current[0]?.workspace_generation) >= 2147483647) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "generation_exhausted",
+              "Workspace mutation generation is exhausted",
+            );
+          }
+          if (current[0]?.lease_current && !current[0].holder_current) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "holder_fenced",
+              "Workspace mutation rejected because the exact lease holder is absent",
+            );
+          }
+          throw new SandboxWorkspaceMutationFencedError(
+            "lease_fenced",
+            "Workspace mutation rejected by lease epoch/provider fence",
+          );
+        }
+        return mapWorkspaceMutationAdmission(row);
+      }),
+  );
 }
 
 /**
@@ -20245,144 +20758,351 @@ export async function advanceWorkspaceGeneration(
     expectedEpoch: number;
     expectedInstanceId: string;
     operation: string;
+    /** Active-routed mutations bind to the exact session pointer. Omitted means
+     * an intentional home-provider write outside the routing surface. */
+    routeKind?: "home" | "active";
+    routeTargetId?: string | null;
+    routeEpoch?: number;
   },
 ): Promise<SandboxWorkspaceMutationAdmission> {
-  const operation = normalizeWorkspaceMutationOperation(input.operation);
-  return await withRlsContext(
+  const routeKind = input.routeKind ?? "home";
+  return await advanceWorkspaceGenerationForAuthority(
     db,
-    { accountId: input.accountId, workspaceId: input.workspaceId },
+    {
+      kind: "turn",
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      holderId: input.holderId,
+      sandboxGroupId: input.sandboxGroupId,
+      expectedEpoch: input.expectedEpoch,
+      expectedInstanceId: input.expectedInstanceId,
+      routeKind,
+      routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
+      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+    },
+    input.operation,
+  );
+}
+
+/** Admit an API/direct mutation under an exact request holder and active route.
+ * Direct actors intentionally have no turn identity and can never inherit the
+ * attempt-quiescence archive fallback. */
+export async function advanceWorkspaceGenerationForDirectRequest(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+    holderId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    routeTargetId: string | null;
+    routeEpoch: number;
+    operation: string;
+  },
+): Promise<SandboxWorkspaceMutationAdmission> {
+  return await advanceWorkspaceGenerationForAuthority(
+    db,
+    { kind: "direct", routeKind: "active", ...input },
+    input.operation,
+  );
+}
+
+/** Admit one model/user-visible stdin write for an exact retained process. The
+ * process's original provider and route are authoritative even if the session's
+ * active pointer has since moved. */
+export async function advanceWorkspaceGenerationForRetainedProcess(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    operation: string;
+  },
+): Promise<SandboxWorkspaceMutationAdmission> {
+  return await advanceWorkspaceGenerationForAuthority(
+    db,
+    { kind: "process", ...input },
+    input.operation,
+  );
+}
+
+type AdmissionIdentityRow = {
+  id: string;
+  lease_id: string;
+  sandbox_group_id: string;
+  session_id: string;
+  actor_kind: "turn" | "direct" | "process";
+  actor_id: string;
+  turn_id: string | null;
+  attempt_id: string | null;
+  execution_generation: number | string | null;
+  holder_kind: "turn" | "direct" | "process";
+  holder_id: string;
+  lease_epoch: number | string;
+  provider_backend: string;
+  provider_instance_id: string;
+  route_kind: "home" | "active";
+  route_target_id: string | null;
+  route_epoch: number | string;
+  workspace_generation: number | string;
+  operation: string;
+  provider_outcome: "resolved" | "rejected" | "retained" | null;
+  settled_at: Date | string | null;
+} & Record<string, unknown>;
+
+async function selectExactAdmissionForUpdate(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    admissionId: string;
+    actorKind: "turn" | "direct" | "process";
+    actorId: string;
+    sessionId: string;
+    admittedWorkspaceGeneration: number;
+    operation: string;
+  },
+): Promise<AdmissionIdentityRow | null> {
+  const rows = await tx.execute<AdmissionIdentityRow>(sql`
+    select * from sandbox_workspace_mutation_admissions
+    where id = ${input.admissionId}
+      and account_id = ${input.accountId}
+      and workspace_id = ${input.workspaceId}
+      and session_id = ${input.sessionId}
+      and actor_kind = ${input.actorKind}
+      and actor_id = ${input.actorId}
+      and workspace_generation = ${input.admittedWorkspaceGeneration}
+      and operation = ${input.operation}
+    for update
+  `);
+  return rows[0] ?? null;
+}
+
+function admissionMatchesAuthority(
+  admission: AdmissionIdentityRow,
+  authority: LockedWorkspaceMutationAuthority,
+): boolean {
+  return (
+    admission.lease_id === (authority.expectedLeaseId ?? admission.lease_id) &&
+    admission.sandbox_group_id === authority.sandboxGroupId &&
+    admission.session_id === authority.sessionId &&
+    admission.actor_kind === authority.actorKind &&
+    admission.actor_id === authority.actorId &&
+    admission.turn_id === authority.turnId &&
+    admission.attempt_id === authority.attemptId &&
+    (admission.execution_generation === null
+      ? authority.executionGeneration === null
+      : Number(admission.execution_generation) === authority.executionGeneration) &&
+    admission.holder_kind === authority.holderKind &&
+    admission.holder_id === authority.holderId &&
+    Number(admission.lease_epoch) === authority.expectedEpoch &&
+    admission.provider_instance_id === authority.expectedInstanceId &&
+    (authority.expectedBackend === null ||
+      admission.provider_backend === authority.expectedBackend) &&
+    admission.route_kind === authority.routeKind &&
+    admission.route_target_id === authority.routeTargetId &&
+    Number(admission.route_epoch) === authority.routeEpoch
+  );
+}
+
+function admissionMatchesSnapshot(
+  admission: AdmissionIdentityRow,
+  snapshot: SandboxWorkspaceMutationAdmission,
+): boolean {
+  return (
+    admission.id === snapshot.id &&
+    admission.lease_id === snapshot.leaseId &&
+    admission.sandbox_group_id === snapshot.sandboxGroupId &&
+    admission.session_id === snapshot.sessionId &&
+    admission.actor_kind === snapshot.actorKind &&
+    admission.actor_id === snapshot.actorId &&
+    admission.holder_kind === snapshot.holderKind &&
+    admission.holder_id === snapshot.holderId &&
+    Number(admission.lease_epoch) === snapshot.leaseEpoch &&
+    admission.provider_backend === snapshot.providerBackend &&
+    admission.provider_instance_id === snapshot.providerInstanceId &&
+    admission.route_kind === snapshot.routeKind &&
+    admission.route_target_id === snapshot.routeTargetId &&
+    Number(admission.route_epoch) === snapshot.routeEpoch &&
+    Number(admission.workspace_generation) === snapshot.workspaceGeneration
+  );
+}
+
+function admissionSnapshotMatchesAuthorityInput(
+  admission: SandboxWorkspaceMutationAdmission,
+  authority: WorkspaceMutationAuthority,
+): boolean {
+  if (admission.sessionId !== authority.sessionId) return false;
+  if (authority.kind === "process") {
+    return admission.actorKind === "process" && admission.actorId === authority.processId;
+  }
+  if (
+    admission.sandboxGroupId !== authority.sandboxGroupId ||
+    admission.leaseEpoch !== authority.expectedEpoch ||
+    admission.providerInstanceId !== authority.expectedInstanceId ||
+    admission.holderId !== authority.holderId
+  ) {
+    return false;
+  }
+  if (authority.kind === "direct") {
+    return (
+      admission.actorKind === "direct" &&
+      admission.actorId === authority.requestId &&
+      admission.holderKind === "direct" &&
+      admission.routeKind === "active" &&
+      admission.routeTargetId === authority.routeTargetId &&
+      admission.routeEpoch === authority.routeEpoch
+    );
+  }
+  const routeKind = authority.routeKind;
+  return (
+    admission.actorKind === "turn" &&
+    admission.actorId === authority.attemptId &&
+    admission.holderKind === "turn" &&
+    admission.routeKind === routeKind &&
+    admission.routeTargetId === (routeKind === "home" ? null : authority.routeTargetId) &&
+    (authority.routeEpoch === undefined || admission.routeEpoch === authority.routeEpoch)
+  );
+}
+
+async function verifyResolvedAdmissionAuthority(
+  tx: Database,
+  authority: LockedWorkspaceMutationAuthority,
+  admission: AdmissionIdentityRow,
+): Promise<SandboxWorkspaceMutationSettlementResult> {
+  if (!admissionMatchesAuthority(admission, authority)) {
+    return {
+      failure: "admission_fenced",
+      detail: "Workspace mutation settlement did not match its exact durable admission",
+    };
+  }
+  if (
+    admission.route_kind === "active" &&
+    authority.actorKind !== "process" &&
+    (authority.session.activeSandboxId !== admission.route_target_id ||
+      authority.session.activeEpoch !== Number(admission.route_epoch))
+  ) {
+    return {
+      failure: "route_fenced",
+      detail: "Workspace mutation output rejected because its active route moved",
+    };
+  }
+  const [identity] = await tx.execute<{
+    lease_current: boolean;
+    holder_current: boolean;
+  }>(sql`
+    select
+      (
+        lease.account_id = ${authority.accountId}
+        and lease.workspace_id = ${authority.workspaceId}
+        and lease.sandbox_group_id = ${authority.sandboxGroupId}
+        and lease.liveness = 'warm'
+        and lease.lease_epoch = ${authority.expectedEpoch}
+        and lease.backend = ${admission.provider_backend}
+        and lease.instance_id = ${authority.expectedInstanceId}
+        and lease.workspace_generation >= ${Number(admission.workspace_generation)}
+      ) as lease_current,
+      exists (
+        select 1 from sandbox_lease_holders as holder
+        where holder.lease_id = lease.id
+          and holder.account_id = ${authority.accountId}
+          and holder.workspace_id = ${authority.workspaceId}
+          and holder.kind = ${authority.holderKind}
+          and holder.holder_id = ${authority.holderId}
+          and holder.subject_id = ${authority.sessionId}
+      ) as holder_current
+    from sandbox_leases as lease
+    where lease.id = ${admission.lease_id}
+    for share
+  `);
+  if (!identity?.lease_current) {
+    return {
+      failure: "lease_fenced",
+      detail: "Workspace mutation output rejected by lease epoch/provider fence",
+    };
+  }
+  if (!identity.holder_current) {
+    return {
+      failure: "holder_fenced",
+      detail: "Workspace mutation output rejected because the exact holder is absent",
+    };
+  }
+  return { failure: null };
+}
+
+async function verifyWorkspaceMutationSettlementForAuthority(
+  db: Database,
+  authorityInput: WorkspaceMutationAuthority,
+  input: {
+    admission: SandboxWorkspaceMutationAdmission;
+    operation: string;
+    outcome: SandboxWorkspaceMutationProviderOutcome;
+  },
+): Promise<void> {
+  const operation = normalizeWorkspaceMutationOperation(input.operation);
+  const settlement: SandboxWorkspaceMutationSettlementResult = await withRlsContext(
+    db,
+    { accountId: authorityInput.accountId, workspaceId: authorityInput.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const attempt = await lockTurnAttemptWriteFenceTx(tx, {
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          turnId: input.turnId,
-          executionGeneration: input.executionGeneration,
-          attemptId: input.attemptId,
+        // Resolved output requires live authority. A provider rejection has no
+        // output to accept, but still settles the exact matching admission.
+        const authority =
+          input.outcome === "resolved"
+            ? await lockWorkspaceMutationAuthorityTx(tx, authorityInput)
+            : null;
+        const actorKind = authorityInput.kind;
+        const actorId =
+          authorityInput.kind === "turn"
+            ? authorityInput.attemptId
+            : authorityInput.kind === "direct"
+              ? authorityInput.requestId
+              : authorityInput.processId;
+        const admission = await selectExactAdmissionForUpdate(tx, {
+          accountId: authorityInput.accountId,
+          workspaceId: authorityInput.workspaceId,
+          admissionId: input.admission.id,
+          actorKind,
+          actorId,
+          sessionId: authorityInput.sessionId,
+          admittedWorkspaceGeneration: input.admission.workspaceGeneration,
+          operation,
         });
-        if (!attempt.allowed) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "attempt_fenced",
-            `Workspace mutation rejected by turn-attempt fence (${attempt.reason})`,
-          );
+        if (
+          !admission ||
+          !admissionMatchesSnapshot(admission, input.admission) ||
+          !admissionSnapshotMatchesAuthorityInput(input.admission, authorityInput) ||
+          admission.provider_outcome === "retained" ||
+          (admission.provider_outcome && admission.provider_outcome !== input.outcome)
+        ) {
+          return {
+            failure: "admission_fenced" as const,
+            detail: "Workspace mutation settlement did not match its exact durable admission",
+          };
         }
-        if (attempt.session.sandboxGroupId !== input.sandboxGroupId) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "attempt_fenced",
-            "Workspace mutation rejected because the turn session does not own the sandbox group",
-          );
-        }
-        const rows = await tx.execute<{
-          id: string;
-          workspace_generation: number | string;
-        }>(sql`
-          with advanced as (
-            update sandbox_leases as lease set
-              workspace_generation = lease.workspace_generation + 1,
-              updated_at = now()
-            from sandbox_lease_holders as holder
-            where lease.account_id = ${input.accountId}
-              and lease.workspace_id = ${input.workspaceId}
-              and lease.sandbox_group_id = ${input.sandboxGroupId}
-              and lease.liveness = 'warm'
-              and lease.lease_epoch = ${input.expectedEpoch}
-              and lease.instance_id = ${input.expectedInstanceId}
-              and lease.workspace_generation < 2147483647
-              and holder.lease_id = lease.id
-              and holder.account_id = ${input.accountId}
-              and holder.workspace_id = ${input.workspaceId}
-              and holder.kind = 'turn'
-              and holder.holder_id = ${input.holderId}
-              and holder.subject_id = ${input.sessionId}
-            returning lease.id, lease.workspace_generation
-          )
-          insert into sandbox_workspace_mutation_admissions (
-            account_id,
-            workspace_id,
-            lease_id,
-            sandbox_group_id,
-            session_id,
-            turn_id,
-            attempt_id,
-            execution_generation,
-            holder_id,
-            lease_epoch,
-            provider_instance_id,
-            workspace_generation,
-            operation
-          )
-          select
-            ${input.accountId},
-            ${input.workspaceId},
-            advanced.id,
-            ${input.sandboxGroupId},
-            ${input.sessionId},
-            ${input.turnId},
-            ${input.attemptId},
-            ${input.executionGeneration},
-            ${input.holderId},
-            ${input.expectedEpoch},
-            ${input.expectedInstanceId},
-            advanced.workspace_generation,
-            ${operation}
-          from advanced
-          returning id, workspace_generation
-        `);
-        const row = rows[0];
-        if (!row) {
-          const current = await tx.execute<{
-            workspace_generation: number | string;
-            lease_current: boolean;
-            holder_current: boolean;
-          }>(sql`
-            select
-              lease.workspace_generation,
-              (
-                lease.account_id = ${input.accountId}
-                and lease.liveness = 'warm'
-                and lease.lease_epoch = ${input.expectedEpoch}
-                and lease.instance_id = ${input.expectedInstanceId}
-              ) as lease_current,
-              exists (
-                select 1
-                from sandbox_lease_holders as holder
-                where holder.lease_id = lease.id
-                  and holder.account_id = ${input.accountId}
-                  and holder.workspace_id = ${input.workspaceId}
-                  and holder.kind = 'turn'
-                  and holder.holder_id = ${input.holderId}
-                  and holder.subject_id = ${input.sessionId}
-              ) as holder_current
-            from sandbox_leases as lease
-            where lease.account_id = ${input.accountId}
-              and lease.workspace_id = ${input.workspaceId}
-              and lease.sandbox_group_id = ${input.sandboxGroupId}
-            limit 1
+        if (!admission.settled_at) {
+          await tx.execute(sql`
+            update sandbox_workspace_mutation_admissions set
+              provider_outcome = ${input.outcome}, settled_at = now()
+            where id = ${input.admission.id} and settled_at is null
           `);
-          if (Number(current[0]?.workspace_generation) >= 2147483647) {
-            throw new SandboxWorkspaceMutationFencedError(
-              "generation_exhausted",
-              "Workspace mutation generation is exhausted",
-            );
-          }
-          if (current[0]?.lease_current && !current[0].holder_current) {
-            throw new SandboxWorkspaceMutationFencedError(
-              "holder_fenced",
-              "Workspace mutation rejected because the exact turn-attempt lease holder is absent",
-            );
-          }
-          throw new SandboxWorkspaceMutationFencedError(
-            "lease_fenced",
-            "Workspace mutation rejected by lease epoch/provider fence",
-          );
         }
-        return {
-          id: row.id,
-          workspaceGeneration: Number(row.workspace_generation),
-        };
+        if (input.outcome === "rejected") return { failure: null };
+        return await verifyResolvedAdmissionAuthority(tx, authority!, admission);
       }),
   );
+  if (settlement.failure !== null) {
+    throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
+  }
 }
 
 /** Physically settle one exact provider mutation admission after its promise
@@ -20405,138 +21125,441 @@ export async function verifyWorkspaceMutationSettlement(
     sandboxGroupId: string;
     expectedEpoch: number;
     expectedInstanceId: string;
-    admissionId: string;
-    admittedWorkspaceGeneration: number;
+    admission: SandboxWorkspaceMutationAdmission;
+    operation: string;
+    outcome: SandboxWorkspaceMutationProviderOutcome;
+    routeKind?: "home" | "active";
+    routeTargetId?: string | null;
+    routeEpoch?: number;
+  },
+): Promise<void> {
+  const routeKind = input.routeKind ?? "home";
+  await verifyWorkspaceMutationSettlementForAuthority(
+    db,
+    {
+      kind: "turn",
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      executionGeneration: input.executionGeneration,
+      attemptId: input.attemptId,
+      holderId: input.holderId,
+      sandboxGroupId: input.sandboxGroupId,
+      expectedEpoch: input.expectedEpoch,
+      expectedInstanceId: input.expectedInstanceId,
+      routeKind,
+      routeTargetId: routeKind === "home" ? null : (input.routeTargetId ?? null),
+      ...(input.routeEpoch === undefined ? {} : { routeEpoch: input.routeEpoch }),
+    },
+    input,
+  );
+}
+
+export async function verifyDirectWorkspaceMutationSettlement(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    requestId: string;
+    holderId: string;
+    sandboxGroupId: string;
+    expectedEpoch: number;
+    expectedInstanceId: string;
+    routeTargetId: string | null;
+    routeEpoch: number;
+    admission: SandboxWorkspaceMutationAdmission;
     operation: string;
     outcome: SandboxWorkspaceMutationProviderOutcome;
   },
 ): Promise<void> {
+  await verifyWorkspaceMutationSettlementForAuthority(
+    db,
+    { kind: "direct", routeKind: "active", ...input },
+    input,
+  );
+}
+
+export async function verifyRetainedProcessMutationSettlement(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    admission: SandboxWorkspaceMutationAdmission;
+    operation: string;
+    outcome: SandboxWorkspaceMutationProviderOutcome;
+  },
+): Promise<void> {
+  await verifyWorkspaceMutationSettlementForAuthority(db, { kind: "process", ...input }, input);
+}
+
+/** Promote one yielded provider exec into durable process authority. The parent
+ * admission stays unsettled (`retained`) and a process holder is inserted in the
+ * same transaction, so ordinary request/turn cleanup cannot open archive capture. */
+export async function retainWorkspaceMutationProcess(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    providerSessionId: number;
+    admissionId: string;
+    admittedWorkspaceGeneration: number;
+    operation: string;
+    owner:
+      | {
+          kind: "turn";
+          turnId: string;
+          executionGeneration: number;
+          attemptId: string;
+          holderId: string;
+          sandboxGroupId: string;
+          expectedEpoch: number;
+          expectedInstanceId: string;
+          routeKind?: "home" | "active";
+          routeTargetId?: string | null;
+          routeEpoch?: number;
+        }
+      | {
+          kind: "direct";
+          requestId: string;
+          holderId: string;
+          sandboxGroupId: string;
+          expectedEpoch: number;
+          expectedInstanceId: string;
+          routeTargetId: string | null;
+          routeEpoch: number;
+        };
+  },
+): Promise<SandboxRetainedProcess> {
+  if (!Number.isSafeInteger(input.providerSessionId) || input.providerSessionId < 0) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained provider session id must be a non-negative safe integer",
+    );
+  }
   const operation = normalizeWorkspaceMutationOperation(input.operation);
-  const settlement: SandboxWorkspaceMutationSettlementResult = await withRlsContext(
+  const authorityInput: TurnWorkspaceMutationAuthority | DirectWorkspaceMutationAuthority =
+    input.owner.kind === "turn"
+      ? {
+          kind: "turn",
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: input.owner.turnId,
+          executionGeneration: input.owner.executionGeneration,
+          attemptId: input.owner.attemptId,
+          holderId: input.owner.holderId,
+          sandboxGroupId: input.owner.sandboxGroupId,
+          expectedEpoch: input.owner.expectedEpoch,
+          expectedInstanceId: input.owner.expectedInstanceId,
+          routeKind: input.owner.routeKind ?? "home",
+          routeTargetId:
+            (input.owner.routeKind ?? "home") === "home"
+              ? null
+              : (input.owner.routeTargetId ?? null),
+          ...(input.owner.routeEpoch === undefined ? {} : { routeEpoch: input.owner.routeEpoch }),
+        }
+      : {
+          kind: "direct",
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          requestId: input.owner.requestId,
+          holderId: input.owner.holderId,
+          sandboxGroupId: input.owner.sandboxGroupId,
+          expectedEpoch: input.owner.expectedEpoch,
+          expectedInstanceId: input.owner.expectedInstanceId,
+          routeKind: "active",
+          routeTargetId: input.owner.routeTargetId,
+          routeEpoch: input.owner.routeEpoch,
+        };
+  return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        // A resolved provider result needs the normal output-acceptance fence.
-        // Acquire it first to preserve the canonical control/workspace/session/
-        // turn/attempt lock order. A rejected promise has no output to accept.
-        const attempt =
-          input.outcome === "resolved"
-            ? await lockTurnAttemptWriteFenceTx(tx, {
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: input.turnId,
-                executionGeneration: input.executionGeneration,
-                attemptId: input.attemptId,
-              })
-            : null;
-        const rows = await tx.execute<{
-          id: string;
-          provider_outcome: string | null;
-          settled_at: Date | string | null;
-          lease_id: string;
-        }>(sql`
-          select id, provider_outcome, settled_at, lease_id
-          from sandbox_workspace_mutation_admissions
-          where id = ${input.admissionId}
-            and account_id = ${input.accountId}
-            and workspace_id = ${input.workspaceId}
-            and sandbox_group_id = ${input.sandboxGroupId}
-            and session_id = ${input.sessionId}
-            and turn_id = ${input.turnId}
-            and attempt_id = ${input.attemptId}
-            and execution_generation = ${input.executionGeneration}
-            and holder_id = ${input.holderId}
-            and lease_epoch = ${input.expectedEpoch}
-            and provider_instance_id = ${input.expectedInstanceId}
-            and workspace_generation = ${input.admittedWorkspaceGeneration}
-            and operation = ${operation}
-          for update
+        const authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+        const admission = await selectExactAdmissionForUpdate(tx, {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          admissionId: input.admissionId,
+          actorKind: authority.actorKind,
+          actorId: authority.actorId,
+          sessionId: input.sessionId,
+          admittedWorkspaceGeneration: input.admittedWorkspaceGeneration,
+          operation,
+        });
+        if (!admission || !admissionMatchesAuthority(admission, authority)) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "admission_fenced",
+            "Retained process did not match its exact parent admission",
+          );
+        }
+        const [existing] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(eq(schema.sandboxRetainedProcesses.parentAdmissionId, input.admissionId))
+          .limit(1);
+        if (existing) {
+          if (
+            existing.id !== input.processId ||
+            existing.providerSessionId !== input.providerSessionId ||
+            existing.state !== "active"
+          ) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "process_fenced",
+              "Parent admission is already bound to a different retained process",
+            );
+          }
+          return mapRetainedProcess(existing);
+        }
+        if (admission.provider_outcome !== null || admission.settled_at !== null) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "admission_fenced",
+            "Settled workspace mutation cannot be promoted to a retained process",
+          );
+        }
+        const identity = await verifyResolvedAdmissionAuthority(tx, authority, admission);
+        if (identity.failure !== null) {
+          throw new SandboxWorkspaceMutationFencedError(identity.failure, identity.detail);
+        }
+        const processHolderId = `process:${input.processId}`;
+        await tx.execute(sql`
+          insert into sandbox_lease_holders
+            (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
+             last_heartbeat_at)
+          values (${input.accountId}, ${input.workspaceId}, ${admission.lease_id},
+            'process', ${processHolderId}, ${input.sessionId}, now())
+          on conflict (lease_id, kind, holder_id) do nothing
         `);
-        const admission = rows[0];
-        if (
-          !admission ||
-          (admission.provider_outcome && admission.provider_outcome !== input.outcome)
-        ) {
-          return {
-            failure: "admission_fenced" as const,
-            detail: "Workspace mutation settlement did not match its exact durable admission",
-          };
-        }
-
-        if (!admission.settled_at) {
-          await tx.execute(sql`
-            update sandbox_workspace_mutation_admissions set
-              provider_outcome = ${input.outcome},
-              settled_at = now()
-            where id = ${input.admissionId}
-              and settled_at is null
-          `);
-        }
-        if (input.outcome === "rejected") {
-          return { failure: null };
-        }
-        if (!attempt?.allowed) {
-          return {
-            failure: "attempt_fenced" as const,
-            detail: `Workspace mutation output rejected by turn-attempt fence (${attempt?.reason ?? "not_found"})`,
-          };
-        }
-        if (attempt.session.sandboxGroupId !== input.sandboxGroupId) {
-          return {
-            failure: "attempt_fenced" as const,
-            detail:
-              "Workspace mutation output rejected because the turn session does not own the sandbox group",
-          };
-        }
-        const [identity] = await tx.execute<{
-          lease_current: boolean;
-          holder_current: boolean;
-        }>(sql`
-          select
-            (
-              lease.account_id = ${input.accountId}
-              and lease.workspace_id = ${input.workspaceId}
-              and lease.sandbox_group_id = ${input.sandboxGroupId}
-              and lease.liveness = 'warm'
-              and lease.lease_epoch = ${input.expectedEpoch}
-              and lease.instance_id = ${input.expectedInstanceId}
-              and lease.workspace_generation >= ${input.admittedWorkspaceGeneration}
-            ) as lease_current,
-            exists (
-              select 1
-              from sandbox_lease_holders as holder
-              where holder.lease_id = lease.id
-                and holder.account_id = ${input.accountId}
-                and holder.workspace_id = ${input.workspaceId}
-                and holder.kind = 'turn'
-                and holder.holder_id = ${input.holderId}
-                and holder.subject_id = ${input.sessionId}
-            ) as holder_current
-          from sandbox_leases as lease
+        const [created] = await tx
+          .insert(schema.sandboxRetainedProcesses)
+          .values({
+            id: input.processId,
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            sessionId: input.sessionId,
+            leaseId: admission.lease_id,
+            sandboxGroupId: admission.sandbox_group_id,
+            parentAdmissionId: admission.id,
+            holderId: processHolderId,
+            ownerActorKind: authority.actorKind as "turn" | "direct",
+            ownerActorId: authority.actorId,
+            ownerTurnId: authority.turnId,
+            ownerAttemptId: authority.attemptId,
+            ownerExecutionGeneration: authority.executionGeneration,
+            leaseEpoch: Number(admission.lease_epoch),
+            providerBackend: admission.provider_backend,
+            providerInstanceId: admission.provider_instance_id,
+            routeKind: admission.route_kind,
+            routeTargetId: admission.route_target_id,
+            routeEpoch: Number(admission.route_epoch),
+            providerSessionId: input.providerSessionId,
+            state: "active",
+          })
+          .returning();
+        await tx.execute(sql`
+          update sandbox_workspace_mutation_admissions set provider_outcome = 'retained'
+          where id = ${admission.id} and provider_outcome is null and settled_at is null
+        `);
+        await tx.execute(sql`
+          update sandbox_leases as lease set
+            refcount = counts.total,
+            turn_holders = counts.turns,
+            viewer_holders = counts.viewers,
+            updated_at = now()
+          from (
+            select count(*)::int as total,
+              count(*) filter (where kind = 'turn')::int as turns,
+              count(*) filter (where kind = 'viewer')::int as viewers
+            from sandbox_lease_holders
+            where lease_id = ${admission.lease_id}
+          ) as counts
           where lease.id = ${admission.lease_id}
-          for share
         `);
-        if (!identity?.lease_current) {
-          return {
-            failure: "lease_fenced" as const,
-            detail: "Workspace mutation output rejected by lease epoch/provider fence",
-          };
-        }
-        if (!identity.holder_current) {
-          return {
-            failure: "holder_fenced" as const,
-            detail:
-              "Workspace mutation output rejected because the exact turn-attempt holder is absent",
-          };
-        }
-        return { failure: null };
+        return mapRetainedProcess(created!);
       }),
   );
-  if (settlement.failure !== null) {
-    throw new SandboxWorkspaceMutationFencedError(settlement.failure, settlement.detail);
+}
+
+/** Read one retained process by durable UUID. Callers must use the copied route
+ * identity; a numeric provider session id alone is never sufficient authority. */
+export async function getRetainedProcess(
+  db: Database,
+  input: { workspaceId: string; sessionId: string; processId: string },
+): Promise<SandboxRetainedProcess | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sandboxRetainedProcesses)
+      .where(
+        and(
+          eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+          eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+          eq(schema.sandboxRetainedProcesses.id, input.processId),
+        ),
+      )
+      .limit(1);
+    return row ? mapRetainedProcess(row) : null;
+  });
+}
+
+/** Settle an exact retained process only after exit or definitive loss proof.
+ * The process row, parent admission, non-TTL holder, and lease count transition
+ * commit atomically. Duplicate identical proof is idempotent; conflicting proof
+ * fails closed. */
+export async function settleRetainedProcess(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    outcome: "exited" | "lost";
+    exitCode?: number | null;
+    reason: string;
+    idleGraceMs: number;
+  },
+): Promise<{ settled: boolean; process: SandboxRetainedProcess }> {
+  const reason = input.reason.trim().slice(0, 512);
+  if (reason.length === 0) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process settlement requires a reason",
+    );
   }
+  const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
+  if (exitCode !== null && !Number.isSafeInteger(exitCode)) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process exit code must be a safe integer or null",
+    );
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        await lockWorkspaceMutationSessionTx(tx, input.workspaceId, input.sessionId);
+        const [process] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+              eq(schema.sandboxRetainedProcesses.id, input.processId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!process) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process settlement did not match a durable process",
+          );
+        }
+        if (process.state !== "active") {
+          if (
+            process.state !== input.outcome ||
+            process.exitCode !== exitCode ||
+            process.settlementReason !== reason
+          ) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "process_fenced",
+              "Retained process already carries different terminal proof",
+            );
+          }
+          return { settled: false, process: mapRetainedProcess(process) };
+        }
+        const admissions = await tx.execute<AdmissionIdentityRow>(sql`
+          select * from sandbox_workspace_mutation_admissions
+          where id = ${process.parentAdmissionId}
+            and account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and session_id = ${input.sessionId}
+            and lease_id = ${process.leaseId}
+            and provider_outcome = 'retained'
+            and settled_at is null
+          for update
+        `);
+        if (!admissions[0]) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "admission_fenced",
+            "Retained process parent admission is not open",
+          );
+        }
+        const [updated] = await tx
+          .update(schema.sandboxRetainedProcesses)
+          .set({
+            state: input.outcome,
+            exitCode,
+            settlementReason: reason,
+            settledAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.id, process.id),
+              eq(schema.sandboxRetainedProcesses.state, "active"),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process changed while its row was locked",
+          );
+        }
+        await tx.execute(sql`
+          update sandbox_workspace_mutation_admissions set
+            provider_outcome = ${input.outcome === "exited" ? "resolved" : "rejected"},
+            settled_at = now()
+          where id = ${process.parentAdmissionId}
+            and provider_outcome = 'retained' and settled_at is null
+        `);
+        await tx.execute(sql`
+          delete from sandbox_lease_holders
+          where lease_id = ${process.leaseId}
+            and kind = 'process' and holder_id = ${process.holderId}
+        `);
+        const [counts] = await tx.execute<{
+          total: number;
+          turns: number;
+          viewers: number;
+        }>(sql`
+          select count(*)::int as total,
+            count(*) filter (where kind = 'turn')::int as turns,
+            count(*) filter (where kind = 'viewer')::int as viewers
+          from sandbox_lease_holders where lease_id = ${process.leaseId}
+        `);
+        const enterDraining = (counts?.total ?? 0) === 0;
+        await tx.execute(sql`
+          update sandbox_leases set
+            refcount = ${counts?.total ?? 0},
+            turn_holders = ${counts?.turns ?? 0},
+            viewer_holders = ${counts?.viewers ?? 0},
+            ${
+              enterDraining
+                ? sql`liveness = case when liveness = 'warm' then 'draining' else liveness end,
+                      expires_at = case when liveness = 'warm'
+                        then now() + (${String(input.idleGraceMs)} || ' milliseconds')::interval
+                        else expires_at end,`
+                : sql``
+            }
+            updated_at = now()
+          where id = ${process.leaseId}
+        `);
+        return { settled: true, process: mapRetainedProcess(updated) };
+      }),
+  );
 }
 
 /** Read the exact generation a verified capture must later fold. This is a
@@ -20572,17 +21595,18 @@ export async function readWorkspaceArchiveCapturePreflight(
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
-            inner join session_turn_attempts as attempt
+            left join session_turn_attempts as attempt
               on attempt.account_id = admission.account_id
              and attempt.workspace_id = admission.workspace_id
              and attempt.session_id = admission.session_id
              and attempt.turn_id = admission.turn_id
              and attempt.id = admission.attempt_id
              and attempt.execution_generation = admission.execution_generation
+             and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
               and admission.workspace_generation <= lease.workspace_generation
               and admission.settled_at is null
-              and attempt.quiesced_at is null
+              and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         limit 1
       `);
@@ -20660,17 +21684,18 @@ export async function persistDrainSnapshot(
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
-            inner join session_turn_attempts as attempt
+            left join session_turn_attempts as attempt
               on attempt.account_id = admission.account_id
              and attempt.workspace_id = admission.workspace_id
              and attempt.session_id = admission.session_id
              and attempt.turn_id = admission.turn_id
              and attempt.id = admission.attempt_id
              and attempt.execution_generation = admission.execution_generation
+             and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
-              and attempt.quiesced_at is null
+              and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         for update
       `);
@@ -20862,17 +21887,18 @@ async function foldWorkspaceArchiveOntoLease(
       and not exists (
         select 1
         from sandbox_workspace_mutation_admissions as admission
-        inner join session_turn_attempts as attempt
+        left join session_turn_attempts as attempt
           on attempt.account_id = admission.account_id
          and attempt.workspace_id = admission.workspace_id
          and attempt.session_id = admission.session_id
          and attempt.turn_id = admission.turn_id
          and attempt.id = admission.attempt_id
          and attempt.execution_generation = admission.execution_generation
+         and admission.actor_kind = 'turn'
         where admission.lease_id = lease.id
           and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
           and admission.settled_at is null
-          and attempt.quiesced_at is null
+          and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
       )
     returning lease.id
   `);
@@ -21023,17 +22049,18 @@ export async function persistWarmSnapshot(
           and not exists (
             select 1
             from sandbox_workspace_mutation_admissions as admission
-            inner join session_turn_attempts as attempt
+            left join session_turn_attempts as attempt
               on attempt.account_id = admission.account_id
              and attempt.workspace_id = admission.workspace_id
              and attempt.session_id = admission.session_id
              and attempt.turn_id = admission.turn_id
              and attempt.id = admission.attempt_id
              and attempt.execution_generation = admission.execution_generation
+             and admission.actor_kind = 'turn'
             where admission.lease_id = lease.id
               and admission.workspace_generation <= ${input.expectedWorkspaceGeneration}
               and admission.settled_at is null
-              and attempt.quiesced_at is null
+              and (admission.actor_kind <> 'turn' or attempt.quiesced_at is null)
           )
         for update
       `);
