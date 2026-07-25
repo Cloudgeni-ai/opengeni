@@ -54,6 +54,7 @@ async function freshTurn(): Promise<{
   sessionId: string;
   turnId: string;
   attemptId: string;
+  executionGeneration: number;
 }> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
@@ -103,6 +104,7 @@ async function freshTurn(): Promise<{
     sessionId: session.id,
     turnId: turn!.id,
     attemptId,
+    executionGeneration: 1,
   };
 }
 

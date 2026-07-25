@@ -22,6 +22,7 @@ import {
 } from "@opengeni/network";
 export { isPrivateAddress } from "@opengeni/network";
 import { Buffer } from "node:buffer";
+import { isIP } from "node:net";
 import { encryptEnvironmentValue } from "./environment-crypto";
 import {
   loadConnectionCredentialForBroker,

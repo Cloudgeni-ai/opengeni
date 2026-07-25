@@ -538,6 +538,7 @@ describe("buildHostConnectionTokenResolver", () => {
       workspaceId: "ws_1",
       subjectId: "worker:first-party-mcp",
       serverId: "github",
+      destinationUrl: "https://github.com/mcp",
       toolName: "create_pull_request",
       connectionRef: {
         provider: "github",
@@ -599,6 +600,7 @@ describe("buildHostConnectionTokenResolver", () => {
       resolver({
         workspaceId: "ws_1",
         serverId: "github",
+        destinationUrl: "https://github.com/mcp",
         connectionRef: { providerDomain: "github.com" },
       }),
     ).rejects.toBeInstanceOf(HostMcpCredentialScopeError);
@@ -624,6 +626,7 @@ describe("buildHostConnectionTokenResolver", () => {
       resolver({
         workspaceId: "ws_1",
         serverId: "github",
+        destinationUrl: "https://github.com/mcp",
         connectionRef: {
           connectionId: "host-connection-7",
           provider: "github",
@@ -653,6 +656,7 @@ describe("buildHostConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "gitlab",
+      destinationUrl: "https://gitlab.com/mcp",
       connectionRef: { providerDomain: "gitlab.com" },
     });
     expect(result).toEqual({
@@ -683,6 +687,7 @@ describe("buildHostConnectionTokenResolver", () => {
       resolver({
         workspaceId: "ws_1",
         serverId: "gitlab",
+        destinationUrl: "https://gitlab.com/mcp",
         connectionRef: { providerDomain: "gitlab.com" },
       }),
     ).rejects.toThrow("invalid authorizationUrl");
@@ -696,6 +701,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "github",
+      destinationUrl: "https://github.com/mcp",
       connectionRef: {
         connectionId: "github-installation-one",
         provider: "github",
@@ -723,6 +729,7 @@ describe("buildConnectionTokenResolver", () => {
       workspaceId: "ws_1",
       subjectId: "subject-a",
       serverId: "srv_1",
+      destinationUrl: "https://api.example.com/mcp",
       connectionRef: { providerDomain: "api.example.com", kind: "api_key", scopes: [] },
     });
     expect(result).toEqual({
@@ -746,6 +753,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://api.example.com/mcp",
       connectionRef: {
         providerDomain: "api.example.com",
         kind: "api_key",
@@ -803,12 +811,14 @@ describe("buildConnectionTokenResolver", () => {
       resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
         forceRefresh: true,
       }),
       resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2", scopes: ["read"] },
         forceRefresh: true,
       }),
@@ -853,6 +863,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({
@@ -882,6 +893,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({ status: "auth_needed", reason: "refresh_failed" });
@@ -936,7 +948,7 @@ describe("buildConnectionTokenResolver", () => {
         refresh: async (cred, ref) => {
           counts.refresh += 1;
           try {
-            return await refreshOAuthConnectionCredential(cred, ref);
+            return await refreshOAuthConnectionCredential(cred, ref, settings);
           } catch (error) {
             observedError = error;
             throw error;
@@ -947,6 +959,7 @@ describe("buildConnectionTokenResolver", () => {
       const result = await resolver({
         workspaceId: "ws_1",
         serverId: "srv_1",
+        destinationUrl: "https://oauth.example.com/mcp",
         connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
       });
       expect(result).toMatchObject({
@@ -995,6 +1008,7 @@ describe("buildConnectionTokenResolver", () => {
           },
         }),
         { providerDomain: "oauth.example.com", kind: "oauth2" },
+        settings,
       );
       expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
       expect(capturedBody!.get("client_id")).toBe(
@@ -1026,6 +1040,7 @@ describe("buildConnectionTokenResolver", () => {
     const result = await resolver({
       workspaceId: "ws_1",
       serverId: "srv_1",
+      destinationUrl: "https://oauth.example.com/mcp",
       connectionRef: { providerDomain: "oauth.example.com", kind: "oauth2" },
     });
     expect(result).toMatchObject({

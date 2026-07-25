@@ -3872,7 +3872,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         cancellationSignal,
         undefined,
       );
-      );
       const sandboxToolspaceTokenFile = sandboxToolspaceToken
         ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
         : undefined;

@@ -831,6 +831,10 @@ type McpRequestInfo = {
   toolName?: string;
 };
 
+function mcpRequestDestinationUrl(input: string | URL | Request): string {
+  return new URL(input instanceof Request ? input.url : input.toString()).toString();
+}
+
 function connectionBrokerFetch(
   baseFetch: FetchLike,
   input: {
@@ -862,10 +866,12 @@ function connectionBrokerFetch(
     : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
   return async (requestInput, init) => {
     const request = await mcpRequestInfo(requestInput, init);
+    const destinationUrl = mcpRequestDestinationUrl(requestInput);
     const first = await resolveCredential({
       workspaceId: input.grant.workspaceId,
       serverId: input.config.id,
       connectionRef,
+      destinationUrl,
       forceRefresh: false,
       ...(request.toolName ? { toolName: request.toolName } : {}),
       subjectId: input.grant.subjectId,
@@ -882,6 +888,7 @@ function connectionBrokerFetch(
         workspaceId: input.grant.workspaceId,
         serverId: input.config.id,
         connectionRef,
+        destinationUrl,
         forceRefresh: true,
         ...(request.toolName ? { toolName: request.toolName } : {}),
         subjectId: input.grant.subjectId,
@@ -980,8 +987,19 @@ async function authNeededFetchResponse(
   return new Response("Authentication required for MCP server connection", { status: 401 });
 }
 
-async function mcpRequestInfo(_input: string | URL, init?: RequestInit): Promise<McpRequestInfo> {
-  const body = typeof init?.body === "string" ? init.body : "";
+async function mcpRequestInfo(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<McpRequestInfo> {
+  const body =
+    typeof init?.body === "string"
+      ? init.body
+      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
+        ? await input
+            .clone()
+            .text()
+            .catch(() => "")
+        : "";
   if (!body) {
     return {};
   }
@@ -1011,19 +1029,21 @@ async function mcpRequestInfo(_input: string | URL, init?: RequestInit): Promise
 }
 
 function withConnectionHeaders(
-  _input: string | URL,
+  input: string | URL | Request,
   init: RequestInit | undefined,
   authHeaders: Record<string, string>,
 ): RequestInit {
-  const headers = new Headers(init?.headers);
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
   for (const [name, value] of Object.entries(authHeaders)) {
     headers.set(name, value);
   }
   return { ...init, headers };
 }
 
-function fetchInputForAttempt(input: string | URL): string | URL {
-  return input;
+function fetchInputForAttempt(input: string | URL | Request): string | URL | Request {
+  return input instanceof Request ? input.clone() : input;
 }
 
 function isToolspaceAuthNeededError(error: unknown): boolean {

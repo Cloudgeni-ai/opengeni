@@ -306,6 +306,7 @@ describe("canonical queue commands", () => {
             text: "edited prompt with replacement content",
             resources: [],
             tools: [],
+            toolsProvided: false,
             model: "edited-model",
             reasoningEffort: "medium",
           }),

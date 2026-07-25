@@ -121,6 +121,7 @@ describe("provider-neutral host DevOps MCP conformance", () => {
         const result = await resolver({
           workspaceId: "workspace-one",
           serverId: `${binding.provider}-${binding.connectionId}`,
+          destinationUrl: `https://${binding.providerDomain}/mcp`,
           connectionRef: binding,
           forceRefresh,
         });
@@ -195,6 +196,7 @@ describe("provider-neutral host DevOps MCP conformance", () => {
     const unavailable = await resolver({
       workspaceId: "workspace-one",
       serverId: "gitlab-hosted",
+      destinationUrl: "https://gitlab.com/mcp",
       connectionRef: {
         connectionId: "gitlab-hosted-oauth-only",
         provider: "gitlab",
@@ -208,6 +210,7 @@ describe("provider-neutral host DevOps MCP conformance", () => {
     const widened = await resolver({
       workspaceId: "workspace-one",
       serverId: "github-widened",
+      destinationUrl: "https://github.com/mcp",
       connectionRef: {
         connectionId: "github-widened",
         provider: "github",
@@ -227,6 +230,7 @@ describe("provider-neutral host DevOps MCP conformance", () => {
     const stillCompatible = await resolver({
       workspaceId: "workspace-one",
       serverId: "github-compatible",
+      destinationUrl: "https://github.com/mcp",
       connectionRef: compatible,
     });
     expect(stillCompatible).toMatchObject({ status: "ok", connectionId: compatible.connectionId });
