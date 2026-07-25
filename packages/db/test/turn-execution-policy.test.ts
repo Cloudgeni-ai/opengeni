@@ -16,6 +16,7 @@ import {
   createSession,
   createSessionGoal,
   ensureCodexRotationSettings,
+  getCodexCapacityWaitForSession,
   getSessionTurn,
   installOrReadTurnExecutionPolicyForAttempt,
   requestSessionTurnRecovery,
@@ -289,7 +290,7 @@ describe("OPE-12 accepted turn execution policy", () => {
     }
   });
 
-  test("rejects stale attempt and generation fences without installing", async () => {
+  test("rejects missing attempt and stale generation fences without installing", async () => {
     if (!available) return;
     const value = await fixture();
     const claimed = await claim(value);
@@ -304,7 +305,7 @@ describe("OPE-12 accepted turn execution policy", () => {
         attemptId: crypto.randomUUID(),
         policyForAbsent: acceptedPolicy,
       }),
-    ).toEqual({ accepted: false, reason: "attempt_changed" });
+    ).toEqual({ accepted: false, reason: "not_found" });
     expect(
       await installOrReadTurnExecutionPolicyForAttempt(client.db, {
         accountId: value.accountId,
@@ -409,11 +410,14 @@ describe("OPE-12 accepted turn execution policy", () => {
       }),
     ).toMatchObject({ action: "waiting" });
 
-    const waiting = await getSessionTurn(client.db, value.workspaceId, value.turnId);
-    expect(waiting).toMatchObject({ status: "waiting_capacity", activeAttemptId: null });
-    expect(readTurnExecutionPolicyV1(waiting!.metadata)).toEqual({
+    const blockedTurn = await getSessionTurn(client.db, value.workspaceId, value.turnId);
+    expect(blockedTurn).toMatchObject({ status: "failed", activeAttemptId: null });
+    expect(readTurnExecutionPolicyV1(blockedTurn!.metadata)).toEqual({
       kind: "valid",
       policy: acceptedPolicy,
     });
+    expect(
+      await getCodexCapacityWaitForSession(client.db, value.workspaceId, value.sessionId),
+    ).toMatchObject({ status: "waiting", blockedTurnId: value.turnId });
   });
 });

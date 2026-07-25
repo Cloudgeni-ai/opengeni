@@ -1497,6 +1497,7 @@ export async function submitHumanPromptInTransaction(
       .update(schema.sessionTurns)
       .set({
         metadata: {
+          ...turn.metadata,
           delivery: "steer",
           replacedTurnId,
           replacedAttemptId,
