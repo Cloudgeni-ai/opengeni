@@ -157,7 +157,8 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Per-workspace model/provider availability policy (the HARD blocker over
   // which providers/models may serve a turn at all). Absent row reads as
-  // unrestricted {null, null}.
+  // unrestricted {null, null}. No Azure AD credential resolver is wired here,
+  // so bearer/federated definitions intentionally fail closed as not ready.
   app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");

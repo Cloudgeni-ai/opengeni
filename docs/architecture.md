@@ -399,6 +399,16 @@ The **relay** (`opengeni-relay`) is the data-plane edge that carries live pixel 
 
 A thin control-plane Hono app: durable state lives in Postgres, agent turns run in the worker, live fanout rides NATS. `createApp(deps)` (`apps/api/src/app.ts`) is the composition root: middleware chain + every `/v1` router. **The auth/authz boundary is in core** (`packages/core/src/access/index.ts`: `requireAccessGrant`/`requirePermission` + the `resolveAccessContext` chain per `productAccessMode`). Session lifecycle logic lives in `packages/core/src/domain/sessions.ts` (shared by routes **and** the MCP server); this is also where per-session MCP server attach/rotation is permission-gated, encrypted, and reduced to metadata before events publish. Integration connection routes live in `apps/api/src/routes/connections.ts`: CRUD exposes metadata only, manual credential writes encrypt one JSON bundle, and OAuth start/callback delegate to the MCP OAuth client in `apps/api/src/integrations/oauth-client.ts` for discovery, CIMD/DCR registration, signed PKCE state, token exchange, and tools/list verification. Scheduled-task logic lives in `packages/core/src/domain/scheduled-tasks.ts`; usage-limit admission is in `packages/core/src/billing/limits.ts`. `apps/api` routes are HTTP adapters over those core helpers, with Stripe integration still confined to `routes/billing.ts`. SSE semantics are in `http/sse.ts`. The first-party MCP route (`/v1/workspaces/:workspaceId/mcp`) is also the Toolspace gate: a verified `ogd_` bearer with `toolspace:call` plus exact session/turn/attempt/execution-generation authority gets the attempt-selected safe first-party/capability/per-session MCP surface from `apps/api/src/mcp/toolspace.ts`; approval-required tools are denied with an MCP `isError`. The API-direct sandbox seam (`sandbox/access.ts`, `sandbox/channel-a.ts`, `sandbox/viewer.ts`) resumes a box by id **in-process** (no Temporal/worker) for FS/Git/Terminal point ops and viewer attach, importing **only** the agent-loop-free leaf; it injects a NON-OWNED handle and drops it with the `dropEstablishedHandle` no-op (§3.9) so it never kills a resumed box.
 
+The authenticated workspace model catalog projects static definitions through
+four ordered gates: runnable definition → secret-safe credential readiness →
+workspace policy → provider health/entitlement. API-key presence proves only
+configuration; Codex uses its metadata-only connection seam; bearer/federated
+credentials require a fresh typed resolver observation. The current route
+supplies no Azure AD resolver observation, and runtime implements neither
+`DefaultAzureCredential` nor managed-identity token acquisition, so those
+entries fail closed as unselectable without exposing token or identity
+material.
+
 Critical route discipline (canonical: `routes/sessions.ts`):
 
 - `requireAccessGrant` **before** any Zod parse; explicit `HTTPException(400)` on parse failure (never a raw `ZodError` → 500); `HTTPException(409)` on an epoch fence.

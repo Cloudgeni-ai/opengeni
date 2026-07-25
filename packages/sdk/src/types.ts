@@ -1540,6 +1540,7 @@ export type ModelAvailabilityV1 = {
   reason:
     | "missing_credential"
     | "needs_reauth"
+    | "credential_not_ready"
     | "not_entitled"
     | "provider_unhealthy"
     | "policy_blocked"
@@ -1548,7 +1549,21 @@ export type ModelAvailabilityV1 = {
   checkedAt: string | null;
 };
 
+export type ModelCredentialReadinessV1 = {
+  status: "ready" | "not_ready" | "error";
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "prerequisites_missing"
+    | "resolver_error"
+    | "observation_stale"
+    | null;
+  basis: "configuration" | "connection" | "resolver";
+  checkedAt: string | null;
+};
+
 export type WorkspaceModelCatalogModel = ClientModel & {
+  credentialReadiness: ModelCredentialReadinessV1;
   availability: ModelAvailabilityV1;
 };
 

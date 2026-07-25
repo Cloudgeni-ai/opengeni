@@ -14,6 +14,7 @@ import {
   claimSessionWorkForAttempt,
   createDb,
   createSession,
+  createSessionGoal,
   ensureCodexRotationSettings,
   getSessionTurn,
   installOrReadTurnExecutionPolicyForAttempt,
@@ -383,6 +384,13 @@ describe("OPE-12 accepted turn execution policy", () => {
     const value = await fixture();
     const claimed = await claim(value);
     expect(await install(value, claimed)).toMatchObject({ accepted: true, installed: true });
+    const goal = await createSessionGoal(client.db, {
+      accountId: value.accountId,
+      workspaceId: value.workspaceId,
+      sessionId: value.sessionId,
+      text: "Resume after Codex capacity returns",
+      createdBy: "api",
+    });
     await ensureCodexRotationSettings(client.db, value.accountId, value.workspaceId);
 
     expect(
@@ -393,8 +401,8 @@ describe("OPE-12 accepted turn execution policy", () => {
         turnId: value.turnId,
         attemptId: claimed.attemptId,
         workflowId: value.workflowId,
-        goalId: null,
-        goalVersion: null,
+        goalId: goal.id,
+        goalVersion: goal.version,
         earliestResetAt: null,
         resetKind: "bounded_refresh",
         failurePayload: { code: "codex_usage_limit_reached" },

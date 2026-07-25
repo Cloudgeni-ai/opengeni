@@ -28,6 +28,7 @@ import {
   mergeToolRefs,
   McpServerConnectionRef,
   ModelBillingAttributionV1,
+  ModelCredentialReadinessV1,
   ModelCredentialSourceV1,
   OAuthStartRequest,
   OPENGENI_API_CONTRACT_REVISION,
@@ -208,21 +209,21 @@ describe("contracts", () => {
       }),
     ).toThrow();
 
-    expect(turnExecutionPolicyAuditMetadata(turnExecutionPolicy, crypto.randomUUID())).toMatchObject(
-      {
-        requestedModelId: "grok-4.5",
-        effectiveModelId: "xai/grok-4.5",
-        modelSource: "explicit",
-        effectiveReasoningEffort: "high",
-        reasoningSource: "explicit",
-        providerId: "xai",
-        credentialSourceKind: "deployment",
-        credentialSourceMechanism: "api_key",
-        billingOwner: "deployment",
-        billingMetering: "opengeni_credits",
-        definitionVersion: turnExecutionPolicy.definitionVersion,
-      },
-    );
+    expect(
+      turnExecutionPolicyAuditMetadata(turnExecutionPolicy, crypto.randomUUID()),
+    ).toMatchObject({
+      requestedModelId: "grok-4.5",
+      effectiveModelId: "xai/grok-4.5",
+      modelSource: "explicit",
+      effectiveReasoningEffort: "high",
+      reasoningSource: "explicit",
+      providerId: "xai",
+      credentialSourceKind: "deployment",
+      credentialSourceMechanism: "api_key",
+      billingOwner: "deployment",
+      billingMetering: "opengeni_credits",
+      definitionVersion: turnExecutionPolicy.definitionVersion,
+    });
   });
 
   test("models provider-neutral MCP bindings with exact selected repository scope", () => {
@@ -837,6 +838,12 @@ describe("contracts", () => {
       models: [
         {
           ...normalized,
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "configuration",
+            checkedAt: null,
+          },
           availability: {
             status: "unknown",
             selectable: true,
@@ -847,6 +854,71 @@ describe("contracts", () => {
       ],
     });
     expect(catalog.models[0]?.availability.selectable).toBe(true);
+  });
+
+  test("enforces consistent, secret-safe model credential readiness", () => {
+    const ready = {
+      status: "ready",
+      reason: null,
+      basis: "configuration",
+      checkedAt: null,
+    } as const;
+    expect(ModelCredentialReadinessV1.parse(ready)).toEqual(ready);
+    expect(
+      ModelCredentialReadinessV1.parse({
+        status: "not_ready",
+        reason: "needs_reauth",
+        basis: "connection",
+        checkedAt: null,
+      }),
+    ).toEqual({
+      status: "not_ready",
+      reason: "needs_reauth",
+      basis: "connection",
+      checkedAt: null,
+    });
+
+    expect(() =>
+      ModelCredentialReadinessV1.parse({ ...ready, reason: "missing_credential" }),
+    ).toThrow();
+    expect(() => ModelCredentialReadinessV1.parse({ ...ready, status: "not_ready" })).toThrow();
+    expect(() => ModelCredentialReadinessV1.parse({ ...ready, basis: "resolver" })).toThrow();
+    expect(() =>
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        status: "error",
+        reason: "prerequisites_missing",
+        basis: "resolver",
+        checkedAt: new Date().toISOString(),
+      }),
+    ).toThrow();
+    expect(() =>
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        status: "not_ready",
+        reason: "resolver_error",
+        basis: "resolver",
+        checkedAt: new Date().toISOString(),
+      }),
+    ).toThrow();
+    expect(() =>
+      ModelCredentialReadinessV1.parse({
+        ...ready,
+        status: "not_ready",
+        reason: "observation_stale",
+        basis: "resolver",
+      }),
+    ).toThrow();
+
+    const sensitiveMarker = "identity-material-must-not-reflect";
+    const rejected = ModelCredentialReadinessV1.safeParse({
+      ...ready,
+      token: sensitiveMarker,
+    });
+    expect(rejected.success).toBe(false);
+    if (!rejected.success) {
+      expect(JSON.stringify(rejected.error.issues)).not.toContain(sensitiveMarker);
+    }
   });
 
   test("accepts checkout requests that use the caller default account", () => {

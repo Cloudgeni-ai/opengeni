@@ -128,6 +128,7 @@ export type {
   ModelCapabilitiesV1,
   ModelCapabilityStateV1,
   ModelCapabilitySupportV1,
+  ModelCredentialReadinessV1,
   ModelCredentialSourceV1,
   ModelPricingScheduleV1,
   ModelPricingV1,

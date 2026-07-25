@@ -191,12 +191,26 @@ The route requires `workspace:read`, returns `cache-control: private, no-store`,
 and adds availability to each static definition:
 
 ```ts
+type ModelCredentialReadinessV1 = {
+  status: "ready" | "not_ready" | "error";
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "prerequisites_missing"
+    | "resolver_error"
+    | "observation_stale"
+    | null;
+  basis: "configuration" | "connection" | "resolver";
+  checkedAt: string | null;
+};
+
 type ModelAvailabilityV1 = {
   status: "available" | "unavailable" | "degraded" | "unknown";
   selectable: boolean;
   reason:
     | "missing_credential"
     | "needs_reauth"
+    | "credential_not_ready"
     | "not_entitled"
     | "provider_unhealthy"
     | "policy_blocked"
@@ -206,11 +220,30 @@ type ModelAvailabilityV1 = {
 };
 ```
 
-Selectability requires a runnable text definition, credential readiness, and
-an allowing workspace model policy. A ready model with no current typed health
-observation is `unknown` but selectable. Health and entitlement observations
-are consumed as typed inputs owned by their respective subsystems; the catalog
-does not invent them.
+Credential readiness and provider availability are deliberately separate.
+Static API-key presence proves only local configuration readiness; it is not a
+provider-health probe. Codex readiness comes from the existing metadata-only
+workspace connection lookup. Azure AD bearer and future workspace/federated
+credentials require a successful typed resolver observation no more than five
+minutes old. Missing, malformed, error, and stale resolver observations fail
+closed and make the model unselectable. Catalog output never carries a token,
+client or tenant ID, account/subscription identity, credential row ID,
+federation subject/assertion, or raw provider error.
+
+Blocker precedence is deterministic: an unsupported model definition wins,
+then credential readiness, then workspace policy, then provider health or
+entitlement. A ready, policy-allowed model with no current typed provider-health
+observation is `unknown` but selectable. Observation timestamps describe only
+the blocker that is actually returned; static/policy blockers do not borrow a
+provider-health timestamp.
+
+The current API route does not yet wire an Azure credential resolver and the
+runtime has no `DefaultAzureCredential` or managed-identity token acquisition.
+Consequently Azure AD bearer catalog entries fail closed as not ready even when
+deployment configuration contains an explicit bearer token. Implementing and
+wiring authoritative acquisition/refresh/readiness is separate work; catalog
+discovery must not infer it from ambient Azure configuration or skill
+activation.
 
 The SDK method is:
 

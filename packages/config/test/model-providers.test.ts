@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  assertTurnExecutionPolicyMatchesConfigV1,
   calculateModelUsageCostMicros,
   canonicalizeConfiguredModelId,
   configuredAllowedModels,
@@ -13,6 +14,7 @@ import {
   policyProviderIdForModel,
   resolveModelProvider,
   resolveProviderApiKey,
+  resolveTurnExecutionPolicyV1,
   selectModelPricing,
 } from "../src";
 

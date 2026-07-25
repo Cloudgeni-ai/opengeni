@@ -280,6 +280,12 @@ describe("OpenGeniClient access + workspaces", () => {
           provider: "openai",
           providerLabel: "OpenAI",
           api: "responses",
+          credentialReadiness: {
+            status: "ready",
+            reason: null,
+            basis: "configuration",
+            checkedAt: null,
+          },
           availability: {
             status: "unknown",
             selectable: true,
@@ -295,6 +301,7 @@ describe("OpenGeniClient access + workspaces", () => {
     expect(requests[0]!.method).toBe("GET");
     expect(new URL(requests[0]!.url).pathname).toBe(`/v1/workspaces/${WORKSPACE_ID}/model-catalog`);
     expect(result.models[0]?.availability.selectable).toBe(true);
+    expect(result.models[0]?.credentialReadiness.status).toBe("ready");
   });
 });
 

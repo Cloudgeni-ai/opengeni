@@ -7678,6 +7678,59 @@ export const ClientModel = z.object({
 });
 export type ClientModel = z.infer<typeof ClientModel>;
 
+export const ModelCredentialReadinessV1 = z
+  .object({
+    status: z.enum(["ready", "not_ready", "error"]),
+    reason: z
+      .enum([
+        "missing_credential",
+        "needs_reauth",
+        "prerequisites_missing",
+        "resolver_error",
+        "observation_stale",
+      ])
+      .nullable(),
+    basis: z.enum(["configuration", "connection", "resolver"]),
+    checkedAt: z.string().datetime().nullable(),
+  })
+  .strict()
+  .superRefine((readiness, context) => {
+    if ((readiness.status === "ready") !== (readiness.reason === null)) {
+      context.addIssue({
+        code: "custom",
+        path: ["reason"],
+        message: "ready credential state requires no reason; non-ready state requires a reason",
+      });
+    }
+    if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+      context.addIssue({
+        code: "custom",
+        path: ["reason"],
+        message:
+          "credential errors require resolver_error and resolver_error requires error status",
+      });
+    }
+    if (
+      readiness.basis === "resolver" &&
+      readiness.status === "ready" &&
+      readiness.checkedAt === null
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["checkedAt"],
+        message: "resolver readiness requires an observation timestamp",
+      });
+    }
+    if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["checkedAt"],
+        message: "a stale observation requires its observation timestamp",
+      });
+    }
+  });
+export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
+
 export const ModelAvailabilityV1 = z.object({
   status: z.enum(["available", "unavailable", "degraded", "unknown"]),
   selectable: z.boolean(),
@@ -7685,6 +7738,7 @@ export const ModelAvailabilityV1 = z.object({
     .enum([
       "missing_credential",
       "needs_reauth",
+      "credential_not_ready",
       "not_entitled",
       "provider_unhealthy",
       "policy_blocked",
@@ -7696,6 +7750,7 @@ export const ModelAvailabilityV1 = z.object({
 export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
 
 export const WorkspaceModelCatalogModel = ClientModel.extend({
+  credentialReadiness: ModelCredentialReadinessV1,
   availability: ModelAvailabilityV1,
 });
 export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
