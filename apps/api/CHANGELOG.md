@@ -1,5 +1,36 @@
 # @opengeni/api-router
 
+## 0.9.0
+
+### Minor Changes
+
+- 0d60720: Add capability-first session tool policies with omission-as-discovery defaults,
+  explicit per-turn narrowing and child inheritance, secret-safe effective-policy
+  projections, stable lazy `tool_search` catalogs, and matching API, SDK, React,
+  worker, embedding, and audit contracts.
+
+  Harden credential-bearing MCP and OAuth traffic with destination-bound
+  credentials, single-resolution DNS-pinned transport, bounded catalogs, schemas,
+  results, request and response bodies, and independently validated manual
+  redirects. Extend renewable, session-bound Toolspace access to connected
+  machines while dynamically fencing every call to the session's active attempt.
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/config@0.6.9
+  - @opengeni/contracts@0.18.0
+  - @opengeni/core@0.10.0
+  - @opengeni/db@0.10.7
+  - @opengeni/network@0.1.1
+  - @opengeni/runtime@0.13.0
+  - @opengeni/codex@0.2.7
+  - @opengeni/documents@0.2.28
+  - @opengeni/github@0.3.10
+  - @opengeni/storage@0.2.22
+  - @opengeni/events@0.3.19
+
 ## 0.8.7
 
 ### Patch Changes
