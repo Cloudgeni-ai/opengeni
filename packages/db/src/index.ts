@@ -901,7 +901,7 @@ export async function setRlsContext(db: Database, context: RlsContext): Promise<
   await db.execute(
     sql`select set_config('opengeni.workspace_id', ${context.workspaceId ?? ""}, true)`,
   );
-  await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v1', '1', true)`);
+  await db.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
 }
 
 export async function withRlsContext<T>(
@@ -19834,7 +19834,7 @@ export async function reapStaleLeaseHoldersGlobal(
   const runCurrentReaper = async () =>
     await db.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
-      await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v1', '1', true)`);
+      await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
       return await rawRows<{
         workspace_id: string;
         sandbox_group_id: string;
@@ -19851,7 +19851,7 @@ export async function reapStaleLeaseHoldersGlobal(
   const runLegacyReaper = async () =>
     await db.transaction(async (txRaw) => {
       const tx = txRaw as unknown as Database;
-      await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v1', '1', true)`);
+      await tx.execute(sql`select set_config('opengeni.sandbox_recovery_protocol_v2', '1', true)`);
       return await rawRows<{
         workspace_id: string;
         sandbox_group_id: string;
@@ -20359,6 +20359,25 @@ function normalizeWorkspaceMutationOperation(operation: string): string {
     );
   }
   return normalized;
+}
+
+function normalizeRetainedProcessSettlementReason(reason: string): string {
+  const normalized = reason.trim();
+  let bounded = "";
+  let bytes = 0;
+  for (const character of normalized) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > 512) break;
+    bounded += character;
+    bytes += characterBytes;
+  }
+  if (bounded.length === 0) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process settlement requires a reason",
+    );
+  }
+  return bounded;
 }
 
 function mapWorkspaceMutationAdmission(row: {
@@ -21236,10 +21255,10 @@ export async function retainWorkspaceMutationProcess(
         };
   },
 ): Promise<SandboxRetainedProcess> {
-  if (!Number.isSafeInteger(input.providerSessionId) || input.providerSessionId < 0) {
+  if (!Number.isSafeInteger(input.providerSessionId) || input.providerSessionId <= 0) {
     throw new SandboxWorkspaceMutationFencedError(
       "process_fenced",
-      "Retained provider session id must be a non-negative safe integer",
+      "Retained provider session id must be a positive safe integer",
     );
   }
   const operation = normalizeWorkspaceMutationOperation(input.operation);
@@ -21427,13 +21446,7 @@ export async function settleRetainedProcess(
     idleGraceMs: number;
   },
 ): Promise<{ settled: boolean; process: SandboxRetainedProcess }> {
-  const reason = input.reason.trim().slice(0, 512);
-  if (reason.length === 0) {
-    throw new SandboxWorkspaceMutationFencedError(
-      "process_fenced",
-      "Retained process settlement requires a reason",
-    );
-  }
+  const reason = normalizeRetainedProcessSettlementReason(input.reason);
   const exitCode = input.outcome === "exited" ? (input.exitCode ?? null) : null;
   if (exitCode !== null && !Number.isSafeInteger(exitCode)) {
     throw new SandboxWorkspaceMutationFencedError(
@@ -21478,6 +21491,15 @@ export async function settleRetainedProcess(
               "Retained process already carries different terminal proof",
             );
           }
+          await tx
+            .update(schema.sandboxPtySessions)
+            .set({ status: "closed", closedAt: new Date() })
+            .where(
+              and(
+                eq(schema.sandboxPtySessions.retainedProcessId, process.id),
+                eq(schema.sandboxPtySessions.status, "open"),
+              ),
+            );
           return { settled: false, process: mapRetainedProcess(process) };
         }
         const admissions = await tx.execute<AdmissionIdentityRow>(sql`
@@ -21497,6 +21519,15 @@ export async function settleRetainedProcess(
             "Retained process parent admission is not open",
           );
         }
+        await tx
+          .update(schema.sandboxPtySessions)
+          .set({ status: "closed", closedAt: new Date() })
+          .where(
+            and(
+              eq(schema.sandboxPtySessions.retainedProcessId, process.id),
+              eq(schema.sandboxPtySessions.status, "open"),
+            ),
+          );
         const [updated] = await tx
           .update(schema.sandboxRetainedProcesses)
           .set({

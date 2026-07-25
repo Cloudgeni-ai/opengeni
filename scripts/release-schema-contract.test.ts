@@ -65,7 +65,7 @@ describe("release schema contract", () => {
     );
   });
 
-  test("preserves published host-export history and appends the forward repair", async () => {
+  test("preserves published history and appends the recovery protocol cutover", async () => {
     const contract = await buildSchemaContract();
     const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
     const currentMainMigrations = [
@@ -85,17 +85,18 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(97 + currentMainMigrations.length);
-    expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
+    expect(contract.fileCount).toBe(99 + currentMainMigrations.length);
+    expect(contract.latestMigration).toBe("0109_sandbox_recovery_generations.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^010[3-8]_/.test(path)),
+        .filter((path) => /^010[3-9]_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       "0108_fence_invalidated_warming_epochs.sql",
+      "0109_sandbox_recovery_generations.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -121,6 +122,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
       sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
       deploymentMode: "rolling",
+    });
+    expect(migrations.get("0109_sandbox_recovery_generations.sql")).toMatchObject({
+      sha256: "cd9df2775bf5ecb79b96bca06e2de7bb19a5b682147fdd7e9ef22f9d4bf4e27e",
+      deploymentMode: "maintenance",
     });
   });
 });

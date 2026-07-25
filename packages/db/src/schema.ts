@@ -2334,9 +2334,30 @@ export const sandboxLeases = pgTable(
   },
   (table) => ({
     groupIdx: uniqueIndex("sandbox_leases_group_idx").on(table.workspaceId, table.sandboxGroupId),
+    scopedId: uniqueIndex("sandbox_leases_scoped_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.sandboxGroupId,
+      table.id,
+    ),
+    accountWorkspaceId: uniqueIndex("sandbox_leases_account_workspace_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
     reaperIdx: index("sandbox_leases_reaper_idx")
       .on(table.expiresAt)
       .where(sql`${table.liveness} in ('warming','warm','draining')`),
+    workspaceGenerationValid: check(
+      "sandbox_leases_workspace_generation_check",
+      sql`${table.workspaceGeneration} >= 0`,
+    ),
+    archiveGenerationValid: check(
+      "sandbox_leases_archive_generation_check",
+      sql`${table.archiveGeneration} is null
+        or (${table.archiveGeneration} >= 0
+          and ${table.archiveGeneration} <= ${table.workspaceGeneration})`,
+    ),
   }),
 );
 
@@ -2363,6 +2384,11 @@ export const sandboxLeaseHolders = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    leaseScope: foreignKey({
+      name: "sandbox_lease_holders_lease_scope_fk",
+      columns: [table.accountId, table.workspaceId, table.leaseId],
+      foreignColumns: [sandboxLeases.accountId, sandboxLeases.workspaceId, sandboxLeases.id],
+    }).onDelete("cascade"),
     holderIdx: uniqueIndex("sandbox_lease_holders_holder_idx").on(
       table.leaseId,
       table.kind,
@@ -2499,8 +2525,12 @@ export const sandboxWorkspaceMutationAdmissions = pgTable(
     ),
     routeValid: check(
       "sandbox_workspace_mutation_admissions_route_check",
-      sql`octet_length(${table.providerBackend}) between 1 and 64
+      sql`${table.actorKind} in ('turn', 'direct', 'process')
+        and ${table.holderKind} in ('turn', 'direct', 'process')
+        and octet_length(${table.holderId}) between 1 and 256
+        and octet_length(${table.providerBackend}) between 1 and 64
         and octet_length(${table.providerInstanceId}) between 1 and 512
+        and ${table.routeKind} in ('home', 'active')
         and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)`,
     ),
     operationValid: check(
@@ -2611,7 +2641,7 @@ export const sandboxRetainedProcesses = pgTable(
       "sandbox_retained_processes_identity_check",
       sql`${table.leaseEpoch} >= 0
         and ${table.routeEpoch} >= 0
-        and ${table.providerSessionId} >= 0
+        and ${table.providerSessionId} > 0
         and octet_length(${table.holderId}) between 1 and 256
         and octet_length(${table.providerBackend}) between 1 and 64
         and octet_length(${table.providerInstanceId}) between 1 and 512
@@ -2637,6 +2667,11 @@ export const sandboxRetainedProcesses = pgTable(
       sql`(${table.state} = 'active' and ${table.settledAt} is null and ${table.exitCode} is null)
         or (${table.state} = 'exited' and ${table.settledAt} is not null)
         or (${table.state} = 'lost' and ${table.settledAt} is not null and ${table.exitCode} is null)`,
+    ),
+    reasonValid: check(
+      "sandbox_retained_processes_reason_check",
+      sql`${table.settlementReason} is null
+        or octet_length(${table.settlementReason}) between 1 and 512`,
     ),
   }),
 );
@@ -2835,10 +2870,11 @@ export const sandboxPtySessions = pgTable(
         and ${table.sandboxGroupId} is not null
         and ${table.retainedProcessId} is not null
         and ${table.openAdmissionId} is not null
-        and ${table.execSessionId} is not null
-        and ${table.providerBackend} is not null
-        and ${table.providerInstanceId} is not null
-        and ${table.routeKind} is not null
+        and ${table.execSessionId} > 0
+        and octet_length(${table.providerBackend}) between 1 and 64
+        and octet_length(${table.providerInstanceId}) between 1 and 512
+        and ${table.routeKind} in ('home', 'active')
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)
         and ${table.routeEpoch} is not null
         and ${table.leaseEpoch} >= 0
         and ${table.routeEpoch} >= 0
