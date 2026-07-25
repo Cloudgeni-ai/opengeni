@@ -1,5 +1,22 @@
 # @opengeni/runtime
 
+## 0.12.4
+
+### Patch Changes
+
+- cb188f9: Protect clean rig verification sandboxes with canonical exact-instance leases, make Modal orphan termination revalidate durable ownership immediately before deletion, and add a default-off two-phase rollout flag.
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/config@0.6.6
+
+## 0.12.3
+
+### Patch Changes
+
+- 2174006: Bound Modal display startup ownership, parse terminal state only from trusted provider metadata, poll yielded processes to completion, and prevent detached desktop processes from retaining startup locks.
+- 4e16410: Preserve provider-reported prompt-cache writes through source-key-authoritative production usage paths, deduplicate mirrored and retried terminal responses before response-scoped side effects, derive billing and context totals from canonical input/output and complete SDK request aggregates, distinguish unknown cache reads from real zeros with call-traffic-aware availability alerting, and reject inconsistent or unsafe token values before billing or metrics.
+
 ## 0.12.2
 
 ### Patch Changes

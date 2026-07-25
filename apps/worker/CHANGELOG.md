@@ -1,5 +1,32 @@
 # @opengeni/worker-bundle
 
+## 0.10.5
+
+### Patch Changes
+
+- cb188f9: Protect clean rig verification sandboxes with canonical exact-instance leases, make Modal orphan termination revalidate durable ownership immediately before deletion, and add a default-off two-phase rollout flag.
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/db@0.10.4
+  - @opengeni/config@0.6.6
+  - @opengeni/runtime@0.12.4
+  - @opengeni/core@0.9.5
+  - @opengeni/documents@0.2.25
+  - @opengeni/events@0.3.16
+  - @opengeni/github@0.3.7
+  - @opengeni/storage@0.2.19
+
+## 0.10.4
+
+### Patch Changes
+
+- 4e16410: Preserve provider-reported prompt-cache writes through source-key-authoritative production usage paths, deduplicate mirrored and retried terminal responses before response-scoped side effects, derive billing and context totals from canonical input/output and complete SDK request aggregates, distinguish unknown cache reads from real zeros with call-traffic-aware availability alerting, and reject inconsistent or unsafe token values before billing or metrics.
+- Updated dependencies [2174006]
+- Updated dependencies [4e16410]
+  - @opengeni/runtime@0.12.3
+  - @opengeni/core@0.9.4
+
 ## 0.10.3
 
 ### Patch Changes

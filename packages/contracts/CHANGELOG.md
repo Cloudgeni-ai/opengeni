@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.17.2
+
+### Patch Changes
+
+- 4966649: Add bounded authoritative terminal-result projections to session event monitoring APIs and SDK types.
+
 ## 0.17.1
 
 ### Patch Changes
