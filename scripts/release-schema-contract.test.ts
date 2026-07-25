@@ -85,7 +85,7 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(96 + currentMainMigrations.length);
+    expect(contract.fileCount).toBe(97 + currentMainMigrations.length);
     expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
     expect(
       contract.migrations
