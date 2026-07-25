@@ -1,5 +1,13 @@
 # @opengeni/core
 
+## 0.9.4
+
+### Patch Changes
+
+- Updated dependencies [2174006]
+- Updated dependencies [4e16410]
+  - @opengeni/runtime@0.12.3
+
 ## 0.9.3
 
 ### Patch Changes
