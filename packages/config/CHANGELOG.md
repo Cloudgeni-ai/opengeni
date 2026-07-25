@@ -1,5 +1,12 @@
 # @opengeni/config
 
+## 0.6.7
+
+### Patch Changes
+
+- Updated dependencies [229902b]
+  - @opengeni/codex@0.2.6
+
 ## 0.6.6
 
 ### Patch Changes

@@ -104,6 +104,8 @@ export type AppDependencies = {
    */
   sessionAuthorization?: SessionAuthorizationPort | null;
   managedAuth?: ManagedAuth | null;
+  /** Injectable Codex HTTP transport for deterministic API/provider tests. */
+  codexFetch?: typeof fetch;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes
