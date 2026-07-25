@@ -187,11 +187,12 @@ describe("nested-agent depth database admission", () => {
 
     const currentWriter = createSessionWithIdempotencyKeyResult(
       db,
-      sessionInput(workspace, "current writer", { createIdempotencyKey: key }),
+      { ...sessionInput(workspace, "current writer"), createIdempotencyKey: key },
     );
     const [oldSessionId, replay] = await Promise.all([oldWriter, currentWriter]);
 
     expect(oldSessionId).not.toBeNull();
+    if (oldSessionId === null) throw new Error("old writer did not create a session");
     expect(replay.denied).toBe(false);
     if (replay.denied) return;
     expect(replay.created).toBe(false);
@@ -238,11 +239,12 @@ describe("nested-agent depth database admission", () => {
 
     const currentWriter = createSessionWithIdempotencyKeyResult(
       db,
-      sessionInput(workspace, "current writer", { createIdempotencyKey: key }),
+      { ...sessionInput(workspace, "current writer"), createIdempotencyKey: key },
     );
     const [oldDenialId, replay] = await Promise.all([oldWriter, currentWriter]);
 
     expect(oldDenialId).not.toBeNull();
+    if (oldDenialId === null) throw new Error("old writer did not create a denial");
     expect(replay.denied).toBe(true);
     const replayedDenial = denied(replay);
     expect(replayedDenial.id).toBe(oldDenialId);
