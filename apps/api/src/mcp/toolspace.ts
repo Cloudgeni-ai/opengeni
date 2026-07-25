@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
 import {
@@ -29,7 +29,7 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
-import { undiciFetch } from "@opengeni/network";
+import { undiciFetch, type FetchLike } from "@opengeni/network";
 import {
   MCP_MAX_AGGREGATE_TOOL_LIST_BYTES,
   MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,

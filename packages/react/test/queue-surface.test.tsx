@@ -41,6 +41,7 @@ function composer(overrides: Partial<ComposerState> = {}): ComposerState {
     steer: async () => true,
     sending: false,
     canSend: false,
+    hasDraftContent: () => false,
     pause: async () => {},
     pausing: false,
     resume: async () => {},

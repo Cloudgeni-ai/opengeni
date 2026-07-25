@@ -67,6 +67,7 @@ function queueSnapshot(
       settlement: null,
     },
     items,
+    stoppingPreviousAttempt: false,
     ...overrides,
   };
 }
