@@ -359,56 +359,52 @@ async function resolveToolListing(input: {
   // after the upstream result is bounded. No per-provider result arrays are
   // retained by boundedParallelMap, and a failed aggregate replacement never
   // reaches the cache or the exposed MCP surface.
-  await boundedParallelMap(
-    proxyableIds,
-    MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
-    async (serverId) => {
-      const config = registry.get(serverId);
-      if (!config || !toolspaceCanProxyServer(config)) {
-        aggregateBudget.replace(serverId, []);
-        return;
-      }
-      const connection = await connectToolspaceServer({
-        deps,
-        grant,
-        config,
-        sessionId,
-        rootSessionId,
-        turn: activeTurn,
-      }).catch(() => null);
-      if (!connection) {
-        aggregateBudget.replace(serverId, []);
-        return;
-      }
+  await boundedParallelMap(proxyableIds, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (serverId) => {
+    const config = registry.get(serverId);
+    if (!config || !toolspaceCanProxyServer(config)) {
+      aggregateBudget.replace(serverId, []);
+      return;
+    }
+    const connection = await connectToolspaceServer({
+      deps,
+      grant,
+      config,
+      sessionId,
+      rootSessionId,
+      turn: activeTurn,
+    }).catch(() => null);
+    if (!connection) {
+      aggregateBudget.replace(serverId, []);
+      return;
+    }
+    try {
+      const listed = await connection.client
+        .listTools(undefined, toolspaceRequestOptions(config))
+        .catch(() => ({ tools: [] }));
+      let boundedTools: readonly McpTool[];
       try {
-        const listed = await connection.client
-          .listTools(undefined, toolspaceRequestOptions(config))
-          .catch(() => ({ tools: [] }));
-        let boundedTools: readonly McpTool[];
-        try {
-          boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
-        } catch (error) {
-          deps.observability?.warn("toolspace upstream tool list exceeded safety limit", {
-            serverId,
-            errorClass: error instanceof Error ? error.name : typeof error,
-          });
-          aggregateBudget.replace(serverId, []);
-          return;
-        }
-        const sourceEntries = boundedTools
-          .filter((tool) => Boolean(tool?.name) && allowedByConfig(config, tool.name))
-          .map((tool) => ({
-            serverId,
-            tool,
-            requireApproval: config.requireApproval,
-          }));
-        aggregateBudget.replace(serverId, sourceEntries);
-        entries.push(...sourceEntries);
-      } finally {
-        await connection.close();
+        boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
+      } catch (error) {
+        deps.observability?.warn("toolspace upstream tool list exceeded safety limit", {
+          serverId,
+          errorClass: error instanceof Error ? error.name : typeof error,
+        });
+        aggregateBudget.replace(serverId, []);
+        return;
       }
-    },
-  );
+      const sourceEntries = boundedTools
+        .filter((tool) => Boolean(tool?.name) && allowedByConfig(config, tool.name))
+        .map((tool) => ({
+          serverId,
+          tool,
+          requireApproval: config.requireApproval,
+        }));
+      aggregateBudget.replace(serverId, sourceEntries);
+      entries.push(...sourceEntries);
+    } finally {
+      await connection.close();
+    }
+  });
   writeToolListCache(cacheKey, entries);
   return entries;
 }

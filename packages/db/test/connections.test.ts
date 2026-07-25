@@ -609,21 +609,18 @@ describe("buildHostConnectionTokenResolver", () => {
 
   test("rejects a destination/provider mismatch before invoking the host", async () => {
     let calls = 0;
-    const resolver = buildHostConnectionTokenResolver(
-      async () => {
-        calls += 1;
-        return {
-          status: "ok",
-          accountId: "acct_1",
-          workspaceId: "ws_1",
-          sessionId: "session_1",
-          headers: { Authorization: "Bearer must-not-escape" },
-          connectionId: "host-connection-7",
-          providerDomain: "github.com",
-        };
-      },
-      context,
-    );
+    const resolver = buildHostConnectionTokenResolver(async () => {
+      calls += 1;
+      return {
+        status: "ok",
+        accountId: "acct_1",
+        workspaceId: "ws_1",
+        sessionId: "session_1",
+        headers: { Authorization: "Bearer must-not-escape" },
+        connectionId: "host-connection-7",
+        providerDomain: "github.com",
+      };
+    }, context);
 
     await expect(
       resolver({

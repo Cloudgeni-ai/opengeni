@@ -210,7 +210,10 @@ export function useComposer(
           draftRef.current = fetched;
           setDraft(fetched);
           setDraftConflict(null);
-          if (replaceLocal || (!localWasDirtyAtStart && localAtStart === localEditRevision.current)) {
+          if (
+            replaceLocal ||
+            (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
+          ) {
             valueRef.current = fetched.text;
             restoredResourcesRef.current = fetched.resources;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
@@ -275,11 +278,7 @@ export function useComposer(
     async (payload: SaveComposerDraftRequest): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
-      if (
-        !sessionId ||
-        !durableDrafts ||
-        targetKeyRef.current !== ownedTargetKey
-      ) {
+      if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) {
         return false;
       }
       let success = false;
@@ -669,10 +668,7 @@ export function useComposer(
       const ownedGeneration = targetGeneration.current;
       if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) return;
       const remote = await client.getComposerDraft(workspaceId, sessionId);
-      if (
-        targetKeyRef.current !== ownedTargetKey ||
-        targetGeneration.current !== ownedGeneration
-      ) {
+      if (targetKeyRef.current !== ownedTargetKey || targetGeneration.current !== ownedGeneration) {
         return;
       }
       if (choice === "use_remote") {

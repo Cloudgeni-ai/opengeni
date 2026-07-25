@@ -360,12 +360,7 @@ describe("connectionBrokerFetch response lifecycle", () => {
     const insufficient = await broker("https://example.com/mcp", { method: "GET" });
     expect(insufficient.status).toBe(401);
     expect(fetchCount).toBe(5);
-    expect(canceled).toEqual([
-      "initial-401",
-      "initial-401-again",
-      "retry-401",
-      "initial-403",
-    ]);
+    expect(canceled).toEqual(["initial-401", "initial-401-again", "retry-401", "initial-403"]);
   });
 });
 

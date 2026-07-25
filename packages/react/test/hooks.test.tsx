@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   ComposerDraft,
+  SessionControlResponse,
   SessionEvent,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
@@ -1061,7 +1062,7 @@ describe("useComposer durable draft and control binding", () => {
     });
     const hook = await renderHook(
       (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
-      sessionA,
+      sessionA as string,
     );
     await flush();
 
@@ -1091,15 +1092,37 @@ describe("useComposer durable draft and control binding", () => {
     const pauseResult = new Promise<void>((resolve) => {
       releasePause = resolve;
     });
+    const pauseResponse: SessionControlResponse = {
+      receipt: {
+        id: crypto.randomUUID(),
+        action: "session.pause",
+        operationKey: crypto.randomUUID(),
+        targetSessionId: sessionA,
+        targetTurnId: null,
+        appliedControlRevision: 1,
+        appliedQueueVersion: null,
+        appliedTurnVersion: null,
+        appliedDraftRevision: null,
+        createdAt: new Date().toISOString(),
+      },
+      effectiveControl: {
+        ...queueSnapshot([]).effectiveControl,
+        state: "paused",
+        directState: "paused",
+      },
+      interruptionCount: 1,
+      wakeCount: 0,
+    };
     const client = fakeClient({
       pauseSession: async () => {
         markPauseStarted();
         await pauseResult;
+        return pauseResponse;
       },
     });
     const hook = await renderHook(
       (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
-      sessionA,
+      sessionA as string,
     );
     await flush();
 
@@ -1150,7 +1173,7 @@ describe("useComposer durable draft and control binding", () => {
     });
     const hook = await renderHook(
       (sessionId: string) => useComposer(sessionId, { client, workspaceId: WORKSPACE_ID }),
-      sessionA,
+      sessionA as string,
     );
     await flush();
 
