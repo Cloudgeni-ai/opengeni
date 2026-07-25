@@ -1018,6 +1018,8 @@ function AuthNeededRow({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
+  const unavailable =
+    item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
   const missing = item.reason === "missing_connection";
   const actionLabel = missing ? "Connect" : "Reconnect";
 
@@ -1049,12 +1051,12 @@ function AuthNeededRow({
           />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">
-              {actionLabel} {provider}
+              {unavailable ? `${provider} tools unavailable` : `${actionLabel} ${provider}`}
             </p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
           </div>
         </div>
-        {onReconnect ? (
+        {!unavailable && onReconnect ? (
           <button
             type="button"
             onClick={() => void start()}
@@ -1067,7 +1069,7 @@ function AuthNeededRow({
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
             {busy ? "Opening…" : actionLabel}
           </button>
-        ) : item.authorizationUrl ? (
+        ) : !unavailable && item.authorizationUrl ? (
           <a
             href={item.authorizationUrl}
             rel="noreferrer"
@@ -1169,6 +1171,10 @@ function authReasonLine(reason: AuthNeededItem["reason"]): string {
     case "expired":
     case "refresh_failed":
       return "Its access expired.";
+    case "unsupported_auth":
+      return "This connection cannot authenticate the configured tool endpoint.";
+    case "resource_scope_unavailable":
+      return "This tool endpoint cannot enforce the selected repository access.";
     default:
       return "Its connection needs attention.";
   }

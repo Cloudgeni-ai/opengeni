@@ -1,7 +1,5 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
-const { default: fleetDecisionItem, FleetDecisionRow } =
-  await import("./fleet-decision-projection");
-export { FleetDecisionRow };
+const { default: fleetDecisionItem } = await import("./fleet-decision-projection");
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   humanizeFailureReason,
@@ -22,7 +20,12 @@ import type {
   ToolCallItem,
   WorkerItem,
 } from "./types";
-export { toolDisplayName } from "./tool-display-name";
+/** Readable label for a tool call, without leaking an MCP server prefix. */
+export function toolDisplayName(name: string): string {
+  const boundary = name.indexOf("__");
+  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
+  return toolPart.replace(/[_-]+/g, " ").trim();
+}
 
 /* ----------------------------------------------------------------------------
    Timeline projection

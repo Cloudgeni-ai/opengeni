@@ -244,7 +244,14 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed" | null;
+  reason:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "unsupported_auth"
+    | "resource_scope_unavailable"
+    | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
   scopes: string[];
   /** The OAuth `resource` (RFC 8707) the reconnect should target, when supplied. */

@@ -5,6 +5,7 @@ import {
   BrainIcon,
   SquareTerminalIcon,
 } from "lucide-react";
+import { lazy, Suspense } from "react";
 import { jsx as rowJsx, jsxs as rowJsxs } from "react/jsx-runtime";
 import { cn } from "../lib/cn";
 import { truncate } from "../lib/format";
@@ -15,7 +16,7 @@ import { BodyNote, PayloadBlock, ActivityDisclosure } from "./shared";
 import { toolDisplayName } from "./tool-display-name";
 import type { ActivityItem, MemoryItem, ReasoningItem, SandboxItem, WorkerItem } from "./types";
 
-import { FleetDecisionRow } from "./projection";
+const LazyFleetDecisionRow = lazy(() => import("./fleet-decision-row"));
 
 /* ----------------------------------------------------------------------------
    Activity rail
@@ -117,7 +118,15 @@ function renderActivity(
       return <MemoryRow item={item} onMemoryClick={onMemoryClick} />;
     case "fleet-decision":
       return (
-        <FleetDecisionRow item={item} d={ActivityDisclosure} b={BodyNote} j={rowJsx} s={rowJsxs} />
+        <Suspense fallback={null}>
+          <LazyFleetDecisionRow
+            item={item}
+            d={ActivityDisclosure}
+            b={BodyNote}
+            j={rowJsx}
+            s={rowJsxs}
+          />
+        </Suspense>
       );
     default:
       return assertNever(item);

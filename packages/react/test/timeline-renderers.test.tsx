@@ -3,8 +3,9 @@ import type { SessionEvent } from "@opengeni/sdk";
 import { act } from "react";
 import { registerDom, renderComponent, flush } from "./render-hook";
 import { defaultToolRegistry, ActivityRail } from "../src/timeline";
-import type { MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
+import type { AuthNeededItem, MemoryItem, ToolCallItem, SandboxItem } from "../src/timeline";
 import { MessageTimeline } from "../src";
+import { TimelineRow } from "../src/components/message-timeline";
 
 /* ----------------------------------------------------------------------------
    Renderer integration tests for Issue-2 (multi-file apply_patch count) and

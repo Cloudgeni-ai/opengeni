@@ -1,8 +1,5 @@
 import type { SessionEvent } from "@opengeni/sdk";
 import type { FleetDecisionItem, FleetDecisionScoreItem } from "./types";
-import FleetDecisionRow from "./fleet-decision-row";
-
-export { FleetDecisionRow };
 
 const FLEET_ACTUAL_OUTCOMES = ["selected", "waiting", "none"] as const;
 const FLEET_ACTUAL_REASONS = [
@@ -43,11 +40,18 @@ const FLEET_ADMISSION_REASONS = [
   "capacity_saturated",
   "emergency_fuse",
 ] as const;
-const FLEET_PACED_ADMISSION_REASONS = new Set([
-  "manager_priority",
-  "capacity_saturated",
-  "emergency_fuse",
-]);
+type FleetAdmissionReason = (typeof FLEET_ADMISSION_REASONS)[number];
+const FLEET_ADMISSION_REASON_CLASSIFICATION = {
+  fenced_in_flight: "admit",
+  pacing_disabled: "admit",
+  capacity_unknown: "admit",
+  capacity_available: "admit",
+  work_conserving_borrow: "admit",
+  manager_priority: "pace",
+  standard_starvation_bound: "admit",
+  capacity_saturated: "pace",
+  emergency_fuse: "pace",
+} as const satisfies Record<FleetAdmissionReason, "admit" | "pace">;
 const FLEET_REJECTION_REASONS = [
   "allocator_disabled",
   "unavailable",
@@ -344,7 +348,8 @@ function fleetDecisionSemanticsAreConsistent(input: {
           );
   // Keep this mapping exhaustive so a newly accepted admission reason cannot
   // silently be dropped from the paced/admitted event consistency check.
-  const pacedAdmissionReason = FLEET_PACED_ADMISSION_REASONS.has(input.admissionReason);
+  const pacedAdmissionReason =
+    FLEET_ADMISSION_REASON_CLASSIFICATION[input.admissionReason] === "pace";
   return (
     actualConsistent &&
     shadowConsistent &&

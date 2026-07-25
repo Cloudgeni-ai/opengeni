@@ -8,7 +8,7 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
