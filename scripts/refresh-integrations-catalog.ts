@@ -64,7 +64,10 @@ if (import.meta.main) {
     ? await readSnapshotFile(args.inputPath)
     : await fetchSnapshot(args.sourceUrl);
   await mkdir(dirname(args.outputPath), { recursive: true });
-  let normalized = normalizeCatalogSnapshot(snapshot);
+  // A refresh deliberately starts from an unprobed upstream snapshot. Keep
+  // those candidates long enough for the dedicated MCP probe below; the
+  // importer itself remains fail-closed and accepts only real probe evidence.
+  let normalized = normalizeCatalogSnapshot(snapshot, { allowUnprobedCandidates: true });
   let fallbackInput: string | null = null;
   if (!args.inputPath && normalized.rows.length === 0) {
     fallbackInput = args.outputPath;

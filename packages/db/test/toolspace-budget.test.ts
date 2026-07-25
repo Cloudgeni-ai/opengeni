@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
+  admitToolspaceTurnAttempt,
   createDb,
   createSession,
   reserveToolspaceCallForAttempt,
@@ -53,6 +54,7 @@ async function freshTurn(): Promise<{
   sessionId: string;
   turnId: string;
   attemptId: string;
+  executionGeneration: number;
 }> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('acct') returning id`;
@@ -102,6 +104,7 @@ async function freshTurn(): Promise<{
     sessionId: session.id,
     turnId: turn!.id,
     attemptId,
+    executionGeneration: 1,
   };
 }
 
@@ -172,5 +175,53 @@ describe("reserveToolspaceCallForAttempt", () => {
       turnId: crypto.randomUUID(),
     });
     expect(result).toEqual({ reserved: false, reason: "not_found" });
+  }, 60_000);
+
+  test("replaced attempts and generations are rejected without consuming budget", async () => {
+    if (!available) return;
+    const seed = await freshTurn();
+    const wrongAttempt = { ...seed, attemptId: crypto.randomUUID() };
+    const wrongGeneration = { ...seed, executionGeneration: 2 };
+
+    expect(
+      await admitToolspaceTurnAttempt(db, seed.workspaceId, {
+        sessionId: seed.sessionId,
+        turnId: seed.turnId,
+        attemptId: wrongAttempt.attemptId,
+        executionGeneration: 1,
+      }),
+    ).toBe(false);
+    expect(
+      await admitToolspaceTurnAttempt(db, seed.workspaceId, {
+        sessionId: seed.sessionId,
+        turnId: seed.turnId,
+        attemptId: seed.attemptId,
+        executionGeneration: wrongGeneration.executionGeneration,
+      }),
+    ).toBe(false);
+    expect(await reserveToolspaceCallForAttempt(db, reservationInput(wrongAttempt, 10))).toEqual({
+      reserved: false,
+      reason: "not_found",
+    });
+    expect(await reserveToolspaceCallForAttempt(db, reservationInput(wrongGeneration, 10))).toEqual(
+      {
+        reserved: false,
+        reason: "generation_changed",
+      },
+    );
+    expect(await currentCount(seed.turnId)).toBe(0);
+  }, 60_000);
+
+  test("a successor active turn immediately revokes the old bearer", async () => {
+    if (!available) return;
+    const seed = await freshTurn();
+    await admin`update sessions set active_turn_id = null where id = ${seed.sessionId}`;
+
+    expect(await admitToolspaceTurnAttempt(db, seed.workspaceId, seed)).toBe(false);
+    expect(await reserveToolspaceCallForAttempt(db, reservationInput(seed, 10))).toEqual({
+      reserved: false,
+      reason: "active_turn_changed",
+    });
+    expect(await currentCount(seed.turnId)).toBe(0);
   }, 60_000);
 });

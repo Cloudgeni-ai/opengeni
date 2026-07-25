@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { FetchLike, Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { environmentsEncryptionKeyBytes, type McpServerConfig } from "@opengeni/config";
 import {
@@ -15,6 +15,7 @@ import {
   type ApiRouteDeps,
 } from "@opengeni/core";
 import {
+  admitToolspaceTurnAttempt,
   buildConnectionTokenResolver,
   buildHostConnectionTokenResolver,
   clearPendingSessionToolspaceCall,
@@ -28,6 +29,24 @@ import {
   type ResolveConnectionCredentialResult,
 } from "@opengeni/db";
 import { appendAndPublishEvents, appendAndPublishTurnEventsFenced } from "@opengeni/events";
+import { undiciFetch, type FetchLike } from "@opengeni/network";
+import {
+  MCP_MAX_AGGREGATE_TOOL_LIST_BYTES,
+  MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,
+  MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
+  MCP_MAX_TOOL_RESULT_BYTES,
+  McpAggregateToolListBudget,
+  McpPayloadTooLargeError,
+  assertMcpPayloadWithinBytes,
+  assertMcpServerSelectionWithinBounds,
+  assertMcpToolListWithinBounds,
+  boundedParallelMap,
+  cancelMcpResponseBody,
+  guardedMcpFetch,
+  mcpSerializedSizeBytes,
+} from "@opengeni/runtime/mcp-network";
+import { Buffer } from "node:buffer";
+import { createHash } from "node:crypto";
 
 export type ToolspaceCallResult = CallToolResult;
 
@@ -75,13 +94,88 @@ const FIRST_PARTY_PROXY_IDS = new Set(["files", "docs"]);
 // to every upstream on every call.
 const TOOLSPACE_TOOL_LIST_TTL_MS = 30_000;
 const TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES = 2_000;
-const toolListCache = new Map<string, { expiresAt: number; entries: ToolListingEntry[] }>();
+const TOOLSPACE_TOOL_LIST_CACHE_MAX_BYTES = 64 * 1024 * 1024;
 
-type ToolListingEntry = {
+export type ToolListingEntry = {
   serverId: string;
   tool: McpTool;
   requireApproval: McpServerConfig["requireApproval"];
 };
+
+type ToolListCacheValue = {
+  expiresAt: number;
+  entries: ToolListingEntry[];
+  sizeBytes: number;
+};
+
+/** Deterministic LRU bounded by both key count and serialized retained bytes. */
+export class ToolspaceToolListCache {
+  private readonly values = new Map<string, ToolListCacheValue>();
+  private retainedBytes = 0;
+
+  constructor(
+    private readonly maxEntries = TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES,
+    private readonly maxBytes = TOOLSPACE_TOOL_LIST_CACHE_MAX_BYTES,
+    private readonly ttlMs = TOOLSPACE_TOOL_LIST_TTL_MS,
+  ) {
+    if (maxEntries < 1 || maxBytes < 1 || ttlMs < 1) {
+      throw new Error("toolspace cache limits must be positive");
+    }
+  }
+
+  read(key: string, now = Date.now()): ToolListingEntry[] | null {
+    const hit = this.values.get(key);
+    if (!hit) return null;
+    if (hit.expiresAt <= now) {
+      this.delete(key);
+      return null;
+    }
+    this.values.delete(key);
+    this.values.set(key, hit);
+    return hit.entries;
+  }
+
+  write(key: string, entries: ToolListingEntry[], now = Date.now()): boolean {
+    const sizeBytes = Buffer.byteLength(key) + mcpSerializedSizeBytes(entries);
+    if (sizeBytes > this.maxBytes) return false;
+    // A rejected replacement is a no-op: preserve the current safe value
+    // until the candidate has passed its own size check.
+    this.delete(key);
+    for (const [existingKey, value] of this.values) {
+      if (value.expiresAt <= now) this.delete(existingKey);
+    }
+    while (this.values.size >= this.maxEntries || this.retainedBytes + sizeBytes > this.maxBytes) {
+      const oldestKey = this.values.keys().next().value as string | undefined;
+      if (oldestKey === undefined) break;
+      this.delete(oldestKey);
+    }
+    this.values.set(key, { expiresAt: now + this.ttlMs, entries, sizeBytes });
+    this.retainedBytes += sizeBytes;
+    return true;
+  }
+
+  clear(): void {
+    this.values.clear();
+    this.retainedBytes = 0;
+  }
+
+  snapshot(): { entries: number; bytes: number; keys: string[] } {
+    return {
+      entries: this.values.size,
+      bytes: this.retainedBytes,
+      keys: [...this.values.keys()],
+    };
+  }
+
+  private delete(key: string): void {
+    const existing = this.values.get(key);
+    if (!existing) return;
+    this.values.delete(key);
+    this.retainedBytes -= existing.sizeBytes;
+  }
+}
+
+const toolListCache = new ToolspaceToolListCache();
 
 type ToolspaceAuthority = {
   sessionId: string;
@@ -126,6 +220,9 @@ export async function prepareToolspaceMcpSurface(input: {
     return null;
   }
   const { sessionId } = authority;
+  if (!(await admitToolspaceTurnAttempt(deps.db, grant.workspaceId, authority))) {
+    return emptyToolspaceSurface(sessionId, grant.subjectId);
+  }
   const session = await requireSession(deps.db, grant.workspaceId, sessionId);
   let rootSessionId = sessionId;
   if (deps.connectionCredentials?.mcpCredentials) {
@@ -142,6 +239,7 @@ export async function prepareToolspaceMcpSurface(input: {
   // Proxyable ids: everything selected except the first-party OpenGeni tool
   // server and the first-party MCP proxies, both of which would re-enter /mcp.
   const proxyableIds = [...selectedIds].filter((id) => toolspaceCanProxyServerId(id));
+  assertMcpServerSelectionWithinBounds(proxyableIds);
   if (proxyableIds.length === 0) {
     return emptyToolspaceSurface(sessionId, grant.subjectId);
   }
@@ -251,11 +349,21 @@ async function resolveToolListing(input: {
     return cached;
   }
   const registry = await getRegistry();
+  const aggregateBudget = new McpAggregateToolListBudget(
+    "aggregate Toolspace tool list",
+    MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES,
+    MCP_MAX_AGGREGATE_TOOL_LIST_BYTES,
+  );
   const entries: ToolListingEntry[] = [];
-  for (const serverId of proxyableIds) {
+  // Each mapper commits its source contribution synchronously immediately
+  // after the upstream result is bounded. No per-provider result arrays are
+  // retained by boundedParallelMap, and a failed aggregate replacement never
+  // reaches the cache or the exposed MCP surface.
+  await boundedParallelMap(proxyableIds, MCP_MAX_CONCURRENT_SERVER_OPERATIONS, async (serverId) => {
     const config = registry.get(serverId);
     if (!config || !toolspaceCanProxyServer(config)) {
-      continue;
+      aggregateBudget.replace(serverId, []);
+      return;
     }
     const connection = await connectToolspaceServer({
       deps,
@@ -266,22 +374,37 @@ async function resolveToolListing(input: {
       turn: activeTurn,
     }).catch(() => null);
     if (!connection) {
-      continue;
+      aggregateBudget.replace(serverId, []);
+      return;
     }
     try {
       const listed = await connection.client
         .listTools(undefined, toolspaceRequestOptions(config))
         .catch(() => ({ tools: [] }));
-      for (const tool of listed.tools as McpTool[]) {
-        if (!tool?.name || !allowedByConfig(config, tool.name)) {
-          continue;
-        }
-        entries.push({ serverId, tool, requireApproval: config.requireApproval });
+      let boundedTools: readonly McpTool[];
+      try {
+        boundedTools = assertMcpToolListWithinBounds(listed.tools as McpTool[]) as McpTool[];
+      } catch (error) {
+        deps.observability?.warn("toolspace upstream tool list exceeded safety limit", {
+          serverId,
+          errorClass: error instanceof Error ? error.name : typeof error,
+        });
+        aggregateBudget.replace(serverId, []);
+        return;
       }
+      const sourceEntries = boundedTools
+        .filter((tool) => Boolean(tool?.name) && allowedByConfig(config, tool.name))
+        .map((tool) => ({
+          serverId,
+          tool,
+          requireApproval: config.requireApproval,
+        }));
+      aggregateBudget.replace(serverId, sourceEntries);
+      entries.push(...sourceEntries);
     } finally {
       await connection.close();
     }
-  }
+  });
   writeToolListCache(cacheKey, entries);
   return entries;
 }
@@ -310,30 +433,11 @@ async function toolListCacheKey(
 }
 
 function readToolListCache(key: string): ToolListingEntry[] | null {
-  const hit = toolListCache.get(key);
-  if (!hit) {
-    return null;
-  }
-  if (hit.expiresAt <= Date.now()) {
-    toolListCache.delete(key);
-    return null;
-  }
-  return hit.entries;
+  return toolListCache.read(key);
 }
 
 function writeToolListCache(key: string, entries: ToolListingEntry[]): void {
-  if (toolListCache.size >= TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES) {
-    const now = Date.now();
-    for (const [existingKey, value] of toolListCache) {
-      if (value.expiresAt <= now) {
-        toolListCache.delete(existingKey);
-      }
-    }
-    if (toolListCache.size >= TOOLSPACE_TOOL_LIST_CACHE_MAX_ENTRIES) {
-      toolListCache.clear();
-    }
-  }
-  toolListCache.set(key, { expiresAt: Date.now() + TOOLSPACE_TOOL_LIST_TTL_MS, entries });
+  toolListCache.write(key, entries);
 }
 
 async function settingsWithSessionMcpServersForToolspace(
@@ -395,9 +499,10 @@ async function connectToolspaceServer(input: {
   rootSessionId: string;
   turn: SessionTurn;
 }): Promise<ConnectedToolspaceServer> {
+  const guardedFetch = guardedMcpFetch(input.deps.settings, undiciFetch);
   const baseFetch: FetchLike = input.config.connectionRef
-    ? connectionBrokerFetch(globalThis.fetch, input)
-    : globalThis.fetch;
+    ? connectionBrokerFetch(guardedFetch, input)
+    : guardedFetch;
   const client = new Client(
     { name: `opengeni-toolspace-${input.config.id}`, version: "1.0.0" },
     { capabilities: {} },
@@ -408,7 +513,12 @@ async function connectToolspaceServer(input: {
       headers: toolspaceServerHeaders(input.config),
     },
   });
-  await client.connect(transport as unknown as Transport, toolspaceRequestOptions(input.config));
+  try {
+    await client.connect(transport as unknown as Transport, toolspaceRequestOptions(input.config));
+  } catch (error) {
+    await client.close().catch(() => undefined);
+    throw error;
+  }
   return {
     config: input.config,
     client,
@@ -489,7 +599,7 @@ function toolspaceToolFor(input: {
             type: "toolspace_call",
             id: callId,
             name,
-            arguments: args,
+            arguments: toolspaceAuditSummary(args),
             serverId,
             toolName: tool.name,
           },
@@ -548,7 +658,7 @@ function toolspaceToolFor(input: {
               producerId: grant.subjectId,
               payload: {
                 id: callId,
-                output,
+                output: toolspaceAuditSummary(output),
                 origin: "toolspace",
                 subjectId: grant.subjectId,
               },
@@ -573,7 +683,7 @@ async function callRemoteTool(
   args: Record<string, unknown>,
 ): Promise<ToolspaceCallResult> {
   try {
-    return (await server.client.callTool(
+    const output = (await server.client.callTool(
       {
         name: toolName,
         arguments: args,
@@ -581,7 +691,17 @@ async function callRemoteTool(
       undefined,
       toolspaceRequestOptions(server.config),
     )) as ToolspaceCallResult;
+    assertMcpPayloadWithinBytes(output, MCP_MAX_TOOL_RESULT_BYTES, "MCP tool result");
+    return output;
   } catch (error) {
+    if (error instanceof McpPayloadTooLargeError) {
+      deps.observability?.warn("toolspace upstream tool result exceeded safety limit", {
+        serverId: server.config.id,
+        toolName,
+        errorClass: error.name,
+      });
+      return mcpError("upstream tool result exceeded the safety limit");
+    }
     if (isToolspaceAuthNeededError(error)) {
       return mcpError(TOOLSPACE_AUTH_NEEDED_MESSAGE);
     }
@@ -595,6 +715,24 @@ async function callRemoteTool(
     });
     return mcpError(`upstream tool failed: ${prefixedMcpToolName(server.config.id, toolName)}`);
   }
+}
+
+function toolspaceAuditSummary(value: unknown): {
+  redacted: true;
+  sizeBytes: number;
+  sha256: string;
+} {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(value) ?? "null";
+  } catch {
+    serialized = "[unserializable]";
+  }
+  return {
+    redacted: true,
+    sizeBytes: Buffer.byteLength(serialized),
+    sha256: createHash("sha256").update(serialized).digest("hex"),
+  };
 }
 
 type ToolspaceReservation =
@@ -692,7 +830,11 @@ type McpRequestInfo = {
   toolName?: string;
 };
 
-function connectionBrokerFetch(
+function mcpRequestDestinationUrl(input: string | URL | Request): string {
+  return new URL(input instanceof Request ? input.url : input.toString()).toString();
+}
+
+export function connectionBrokerFetch(
   baseFetch: FetchLike,
   input: {
     deps: ApiRouteDeps;
@@ -723,10 +865,12 @@ function connectionBrokerFetch(
     : buildConnectionTokenResolver(input.deps.db, input.deps.settings);
   return async (requestInput, init) => {
     const request = await mcpRequestInfo(requestInput, init);
+    const destinationUrl = mcpRequestDestinationUrl(requestInput);
     const first = await resolveCredential({
       workspaceId: input.grant.workspaceId,
       serverId: input.config.id,
       connectionRef,
+      destinationUrl,
       forceRefresh: false,
       ...(request.toolName ? { toolName: request.toolName } : {}),
       subjectId: input.grant.subjectId,
@@ -739,10 +883,12 @@ function connectionBrokerFetch(
       withConnectionHeaders(requestInput, init, first.headers),
     );
     if (response.status === 401) {
+      await cancelMcpResponseBody(response);
       const refreshed = await resolveCredential({
         workspaceId: input.grant.workspaceId,
         serverId: input.config.id,
         connectionRef,
+        destinationUrl,
         forceRefresh: true,
         ...(request.toolName ? { toolName: request.toolName } : {}),
         subjectId: input.grant.subjectId,
@@ -750,12 +896,30 @@ function connectionBrokerFetch(
       if (refreshed.status === "auth_needed") {
         return await authNeededFetchResponse(input, request, refreshed);
       }
-      return await baseFetch(
+      const retry = await baseFetch(
         fetchInputForAttempt(requestInput),
         withConnectionHeaders(requestInput, init, refreshed.headers),
       );
+      if (retry.status === 401) {
+        await cancelMcpResponseBody(retry);
+        return await authNeededFetchResponse(
+          input,
+          request,
+          authNeededFromStatus(input.config, refreshed, "expired"),
+        );
+      }
+      if (retry.status === 403) {
+        await cancelMcpResponseBody(retry);
+        return await authNeededFetchResponse(
+          input,
+          request,
+          authNeededFromStatus(input.config, refreshed, "insufficient_scope"),
+        );
+      }
+      return retry;
     }
     if (response.status === 403) {
+      await cancelMcpResponseBody(response);
       return await authNeededFetchResponse(
         input,
         request,
@@ -841,8 +1005,19 @@ async function authNeededFetchResponse(
   return new Response("Authentication required for MCP server connection", { status: 401 });
 }
 
-async function mcpRequestInfo(_input: string | URL, init?: RequestInit): Promise<McpRequestInfo> {
-  const body = typeof init?.body === "string" ? init.body : "";
+async function mcpRequestInfo(
+  input: string | URL | Request,
+  init?: RequestInit,
+): Promise<McpRequestInfo> {
+  const body =
+    typeof init?.body === "string"
+      ? init.body
+      : input instanceof Request && (init?.method ?? input.method).toUpperCase() === "POST"
+        ? await input
+            .clone()
+            .text()
+            .catch(() => "")
+        : "";
   if (!body) {
     return {};
   }
@@ -872,19 +1047,21 @@ async function mcpRequestInfo(_input: string | URL, init?: RequestInit): Promise
 }
 
 function withConnectionHeaders(
-  _input: string | URL,
+  input: string | URL | Request,
   init: RequestInit | undefined,
   authHeaders: Record<string, string>,
 ): RequestInit {
-  const headers = new Headers(init?.headers);
+  const headers = new Headers(
+    init?.headers ?? (input instanceof Request ? input.headers : undefined),
+  );
   for (const [name, value] of Object.entries(authHeaders)) {
     headers.set(name, value);
   }
   return { ...init, headers };
 }
 
-function fetchInputForAttempt(input: string | URL): string | URL {
-  return input;
+function fetchInputForAttempt(input: string | URL | Request): string | URL | Request {
+  return input instanceof Request ? input.clone() : input;
 }
 
 function isToolspaceAuthNeededError(error: unknown): boolean {

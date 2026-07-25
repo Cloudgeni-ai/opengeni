@@ -20,7 +20,6 @@ import type { ComponentType } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { Collapsible } from "radix-ui";
 import {
-  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -109,8 +108,6 @@ export type MessageTimelineProps = {
   className?: string | undefined;
 };
 
-const INITIAL_MOUNTED_GROUPS = 1;
-
 /**
  * The session timeline: chat messages with streaming deltas, collapsed
  * activity clusters (reasoning, tool calls, sandbox work), spawned-worker
@@ -135,10 +132,8 @@ export function MessageTimeline({
   className,
 }: MessageTimelineProps) {
   const resolvedItems = useMemo(() => items ?? buildTimeline(events ?? []), [items, events]);
-  const allGroups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
-  const keyedGroups = useStableTimelineGroupKeys(allGroups);
-  const { mountedGroups: groups, mountingOlderGroups } = useProgressivelyMountedGroups(keyedGroups);
-  const firstGroupKey = allGroups[0] ? timelineGroupKey(allGroups[0]) : null;
+  const groups = useMemo(() => groupTimeline(resolvedItems), [resolvedItems]);
+  const firstGroupKey = groups[0] ? timelineGroupKey(groups[0]) : null;
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const topSentinelRef = useRef<HTMLDivElement | null>(null);
@@ -183,8 +178,7 @@ export function MessageTimeline({
   const firstKeyChangedForBulk =
     previousBulkFirstKeyRef.current !== undefined &&
     previousBulkFirstKeyRef.current !== firstGroupKey;
-  const bulkRender =
-    allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk || mountingOlderGroups);
+  const bulkRender = groups.length > 0 && (bulkActive || firstKeyChangedForBulk);
 
   // Snapshot the topmost visible element and where it sits in the viewport, so a
   // later reflow can restore it to the same spot. Transient chrome (the backfill
@@ -227,10 +221,10 @@ export function MessageTimeline({
   // A cleared timeline (stream identity change) re-arms the reveal so the next
   // session also first paints at its bottom.
   useLayoutEffect(() => {
-    if (allGroups.length === 0 && revealed) {
+    if (groups.length === 0 && revealed) {
       setRevealed(false);
     }
-  }, [allGroups.length, revealed]);
+  }, [groups.length, revealed]);
 
   // Clear the bulk-paint marker a frame after it renders, so rows appended
   // live (streams, new turns) animate exactly as before.
@@ -240,15 +234,9 @@ export function MessageTimeline({
       return;
     }
     setBulkActive(true);
-    // Initial tails and prepended history mount from newest to oldest across
-    // frames. Keep every row born during that bulk window animation-free; only
-    // clear the marker after the authoritative group list is fully mounted.
-    if (mountingOlderGroups) {
-      return;
-    }
     const frame = requestFrame(() => setBulkActive(false));
     return () => cancelFrame(frame);
-  }, [bulkRender, firstGroupKey, mountingOlderGroups]);
+  }, [bulkRender, firstGroupKey]);
 
   // Prefetch older history well before the reader reaches the top: the
   // sentinel sits above the first group and trips 1600px early, so backfill
@@ -260,7 +248,6 @@ export function MessageTimeline({
     if (
       !root ||
       !target ||
-      mountingOlderGroups ||
       !hasOlder ||
       loadingOlder ||
       !onLoadOlder ||
@@ -278,7 +265,7 @@ export function MessageTimeline({
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey, mountingOlderGroups]);
+  }, [hasOlder, loadingOlder, onLoadOlder, firstGroupKey]);
 
   // Scroll anchoring: when the content reflows (a fold expands/collapses, a
   // stream appends), keep following the bottom if pinned; otherwise pin the
@@ -351,7 +338,7 @@ export function MessageTimeline({
                     <p className="py-10 text-center text-sm text-og-fg-subtle">No activity yet.</p>
                   ))
                 : null}
-              {hasOlder && !mountingOlderGroups ? (
+              {hasOlder ? (
                 <div
                   ref={topSentinelRef}
                   data-og-top-sentinel=""
@@ -365,9 +352,9 @@ export function MessageTimeline({
                   <span className="og-shimmer-text font-medium">Loading earlier activity…</span>
                 </div>
               ) : null}
-              {groups.map(({ group, key }, index) => (
+              {groups.map((group, index) => (
                 <TimelineGroupView
-                  key={key}
+                  key={timelineGroupKey(group)}
                   group={group}
                   renderMessageText={renderMessageText}
                   onOpenSession={onOpenSession}
@@ -375,7 +362,7 @@ export function MessageTimeline({
                   onReconnect={onReconnect}
                   resolveProviderLogo={resolveProviderLogo}
                   toolRegistry={toolRegistry}
-                  foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
+                  foldLiveCluster={isAgentProgress(groups[index + 1])}
                 />
               ))}
               {working ? (
@@ -419,148 +406,6 @@ export function MessageTimeline({
   );
 }
 
-type MountedGroupWindow = {
-  groupKeys: string[];
-  visibleStart: number;
-};
-
-type KeyedTimelineGroup = {
-  group: TimelineGroup;
-  key: string;
-  itemIds: string[];
-};
-
-/**
- * Projection can legitimately change a group's content-derived key while
- * retaining its existing rows. The common pagination case is an older activity
- * item merging into the first activity group; live appends grow the same group
- * from the other side. Match the new authoritative groups to the previous
- * committed groups by their durable item IDs so both the React key and the
- * progressive-window anchor survive either change.
- */
-function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
-  const previousRef = useRef<KeyedTimelineGroup[]>([]);
-  const keyedGroups = useMemo(() => {
-    const previousByItemId = new Map<string, KeyedTimelineGroup[]>();
-    for (const previous of previousRef.current) {
-      for (const itemId of previous.itemIds) {
-        const matches = previousByItemId.get(itemId);
-        if (matches) {
-          matches.push(previous);
-        } else {
-          previousByItemId.set(itemId, [previous]);
-        }
-      }
-    }
-
-    const usedKeys = new Set<string>();
-    return allGroups.map((group, index) => {
-      const itemIds = timelineGroupItemIds(group);
-      let retainedKey: string | undefined;
-      for (const itemId of itemIds) {
-        const previousMatches = previousByItemId.get(itemId);
-        const previous = previousMatches?.find((candidate) => !usedKeys.has(candidate.key));
-        if (previous) {
-          retainedKey = previous.key;
-          break;
-        }
-      }
-
-      const canonicalKey = timelineGroupKey(group);
-      let key = retainedKey ?? canonicalKey;
-      let collision = 0;
-      while (usedKeys.has(key)) {
-        key = `${canonicalKey}:${index}:${collision}`;
-        collision += 1;
-      }
-      usedKeys.add(key);
-      return { group, key, itemIds };
-    });
-  }, [allGroups]);
-
-  useLayoutEffect(() => {
-    previousRef.current = keyedGroups;
-  }, [keyedGroups]);
-
-  return keyedGroups;
-}
-
-/**
- * Bulk history is already projected into its authoritative order before this
- * hook runs. Mount its newest group first, then prepend one older group per
- * animation frame so low-end browsers can paint and service input between
- * React/Markdown commits instead of doing the entire tail in one long task.
- *
- * A live append does not move the first mounted key, so it is included
- * immediately in the mounted suffix. A history prepend moves that key deeper
- * in the array; shifting `visibleStart` by that exact prefix keeps every
- * existing row mounted while the new prefix is revealed. If projection
- * coalesces the seam item itself away, the earliest surviving mounted key
- * provides the same anchor. Replacements with no shared mounted key (for
- * example a session switch or clear-view) start a fresh suffix.
- */
-function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
-  mountedGroups: KeyedTimelineGroup[];
-  mountingOlderGroups: boolean;
-} {
-  const previousGroupKeysRef = useRef<string[]>([]);
-  const groupKeys = useMemo(() => {
-    const nextKeys = allGroups.map((group) => group.key);
-    return equalGroupKeys(previousGroupKeysRef.current, nextKeys)
-      ? previousGroupKeysRef.current
-      : nextKeys;
-  }, [allGroups]);
-  useLayoutEffect(() => {
-    previousGroupKeysRef.current = groupKeys;
-  }, [groupKeys]);
-  const [window, setWindow] = useState<MountedGroupWindow>(() => ({
-    groupKeys,
-    visibleStart: initialVisibleGroupIndex(allGroups.length),
-  }));
-
-  const lastPossibleStart = Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS);
-  let visibleStart = 0;
-  if (allGroups.length > 0) {
-    const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
-    const previousMountedKeys = window.groupKeys.slice(window.visibleStart);
-    const retainedStart = previousMountedKeys
-      .map((key) => currentIndexByKey.get(key))
-      .find((index): index is number => index !== undefined);
-    visibleStart =
-      retainedStart === undefined
-        ? initialVisibleGroupIndex(allGroups.length)
-        : Math.min(retainedStart, lastPossibleStart);
-  }
-
-  useEffect(() => {
-    // Synchronize a prepend/replacement before scheduling its first reveal.
-    if (window.groupKeys !== groupKeys || window.visibleStart !== visibleStart) {
-      setWindow({ groupKeys, visibleStart });
-      return;
-    }
-    if (visibleStart === 0) {
-      return;
-    }
-    const frame = requestFrame(() => {
-      setWindow((current) =>
-        current.groupKeys === groupKeys && current.visibleStart > 0
-          ? { ...current, visibleStart: current.visibleStart - 1 }
-          : current,
-      );
-    });
-    return () => cancelFrame(frame);
-  }, [groupKeys, visibleStart, window.groupKeys, window.visibleStart]);
-
-  return {
-    mountedGroups: allGroups.slice(visibleStart),
-    mountingOlderGroups: visibleStart > 0,
-  };
-}
-
-function initialVisibleGroupIndex(groupCount: number): number {
-  return Math.max(0, groupCount - INITIAL_MOUNTED_GROUPS);
-}
-
 function requestFrame(callback: FrameRequestCallback): number {
   if (typeof requestAnimationFrame === "function") {
     return requestAnimationFrame(callback);
@@ -576,11 +421,7 @@ function cancelFrame(id: number): void {
   window.clearTimeout(id);
 }
 
-// Progressive history mounting reuses the exact group objects from `allGroups`.
-// Skip repainting those stable rows on every prefix reveal; live projection
-// creates a new group object, and behavior/callback changes are separate props,
-// so ordinary streaming and host updates still invalidate immediately.
-const TimelineGroupView = memo(function TimelineGroupView({
+function TimelineGroupView({
   group,
   renderMessageText,
   onOpenSession,
@@ -690,7 +531,7 @@ const TimelineGroupView = memo(function TimelineGroupView({
         />
       );
   }
-});
+}
 
 function timelineGroupKey(group: TimelineGroup): string {
   switch (group.kind) {
@@ -700,21 +541,6 @@ function timelineGroupKey(group: TimelineGroup): string {
       return group.id;
     case "turn":
       return group.id;
-  }
-}
-
-function equalGroupKeys(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((key, index) => key === right[index]);
-}
-
-function timelineGroupItemIds(group: TimelineGroup): string[] {
-  switch (group.kind) {
-    case "item":
-      return [group.item.id];
-    case "activity":
-      return group.items.map((item) => item.id);
-    case "turn":
-      return group.groups.flatMap(timelineGroupItemIds);
   }
 }
 
@@ -1172,12 +998,12 @@ function NoticeRow({ item }: { item: NoticeItem }) {
 }
 
 /**
- * The inline connection card: a lapsed connection surfaces as a calm, tappable
- * reconnect affordance, while an incompatible host-owned endpoint/resource
- * contract remains informative and non-actionable. The `reason` only shapes
- * the helper copy; no domain or enum code is shown as a label.
- * `onReconnect` (from the app, which owns the SDK client) runs the flow; without
- * it, a pre-minted authorization link is offered, or the card stays informative.
+ * The inline connection-recovery card: missing or lapsed access surfaces as a
+ * calm, tappable affordance instead of a raw provider-domain error. The `reason`
+ * only shapes human copy; no domain or enum code is shown as a label.
+ * `onReconnect` (from the app, which owns the SDK client) starts the flow;
+ * without it, a pre-minted authorization link is offered, or the card stays
+ * informative. Recovery never claims to resume/replay the failed tool call.
  */
 function AuthNeededRow({
   item,
@@ -1192,8 +1018,8 @@ function AuthNeededRow({
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
   const provider = providerLabel(item.providerDomain);
-  const unavailable =
-    item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
+  const missing = item.reason === "missing_connection";
+  const actionLabel = missing ? "Connect" : "Reconnect";
 
   const start = async () => {
     if (!onReconnect || busy) {
@@ -1204,6 +1030,7 @@ function AuthNeededRow({
     try {
       // On success the app redirects to consent (or routes to credential entry),
       // so this row unmounts; a resolve without navigation just relaxes the button.
+      // The callback starts authorization only. It never resumes this tool call.
       await onReconnect(item);
       setBusy(false);
     } catch {
@@ -1222,12 +1049,12 @@ function AuthNeededRow({
           />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">
-              {unavailable ? `${provider} tools unavailable` : `Reconnect ${provider}`}
+              {actionLabel} {provider}
             </p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
           </div>
         </div>
-        {!unavailable && onReconnect ? (
+        {onReconnect ? (
           <button
             type="button"
             onClick={() => void start()}
@@ -1238,9 +1065,9 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
-            {busy ? "Reconnecting…" : "Reconnect"}
+            {busy ? "Opening…" : actionLabel}
           </button>
-        ) : !unavailable && item.authorizationUrl ? (
+        ) : item.authorizationUrl ? (
           <a
             href={item.authorizationUrl}
             rel="noreferrer"
@@ -1251,13 +1078,17 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className="size-3.5" aria-hidden />
-            Reconnect
+            {actionLabel}
           </a>
         ) : null}
       </div>
+      <p className="px-1 text-og-xs text-og-fg-subtle">
+        This tool call wasn't replayed. After {missing ? "connecting" : "reconnecting"}, send a new
+        message to try again.
+      </p>
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start reconnecting {provider}. Try again.
+          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
         </p>
       ) : null}
     </div>
@@ -1338,10 +1169,6 @@ function authReasonLine(reason: AuthNeededItem["reason"]): string {
     case "expired":
     case "refresh_failed":
       return "Its access expired.";
-    case "unsupported_auth":
-      return "This connection cannot authenticate the configured tool endpoint.";
-    case "resource_scope_unavailable":
-      return "This tool endpoint cannot enforce the selected repository access.";
     default:
       return "Its connection needs attention.";
   }

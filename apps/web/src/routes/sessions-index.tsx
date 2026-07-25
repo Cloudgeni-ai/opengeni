@@ -91,6 +91,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const createComposer: ComposerState = {
     value: message,
     setValue: setMessage,
+    hasDraftContent: () => message.length > 0 || attachments.readyResources.length > 0,
     sending: context.busy,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()

@@ -270,6 +270,7 @@ describe("immutable session turn initiators", () => {
           text: "edited queued work",
           resources: [],
           tools: [],
+          toolsProvided: false,
           model: "scripted-model",
           reasoningEffort: "low",
         }),

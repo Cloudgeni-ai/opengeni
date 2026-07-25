@@ -28,6 +28,10 @@
     "./skill-library": {
       "types": "./src/skill-library.ts",
       "default": "./src/skill-library.ts"
+    },
+    "./mcp-network": {
+      "types": "./src/mcp-network.ts",
+      "default": "./src/mcp-network.ts"
     }
   },
   "publishConfig": {
@@ -49,6 +53,7 @@
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
     "debug": "4.4.3",
+    "@opengeni/network": "workspace:*",
     "modal": "0.7.6",
     "openai": "6.47.0",
     "ws": "8.21.1"
