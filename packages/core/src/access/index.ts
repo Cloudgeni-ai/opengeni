@@ -9,6 +9,7 @@ import {
   bootstrapWorkspace,
   ensureManagedAccessForUser,
   findActiveApiKeyByHash,
+  getOrganizationGovernanceStatus,
   getWorkspaceGrant,
   requireWorkspace,
   type Database,
@@ -30,7 +31,7 @@ export async function requireAccessContext(c: Context, deps: AccessDeps): Promis
   if (!context) {
     throw new HTTPException(401, { message: "authentication required" });
   }
-  return context;
+  return await governanceBoundContext(deps, context);
 }
 
 export async function requireAccessGrant(
@@ -48,7 +49,21 @@ export async function requireAccessGrant(
     if (!workspace) {
       throw new HTTPException(404, { message: "workspace not found" });
     }
+    const governance = await getOrganizationGovernanceStatus(deps.db, workspace.accountId);
+    if (governance?.state === "governance_locked") {
+      throw new HTTPException(423, { message: "organization governance is locked" });
+    }
     throw new HTTPException(403, { message: "workspace access denied" });
+  }
+  const governance = await getOrganizationGovernanceStatus(deps.db, grant.accountId);
+  if (!governance) {
+    throw new HTTPException(404, { message: "workspace not found" });
+  }
+  if (governance.state === "governance_locked") {
+    throw new HTTPException(423, { message: "organization governance is locked" });
+  }
+  if (authorizationWasInvalidated(grant.metadata, governance.authorizationInvalidatedAt)) {
+    throw new HTTPException(401, { message: "authorization invalidated by governance recovery" });
   }
   if (permission) {
     requirePermission(grant, permission);
@@ -167,6 +182,8 @@ async function apiKeyAccessContext(
         (permission) => permission === "billing:read" || permission === "billing:manage",
       )
     : apiKey.permissions;
+  const governance = await getOrganizationGovernanceStatus(deps.db, apiKey.accountId);
+  if (!governance) return null;
   return {
     mode,
     subjectId,
@@ -177,6 +194,10 @@ async function apiKeyAccessContext(
         subjectId,
         subjectLabel: apiKey.name,
         permissions: accountPermissions,
+        metadata: {
+          authType: "api_key",
+          governanceRevision: governance.governanceRevision,
+        },
       },
     ],
     workspaceGrants: apiKey.workspaceId
@@ -187,6 +208,10 @@ async function apiKeyAccessContext(
             subjectId,
             subjectLabel: apiKey.name,
             permissions: apiKey.permissions,
+            metadata: {
+              authType: "api_key",
+              governanceRevision: governance.governanceRevision,
+            },
           },
         ]
       : [],
@@ -218,6 +243,10 @@ async function delegatedAccessContext(
         subjectId: payload.subjectId,
         ...(payload.subjectLabel ? { subjectLabel: payload.subjectLabel } : {}),
         permissions: payload.permissions,
+        metadata: {
+          delegated: true,
+          authIssuedAt: payload.iat ?? null,
+        },
       },
     ],
     workspaceGrants: [
@@ -231,6 +260,7 @@ async function delegatedAccessContext(
         // controlled; it scopes session-bound MCP tools such as goal management.
         metadata: {
           delegated: true,
+          authIssuedAt: payload.iat ?? null,
           ...(payload.sessionId ? { sessionId: payload.sessionId } : {}),
           // Caller identity: the turn that minted this token. Tools classify the
           // CALLER from this instead of re-reading the live active pointer.
@@ -249,6 +279,70 @@ async function delegatedAccessContext(
     defaultAccountId: payload.accountId,
     defaultWorkspaceId: payload.workspaceId,
   };
+}
+
+async function governanceBoundContext(
+  deps: AccessDeps,
+  context: AccessContext,
+): Promise<AccessContext> {
+  const accountIds = new Set([
+    ...context.accountGrants.map((grant) => grant.accountId),
+    ...context.workspaceGrants.map((grant) => grant.accountId),
+  ]);
+  const statuses = new Map(
+    (
+      await Promise.all(
+        [...accountIds].map(
+          async (accountId) =>
+            [accountId, await getOrganizationGovernanceStatus(deps.db, accountId)] as const,
+        ),
+      )
+    ).filter((entry): entry is readonly [string, NonNullable<(typeof entry)[1]>] => !!entry[1]),
+  );
+  for (const grant of [...context.accountGrants, ...context.workspaceGrants]) {
+    const governance = statuses.get(grant.accountId);
+    if (
+      authorizationWasInvalidated(grant.metadata, governance?.authorizationInvalidatedAt ?? null)
+    ) {
+      throw new HTTPException(401, {
+        message: "authorization invalidated by governance recovery",
+      });
+    }
+  }
+  const blocked = (grant: {
+    accountId: string;
+    metadata?: Record<string, unknown> | undefined;
+  }) => {
+    const governance = statuses.get(grant.accountId);
+    return governance?.state === "governance_locked";
+  };
+  const workspaceGrants = context.workspaceGrants.map((grant) =>
+    blocked(grant) ? { ...grant, permissions: [] } : grant,
+  );
+  return {
+    ...context,
+    accountGrants: context.accountGrants.map((grant) =>
+      blocked(grant) ? { ...grant, permissions: [] } : grant,
+    ),
+    workspaceGrants,
+    defaultWorkspaceId:
+      workspaceGrants.find((grant) => grant.workspaceId === context.defaultWorkspaceId)?.permissions
+        .length === 0
+        ? null
+        : context.defaultWorkspaceId,
+  };
+}
+
+function authorizationWasInvalidated(
+  metadata: Record<string, unknown> | undefined,
+  invalidatedAt: string | null,
+): boolean {
+  if (!invalidatedAt || metadata?.delegated !== true) return false;
+  const issuedAt = metadata.authIssuedAt;
+  return (
+    typeof issuedAt !== "number" ||
+    issuedAt <= Math.floor(new Date(invalidatedAt).getTime() / 1_000)
+  );
 }
 
 function configuredSubject(c: Context): string {

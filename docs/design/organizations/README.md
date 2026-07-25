@@ -5,9 +5,7 @@
 
 # Organizations and identity design packet
 
-Status: **corrective revision after a third exact-head BLOCK/REQUEST CHANGES; implementation remains blocked pending fresh independent approval**
-
-Issue: OPE-10
+Status: **implementation review candidate; not production-approved**
 
 Date: 2026-07-19
 
@@ -109,7 +107,7 @@ independent review pinned to the new immutable head after it is frozen.
 
 ## Ownership boundary
 
-OPE-10 owns the generic human/login-account/organization/workspace model and its public
+This design packet owns the generic human/login-account/organization/workspace model and its public
 switching contract. It does not take ownership of:
 
 - runtime database-role provisioning or RLS deployment posture;

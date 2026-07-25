@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
 import * as opengeniDb from "@opengeni/db";
 import type { CodexUsagePayload } from "@opengeni/codex";
@@ -8,8 +8,8 @@ import { createApp } from "../src/app";
 // Per-account usage routes (P2): the batched live refresh, the single-account live
 // read, and the repointed back-compat /usage. db accessors are spied so no real
 // Postgres or provider call is made — the routes' batching/keying/status mapping
-// is what's under test. requireAccessGrant authenticates from the delegated token
-// alone (no db hit), so the underlying db is a poison proxy.
+// is what's under test. The delegated token supplies the grant, while the access
+// layer's mandatory governance fence is mocked explicitly below.
 
 const DELEGATION_SECRET = "codex-usage-delegation-secret";
 const STATE_SECRET = "codex-usage-state-secret";
@@ -120,6 +120,18 @@ function payload(
 }
 
 const restores: Array<() => void> = [];
+beforeEach(() => {
+  const governance = spyOn(opengeniDb, "getOrganizationGovernanceStatus").mockResolvedValue({
+    accountId: ACCOUNT,
+    kind: "team",
+    state: "active",
+    governanceRevision: 0,
+    authoritySubjectId: null,
+    authorizationInvalidatedAt: null,
+  });
+  restores.push(() => governance.mockRestore());
+});
+
 afterEach(() => {
   while (restores.length) restores.pop()!();
 });

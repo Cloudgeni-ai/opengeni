@@ -578,11 +578,167 @@ export type UsageLimitsMode = z.infer<typeof UsageLimitsMode>;
 export const AccountRole = z.enum(["owner", "admin", "member"]);
 export type AccountRole = z.infer<typeof AccountRole>;
 
+export const OrganizationKind = z.enum(["personal", "team"]);
+export type OrganizationKind = z.infer<typeof OrganizationKind>;
+
+export const OrganizationGovernanceState = z.enum(["active", "governance_locked"]);
+export type OrganizationGovernanceState = z.infer<typeof OrganizationGovernanceState>;
+
+export const OrganizationRecoveryOperationState = z.enum(["pending", "finalized", "cancelled"]);
+export type OrganizationRecoveryOperationState = z.infer<typeof OrganizationRecoveryOperationState>;
+
+const GovernanceIdempotencyKey = z.string().trim().min(1).max(128);
+const GovernanceSubjectId = z.string().trim().min(1).max(512);
+
+export const OrganizationRecoveryCustodian = z
+  .object({
+    subjectId: GovernanceSubjectId,
+    subjectLabel: z.string().max(512).nullable(),
+    policyRevision: z.number().int().positive(),
+    enrolledAt: z.string(),
+  })
+  .strict();
+export type OrganizationRecoveryCustodian = z.infer<typeof OrganizationRecoveryCustodian>;
+
+export const OrganizationRecoveryPolicy = z
+  .object({
+    revision: z.number().int().positive(),
+    quorum: z.number().int().positive(),
+    custodians: z.array(OrganizationRecoveryCustodian),
+  })
+  .strict();
+export type OrganizationRecoveryPolicy = z.infer<typeof OrganizationRecoveryPolicy>;
+
+export const OrganizationGovernance = z
+  .object({
+    accountId: z.string().uuid(),
+    kind: OrganizationKind,
+    state: OrganizationGovernanceState,
+    governanceRevision: z.number().int().nonnegative(),
+    authoritySubjectId: GovernanceSubjectId.nullable(),
+    recoveryPolicy: OrganizationRecoveryPolicy.nullable(),
+    authorizationInvalidatedAt: z.string().nullable(),
+  })
+  .strict();
+export type OrganizationGovernance = z.infer<typeof OrganizationGovernance>;
+
+export const OrganizationRecoveryApprovalMetadata = z
+  .object({
+    subjectId: GovernanceSubjectId,
+    evidenceExpiresAt: z.string(),
+    revokedAt: z.string().nullable(),
+    consumedAt: z.string().nullable(),
+    createdAt: z.string(),
+  })
+  .strict();
+export type OrganizationRecoveryApprovalMetadata = z.infer<
+  typeof OrganizationRecoveryApprovalMetadata
+>;
+
+export const OrganizationRecoveryOperation = z
+  .object({
+    id: z.string().uuid(),
+    accountId: z.string().uuid(),
+    state: OrganizationRecoveryOperationState,
+    governanceRevision: z.number().int().nonnegative(),
+    policyRevision: z.number().int().positive(),
+    quorum: z.number().int().positive(),
+    approvalCount: z.number().int().nonnegative(),
+    approvals: z.array(OrganizationRecoveryApprovalMetadata),
+    expiresAt: z.string(),
+    finalizedAt: z.string().nullable(),
+    cancelledAt: z.string().nullable(),
+    createdAt: z.string(),
+  })
+  .strict();
+export type OrganizationRecoveryOperation = z.infer<typeof OrganizationRecoveryOperation>;
+
+export const SetOrganizationRecoveryPolicyRequest = z
+  .object({
+    expectedGovernanceRevision: z.number().int().nonnegative(),
+    quorum: z.number().int().positive().max(10),
+    custodians: z
+      .array(
+        z
+          .object({
+            subjectId: GovernanceSubjectId,
+            subjectLabel: z.string().trim().min(1).max(512).optional(),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(10),
+    idempotencyKey: GovernanceIdempotencyKey,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const subjects = value.custodians.map((custodian) => custodian.subjectId);
+    if (new Set(subjects).size !== subjects.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["custodians"],
+        message: "custodian subjects must be distinct",
+      });
+    }
+    if (value.quorum > value.custodians.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["quorum"],
+        message: "quorum cannot exceed the custodian count",
+      });
+    }
+  });
+export type SetOrganizationRecoveryPolicyRequest = z.infer<
+  typeof SetOrganizationRecoveryPolicyRequest
+>;
+
+export const LockOrganizationGovernanceRequest = z
+  .object({
+    expectedGovernanceRevision: z.number().int().nonnegative(),
+    reason: z.string().trim().min(1).max(500),
+    idempotencyKey: GovernanceIdempotencyKey,
+  })
+  .strict();
+export type LockOrganizationGovernanceRequest = z.infer<typeof LockOrganizationGovernanceRequest>;
+
+export const CreateOrganizationRecoveryOperationRequest = z
+  .object({ idempotencyKey: GovernanceIdempotencyKey })
+  .strict();
+export type CreateOrganizationRecoveryOperationRequest = z.infer<
+  typeof CreateOrganizationRecoveryOperationRequest
+>;
+
+export const ApproveOrganizationRecoveryRequest = z
+  .object({
+    // Sensitive, one-use proof. It is accepted only over TLS in managed
+    // deployments, encrypted before persistence, and never returned.
+    evidence: z
+      .string()
+      .min(1)
+      .max(4096)
+      .refine((value) => new TextEncoder().encode(value).byteLength <= 4096, {
+        message: "recovery evidence exceeds 4096 UTF-8 bytes",
+      }),
+    idempotencyKey: GovernanceIdempotencyKey,
+  })
+  .strict();
+export type ApproveOrganizationRecoveryRequest = z.infer<typeof ApproveOrganizationRecoveryRequest>;
+
+export const OrganizationRecoveryCommandRequest = z
+  .object({ idempotencyKey: GovernanceIdempotencyKey })
+  .strict();
+export type OrganizationRecoveryCommandRequest = z.infer<typeof OrganizationRecoveryCommandRequest>;
+
 export const ManagedAccount = z.object({
   id: z.string().uuid(),
   name: z.string(),
   externalSource: z.string().nullable(),
   externalId: z.string().nullable(),
+  organizationKind: OrganizationKind,
+  governanceState: OrganizationGovernanceState,
+  governanceRevision: z.number().int().nonnegative(),
+  governanceAuthoritySubjectId: GovernanceSubjectId.nullable(),
+  authorizationInvalidatedAt: z.string().nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -1078,6 +1234,10 @@ export const DelegatedAccessTokenPayload = z
     // attempt still owns the signed turn.
     attemptId: z.string().uuid().optional(),
     executionGeneration: z.number().int().positive().optional(),
+    // Added by signDelegatedAccessToken. Recovery invalidation rejects tokens
+    // issued at or before the account's latest governance recovery. Legacy
+    // tokens without iat remain valid only for never-invalidated accounts.
+    iat: z.number().int().positive().optional(),
     exp: z.number().int().positive(),
   })
   .superRefine((payload, ctx) => {
@@ -1110,7 +1270,10 @@ export async function signDelegatedAccessToken(
   secret: string,
   payload: DelegatedAccessTokenPayload,
 ): Promise<string> {
-  const parsed = DelegatedAccessTokenPayload.parse(payload);
+  const parsed = DelegatedAccessTokenPayload.parse({
+    ...payload,
+    iat: payload.iat ?? Math.floor(Date.now() / 1000),
+  });
   const prefix = parsed.serviceInitiator
     ? delegatedServiceAccessTokenPrefix
     : delegatedAccessTokenPrefix;

@@ -13,6 +13,7 @@ import {
   pgTable,
   text,
   timestamp,
+  unique,
   uniqueIndex,
   uuid,
   customType,
@@ -34,6 +35,17 @@ export const managedAccounts = pgTable(
     name: text("name").notNull(),
     externalSource: text("external_source"),
     externalId: text("external_id"),
+    organizationKind: text("organization_kind").notNull().default("team"),
+    governanceState: text("governance_state").notNull().default("active"),
+    governanceRevision: bigint("governance_revision", { mode: "number" }).notNull().default(0),
+    recoveryPolicyRevision: bigint("recovery_policy_revision", { mode: "number" })
+      .notNull()
+      .default(0),
+    recoveryQuorum: integer("recovery_quorum"),
+    governanceAuthoritySubjectId: text("governance_authority_subject_id"),
+    authorizationInvalidatedAt: timestamp("authorization_invalidated_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -41,6 +53,198 @@ export const managedAccounts = pgTable(
     external: uniqueIndex("managed_accounts_external_idx").on(
       table.externalSource,
       table.externalId,
+    ),
+    kindValid: check(
+      "managed_accounts_organization_kind_check",
+      sql`${table.organizationKind} in ('personal', 'team')`,
+    ),
+    governanceStateValid: check(
+      "managed_accounts_governance_state_check",
+      sql`${table.governanceState} in ('active', 'governance_locked')`,
+    ),
+    governanceRevisionValid: check(
+      "managed_accounts_governance_revision_check",
+      sql`${table.governanceRevision} >= 0 and ${table.recoveryPolicyRevision} >= 0`,
+    ),
+    recoveryQuorumValid: check(
+      "managed_accounts_recovery_quorum_check",
+      sql`${table.recoveryQuorum} is null or ${table.recoveryQuorum} between 1 and 10`,
+    ),
+  }),
+);
+
+export const organizationRecoveryCustodians = pgTable(
+  "organization_recovery_custodians",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    subjectLabel: text("subject_label"),
+    policyRevision: bigint("policy_revision", { mode: "number" }).notNull(),
+    enrolledAt: timestamp("enrolled_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountSubject: uniqueIndex("organization_recovery_custodians_account_subject_uq").on(
+      table.accountId,
+      table.subjectId,
+    ),
+    accountPolicy: index("organization_recovery_custodians_account_policy_idx").on(
+      table.accountId,
+      table.policyRevision,
+    ),
+    policyRevisionValid: check(
+      "organization_recovery_custodians_policy_revision_check",
+      sql`${table.policyRevision} > 0`,
+    ),
+  }),
+);
+
+export const organizationRecoveryOperations = pgTable(
+  "organization_recovery_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    state: text("state").notNull().default("pending"),
+    governanceRevision: bigint("governance_revision", { mode: "number" }).notNull(),
+    policyRevision: bigint("policy_revision", { mode: "number" }).notNull(),
+    quorum: integer("quorum").notNull(),
+    requestedBySubjectId: text("requested_by_subject_id").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    finalizedAt: timestamp("finalized_at", { withTimezone: true }),
+    cancelledAt: timestamp("cancelled_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idAccount: unique("organization_recovery_operations_id_account_uq").on(
+      table.id,
+      table.accountId,
+    ),
+    accountState: index("organization_recovery_operations_account_state_idx").on(
+      table.accountId,
+      table.state,
+    ),
+    onePending: uniqueIndex("organization_recovery_operations_one_pending_uq")
+      .on(table.accountId)
+      .where(sql`${table.state} = 'pending'`),
+    stateValid: check(
+      "organization_recovery_operations_state_check",
+      sql`${table.state} in ('pending', 'finalized', 'cancelled')`,
+    ),
+    revisionsValid: check(
+      "organization_recovery_operations_revisions_check",
+      sql`${table.governanceRevision} >= 0 and ${table.policyRevision} > 0 and ${table.quorum} between 1 and 10`,
+    ),
+  }),
+);
+
+export const organizationRecoveryApprovals = pgTable(
+  "organization_recovery_approvals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    evidenceCiphertext: text("evidence_ciphertext").notNull(),
+    evidenceKeyVersion: text("evidence_key_version").notNull(),
+    evidenceExpiresAt: timestamp("evidence_expires_at", { withTimezone: true }).notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationAccount: foreignKey({
+      name: "organization_recovery_approvals_operation_account_fk",
+      columns: [table.operationId, table.accountId],
+      foreignColumns: [organizationRecoveryOperations.id, organizationRecoveryOperations.accountId],
+    }).onDelete("cascade"),
+    operationSubject: uniqueIndex("organization_recovery_approvals_operation_subject_uq").on(
+      table.operationId,
+      table.subjectId,
+    ),
+    accountOperation: index("organization_recovery_approvals_account_operation_idx").on(
+      table.accountId,
+      table.operationId,
+    ),
+  }),
+);
+
+export const organizationGovernanceCommands = pgTable(
+  "organization_governance_commands",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    subjectId: text("subject_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    commandType: text("command_type").notNull(),
+    requestHash: text("request_hash").notNull(),
+    result: jsonb("result").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    accountSubjectKey: uniqueIndex("organization_governance_commands_account_subject_key_uq").on(
+      table.accountId,
+      table.subjectId,
+      table.idempotencyKey,
+    ),
+  }),
+);
+
+export const organizationAuthorizationInvalidations = pgTable(
+  "organization_authorization_invalidations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "restrict" }),
+    operationId: uuid("operation_id"),
+    governanceRevision: bigint("governance_revision", { mode: "number" }).notNull(),
+    reason: text("reason").notNull(),
+    invalidatedAt: timestamp("invalidated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationAccount: foreignKey({
+      name: "organization_authorization_invalidations_operation_account_fk",
+      columns: [table.operationId, table.accountId],
+      foreignColumns: [organizationRecoveryOperations.id, organizationRecoveryOperations.accountId],
+    }).onDelete("restrict"),
+    accountRevision: uniqueIndex("organization_authorization_invalidations_account_revision_uq").on(
+      table.accountId,
+      table.governanceRevision,
+    ),
+  }),
+);
+
+export const organizationRecoveryAudit = pgTable(
+  "organization_recovery_audit",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "restrict" }),
+    operationId: uuid("operation_id"),
+    subjectId: text("subject_id").notNull(),
+    action: text("action").notNull(),
+    metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    operationAccount: foreignKey({
+      name: "organization_recovery_audit_operation_account_fk",
+      columns: [table.operationId, table.accountId],
+      foreignColumns: [organizationRecoveryOperations.id, organizationRecoveryOperations.accountId],
+    }).onDelete("restrict"),
+    accountCreated: index("organization_recovery_audit_account_created_idx").on(
+      table.accountId,
+      table.createdAt,
     ),
   }),
 );

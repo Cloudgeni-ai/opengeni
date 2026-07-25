@@ -5,7 +5,7 @@
 
 # Organizations and identity migration and compatibility plan
 
-Status: **corrective revision after the third exact-head blocked review; no DDL may land before approval**
+Status: **bounded governance-recovery implementation candidate; broader canonical migration remains design-only**
 
 Companions: [`tenancy-identity-adr.md`](tenancy-identity-adr.md),
 [`threat-model.md`](threat-model.md)
@@ -27,8 +27,8 @@ Companions: [`tenancy-identity-adr.md`](tenancy-identity-adr.md),
    tests pass.
 9. A binary rollback does not require a database rollback and does not grant broader
    access than before the deployment.
-10. Destructive cleanup is a later, separately reviewed program—not part of OPE-10's
-    initial rollout.
+10. Destructive cleanup is a later, separately reviewed program—not part of the initial
+    rollout.
 11. Human/login recovery authority is deployment-scoped and stored outside organization
     membership. Organization governance recovery is scoped to exactly one organization
     and has no database capability over human/login state.
@@ -877,11 +877,12 @@ so stale signed state cannot resolve to the new tenant.
 
 ## 13. Migration identity and online DDL transaction rules
 
-This design intentionally names no migration number. Immediately before implementation,
-the sole schema owner must fetch current `main` and every accepted adjacent candidate,
-reserve the next identity through the repository's migration ownership process, and
-record the exact prefix/checksum in Linear and the PR. A placeholder or locally guessed
-number may not be committed.
+The broader canonical redesign intentionally names no migration number. The bounded
+governance-recovery slice reserves `0109_organization_governance_recovery.sql`; any
+later schema owner must still fetch current `main` and every accepted adjacent
+candidate, reserve the next identity through the repository's migration ownership
+process, and record the exact prefix/checksum in Linear and the PR. A placeholder or
+locally guessed number may not be committed.
 
 Online expansion is split by PostgreSQL transaction semantics:
 
