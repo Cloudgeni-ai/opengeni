@@ -13743,8 +13743,9 @@ export type ListSessionEventsOptions = {
   /**
    * Internal exclusive-latest selector. Eligible legacy rows with a null
    * association remain visible, while late-rejected and duplicate callbacks do
-   * not compete with current truth. Ordering is generation-first, sequence
-   * second; callers must pair this with a single semantic class and limit 1.
+   * not compete with current truth. Durable session sequence is authoritative
+   * across distinct turns; turn generation is metadata only here. Callers must
+   * pair this with a single semantic class and limit 1.
    */
   authoritativeLatest?: boolean;
 };
@@ -13845,12 +13846,15 @@ export async function listSessionEventPage(
       ];
       if (options.authoritativeLatest) {
         // Historical rows predate association stamping and intentionally carry
-        // null. They remain eligible; only explicit stale/duplicate evidence is
-        // excluded from current terminal truth.
+        // null. They remain eligible; explicitly stale/duplicate rows and rows
+        // carrying a duplicate reference cannot compete with current truth.
         filters.push(
-          or(
-            isNull(schema.sessionEvents.turnAssociation),
-            eq(schema.sessionEvents.turnAssociation, "current"),
+          and(
+            or(
+              isNull(schema.sessionEvents.turnAssociation),
+              eq(schema.sessionEvents.turnAssociation, "current"),
+            )!,
+            isNull(schema.sessionEvents.duplicateOfEventId),
           )!,
         );
       }
@@ -13877,10 +13881,7 @@ export async function listSessionEventPage(
         .where(and(...filters))
         .orderBy(
           options.authoritativeLatest
-            ? sql`
-                ${schema.sessionEvents.turnGeneration} desc nulls last,
-                ${schema.sessionEvents.sequence} desc
-              `
+            ? desc(schema.sessionEvents.sequence)
             : direction === "before"
               ? desc(schema.sessionEvents.sequence)
               : asc(schema.sessionEvents.sequence),

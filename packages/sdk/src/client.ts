@@ -667,9 +667,10 @@ export class OpenGeniClient {
   }
 
   /**
-   * Fetch the authoritative newest-generation semantic result directly. This
-   * is the callback-loss recovery path: it reads one compact durable result and
-   * never creates a model turn. `latest: "receipt"` aliases `tool_receipt`.
+   * Fetch the authoritative newest-sequence semantic result directly. This is
+   * the callback-loss recovery path: it reads one compact durable result and
+   * never creates a model turn. `latest: "receipt"` aliases `tool_receipt`;
+   * turn generation remains scoped retry metadata.
    */
   async getLatestEventResult(
     workspaceId: string,

@@ -57,8 +57,9 @@ filter, so an unrelated newer event cannot displace the requested result and an
 exclusion cannot remove it.
 
 For callback-loss recovery, `latest` selects authoritative current/legacy rows
-by `turnGeneration` first and `sequence` second; explicit `late_rejected` and
-`duplicate` callbacks never compete with current truth. Use
+by durable session `sequence` across distinct turns; explicit `late_rejected` and
+`duplicate` callbacks never compete with current truth. `turnGeneration` remains
+metadata and is interpreted only within its turn/retry scope. Use
 `resultMode: "compact"` to receive one bounded result-bearing completion,
 failure, checkpoint, or receipt without creating another model turn. The
 `receipt` spelling aliases `tool_receipt`, and a missing event returns `null`.

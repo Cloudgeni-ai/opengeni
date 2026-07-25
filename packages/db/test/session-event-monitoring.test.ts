@@ -277,34 +277,51 @@ describe("session event monitoring (real PostgreSQL)", () => {
     const [canonicalProvider] = await shared.admin<Array<{ id: string }>>`
       select id from session_events
       where session_id = ${sessionId} and sequence = 200006`;
+    const olderTurnId = crypto.randomUUID();
+    const newerTurnId = crypto.randomUUID();
     await shared.admin`
       insert into session_events (
         account_id, workspace_id, session_id, sequence, type, payload,
-        turn_generation, turn_association, duplicate_of_event_id, duplicate_reason
+        turn_id, turn_generation, turn_association, duplicate_of_event_id, duplicate_reason
       ) values
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 200007,
-          'turn.completed', ${shared.admin.json({ result: "older-generation-later-sequence" })}, 6, 'current', null, null),
+          'turn.completed', ${shared.admin.json({ result: "older-turn-generation-3" })},
+          ${olderTurnId}, 3, 'current', null, null),
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 200008,
-          'turn.completed', ${shared.admin.json({ result: "late-rejected-newer" })}, 99, 'late_rejected', null, null),
+          'turn.completed', ${shared.admin.json({ result: "late-rejected-newer" })},
+          ${olderTurnId}, 99, 'late_rejected', null, null),
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 200009,
-          'agent.model.usage', ${shared.admin.json({ sourceKey: "canonical-provider-response" })}, 100, 'duplicate',
+          'agent.model.usage', ${shared.admin.json({ sourceKey: "canonical-provider-response" })},
+          null, 100, 'duplicate',
           ${canonicalProvider!.id}, 'duplicate_provider_response_usage'),
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 200010,
-          'agent.message.completed', ${shared.admin.json({ text: "newest-authoritative-message" })}, 8, 'current', null, null),
+          'agent.message.completed', ${shared.admin.json({ text: "older-turn-message" })},
+          ${olderTurnId}, 3, 'current', null, null),
         (${session!.accountId}, ${workspaceId}, ${sessionId}, 200011,
-          'goal.completed', ${shared.admin.json({ status: "completed" })}, null, 'current', null, null)`;
+          'goal.completed', ${shared.admin.json({ status: "completed" })},
+          null, null, 'current', null, null)`;
+    await shared.admin`
+      insert into session_events (
+        account_id, workspace_id, session_id, sequence, type, payload,
+        turn_id, turn_generation, turn_association, duplicate_of_event_id, duplicate_reason
+      ) values (
+        ${session!.accountId}, ${workspaceId}, ${sessionId}, 200012,
+        'turn.completed', ${shared.admin.json({ result: "newer-turn-generation-1" })},
+        ${newerTurnId}, 1, 'current', null, null
+      )`;
 
-    const generationFirst = await listSessionEventPage(client.db, workspaceId, sessionId, {
+    const sequenceFirst = await listSessionEventPage(client.db, workspaceId, sessionId, {
       direction: "before",
       limit: 1,
       includeTypes: ["turn.completed"],
       payloadMode: "full",
       authoritativeLatest: true,
     });
-    expect(generationFirst.events[0]).toMatchObject({
-      sequence: 200005,
-      turnGeneration: 7,
-      payload: { result: "authoritative" },
+    expect(sequenceFirst.events[0]).toMatchObject({
+      sequence: 200012,
+      turnId: newerTurnId,
+      turnGeneration: 1,
+      payload: { result: "newer-turn-generation-1" },
     });
 
     const providerAccount = await listSessionEventPage(client.db, workspaceId, sessionId, {
@@ -329,9 +346,10 @@ describe("session event monitoring (real PostgreSQL)", () => {
       authoritativeLatest: true,
     });
     expect(authoritative.events[0]).toMatchObject({
-      sequence: 200010,
-      turnGeneration: 8,
-      payload: { text: "newest-authoritative-message" },
+      sequence: 200012,
+      turnId: newerTurnId,
+      turnGeneration: 1,
+      payload: { result: "newer-turn-generation-1" },
       turnAssociation: "current",
     });
 

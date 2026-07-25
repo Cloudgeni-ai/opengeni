@@ -157,7 +157,7 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
     expect(forensic.nextAfter).toBe(40);
   });
 
-  test("returns the authoritative latest terminal generation directly", async () => {
+  test("returns the authoritative latest terminal sequence directly", async () => {
     const latest = await callMcpTool<{
       events: Array<{
         sequence: number;
