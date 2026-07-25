@@ -85,7 +85,8 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(97 + currentMainMigrations.length);
+    // Main also carries the Codex subscription overview migration alongside this repair.
+    expect(contract.fileCount).toBe(98 + currentMainMigrations.length);
     expect(contract.latestMigration).toBe("0109_organization_governance_recovery.sql");
     expect(
       contract.migrations
