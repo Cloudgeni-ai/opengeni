@@ -62,25 +62,21 @@ describe("release schema contract", () => {
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",
-    ].filter((file) => migrations.has(file));
-    const forwardRepairMigrations = [
       "0107_host_export_lineage_contract.sql",
-      "0108_fence_invalidated_warming_epochs.sql",
     ].filter((file) => migrations.has(file));
 
     expect(currentMainMigrations).toEqual(
       currentMainMigrations.length === 0
         ? []
-        : ["0105_session_turn_instructions.sql", "0106_session_attempt_mcp_approval_policies.sql"],
+        : [
+            "0105_session_turn_instructions.sql",
+            "0106_session_attempt_mcp_approval_policies.sql",
+            ...(currentMainMigrations.includes("0107_host_export_lineage_contract.sql")
+              ? ["0107_host_export_lineage_contract.sql"]
+              : []),
+          ],
     );
-    expect(forwardRepairMigrations).toEqual(
-      forwardRepairMigrations.includes("0107_host_export_lineage_contract.sql")
-        ? ["0107_host_export_lineage_contract.sql", "0108_fence_invalidated_warming_epochs.sql"]
-        : ["0108_fence_invalidated_warming_epochs.sql"],
-    );
-    expect(contract.fileCount).toBe(
-      96 + currentMainMigrations.length + Math.max(0, forwardRepairMigrations.length - 1),
-    );
+    expect(contract.fileCount).toBe(96 + currentMainMigrations.length);
     expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
     expect(
       contract.migrations
@@ -90,7 +86,7 @@ describe("release schema contract", () => {
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
-      ...forwardRepairMigrations,
+      "0108_fence_invalidated_warming_epochs.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

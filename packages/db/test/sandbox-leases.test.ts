@@ -499,12 +499,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(draining?.liveness).toBe("draining");
     expect(draining?.instance_id).toBe("old-provider-local");
     expect(draining?.lease_epoch).toBe(old.lease.leaseEpoch + 1);
-    await assertExpiredDrainFence(
-      ids,
-      old.lease.leaseEpoch,
-      "old-provider-local",
-      "local",
-    );
+    await assertExpiredDrainFence(ids, old.lease.leaseEpoch, "old-provider-local", "local");
   }, 60_000);
 
   test("(1g) global post-create expiry fences a successor re-arm and late cleanup", async () => {
@@ -554,12 +549,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     expect(draining?.liveness).toBe("draining");
     expect(draining?.instance_id).toBe("old-provider-global");
     expect(draining?.lease_epoch).toBe(old.lease.leaseEpoch + 1);
-    await assertExpiredDrainFence(
-      ids,
-      old.lease.leaseEpoch,
-      "old-provider-global",
-      "global",
-    );
+    await assertExpiredDrainFence(ids, old.lease.leaseEpoch, "old-provider-global", "global");
   }, 60_000);
 
   test("(1c) SKIP-LOCKED counterfactual: a concurrent arrival is SKIPPED (no row), proving plain FOR UPDATE is load-bearing", async () => {
