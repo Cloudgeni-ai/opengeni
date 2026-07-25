@@ -3,6 +3,8 @@
 "@opengeni/codex": patch
 "@opengeni/config": patch
 "@opengeni/contracts": patch
+"@opengeni/core": patch
+"@opengeni/db": patch
 "@opengeni/react": patch
 "@opengeni/sdk": patch
 ---

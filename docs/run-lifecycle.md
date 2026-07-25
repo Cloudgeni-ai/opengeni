@@ -39,6 +39,32 @@ subject and permissions still authorize the command; the asserted service is
 only the immutable initiator of the newly created work. It cannot assert a
 human subject or override a worker-signed exact agent attempt.
 
+An operation-keyed Send retry first authenticates the caller and reauthorizes
+exact append access to the target session. It then locks the action-bound
+durable receipt before resolving mutable workspace capability defaults, model
+policy, or `agent_run:create` limits. Only a complete applied receipt with the
+same account/workspace/actor/action/target/key and exact v2 raw-prompt identity
+may replay. Replay republishes the original accepted event batch, emits the
+original durable workflow wake again, and records usage under the original
+turn idempotency key, so billing remains single-shot. Changed input conflicts;
+pending, incomplete, or missing durable result facts fail closed. An unseen key
+continues through normal limit admission, and Steer uses its separate
+`prompt.steer` identity.
+
+Prompt receipts never persist raw MCP credential values or a hash derived from
+those values. They record only safe server/header shape and the applied
+credential version alongside the one-way non-secret prompt identity. A
+credential-bearing replay first requires that exact version to remain current,
+then compares normalized retry plaintext to the encrypted session headers only
+in server memory, and fails closed when storage, key, decryption, version,
+shape, or value does not match. A later credential rotation therefore cannot
+masquerade as the original retry payload even though values are absent from the
+persisted identity.
+For receipts predating v2, that plaintext match must happen before the stored
+ciphertext is reused to reconstruct the historical canonical request hash.
+Credential ciphertext/key rotation can intentionally make those historical
+retries unreplayable rather than weakening the secret boundary.
+
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
 only when no turn has actually started. This keeps routing and billing

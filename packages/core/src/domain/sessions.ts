@@ -48,6 +48,8 @@ import {
   listSessionTurns,
   listSessionMcpServersForChildInheritance,
   requireSession,
+  replayHumanPromptInTransaction,
+  sessionPromptPayloadIdentity,
   submitHumanPromptInTransaction,
   appendSessionEventsWithLockedSessionUpdate,
   updateSessionTitle as updateSessionTitleRow,
@@ -59,6 +61,9 @@ import {
   AgentCommandAuthorityError,
   SessionControlConflictError,
   type SessionCommandActor,
+  type SessionPromptPayloadIdentity,
+  type SessionPromptReplayCredentialUpdate,
+  type SubmitHumanPromptResult,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -394,20 +399,23 @@ function validateInheritedSessionMcpServersForCreate(
   };
 }
 
-function validateSessionMcpCredentialUpdates(input: {
+function validateSessionMcpCredentialUpdatesForReplay(input: {
   settings: Settings;
   grant: AccessGrant;
   session: Session;
   updates: SessionMcpCredentialUpdateInput[];
-}): UpdateSessionMcpServerCredentialsInput[] {
+}): {
+  plaintext: SessionPromptReplayCredentialUpdate[];
+  encryptionKey: Uint8Array | null;
+} {
   if (input.updates.length === 0) {
-    return [];
+    return { plaintext: [], encryptionKey: null };
   }
   requirePermission(input.grant, "mcp_servers:attach");
   const encryptionKey = requireVariableSetEncryption(input.settings);
   const knownIds = new Set(input.session.mcpServers.map((server) => server.id));
   const seenIds = new Set<string>();
-  const encryptedUpdates = input.updates.map((update) => {
+  const plaintext = input.updates.map((update) => {
     if (seenIds.has(update.id)) {
       throw new HTTPException(422, {
         message: `duplicate session MCP credential update id: ${update.id}`,
@@ -418,17 +426,33 @@ function validateSessionMcpCredentialUpdates(input: {
       throw new HTTPException(422, { message: `unknown session MCP server id: ${update.id}` });
     }
     const headers = normalizedSessionMcpCredentialHeaders(update.headers);
-    return {
-      id: update.id,
-      headersEncrypted: Object.fromEntries(
-        Object.entries(headers).map(([name, value]) => [
-          name,
-          encryptVariableSetValue(encryptionKey, value),
-        ]),
-      ),
-    };
+    return { id: update.id, headers };
   });
-  return encryptedUpdates;
+  return {
+    plaintext,
+    encryptionKey,
+  };
+}
+
+function encryptSessionMcpCredentialUpdates(
+  updates: SessionPromptReplayCredentialUpdate[],
+  encryptionKey: Uint8Array | null,
+): UpdateSessionMcpServerCredentialsInput[] {
+  if (updates.length === 0) return [];
+  if (!encryptionKey) {
+    throw new HTTPException(503, {
+      message: "variable sets require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+    });
+  }
+  return updates.map((update) => ({
+    id: update.id,
+    headersEncrypted: Object.fromEntries(
+      Object.entries(update.headers).map(([name, value]) => [
+        name,
+        encryptVariableSetValue(encryptionKey, value),
+      ]),
+    ),
+  }));
 }
 
 export async function createAndStartSession(input: {
@@ -789,90 +813,18 @@ export function reasoningEffortForSession(
   return reasoningEffortForMetadata(metadata, fallback);
 }
 
-/**
- * Appends a `user.message` to an existing session and enqueues the resulting
- * turn, merging requested resources/tools into the session and waking the
- * workflow. Shared by the public events route and the first-party MCP
- * `session_send_message` tool so the two surfaces cannot drift. Callers own
- * resource/tool validation and the per-message usage limit before calling.
- */
-export async function postUserMessageTurn(input: {
-  db: Database;
-  bus: EventBus;
-  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
-  settings: Settings;
-  accountId: string;
-  workspaceId: string;
-  sessionId: string;
-  text: string;
-  turnInstructions?: string | null;
-  resources: ResourceRef[];
-  tools: ToolRef[];
-  model?: string | null;
-  reasoningEffort?: Settings["openaiReasoningEffort"] | null;
-  clientEventId?: string;
-  mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
-  delivery?: "send" | "steer";
-  origin?: "human" | "operator";
-  actor?: string;
-  actorLabel?: string;
-  commandActor?: SessionCommandActor;
-  controlEtag?: string | null;
-  expectedDraftRevision?: number | null;
-}): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
-  const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
-  const requestedModel = input.model ?? null;
-  const requestedReasoningEffort = input.reasoningEffort ?? null;
-  // Reject an explicit per-message model the host does not expose; an omitted
-  // model inherits the session's model downstream (always a configured id).
-  assertConfiguredModel(settings, requestedModel);
-  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
-  const operationKey = input.clientEventId ?? crypto.randomUUID();
-  let result;
-  try {
-    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
-      scoped.transaction((tx) =>
-        submitHumanPromptInTransaction(tx as unknown as Database, {
-          accountId,
-          workspaceId,
-          sessionId,
-          subjectId: input.actor ?? accountId,
-          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
-          actor: input.commandActor ?? {
-            type: "human",
-            subjectId: input.actor ?? accountId,
-          },
-          operationKey,
-          delivery: input.delivery ?? "send",
-          controlEtag: input.controlEtag ?? null,
-          expectedDraftRevision: input.expectedDraftRevision ?? null,
-          text: input.text,
-          turnInstructions: input.turnInstructions ?? null,
-          resources: input.resources,
-          tools: input.tools,
-          model: requestedModel,
-          reasoningEffort: requestedReasoningEffort,
-          reasoningEffortFallback: settings.openaiReasoningEffort,
-          source: input.origin === "operator" ? "api" : "user",
-          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
-        }),
-      ),
-    );
-  } catch (error) {
-    if (
-      error instanceof QueueCommandConflictError ||
-      error instanceof SessionControlConflictError
-    ) {
-      throw new HTTPException(409, { message: error.message });
-    }
-    if (error instanceof Error && error.message.includes("cancelled")) {
-      throw new HTTPException(409, { message: error.message });
-    }
-    if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
-      throw new HTTPException(422, { message: error.message });
-    }
-    throw error;
-  }
+async function publishSubmittedUserMessage(
+  input: {
+    db: Database;
+    bus: EventBus;
+    workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+  },
+  result: SubmitHumanPromptResult,
+): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  const { db, bus, workflowClient, accountId, workspaceId, sessionId } = input;
   const events = await Promise.all(
     result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)),
   );
@@ -918,6 +870,106 @@ export async function postUserMessageTurn(input: {
     );
   }
   return { accepted, turn };
+}
+
+/**
+ * Appends a `user.message` to an existing session and enqueues the resulting
+ * turn, merging requested resources/tools into the session and waking the
+ * workflow. Shared by the public events route and the first-party MCP
+ * `session_send_message` tool so the two surfaces cannot drift. Callers own
+ * resource/tool validation and the per-message usage limit before calling.
+ */
+export async function postUserMessageTurn(input: {
+  db: Database;
+  bus: EventBus;
+  workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
+  settings: Settings;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  text: string;
+  turnInstructions?: string | null;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  model?: string | null;
+  reasoningEffort?: Settings["openaiReasoningEffort"] | null;
+  clientEventId?: string;
+  mcpCredentialUpdates?: UpdateSessionMcpServerCredentialsInput[];
+  delivery?: "send" | "steer";
+  origin?: "human" | "operator";
+  actor?: string;
+  actorLabel?: string;
+  commandActor?: SessionCommandActor;
+  toolsProvided?: boolean;
+  promptPayloadIdentity?: SessionPromptPayloadIdentity;
+  replayCredentialUpdates?: SessionPromptReplayCredentialUpdate[];
+  credentialEncryptionKey?: Uint8Array | null;
+  controlEtag?: string | null;
+  expectedDraftRevision?: number | null;
+}): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
+  const requestedModel = input.model ?? null;
+  const requestedReasoningEffort = input.reasoningEffort ?? null;
+  // Reject an explicit per-message model the host does not expose; an omitted
+  // model inherits the session's model downstream (always a configured id).
+  assertConfiguredModel(settings, requestedModel);
+  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, requestedModel);
+  const operationKey = input.clientEventId ?? crypto.randomUUID();
+  let result;
+  try {
+    result = await withWorkspaceSubjectRls(db, workspaceId, input.actor ?? accountId, (scoped) =>
+      scoped.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as unknown as Database, {
+          accountId,
+          workspaceId,
+          sessionId,
+          subjectId: input.actor ?? accountId,
+          ...(input.actorLabel ? { subjectLabel: input.actorLabel } : {}),
+          actor: input.commandActor ?? {
+            type: "human",
+            subjectId: input.actor ?? accountId,
+          },
+          operationKey,
+          delivery: input.delivery ?? "send",
+          controlEtag: input.controlEtag ?? null,
+          expectedDraftRevision: input.expectedDraftRevision ?? null,
+          text: input.text,
+          turnInstructions: input.turnInstructions ?? null,
+          resources: input.resources,
+          tools: input.tools,
+          model: requestedModel,
+          reasoningEffort: requestedReasoningEffort,
+          reasoningEffortFallback: settings.openaiReasoningEffort,
+          source: input.origin === "operator" ? "api" : "user",
+          toolsProvided: input.toolsProvided ?? true,
+          ...(input.promptPayloadIdentity
+            ? { promptPayloadIdentity: input.promptPayloadIdentity }
+            : {}),
+          replayCredentialUpdates: input.replayCredentialUpdates ?? [],
+          credentialEncryptionKey: input.credentialEncryptionKey ?? null,
+          mcpCredentialUpdates: input.mcpCredentialUpdates ?? [],
+        }),
+      ),
+    );
+  } catch (error) {
+    if (
+      error instanceof QueueCommandConflictError ||
+      error instanceof SessionControlConflictError
+    ) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    if (error instanceof Error && error.message.includes("cancelled")) {
+      throw new HTTPException(409, { message: error.message });
+    }
+    if (error instanceof Error && error.message.startsWith("Unknown session MCP server")) {
+      throw new HTTPException(422, { message: error.message });
+    }
+    throw error;
+  }
+  return await publishSubmittedUserMessage(
+    { db, bus, workflowClient, accountId, workspaceId, sessionId },
+    result,
+  );
 }
 
 /**
@@ -1432,20 +1484,123 @@ export async function acceptSessionUserMessage(
     operation: input.delivery === "steer" ? "session.steer" : "session.append",
     surface: "core",
   });
+  // Exact session access and command identity are resolved before replay, but
+  // workspace capability defaults, model policy and run limits deliberately
+  // are not: an already-accepted Send must remain replayable after those
+  // mutable settings change.
+  const existingSession = await requireSession(db, workspaceId, sessionId);
+  const requestedResources = normalizeResources(input.resources ?? []);
+  const rawRequestedTools = mergeToolRefs([], input.tools ?? []);
+  const replayCredentials = validateSessionMcpCredentialUpdatesForReplay({
+    settings,
+    grant,
+    session: existingSession,
+    updates: input.mcpCredentialUpdates ?? [],
+  });
+  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
+  const commandActor: SessionCommandActor = delegatedServiceInitiator
+    ? {
+        type: "service",
+        subjectId: delegatedServiceInitiator.initiator.subjectId,
+        ...(delegatedServiceInitiator.initiator.label
+          ? { subjectLabel: delegatedServiceInitiator.initiator.label }
+          : {}),
+        context: delegatedServiceInitiator.context,
+      }
+    : { type: "human", subjectId: grant.subjectId };
+  const delivery = input.delivery ?? "send";
+  const origin = delegatedServiceInitiator ? "operator" : (input.origin ?? "human");
+  const source = origin === "operator" ? "api" : "user";
+  const promptPayloadIdentity = sessionPromptPayloadIdentity({
+    delivery,
+    controlEtag: input.controlEtag ?? null,
+    expectedDraftRevision: input.expectedDraftRevision ?? null,
+    text: input.text,
+    turnInstructions: input.turnInstructions ?? null,
+    resources: requestedResources,
+    tools: rawRequestedTools,
+    toolsProvided: input.toolsProvided,
+    model: input.model ?? null,
+    reasoningEffort: input.reasoningEffort ?? null,
+    source,
+    credentialUpdates: replayCredentials.plaintext,
+    ...(delegatedServiceInitiator
+      ? {
+          serviceInitiator: {
+            subjectId: delegatedServiceInitiator.initiator.subjectId,
+            subjectLabel: delegatedServiceInitiator.initiator.label ?? null,
+            context: delegatedServiceInitiator.context,
+          },
+        }
+      : {}),
+  });
+  if (delivery === "send" && input.clientEventId) {
+    const replay = await withWorkspaceSubjectRls(db, workspaceId, grant.subjectId, (scoped) =>
+      scoped.transaction((tx) =>
+        replayHumanPromptInTransaction(tx as unknown as Database, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          actor: commandActor,
+          operationKey: input.clientEventId!,
+          delivery,
+          controlEtag: input.controlEtag ?? null,
+          expectedDraftRevision: input.expectedDraftRevision ?? null,
+          text: input.text,
+          turnInstructions: input.turnInstructions ?? null,
+          resources: requestedResources,
+          tools: rawRequestedTools,
+          toolsProvided: input.toolsProvided,
+          model: input.model ?? null,
+          reasoningEffort: input.reasoningEffort ?? null,
+          source,
+          promptPayloadIdentity,
+          replayCredentialUpdates: replayCredentials.plaintext,
+          credentialEncryptionKey: replayCredentials.encryptionKey,
+        }),
+      ),
+    );
+    if (replay) {
+      const { accepted, turn } = await publishSubmittedUserMessage(
+        {
+          db,
+          bus,
+          workflowClient,
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+        },
+        replay,
+      );
+      await recordWorkspaceUsage(deps, {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        eventType: "agent_run.created",
+        quantity: 1,
+        unit: "run",
+        sourceResourceType: "session_turn",
+        sourceResourceId: turn.id,
+        sessionId,
+        turnId: turn.id,
+        initiator: turn.initiator,
+        initiatorContext: turn.initiatorContext,
+        origin: turn.source,
+        idempotencyKey: `agent_run.created:${workspaceId}:${turn.id}`,
+      });
+      return { accepted, turn };
+    }
+  }
+
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
     settings,
   );
-  // Hoisted above requireLimit so the codex-billed predicate can resolve the
-  // turn's effective model (a follow-up turn inherits the session's model). A
-  // pure read with no side effects.
-  const existingSession = await requireSession(db, workspaceId, sessionId);
   const runtimeSettings = settingsWithSessionMcpServerMetadata(
     capabilityRuntimeSettings,
     existingSession.mcpServers,
   );
-  const requestedResources = normalizeResources(input.resources ?? []);
   const validatedTools = validateToolRefs(input.tools ?? [], runtimeSettings);
   const requestedTools = input.toolsProvided
     ? validatedTools
@@ -1465,13 +1620,10 @@ export async function acceptSessionUserMessage(
     ...existingSession.resources,
     ...requestedResources,
   ]);
-  const mcpCredentialUpdates = validateSessionMcpCredentialUpdates({
-    settings,
-    grant,
-    session: existingSession,
-    updates: input.mcpCredentialUpdates ?? [],
-  });
-  const delegatedServiceInitiator = serviceInitiatorForGrant(grant);
+  const mcpCredentialUpdates = encryptSessionMcpCredentialUpdates(
+    replayCredentials.plaintext,
+    replayCredentials.encryptionKey,
+  );
   const { accepted, turn } = await postUserMessageTurn({
     db,
     bus,
@@ -1487,22 +1639,15 @@ export async function acceptSessionUserMessage(
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     mcpCredentialUpdates,
-    delivery: input.delivery ?? "send",
-    origin: delegatedServiceInitiator ? "operator" : (input.origin ?? "human"),
+    delivery,
+    origin,
     actor: grant.subjectId,
+    toolsProvided: input.toolsProvided,
+    promptPayloadIdentity,
+    replayCredentialUpdates: replayCredentials.plaintext,
+    credentialEncryptionKey: replayCredentials.encryptionKey,
     ...(grant.subjectLabel ? { actorLabel: grant.subjectLabel } : {}),
-    ...(delegatedServiceInitiator
-      ? {
-          commandActor: {
-            type: "service" as const,
-            subjectId: delegatedServiceInitiator.initiator.subjectId,
-            ...(delegatedServiceInitiator.initiator.label
-              ? { subjectLabel: delegatedServiceInitiator.initiator.label }
-              : {}),
-            context: delegatedServiceInitiator.context,
-          },
-        }
-      : {}),
+    commandActor,
     ...(input.controlEtag !== undefined ? { controlEtag: input.controlEtag } : {}),
     ...(input.expectedDraftRevision !== undefined
       ? { expectedDraftRevision: input.expectedDraftRevision }

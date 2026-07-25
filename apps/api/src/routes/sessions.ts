@@ -1016,24 +1016,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const raw = await c.req.json();
     const payload = SteerSessionMessageRequest.parse(raw);
-    const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-      text: payload.text,
-      turnInstructions: payload.turnInstructions ?? null,
-      resources: payload.resources,
-      tools: payload.tools,
-      toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
-      model: payload.model ?? null,
-      reasoningEffort: payload.reasoningEffort ?? null,
-      mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
-      delivery: "steer",
-      origin: "human",
-      ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
-      ...(payload.expectedDraftRevision !== undefined
-        ? { expectedDraftRevision: payload.expectedDraftRevision }
-        : {}),
-      ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
-    });
-    return c.json(result, 202);
+    try {
+      const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+        text: payload.text,
+        turnInstructions: payload.turnInstructions ?? null,
+        resources: payload.resources,
+        tools: payload.tools,
+        toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
+        model: payload.model ?? null,
+        reasoningEffort: payload.reasoningEffort ?? null,
+        mcpCredentialUpdates: payload.mcpCredentialUpdates ?? [],
+        delivery: "steer",
+        origin: "human",
+        ...(payload.controlEtag !== undefined ? { controlEtag: payload.controlEtag } : {}),
+        ...(payload.expectedDraftRevision !== undefined
+          ? { expectedDraftRevision: payload.expectedDraftRevision }
+          : {}),
+        ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
+      });
+      return c.json(result, 202);
+    } catch (error) {
+      return commandConflictResponse(c, error);
+    }
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/events", async (c) => {
@@ -1060,24 +1064,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       }
     }
     if (event.type === "user.message") {
-      const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
-        text: event.payload.text,
-        turnInstructions: event.payload.turnInstructions ?? null,
-        resources: event.payload.resources ?? [],
-        tools: event.payload.tools ?? [],
-        toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
-        model: event.payload.model ?? null,
-        reasoningEffort: event.payload.reasoningEffort ?? null,
-        mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
-        ...(event.payload.controlEtag !== undefined
-          ? { controlEtag: event.payload.controlEtag }
-          : {}),
-        ...(event.payload.expectedDraftRevision !== undefined
-          ? { expectedDraftRevision: event.payload.expectedDraftRevision }
-          : {}),
-        ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
-      });
-      return c.json(accepted, 202);
+      try {
+        const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
+          text: event.payload.text,
+          turnInstructions: event.payload.turnInstructions ?? null,
+          resources: event.payload.resources ?? [],
+          tools: event.payload.tools ?? [],
+          toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
+          model: event.payload.model ?? null,
+          reasoningEffort: event.payload.reasoningEffort ?? null,
+          mcpCredentialUpdates: event.payload.mcpCredentialUpdates ?? [],
+          ...(event.payload.controlEtag !== undefined
+            ? { controlEtag: event.payload.controlEtag }
+            : {}),
+          ...(event.payload.expectedDraftRevision !== undefined
+            ? { expectedDraftRevision: event.payload.expectedDraftRevision }
+            : {}),
+          ...(event.clientEventId ? { clientEventId: event.clientEventId } : {}),
+        });
+        return c.json(accepted, 202);
+      } catch (error) {
+        return commandConflictResponse(c, error);
+      }
     }
 
     if (event.type === "user.approvalDecision") {

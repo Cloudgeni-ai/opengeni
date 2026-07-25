@@ -5,7 +5,9 @@ import {
   type ResourceRef,
   type ToolRef,
 } from "@opengeni/contracts";
+import { timingSafeEqual } from "node:crypto";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { decryptEnvironmentValue } from "./environment-crypto";
 import type { Database } from "./index";
 import { sanitizeEventPayload } from "./event-payload-sanitizer";
 import { closePendingSessionToolCallsInTransaction } from "./session-tool-call-settlement";
@@ -14,6 +16,7 @@ import {
   autoResumeSessionBranchInTransaction,
   canonicalSessionCommandHash,
   evaluateSessionControl,
+  findSessionCommandReceiptForReplay,
   lockSessionEventWriteRows,
   lockWorkspaceInferenceControl,
   registerInternalUpdateWakeInTransaction,
@@ -21,6 +24,7 @@ import {
   registerSessionWorkflowWakeInTransaction,
   type SessionCommandActor,
   type SessionCommandReceiptRow,
+  SessionCommandIdempotencyError,
   SessionControlConflictError,
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
@@ -89,6 +93,474 @@ export type SubmitHumanPromptResult = {
   workspaceControlEventId: string | null;
   replay: boolean;
 };
+
+export type SessionPromptPayloadIdentity = {
+  version: 2;
+  hash: string;
+};
+
+export type SessionPromptReplayCredentialUpdate = {
+  id: string;
+  headers: Record<string, string>;
+};
+
+type SessionPromptCredentialUpdateShape = Array<{
+  id: string;
+  headerNames: string[];
+}>;
+
+type SessionPromptAppliedCredentialUpdate = SessionPromptCredentialUpdateShape[number] & {
+  credentialVersion: number;
+};
+
+type HumanPromptReplayInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  actor: SessionCommandActor;
+  operationKey: string;
+  delivery: "send" | "steer";
+  controlEtag?: string | null;
+  expectedDraftRevision?: number | null;
+  text: string;
+  turnInstructions?: string | null;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  toolsProvided: boolean;
+  model?: string | null;
+  reasoningEffort?: ReasoningEffort | null;
+  source: "user" | "api";
+  promptPayloadIdentity?: SessionPromptPayloadIdentity;
+  replayCredentialUpdates: SessionPromptReplayCredentialUpdate[];
+  credentialEncryptionKey: Uint8Array | null;
+};
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isUuid(value: unknown): value is string {
+  return typeof value === "string" && UUID_PATTERN.test(value);
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function credentialUpdateShape(
+  updates: SessionPromptReplayCredentialUpdate[],
+): SessionPromptCredentialUpdateShape {
+  return updates.map((update) => ({
+    id: update.id,
+    headerNames: Object.keys(update.headers).sort(),
+  }));
+}
+
+/**
+ * Builds the non-secret v2 identity persisted with newly accepted prompts.
+ * Credential values are deliberately excluded: only server ids/header names
+ * enter this hash, while values are checked transiently against encrypted
+ * session storage during replay.
+ */
+export function sessionPromptPayloadIdentity(input: {
+  delivery: "send" | "steer";
+  controlEtag?: string | null;
+  expectedDraftRevision?: number | null;
+  text: string;
+  turnInstructions?: string | null;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  toolsProvided: boolean;
+  model?: string | null;
+  reasoningEffort?: ReasoningEffort | null;
+  source: "user" | "api";
+  credentialUpdates: SessionPromptReplayCredentialUpdate[];
+  serviceInitiator?: {
+    subjectId: string;
+    subjectLabel: string | null;
+    context: Record<string, unknown>;
+  };
+}): SessionPromptPayloadIdentity {
+  return {
+    version: 2,
+    hash: canonicalSessionCommandHash({
+      delivery: input.delivery,
+      controlEtag: input.controlEtag ?? null,
+      expectedDraftRevision: input.expectedDraftRevision ?? null,
+      text: input.text,
+      turnInstructions: input.turnInstructions ?? null,
+      resources: input.resources,
+      tools: input.tools,
+      toolsProvided: input.toolsProvided,
+      model: input.model ?? null,
+      reasoningEffort: input.reasoningEffort ?? null,
+      source: input.source,
+      credentialUpdateShape: credentialUpdateShape(input.credentialUpdates),
+      ...(input.serviceInitiator ? { serviceInitiator: input.serviceInitiator } : {}),
+    }),
+  };
+}
+
+function promptReplayUnavailable(): SessionCommandIdempotencyError {
+  return new SessionCommandIdempotencyError(
+    "The prior operation was accepted but its durable result cannot be safely replayed",
+  );
+}
+
+function asCompletedPromptReplay(receipt: SessionCommandReceiptRow): SubmitHumanPromptResult {
+  const turnId = receipt.result.turnId;
+  const acceptedEventId = receipt.result.acceptedEventId;
+  const rawEventIds = receipt.result.eventIds;
+  const eventIds =
+    Array.isArray(rawEventIds) && rawEventIds.every(isUuid) ? [...rawEventIds] : null;
+  const wakeRevision = receipt.result.wakeRevision;
+  const interruptionCount = receipt.result.interruptionCount ?? 0;
+  const workspaceControlEventId = receipt.result.workspaceControlEventId ?? null;
+  if (
+    !isNonNegativeSafeInteger(receipt.appliedControlRevision) ||
+    !isNonNegativeSafeInteger(receipt.appliedQueueVersion) ||
+    !isNonNegativeSafeInteger(receipt.appliedTurnVersion) ||
+    !isUuid(turnId) ||
+    !isUuid(acceptedEventId) ||
+    !eventIds ||
+    eventIds.length === 0 ||
+    !eventIds.includes(acceptedEventId) ||
+    !isNonNegativeSafeInteger(wakeRevision) ||
+    wakeRevision < 1 ||
+    !isNonNegativeSafeInteger(interruptionCount) ||
+    (workspaceControlEventId !== null && !isUuid(workspaceControlEventId))
+  ) {
+    throw promptReplayUnavailable();
+  }
+  return {
+    receipt,
+    queueVersion: Number(receipt.appliedQueueVersion),
+    acceptedEventId,
+    eventIds,
+    turnId,
+    wakeRevision,
+    interruptionCount,
+    workspaceControlEventId,
+    replay: true,
+  };
+}
+
+function parsedPromptPayloadIdentity(value: unknown): SessionPromptPayloadIdentity | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as { version?: unknown; hash?: unknown };
+  return candidate.version === 2 &&
+    typeof candidate.hash === "string" &&
+    /^[a-f0-9]{64}$/.test(candidate.hash)
+    ? { version: 2, hash: candidate.hash }
+    : null;
+}
+
+function isCanonicalHeaderNames(value: unknown): value is string[] {
+  if (
+    !Array.isArray(value) ||
+    !value.every((name): name is string => typeof name === "string" && name.length > 0) ||
+    new Set(value).size !== value.length
+  ) {
+    return false;
+  }
+  const sorted = [...value].sort();
+  return value.every((name, index) => name === sorted[index]);
+}
+
+function parsedAppliedCredentialUpdates(
+  value: unknown,
+): SessionPromptAppliedCredentialUpdate[] | null {
+  if (!Array.isArray(value)) return null;
+  const parsed: SessionPromptAppliedCredentialUpdate[] = [];
+  const ids = new Set<string>();
+  for (const item of value) {
+    if (!item || typeof item !== "object") return null;
+    const candidate = item as {
+      id?: unknown;
+      headerNames?: unknown;
+      credentialVersion?: unknown;
+    };
+    if (
+      typeof candidate.id !== "string" ||
+      candidate.id.length === 0 ||
+      ids.has(candidate.id) ||
+      !isCanonicalHeaderNames(candidate.headerNames) ||
+      typeof candidate.credentialVersion !== "number" ||
+      !Number.isSafeInteger(candidate.credentialVersion) ||
+      candidate.credentialVersion < 1
+    ) {
+      return null;
+    }
+    ids.add(candidate.id);
+    parsed.push({
+      id: candidate.id,
+      headerNames: [...candidate.headerNames],
+      credentialVersion: candidate.credentialVersion,
+    });
+  }
+  return parsed;
+}
+
+function confidentialValuesEqual(left: unknown, right: unknown): boolean {
+  const leftHash = Buffer.from(canonicalSessionCommandHash(left), "hex");
+  const rightHash = Buffer.from(canonicalSessionCommandHash(right), "hex");
+  return timingSafeEqual(leftHash, rightHash);
+}
+
+async function reconstructStoredCredentialUpdates(
+  db: Database,
+  input: Pick<
+    HumanPromptReplayInput,
+    "workspaceId" | "sessionId" | "replayCredentialUpdates" | "credentialEncryptionKey"
+  >,
+  appliedUpdates?: SessionPromptAppliedCredentialUpdate[],
+): Promise<Array<{ id: string; headersEncrypted: Record<string, string> }>> {
+  if (input.replayCredentialUpdates.length === 0) return [];
+  if (!input.credentialEncryptionKey) throw promptReplayUnavailable();
+  const ids = input.replayCredentialUpdates.map((update) => update.id);
+  if (new Set(ids).size !== ids.length) throw new SessionCommandIdempotencyError();
+  const appliedById = appliedUpdates
+    ? new Map(appliedUpdates.map((update) => [update.id, update.credentialVersion]))
+    : null;
+  if (appliedById && appliedById.size !== ids.length) {
+    throw promptReplayUnavailable();
+  }
+  const rows = await db
+    .select({
+      id: schema.sessionMcpServers.serverId,
+      headersEncrypted: schema.sessionMcpServers.headersEncrypted,
+      credentialVersion: schema.sessionMcpServers.credentialVersion,
+    })
+    .from(schema.sessionMcpServers)
+    .where(
+      and(
+        eq(schema.sessionMcpServers.workspaceId, input.workspaceId),
+        eq(schema.sessionMcpServers.sessionId, input.sessionId),
+        inArray(schema.sessionMcpServers.serverId, ids),
+      ),
+    );
+  const byId = new Map(rows.map((row) => [row.id, row.headersEncrypted ?? {}]));
+  const versionsById = new Map(rows.map((row) => [row.id, row.credentialVersion]));
+  return input.replayCredentialUpdates.map((update) => {
+    const headersEncrypted = byId.get(update.id);
+    if (!headersEncrypted) throw promptReplayUnavailable();
+    if (
+      appliedById &&
+      (!appliedById.has(update.id) || versionsById.get(update.id) !== appliedById.get(update.id))
+    ) {
+      throw promptReplayUnavailable();
+    }
+    let storedHeaders: Record<string, string>;
+    try {
+      storedHeaders = Object.fromEntries(
+        Object.entries(headersEncrypted).map(([name, value]) => [
+          name,
+          decryptEnvironmentValue(input.credentialEncryptionKey!, value),
+        ]),
+      );
+    } catch {
+      throw promptReplayUnavailable();
+    }
+    if (!confidentialValuesEqual(storedHeaders, update.headers)) {
+      throw new SessionCommandIdempotencyError();
+    }
+    return { id: update.id, headersEncrypted: { ...headersEncrypted } };
+  });
+}
+
+async function replayHumanPromptAfterLocks(
+  db: Database,
+  input: HumanPromptReplayInput,
+): Promise<SubmitHumanPromptResult | null> {
+  const receipt = await findSessionCommandReceiptForReplay(db, {
+    workspaceId: input.workspaceId,
+    actor: input.actor,
+    action: input.delivery === "steer" ? "prompt.steer" : "prompt.send",
+    targetSessionId: input.sessionId,
+    targetTurnId: null,
+    operationKey: input.operationKey,
+  });
+  if (!receipt) return null;
+  if (receipt.accountId !== input.accountId) throw promptReplayUnavailable();
+
+  const replay = asCompletedPromptReplay(receipt);
+  const turnRows = await db
+    .select({
+      id: schema.sessionTurns.id,
+      accountId: schema.sessionTurns.accountId,
+      workspaceId: schema.sessionTurns.workspaceId,
+      sessionId: schema.sessionTurns.sessionId,
+      triggerEventId: schema.sessionTurns.triggerEventId,
+      temporalWorkflowId: schema.sessionTurns.temporalWorkflowId,
+    })
+    .from(schema.sessionTurns)
+    .where(
+      and(
+        eq(schema.sessionTurns.workspaceId, input.workspaceId),
+        eq(schema.sessionTurns.sessionId, input.sessionId),
+        eq(schema.sessionTurns.id, replay.turnId),
+      ),
+    )
+    .limit(1);
+  const eventRows = await db
+    .select({
+      id: schema.sessionEvents.id,
+      accountId: schema.sessionEvents.accountId,
+      workspaceId: schema.sessionEvents.workspaceId,
+      sessionId: schema.sessionEvents.sessionId,
+      type: schema.sessionEvents.type,
+      clientEventId: schema.sessionEvents.clientEventId,
+      payload: schema.sessionEvents.payload,
+    })
+    .from(schema.sessionEvents)
+    .where(
+      and(
+        eq(schema.sessionEvents.workspaceId, input.workspaceId),
+        eq(schema.sessionEvents.sessionId, input.sessionId),
+        inArray(schema.sessionEvents.id, replay.eventIds),
+      ),
+    );
+  const wakeRows = await db
+    .select({
+      accountId: schema.sessionWorkflowWakeOutbox.accountId,
+      workspaceId: schema.sessionWorkflowWakeOutbox.workspaceId,
+      sessionId: schema.sessionWorkflowWakeOutbox.sessionId,
+      temporalWorkflowId: schema.sessionWorkflowWakeOutbox.temporalWorkflowId,
+      wakeRevision: schema.sessionWorkflowWakeOutbox.wakeRevision,
+    })
+    .from(schema.sessionWorkflowWakeOutbox)
+    .where(
+      and(
+        eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+        eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+      ),
+    )
+    .limit(1);
+  const turn = turnRows[0];
+  const wake = wakeRows[0];
+  const acceptedEvent = eventRows.find((event) => event.id === replay.acceptedEventId);
+  const replayEventIds = new Set(replay.eventIds);
+  if (
+    !turn ||
+    !wake ||
+    !acceptedEvent ||
+    replayEventIds.size !== replay.eventIds.length ||
+    eventRows.length !== replayEventIds.size ||
+    eventRows.some(
+      (event) =>
+        event.accountId !== input.accountId ||
+        event.workspaceId !== input.workspaceId ||
+        event.sessionId !== input.sessionId,
+    ) ||
+    turn.accountId !== input.accountId ||
+    acceptedEvent.accountId !== input.accountId ||
+    turn.workspaceId !== input.workspaceId ||
+    acceptedEvent.workspaceId !== input.workspaceId ||
+    turn.sessionId !== input.sessionId ||
+    acceptedEvent.sessionId !== input.sessionId ||
+    wake.accountId !== input.accountId ||
+    wake.workspaceId !== input.workspaceId ||
+    wake.sessionId !== input.sessionId ||
+    wake.temporalWorkflowId !== turn.temporalWorkflowId ||
+    !Number.isSafeInteger(wake.wakeRevision) ||
+    wake.wakeRevision < replay.wakeRevision ||
+    turn.triggerEventId !== acceptedEvent.id ||
+    acceptedEvent.type !== "user.message" ||
+    acceptedEvent.clientEventId !== input.operationKey
+  ) {
+    throw promptReplayUnavailable();
+  }
+
+  const storedIdentityValue = receipt.result.promptPayloadIdentity;
+  const storedIdentity = parsedPromptPayloadIdentity(storedIdentityValue);
+  if (storedIdentityValue !== undefined && !storedIdentity) {
+    throw promptReplayUnavailable();
+  }
+  if (storedIdentity) {
+    if (
+      !input.promptPayloadIdentity ||
+      input.promptPayloadIdentity.version !== storedIdentity.version ||
+      input.promptPayloadIdentity.hash !== storedIdentity.hash
+    ) {
+      throw new SessionCommandIdempotencyError();
+    }
+    const appliedCredentialUpdates = parsedAppliedCredentialUpdates(
+      receipt.result.credentialUpdateShape,
+    );
+    if (!appliedCredentialUpdates) {
+      throw promptReplayUnavailable();
+    }
+    const retryShape = credentialUpdateShape(input.replayCredentialUpdates);
+    const storedShape = appliedCredentialUpdates.map(({ credentialVersion: _, ...shape }) => shape);
+    if (!confidentialValuesEqual(storedShape, retryShape)) {
+      throw new SessionCommandIdempotencyError();
+    }
+    if (appliedCredentialUpdates.length > 0) {
+      await reconstructStoredCredentialUpdates(db, input, appliedCredentialUpdates);
+    }
+    return replay;
+  }
+
+  // Legacy receipts predate the raw-prompt identity. Rebuild their original
+  // canonical request from immutable accepted data. When credentials were
+  // present, current session storage must still decrypt to the retry plaintext;
+  // only then may its unchanged ciphertext be used to reproduce the old hash.
+  const storedCredentialUpdates = await reconstructStoredCredentialUpdates(db, input);
+  const acceptedPayload =
+    acceptedEvent.payload && typeof acceptedEvent.payload === "object"
+      ? (acceptedEvent.payload as Record<string, unknown>)
+      : {};
+  const acceptedTools = Array.isArray(acceptedPayload.tools)
+    ? (acceptedPayload.tools as ToolRef[])
+    : [];
+  const legacyHash = canonicalSessionCommandHash({
+    delivery: input.delivery,
+    controlEtag: input.controlEtag ?? null,
+    expectedDraftRevision: input.expectedDraftRevision ?? null,
+    text: input.text,
+    turnInstructions: input.turnInstructions ?? null,
+    resources: input.resources,
+    tools: input.toolsProvided ? input.tools : acceptedTools,
+    model: input.model ?? null,
+    reasoningEffort: input.reasoningEffort ?? null,
+    source: input.source,
+    mcpCredentialUpdates: storedCredentialUpdates,
+    ...(input.actor.type === "service"
+      ? {
+          serviceInitiator: {
+            subjectId: input.actor.subjectId,
+            subjectLabel: input.actor.subjectLabel ?? null,
+            context: input.actor.context ?? {},
+          },
+        }
+      : {}),
+  });
+  if (legacyHash !== receipt.canonicalRequestHash) {
+    throw new SessionCommandIdempotencyError();
+  }
+  return replay;
+}
+
+/**
+ * Finds and validates a previously accepted human prompt under the canonical
+ * control/workspace/session lock prefix. Returns null for a genuinely unseen
+ * key so normal mutable-default and limit admission can continue.
+ */
+export async function replayHumanPromptInTransaction(
+  db: Database,
+  input: HumanPromptReplayInput,
+): Promise<SubmitHumanPromptResult | null> {
+  await lockWorkspaceInferenceControl(db, input.workspaceId, "update");
+  await lockSessionEventWriteRows(db, {
+    workspaceId: input.workspaceId,
+    controlLock: "already_locked",
+    sessionIds:
+      input.actor.type === "agent_attempt"
+        ? [input.actor.sessionId, input.sessionId]
+        : [input.sessionId],
+    turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
+    attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
+  });
+  return await replayHumanPromptAfterLocks(db, input);
+}
 
 export type AgentInternalUpdateCommandResult = {
   receipt: SessionCommandReceiptRow;
@@ -1139,6 +1611,10 @@ export async function submitHumanPromptInTransaction(
     reasoningEffort?: ReasoningEffort | null;
     reasoningEffortFallback: ReasoningEffort;
     source: "user" | "api";
+    toolsProvided?: boolean;
+    promptPayloadIdentity?: SessionPromptPayloadIdentity;
+    replayCredentialUpdates?: SessionPromptReplayCredentialUpdate[];
+    credentialEncryptionKey?: Uint8Array | null;
     mcpCredentialUpdates?: Array<{
       id: string;
       headersEncrypted: Record<string, string>;
@@ -1156,6 +1632,44 @@ export async function submitHumanPromptInTransaction(
     turnIds: input.actor.type === "agent_attempt" ? [input.actor.turnId] : [],
     attemptIds: input.actor.type === "agent_attempt" ? [input.actor.attemptId] : [],
   });
+  const replay = await replayHumanPromptAfterLocks(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    actor: input.actor,
+    operationKey: input.operationKey,
+    delivery: input.delivery,
+    controlEtag: input.controlEtag ?? null,
+    expectedDraftRevision: input.expectedDraftRevision ?? null,
+    text: input.text,
+    turnInstructions: input.turnInstructions ?? null,
+    resources: input.resources,
+    tools: input.tools,
+    toolsProvided: input.toolsProvided ?? true,
+    model: input.model ?? null,
+    reasoningEffort: input.reasoningEffort ?? null,
+    source: input.source,
+    ...(input.promptPayloadIdentity ? { promptPayloadIdentity: input.promptPayloadIdentity } : {}),
+    replayCredentialUpdates: input.replayCredentialUpdates ?? [],
+    credentialEncryptionKey: input.credentialEncryptionKey ?? null,
+  });
+  if (replay) return replay;
+  if (input.promptPayloadIdentity) {
+    const submittedCredentialShape = (input.mcpCredentialUpdates ?? []).map((update) => ({
+      id: update.id,
+      headerNames: Object.keys(update.headersEncrypted).sort(),
+    }));
+    if (
+      !confidentialValuesEqual(
+        submittedCredentialShape,
+        credentialUpdateShape(input.replayCredentialUpdates ?? []),
+      )
+    ) {
+      throw new SessionControlInvariantError(
+        "Prompt credential replay shape does not match the stored update",
+      );
+    }
+  }
   const requestHash = canonicalSessionCommandHash({
     delivery: input.delivery,
     controlEtag: input.controlEtag ?? null,
@@ -1340,6 +1854,7 @@ export async function submitHumanPromptInTransaction(
     editedSourceTurnInstructions = sourceTurn.turnInstructions ?? null;
   }
 
+  const appliedCredentialUpdates: SessionPromptAppliedCredentialUpdate[] = [];
   for (const update of input.mcpCredentialUpdates ?? []) {
     const [server] = await db
       .update(schema.sessionMcpServers)
@@ -1355,8 +1870,16 @@ export async function submitHumanPromptInTransaction(
           eq(schema.sessionMcpServers.serverId, update.id),
         ),
       )
-      .returning({ id: schema.sessionMcpServers.serverId });
+      .returning({
+        id: schema.sessionMcpServers.serverId,
+        credentialVersion: schema.sessionMcpServers.credentialVersion,
+      });
     if (!server) throw new Error(`Unknown session MCP server: ${update.id}`);
+    appliedCredentialUpdates.push({
+      id: server.id,
+      headerNames: Object.keys(update.headersEncrypted).sort(),
+      credentialVersion: server.credentialVersion,
+    });
   }
 
   const now = new Date();
@@ -1617,6 +2140,12 @@ export async function submitHumanPromptInTransaction(
       interruptionCount,
       replacedTurnId,
       workspaceControlEventId: resumed.workspaceControlEventId,
+      ...(input.promptPayloadIdentity
+        ? {
+            promptPayloadIdentity: input.promptPayloadIdentity,
+            credentialUpdateShape: appliedCredentialUpdates,
+          }
+        : {}),
     },
   });
   return {

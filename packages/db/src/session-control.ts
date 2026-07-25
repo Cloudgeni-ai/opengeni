@@ -180,8 +180,8 @@ export class SessionControlConflictError extends Error {
 export class SessionCommandIdempotencyError extends Error {
   readonly code = "IDEMPOTENCY_KEY_REUSED";
 
-  constructor() {
-    super("The operation key was already used with different input");
+  constructor(message = "The operation key was already used with different input") {
+    super(message);
     this.name = "SessionCommandIdempotencyError";
   }
 }
@@ -1366,6 +1366,27 @@ async function findCommandReceipt(
     )
     .for("update");
   return rows[0] ?? null;
+}
+
+/**
+ * Locks an already-created command receipt without reserving a new operation
+ * key. Replay admission uses this read before mutable defaults and usage-limit
+ * checks; an unseen operation must continue through normal admission instead
+ * of leaving a pending receipt behind.
+ */
+export async function findSessionCommandReceiptForReplay(
+  db: Database,
+  input: {
+    workspaceId: string;
+    actor: SessionCommandActor;
+    action: string;
+    targetSessionId: string | null;
+    targetTurnId: string | null;
+    operationKey: string;
+  },
+): Promise<SessionCommandReceiptRow | null> {
+  if (!input.operationKey.trim()) throw new Error("operationKey must not be empty");
+  return await findCommandReceipt(db, input);
 }
 
 export async function reserveSessionCommandReceipt(
