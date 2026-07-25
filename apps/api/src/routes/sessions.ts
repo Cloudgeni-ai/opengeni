@@ -12,6 +12,7 @@ import {
   FsMoveRequest,
   FsReadRequest,
   FsWriteRequest,
+  HumanInputRequestStatus,
   GitDiffRequest,
   GitLogRequest,
   GitShowRequest,
@@ -26,20 +27,28 @@ import {
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
+  SessionEventLatestClass,
+  SessionEventResultMode,
   SessionEventSemanticClass,
   SessionEventType,
+  SessionMcpServerId,
+  compactSessionEventResult,
+  sessionEventLatestClassToSemanticClass,
   SaveComposerDraftRequest,
   SteerSessionQueueItemRequest,
   SteerSessionMessageRequest,
   TerminalExecRequest,
   UpdateSessionPinRequest,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   workspaceControlUtf8Bytes,
   type SandboxBackend,
   type Session,
+  type SessionAuthorizationOperation,
+  type SessionQueueSnapshot,
   type TerminalPtyExitedPayload,
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
@@ -47,6 +56,7 @@ import {
 import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
+  acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
   closePtySession,
@@ -55,13 +65,17 @@ import {
   getSession,
   getSessionForSubject,
   getSessionGoal,
+  getSessionHumanInputRequest,
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
   listSessionEventPage,
+  listSessionHumanInputRequests,
   listSessionIdsInGroup,
   listSessionsForSubject,
   listSessionTurns,
+  projectEffectiveControlForRelatedAccess,
+  projectSessionForRelatedAccess,
   recordStreamAcknowledgment,
   requestSessionCompaction,
   setSessionCodexPin,
@@ -81,6 +95,7 @@ import {
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   SessionContextBusyError,
+  HumanInputResponseValidationError,
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
@@ -94,9 +109,17 @@ import {
 import { z } from "zod";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
-import type { Context, Hono } from "hono";
+import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { requireAccessGrant } from "@opengeni/core";
+import {
+  requireAccessGrant,
+  requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
+  SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+  type ResolvedSessionAuthorization,
+} from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import {
   attachViewer,
@@ -121,6 +144,7 @@ import {
   readSessionLineage,
   saveHumanComposerDraft,
   steerHumanQueuePrompt,
+  updateSessionMcpApprovalPolicy,
   updateSessionTitle,
   workflowIdForSession,
 } from "@opengeni/core";
@@ -130,6 +154,60 @@ import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-ca
 
 export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const requestSessionAuthorization = new WeakMap<Request, ResolvedSessionAuthorization>();
+  const relatedSessionAccessFor = (c: Context): "target" | "root" =>
+    requestSessionAuthorization.get(c.req.raw)?.relatedSessionAccess ?? "root";
+  const projectQueueSnapshot = (
+    snapshot: SessionQueueSnapshot,
+    sessionId: string,
+    access: "target" | "root",
+  ): SessionQueueSnapshot => ({
+    ...snapshot,
+    effectiveControl: projectEffectiveControlForRelatedAccess(
+      snapshot.effectiveControl,
+      sessionId,
+      access,
+    ),
+  });
+
+  // A host-bound deployment has one fail-closed authorization seam for every
+  // HTTP session surface. Register it before the routes so a newly added path
+  // cannot accidentally inherit workspace access without an explicit operation
+  // classification. The long-lived event stream performs its own initial check
+  // and bounded reauthorization below.
+  const authorizeSessionHttp: MiddlewareHandler = async (c, next) => {
+    if (!deps.sessionAuthorization) {
+      await next();
+      return;
+    }
+    const workspaceId = c.req.param("workspaceId") ?? "";
+    const sessionId = c.req.param("sessionId") ?? "";
+    const operation = sessionAuthorizationOperationForHttp(
+      c.req.method,
+      new URL(c.req.url).pathname,
+      sessionId,
+    );
+    if (operation === "session.stream.read") {
+      await next();
+      return;
+    }
+    if (!operation) {
+      throw sessionAuthorizationHttpError(new SessionAuthorizationUnavailableError());
+    }
+    const grant = await requireAccessGrant(c, deps, workspaceId);
+    try {
+      const authorization = await requireSessionAuthorization(deps, grant, {
+        sessionId,
+        operation,
+        surface: "http",
+      });
+      if (authorization) requestSessionAuthorization.set(c.req.raw, authorization);
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
+    await next();
+  };
+  app.use("/v1/workspaces/:workspaceId/sessions/:sessionId/*", authorizeSessionHttp);
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -141,6 +219,12 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    let authorizationScope;
+    try {
+      authorizationScope = await requireSessionAuthorizationListScope(deps, grant, "http");
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
     const pageView = c.req.query("view") === "page";
     const query = sessionListQuery(c.req.query(), pageView);
     let page: Awaited<ReturnType<typeof listSessionsForSubject>>;
@@ -153,6 +237,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(query.search ? { search: query.search } : {}),
         ...(query.pinsOnly ? { pinsOnly: true } : {}),
         ...(query.parentSessionId !== undefined ? { parentSessionId: query.parentSessionId } : {}),
+        ...(authorizationScope ? { authorizationScope } : {}),
       });
     } catch (error) {
       if (error instanceof SessionListAccessError) {
@@ -196,7 +281,13 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (!z.string().uuid().safeParse(sessionId).success) {
       throw new HTTPException(404, { message: "session not found" });
     }
-    const session = await getSessionForSubject(db, workspaceId, sessionId, grant.subjectId);
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      relatedSessionAccessFor(c),
+    );
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
@@ -227,7 +318,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       if (!session) {
         throw new HTTPException(404, { message: "session not found" });
       }
-      return c.json(session);
+      return c.json(projectSessionForRelatedAccess(session, relatedSessionAccessFor(c)));
     } catch (error) {
       if (error instanceof SessionPinAccessError) {
         throw new HTTPException(403, { message: error.message });
@@ -247,8 +338,8 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/lineage", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
-    return c.json(await readSessionLineage(db, workspaceId, c.req.param("sessionId")));
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await readSessionLineage(deps, grant, c.req.param("sessionId")));
   });
 
   // Pin (or unpin) the session's Codex account. body { target: "auto" | "<id>" }:
@@ -314,16 +405,48 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = UpdateSessionRequest.parse(await c.req.json());
-    await updateSessionTitle({ db, bus }, workspaceId, sessionId, payload.title, "user");
+    const titleUpdate = await updateSessionTitle(deps, grant, sessionId, payload.title, "user");
     // A session-returning member route must preserve the caller's private pin
     // projection. Returning the generic mapSession() default here would reset a
     // pinned React consumer to false/version 0 after a harmless rename.
-    const session = await getSessionForSubject(db, workspaceId, sessionId, grant.subjectId);
+    const session = await getSessionForSubject(
+      db,
+      workspaceId,
+      sessionId,
+      grant.subjectId,
+      titleUpdate.relatedSessionAccess,
+    );
     if (!session) {
       throw new HTTPException(404, { message: "session not found" });
     }
     return c.json(session);
   });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/mcp-servers/:serverId/approval-policy",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      const sessionId = c.req.param("sessionId");
+      const parsedServerId = SessionMcpServerId.safeParse(c.req.param("serverId"));
+      const payload = UpdateSessionMcpApprovalPolicyRequest.safeParse(
+        await c.req.json().catch(() => null),
+      );
+      if (!parsedServerId.success || !payload.success) {
+        throw new HTTPException(400, { message: "invalid MCP approval-policy request" });
+      }
+      await assertSessionExists(db, workspaceId, sessionId);
+      return c.json(
+        await updateSessionMcpApprovalPolicy(
+          deps,
+          grant,
+          sessionId,
+          parsedServerId.data,
+          payload.data.requireApproval,
+        ),
+      );
+    },
+  );
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -522,12 +645,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       "mode",
       explicitReplay ? "forensic" : "monitoring",
     );
-    const latestClass = eventEnumValue(
+    const latestRequested = eventEnumValue(
       c.req.query("latest"),
-      SessionEventSemanticClass,
+      SessionEventLatestClass,
       "latest",
       undefined,
     );
+    const latestClass =
+      latestRequested === undefined
+        ? undefined
+        : sessionEventLatestClassToSemanticClass(latestRequested);
+    const resultMode = eventEnumValue(
+      c.req.query("resultMode") ?? c.req.query("result"),
+      SessionEventResultMode,
+      "resultMode",
+      "events",
+    );
+    if (resultMode === "compact" && latestClass === undefined) {
+      throw new HTTPException(400, {
+        message: "resultMode=compact requires latest",
+      });
+    }
     if (
       latestClass &&
       ["includeTypes", "excludeTypes", "includeClasses", "excludeClasses"].some(
@@ -585,19 +723,39 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           compact ? 5000 : mode === "monitoring" ? 250 : 2000,
           mode === "monitoring" ? 40 : 500,
         );
+    const dbPayloadMode = resultMode === "compact" ? ("full" as const) : payloadMode;
     const dbPage = await listSessionEventPage(db, workspaceId, sessionId, {
       after,
       ...(before !== undefined ? { before } : {}),
       limit,
       direction,
-      payloadMode,
+      payloadMode: dbPayloadMode,
       includeTypes,
       excludeTypes,
       includeClasses: latestClass ? [latestClass] : includeClasses,
       excludeClasses,
       ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+      ...(latestClass ? { authoritativeLatest: true } : {}),
     });
     const events = dbPage.events;
+    if (resultMode === "compact") {
+      const event = events[0];
+      c.header("X-OpenGeni-Event-Result-Mode", "compact");
+      c.header("X-OpenGeni-Event-Result", event ? "found" : "not_found");
+      c.header("X-OpenGeni-Event-Mode", mode);
+      c.header("X-OpenGeni-Event-Direction", direction);
+      c.header("X-OpenGeni-Payload-Mode", "full");
+      c.header("X-OpenGeni-Forensic-Exact", "false");
+      if (!event) return c.json(null, 200);
+      const result = compactSessionEventResult(
+        event,
+        latestClass!,
+        dbPage.coveredSequence ?? { first: event.sequence, last: event.sequence },
+      );
+      c.header("X-OpenGeni-Covered-First", String(result.coveredSequence.first));
+      c.header("X-OpenGeni-Covered-Last", String(result.coveredSequence.last));
+      return c.json(result);
+    }
     const projected = compact ? coalesceSessionEventDeltas(events) : events;
     const page = boundSessionEventHttpPage(projected, {
       direction,
@@ -628,8 +786,18 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/events/stream", async (c) => {
     const workspaceId = c.req.param("workspaceId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
+    let authorization;
+    try {
+      authorization = await requireSessionAuthorization(deps, grant, {
+        sessionId,
+        operation: "session.stream.read",
+        surface: "stream",
+      });
+    } catch (error) {
+      throw sessionAuthorizationHttpError(error);
+    }
     await assertSessionExists(db, workspaceId, sessionId);
     const after = Number(c.req.query("after") ?? c.req.header("Last-Event-ID") ?? 0);
     return sseSessionStream(
@@ -639,7 +807,22 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       sessionId,
       Number.isFinite(after) ? after : 0,
       c.req.raw.signal,
-      { observability: deps.observability },
+      {
+        observability: deps.observability,
+        ...(authorization
+          ? {
+              reauthorizeAfterMs:
+                authorization.reauthorizeAfterMs ?? SESSION_AUTHORIZATION_DEFAULT_REAUTHORIZE_MS,
+              reauthorize: async () => {
+                await requireSessionAuthorization(deps, grant, {
+                  sessionId,
+                  operation: "session.stream.read",
+                  surface: "stream",
+                });
+              },
+            }
+          : {}),
+      },
     );
   });
 
@@ -659,7 +842,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     const snapshot = await getSessionQueueSnapshot(db, workspaceId, sessionId);
     if (!snapshot) throw new HTTPException(404, { message: "session not found" });
-    return c.json(snapshot);
+    return c.json(projectQueueSnapshot(snapshot, sessionId, relatedSessionAccessFor(c)));
   });
 
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/queue/:turnId/move", async (c) => {
@@ -669,19 +852,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = MoveSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await moveHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await moveHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -694,19 +879,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = EditSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await editHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await editHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -719,19 +906,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = SteerSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await steerHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await steerHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -744,19 +933,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await assertSessionExists(db, workspaceId, sessionId);
     const payload = DeleteSessionQueueItemRequest.parse(await c.req.json());
     try {
-      return c.json(
-        await deleteHumanQueuePrompt(
-          { db, bus },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          c.req.param("turnId"),
-          payload,
-        ),
+      const response = await deleteHumanQueuePrompt(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        c.req.param("turnId"),
+        payload,
       );
+      return c.json({
+        ...response,
+        snapshot: projectQueueSnapshot(response.snapshot, sessionId, relatedSessionAccessFor(c)),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -767,7 +958,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     return c.json(
-      await getHumanComposerDraft(db, {
+      await getHumanComposerDraft(deps, {
         accountId: grant.accountId,
         workspaceId,
         sessionId,
@@ -784,7 +975,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     try {
       return c.json(
         await saveHumanComposerDraft(
-          db,
+          deps,
           {
             accountId: grant.accountId,
             workspaceId,
@@ -811,18 +1002,24 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       throw new HTTPException(400, { message: "invalid session control request" });
     }
     try {
-      return c.json(
-        await controlHumanSessionWorkstream(
-          { db, bus, workflowClient },
-          {
-            accountId: grant.accountId,
-            workspaceId,
-            sessionId,
-            subjectId: grant.subjectId,
-          },
-          parsed.data,
-        ),
+      const response = await controlHumanSessionWorkstream(
+        deps,
+        {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          subjectId: grant.subjectId,
+        },
+        parsed.data,
       );
+      return c.json({
+        ...response,
+        effectiveControl: projectEffectiveControlForRelatedAccess(
+          response.effectiveControl,
+          sessionId,
+          relatedSessionAccessFor(c),
+        ),
+      });
     } catch (error) {
       return commandConflictResponse(c, error);
     }
@@ -837,6 +1034,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const payload = SteerSessionMessageRequest.parse(raw);
     const result = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
       text: payload.text,
+      turnInstructions: payload.turnInstructions ?? null,
       resources: payload.resources,
       tools: payload.tools,
       toolsProvided: userMessagePayloadHasOwnProperty({ payload: raw }, "tools"),
@@ -860,9 +1058,27 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     const sessionId = c.req.param("sessionId");
     const rawEvent = await c.req.json();
     const event = ClientSessionEvent.parse(rawEvent);
+    const refinedOperation =
+      event.type === "user.approvalDecision"
+        ? "session.approval.write"
+        : event.type === "user.humanInputResponse"
+          ? "session.human_input.write"
+          : null;
+    if (refinedOperation) {
+      try {
+        await requireSessionAuthorization(deps, grant, {
+          sessionId,
+          operation: refinedOperation,
+          surface: "http",
+        });
+      } catch (error) {
+        throw sessionAuthorizationHttpError(error);
+      }
+    }
     if (event.type === "user.message") {
       const { accepted } = await acceptSessionUserMessage(deps, grant, workspaceId, sessionId, {
         text: event.payload.text,
+        turnInstructions: event.payload.turnInstructions ?? null,
         resources: event.payload.resources ?? [],
         tools: event.payload.tools ?? [],
         toolsProvided: userMessagePayloadHasOwnProperty(rawEvent, "tools"),
@@ -905,7 +1121,82 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
       return c.json(accepted.event, 202);
     }
+
+    if (event.type === "user.humanInputResponse") {
+      let accepted;
+      try {
+        accepted = await acceptSessionHumanInputResponse(db, {
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          requestId: event.payload.requestId,
+          response: event.payload.response,
+          respondedBy: grant.subjectId,
+          clientEventId: event.clientEventId ?? null,
+        });
+      } catch (error) {
+        if (error instanceof HumanInputResponseValidationError) {
+          throw new HTTPException(error.code === "SKIP_NOT_ALLOWED" ? 409 : 422, {
+            message: error.message,
+          });
+        }
+        throw error;
+      }
+      if (accepted.action === "not_found") {
+        throw new HTTPException(404, { message: "human-input request not found" });
+      }
+      await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
+      if (accepted.workflowWakeRevision !== null) {
+        await workflowClient.signalApprovalDecision({
+          accountId: grant.accountId,
+          workspaceId,
+          sessionId,
+          eventId: accepted.events[0]?.id ?? event.payload.requestId,
+          workflowId: workflowIdForSession(sessionId),
+          workflowWakeRevision: accepted.workflowWakeRevision,
+        });
+      }
+      if (accepted.action === "conflict") {
+        throw new HTTPException(409, {
+          message: `human-input request is ${accepted.request.status}`,
+        });
+      }
+      return c.json(accepted.event, 202);
+    }
   });
+
+  app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    const sessionId = c.req.param("sessionId");
+    await assertSessionExists(db, workspaceId, sessionId);
+    const rawStatus = c.req.query("status");
+    const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
+    if (status && !status.success) {
+      throw new HTTPException(400, { message: "invalid human-input request status" });
+    }
+    const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
+      ...(status?.success ? { status: status.data } : {}),
+    });
+    return c.json({ requests });
+  });
+
+  app.get(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/human-input-requests/:requestId",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+      const sessionId = c.req.param("sessionId");
+      const request = await getSessionHumanInputRequest(
+        db,
+        workspaceId,
+        sessionId,
+        c.req.param("requestId"),
+      );
+      if (!request) throw new HTTPException(404, { message: "human-input request not found" });
+      return c.json(request);
+    },
+  );
 
   // ── API-direct stream capabilities + viewer attach (P1.4) ─────────────────
   //
@@ -960,6 +1251,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       { workspaceId, sandboxGroupId: session.sandboxGroupId },
     );
     const { shared, sharedSessionIds } = await resolveSharedExposure(workspaceId, session);
+    const visibleSharedSessionIds = relatedSessionAccessFor(c) === "root" ? sharedSessionIds : [];
     // Per-principal acknowledgment: A acknowledging does not consent for B. The
     // un-redacted desktop stream ALWAYS requires the un-redacted ack; a shared box
     // ADDITIONALLY requires the shared-exposure ack. Both must match the POST
@@ -1057,7 +1349,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       streamTokenSecretAvailable: !streamTokenDegraded(settings),
       desktopAcknowledged: acknowledged,
       shared,
-      sharedSessionIds,
+      sharedSessionIds: visibleSharedSessionIds,
       // The minted live address (null when not unlocked/degraded). The resolver
       // only folds it in when the desktop gates pass + the ack is present.
       ...(desktopStream
@@ -1789,6 +2081,104 @@ function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): nu
     return fallback;
   }
   return Math.min(max, Math.max(1, Math.floor(limit)));
+}
+
+/**
+ * Map every mounted session-addressed HTTP path to the host-neutral operation
+ * the embedding port authorizes. Returning null is deliberately fail-closed in
+ * host-managed mode; standalone deployments never consult this classifier.
+ */
+export function sessionAuthorizationOperationForHttp(
+  method: string,
+  pathname: string,
+  sessionId: string,
+): SessionAuthorizationOperation | null {
+  const marker = `/sessions/${sessionId}`;
+  const markerAt = pathname.indexOf(marker);
+  if (markerAt < 0) return null;
+  const suffix = pathname.slice(markerAt + marker.length);
+  const verb = method.toUpperCase();
+
+  if (suffix === "") {
+    if (verb === "GET") return "session.read";
+    if (verb === "PATCH") return "session.title.write";
+    return null;
+  }
+  if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
+    return "session.mcp.approval_policy.write";
+  }
+  if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
+  if (suffix === "/codex-account" && verb === "POST") {
+    return "session.codex_account.write";
+  }
+  if (suffix === "/goal") {
+    return verb === "GET"
+      ? "session.goal.read"
+      : ["PATCH", "DELETE"].includes(verb)
+        ? "session.goal.write"
+        : null;
+  }
+  if (suffix === "/context/clear" || suffix === "/context/compact") {
+    return verb === "POST" ? "session.context.write" : null;
+  }
+  if (suffix === "/events/stream" && verb === "GET") return "session.stream.read";
+  if (suffix === "/events") {
+    if (verb === "GET") return "session.events.read";
+    if (verb === "POST") return "session.append";
+    return null;
+  }
+  if (suffix === "/turns" && verb === "GET") return "session.turns.read";
+  if (suffix === "/queue" && verb === "GET") return "session.queue.read";
+  if (suffix.startsWith("/queue/") && verb === "POST") return "session.queue.control";
+  if (suffix === "/composer-draft") {
+    if (verb === "GET") return "session.composer.read";
+    if (verb === "PUT") return "session.composer.write";
+    return null;
+  }
+  if (suffix === "/control" && verb === "POST") return "session.control";
+  if (suffix === "/steer" && verb === "POST") return "session.steer";
+  if (suffix === "/human-input-requests" && verb === "GET") {
+    return "session.human_input.read";
+  }
+  if (suffix.startsWith("/human-input-requests/") && verb === "GET") {
+    return "session.human_input.read";
+  }
+  if (suffix === "/stream-capabilities" && verb === "GET") return "session.viewer.read";
+  if (suffix === "/stream-capabilities/acknowledge" && verb === "POST") {
+    return "session.stream.acknowledge";
+  }
+  if (suffix === "/viewers" && verb === "POST") return "session.viewer.control";
+  if (suffix.startsWith("/viewers/") && ["POST", "DELETE"].includes(verb)) {
+    return "session.viewer.control";
+  }
+  if (suffix === "/fs/list" || suffix === "/fs/read") {
+    return verb === "POST" ? "session.files.read" : null;
+  }
+  if (["/fs/write", "/fs/delete", "/fs/move", "/fs/mkdir"].includes(suffix)) {
+    return verb === "POST" ? "session.files.write" : null;
+  }
+  if (suffix.startsWith("/git/") && verb === "POST") return "session.git.read";
+  if ((suffix === "/workspace/capture" || suffix === "/workspace/capture/file") && verb === "GET") {
+    return "session.capture.read";
+  }
+  if (suffix === "/terminal/exec" && verb === "POST") return "session.terminal.control";
+  if (suffix === "/terminal/pty" && verb === "POST") return "session.terminal.control";
+  if (suffix.startsWith("/terminal/pty/") && verb === "POST") {
+    return "session.terminal.control";
+  }
+  return null;
+}
+
+function sessionAuthorizationHttpError(error: unknown): HTTPException {
+  if (error instanceof SessionAuthorizationDeniedError) {
+    return new HTTPException(404, { message: "session not found" });
+  }
+  if (error instanceof SessionAuthorizationUnavailableError) {
+    return new HTTPException(503, { message: "session authorization is unavailable" });
+  }
+  if (error instanceof HTTPException) return error;
+  throw error;
 }
 
 function eventEnumValue<T extends string>(

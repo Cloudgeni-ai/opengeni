@@ -32,6 +32,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import { getSettings, type Settings } from "@opengeni/config";
 import {
+  acquireLease,
   claimSessionWorkForAttempt,
   createSession,
   createDb,
@@ -347,7 +348,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
 
     // The post-create warming-death row kept its instance_id long enough for the
     // provider terminate seam, then went cold.
-    expect(spy.calls.some((c) => c.group === warmingCreated.groupId && c.epoch === 4)).toBe(true);
+    expect(spy.calls.some((c) => c.group === warmingCreated.groupId && c.epoch === 5)).toBe(true);
     const warmingCreatedRow = await readRow(warmingCreated.workspaceId, warmingCreated.groupId);
     expect(warmingCreatedRow?.liveness).toBe("cold");
     expect(warmingCreatedRow?.instance_id).toBeNull();
@@ -1291,6 +1292,62 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(deleteCount).toBe(1);
     const row = await readRow(ws.workspaceId, ws.groupId);
     expect(row?.liveness).toBe("cold");
+  }, 60_000);
+
+  // An expired attributed warming row is already owned by provider teardown.
+  // The canonical acquire path must fence a successor here; otherwise the old
+  // creator's late cleanup could terminate the successor's reused instance.
+  test("(F1c) expired attributed warming drain fences acquire before provider stop", async () => {
+    if (!available) return;
+
+    const ws = await freshWorkspace();
+    const old = await insertLease(ws, {
+      liveness: "draining",
+      refcount: 0,
+      leaseEpoch: 8,
+      expiresInMs: -1_000,
+      instanceId: "box-expired-attributed",
+      backend: "local",
+      resumeBackendId: "local",
+      resumeState: { backendId: "local", sessionState: {} },
+    });
+    expect(old).toBeTruthy();
+
+    let deleteCount = 0;
+    let successorRole: string | null = null;
+    const terminateSpy: TerminateBoxFn = async (
+      _settings,
+      _lease,
+      _observability,
+      persistArchive,
+    ) => {
+      const successor = await acquireLease(db, {
+        accountId: ws.accountId,
+        workspaceId: ws.workspaceId,
+        sandboxGroupId: ws.groupId,
+        kind: "turn",
+        holderId: "late-successor",
+        backend: "local",
+        leaseTtlMs: 45_000,
+      });
+      successorRole = successor.role;
+      const { wrote } = await persistArchive(null);
+      if (!wrote) return false;
+      deleteCount += 1;
+      return true;
+    };
+
+    const { reapSandboxLeases } = createSandboxLeaseActivities(reaperServices(), {
+      terminateBox: terminateSpy,
+    });
+    const result = await reapSandboxLeases();
+
+    expect(successorRole).toBe("fenced");
+    expect(deleteCount).toBe(1);
+    expect(result.terminated).toBeGreaterThanOrEqual(1);
+    const row = await readRow(ws.workspaceId, ws.groupId);
+    expect(row?.liveness).toBe("cold");
+    expect(row?.instance_id).toBeNull();
   }, 60_000);
 
   // ── FINDING 2: failed cold-warm preserves the workspace archive for retry.

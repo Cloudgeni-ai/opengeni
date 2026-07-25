@@ -41,6 +41,7 @@ export async function settingsWithSessionMcpServersForRun(
   db: Database,
   workspaceId: string,
   sessionId: string,
+  attemptId: string,
   settings: Settings,
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
@@ -49,11 +50,15 @@ export async function settingsWithSessionMcpServersForRun(
     if (metadata.length === 0) {
       return settings;
     }
-    throw new Error("session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY");
+    if (metadata.some((server) => server.headerNames.length > 0)) {
+      throw new Error(
+        "session MCP server credentials require OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY",
+      );
+    }
   }
   return settingsWithSessionMcpServers(
     settings,
-    await listSessionMcpServersForRun(db, workspaceId, sessionId, encryptionKey),
+    await listSessionMcpServersForRun(db, workspaceId, sessionId, attemptId, encryptionKey ?? null),
   );
 }
 
@@ -79,6 +84,7 @@ export function settingsWithSessionMcpServers(
         ...(server.requireApproval !== undefined
           ? { requireApproval: server.requireApproval }
           : {}),
+        ...(server.connectionRef ? { connectionRef: server.connectionRef } : {}),
         headers: server.headers,
       })),
     ],
@@ -168,6 +174,7 @@ export function withCodexProvider(settings: Settings): Settings {
     baseUrl: CODEX_PROVIDER_BASE_URL,
     models: CODEX_FALLBACK_MODEL_SLUGS.map((slug) => ({
       id: `${CODEX_MODEL_ID_PREFIX}${slug}`,
+      upstreamModelId: slug,
       label: slug,
       reasoningEffort: true,
       // These three values are the live Codex CLI catalog policy, kept distinct

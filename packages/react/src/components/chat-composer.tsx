@@ -29,6 +29,10 @@ import {
   type ChatComposerMessages,
   type ComposerControlLinks,
 } from "./composer";
+import {
+  ComposerTranscriptionControl,
+  type ComposerTranscriptionControlProps,
+} from "./composer-transcription-control";
 
 export { OPEN_WORKSTREAM_CONTROL_EVENT };
 
@@ -49,6 +53,8 @@ export type ChatComposerProps = {
   hint?: string | undefined;
   /** App controls in the footer row, replacing the hint. */
   controlsStart?: ReactNode | undefined;
+  /** Provider-neutral speech capability. Provider configuration stays in workspace settings. */
+  transcription?: ComposerTranscriptionControlProps | undefined;
   /** Content rendered above the textarea, inside the field chrome. */
   header?: ReactNode | undefined;
   /** Paste hook composed with the attachment paste path. */
@@ -83,6 +89,7 @@ export function ChatComposer({
   autoFocus,
   hint,
   controlsStart,
+  transcription,
   header,
   onPaste,
   attachments,
@@ -111,7 +118,7 @@ export function ChatComposer({
     onPaste,
     messages,
   });
-  const hasControls = Boolean(attachments || models || controlsStart);
+  const hasControls = Boolean(attachments || models || controlsStart || transcription);
 
   return (
     <Root controller={controller} className={className}>
@@ -130,6 +137,7 @@ export function ChatComposer({
               {hasControls ? (
                 <Controls>
                   <AttachButton />
+                  {transcription ? <ComposerTranscriptionControl {...transcription} /> : null}
                   {models ? (
                     <ModelPicker models={models} value={selectedModel} onChange={onSelectModel} />
                   ) : null}

@@ -37,6 +37,39 @@ function timelineEvent(
   };
 }
 
+describe("provider MCP unavailable rendering", () => {
+  test("does not offer a duplicate reconnect flow for unsupported host-owned auth", async () => {
+    let reconnects = 0;
+    const r = await renderComponent(
+      <MessageTimeline
+        events={[
+          timelineEvent("tool.auth_needed", {
+            serverId: "gitlab-hosted",
+            provider: "gitlab",
+            providerDomain: "gitlab.com",
+            connectionId: "host-gitlab-one",
+            reason: "unsupported_auth",
+            authorizationUrl: "https://should-not-be-used.example/connect",
+          }),
+        ]}
+        onReconnect={() => {
+          reconnects += 1;
+        }}
+      />,
+    );
+    await flush();
+    expect(r.container.textContent).toContain("Gitlab tools unavailable");
+    expect(r.container.textContent).toContain(
+      "This connection cannot authenticate the configured tool endpoint.",
+    );
+    expect(r.container.textContent).not.toContain("Reconnect");
+    expect(r.container.querySelector("button")).toBeNull();
+    expect(r.container.querySelector("a")).toBeNull();
+    expect(reconnects).toBe(0);
+    await r.unmount();
+  });
+});
+
 function resetTimelineEvents(): void {
   timelineSequence = 0;
 }
