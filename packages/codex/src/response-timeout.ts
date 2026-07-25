@@ -105,7 +105,9 @@ export function classifyCodexResponseTimeoutError(
       (typeof nested?.code === "string" ? nested.code : undefined);
     if (type === CODEX_RESPONSE_TIMEOUT_ERROR_TYPE || value.name === "CodexResponseTimeoutError") {
       const klass =
-        parseTimeoutClass(value.timeoutClass) ?? parseTimeoutClass(nested?.timeout_class) ?? "headers";
+        parseTimeoutClass(value.timeoutClass) ??
+        parseTimeoutClass(nested?.timeout_class) ??
+        "headers";
       return {
         timeoutClass: klass,
         requestId:
