@@ -72,7 +72,9 @@ export {
   type LiveModalSandboxLeaseAttribution,
   type ModalModuleLoader,
   type ModalOrphanSweepResult,
+  type ModalOrphanSweepTermination,
   type ModalSandboxAttribution,
+  type RevalidateModalOrphanTermination,
 } from "./providers/modal";
 export {
   selectBackend,

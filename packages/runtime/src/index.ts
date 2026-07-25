@@ -182,7 +182,16 @@ export {
 } from "./skill-library";
 
 export type { RuntimeMetricsHooks } from "./metrics";
-export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
+export {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./sandbox/turn-tool-cancellation";
+export type {
+  TurnSandboxCommandArgs,
+  TurnSandboxCommandSession,
+  TurnToolCancellationController,
+  TurnToolCancellationFence,
+} from "./sandbox/turn-tool-cancellation";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability

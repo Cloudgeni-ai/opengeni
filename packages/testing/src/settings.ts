@@ -179,6 +179,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     vercelTeamId: undefined,
     vercelRuntime: undefined,
     sandboxOwnershipEnabled: false,
+    rigVerificationLeaseOwnershipEnabled: false,
     sandboxLazyProvisionEnabled: false,
     sandboxSelfhostedEnabled: false,
     agentOpStreamEnabled: false,
