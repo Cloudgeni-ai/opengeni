@@ -4,14 +4,17 @@ import type { RealtimeVoiceStatus } from "../hooks/use-realtime-voice";
 export type RealtimeVoiceOrbProps = {
   status: RealtimeVoiceStatus;
   targetLabel: string;
-  targetSessionId: string;
+  targetSessionId: string | null;
   partial?: string | undefined;
   unavailableReason?: RealtimeVoiceUnavailableReason | null | undefined;
+  /** Host-owned explanation when no exact session target can be bound. */
+  unavailableDetail?: string | undefined;
   errorCode?: string | null | undefined;
   onStart: () => void;
   onStop: () => void;
   onInterrupt: () => void;
   onTextFallback: () => void;
+  textFallbackDisabled?: boolean | undefined;
   className?: string | undefined;
 };
 
@@ -30,7 +33,7 @@ export function RealtimeVoiceOrb(props: RealtimeVoiceOrbProps) {
   const busy = ["authorizing", "connecting", "closing"].includes(props.status);
   const unavailable = props.status === "unavailable";
   const statusText = voiceStatusText(props.status, props.unavailableReason, props.errorCode);
-  const detail = props.partial?.trim() || statusText;
+  const detail = props.partial?.trim() || props.unavailableDetail?.trim() || statusText;
   const activate = () => {
     if (props.status === "speaking") props.onInterrupt();
     else if (active) props.onStop();
@@ -90,7 +93,11 @@ export function RealtimeVoiceOrb(props: RealtimeVoiceOrbProps) {
           </span>
           <span
             className="truncate text-og-xs font-medium text-og-fg-muted"
-            title={`${props.targetLabel} (${props.targetSessionId})`}
+            title={
+              props.targetSessionId
+                ? `${props.targetLabel} (${props.targetSessionId})`
+                : props.targetLabel
+            }
           >
             {props.targetLabel}
           </span>
@@ -109,7 +116,8 @@ export function RealtimeVoiceOrb(props: RealtimeVoiceOrbProps) {
       <button
         type="button"
         onClick={props.onTextFallback}
-        className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg pointer-coarse:size-11"
+        disabled={props.textFallbackDisabled}
+        className="inline-flex size-8 shrink-0 items-center justify-center rounded-og-md text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:size-11"
         aria-label="Use text composer instead"
         title="Use text composer"
       >
@@ -120,7 +128,8 @@ export function RealtimeVoiceOrb(props: RealtimeVoiceOrbProps) {
         role={props.status === "error" ? "alert" : "status"}
         aria-live="polite"
       >
-        Realtime voice for {props.targetLabel}, session {props.targetSessionId}: {detail}
+        Realtime voice for {props.targetLabel}
+        {props.targetSessionId ? `, session ${props.targetSessionId}` : ""}: {detail}
       </span>
     </div>
   );

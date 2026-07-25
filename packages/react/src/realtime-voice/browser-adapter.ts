@@ -172,17 +172,26 @@ async function connectBrowserVoice(
         activeSpeechMessageId = null;
         stopAudio();
       }
+      // A terminal gateway message revokes recorder/microphone/playback/socket
+      // ownership before the host hook can clear its session handle or render a
+      // terminal state. cleanup is idempotent when socket.close re-enters.
+      if (event.type === "closed" || (event.type === "error" && !event.recoverable)) {
+        cleanup();
+        listener(event);
+        return;
+      }
       listener(event);
     };
     activeSocket.onerror = () => {
       if (!closed) listener({ type: "error", code: "network", recoverable: true });
     };
     activeSocket.onclose = () => {
-      if (!closed) {
+      const notify = !closed;
+      cleanup();
+      if (notify) {
         listener({ type: "error", code: "network", recoverable: true });
         listener({ type: "closed", reason: "error" });
       }
-      cleanup();
     };
 
     recorder = createRecorder(stream);
@@ -268,7 +277,10 @@ function parseGatewayEvent(raw: string): RealtimeVoiceAdapterEvent | null {
     case "transcript.partial":
       return typeof event.text === "string" ? { type: event.type, text: event.text } : null;
     case "transcript.final":
-      return typeof event.text === "string" && typeof event.providerAcceptanceId === "string"
+      return typeof event.text === "string" &&
+        typeof event.providerAcceptanceId === "string" &&
+        event.providerAcceptanceId.length > 0 &&
+        event.providerAcceptanceId.length <= 128
         ? {
             type: event.type,
             text: event.text,

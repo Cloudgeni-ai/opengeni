@@ -10,6 +10,7 @@ import type {
 import { createBrowserRealtimeVoiceAdapter } from "../src/realtime-voice/browser-adapter";
 import { RealtimeVoiceOrb } from "../src/components/realtime-voice-orb";
 import {
+  realtimeVoiceClientEventId,
   useRealtimeVoice,
   type RealtimeVoiceController,
   type UseRealtimeVoiceOptions,
@@ -36,6 +37,12 @@ const availableCapability: SessionVoiceCapability = {
   status: "available",
   reason: null,
   retryAt: null,
+  retention: {
+    inputAudio: "ephemeral",
+    partialTranscripts: "ephemeral",
+    acceptedTranscripts: "ordinary-session",
+    providerState: "ephemeral",
+  },
   checks: {
     feature: "enabled",
     subscription: "enabled",
@@ -49,6 +56,8 @@ const availableCapability: SessionVoiceCapability = {
     grantTtlSeconds: 60,
     maxSessionSeconds: 900,
     maxInputAudioBytes: 32 * 1024 * 1024,
+    maxConcurrentSessions: 1,
+    workspaceAudioBudgetSeconds: null,
   },
 };
 
@@ -223,6 +232,282 @@ describe("useRealtimeVoice", () => {
     });
     expect(finals).toEqual(["run the check"]);
     expect(hook.result.current.status).toBe("executing");
+    await hook.unmount();
+  });
+
+  test("serializes distinct finals and gives each one a stable ordinary Send key", async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const adapter = new FixtureAdapter();
+    const submissions: Array<{ text: string; acceptanceId: string; clientEventId: string }> = [];
+    const hook = await renderHook(
+      () =>
+        useRealtimeVoice(
+          options(adapter, {
+            onFinalTranscript: async (text, context) => {
+              submissions.push({
+                text,
+                acceptanceId: context.providerAcceptanceId,
+                clientEventId: context.clientEventId,
+              });
+              if (context.providerAcceptanceId === "first") await firstGate;
+              return true;
+            },
+          }),
+        ),
+      undefined,
+    );
+    await flush();
+    await actRun(() => hook.result.current.start());
+    await actRun(async () => {
+      adapter.emit({ type: "transcript.final", text: "first turn", providerAcceptanceId: "first" });
+      adapter.emit({
+        type: "transcript.final",
+        text: "second turn",
+        providerAcceptanceId: "second",
+      });
+      await Promise.resolve();
+    });
+    expect(submissions.map(({ text }) => text)).toEqual(["first turn"]);
+    releaseFirst();
+    await flush();
+    expect(submissions).toEqual([
+      {
+        text: "first turn",
+        acceptanceId: "first",
+        clientEventId: realtimeVoiceClientEventId(workspaceId, sessionId, "first"),
+      },
+      {
+        text: "second turn",
+        acceptanceId: "second",
+        clientEventId: realtimeVoiceClientEventId(workspaceId, sessionId, "second"),
+      },
+    ]);
+    await hook.unmount();
+  });
+
+  test("retains an outcome-unknown final and retries it only after explicit Start", async () => {
+    const adapter = new FixtureAdapter();
+    const contexts: string[] = [];
+    let attempts = 0;
+    const hook = await renderHook(
+      () =>
+        useRealtimeVoice(
+          options(adapter, {
+            reconnectDelayMs: 0,
+            onFinalTranscript: async (_text, context) => {
+              attempts += 1;
+              contexts.push(context.clientEventId);
+              return attempts > 1;
+            },
+          }),
+        ),
+      undefined,
+    );
+    await flush();
+    await actRun(() => hook.result.current.start());
+    await actRun(async () => {
+      adapter.emit({
+        type: "transcript.final",
+        text: "do not duplicate me",
+        providerAcceptanceId: "ambiguous",
+      });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(attempts).toBe(1);
+    expect(adapter.closes).toBe(1);
+    expect(hook.result.current).toMatchObject({
+      status: "error",
+      pendingTranscript: "do not duplicate me",
+      errorCode: "unknown",
+    });
+    await flush();
+    expect(attempts).toBe(1);
+
+    await actRun(() => hook.result.current.start());
+    expect(attempts).toBe(2);
+    expect(contexts[1]).toBe(contexts[0]);
+    expect(adapter.connects).toBe(2);
+    expect(hook.result.current.pendingTranscript).toBeNull();
+    await hook.unmount();
+  });
+
+  test("uses the same durable Send key when a gateway redelivers after a true remount", async () => {
+    const redelivered = {
+      type: "transcript.final",
+      text: "recover the ambiguous final",
+      providerAcceptanceId: "remount-ambiguous",
+    } as const;
+    const clientEventIds: string[] = [];
+    const firstAdapter = new FixtureAdapter();
+    const first = await renderHook(
+      () =>
+        useRealtimeVoice(
+          options(firstAdapter, {
+            onFinalTranscript: async (_text, context) => {
+              clientEventIds.push(context.clientEventId);
+              return false;
+            },
+          }),
+        ),
+      undefined,
+    );
+    await flush();
+    await actRun(() => first.result.current.start());
+    await actRun(async () => {
+      firstAdapter.emit(redelivered);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(first.result.current.pendingTranscript).toBe(redelivered.text);
+    await first.unmount();
+
+    const secondAdapter = new FixtureAdapter();
+    const second = await renderHook(
+      () =>
+        useRealtimeVoice(
+          options(secondAdapter, {
+            onFinalTranscript: async (_text, context) => {
+              clientEventIds.push(context.clientEventId);
+              return true;
+            },
+          }),
+        ),
+      undefined,
+    );
+    await flush();
+    expect(second.result.current.pendingTranscript).toBeNull();
+    await actRun(() => second.result.current.start());
+    await actRun(async () => {
+      secondAdapter.emit(redelivered);
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(clientEventIds).toEqual([
+      realtimeVoiceClientEventId(workspaceId, sessionId, redelivered.providerAcceptanceId),
+      realtimeVoiceClientEventId(workspaceId, sessionId, redelivered.providerAcceptanceId),
+    ]);
+    expect(second.result.current.pendingTranscript).toBeNull();
+    await second.unmount();
+  });
+
+  test("coalesces error plus closed into one cleanup and reconnects with a fresh grant", async () => {
+    const adapter = new FixtureAdapter();
+    let grants = 0;
+    const voiceClient = {
+      getSessionVoiceCapability: async () => availableCapability,
+      createSessionVoiceGrant: async () => {
+        grants += 1;
+        return {
+          capability: availableCapability,
+          grant: { ...grant, id: `${String(grants).padStart(8, "0")}-3333-4333-8333-333333333333` },
+        };
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useRealtimeVoice(
+          options(adapter, {
+            client: voiceClient,
+            reconnectDelayMs: 0,
+            maxReconnectAttempts: 2,
+          }),
+        ),
+      undefined,
+    );
+    await flush();
+    await actRun(() => hook.result.current.start());
+    const failedGeneration = adapter.listener;
+    await actRun(async () => {
+      failedGeneration?.({ type: "error", code: "network", recoverable: true });
+      failedGeneration?.({ type: "closed", reason: "error" });
+      await Promise.resolve();
+    });
+    await flush();
+    expect(grants).toBe(2);
+    expect(adapter.connects).toBe(2);
+    expect(adapter.closes).toBe(1);
+    expect(hook.result.current.status).toBe("listening");
+    await hook.unmount();
+  });
+
+  for (const terminalEvent of [
+    { type: "error", code: "provider", recoverable: false } as const,
+    { type: "closed", reason: "expired" } as const,
+  ]) {
+    test(`closes a host adapter before ${terminalEvent.type} state and permits a clean restart`, async () => {
+      let releaseClose!: () => void;
+      const closeGate = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const adapter = new FixtureAdapter();
+      adapter.closeImpl = async () => await closeGate;
+      const hook = await renderHook(() => useRealtimeVoice(options(adapter)), undefined);
+      await flush();
+      await actRun(() => hook.result.current.start());
+
+      await actRun(async () => {
+        adapter.emit(terminalEvent);
+        await Promise.resolve();
+      });
+      expect(adapter.closes).toBe(0);
+      expect(hook.result.current.status).toBe("listening");
+
+      releaseClose();
+      await flush();
+      expect(adapter.closes).toBe(1);
+      expect(hook.result.current.status).toBe(terminalEvent.type === "error" ? "error" : "closed");
+
+      adapter.closeImpl = null;
+      await actRun(() => hook.result.current.start());
+      expect(adapter.connects).toBe(2);
+      expect(hook.result.current.status).toBe("listening");
+      await hook.unmount();
+    });
+  }
+
+  test("caps failed fresh-grant reconnect attempts", async () => {
+    const adapter = new FixtureAdapter();
+    const hook = await renderHook(
+      () => useRealtimeVoice(options(adapter, { reconnectDelayMs: 0, maxReconnectAttempts: 2 })),
+      undefined,
+    );
+    await flush();
+    await actRun(() => hook.result.current.start());
+    adapter.connectError = new Error("gateway down");
+    await actRun(async () => {
+      adapter.emit({ type: "error", code: "network", recoverable: true });
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(adapter.connects).toBe(3);
+    expect(hook.result.current).toMatchObject({ status: "error", errorCode: "network" });
+    await hook.unmount();
+  });
+
+  test("times out a transport generation that ignores AbortSignal", async () => {
+    let connects = 0;
+    const hangingAdapter: RealtimeVoiceAdapter = {
+      connect: async () => {
+        connects += 1;
+        return await new Promise<RealtimeVoiceAdapterSession>(() => undefined);
+      },
+    };
+    const hook = await renderHook(
+      () =>
+        useRealtimeVoice(options(hangingAdapter, { connectTimeoutMs: 5, maxReconnectAttempts: 0 })),
+      undefined,
+    );
+    await flush();
+    await actRun(() => hook.result.current.start());
+    await flush(10);
+    expect(connects).toBe(1);
+    expect(hook.result.current).toMatchObject({ status: "error", errorCode: "network" });
     await hook.unmount();
   });
 
@@ -478,6 +763,87 @@ describe("browser realtime voice adapter", () => {
       adapter.connect(grant, () => undefined, { signal: new AbortController().signal }),
     ).rejects.toThrow("socket construction failed");
     expect(trackStops).toBe(1);
+  });
+
+  for (const terminalEvent of [
+    { type: "error", code: "provider", recoverable: false } as const,
+    { type: "closed", reason: "expired" } as const,
+  ]) {
+    test(`cleans media before notifying ${terminalEvent.type} gateway termination`, async () => {
+      let trackStops = 0;
+      let recorderStops = 0;
+      const cleanupAtNotification: Array<[number, number]> = [];
+      const socket = new FakeSocket([]);
+      const adapter = createBrowserRealtimeVoiceAdapter({
+        mediaDevices: {
+          getUserMedia: async () =>
+            ({
+              getTracks: () => [{ stop: () => (trackStops += 1) }],
+            }) as unknown as MediaStream,
+        },
+        createSocket: () => {
+          queueMicrotask(() => socket.open());
+          return socket as unknown as WebSocket;
+        },
+        createRecorder: () =>
+          ({
+            ondataavailable: null,
+            start: () => undefined,
+            stop: () => (recorderStops += 1),
+          }) as unknown as MediaRecorder,
+      });
+      const connected = await adapter.connect(
+        grant,
+        (event) => {
+          if (event.type === terminalEvent.type) {
+            cleanupAtNotification.push([trackStops, recorderStops]);
+          }
+        },
+        { signal: new AbortController().signal },
+      );
+      socket.message(JSON.stringify(terminalEvent));
+      expect(cleanupAtNotification).toEqual([[1, 1]]);
+      await connected.close();
+      expect(trackStops).toBe(1);
+      expect(recorderStops).toBe(1);
+    });
+  }
+
+  test("cleans media before reporting a physical socket close", async () => {
+    let trackStops = 0;
+    let recorderStops = 0;
+    const cleanupAtNotification: Array<[number, number]> = [];
+    const socket = new FakeSocket([]);
+    const adapter = createBrowserRealtimeVoiceAdapter({
+      mediaDevices: {
+        getUserMedia: async () =>
+          ({ getTracks: () => [{ stop: () => (trackStops += 1) }] }) as unknown as MediaStream,
+      },
+      createSocket: () => {
+        queueMicrotask(() => socket.open());
+        return socket as unknown as WebSocket;
+      },
+      createRecorder: () =>
+        ({
+          ondataavailable: null,
+          start: () => undefined,
+          stop: () => (recorderStops += 1),
+        }) as unknown as MediaRecorder,
+    });
+    await adapter.connect(
+      grant,
+      (event) => {
+        if (event.type === "error" || event.type === "closed") {
+          cleanupAtNotification.push([trackStops, recorderStops]);
+        }
+      },
+      { signal: new AbortController().signal },
+    );
+    socket.close();
+    expect(cleanupAtNotification).toEqual([
+      [1, 1],
+      [1, 1],
+    ]);
   });
 });
 

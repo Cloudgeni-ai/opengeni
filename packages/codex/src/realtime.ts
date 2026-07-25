@@ -18,6 +18,15 @@ export const CODEX_REALTIME_VOICE_LIMITS = Object.freeze({
   grantTtlSeconds: 60,
   maxSessionSeconds: 15 * 60,
   maxInputAudioBytes: 32 * 1024 * 1024,
+  maxConcurrentSessions: 1,
+  workspaceAudioBudgetSeconds: null,
+});
+
+export const CODEX_REALTIME_VOICE_RETENTION = Object.freeze({
+  inputAudio: "ephemeral" as const,
+  partialTranscripts: "ephemeral" as const,
+  acceptedTranscripts: "ordinary-session" as const,
+  providerState: "ephemeral" as const,
 });
 
 export type CodexRealtimeProtocolEvidence =

@@ -208,13 +208,18 @@ The web bundle ships no production adapter and therefore fails closed.
 
 ### 3.12 Realtime voice is ephemeral media over one normal durable session
 
-The session page may mount one compact full-duplex voice orb bound to that exact existing session.
-It does not create a voice-specific thread, runtime, history, or authorization model. Accepted final
-utterances use ordinary composer Send, the target session retains its normal tools/memory/children/
-approvals/queue/control semantics, and only completed durable assistant messages are eligible for
-speech. Partial transcripts, provider audio, playback, and reconnect state remain ephemeral.
+The workspace shell mounts one compact full-duplex voice overlay. **This session** binds only to the
+routed ordinary session; **Workspace main** binds only to the ordinary session designated by the
+general workspace `settings.mainSessionId`. Missing, deleted, or inaccessible targets fail closed
+without falling back or creating a session. The overlay adds no voice-specific thread, runtime,
+history, or authorization model. Accepted finals serialize through ordinary composer Send with a
+deterministic per-target/provider-acceptance `clientEventId`; an ambiguous failure is retained for
+explicit same-key retry rather than automatically resubmitted. The target session retains its normal
+tools/memory/children/approvals/queue/control semantics, and only completed durable assistant
+messages are eligible for speech. Input audio, partial transcripts, provider state, playback, and
+reconnect state remain ephemeral; accepted transcripts become ordinary durable session truth.
 Barge-in stops playback only and never cancels accepted durable work. The text composer remains
-available in every state.
+available as the exact-target fallback.
 
 The public browser receives only a short-lived target-bound OpenGeni WSS grant; Codex subscription
 credentials remain server-side. Production fails closed behind both protocol-evidence and gateway-
@@ -222,6 +227,10 @@ availability gates because the existing subscription integration proves HTTP Res
 usage, and connector MCP paths but no authorized audio WebSocket/WebRTC protocol. There is no
 silent public Platform API or Azure fallback. Realtime voice has a separate workspace acceptance
 from composer transcription.
+
+Capability limits are policy/provider advertisement hooks only. A future gateway must independently
+enforce admission, time/byte/concurrency/workspace-budget metering, reset handling, and cleanup; the
+current fail-closed foundation makes no live-provider or runtime-enforcement claim.
 
 > Canonical: [`realtime-voice.md`](realtime-voice.md),
 > `packages/codex/src/realtime.ts`, `apps/api/src/routes/sessions.ts`,

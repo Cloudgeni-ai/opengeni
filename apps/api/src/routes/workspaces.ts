@@ -22,6 +22,7 @@ import {
   createWorkspace,
   deleteWorkspace,
   getManagedUserByEmail,
+  getSession,
   getWorkspaceModelPolicy,
   grantWorkspaceAccess,
   listScheduledTasks,
@@ -136,6 +137,13 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     const parsed = UpdateWorkspaceSettingsRequest.safeParse(await c.req.json());
     if (!parsed.success) {
       throw new HTTPException(400, { message: "invalid workspace settings patch" });
+    }
+    if (parsed.data.mainSessionId !== undefined && parsed.data.mainSessionId !== null) {
+      await assertWorkspaceMainSessionExists(
+        (targetWorkspaceId, sessionId) => getSession(deps.db, targetWorkspaceId, sessionId),
+        workspaceId,
+        parsed.data.mainSessionId,
+      );
     }
     const workspace = await updateWorkspaceSettings(deps.db, workspaceId, parsed.data);
     return c.json(Workspace.parse(workspace));
@@ -330,6 +338,17 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
     await removeWorkspaceMember(deps.db, workspaceId, subjectId);
     return c.body(null, 204);
   });
+}
+
+/** Exact-workspace validation seam kept injectable for deterministic route tests. */
+export async function assertWorkspaceMainSessionExists(
+  loadSession: (workspaceId: string, sessionId: string) => Promise<unknown | null>,
+  workspaceId: string,
+  sessionId: string,
+): Promise<void> {
+  if (!(await loadSession(workspaceId, sessionId))) {
+    throw new HTTPException(404, { message: "workspace main session not found" });
+  }
 }
 
 // A persona override that is null or trims to empty collapses to null (use the

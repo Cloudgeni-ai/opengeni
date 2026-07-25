@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { ProblemPanel } from "@/components/common";
 import { RailProvider } from "@/components/rail/rail-context";
 import { RailShell } from "@/components/rail/rail-shell";
+import RealtimeVoiceWorkspaceControl from "@/components/session/realtime-voice-workspace-control";
 import { Button } from "@/components/ui/button";
 import { useAppContext } from "@/context";
 import { isAbortError } from "@/lib/session-tools";
@@ -87,6 +88,7 @@ export function WorkspaceShellRoute({ workspaceId }: { workspaceId: string }) {
       <RailProvider workspaceId={workspaceId}>
         <RailShell>
           <Outlet />
+          <RealtimeVoiceWorkspaceControl workspaceId={workspaceId} />
         </RailShell>
       </RailProvider>
     </OpenGeniProvider>

@@ -57,9 +57,6 @@ import { buildTools } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
-const RealtimeVoiceSessionControl = lazy(
-  () => import("@/components/session/realtime-voice-session-control"),
-);
 const SessionInspector = lazy(() => import("@/components/session/inspector"));
 
 export function SessionRoute({
@@ -779,22 +776,6 @@ function SessionChatPane(props: {
       {!terminal ? <QueueSurface queue={props.queue} composer={composer} /> : null}
       <GoalSurface session={props.session} goal={props.goal} />
       <ComposerAgentsPill workspaceId={props.session.workspaceId} nodes={props.agentNodes} />
-      {!terminal ? (
-        <div className="mx-auto w-full max-w-3xl shrink-0 px-4 pb-1 sm:px-6">
-          <Suspense fallback={null}>
-            <RealtimeVoiceSessionControl
-              client={context.client}
-              workspaceId={props.session.workspaceId}
-              sessionId={props.session.id}
-              sessionStatus={props.session.status}
-              sessionTitle={props.session.title}
-              timeline={props.timeline}
-              onFinalTranscript={composer.send}
-            />
-          </Suspense>
-        </div>
-      ) : null}
-
       <div className="shrink-0 px-4 pb-4 pt-1 sm:px-6">
         <div className="mx-auto w-full max-w-3xl" data-session-text-composer>
           <ConsoleComposer

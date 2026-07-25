@@ -734,8 +734,8 @@ describe("embedding host session authorization routes", () => {
     const value = await fixture();
     const decisions: Array<{ operation: string; sessionId: string; surface: string }> = [];
     const app = appWith({
-      authorizeSession: async ({ operation, sessionId, surface }) => {
-        decisions.push({ operation, sessionId, surface });
+      authorizeSession: async ({ operation, target, surface }) => {
+        decisions.push({ operation, sessionId: target.sessionId, surface });
         return { allowed: true, relatedSessionAccess: "target" };
       },
       resolveListScope: async () => ({ kind: "all" }),

@@ -105,6 +105,12 @@ function demoVoiceCapability(workspaceId: string, sessionId: string): SessionVoi
     status: "disabled",
     reason: "feature_disabled",
     retryAt: null,
+    retention: {
+      inputAudio: "ephemeral",
+      partialTranscripts: "ephemeral",
+      acceptedTranscripts: "ordinary-session",
+      providerState: "ephemeral",
+    },
     checks: {
       feature: "disabled",
       subscription: "disabled",
@@ -118,6 +124,8 @@ function demoVoiceCapability(workspaceId: string, sessionId: string): SessionVoi
       grantTtlSeconds: 60,
       maxSessionSeconds: 900,
       maxInputAudioBytes: 32 * 1024 * 1024,
+      maxConcurrentSessions: 1,
+      workspaceAudioBudgetSeconds: null,
     },
   };
 }

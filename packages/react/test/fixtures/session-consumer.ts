@@ -23,8 +23,6 @@ export const sessionClient = {
   getComposerDraft: unused,
   saveComposerDraft: unused,
   sendMessage: unused,
-  getSessionVoiceCapability: unused,
-  createSessionVoiceGrant: unused,
   steerMessage: unused,
   getQueue: unused,
   moveQueueItem: unused,

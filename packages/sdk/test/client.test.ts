@@ -162,6 +162,12 @@ describe("OpenGeniClient", () => {
       status: "unavailable",
       reason: "codex_realtime_protocol_unverified",
       retryAt: null,
+      retention: {
+        inputAudio: "ephemeral",
+        partialTranscripts: "ephemeral",
+        acceptedTranscripts: "ordinary-session",
+        providerState: "ephemeral",
+      },
       checks: {
         feature: "enabled",
         subscription: "enabled",
@@ -175,6 +181,8 @@ describe("OpenGeniClient", () => {
         grantTtlSeconds: 60,
         maxSessionSeconds: 900,
         maxInputAudioBytes: 33_554_432,
+        maxConcurrentSessions: 1,
+        workspaceAudioBudgetSeconds: null,
       },
     };
     const { client, requests } = makeClient((request) =>

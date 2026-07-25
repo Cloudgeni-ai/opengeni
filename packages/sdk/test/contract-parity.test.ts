@@ -404,10 +404,16 @@ describe("SDK / contracts parity", () => {
       pinned: true,
     };
     const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
-    const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
+    const settings: UpdateWorkspaceSettingsRequest = {
+      memoryEnabled: true,
+      mainSessionId: "33333333-3333-4333-8333-333333333333",
+    };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse({ mainSessionId: null }).success).toBe(
+      true,
+    );
     const transcription: WorkspaceTranscriptionPolicy = {
       enabled: true,
       acceptanceId: "11111111-1111-4111-8111-111111111111",

@@ -10,6 +10,18 @@ const acceptedVoicePolicy = {
     acceptanceId: "33333333-3333-4333-8333-333333333333",
     provider: "codex-subscription",
     credentialMode: "managed",
+    retention: {
+      inputAudio: "ephemeral",
+      partialTranscripts: "ephemeral",
+      acceptedTranscripts: "ordinary-session",
+      providerState: "ephemeral",
+    },
+    limits: {
+      maxSessionSeconds: 1200,
+      maxInputAudioBytes: 64 * 1024 * 1024,
+      maxConcurrentSessions: 5,
+      workspaceAudioBudgetSeconds: 3600,
+    },
   },
 };
 
@@ -82,5 +94,25 @@ describe("session realtime voice API capability", () => {
         sessionId,
       ).checks.workspacePolicy,
     ).toBe("unaccepted");
+  });
+
+  test("advertises ephemeral retention and clamps policy limits to provider ceilings", () => {
+    expect(
+      buildSessionVoiceCapability(
+        testSettings({ codexRealtimeVoiceEnabled: true, codexSubscriptionEnabled: true }),
+        acceptedVoicePolicy,
+        workspaceId,
+        sessionId,
+      ),
+    ).toMatchObject({
+      retention: acceptedVoicePolicy.realtimeVoice.retention,
+      limits: {
+        grantTtlSeconds: 60,
+        maxSessionSeconds: 900,
+        maxInputAudioBytes: 32 * 1024 * 1024,
+        maxConcurrentSessions: 1,
+        workspaceAudioBudgetSeconds: 3600,
+      },
+    });
   });
 });

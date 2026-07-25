@@ -18,11 +18,27 @@ export type RealtimeVoiceTarget = {
   sessionId: string;
 };
 
+export type RealtimeVoiceRetentionPolicy = {
+  inputAudio: "ephemeral";
+  partialTranscripts: "ephemeral";
+  acceptedTranscripts: "ordinary-session";
+  providerState: "ephemeral";
+};
+
+export type RealtimeVoiceLimitsPolicy = {
+  maxSessionSeconds: number;
+  maxInputAudioBytes: number;
+  maxConcurrentSessions: number;
+  workspaceAudioBudgetSeconds: number | null;
+};
+
 export type WorkspaceRealtimeVoicePolicy = {
   enabled: boolean;
   acceptanceId: string | null;
   provider: RealtimeVoiceProvider;
   credentialMode: "managed";
+  retention: RealtimeVoiceRetentionPolicy;
+  limits: RealtimeVoiceLimitsPolicy;
 };
 
 export type SessionVoiceCapability = {
@@ -33,6 +49,7 @@ export type SessionVoiceCapability = {
   status: RealtimeVoiceCapabilityStatus;
   reason: RealtimeVoiceUnavailableReason | null;
   retryAt: string | null;
+  retention: RealtimeVoiceRetentionPolicy;
   checks: {
     feature: "enabled" | "disabled";
     subscription: "enabled" | "disabled";
@@ -46,6 +63,8 @@ export type SessionVoiceCapability = {
     grantTtlSeconds: number;
     maxSessionSeconds: number;
     maxInputAudioBytes: number;
+    maxConcurrentSessions: number;
+    workspaceAudioBudgetSeconds: number | null;
   };
 };
 

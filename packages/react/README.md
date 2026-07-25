@@ -290,15 +290,28 @@ the same semantics.
 
 `useRealtimeVoice` and `RealtimeVoiceOrb` bind a provider-neutral full-duplex
 media session to one existing durable OpenGeni session. Accepted finals use the
-ordinary composer Send callback, barge-in stops playback without cancelling
-accepted work, and only completed durable assistant messages are spoken.
+ordinary composer Send callback. Finals serialize with a deterministic
+per-target/provider-acceptance `clientEventId`; an outcome-unknown final is
+retained for explicit same-key retry instead of automatic ambiguous replay.
+Barge-in stops playback without cancelling accepted work, fresh-grant reconnects
+are timeout/retry bounded, and only completed durable assistant messages are
+spoken. The hook's narrow `RealtimeVoiceClientLike` refinement keeps the package's
+existing structural session client interfaces source-compatible.
 `createBrowserRealtimeVoiceAdapter` requests microphone access only after the
 API returns an available capability and short-lived OpenGeni WSS grant.
+
+The OpenGeni web shell mounts one persistent overlay with explicit **This
+session** and **Workspace main** modes. Both bridge through ordinary
+`useSession`, `useSessionEvents`, and `useComposer(..., { draftPersistence:
+"disabled" })` state. A missing exact target stays unavailable with no fallback.
+Input audio, partial transcripts, and provider state remain ephemeral; accepted
+transcripts are ordinary durable session truth.
 
 Production currently fails closed because no authorized Codex-subscription
 audio/realtime protocol or OpenGeni gateway has been proven. See the canonical
 [session realtime voice guide](../../docs/realtime-voice.md) for authorization,
-security, lifecycle, provider evidence, and activation requirements.
+security, retention, advertised-policy-limit caveats, lifecycle, provider
+evidence, and activation requirements.
 
 ## Sandbox surfacing
 

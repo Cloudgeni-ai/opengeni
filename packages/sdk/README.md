@@ -150,7 +150,17 @@ if (capability.status === "available") {
 The SDK types contain no provider credential fields. Production currently
 returns a typed unavailable capability because the Codex-subscription audio
 protocol and OpenGeni server gateway are unverified/unimplemented; there is no
-public Platform API or Azure fallback. See [session realtime voice](../../docs/realtime-voice.md).
+public Platform API or Azure fallback. Capability retention declares audio,
+partials, and provider state ephemeral while accepted transcripts enter the
+ordinary durable session. Advertised time, byte, concurrency, and workspace
+budget limits are policy hooks only; a future gateway must enforce them
+independently.
+
+The workspace's general settings bag may designate one existing ordinary
+`mainSessionId`. The persistent web overlay uses that exact ID for **Workspace
+main** and the route ID for **This session**; missing or inaccessible targets do
+not fall back or create another conversation. See [session realtime
+voice](../../docs/realtime-voice.md).
 
 ## Goals
 

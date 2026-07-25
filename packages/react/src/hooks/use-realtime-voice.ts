@@ -26,57 +26,136 @@ export type RealtimeVoiceState = {
   status: RealtimeVoiceStatus;
   capability: SessionVoiceCapability | null;
   partial: string;
+  /** A final whose durable Send outcome is unknown and requires an explicit retry. */
+  pendingTranscript: string | null;
   errorCode: "permission_denied" | "not_supported" | "network" | "provider" | "unknown" | null;
 };
 
-type RealtimeVoiceClient = Pick<
+/** Optional SDK refinement required only by the experimental voice hook. */
+export type RealtimeVoiceClientLike = Pick<
   OpenGeniClient,
   "getSessionVoiceCapability" | "createSessionVoiceGrant"
 >;
 
+export type RealtimeVoiceFinalContext = {
+  providerAcceptanceId: string;
+  /** Stable ordinary Send idempotency key for this target + provider acceptance. */
+  clientEventId: string;
+};
+
 export type UseRealtimeVoiceOptions = {
-  client: RealtimeVoiceClient;
+  client: RealtimeVoiceClientLike;
   workspaceId: string;
   sessionId: string;
   adapter: RealtimeVoiceAdapter;
   sessionStatus: SessionStatus;
-  onFinalTranscript: (text: string) => Promise<boolean>;
+  onFinalTranscript: (text: string, context: RealtimeVoiceFinalContext) => Promise<boolean>;
   completedAssistantMessage?: { id: string; text: string } | null | undefined;
+  /** Time allowed for one gateway transport generation. @default 10000 */
+  connectTimeoutMs?: number | undefined;
+  /** Fresh-grant reconnect attempts after a recoverable transport failure. @default 3 */
+  maxReconnectAttempts?: number | undefined;
+  /** Base delay before a reconnect; later attempts use bounded linear backoff. @default 250 */
+  reconnectDelayMs?: number | undefined;
 };
 
 export type RealtimeVoiceController = RealtimeVoiceState & {
+  /** Starts voice, or explicitly retries one outcome-unknown final before reconnecting. */
   start: () => Promise<void>;
   stop: () => Promise<void>;
   interrupt: () => Promise<void>;
   refreshCapability: () => Promise<void>;
 };
 
+type FinalQueueEntry = {
+  providerAcceptanceId: string;
+  clientEventId: string;
+  text: string;
+  state: "queued" | "submitting" | "outcome-unknown";
+};
+
+const MAX_PROVIDER_ACCEPTANCE_ID_CHARS = 128;
+const MAX_PENDING_FINALS = 64;
+const MAX_ACCEPTED_FINALS = 256;
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 3;
+const DEFAULT_RECONNECT_DELAY_MS = 250;
+const MAX_RECONNECT_DELAY_MS = 2_000;
+
 const initialState: RealtimeVoiceState = {
   status: "authorizing",
   capability: null,
   partial: "",
+  pendingTranscript: null,
   errorCode: null,
 };
 
-/** Session-bound controller. Finals use the caller's ordinary composer Send. */
+/** Deterministic and bounded so a replay/remount reaches ordinary Send idempotency. */
+export function realtimeVoiceClientEventId(
+  workspaceId: string,
+  sessionId: string,
+  providerAcceptanceId: string,
+): string {
+  return `realtime-voice:${workspaceId}:${sessionId}:${providerAcceptanceId}`;
+}
+
+/**
+ * Exact-session voice controller. Every reconnect obtains a fresh target-bound
+ * grant; accepted finals serialize through the caller's ordinary composer Send.
+ */
 export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoiceController {
+  const targetKey = `${options.workspaceId}\u0000${options.sessionId}`;
   const [state, setState] = useState(initialState);
   const stateRef = useRef(state);
-  const generation = useRef(0);
-  const pending = useRef<AbortController | null>(null);
+  const targetKeyRef = useRef(targetKey);
+  const transportGeneration = useRef(0);
+  const pendingConnection = useRef<AbortController | null>(null);
   const session = useRef<RealtimeVoiceAdapterSession | null>(null);
   const revocation = useRef<Promise<void>>(Promise.resolve());
+  const desiredActive = useRef(false);
+  const reconnectAttempt = useRef(0);
+  const finalQueue = useRef<FinalQueueEntry[]>([]);
+  const drainingFinals = useRef(false);
   const acceptedFinals = useRef(new Set<string>());
   const spokenMessages = useRef(new Set<string>());
   const client = useRef(options.client);
+  const adapter = useRef(options.adapter);
   const onFinalTranscript = useRef(options.onFinalTranscript);
+  const connectFreshRef = useRef<(reconnecting: boolean) => Promise<void>>(async () => undefined);
+  const scheduleReconnectRef = useRef<
+    (owned: number, code: RealtimeVoiceState["errorCode"]) => Promise<void>
+  >(async () => undefined);
+  const connectTimeoutMs = useRef(DEFAULT_CONNECT_TIMEOUT_MS);
+  const maxReconnectAttempts = useRef(DEFAULT_MAX_RECONNECT_ATTEMPTS);
+  const reconnectDelayMs = useRef(DEFAULT_RECONNECT_DELAY_MS);
+
   client.current = options.client;
+  adapter.current = options.adapter;
   onFinalTranscript.current = options.onFinalTranscript;
+  connectTimeoutMs.current = boundedInteger(
+    options.connectTimeoutMs,
+    DEFAULT_CONNECT_TIMEOUT_MS,
+    1,
+    60_000,
+  );
+  maxReconnectAttempts.current = boundedInteger(
+    options.maxReconnectAttempts,
+    DEFAULT_MAX_RECONNECT_ATTEMPTS,
+    0,
+    10,
+  );
+  reconnectDelayMs.current = boundedInteger(
+    options.reconnectDelayMs,
+    DEFAULT_RECONNECT_DELAY_MS,
+    0,
+    MAX_RECONNECT_DELAY_MS,
+  );
   stateRef.current = state;
+  targetKeyRef.current = targetKey;
 
   const revokeMedia = useCallback(async (reason: string) => {
-    const acquisition = pending.current;
-    pending.current = null;
+    const acquisition = pendingConnection.current;
+    pendingConnection.current = null;
     acquisition?.abort(reason);
 
     const active = session.current;
@@ -92,157 +171,380 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
         activeClose = Promise.resolve();
       }
     }
-
     const complete = Promise.all([revocation.current, activeClose]).then(() => undefined);
     revocation.current = complete;
     await complete;
   }, []);
 
+  const terminalError = useCallback(
+    async (code: RealtimeVoiceState["errorCode"], pendingTranscript: string | null = null) => {
+      desiredActive.current = false;
+      const terminalGeneration = ++transportGeneration.current;
+      const ownedTarget = targetKeyRef.current;
+      await revokeMedia("realtime-voice-terminal-error");
+      if (
+        transportGeneration.current !== terminalGeneration ||
+        targetKeyRef.current !== ownedTarget
+      ) {
+        return;
+      }
+      setState((current) => ({
+        ...current,
+        status: "error",
+        partial: "",
+        pendingTranscript,
+        errorCode: code,
+      }));
+    },
+    [revokeMedia],
+  );
+
+  const rememberAcceptedFinal = useCallback((providerAcceptanceId: string) => {
+    acceptedFinals.current.add(providerAcceptanceId);
+    while (acceptedFinals.current.size > MAX_ACCEPTED_FINALS) {
+      const oldest = acceptedFinals.current.values().next().value as string | undefined;
+      if (!oldest) break;
+      acceptedFinals.current.delete(oldest);
+    }
+  }, []);
+
+  const drainFinalQueue = useCallback(
+    async (retryOutcomeUnknown = false): Promise<void> => {
+      if (drainingFinals.current) return;
+      const ownedTarget = targetKeyRef.current;
+      const first = finalQueue.current[0];
+      if (retryOutcomeUnknown && first?.state === "outcome-unknown") first.state = "queued";
+      drainingFinals.current = true;
+      try {
+        while (targetKeyRef.current === ownedTarget) {
+          const entry = finalQueue.current[0];
+          if (!entry || entry.state === "outcome-unknown") return;
+          entry.state = "submitting";
+          let accepted = false;
+          try {
+            accepted = await onFinalTranscript.current(entry.text, {
+              providerAcceptanceId: entry.providerAcceptanceId,
+              clientEventId: entry.clientEventId,
+            });
+          } catch {
+            accepted = false;
+          }
+          if (targetKeyRef.current !== ownedTarget) return;
+          if (!accepted) {
+            entry.state = "outcome-unknown";
+            await terminalError("unknown", entry.text);
+            return;
+          }
+          finalQueue.current.shift();
+          rememberAcceptedFinal(entry.providerAcceptanceId);
+          setState((current) => ({
+            ...current,
+            status: "executing",
+            partial: "",
+            pendingTranscript: finalQueue.current[0]?.text ?? null,
+            errorCode: null,
+          }));
+        }
+      } finally {
+        drainingFinals.current = false;
+      }
+    },
+    [rememberAcceptedFinal, terminalError],
+  );
+
+  const enqueueFinal = useCallback(
+    (event: Extract<RealtimeVoiceAdapterEvent, { type: "transcript.final" }>) => {
+      const text = event.text.trim();
+      const providerAcceptanceId = event.providerAcceptanceId;
+      if (!text) return;
+      if (!providerAcceptanceId || providerAcceptanceId.length > MAX_PROVIDER_ACCEPTANCE_ID_CHARS) {
+        void terminalError("provider");
+        return;
+      }
+      if (
+        acceptedFinals.current.has(providerAcceptanceId) ||
+        finalQueue.current.some((entry) => entry.providerAcceptanceId === providerAcceptanceId)
+      ) {
+        return;
+      }
+      if (finalQueue.current.length >= MAX_PENDING_FINALS) {
+        void terminalError("provider");
+        return;
+      }
+      finalQueue.current.push({
+        providerAcceptanceId,
+        clientEventId: realtimeVoiceClientEventId(
+          options.workspaceId,
+          options.sessionId,
+          providerAcceptanceId,
+        ),
+        text,
+        state: "queued",
+      });
+      setState((current) => ({
+        ...current,
+        status: "executing",
+        partial: "",
+        pendingTranscript: finalQueue.current[0]?.text ?? null,
+      }));
+      void drainFinalQueue();
+    },
+    [drainFinalQueue, options.sessionId, options.workspaceId, terminalError],
+  );
+
+  const scheduleReconnect = useCallback(
+    async (owned: number, code: RealtimeVoiceState["errorCode"]): Promise<void> => {
+      if (transportGeneration.current !== owned || !desiredActive.current) return;
+      const fenced = ++transportGeneration.current;
+      await revokeMedia("realtime-voice-reconnecting");
+      if (transportGeneration.current !== fenced || !desiredActive.current) return;
+      if (reconnectAttempt.current >= maxReconnectAttempts.current) {
+        desiredActive.current = false;
+        setState((current) => ({ ...current, status: "error", partial: "", errorCode: code }));
+        return;
+      }
+      reconnectAttempt.current += 1;
+      const attempt = reconnectAttempt.current;
+      setState((current) => ({
+        ...current,
+        status: "reconnecting",
+        partial: "",
+        errorCode: code,
+      }));
+      const delay = Math.min(reconnectDelayMs.current * attempt, MAX_RECONNECT_DELAY_MS);
+      if (delay > 0) await wait(delay);
+      if (transportGeneration.current !== fenced || !desiredActive.current) return;
+      await connectFreshRef.current(true);
+    },
+    [revokeMedia],
+  );
+  scheduleReconnectRef.current = scheduleReconnect;
+
+  const onAdapterEvent = useCallback(
+    (owned: number, event: RealtimeVoiceAdapterEvent) => {
+      if (transportGeneration.current !== owned) return;
+      switch (event.type) {
+        case "connected":
+        case "listening":
+          setState((current) => ({ ...current, status: "listening", errorCode: null }));
+          return;
+        case "transcript.partial":
+          setState((current) => ({ ...current, partial: event.text }));
+          return;
+        case "transcript.final":
+          enqueueFinal(event);
+          return;
+        case "speaking.started":
+          setState((current) => ({ ...current, status: "speaking" }));
+          return;
+        case "speaking.stopped":
+          setState((current) => ({ ...current, status: "listening" }));
+          return;
+        case "reconnecting":
+          void scheduleReconnectRef.current(owned, "network");
+          return;
+        case "error":
+          if (event.recoverable) void scheduleReconnectRef.current(owned, event.code);
+          else void terminalError(event.code);
+          return;
+        case "closed":
+          if (event.reason === "error") {
+            void scheduleReconnectRef.current(owned, "network");
+          } else {
+            desiredActive.current = false;
+            const terminalGeneration = ++transportGeneration.current;
+            const ownedTarget = targetKeyRef.current;
+            void revokeMedia("realtime-voice-closed").then(() => {
+              if (
+                transportGeneration.current !== terminalGeneration ||
+                targetKeyRef.current !== ownedTarget
+              ) {
+                return;
+              }
+              setState((current) => ({ ...current, status: "closed", partial: "" }));
+            });
+          }
+      }
+    },
+    [enqueueFinal, revokeMedia, terminalError],
+  );
+
+  const connectFresh = useCallback(
+    async (reconnecting: boolean): Promise<void> => {
+      if (!desiredActive.current) return;
+      const ownedTarget = targetKeyRef.current;
+      const owned = ++transportGeneration.current;
+      await revokeMedia(reconnecting ? "realtime-voice-new-generation" : "realtime-voice-start");
+      if (
+        transportGeneration.current !== owned ||
+        targetKeyRef.current !== ownedTarget ||
+        !desiredActive.current
+      ) {
+        return;
+      }
+      setState((current) => ({
+        ...current,
+        status: reconnecting ? "reconnecting" : "authorizing",
+        partial: "",
+        pendingTranscript: null,
+        errorCode: null,
+      }));
+      let connectionController: AbortController | null = null;
+      try {
+        const response = await client.current.createSessionVoiceGrant(
+          options.workspaceId,
+          options.sessionId,
+        );
+        if (
+          transportGeneration.current !== owned ||
+          targetKeyRef.current !== ownedTarget ||
+          !desiredActive.current
+        ) {
+          return;
+        }
+        if (!response.grant || response.capability.status !== "available") {
+          desiredActive.current = false;
+          setState({
+            status: "unavailable",
+            capability: response.capability,
+            partial: "",
+            pendingTranscript: null,
+            errorCode: null,
+          });
+          return;
+        }
+        setState((current) => ({
+          ...current,
+          status: reconnecting ? "reconnecting" : "connecting",
+          capability: response.capability,
+          partial: "",
+          errorCode: null,
+        }));
+        const controller = new AbortController();
+        connectionController = controller;
+        pendingConnection.current = controller;
+        const connection = adapter.current.connect(
+          response.grant,
+          (event) => onAdapterEvent(owned, event),
+          { signal: controller.signal },
+        );
+        void connection.then(
+          (late) => {
+            if (controller.signal.aborted || transportGeneration.current !== owned) {
+              void late.close().catch(() => undefined);
+            }
+          },
+          () => undefined,
+        );
+        const connected = await raceConnectionTimeout(
+          connection,
+          controller,
+          connectTimeoutMs.current,
+        );
+        if (
+          transportGeneration.current !== owned ||
+          targetKeyRef.current !== ownedTarget ||
+          controller.signal.aborted ||
+          !desiredActive.current
+        ) {
+          await connected.close().catch(() => undefined);
+          return;
+        }
+        session.current = connected;
+        reconnectAttempt.current = 0;
+      } catch (error) {
+        if (
+          transportGeneration.current !== owned ||
+          targetKeyRef.current !== ownedTarget ||
+          controllerWasDeliberatelyAborted(error)
+        ) {
+          return;
+        }
+        const permissionDenied =
+          error instanceof DOMException &&
+          ["NotAllowedError", "SecurityError"].includes(error.name);
+        if (permissionDenied) {
+          await terminalError("permission_denied");
+        } else {
+          void scheduleReconnectRef.current(owned, "network");
+        }
+      } finally {
+        if (pendingConnection.current === connectionController) {
+          pendingConnection.current = null;
+        }
+      }
+    },
+    [onAdapterEvent, options.sessionId, options.workspaceId, revokeMedia, terminalError],
+  );
+  connectFreshRef.current = connectFresh;
+
   const refreshCapability = useCallback(async () => {
-    const owned = ++generation.current;
+    desiredActive.current = false;
+    const owned = ++transportGeneration.current;
+    const ownedTarget = targetKeyRef.current;
     await revokeMedia("realtime-voice-capability-refresh");
-    if (generation.current !== owned) return;
-    setState((current) => ({ ...current, status: "authorizing", errorCode: null }));
+    if (transportGeneration.current !== owned || targetKeyRef.current !== ownedTarget) return;
+    setState((current) => ({
+      ...current,
+      status: "authorizing",
+      partial: "",
+      errorCode: null,
+    }));
     try {
       const capability = await client.current.getSessionVoiceCapability(
         options.workspaceId,
         options.sessionId,
       );
-      if (generation.current !== owned) return;
+      if (transportGeneration.current !== owned || targetKeyRef.current !== ownedTarget) return;
       setState({
         status: capability.status === "available" ? "idle" : "unavailable",
         capability,
         partial: "",
+        pendingTranscript: finalQueue.current[0]?.text ?? null,
         errorCode: null,
       });
     } catch {
-      if (generation.current !== owned) return;
+      if (transportGeneration.current !== owned || targetKeyRef.current !== ownedTarget) return;
       setState((current) => ({ ...current, status: "error", errorCode: "network" }));
     }
   }, [options.sessionId, options.workspaceId, revokeMedia]);
 
   useEffect(() => {
+    desiredActive.current = false;
+    reconnectAttempt.current = 0;
+    finalQueue.current = [];
+    acceptedFinals.current.clear();
+    spokenMessages.current.clear();
     void refreshCapability();
     return () => {
-      generation.current += 1;
-      void revokeMedia("realtime-voice-unmounted");
+      desiredActive.current = false;
+      transportGeneration.current += 1;
+      void revokeMedia("realtime-voice-target-changed-or-unmounted");
     };
-  }, [refreshCapability, revokeMedia]);
-
-  const onAdapterEvent = useCallback((owned: number, event: RealtimeVoiceAdapterEvent) => {
-    if (generation.current !== owned) return;
-    switch (event.type) {
-      case "connected":
-      case "listening":
-        setState((current) => ({ ...current, status: "listening", errorCode: null }));
-        return;
-      case "transcript.partial":
-        setState((current) => ({ ...current, partial: event.text }));
-        return;
-      case "transcript.final": {
-        const text = event.text.trim();
-        if (!text || acceptedFinals.current.has(event.providerAcceptanceId)) return;
-        acceptedFinals.current.add(event.providerAcceptanceId);
-        setState((current) => ({ ...current, status: "executing", partial: "" }));
-        void onFinalTranscript
-          .current(text)
-          .then((accepted) => {
-            if (!accepted) acceptedFinals.current.delete(event.providerAcceptanceId);
-          })
-          .catch(() => {
-            acceptedFinals.current.delete(event.providerAcceptanceId);
-            if (generation.current === owned) {
-              setState((current) => ({ ...current, status: "error", errorCode: "unknown" }));
-            }
-          });
-        return;
-      }
-      case "speaking.started":
-        setState((current) => ({ ...current, status: "speaking" }));
-        return;
-      case "speaking.stopped":
-        setState((current) => ({ ...current, status: "listening" }));
-        return;
-      case "reconnecting":
-        setState((current) => ({ ...current, status: "reconnecting" }));
-        return;
-      case "error":
-        setState((current) => ({
-          ...current,
-          status: event.recoverable ? "reconnecting" : "error",
-          errorCode: event.code,
-        }));
-        return;
-      case "closed":
-        session.current = null;
-        setState((current) => ({ ...current, status: "closed", partial: "" }));
-    }
-  }, []);
+  }, [refreshCapability, revokeMedia, targetKey]);
 
   const start = useCallback(async () => {
     if (
-      session.current ||
+      desiredActive.current ||
       ["authorizing", "connecting", "closing"].includes(stateRef.current.status)
     ) {
       return;
     }
-    const owned = ++generation.current;
-    const controller = new AbortController();
-    pending.current?.abort("realtime-voice-replaced");
-    pending.current = controller;
-    acceptedFinals.current.clear();
-    spokenMessages.current.clear();
-    setState((current) => ({ ...current, status: "authorizing", partial: "", errorCode: null }));
-    try {
-      const response = await client.current.createSessionVoiceGrant(
-        options.workspaceId,
-        options.sessionId,
-      );
-      if (generation.current !== owned) return;
-      if (!response.grant || response.capability.status !== "available") {
-        setState({
-          status: "unavailable",
-          capability: response.capability,
-          partial: "",
-          errorCode: null,
-        });
-        return;
-      }
-      setState({
-        status: "connecting",
-        capability: response.capability,
-        partial: "",
-        errorCode: null,
-      });
-      const connected = await options.adapter.connect(
-        response.grant,
-        (event) => onAdapterEvent(owned, event),
-        { signal: controller.signal },
-      );
-      if (generation.current !== owned || controller.signal.aborted) {
-        await connected.close().catch(() => undefined);
-        return;
-      }
-      session.current = connected;
-    } catch (error) {
-      if (generation.current !== owned || controller.signal.aborted) return;
-      const permissionDenied =
-        error instanceof DOMException && ["NotAllowedError", "SecurityError"].includes(error.name);
-      setState((current) => ({
-        ...current,
-        status: "error",
-        errorCode: permissionDenied ? "permission_denied" : "network",
-      }));
-    } finally {
-      if (pending.current === controller) pending.current = null;
+    if (finalQueue.current[0]?.state === "outcome-unknown") {
+      await drainFinalQueue(true);
+      if (finalQueue.current[0]?.state === "outcome-unknown") return;
     }
-  }, [onAdapterEvent, options.adapter, options.sessionId, options.workspaceId]);
+    desiredActive.current = true;
+    reconnectAttempt.current = 0;
+    await connectFreshRef.current(false);
+  }, [drainFinalQueue]);
 
   const stop = useCallback(async () => {
-    const owned = ++generation.current;
+    desiredActive.current = false;
+    const owned = ++transportGeneration.current;
     setState((current) => ({ ...current, status: "closing", partial: "" }));
     await revokeMedia("realtime-voice-stopped");
-    if (generation.current !== owned) return;
+    if (transportGeneration.current !== owned) return;
     setState((current) => ({ ...current, status: "closed" }));
   }, [revokeMedia]);
 
@@ -283,4 +585,44 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
   }, [options.completedAssistantMessage]);
 
   return { ...state, start, stop, interrupt, refreshCapability };
+}
+
+function boundedInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, Math.trunc(value)));
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function raceConnectionTimeout(
+  connection: Promise<RealtimeVoiceAdapterSession>,
+  controller: AbortController,
+  timeoutMs: number,
+): Promise<RealtimeVoiceAdapterSession> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  try {
+    return await Promise.race([
+      connection,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          const error = new Error("Realtime voice gateway connection timed out");
+          controller.abort(error);
+          reject(error);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
+function controllerWasDeliberatelyAborted(error: unknown): boolean {
+  return typeof error === "string" && error.startsWith("realtime-voice-");
 }

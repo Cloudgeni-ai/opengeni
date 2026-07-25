@@ -1694,6 +1694,7 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  mainSessionId?: string | null | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   realtimeVoice?: WorkspaceRealtimeVoicePolicy | undefined;
   [key: string]: unknown;
@@ -1701,6 +1702,7 @@ export type WorkspaceSettings = {
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  mainSessionId?: string | null | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
   realtimeVoice?: WorkspaceRealtimeVoicePolicy | undefined;
   [key: string]: unknown;

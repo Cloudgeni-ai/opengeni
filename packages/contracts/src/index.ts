@@ -937,6 +937,26 @@ export const RealtimeVoiceTarget = z
   .strict();
 export type RealtimeVoiceTarget = z.infer<typeof RealtimeVoiceTarget>;
 
+export const RealtimeVoiceRetentionPolicy = z
+  .object({
+    inputAudio: z.literal("ephemeral"),
+    partialTranscripts: z.literal("ephemeral"),
+    acceptedTranscripts: z.literal("ordinary-session"),
+    providerState: z.literal("ephemeral"),
+  })
+  .strict();
+export type RealtimeVoiceRetentionPolicy = z.infer<typeof RealtimeVoiceRetentionPolicy>;
+
+export const RealtimeVoiceLimitsPolicy = z
+  .object({
+    maxSessionSeconds: z.number().int().positive().max(3600),
+    maxInputAudioBytes: z.number().int().positive().max(1_000_000_000),
+    maxConcurrentSessions: z.number().int().positive().max(100),
+    workspaceAudioBudgetSeconds: z.number().int().positive().max(31_536_000).nullable(),
+  })
+  .strict();
+export type RealtimeVoiceLimitsPolicy = z.infer<typeof RealtimeVoiceLimitsPolicy>;
+
 export const SessionVoiceCapability = z
   .object({
     target: RealtimeVoiceTarget,
@@ -946,6 +966,7 @@ export const SessionVoiceCapability = z
     status: RealtimeVoiceCapabilityStatus,
     reason: RealtimeVoiceUnavailableReason.nullable(),
     retryAt: z.string().datetime({ offset: true }).nullable(),
+    retention: RealtimeVoiceRetentionPolicy,
     checks: z
       .object({
         feature: z.enum(["enabled", "disabled"]),
@@ -962,6 +983,8 @@ export const SessionVoiceCapability = z
         grantTtlSeconds: z.number().int().positive().max(300),
         maxSessionSeconds: z.number().int().positive().max(3600),
         maxInputAudioBytes: z.number().int().positive().max(1_000_000_000),
+        maxConcurrentSessions: z.number().int().positive().max(100),
+        workspaceAudioBudgetSeconds: z.number().int().positive().max(31_536_000).nullable(),
       })
       .strict(),
   })
@@ -1042,6 +1065,8 @@ export const WorkspaceRealtimeVoicePolicy = z
     acceptanceId: z.string().uuid().nullable(),
     provider: RealtimeVoiceProvider,
     credentialMode: z.literal("managed"),
+    retention: RealtimeVoiceRetentionPolicy,
+    limits: RealtimeVoiceLimitsPolicy,
   })
   .strict()
   .superRefine((policy, context) => {
@@ -1057,10 +1082,12 @@ export type WorkspaceRealtimeVoicePolicy = z.infer<typeof WorkspaceRealtimeVoice
 
 // Validates the KNOWN keys of workspaces.settings; passthrough keeps unknown
 // (future) keys rather than stripping them. memoryEnabled, transcription, and
-// realtime voice are all default-off capabilities.
+// realtime voice are all default-off capabilities. mainSessionId is a general
+// workspace designation; it grants no authority and creates no new session.
 export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    mainSessionId: z.string().uuid().nullable().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
     realtimeVoice: WorkspaceRealtimeVoicePolicy.optional(),
   })
@@ -1073,12 +1100,19 @@ export function resolveWorkspaceMemoryEnabled(settings: unknown): boolean {
   return parsed.success ? parsed.data.memoryEnabled === true : false;
 }
 
+/** Resolve the designated ordinary workspace-main session (default: none). */
+export function resolveWorkspaceMainSessionId(settings: unknown): string | null {
+  const parsed = WorkspaceSettingsSchema.safeParse(settings ?? {});
+  return parsed.success ? (parsed.data.mainSessionId ?? null) : null;
+}
+
 // PATCH body for workspace settings: a partial top-level patch that merges into
 // the stored bag. Nested capability policy updates are therefore full
 // replacements; passthrough carries forward-compatible unknown keys.
 export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
+    mainSessionId: z.string().uuid().nullable().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
     realtimeVoice: WorkspaceRealtimeVoicePolicy.optional(),
   })

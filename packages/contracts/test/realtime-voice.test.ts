@@ -5,6 +5,7 @@ import {
   SessionVoiceGrant,
   UpdateWorkspaceSettingsRequest,
   WorkspaceRealtimeVoicePolicy,
+  resolveWorkspaceMainSessionId,
 } from "../src";
 
 const target = {
@@ -26,6 +27,22 @@ const limits = {
   grantTtlSeconds: 60,
   maxSessionSeconds: 900,
   maxInputAudioBytes: 32 * 1024 * 1024,
+  maxConcurrentSessions: 1,
+  workspaceAudioBudgetSeconds: null,
+};
+
+const retention = {
+  inputAudio: "ephemeral" as const,
+  partialTranscripts: "ephemeral" as const,
+  acceptedTranscripts: "ordinary-session" as const,
+  providerState: "ephemeral" as const,
+};
+
+const policyLimits = {
+  maxSessionSeconds: 900,
+  maxInputAudioBytes: 32 * 1024 * 1024,
+  maxConcurrentSessions: 1,
+  workspaceAudioBudgetSeconds: null,
 };
 
 describe("realtime voice contracts", () => {
@@ -36,6 +53,8 @@ describe("realtime voice contracts", () => {
         acceptanceId: null,
         provider: "codex-subscription",
         credentialMode: "managed",
+        retention,
+        limits: policyLimits,
       }).success,
     ).toBe(false);
     const policy = {
@@ -43,6 +62,8 @@ describe("realtime voice contracts", () => {
       acceptanceId: "33333333-3333-4333-8333-333333333333",
       provider: "codex-subscription" as const,
       credentialMode: "managed" as const,
+      retention,
+      limits: policyLimits,
     };
     expect(WorkspaceRealtimeVoicePolicy.parse(policy)).toEqual(policy);
     expect(UpdateWorkspaceSettingsRequest.safeParse({ realtimeVoice: policy }).success).toBe(true);
@@ -57,6 +78,7 @@ describe("realtime voice contracts", () => {
       status: "unavailable",
       reason: "gateway_unavailable",
       retryAt: null,
+      retention,
       checks: { ...checks, gateway: "unavailable" },
       limits,
     });
@@ -99,6 +121,7 @@ describe("realtime voice contracts", () => {
       status: "available",
       reason: null,
       retryAt: null,
+      retention,
       checks,
       limits,
     });
@@ -112,5 +135,19 @@ describe("realtime voice contracts", () => {
         grant: { ...grant, target: { ...target, sessionId: crypto.randomUUID() } },
       }),
     ).toThrow("voice grant target must match its capability target");
+  });
+
+  test("parses, resolves, and clears a general workspace main-session designation", () => {
+    const mainSessionId = "55555555-5555-4555-8555-555555555555";
+    expect(UpdateWorkspaceSettingsRequest.parse({ mainSessionId })).toEqual({ mainSessionId });
+    expect(resolveWorkspaceMainSessionId({ mainSessionId })).toBe(mainSessionId);
+    expect(UpdateWorkspaceSettingsRequest.parse({ mainSessionId: null })).toEqual({
+      mainSessionId: null,
+    });
+    expect(resolveWorkspaceMainSessionId({ mainSessionId: null })).toBeNull();
+    expect(resolveWorkspaceMainSessionId({})).toBeNull();
+    expect(UpdateWorkspaceSettingsRequest.safeParse({ mainSessionId: "not-a-uuid" }).success).toBe(
+      false,
+    );
   });
 });

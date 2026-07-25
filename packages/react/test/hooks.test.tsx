@@ -1516,6 +1516,37 @@ describe("useComposer queue-vs-steer", () => {
     expect(typeof input.clientEventId).toBe("string");
     await hook.unmount();
   });
+
+  test("preserves an explicit clientEventId across a failed ordinary Send retry", async () => {
+    const clientEventIds: string[] = [];
+    let attempts = 0;
+    const client = fakeClient({
+      sendMessage: async (_workspaceId, _sessionId, input) => {
+        attempts += 1;
+        clientEventIds.push(typeof input === "string" ? "" : (input.clientEventId ?? ""));
+        if (attempts === 1) throw new Error("response lost");
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          draftPersistence: "disabled",
+        }),
+      undefined,
+    );
+    const clientEventId = "realtime-voice:workspace:session:acceptance";
+
+    await flushing(async () => {
+      expect(await hook.result.current.send("accepted voice input", clientEventId)).toBe(false);
+      expect(await hook.result.current.send("accepted voice input", clientEventId)).toBe(true);
+    });
+
+    expect(clientEventIds).toEqual([clientEventId, clientEventId]);
+    await hook.unmount();
+  });
 });
 
 describe("useComposer durable draft and control binding", () => {

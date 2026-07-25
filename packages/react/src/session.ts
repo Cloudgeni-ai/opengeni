@@ -29,9 +29,11 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
-export { useRealtimeVoice } from "./hooks/use-realtime-voice";
+export { realtimeVoiceClientEventId, useRealtimeVoice } from "./hooks/use-realtime-voice";
 export type {
+  RealtimeVoiceClientLike,
   RealtimeVoiceController,
+  RealtimeVoiceFinalContext,
   RealtimeVoiceState,
   RealtimeVoiceStatus,
   UseRealtimeVoiceOptions,

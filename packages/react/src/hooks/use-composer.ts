@@ -45,7 +45,7 @@ export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
   /** Append the draft behind prompts already visible in the queue. */
-  send: (text?: string) => Promise<boolean>;
+  send: (text?: string, clientEventId?: string) => Promise<boolean>;
   /** Supersede current direction with the draft. */
   steer: (text?: string) => Promise<boolean>;
   sending: boolean;
@@ -370,7 +370,11 @@ export function useComposer(
   ]);
 
   const dispatch = useCallback(
-    async (delivery: "send" | "steer", explicit?: string): Promise<boolean> => {
+    async (
+      delivery: "send" | "steer",
+      explicit?: string,
+      explicitClientEventId?: string,
+    ): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
       const draftAtSend = value;
@@ -390,7 +394,9 @@ export function useComposer(
       }
       // Reuse the clientEventId across retries of the same draft so a
       // timeout + resend cannot double-deliver the message.
-      pendingClientEventId.current ??= generateClientEventId();
+      const clientEventId =
+        explicitClientEventId ?? pendingClientEventId.current ?? generateClientEventId();
+      if (!explicitClientEventId) pendingClientEventId.current = clientEventId;
       setSending(true);
       setError(null);
       try {
@@ -409,7 +415,7 @@ export function useComposer(
         ) {
           return false;
         }
-        const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
+        const input = composeSendInput(sendText, clientEventId, extras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
             : {}),
@@ -427,7 +433,7 @@ export function useComposer(
         ) {
           return false;
         }
-        pendingClientEventId.current = null;
+        if (!explicitClientEventId) pendingClientEventId.current = null;
         const previousDraft = draftRef.current;
         if (previousDraft) {
           const cleared = {
@@ -483,7 +489,10 @@ export function useComposer(
     ],
   );
 
-  const send = useCallback(async (text?: string) => await dispatch("send", text), [dispatch]);
+  const send = useCallback(
+    async (text?: string, clientEventId?: string) => await dispatch("send", text, clientEventId),
+    [dispatch],
+  );
   const steer = useCallback(async (text?: string) => await dispatch("steer", text), [dispatch]);
 
   // A send is possible with non-empty text OR with ≥1 attached resource (a

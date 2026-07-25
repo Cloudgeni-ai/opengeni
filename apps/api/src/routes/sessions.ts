@@ -52,7 +52,11 @@ import {
   type TerminalPtyOutputDeltaPayload,
   type TerminalPtyStartedPayload,
 } from "@opengeni/contracts";
-import { CODEX_REALTIME_VOICE_LIMITS, codexRealtimeAvailability } from "@opengeni/codex";
+import {
+  CODEX_REALTIME_VOICE_LIMITS,
+  CODEX_REALTIME_VOICE_RETENTION,
+  codexRealtimeAvailability,
+} from "@opengeni/codex";
 import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
@@ -2188,7 +2192,26 @@ export function buildSessionVoiceCapability(
       credential: "not_evaluated",
       capacity: "not_evaluated",
     },
-    limits: CODEX_REALTIME_VOICE_LIMITS,
+    retention: realtimeVoice?.retention ?? CODEX_REALTIME_VOICE_RETENTION,
+    limits: {
+      grantTtlSeconds: CODEX_REALTIME_VOICE_LIMITS.grantTtlSeconds,
+      maxSessionSeconds: Math.min(
+        realtimeVoice?.limits.maxSessionSeconds ?? CODEX_REALTIME_VOICE_LIMITS.maxSessionSeconds,
+        CODEX_REALTIME_VOICE_LIMITS.maxSessionSeconds,
+      ),
+      maxInputAudioBytes: Math.min(
+        realtimeVoice?.limits.maxInputAudioBytes ?? CODEX_REALTIME_VOICE_LIMITS.maxInputAudioBytes,
+        CODEX_REALTIME_VOICE_LIMITS.maxInputAudioBytes,
+      ),
+      maxConcurrentSessions: Math.min(
+        realtimeVoice?.limits.maxConcurrentSessions ??
+          CODEX_REALTIME_VOICE_LIMITS.maxConcurrentSessions,
+        CODEX_REALTIME_VOICE_LIMITS.maxConcurrentSessions,
+      ),
+      workspaceAudioBudgetSeconds:
+        realtimeVoice?.limits.workspaceAudioBudgetSeconds ??
+        CODEX_REALTIME_VOICE_LIMITS.workspaceAudioBudgetSeconds,
+    },
   });
 }
 

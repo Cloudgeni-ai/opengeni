@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { RealtimeVoiceOrb } from "../src/components/realtime-voice-orb";
 import type { RealtimeVoiceStatus } from "../src/hooks/use-realtime-voice";
@@ -9,6 +9,9 @@ const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
 const layout = params.get("layout") === "mobile" ? "mobile" : "desktop";
 const sessionId = "9e6e7864-7f1b-4a8d-9a30-70a50676562c";
+const workspaceMainSessionId = "69179669-8a87-4ac3-8179-ebad4fdf417e";
+
+type TargetMode = "session" | "workspace-main";
 
 type VoiceFixture = {
   label: string;
@@ -88,11 +91,27 @@ const fixtures: VoiceFixture[] = [
 
 function Harness() {
   const [interactiveStatus, setInteractiveStatus] = useState<RealtimeVoiceStatus>("idle");
+  const [targetMode, setTargetMode] = useState<TargetMode>("session");
   const [fallbackFocused, setFallbackFocused] = useState(false);
+  const fallbackRef = useRef<HTMLTextAreaElement>(null);
+  const target =
+    targetMode === "session"
+      ? {
+          label: "This session — Production rollout audit",
+          sessionId,
+        }
+      : {
+          label: "Workspace main — OpenGeni Main Orchestrator",
+          sessionId: workspaceMainSessionId,
+        };
 
   useEffect(() => {
     (globalThis as Record<string, unknown>).__ogReady = true;
   }, []);
+
+  useEffect(() => {
+    if (fallbackFocused) fallbackRef.current?.focus();
+  }, [fallbackFocused]);
 
   return (
     <main
@@ -113,7 +132,7 @@ function Harness() {
           <div className="absolute -right-20 -top-24 size-64 rounded-full bg-og-accent/10 blur-3xl" />
           <div className="relative grid gap-3">
             <div className="flex flex-wrap items-center gap-2">
-              <span className="rounded-full border border-og-accent/30 bg-og-accent/10 px-2.5 py-1 text-og-xs font-semibold text-og-accent">
+              <span className="rounded-full border border-og-accent/30 bg-og-accent/10 px-2.5 py-1 text-og-xs font-semibold text-og-accent-strong">
                 Experimental
               </span>
               <span className="rounded-full border border-og-border bg-og-surface-2 px-2.5 py-1 text-og-xs text-og-fg-muted">
@@ -193,19 +212,10 @@ function Harness() {
               network connection.
             </p>
           </div>
-          <RealtimeVoiceOrb
-            status={interactiveStatus}
-            targetLabel="This session — Production rollout audit"
-            targetSessionId={sessionId}
-            onStart={() => setInteractiveStatus("listening")}
-            onStop={() => setInteractiveStatus("closed")}
-            onInterrupt={() => setInteractiveStatus("listening")}
-            onTextFallback={() => setFallbackFocused(true)}
-          />
           <label className="grid gap-1.5 text-og-xs font-medium text-og-fg-muted">
             Ordinary text composer
             <textarea
-              autoFocus={fallbackFocused}
+              ref={fallbackRef}
               rows={2}
               placeholder="Message this session…"
               className="min-h-16 w-full resize-none rounded-og-lg border border-og-border bg-og-surface-2 px-3 py-2 text-sm text-og-fg outline-none placeholder:text-og-fg-subtle focus:border-og-accent/60 focus:ring-2 focus:ring-og-accent/15"
@@ -234,7 +244,57 @@ function Harness() {
           </div>
         </section>
       </div>
+
+      <aside
+        data-persistent-voice-control
+        aria-label="Realtime voice"
+        className="fixed right-3 bottom-[max(0.75rem,env(safe-area-inset-bottom))] z-40 flex max-w-[calc(100vw-1.5rem)] flex-col items-end gap-1.5 sm:right-4 sm:bottom-[max(1rem,env(safe-area-inset-bottom))]"
+      >
+        <div
+          role="group"
+          aria-label="Voice target"
+          className="inline-flex rounded-og-lg border border-og-border bg-og-surface-1/95 p-0.5 shadow-og-sm backdrop-blur"
+        >
+          <TargetModeButton
+            active={targetMode === "session"}
+            label="This session"
+            onClick={() => setTargetMode("session")}
+          />
+          <TargetModeButton
+            active={targetMode === "workspace-main"}
+            label="Workspace main"
+            onClick={() => setTargetMode("workspace-main")}
+          />
+        </div>
+        <RealtimeVoiceOrb
+          status={interactiveStatus}
+          targetLabel={target.label}
+          targetSessionId={target.sessionId}
+          onStart={() => setInteractiveStatus("listening")}
+          onStop={() => setInteractiveStatus("closed")}
+          onInterrupt={() => setInteractiveStatus("listening")}
+          onTextFallback={() => setFallbackFocused(true)}
+          className="w-[min(25rem,calc(100vw-1.5rem))]"
+        />
+      </aside>
     </main>
+  );
+}
+
+function TargetModeButton(props: { active: boolean; label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      aria-pressed={props.active}
+      onClick={props.onClick}
+      className={`rounded-og-md px-2.5 py-1 text-og-xs font-medium transition-colors pointer-coarse:min-h-11 ${
+        props.active
+          ? "bg-og-surface-3 text-og-fg shadow-og-xs"
+          : "text-og-fg-muted hover:bg-og-surface-2 hover:text-og-fg"
+      }`}
+    >
+      {props.label}
+    </button>
   );
 }
 

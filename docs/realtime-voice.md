@@ -1,7 +1,7 @@
 # Session realtime voice
 
 Realtime voice is an experimental, provider-neutral full-duplex media capability bound to one
-existing OpenGeni session. It adds a compact persistent voice orb to the session page without
+existing OpenGeni session. It adds one compact persistent workspace voice overlay without
 creating a voice-only thread, a second agent runtime, or a new authorization model.
 
 ## Current production status
@@ -18,14 +18,28 @@ are not evidence of a live microphone, provider session, entitlement, latency, o
 
 ## Product and durability contract
 
-- The orb targets the exact normal session shown on the page. That session keeps its existing
-  workspace permissions, tools, memory, child-session graph, approvals, queue/control semantics,
-  compute target, and durable history.
-- Provider audio, partial transcripts, playback state, and reconnect state are ephemeral media.
-  They do not create an alternate conversation store.
-- Each non-empty accepted final transcript is deduplicated by the provider acceptance ID and sent
-  through the ordinary composer **Send** operation. Voice never silently uses Steer. A blank final
-  does not consume its ID, so a corrected non-empty final can still be accepted once.
+- The persistent overlay has two explicit modes. **This session** binds only to the session ID in
+  the current route. **Workspace main** binds only to the ordinary session ID designated by the
+  workspace's general `settings.mainSessionId`. A missing, deleted, or inaccessible target leaves
+  that mode unavailable; neither mode silently falls back to the other or creates a session.
+- The target session keeps its existing workspace permissions, tools, memory, child-session graph,
+  approvals, queue/control semantics, compute target, and durable history.
+- Input audio, partial transcripts, provider state, playback, and reconnect state are ephemeral.
+  An accepted transcript becomes an ordinary durable session message; there is no alternate
+  conversation store.
+- Non-empty provider finals serialize through a bounded queue. Each provider acceptance ID binds
+  to a deterministic ordinary Send `clientEventId` for the exact workspace and session. Voice
+  never silently uses Steer. The final is acknowledged locally only after Send succeeds.
+- If Send throws or returns false, that final remains `outcome-unknown`, media is revoked, and no
+  automatic ambiguous resubmission occurs. A later explicit Start retries the same text with the
+  exact same `clientEventId` before opening a new transport. Ordinary Send idempotency therefore
+  collapses a response-loss replay instead of duplicating durable input.
+- The pending-final queue and accepted-ID cache are deliberately memory-only transport state; they
+  are never copied into browser persistence. After a true page remount, the gateway must redeliver
+  every final whose durable acceptance was not acknowledged. The replay derives the same
+  `clientEventId`, so ordinary Send idempotency recovers an ambiguous response without creating a
+  second durable message. This redelivery/acknowledgement protocol is an activation requirement,
+  not behavior proved by the deterministic fixture.
 - The agent executes the accepted text as an ordinary durable turn. Existing session status drives
   the orb's executing and approval states.
 - Only completed, non-streaming assistant text already present in the durable session timeline is
@@ -46,7 +60,7 @@ separate workspace policies and acceptance IDs; enabling one never authorizes th
 ## Trust boundary and data flow
 
 ```text
-session page for exact workspaceId + sessionId
+workspace overlay resolves explicit routed-session or configured-main target
   -> GET the session-bound voice capability
   -> fail closed unless the feature, subscription, workspace policy,
      verified protocol, OpenGeni gateway, credential, and capacity checks pass
@@ -65,7 +79,8 @@ construct a public OpenAI, Azure, or other provider URL from this contract.
 
 Construction of the browser adapter is side-effect free. `getUserMedia` runs only inside
 `connect`, and React invokes `connect` only after receiving an available capability and non-null
-grant. Target changes, stop, and unmount locally fence late callbacks and close the prior transport.
+grant. Mode/target changes, stop, unmount, terminal gateway messages, and physical socket close
+locally fence callbacks and revoke recorder, microphone, playback, and socket ownership.
 
 ## Authorization
 
@@ -76,9 +91,10 @@ Realtime voice inherits the target session's existing boundaries:
 | Read capability | `sessions:read` | `session.read` |
 | Create short-lived grant | `sessions:control` | `session.append` |
 
-Both routes verify that the exact target session exists. A future global orb must target the
-already-existing main orchestrator session through these same rules; it must not create a global
-workspace voice authority or a separate voice session.
+Both routes verify that the exact target session exists. Workspace admins designate or clear the
+Workspace main target through the general workspace settings API, which tenant-scopes and validates
+the referenced ordinary session. This selection adds no global voice authority: capability/grant
+checks still authorize the target session under the same rules.
 
 ## Codex-subscription evidence and fail-closed gate
 
@@ -117,13 +133,23 @@ The capability response reports:
 - individual feature, subscription, workspace-policy, protocol, gateway, credential, and capacity
   checks;
 - optional reset time for a capacity-limited provider; and
-- advertised grant TTL, maximum session duration, and maximum input-audio bytes.
+- explicit retention (`inputAudio`, `partialTranscripts`, and `providerState` are ephemeral;
+  `acceptedTranscripts` are `ordinary-session`); and
+- advertised grant TTL, maximum session duration, maximum input-audio bytes, concurrent sessions,
+  and optional workspace audio budget.
+
+These limits are conservative policy/provider **advertisement hooks**, not claims of live metering
+or enforcement. No production gateway exists. A future gateway must independently enforce
+admission, cumulative bytes, elapsed session time, concurrency, workspace budget, resets, and
+cleanup rather than trusting a browser or capability document.
 
 The React controller and orb expose `authorizing`, `connecting`, `listening`, `speaking`,
 `executing`, `awaiting-approval`, `reconnecting`, `closing`, `closed`, `error`, and `unavailable`
-states. Provider errors reach the UI only as controlled local codes. The exact target label and
-session ID remain available to assistive technology, and the text fallback is always one action
-away.
+states. Recoverable transport loss requests a fresh short-lived grant for each bounded reconnect;
+connection attempts time out, and the retry cap ends in a controlled error. Provider errors reach
+the UI only as controlled local codes. The exact target label and session ID remain available to
+assistive technology. Text fallback navigates to that exact ordinary session and focuses its normal
+composer.
 
 ## Canonical implementation
 
@@ -137,6 +163,8 @@ away.
 | React lifecycle and durable-turn reconciliation | `packages/react/src/hooks/use-realtime-voice.ts` |
 | Browser OpenGeni-gateway transport | `packages/react/src/realtime-voice/browser-adapter.ts` |
 | Compact persistent session UI | `packages/react/src/components/realtime-voice-orb.tsx` |
+| Workspace target modes and ordinary-session bridge | `apps/web/src/components/session/realtime-voice-workspace-control.tsx` |
+| Workspace-main designation UI | `apps/web/src/routes/workspace-settings.tsx` |
 | Deterministic visual state fixture | `packages/react/demo/realtime-voice-harness.tsx` |
 
 ## What must be proved before enabling production voice
@@ -146,9 +174,12 @@ away.
    paid Platform API.
 2. A server-side OpenGeni media gateway must redeem short-lived target-bound grants, acquire and
    rotate Codex subscription credentials through the existing broker, keep tokens out of browser
-   traffic and logs, enforce byte/time/capacity limits, and clean up on expiry or disconnect.
+   traffic and logs, enforce byte/time/capacity limits, redeliver unacknowledged accepted finals
+   across reconnects and page remounts, and clean up on expiry or disconnect. It may acknowledge a
+   final only after the ordinary durable Send reports success.
 3. Gateway integration tests must prove target binding, authorization, credential non-disclosure,
-   replay/expiry rejection, limit/reset handling, and no Azure or Platform fallback.
+   replay/expiry rejection, final redelivery and acknowledgement ordering, limit/reset handling,
+   and no Azure or Platform fallback.
 4. A safe live canary must separately prove microphone capture, full-duplex latency, interruption,
    reconnect, approval pauses, provider limits, and completed-message speech. Fixture screenshots
    remain UI evidence only.

@@ -4,6 +4,8 @@
 // danger zone with workspace deletion. The org/billing console lives at
 // Organization settings.
 import { Link, useNavigate } from "@tanstack/react-router";
+import { resolveWorkspaceMainSessionId } from "@opengeni/contracts";
+import { useWorkspaceSessions } from "@opengeni/react";
 import {
   BoxIcon,
   BrainCircuitIcon,
@@ -12,6 +14,7 @@ import {
   CopyIcon,
   KeyRoundIcon,
   Loader2Icon,
+  MicIcon,
   PencilIcon,
   PlusIcon,
   SettingsIcon,
@@ -41,6 +44,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import { orgLabel } from "@/lib/org";
@@ -295,6 +299,9 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
           )}
         </section>
 
+        {/* Exact ordinary session used by the persistent Workspace main voice mode. */}
+        <WorkspaceMainSessionSection workspaceId={workspaceId} canManage={canRename} />
+
         {/* People with access (workspace members) */}
         <MembersSection workspaceId={workspaceId} canManage={canManageMembers} />
 
@@ -474,6 +481,121 @@ export function WorkspaceSettingsRoute({ workspaceId }: { workspaceId: string })
         />
       </section>
     </div>
+  );
+}
+
+function WorkspaceMainSessionSection({
+  workspaceId,
+  canManage,
+}: {
+  workspaceId: string;
+  canManage: boolean;
+}) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === workspaceId) ?? null;
+  const configuredSessionId = resolveWorkspaceMainSessionId(workspace?.settings);
+  const sessionPage = useWorkspaceSessions({ limit: 100 });
+  const sessions = sessionPage.sessions.filter(
+    (session, index, all) => all.findIndex((candidate) => candidate.id === session.id) === index,
+  );
+  const configuredSessionVisible =
+    configuredSessionId !== null && sessions.some((session) => session.id === configuredSessionId);
+  const [selection, setSelection] = useState(configuredSessionId ?? "");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setSelection(configuredSessionId ?? "");
+  }, [configuredSessionId, workspaceId]);
+
+  async function save() {
+    setSaving(true);
+    try {
+      const updated = await context.updateWorkspaceSettings(workspaceId, {
+        mainSessionId: selection || null,
+      });
+      if (updated) {
+        toast.success(
+          selection ? "Workspace main session updated" : "Workspace main session cleared",
+        );
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="grid gap-3 rounded-lg border border-border bg-surface p-4">
+      <div>
+        <h2 className="flex items-center gap-1.5 text-sm font-medium">
+          <MicIcon className="size-3.5 text-brand" />
+          Workspace main session
+        </h2>
+        <p className="mt-1 text-xs text-fg-muted">
+          Workspace main voice continues this exact ordinary session. It never creates a separate
+          conversation or falls back to another session.
+        </p>
+      </div>
+
+      {sessionPage.error ? (
+        <LoadErrorState
+          title="Couldn't load visible sessions"
+          error={sessionPage.error}
+          onRetry={() => void sessionPage.refresh()}
+        />
+      ) : (
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <Select
+            aria-label="Workspace main session"
+            value={selection}
+            disabled={!canManage || sessionPage.loading || saving}
+            onChange={(event) => setSelection(event.target.value)}
+          >
+            <option value="">No workspace main session</option>
+            {configuredSessionId && !configuredSessionVisible ? (
+              <option value={configuredSessionId} disabled>
+                Configured session unavailable — {configuredSessionId}
+              </option>
+            ) : null}
+            {sessions.map((session) => (
+              <option key={session.id} value={session.id}>
+                {session.title?.trim() || session.initialMessage.trim() || session.id}
+              </option>
+            ))}
+          </Select>
+          <Button
+            type="button"
+            disabled={
+              !canManage ||
+              sessionPage.loading ||
+              saving ||
+              selection === (configuredSessionId ?? "")
+            }
+            onClick={() => void save()}
+          >
+            {saving ? (
+              <Loader2Icon className="size-3.5 animate-spin" />
+            ) : (
+              <CheckIcon className="size-3.5" />
+            )}
+            Save
+          </Button>
+        </div>
+      )}
+
+      {configuredSessionId && !configuredSessionVisible && !sessionPage.loading ? (
+        <Notice tone="waiting" title="Configured main session is not visible">
+          It may have been deleted or your access may have changed. Global voice stays unavailable
+          until an admin chooses another visible session or clears the setting.
+        </Notice>
+      ) : null}
+      {!canManage ? (
+        <p className="text-xs text-fg-subtle">Only workspace admins can change this.</p>
+      ) : sessions.length === 0 && !sessionPage.loading && !sessionPage.error ? (
+        <p className="text-xs text-fg-subtle">
+          Start an ordinary session before designating a workspace main session.
+        </p>
+      ) : null}
+    </section>
   );
 }
 
