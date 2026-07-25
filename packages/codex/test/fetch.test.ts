@@ -402,6 +402,51 @@ describe("codexSubscriptionFetch", () => {
     expect(events[3]?.willRetry).toBe(false);
   });
 
+  test("a pre-headers timeout stays typed when audit persistence rejects", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 15,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 100,
+          noByteRetries: 0,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          if (event.phase === "timed_out") {
+            throw new Error("injected audit write failure");
+          }
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async (_input, init) => {
+          calls += 1;
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason ?? new Error("aborted")),
+              { once: true },
+            );
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true }),
+        }),
+    );
+
+    expect(calls).toBe(1);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toMatchObject({
+      error: {
+        type: CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+        timeout_class: "headers",
+        response_observed: false,
+      },
+    });
+  });
+
   test("a native connect timeout is retried only before headers", async () => {
     const events: CodexModelRequestEvent[] = [];
     let calls = 0;

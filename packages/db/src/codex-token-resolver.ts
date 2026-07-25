@@ -26,6 +26,10 @@ import {
   CodexReloginRequired,
   type CodexTokenSnapshot,
   type CodexUsagePayload,
+  type CodexFetch,
+  type CodexRateLimitResetCreditsDetails,
+  type ResetCreditFetchFailureReason,
+  fetchCodexRateLimitResetCredits,
   fetchCodexUsage,
   normalizeCodexUsage,
   refreshCodexToken,
@@ -49,6 +53,92 @@ import {
 // connected credential. Concurrent calls for the SAME credential still coalesce,
 // so the one-time refresh token is never double-spent.
 const inflight = new Map<string, Promise<CodexTokenSnapshot>>();
+const CODEX_TOKEN_REFRESH_TIMEOUT_MS = 6_000;
+
+export type CodexTokenDeadlineClock = {
+  setTimeout: (callback: () => void, delayMs: number) => ReturnType<typeof globalThis.setTimeout>;
+  clearTimeout: (handle: ReturnType<typeof globalThis.setTimeout>) => void;
+};
+
+export type CodexTokenDeadlineOptions = {
+  timeoutMs?: number | undefined;
+  signal?: AbortSignal | undefined;
+  clock?: CodexTokenDeadlineClock | undefined;
+};
+
+const systemCodexTokenDeadlineClock: CodexTokenDeadlineClock = {
+  setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimeout: (handle) => globalThis.clearTimeout(handle),
+};
+
+/**
+ * Bound a refresh promise without abandoning its rejection handler when the
+ * deadline or cancellation wins. The provider promise is observed exactly
+ * once, while the observer itself always fulfills, so a late provider failure
+ * cannot become an unhandled rejection or replace the authoritative outcome.
+ */
+export async function withCodexTokenDeadline<T>(
+  operation: Promise<T>,
+  options: CodexTokenDeadlineOptions = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? CODEX_TOKEN_REFRESH_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error("Codex token refresh timeout must be positive");
+  }
+  const clock = options.clock ?? systemCodexTokenDeadlineClock;
+  const signal = options.signal;
+
+  return await new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+
+    const cleanup = (): void => {
+      if (timeout !== undefined) {
+        clock.clearTimeout(timeout);
+        timeout = undefined;
+      }
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    const settle = (
+      outcome: { kind: "resolve"; value: T } | { kind: "reject"; error: unknown },
+    ) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (outcome.kind === "resolve") {
+        resolve(outcome.value);
+      } else {
+        reject(outcome.error);
+      }
+    };
+
+    const onAbort = (): void => {
+      settle({
+        kind: "reject",
+        error: signal?.reason ?? new Error("Codex token refresh cancelled"),
+      });
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+    } else {
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timeout = clock.setTimeout(
+        () => settle({ kind: "reject", error: new Error("Codex token refresh timed out") }),
+        timeoutMs,
+      );
+    }
+
+    // Do not use Promise.race here. Its derived promise can obscure which
+    // branch owns settlement, while this fulfillment-only observer makes the
+    // losing provider branch explicitly consumed after timeout/cancellation.
+    void Promise.resolve(operation).then(
+      (value) => settle({ kind: "resolve", value }),
+      (error) => settle({ kind: "reject", error }),
+    );
+  });
+}
 
 // Dependencies are injectable so the lifecycle logic (single-flight, staleness,
 // needs_relogin transition) is unit-testable without a database. Production uses
@@ -96,7 +186,10 @@ export function buildCodexTokenResolver(
     cred: CodexCredentialForRun,
   ): Promise<CodexTokenSnapshot> => {
     try {
-      const next = await deps.refresh(cred.tokens.refreshToken);
+      // Bound even injected/custom refresh implementations that ignore abort
+      // signals. The provider client has its own AbortController timeout; this
+      // outer fence ensures the DB advisory transaction cannot be held forever.
+      const next = await withCodexTokenDeadline(deps.refresh(cred.tokens.refreshToken));
       const tokens = {
         access_token: next.accessToken ?? cred.tokens.accessToken,
         refresh_token: next.refreshToken ?? cred.tokens.refreshToken,
@@ -219,6 +312,7 @@ function errorUsagePayload(reason?: "needs_relogin"): CodexUsagePayload {
     weekly: null,
     limitReached: false,
     fetchedAt: new Date().toISOString(),
+    rateLimitResetCredits: null,
     ...(reason ? { reason } : {}),
   };
 }
@@ -242,6 +336,7 @@ export async function fetchCodexUsageForAccount(
   settings: Settings,
   workspaceId: string,
   credentialId: string,
+  fetchImpl: CodexFetch = fetch,
 ): Promise<CodexUsagePayload> {
   const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId);
   let token: CodexTokenSnapshot;
@@ -253,12 +348,15 @@ export async function fetchCodexUsageForAccount(
 
   let normalized: CodexUsagePayload;
   try {
-    const usage = await fetchCodexUsage({
-      accessToken: token.accessToken,
-      chatgptAccountId: token.chatgptAccountId,
-      isFedramp: token.isFedramp,
-      clientVersion: CODEX_CLIENT_VERSION,
-    });
+    const usage = await fetchCodexUsage(
+      {
+        accessToken: token.accessToken,
+        chatgptAccountId: token.chatgptAccountId,
+        isFedramp: token.isFedramp,
+        clientVersion: CODEX_CLIENT_VERSION,
+      },
+      fetchImpl,
+    );
     normalized = normalizeCodexUsage(usage.status, usage.payload);
   } catch {
     // A network throw on the /wham/usage read must surface as an error PAYLOAD
@@ -266,17 +364,80 @@ export async function fetchCodexUsageForAccount(
     return errorUsagePayload();
   }
 
-  if (normalized.fiveHour || normalized.weekly) {
+  const parsedQuota =
+    normalized.status !== "error" && (normalized.fiveHour != null || normalized.weekly != null);
+  if (parsedQuota || normalized.rateLimitResetCredits) {
+    const checkedAt = new Date();
+    // Quota windows and reset-summary freshness are independent. A malformed
+    // usage body can still carry a syntactically valid count; that count may be
+    // cached without erasing or falsely refreshing the last valid quota truth.
     // Cache-write is best-effort: a disconnect under us (false) or a transient
-    // write error must NOT sink the freshly-read usage we are about to return.
+    // write error must NOT sink the freshly-read result we are about to return.
     await recordCodexAccountUsage(db, workspaceId, credentialId, {
-      primaryUsedPercent: normalized.fiveHour?.percent ?? null,
-      primaryResetAt: normalized.fiveHour?.resetAt ? new Date(normalized.fiveHour.resetAt) : null,
-      secondaryUsedPercent: normalized.weekly?.percent ?? null,
-      secondaryResetAt: normalized.weekly?.resetAt ? new Date(normalized.weekly.resetAt) : null,
-      checkedAt: new Date(),
+      ...(parsedQuota
+        ? {
+            primaryUsedPercent: normalized.fiveHour?.percent ?? null,
+            primaryResetAt: normalized.fiveHour?.resetAt
+              ? new Date(normalized.fiveHour.resetAt)
+              : null,
+            secondaryUsedPercent: normalized.weekly?.percent ?? null,
+            secondaryResetAt: normalized.weekly?.resetAt
+              ? new Date(normalized.weekly.resetAt)
+              : null,
+            checkedAt,
+          }
+        : {}),
+      ...(normalized.rateLimitResetCredits
+        ? {
+            resetCreditAvailableCount: normalized.rateLimitResetCredits.availableCount,
+            resetCreditsCheckedAt: checkedAt,
+          }
+        : {}),
     }).catch(() => undefined);
   }
 
   return normalized;
+}
+
+export type CodexRateLimitResetCreditsAccountResult =
+  | { ok: true; status: number; details: CodexRateLimitResetCreditsDetails }
+  | {
+      ok: false;
+      status: number;
+      reason: ResetCreditFetchFailureReason | "needs_relogin";
+    };
+
+/**
+ * Fresh detailed reset-credit inventory for one exact workspace credential.
+ * The token is refreshed through the same resolver as usage and never escapes
+ * this server-side function. Detailed rows are returned to the route only and
+ * are never persisted as redemption authority.
+ */
+export async function fetchCodexRateLimitResetCreditsForAccount(
+  db: Database,
+  settings: Settings,
+  workspaceId: string,
+  credentialId: string,
+  fetchImpl: CodexFetch = fetch,
+): Promise<CodexRateLimitResetCreditsAccountResult> {
+  const resolver = buildCodexTokenResolver(db, settings, workspaceId, credentialId);
+  let token: CodexTokenSnapshot;
+  try {
+    token = await resolver.getToken();
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: error instanceof CodexReloginRequired ? "needs_relogin" : "network_error",
+    };
+  }
+  return await fetchCodexRateLimitResetCredits(
+    {
+      accessToken: token.accessToken,
+      chatgptAccountId: token.chatgptAccountId,
+      isFedramp: token.isFedramp,
+      clientVersion: CODEX_CLIENT_VERSION,
+    },
+    fetchImpl,
+  );
 }

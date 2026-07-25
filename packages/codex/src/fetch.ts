@@ -517,12 +517,14 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
           const canRetry =
             noByteRetriesUsed < policy.noByteRetries &&
             Date.now() - logicalStartedAt + policy.retryBackoffMs < policy.wholeRequestTimeoutMs;
+          // Audit persistence must not replace the transport timeout: the
+          // caller still needs the typed error to make the retry/504 decision.
           await emitRequestEvent(audit, {
             phase: "timed_out",
             responseObserved: false,
             timeoutClass: klass,
             willRetry: canRetry,
-          });
+          }).catch(() => undefined);
           if (!canRetry) {
             throw new CodexResponseTimeoutError(klass, requestId, false);
           }

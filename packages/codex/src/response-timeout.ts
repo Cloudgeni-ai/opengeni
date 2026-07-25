@@ -72,7 +72,7 @@ export type CodexResponseTimeoutInfo = {
   message: string;
 };
 
-function timeoutClass(value: unknown): CodexResponseTimeoutClass | null {
+function parseTimeoutClass(value: unknown): CodexResponseTimeoutClass | null {
   return value === "connect" ||
     value === "headers" ||
     value === "idle_stream" ||
@@ -105,7 +105,7 @@ export function classifyCodexResponseTimeoutError(
       (typeof nested?.code === "string" ? nested.code : undefined);
     if (type === CODEX_RESPONSE_TIMEOUT_ERROR_TYPE || value.name === "CodexResponseTimeoutError") {
       const klass =
-        timeoutClass(value.timeoutClass) ?? timeoutClass(nested?.timeout_class) ?? "headers";
+        parseTimeoutClass(value.timeoutClass) ?? parseTimeoutClass(nested?.timeout_class) ?? "headers";
       return {
         timeoutClass: klass,
         requestId:

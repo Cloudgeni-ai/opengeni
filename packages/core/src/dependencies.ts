@@ -1,5 +1,11 @@
 import type { Settings } from "@opengeni/config";
-import type { Document, GitHubAppApiPort, ScheduledTask } from "@opengeni/contracts";
+import type {
+  ConnectionCredentialsPort,
+  Document,
+  GitHubAppApiPort,
+  ScheduledTask,
+  SessionAuthorizationPort,
+} from "@opengeni/contracts";
 import type { Database } from "@opengeni/db";
 import type { DocumentServices } from "@opengeni/documents";
 import type { EventBus } from "@opengeni/events";
@@ -85,7 +91,21 @@ export type AppDependencies = {
    * App credentials; standalone deployments fall back to @opengeni/github.
    */
   githubAppApi?: GitHubAppApiPort;
+  /**
+   * Optional host-owned connection credential seam. API-side consumers use
+   * the MCP leg for Toolspace/Code Mode; worker consumers bind the same port
+   * for model MCP, Git, and sandbox-secret resolution.
+   */
+  connectionCredentials?: ConnectionCredentialsPort | null;
+  /**
+   * Optional embedding-host session ACL. Unset preserves standalone workspace
+   * authorization; once bound, every session-addressed surface fails closed on
+   * an unavailable or invalid host decision.
+   */
+  sessionAuthorization?: SessionAuthorizationPort | null;
   managedAuth?: ManagedAuth | null;
+  /** Injectable Codex HTTP transport for deterministic API/provider tests. */
+  codexFetch?: typeof fetch;
   // The API process's OWN agent-loop-free sandbox client (constructed from
   // settings via @opengeni/runtime/sandbox). Undefined when sandboxBackend=none.
   // This is the foundation of the API-direct control plane: the API resumes
@@ -124,7 +144,7 @@ export type ApiRouteDeps = AppDependencies & {
  */
 export type AcceptSessionUserMessageDependencies = Pick<
   AppDependencies,
-  "settings" | "db" | "bus"
+  "settings" | "db" | "bus" | "sessionAuthorization"
 > & {
   workflowClient: Pick<SessionWorkflowClient, "wakeSessionWorkflow">;
   objectStorage: ObjectStorageDependency;

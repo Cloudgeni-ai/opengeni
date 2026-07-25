@@ -50,7 +50,9 @@
   /* Accent — one brand hue, used sparingly ----------------------------------- */
   --og-color-accent: oklch(0.72 0.15 255);
   --og-color-accent-strong: oklch(0.78 0.14 255);
-  --og-color-accent-deep: oklch(0.62 0.18 255);
+  /* Primary actions render ordinary 14 px accent-foreground text on this
+     token. Keep the blue dark enough to preserve WCAG AA contrast. */
+  --og-color-accent-deep: oklch(0.54 0.18 255);
   --og-color-accent-fg: oklch(0.985 0.005 260);
   --og-color-accent-soft: color-mix(in oklch, var(--og-color-accent) 16%, transparent);
 

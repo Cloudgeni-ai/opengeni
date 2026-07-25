@@ -114,12 +114,14 @@ export type CodexTurnLeaseSelection = {
 /** The minimum all-capped idle: continueDelayMs is clamped to at least this (never 0). */
 export const MIN_IDLE_MS = 60_000; // 60s
 /**
- * Cooldown applied to an over-threshold account whose cached reset is null / unknown
+ * Cooldown applied to an exhausted account whose cached reset is null / unknown
  * / already-elapsed (the turn hot path never refreshes usage, so a capped window's
  * reset reads stale). Treating it as "available after a default cooldown" keeps
  * availableAt — and therefore earliestReset — ALWAYS in the future.
  */
 export const DEFAULT_RESET_COOLDOWN_MS = 60_000; // 60s
+/** Cached provider usage becomes unavailable only at actual exhaustion. */
+export const CODEX_USAGE_EXHAUSTED_PCT = 100;
 
 function effectiveWindowUsed(usedPercent: number | null, resetAt: Date | null, now: Date): number {
   // A completed provider window is eligible immediately even if its last cache
@@ -192,42 +194,32 @@ function droppedConnectorsFor(acct: CodexRotationAccount, usedConnectors: string
 
 /**
  * Healthy for an already-frozen/in-flight turn = connected/usable (status
- * "active", excludes needs_relogin/error), not cooling, and under the
- * near-exhaustion threshold on BOTH windows. Allocator eligibility is
+ * "active", excludes needs_relogin/error), not cooling, and not exhausted in
+ * either provider window. Allocator eligibility is
  * deliberately separate so disabling NEW work cannot break refresh/resume.
  */
-export function isCodexCredentialHealthy(
-  acct: CodexRotationAccount,
-  nearExhaustionPct: number,
-  now: Date,
-): boolean {
+export function isCodexCredentialHealthy(acct: CodexRotationAccount, now: Date): boolean {
   return (
-    acct.status === "active" && !cooling(acct, now) && bindingUsedPct(acct, now) < nearExhaustionPct
+    acct.status === "active" &&
+    !cooling(acct, now) &&
+    bindingUsedPct(acct, now) < CODEX_USAGE_EXHAUSTED_PCT
   );
 }
 
 /** New automatic allocation requires both health and explicit allocator eligibility. */
-export function isCodexCredentialEligible(
-  acct: CodexRotationAccount,
-  nearExhaustionPct: number,
-  now: Date,
-): boolean {
-  return acct.allocatorEnabled && isCodexCredentialHealthy(acct, nearExhaustionPct, now);
+export function isCodexCredentialEligible(acct: CodexRotationAccount, now: Date): boolean {
+  return acct.allocatorEnabled && isCodexCredentialHealthy(acct, now);
 }
 
 /**
  * Public eligibility predicate (same definition as the private `eligible`): an
- * account is usable this turn iff it is connected/active, not cooling, and under
- * the near-exhaustion threshold on BOTH windows. The worker's sharded home
+ * account is usable this turn iff it is connected/active, not cooling, and below
+ * actual exhaustion on both windows. The worker's sharded home
  * health-check uses this to decide whether a session's existing policy pin is still
  * a valid home or must be re-sharded.
  */
-export function isCodexAccountEligible(
-  acct: CodexRotationAccount,
-  nearExhaustionPct: number,
-  now: Date,
-): boolean {
-  return isCodexCredentialEligible(acct, nearExhaustionPct, now);
+export function isCodexAccountEligible(acct: CodexRotationAccount, now: Date): boolean {
+  return isCodexCredentialEligible(acct, now);
 }
 
 /** Deterministic 32-bit FNV-1a over a UTF-16 code-unit stream. Pure, allocation-free. */
@@ -244,7 +236,7 @@ function fnv1a32(input: string): number {
 /**
  * Session-sharded HOME account (AM-6): the deterministic account a session runs on
  * under the "sharded" strategy — `stableAccountList[ hash(sessionId) % N ]` over the
- * ELIGIBLE (connected, not cooling, under-threshold) accounts in stable created_at
+ * ELIGIBLE (connected, not cooling, not exhausted) accounts in stable created_at
  * order (`listCodexAccountStatuses`).
  *
  * Why deterministic hash over "least-loaded by session count" (AM-6): it needs ZERO
@@ -263,13 +255,10 @@ function fnv1a32(input: string): number {
 export function shardCredentialForSession(args: {
   sessionId: string;
   accounts: CodexRotationAccount[];
-  nearExhaustionPct: number;
   now: Date;
 }): string | null {
-  const { sessionId, accounts, nearExhaustionPct, now } = args;
-  const eligibles = accounts.filter((acct) =>
-    isCodexCredentialEligible(acct, nearExhaustionPct, now),
-  );
+  const { sessionId, accounts, now } = args;
+  const eligibles = accounts.filter((acct) => isCodexCredentialEligible(acct, now));
   if (eligibles.length === 0) {
     return null;
   }
@@ -278,12 +267,8 @@ export function shardCredentialForSession(args: {
 }
 
 /** earliestResetAt across ALL connected accounts — exported for the sharded all-capped idle. */
-export function earliestCodexReset(
-  accounts: CodexRotationAccount[],
-  nearExhaustionPct: number,
-  now: Date,
-): Date {
-  return earliestReset(accounts, nearExhaustionPct, now);
+export function earliestCodexReset(accounts: CodexRotationAccount[], now: Date): Date {
+  return earliestReset(accounts, now);
 }
 
 /**
@@ -307,21 +292,20 @@ export function chooseShardedHome(args: {
   sessionId: string;
   currentPolicyPin: string | null;
   accounts: CodexRotationAccount[];
-  nearExhaustionPct: number;
   now: Date;
 }):
   | { kind: "home"; credentialId: string; rewritePin: boolean }
   | { kind: "allCapped"; earliestResetAt: Date } {
-  const { sessionId, currentPolicyPin, accounts, nearExhaustionPct, now } = args;
+  const { sessionId, currentPolicyPin, accounts, now } = args;
   const pinRow = currentPolicyPin
     ? (accounts.find((acct) => acct.id === currentPolicyPin) ?? null)
     : null;
-  if (pinRow && isCodexCredentialEligible(pinRow, nearExhaustionPct, now)) {
+  if (pinRow && isCodexCredentialEligible(pinRow, now)) {
     return { kind: "home", credentialId: currentPolicyPin!, rewritePin: false };
   }
-  const home = shardCredentialForSession({ sessionId, accounts, nearExhaustionPct, now });
+  const home = shardCredentialForSession({ sessionId, accounts, now });
   if (home == null) {
-    return { kind: "allCapped", earliestResetAt: earliestReset(accounts, nearExhaustionPct, now) };
+    return { kind: "allCapped", earliestResetAt: earliestReset(accounts, now) };
   }
   return { kind: "home", credentialId: home, rewritePin: true };
 }
@@ -338,11 +322,7 @@ export function chooseShardedHome(args: {
  * default cooldown (now + DEFAULT_RESET_COOLDOWN_MS), so the caller always idles a
  * bounded positive time and re-checks (which refreshes usage and self-heals).
  */
-export function availableAt(
-  acct: CodexRotationAccount,
-  nearExhaustionPct: number,
-  now: Date,
-): Date {
+export function availableAt(acct: CodexRotationAccount, now: Date): Date {
   const nowMs = now.getTime();
   // An unknown/elapsed block clears after a default cooldown, never in the past.
   const defaultClear = new Date(nowMs + DEFAULT_RESET_COOLDOWN_MS);
@@ -359,11 +339,13 @@ export function availableAt(
     candidates.push(resetAt != null && resetAt.getTime() > nowMs ? resetAt : defaultClear);
   };
   windowClear(
-    effectiveWindowUsed(acct.primaryUsedPercent, acct.primaryResetAt, now) >= nearExhaustionPct,
+    effectiveWindowUsed(acct.primaryUsedPercent, acct.primaryResetAt, now) >=
+      CODEX_USAGE_EXHAUSTED_PCT,
     acct.primaryResetAt,
   );
   windowClear(
-    effectiveWindowUsed(acct.secondaryUsedPercent, acct.secondaryResetAt, now) >= nearExhaustionPct,
+    effectiveWindowUsed(acct.secondaryUsedPercent, acct.secondaryResetAt, now) >=
+      CODEX_USAGE_EXHAUSTED_PCT,
     acct.secondaryResetAt,
   );
   // Ineligible for a non-quota reason (needs_relogin / error) with no known block, or
@@ -376,13 +358,9 @@ export function availableAt(
 }
 
 /** earliestResetAt across ALL connected accounts (min of each account's availableAt). */
-function earliestReset(
-  accounts: CodexRotationAccount[],
-  nearExhaustionPct: number,
-  now: Date,
-): Date {
+function earliestReset(accounts: CodexRotationAccount[], now: Date): Date {
   return accounts
-    .map((acct) => availableAt(acct, nearExhaustionPct, now))
+    .map((acct) => availableAt(acct, now))
     .reduce((a, b) => (b.getTime() < a.getTime() ? b : a));
 }
 
@@ -394,7 +372,6 @@ function earliestReset(
  */
 export function authoritativeCodexCapacityResetAt(
   accounts: CodexRotationAccount[],
-  nearExhaustionPct: number,
   now: Date,
 ): Date | null {
   const future: Date[] = [];
@@ -404,14 +381,14 @@ export function authoritativeCodexCapacityResetAt(
       future.push(account.exhaustedUntil);
     }
     if (
-      (account.primaryUsedPercent ?? 0) >= nearExhaustionPct &&
+      (account.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT &&
       account.primaryResetAt &&
       account.primaryResetAt.getTime() > now.getTime()
     ) {
       future.push(account.primaryResetAt);
     }
     if (
-      (account.secondaryUsedPercent ?? 0) >= nearExhaustionPct &&
+      (account.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT &&
       account.secondaryResetAt &&
       account.secondaryResetAt.getTime() > now.getTime()
     ) {
@@ -513,7 +490,6 @@ export function chooseRotationActive(args: {
   activeCredentialId: string | null;
   priorCredentialId: string | null;
   accounts: CodexRotationAccount[];
-  nearExhaustionPct: number;
   now: Date;
   // P4 (Part B): the connectors the leaving session has access to (the leaving
   // account's cached connector set, used as the "session needs these" proxy).
@@ -521,7 +497,7 @@ export function chooseRotationActive(args: {
   // P3 (every account trivially covers → Tier 1 == all eligibles). Self-gating.
   usedConnectors?: string[];
 }): RotationDecision {
-  const { activeCredentialId, priorCredentialId, accounts, nearExhaustionPct, now } = args;
+  const { activeCredentialId, priorCredentialId, accounts, now } = args;
   // Normalize at the entry point: rotation-enabled ALWAYS behaves as sharded
   // (see effectiveRotationStrategy). args keeps the field so call sites and
   // tests can still express stored legacy values.
@@ -533,20 +509,18 @@ export function chooseRotationActive(args: {
     return { kind: "none" };
   }
 
-  const eligibles = allocatableAccounts.filter((acct) =>
-    isCodexCredentialEligible(acct, nearExhaustionPct, now),
-  );
+  const eligibles = allocatableAccounts.filter((acct) => isCodexCredentialEligible(acct, now));
 
   // The active pointer is a cursor/manual preference, NOT a sticky lease. In
   // particular, most_remaining must rank the whole eligible pool every turn;
-  // keeping a healthy active account until 90% was the production monopolization
+  // keeping a healthy active account sticky was the production monopolization
   // defect fixed by credential allocator. drain_then_next remains the one explicitly sticky
   // strategy, and a manual pin is handled by the caller as explicit policy.
   const decide = (chosen: CodexRotationAccount | undefined): RotationDecision => {
     if (!chosen) {
       return {
         kind: "allCapped",
-        earliestResetAt: earliestReset(allocatableAccounts, nearExhaustionPct, now),
+        earliestResetAt: earliestReset(allocatableAccounts, now),
       };
     }
     // P4: surface the dropped-connector note when the chosen account doesn't cover
@@ -566,7 +540,7 @@ export function chooseRotationActive(args: {
     if (eligibles.length === 0) {
       return {
         kind: "allCapped",
-        earliestResetAt: earliestReset(allocatableAccounts, nearExhaustionPct, now),
+        earliestResetAt: earliestReset(allocatableAccounts, now),
       };
     }
     const priorIdx = priorCredentialId
@@ -579,7 +553,7 @@ export function chooseRotationActive(args: {
             ...allocatableAccounts.slice(0, priorIdx + 1),
           ]
         : allocatableAccounts;
-    const chosen = ordered.find((acct) => isCodexCredentialEligible(acct, nearExhaustionPct, now));
+    const chosen = ordered.find((acct) => isCodexCredentialEligible(acct, now));
     return decide(chosen);
   }
 
@@ -588,7 +562,7 @@ export function chooseRotationActive(args: {
     const priorRow = priorCredentialId
       ? accounts.find((acct) => acct.id === priorCredentialId)
       : undefined;
-    if (priorRow && isCodexCredentialEligible(priorRow, nearExhaustionPct, now)) {
+    if (priorRow && isCodexCredentialEligible(priorRow, now)) {
       return decide(priorRow);
     }
     return decide(eligibles[0]);
@@ -648,7 +622,7 @@ export function chooseLegacyRotationActive(
     const active = args.activeCredentialId
       ? args.accounts.find((account) => account.id === args.activeCredentialId)
       : undefined;
-    if (active && isCodexCredentialEligible(active, args.nearExhaustionPct, args.now)) {
+    if (active && isCodexCredentialEligible(active, args.now)) {
       return { kind: "active", credentialId: active.id, moved: false };
     }
   }
@@ -678,7 +652,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
   sessionLastCredentialId: string | null;
   /** Same-turn checkpoint/frozen account; temporary disable cannot move it. */
   continuationCredentialId?: string | null;
-  nearExhaustionPct: number;
   now: Date;
 }): CodexTurnLeaseSelection {
   const {
@@ -696,7 +669,7 @@ export function selectCodexCredentialLeaseForTurn(args: {
   const existing = existingCredentialId
     ? accounts.find((account) => account.id === existingCredentialId)
     : undefined;
-  if (existing && isCodexCredentialHealthy(existing, args.nearExhaustionPct, args.now)) {
+  if (existing && isCodexCredentialHealthy(existing, args.now)) {
     return {
       credentialId: existing.id,
       advanceActivePointer: false,
@@ -711,7 +684,7 @@ export function selectCodexCredentialLeaseForTurn(args: {
   const continuation = args.continuationCredentialId
     ? accounts.find((account) => account.id === args.continuationCredentialId)
     : undefined;
-  if (continuation && isCodexCredentialHealthy(continuation, args.nearExhaustionPct, args.now)) {
+  if (continuation && isCodexCredentialHealthy(continuation, args.now)) {
     return {
       credentialId: continuation.id,
       advanceActivePointer: false,
@@ -742,7 +715,7 @@ export function selectCodexCredentialLeaseForTurn(args: {
     if (!pinned?.allocatorEnabled) {
       return { credentialId: null, decision: { kind: "none" }, advanceActivePointer: false };
     }
-    if (isCodexCredentialHealthy(pinned, args.nearExhaustionPct, args.now)) {
+    if (isCodexCredentialHealthy(pinned, args.now)) {
       return {
         credentialId: pinned.id,
         decision: { kind: "active", credentialId: pinned.id, moved: false },
@@ -753,7 +726,7 @@ export function selectCodexCredentialLeaseForTurn(args: {
       credentialId: null,
       decision: {
         kind: "allCapped",
-        earliestResetAt: availableAt(pinned, args.nearExhaustionPct, args.now),
+        earliestResetAt: availableAt(pinned, args.now),
       },
       advanceActivePointer: false,
     };
@@ -771,7 +744,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
       sessionId: args.sessionId,
       currentPolicyPin: args.sessionPinSource === "policy" ? args.sessionPinnedCredentialId : null,
       accounts,
-      nearExhaustionPct: args.nearExhaustionPct,
       now: args.now,
     });
     if (shard.kind === "allCapped") {
@@ -829,7 +801,6 @@ export function selectCodexCredentialLeaseForTurn(args: {
     // the workspace pointer is only correct when this session has never run.
     priorCredentialId: priorId,
     accounts,
-    nearExhaustionPct: args.nearExhaustionPct,
     now: args.now,
     usedConnectors: accounts.find((account) => account.id === priorId)?.connectorNamespaces ?? [],
   });

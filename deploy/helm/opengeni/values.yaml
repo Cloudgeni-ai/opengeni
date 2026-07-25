@@ -71,6 +71,9 @@ secret:
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.
+  # For Temporal Cloud, configure OPENGENI_TEMPORAL_HOST and
+  # OPENGENI_TEMPORAL_NAMESPACE, then place OPENGENI_TEMPORAL_API_KEY in this
+  # secret; the API key automatically enables TLS.
   #
   # Bring-your-own-compute (selfhosted) SECRET keys — set these in the runtime
   # secret (NOT this file) when selfhosted.enabled=true. They thread into the

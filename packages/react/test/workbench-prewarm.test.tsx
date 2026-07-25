@@ -31,7 +31,9 @@ import {
   type UseSandboxWorkspaceTabsResult,
   SandboxWorkspace,
   WORKBENCH_TAB_CHANGES,
+  WORKBENCH_TAB_DESKTOP,
   WORKBENCH_TAB_FILES,
+  WORKBENCH_TAB_TERMINAL,
 } from "../src/components/sandbox-workspace";
 
 registerDom();
@@ -198,6 +200,122 @@ function coldClient(
   } as Partial<SessionClientLike>);
   return { client, spy };
 }
+
+// ── Embedder surface policy ─────────────────────────────────────────────────
+
+describe("workbench surface allowlist", () => {
+  test("omitting Desktop excludes the tab while retaining the requested surfaces", async () => {
+    const { client, spy } = coldClient();
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      surfaces: [WORKBENCH_TAB_CHANGES, WORKBENCH_TAB_FILES, WORKBENCH_TAB_TERMINAL],
+    });
+    await flush(60);
+
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([
+      WORKBENCH_TAB_CHANGES,
+      WORKBENCH_TAB_FILES,
+      WORKBENCH_TAB_TERMINAL,
+    ]);
+    expect(hook.result.current.tabs.some((tab) => tab.id === WORKBENCH_TAB_DESKTOP)).toBe(false);
+    expect(spy.attachCalls).toBe(0);
+    await hook.unmount();
+  });
+
+  test("an empty allowlist initializes no built-in data or capability plane", async () => {
+    const calls = { capabilities: 0, capture: 0, machines: 0 };
+    const client = fakeClient({
+      getStreamCapabilities: async () => {
+        calls.capabilities += 1;
+        return fakeColdCapabilities();
+      },
+      getWorkspaceCapture: async () => {
+        calls.capture += 1;
+        return captureAvailable(fakeManifest(1));
+      },
+      listMachines: async () => {
+        calls.machines += 1;
+        return EMPTY_MACHINES;
+      },
+    } as Partial<SessionClientLike>);
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      surfaces: [],
+    });
+    await flush(60);
+
+    expect(hook.result.current.tabs).toEqual([]);
+    expect(hook.result.current.defaultTab).toBeNull();
+    expect(hook.result.current.machine.enabled).toBe(false);
+    expect(calls).toEqual({ capabilities: 0, capture: 0, machines: 0 });
+    await hook.unmount();
+  });
+
+  test.each([
+    [WORKBENCH_TAB_TERMINAL, WORKBENCH_TAB_TERMINAL],
+    [WORKBENCH_TAB_DESKTOP, WORKBENCH_TAB_DESKTOP],
+  ] as const)(
+    "%s-only negotiates capabilities without loading capture-backed surfaces",
+    async (surface, expectedTab) => {
+      let captureCalls = 0;
+      const { client } = coldClient({
+        getWorkspaceCapture: async () => {
+          captureCalls += 1;
+          return captureAvailable(fakeManifest(1));
+        },
+      });
+      const hook = await renderTabsHook(client, {
+        sessionId: SESSION_ID,
+        events: [],
+        surfaces: [surface],
+      });
+      await flush(60);
+
+      expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([expectedTab]);
+      expect(hook.result.current.defaultTab).toBeNull();
+      expect(hook.result.current.machine.enabled).toBe(true);
+      expect(captureCalls).toBe(0);
+      await hook.unmount();
+    },
+  );
+
+  test("a disabled source-driven initial tab falls back to an enabled surface", async () => {
+    const { client } = coldClient();
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      surfaces: [WORKBENCH_TAB_FILES],
+      initialTab: WORKBENCH_TAB_CHANGES,
+    });
+    await flush(60);
+
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([WORKBENCH_TAB_FILES]);
+    expect(hook.result.current.defaultTab).toBe(WORKBENCH_TAB_FILES);
+    await hook.unmount();
+  });
+
+  test("Changes-only withholds navigation into the disabled Files surface", async () => {
+    const { client } = coldClient();
+    const hook = await renderTabsHook(client, {
+      sessionId: SESSION_ID,
+      events: [],
+      surfaces: [WORKBENCH_TAB_CHANGES],
+      onOpenFile: () => {
+        throw new Error("disabled Files navigation must not be reachable");
+      },
+    });
+    await flush(60);
+
+    expect(hook.result.current.tabs.map((tab) => tab.id)).toEqual([WORKBENCH_TAB_CHANGES]);
+    const changes = hook.result.current.tabs[0]!.content as ReactElement<{
+      onOpenFile?: (path: string) => void;
+    }>;
+    expect(changes.props.onOpenFile).toBeUndefined();
+    await hook.unmount();
+  });
+});
 
 // ── Refinement 1: prewarm gated to intent ────────────────────────────────────
 

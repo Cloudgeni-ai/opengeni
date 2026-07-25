@@ -11,6 +11,7 @@ import {
   listSessionsForSubject,
   removeWorkspaceMember,
   reapExpiredSessionListSnapshots,
+  sessionAuthorizationScopeFilter,
   sessionTreeStatsForSessions,
   SessionListAccessError,
   SessionPinAccessError,
@@ -135,6 +136,16 @@ afterAll(async () => {
 }, 180_000);
 
 describe("session pins (real PostgreSQL + FORCE RLS)", () => {
+  test("rejects an unbounded host authorization scope before issuing SQL", () => {
+    expect(() =>
+      sessionAuthorizationScopeFilter({
+        kind: "scoped",
+        rootSessionIds: Array.from({ length: 10_001 }, () => crypto.randomUUID()),
+        sessionIds: [],
+      }),
+    ).toThrow("Session authorization scope exceeds 10000 ids per field");
+  });
+
   test("rejects an unbounded tree-stat root set before issuing SQL", async () => {
     const rootIds = Array.from({ length: 601 }, () => crypto.randomUUID());
     await expect(
@@ -704,6 +715,102 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(secondPage.sessions.map((row) => row.id)).toEqual([middle.id]);
     expect(secondPage.sessions.map((row) => row.id)).not.toContain(newest.id);
     expect(secondPage.nextCursor).toBeTruthy();
+  }, 60_000);
+
+  test("applies host root/exact scope inside list snapshots and fills pages after revocation", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const subjectId = "user:host-session-scope";
+    await grantMember(workspace, subjectId);
+    const root = await session({ ...workspace, message: "authorized root" });
+    const child = await session({
+      ...workspace,
+      message: "authorized child",
+      parentSessionId: root.id,
+    });
+    const grandchild = await session({
+      ...workspace,
+      message: "authorized grandchild",
+      parentSessionId: child.id,
+    });
+    const exact = await session({ ...workspace, message: "authorized exact" });
+    const hidden = await session({ ...workspace, message: "hidden" });
+
+    const scoped = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      authorizationScope: {
+        kind: "scoped",
+        rootSessionIds: [root.id],
+        sessionIds: [exact.id],
+      },
+    });
+    expect(new Set(scoped.sessions.map((row) => row.id))).toEqual(
+      new Set([root.id, child.id, grandchild.id, exact.id]),
+    );
+    expect(scoped.sessions.map((row) => row.id)).not.toContain(hidden.id);
+    const scopedById = new Map(scoped.sessions.map((row) => [row.id, row]));
+    expect(scopedById.get(child.id)?.parentSessionId).toBe(root.id);
+    expect(scopedById.get(root.id)?.treeStats?.totalDescendants).toBe(2);
+    expect(scopedById.get(exact.id)).toMatchObject({
+      parentSessionId: null,
+      treeStats: {
+        directChildren: 0,
+        totalDescendants: 0,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+
+    await admin`
+      update sessions
+      set updated_at = case id
+        when ${root.id} then now()
+        when ${child.id} then now() - interval '1 minute'
+        when ${grandchild.id} then now() - interval '2 minutes'
+        when ${exact.id} then now() - interval '3 minutes'
+        else now() - interval '4 minutes'
+      end
+      where workspace_id = ${workspace.workspaceId}`;
+    const first = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      authorizationScope: { kind: "all" },
+    });
+    expect(first.sessions.map((row) => row.id)).toEqual([root.id]);
+    const cursor = decodeSessionListCursor(first.nextCursor!);
+    expect(cursor).not.toBeNull();
+
+    // Everything between the first row and the two exact survivors is revoked.
+    // The continuation must scan through those stale snapshot ids and fill the
+    // page with the next currently authorized row instead of returning empty.
+    const afterRevocation = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      cursor: cursor!,
+      authorizationScope: {
+        kind: "scoped",
+        rootSessionIds: [],
+        sessionIds: [exact.id, hidden.id],
+      },
+    });
+    expect(afterRevocation.sessions.map((row) => row.id)).toEqual([exact.id]);
+    expect(afterRevocation.nextCursor).toBeTruthy();
+    const finalPage = await listSessionsForSubject(db, workspace.workspaceId, {
+      subjectId,
+      limit: 1,
+      cursor: decodeSessionListCursor(afterRevocation.nextCursor!)!,
+      authorizationScope: {
+        kind: "scoped",
+        rootSessionIds: [],
+        sessionIds: [exact.id, hidden.id],
+      },
+    });
+    expect(finalPage.sessions.map((row) => row.id)).toEqual([hidden.id]);
+    expect(finalPage.nextCursor).toBeNull();
   }, 60_000);
 
   test("treats percent, underscore, and backslash as literal search text", async () => {

@@ -51,7 +51,7 @@ Decisions baked in:
 - `credential_encrypted` is the only column that may hold secret material; `metadata` is UI-renderable verbatim. API list/get helpers never select `credential_encrypted`.
 - Revoking sets `status='revoked'` (row kept for audit) and best-effort calls the provider's revocation endpoint when known.
 
-**Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. Runtime resolution of subject-owned rows is deferred to I5 (§7 landmine: the worker currently runs under a synthetic subject).
+**Ownership doctrine.** Default new providers to workspace-shared (`subject_id` null) bot-style identity — survives user churn, matches agent workloads. Personal connections are for act-as-a-person tools; the token's native provider-side permissions are the authorization boundary. OpenGeni's standalone table resolver remains workspace-shared. Embedded hosts can resolve subject-scoped connections through `ConnectionCredentialsPort.mcpCredentials`, which receives the immutable current turn initiator rather than relying on the worker's synthetic technical subject.
 
 ## 3. Credential encryption
 
@@ -173,7 +173,12 @@ New permissions `connections:read` (metadata/status only — never secrets) and 
 
 Subject-ownership is enforced in helper predicates + domain logic (DB RLS is account/workspace-scoped and cannot see the caller subject): readers see shared rows plus their own subject rows; admins may revoke subject-owned rows but not use them or read beyond provider + status; the broker re-checks at resolve time.
 
-**Landmine (drives phasing):** the worker calls prepareTools with the synthetic subject `worker:first-party-mcp`, not the human who connected. Until a real initiating subject is threaded through runs (I5), `connectionRef` resolution at runtime accepts **workspace-shared connections only**.
+**Resolved embedding boundary:** the worker still calls `prepareTools` with the synthetic technical subject `worker:first-party-mcp`, so OpenGeni's standalone connection-table resolver intentionally accepts **workspace-shared connections only**. The host MCP credential port separately receives the durable turn's immutable initiator and must use that field—not the technical caller—for subject authorization. Toolspace follows the same rule.
+
+`subjectScope: "subject"` remains representable for forward compatibility, but
+the standalone table resolver currently fails it closed because it does not load
+subject-owned rows. Use the embedding host resolver for subject-scoped provider
+connections until standalone subject resolution is implemented.
 
 ## 8. API surface
 
@@ -207,7 +212,7 @@ Config additions in `packages/config/src/index.ts`: `integrationsEnabled` (`EnvB
 | `codex_subscription_credentials` | Stays separate (account-level rotation semantics, own resolver). Not a goal of this program. |
 | First-party delegated bearer | Unchanged — identity plumbing, not an external credential. |
 | `social_connections` | Superseded for future use; existing rows untouched until a consumer needs migration. |
-| `ConnectionCredentialsPort` | Extended in I5 with `resolveConnection({provider, workspaceId, subjectId})`; OpenGeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections). |
+| `ConnectionCredentialsPort` | Its `mcpCredentials(request)` leg receives account/workspace/session, exact turn lineage, immutable initiator, server/tool, opaque connection ref, and forced-refresh intent. OpenGeni's own table is the default implementation; host-provided implementations take precedence (embed doctrine: host owns connections). |
 
 ## 12. Security invariants and phase acceptance
 

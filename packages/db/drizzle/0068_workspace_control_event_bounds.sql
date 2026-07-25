@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-64: workspace-control rows are compact invalidations, not evidence blobs.
+-- tracking-64: workspace-control rows are compact invalidations, not evidence blobs.
 -- Preserve exact source byte counts while bounding the two free-form fields so
 -- old binaries and direct writers cannot create a durable replay poison row.
 

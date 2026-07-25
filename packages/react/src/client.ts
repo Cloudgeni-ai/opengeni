@@ -21,6 +21,9 @@ export type SessionClientLike = Pick<
   | "pauseSession"
   | "resumeSession"
   | "sendApprovalDecision"
+  | "listHumanInputRequests"
+  | "getHumanInputRequest"
+  | "submitHumanInputResponse"
   | "listEvents"
   | "streamEvents"
   // Turn queue
@@ -111,3 +114,44 @@ export type SessionClientLike = Pick<
   | "terminalPtyResize"
   | "terminalPtyClose"
 >;
+
+/**
+ * Tenant-safe client surface required by the session-only React entry.
+ *
+ * A host proxy can implement only these session-scoped operations instead of
+ * stubbing OpenGeni's workbench, billing, rig, file-system, and workspace
+ * administration APIs. Workspace-level resume is deliberately optional: a
+ * host that does not expose that authority still supports every session-local
+ * composer/control path.
+ */
+export type EmbeddedSessionClientLike = Pick<
+  OpenGeniClient,
+  | "getSession"
+  | "listEvents"
+  | "streamEvents"
+  | "getComposerDraft"
+  | "saveComposerDraft"
+  | "sendMessage"
+  | "steerMessage"
+  | "getQueue"
+  | "moveQueueItem"
+  | "editQueueItem"
+  | "steerQueueItem"
+  | "deleteQueueItem"
+  | "pauseSession"
+  | "resumeSession"
+  | "sendApprovalDecision"
+> & {
+  setWorkspaceInferenceState?: OpenGeniClient["setWorkspaceInferenceState"] | undefined;
+};
+
+/** Session client refinement required only by structured human-input hooks. */
+export type EmbeddedHumanInputSessionClientLike = EmbeddedSessionClientLike &
+  Pick<
+    OpenGeniClient,
+    "listHumanInputRequests" | "getHumanInputRequest" | "submitHumanInputResponse"
+  >;
+
+/** Session client refinement required only by MCP approval-policy hooks. */
+export type EmbeddedSessionMcpApprovalPolicyClientLike = EmbeddedSessionClientLike &
+  Pick<OpenGeniClient, "updateSessionMcpApprovalPolicy">;

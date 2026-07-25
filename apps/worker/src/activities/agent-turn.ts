@@ -11,9 +11,12 @@ import {
   setActiveSandbox,
   requireFile,
   getSessionEvent,
+  getSessionRootId,
   getSessionGoal,
   getLatestRunState,
-  isCodexBilledTurn,
+  getHumanInputResumeForEvent,
+  getSessionHumanInputRequest,
+  installOrReadTurnExecutionPolicyForAttempt,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
   armCodexCapacityWait,
@@ -47,7 +50,6 @@ import {
   nextSessionHistoryPosition,
   settleCodexCredentialLeaseLoss,
   settleCodexCredentialFailover,
-  saveRunState,
   upsertSandboxSessionEnvelope,
   setSessionLastInputTokensForTurnAttempt,
   sumUsageQuantity,
@@ -59,7 +61,6 @@ import {
   SandboxLeaseSupersededError,
   SandboxImageConflictError,
   isSessionEventPersistenceError,
-  buildConnectionTokenResolver,
   getEnrollment,
   abandonRecordingForTurnAttempt,
   markSessionAttemptQuiesced,
@@ -68,14 +69,15 @@ import {
   type SandboxRecord,
   type CodexCredentialLeaseResult,
   type CodexCredentialLeaseSelectionContext,
+  type ApplySessionTurnSettlementInput,
   type SessionTurnRecordingSettlement,
 } from "@opengeni/db";
 import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@opengeni/events";
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
-  modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
+  normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   isEphemeralInternalContext,
@@ -89,7 +91,13 @@ import {
   ensureModalRegistryImage,
   findCompactionNeededError,
   materializeSandboxFileDownloads,
-  refreshGitProviderTokenFiles,
+  materializeRunCredentials,
+  clearRunCredentials,
+  clearRunCredentialsForAttempt,
+  withRunCredentialsSession,
+  refreshGitCredentialBindingTokenFiles,
+  refreshToolspaceTokenFile,
+  toolspaceTokenFileFromEnvironment,
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
@@ -99,21 +107,28 @@ import {
   type OpenGeniRuntime,
   type ComputerToolMode,
   type ModelResponseUsage,
+  type ModelCallUsageInput,
+  type ModelCallUsageNormalization,
   type BuildAgentOptions,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
   type EstablishedSandboxSession,
   type GitCredentialTokenWriterSession,
+  type NormalizedRunCredentialMaterial,
+  type RunCredentialCommandSession,
+  type ToolspaceTokenWriterSession,
   deleteRecordingArtifacts,
   stopRecording as stopRecordingOnBox,
 } from "@opengeni/runtime";
+import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
-  builtinProviderId,
+  assertTurnExecutionPolicyMatchesConfigV1,
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
+  resolveTurnExecutionPolicyV1,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -126,6 +141,7 @@ import {
   settingsWithSessionMcpServersForRun,
 } from "./capabilities";
 import {
+  CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
   chooseRotationActive,
   classifyCodexPin,
@@ -161,9 +177,13 @@ import { mergeResourceRefs, mergeToolRefs } from "./common";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
-  gitHubTokenMintSelection,
+  assertGitCredentialRenewalTransportUnchanged,
+  gitCredentialAuthorityForTurn,
+  gitHubTokenMintSelections,
   loadWorkspaceEnvironmentForRunWithCredentials,
+  mintSandboxToolspaceToken,
   mintRunGitCredentials,
+  mintRunGitCredentialBinding,
   sandboxEnvironmentForRun,
   type GitHubTokenMintAuthorization,
   type MintedRunGitCredentials,
@@ -172,16 +192,32 @@ import {
   startGitCredentialRenewalLoop,
   type GitCredentialRenewalController,
 } from "./git-credential-renewal";
+import {
+  RUN_CREDENTIAL_EXPIRY_LEAD_MS,
+  startRunCredentialRenewalLoop,
+  type RunCredentialRenewalController,
+} from "./run-credential-renewal";
+import {
+  TOOLSPACE_TOKEN_EXPIRY_LEAD_MS,
+  startToolspaceTokenRenewalLoop,
+  type ToolspaceTokenRenewalController,
+} from "./toolspace-token-renewal";
+import {
+  bindRunCredentialResolver,
+  runCredentialAuthNeededPayloads,
+  runCredentialModelNote,
+} from "./run-credentials";
 import { withCodexAppsTool, withFirstPartyTools } from "./goals";
 import {
   mergeRigDefaultVariableSetEnvironment,
   resolveWorkspaceAgentInstructions,
   resolveWorkspacePackRuntime,
+  resolveWorkspaceSkillLibraryRuntime,
   settingsWithPackSandboxImage,
   settingsWithRigImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
-import { createSecretRedactor, identityRedactor } from "./redaction";
+import { createSecretRedactor, identityRedactor, type SecretForRedaction } from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -243,11 +279,13 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
-  type GitCredentialProvider,
+  readTurnExecutionPolicyV1,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
+  type SessionTurn,
+  type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -256,6 +294,32 @@ import { createHash, randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
+  externallyBilled: boolean;
+  codexSubscription: boolean;
+} {
+  return {
+    externallyBilled: policy.billing.metering === "external",
+    codexSubscription:
+      policy.providerId === "codex-subscription" &&
+      policy.credentialSource.kind === "connected_subscription" &&
+      policy.credentialSource.provider === "codex",
+  };
+}
+
+export function legacyTurnExecutionPolicyInput(
+  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort">,
+): Parameters<typeof resolveTurnExecutionPolicyV1>[1] {
+  const explicit = turn.source === "user" || turn.source === "api";
+  return {
+    modelId: turn.model,
+    requestedModelId: explicit ? turn.model : null,
+    modelSource: explicit ? "explicit" : "continuation",
+    reasoningEffort: turn.reasoningEffort,
+    reasoningSource: explicit ? "explicit" : "continuation",
+  };
+}
 
 /** A retryable provider fault recovers the accepted turn itself. Goal state is
  * irrelevant: autonomous continuation and infrastructure recovery are separate
@@ -305,6 +369,28 @@ export function filterUnmaterializedSandboxFileDownloads(
 /** Fixed-length one-way tenant correlation for metrics/alerts; never a raw id. */
 export function codexWorkspaceMetricKey(workspaceId: string): string {
   return createHash("sha256").update(workspaceId).digest("hex").slice(0, 12);
+}
+
+/** Stable public request identity across partial resumes and activity retries. */
+export function stableHumanInputRequestId(
+  sessionId: string,
+  turnId: string,
+  toolCallId: string,
+): string {
+  const hex = createHash("sha256")
+    .update("opengeni-human-input-v1\0")
+    .update(sessionId)
+    .update("\0")
+    .update(turnId)
+    .update("\0")
+    .update(toolCallId)
+    .digest("hex")
+    .slice(0, 32)
+    .split("");
+  hex[12] = "5";
+  hex[16] = ["8", "9", "a", "b"][Number.parseInt(hex[16] ?? "0", 16) % 4] ?? "8";
+  const value = hex.join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
 }
 
 /**
@@ -427,6 +513,29 @@ export async function persistOrSignalSessionAttemptQuiescence(input: {
     input.onPublishFailure?.(publishError);
   }
   return "receipt";
+}
+
+/**
+ * Cross the non-detachable physical boundary for one dying attempt. Temporal's
+ * cancellation signal is intentionally absent: cancellation is transport, not
+ * proof that sandbox tools and attempt-owned credential writers have drained.
+ * A replacement may be admitted only after this function resolves and the
+ * caller durably persists or signals the exact quiescence receipt.
+ */
+export async function drainAttemptOwnedSandboxWriters(input: {
+  toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
+  cancellationReason?: unknown;
+  toolspaceTokenRenewal: Pick<ToolspaceTokenRenewalController, "stop"> | null;
+  runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
+}): Promise<void> {
+  if (input.toolCancellationFence) {
+    input.toolCancellationFence.cancel(
+      input.cancellationReason ?? new Error("TURN_ATTEMPT_FENCED"),
+    );
+    await input.toolCancellationFence.waitForQuiescence();
+  }
+  await input.toolspaceTokenRenewal?.stop();
+  await input.runCredentialRenewal?.stop();
 }
 
 /**
@@ -658,16 +767,8 @@ export function providerContextTokens(
     | null
     | undefined,
 ): number | null {
-  const total = usage?.totalTokens;
-  if (typeof total === "number" && Number.isFinite(total) && total > 0) {
-    return total;
-  }
-  const input = usage?.inputTokens;
-  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
-    return null;
-  }
-  const output = usage?.outputTokens;
-  return input + (typeof output === "number" && Number.isFinite(output) && output > 0 ? output : 0);
+  const total = normalizeModelCallUsage(usage).totalTokens;
+  return total !== null && total > 0 ? total : null;
 }
 
 /**
@@ -698,6 +799,260 @@ type TurnEventPublisher = (
   immediate?: boolean,
 ) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
 
+export type ModelResponseUsageEventState = {
+  responseUsageCount: number;
+  providerContextRevision: number;
+  lastProviderContextTokensObserved: number | null;
+  claimedSourceKeys: Set<string>;
+};
+
+export type CompactionModelUsageEventState = {
+  usageCount: number;
+  claimedSourceKeys: Set<string>;
+};
+
+export function createModelResponseUsageEventState(
+  claimedSourceKeys: Set<string> = new Set<string>(),
+): ModelResponseUsageEventState {
+  return {
+    responseUsageCount: 0,
+    providerContextRevision: 0,
+    lastProviderContextTokensObserved: null,
+    claimedSourceKeys,
+  };
+}
+
+export function createCompactionModelUsageEventState(
+  claimedSourceKeys: Set<string> = new Set<string>(),
+): CompactionModelUsageEventState {
+  return { usageCount: 0, claimedSourceKeys };
+}
+
+export function modelResponseUsageContextSignal(
+  state: ModelResponseUsageEventState,
+): { revision: number; totalTokens: number } | null {
+  return state.lastProviderContextTokensObserved === null
+    ? null
+    : {
+        revision: state.providerContextRevision,
+        totalTokens: state.lastProviderContextTokensObserved,
+      };
+}
+
+/**
+ * Process one SDK stream event through the exact production usage path.
+ *
+ * The pinned Responses SDK mirrors one provider terminal response as both a
+ * normalized `response_done` and a raw `model/response.completed` event. Claim
+ * the stable response/source key before lease renewal or any usage side effect,
+ * and advance the positional ordinal only for a newly claimed response. The
+ * durable `agent.model.usage` source-key fence remains the cross-restart
+ * authority: a replay may retry the idempotent billing write, but it cannot
+ * advance process-local metrics, provider context, or attempt-owned signals.
+ */
+export async function processModelResponseUsageEvent(input: {
+  event: Parameters<typeof modelResponseUsageFromSdkEvent>[0];
+  state: ModelResponseUsageEventState;
+  dispatchId: string | null;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  metricProvider: string;
+  externallyBilled: boolean;
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  emittedSourceKeys: Set<string>;
+  renewLease: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+  setLastInputTokens: (tokens: number) => Promise<void>;
+}): Promise<
+  | { status: "not_usage" }
+  | { status: "duplicate"; sourceKey: string }
+  | { status: "processed"; sourceKey: string; authoritative: boolean }
+> {
+  const responseUsage = modelResponseUsageFromSdkEvent(input.event);
+  if (!responseUsage) {
+    return { status: "not_usage" };
+  }
+
+  const responseOrdinal = input.state.responseUsageCount + 1;
+  const sourceKey = modelUsageSourceKey({
+    responseId: responseUsage.responseId,
+    dispatchId: input.dispatchId,
+    positionalKey: `response-${responseOrdinal}`,
+  });
+  if (input.state.claimedSourceKeys.has(sourceKey)) {
+    return { status: "duplicate", sourceKey };
+  }
+  input.state.claimedSourceKeys.add(sourceKey);
+  input.state.responseUsageCount = responseOrdinal;
+
+  const normalizedUsage = normalizeModelCallUsage(responseUsage.usage);
+  const accountContext = modelCallAccountContext({
+    servingCredentialId: input.servingCredentialId,
+    priorSessionCredentialId: input.priorSessionCredentialId,
+    isFirstCallOfTurn: responseOrdinal === 1,
+  });
+  let authoritative = false;
+  await recordCompletedModelCallBeforeOwnershipFences({
+    renewLease: input.renewLease,
+    leaseLost: input.leaseLost,
+    leaseLostMessage: input.leaseLostMessage,
+    recordUsage: async () => {
+      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        model: input.model,
+        externallyBilled: input.externallyBilled,
+        usage: responseUsage.usage,
+        normalizedUsage,
+        sourceKey,
+        observability: input.observability,
+      });
+      authoritative = await emitModelCallUsage({
+        observability: input.observability,
+        publish: input.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey,
+        usage: responseUsage,
+        normalizedUsage,
+        servingAccountHash: accountContext.servingAccountHash,
+        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+        emittedSourceKeys: input.emittedSourceKeys,
+      });
+      const observedInput = normalizedUsage.telemetry.inputTokens;
+      if (authoritative && observedInput !== null && observedInput > 0) {
+        recordModelInputTokens(input.observability, input.metricProvider, observedInput);
+      }
+    },
+    recordAttemptSignals: async () => {
+      if (!authoritative) return;
+      const observedTotal = normalizedUsage.totalTokens;
+      if (observedTotal !== null) {
+        input.state.lastProviderContextTokensObserved = observedTotal;
+        input.state.providerContextRevision += 1;
+      }
+      const observedInput = normalizedUsage.telemetry.inputTokens;
+      if (observedInput !== null && observedInput > 0) {
+        await input.setLastInputTokens(observedInput);
+      }
+    },
+  });
+  return { status: "processed", sourceKey, authoritative };
+}
+
+/**
+ * Apply the same source-key authority ordering to the compaction summarizer's
+ * usage callback. The summarizer can retry or mirror a terminal response just
+ * like the main stream, so claim before lease renewal, billing, durable usage,
+ * logging, or cache metrics. Durable source-key idempotency remains the
+ * cross-process authority after a worker restart.
+ */
+export async function processCompactionModelUsageEvent(input: {
+  usage: ModelResponseUsage;
+  state: CompactionModelUsageEventState;
+  dispatchId: string | null;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  externallyBilled: boolean;
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  emittedSourceKeys: Set<string>;
+  renewLease: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+}): Promise<
+  | { status: "duplicate"; sourceKey: string }
+  | { status: "processed"; sourceKey: string; authoritative: boolean }
+> {
+  const usageOrdinal = input.state.usageCount + 1;
+  const sourceKey = modelUsageSourceKey({
+    responseId: input.usage.responseId,
+    dispatchId: input.dispatchId,
+    positionalKey: `compaction-${usageOrdinal}`,
+  });
+  if (input.state.claimedSourceKeys.has(sourceKey)) {
+    return { status: "duplicate", sourceKey };
+  }
+  input.state.claimedSourceKeys.add(sourceKey);
+  input.state.usageCount = usageOrdinal;
+
+  const accountContext = modelCallAccountContext({
+    servingCredentialId: input.servingCredentialId,
+    priorSessionCredentialId: input.priorSessionCredentialId,
+    isFirstCallOfTurn: usageOrdinal === 1,
+  });
+  const normalizedUsage = normalizeModelCallUsage(input.usage.usage);
+  let authoritative = false;
+  await recordCompletedModelCallBeforeOwnershipFences({
+    renewLease: input.renewLease,
+    leaseLost: input.leaseLost,
+    leaseLostMessage: input.leaseLostMessage,
+    recordUsage: async () => {
+      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        model: input.model,
+        externallyBilled: input.externallyBilled,
+        usage: input.usage.usage,
+        normalizedUsage,
+        sourceKey,
+        observability: input.observability,
+      });
+      authoritative = await emitModelCallUsage({
+        observability: input.observability,
+        publish: input.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey,
+        usage: input.usage,
+        normalizedUsage,
+        servingAccountHash: accountContext.servingAccountHash,
+        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+        emittedSourceKeys: input.emittedSourceKeys,
+      });
+    },
+  });
+  return { status: "processed", sourceKey, authoritative };
+}
+
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
   publish: TurnEventPublisher | null;
@@ -710,22 +1065,25 @@ export async function emitModelCallUsage(input: {
   model: string;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
+  normalizedUsage?: ModelCallUsageNormalization;
   // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
   // durable event). The opaque serving-account tag and whether it changed since
   // the session's previous call — the account-switch hypothesis for cache misses.
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
-}): Promise<void> {
+}): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
       ? (input.usage as { usage?: unknown }).usage
       : null;
   if (!usage || typeof usage !== "object") {
-    return;
+    return false;
   }
-  if (input.emittedSourceKeys?.has(input.sourceKey)) return;
-  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  if (input.emittedSourceKeys?.has(input.sourceKey)) return false;
+  const normalizedUsage =
+    input.normalizedUsage ?? normalizeModelCallUsage(usage as ModelCallUsageInput);
+  const telemetry = normalizedUsage.telemetry;
   const appended = await input.publish?.(
     [
       {
@@ -754,7 +1112,7 @@ export async function emitModelCallUsage(input: {
       typeof event.payload === "object" &&
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
-  if (!authoritative) return;
+  if (!authoritative) return false;
   try {
     input.observability.info("model call usage", {
       accountId: input.accountId,
@@ -768,6 +1126,7 @@ export async function emitModelCallUsage(input: {
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
+      cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       ...(input.servingAccountHash !== undefined
         ? { servingAccountHash: input.servingAccountHash }
@@ -776,9 +1135,41 @@ export async function emitModelCallUsage(input: {
         ? { accountChangedFromPrevCall: input.accountChangedFromPrevCall }
         : {}),
     });
+    if (normalizedUsage.rejectedFields.length > 0) {
+      input.observability.warn("model call usage fields rejected", {
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey: input.sourceKey,
+        rejectedFields: normalizedUsage.rejectedFields.join(","),
+      });
+    }
   } catch {
     // Durable event + billing already committed; logging is best-effort only.
   }
+  try {
+    applyCodexCacheTelemetry(input.observability, input.provider, normalizedUsage);
+  } catch {
+    // Durable event + billing already committed; metrics are best-effort only.
+  }
+  return true;
+}
+
+/**
+ * Apply one authoritative, normalized model-call usage frame to the shared
+ * prompt-cache metrics. The durable source-key fence in `emitModelCallUsage`
+ * owns idempotency; this helper must never receive raw provider values.
+ */
+export function applyCodexCacheTelemetry(
+  observability: ActivityServices["observability"],
+  provider: string,
+  normalizedUsage: ModelCallUsageNormalization,
+): void {
+  recordModelCacheTokens(observability, provider, {
+    cachedTokens: normalizedUsage.telemetry.cachedTokens,
+    cacheWriteTokens: normalizedUsage.telemetry.cacheWriteTokens,
+    promptTokens: normalizedUsage.telemetry.inputTokens,
+  });
 }
 
 export function historyRowsToAppend(
@@ -1371,7 +1762,7 @@ export function acceptsPromptCacheKeyForTurn(
  * The turn hot path never refreshes Codex usage — only the usage API route does — so a
  * window that has actually reset still reads OVER-threshold from the stale cache, which
  * would idle-loop forever. Before idling, refresh LIVE usage for every connected account
- * the cache marks over-threshold (bounded to the account count), which re-writes the
+ * the cache marks exhausted (bounded to the account count), which re-writes the
  * cache columns, then return the re-read rows so the ranker can pick up a genuinely-reset
  * window THIS turn. A refresh/read failure is swallowed (fall back to the pre-refresh rows
  * + the bounded idle). Cooling (429'd) accounts are NOT refreshed: their exhaustedUntil
@@ -1381,17 +1772,29 @@ async function refreshCappedCodexUsageRows(
   db: ActivityServices["db"],
   settings: Settings,
   workspaceId: string,
-  accounts: CodexAccountStatus[],
+  accounts: Array<
+    Pick<
+      CodexAccountStatus,
+      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+    >
+  >,
   capacitySignals: {
     signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"] | undefined;
     wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   },
-): Promise<CodexAccountStatus[]> {
-  const nearPct = settings.codexRotationNearExhaustionPct;
+): Promise<
+  Array<
+    Pick<
+      CodexAccountStatus,
+      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+    >
+  >
+> {
   const stale = accounts.filter(
     (a) =>
       a.status === "active" &&
-      ((a.primaryUsedPercent ?? 0) >= nearPct || (a.secondaryUsedPercent ?? 0) >= nearPct),
+      ((a.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
+        (a.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT),
   );
   if (stale.length === 0) {
     return accounts;
@@ -1440,7 +1843,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     const noteCancellationRequested = (): void => {
       cancellationRequestedAt ??= performance.now();
     };
-    cancellationSignal?.addEventListener("abort", noteCancellationRequested, { once: true });
+    cancellationSignal?.addEventListener("abort", noteCancellationRequested, {
+      once: true,
+    });
     const dispatchId = activityContext?.info.activityId ?? randomUUID();
     const activityStarted = performance.now();
     const activitySpan = observability.startSpan("worker.run_agent_segment", {
@@ -1483,17 +1888,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       runtimeMetricsHooksForObservability(observability),
     );
     let isCodexTurn = false;
+    let isExternallyBilledTurn = false;
     let executionGeneration = 0;
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
     let redispatchesAtDispatch = 0;
-    const saveRunStateFenced = async (state: Parameters<typeof saveRunState>[1]): Promise<void> => {
-      if (!(await saveRunState(db, state))) {
-        throw new TurnAttemptFencedError(
-          "turn execution generation was fenced while saving run state",
-        );
-      }
-    };
     const setLastInputTokensFenced = async (lastInputTokens: number): Promise<void> => {
       if (!turnId || executionGeneration <= 0) {
         throw new Error("Turn attempt was not initialized before token accounting");
@@ -1646,8 +2045,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // credential-renewal policy: the worker, not the model, owns renewal of run-scoped Git
     // credentials for a multi-day turn. The controller is attached only after
     // the initial seed reached a real cloud box and is drained before capture.
-    let gitCredentialRenewal: GitCredentialRenewalController | null = null;
+    let gitCredentialRenewals: GitCredentialRenewalController[] = [];
     let gitCredentialRenewalClosed = false;
+    // Generic host-owned run material has its own attempt-scoped renewal and
+    // write handle. It is always drained and wiped before workspace capture.
+    let runCredentialRenewal: RunCredentialRenewalController | null = null;
+    let runCredentialRenewalClosed = false;
+    let runCredentialSession: RunCredentialCommandSession | null = null;
+    // The delegated Toolspace bearer has a one-hour TTL. Renewal is attempt-
+    // owned and attaches only after the initial token file reached a real
+    // sandbox session; finalization drains an in-flight replacement.
+    let toolspaceTokenRenewal: ToolspaceTokenRenewalController | null = null;
+    let toolspaceTokenRenewalClosed = false;
     // MID-SESSION snapshot single-flight guard: the heartbeat tick fires every
     // 10s but a Modal filesystem snapshot can take longer — never overlap two
     // captures on one box. The in-flight capture's promise is held so the
@@ -1697,7 +2106,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
-    const toolCancellationFenceRef: { current: TurnToolCancellationFence | null } = {
+    const toolCancellationFenceRef: {
+      current: TurnToolCancellationFence | null;
+    } = {
       current: null,
     };
     let publish: TurnEventPublisher | null = null;
@@ -1714,6 +2125,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: SessionStatus;
           activeTurnId: string | null;
           consumeRequestedCompactionFailure?: boolean;
+          runState?: ApplySessionTurnSettlementInput["runState"];
         }) => Promise<boolean>)
       | null = null;
     let turnStartedPublished = false;
@@ -2014,6 +2426,16 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // Reassigned after the variable set loads; the publish closure is
     // created (and used for turn.started) before the variableSet is available.
     let redact: (payload: unknown) => unknown = identityRedactor;
+    const secretRedactions = new Map<string, string>();
+    const publishedRunCredentialNotices = new Set<string>();
+    const registerSecretRedactions = (secrets: SecretForRedaction[]): void => {
+      for (const secret of secrets) {
+        if (!secretRedactions.has(secret.value)) secretRedactions.set(secret.value, secret.name);
+      }
+      redact = createSecretRedactor(
+        [...secretRedactions].map(([value, name]) => ({ name, value })),
+      );
+    };
     let variableSetId = "";
     // Rig telemetry (M3): set once the session loads; empty string for a rig-less
     // turn (mirrors variableSetId). Read by the activity span's finally block.
@@ -2045,10 +2467,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.workspaceId,
         settings,
       );
-      // Read the active-credential flag ONCE (P2-b) and thread it through both the
-      // routing overlay (settingsWithCodexCredential) and the billed-turn predicate
-      // (isCodexBilledTurn below), so a concurrent disconnect/reconnect cannot make
-      // provider-injection and billing disagree about whether this is a codex turn.
+      // Read the active-credential flag once for the runtime capability overlay.
+      // Accepted billing/provider identity comes from the turn policy below,
+      // never from this mutable health snapshot.
       const codexSubscriptionActive = await workspaceCodexSubscriptionActive(
         db,
         mcpSettings,
@@ -2076,13 +2497,50 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const turn = claim.turn;
       turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
+      const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
+      const policyForAbsent =
+        claimedPolicy.kind === "valid"
+          ? claimedPolicy.policy
+          : resolveTurnExecutionPolicyV1(capabilitySettings, legacyTurnExecutionPolicyInput(turn));
+      const installedPolicy = await installOrReadTurnExecutionPolicyForAttempt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        policyForAbsent,
+      });
+      if (!installedPolicy.accepted) {
+        throw new TurnAttemptFencedError(
+          `turn execution policy was fenced: ${installedPolicy.reason}`,
+        );
+      }
+      const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
+        capabilitySettings,
+        installedPolicy.policy,
+        {
+          modelId: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+        },
+      );
+      const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+      const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
+      isExternallyBilledTurn = billingIdentity.externallyBilled;
+      isCodexTurn = billingIdentity.codexSubscription;
       triggerEventId = turn.triggerEventId;
       const trigger = await getSessionEvent(db, input.workspaceId, triggerEventId);
       if (!trigger) {
         throw new Error(`Trigger event not found: ${triggerEventId}`);
       }
+      const humanInputResume = await getHumanInputResumeForEvent(
+        db,
+        input.workspaceId,
+        input.sessionId,
+        trigger,
+      );
       triggerType = trigger.type;
-      executionGeneration = turn.executionGeneration;
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
@@ -2091,21 +2549,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           0,
       );
       turnLifecycleMetricsFor(observability).start(turnId);
-      // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
-      // workspace credential). Computed once and threaded through every billing
-      // gate + the usage recorder so a turn paid by the user's ChatGPT/Codex plan
-      // consumes ZERO OpenGeni credits and never feeds an OpenGeni cap. Resolved
-      // here (before resolvedModel at the routing step) because the pre-turn gate
-      // below needs it; mirrors the same active-credential read the codex provider
-      // overlay uses, so billing and routing agree on what "codex" is.
-      isCodexTurn = await isCodexBilledTurn({
-        db,
-        settings,
-        workspaceId: input.workspaceId,
-        model: turn.model,
-        active: codexSubscriptionActive,
-      });
-      // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
+      // §7.5 P3 — pass the accepted billing attribution (externally funded turns
+      // bypass OpenGeni credit/token gates)
       // AND the optional host `entitlements` port (when bound, its admitRun replaces
       // the local credit read). Unset port → today's local-ledger path.
       await waitForTurnOperation(
@@ -2114,7 +2559,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           db,
           input.accountId,
           input.workspaceId,
-          isCodexTurn,
+          isExternallyBilledTurn,
           entitlements,
         ),
         cancellationSignal,
@@ -2160,6 +2605,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // one exactly like production.
       codexLeaseHolderId = dispatchId;
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+      const claimedModelUsageSourceKeys = new Set<string>();
       const emittedModelUsageSourceKeys = new Set<string>();
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
@@ -2249,6 +2695,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           sessionStatus: inputSettlement.sessionStatus,
           activeTurnId: inputSettlement.activeTurnId,
           events: inputs,
+          ...(inputSettlement.runState ? { runState: inputSettlement.runState } : {}),
           ...(recordingMutation ? { recording: recordingMutation } : {}),
           ...(compactionRequestFailure ? { compactionRequestFailure } : {}),
         });
@@ -2338,7 +2785,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             sessionPinSource,
             sessionLastCredentialId: sessionCodex?.lastCredentialId ?? null,
             continuationCredentialId: continuationCodexCredentialId,
-            nearExhaustionPct: settings.codexRotationNearExhaustionPct,
             now: new Date(),
           });
 
@@ -2548,7 +2994,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (codexLeaseHeld) startCodexLeaseHeartbeat();
 
         const eligibleCount = leased.accounts.filter((account) =>
-          isCodexCredentialEligible(account, settings.codexRotationNearExhaustionPct, new Date()),
+          isCodexCredentialEligible(account, new Date()),
         ).length;
         const poolDepth = eligibleCount === 0 ? "zero" : eligibleCount === 1 ? "one" : "many";
         observability.incrementCounter({
@@ -2725,7 +3171,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           if (goalActive && goal) {
             const authoritativeResetAt = authoritativeCodexCapacityResetAt(
               leased.accounts,
-              settings.codexRotationNearExhaustionPct,
               new Date(),
             );
             const armed = await armCodexCapacityWait(db, {
@@ -2867,7 +3312,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Resolved after turn.started so a composition conflict (two enabled
       // packs declaring images) fails the turn with its plain error instead
       // of failing the activity opaquely.
-      const packRuntime = await resolveWorkspacePackRuntime(db, input.workspaceId);
+      const [packRuntime, skillLibraryRuntime] = await Promise.all([
+        resolveWorkspacePackRuntime(db, input.workspaceId),
+        resolveWorkspaceSkillLibraryRuntime(db, input.workspaceId),
+      ]);
       // RIG BINDING (M3): load the session's FROZEN rig version (resolved+frozen
       // at create). Everything rig-derived below (image precedence, env default
       // sets, setup hook, credential hooks, doctrine, lease/telemetry stamps) is
@@ -2915,6 +3363,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         db,
         input.workspaceId,
         input.sessionId,
+        input.attemptId,
         baseRunSettings,
       );
       // Multi-provider per-turn routing → the provider gating (compaction mode,
@@ -2930,7 +3379,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // a chat-only Fireworks model. Resolving against the default-model settings
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
-      const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      const resolvedModel = runtime.resolveTurnModel(
+        capabilitySettings,
+        turnExecutionPolicy.productModelId,
+      );
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -2945,25 +3397,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // and the main run both come later in this scope), so a blocked
       // provider/model can never be reached through ANY stamp path: explicit
       // turn model, inherited session default, goal-continuation inheritance,
-      // or the legacy null-resolution fallback (null → the built-in
-      // OpenAI/Azure client, attributed here via builtinProviderId so a policy
-      // blocking the built-in also blocks that fallback — this exact path is
-      // how bare-model turns silently spent real Azure money in a
-      // codex-intended workspace). Fail-loud, never a silent remap.
+      // or the legacy null-resolution fallback. The frozen execution policy is
+      // the attribution source even if an injected test runtime returns no
+      // concrete resolved model. Fail-loud, never a silent remap.
       {
         const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
         if (workspaceModelPolicy) {
-          const effectiveProviderId = resolvedModel
-            ? resolvedModel.provider.id
-            : builtinProviderId(capabilitySettings);
           const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
-            providerId: effectiveProviderId,
-            modelId: turn.model,
+            providerId: turnExecutionPolicy.providerId,
+            modelId: turnExecutionPolicy.productModelId,
           });
           if (!verdict.allowed) {
             throw new WorkspaceModelPolicyBlockedError(
-              turn.model,
-              effectiveProviderId,
+              turnExecutionPolicy.productModelId,
+              turnExecutionPolicy.providerId,
               verdict.reason,
             );
           }
@@ -3035,52 +3482,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
         ? input.sessionId
         : undefined;
-      let compactionUsageCount = 0;
+      const compactionUsageState = createCompactionModelUsageEventState(
+        claimedModelUsageSourceKeys,
+      );
       const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-        await recordCompletedModelCallBeforeOwnershipFences({
+        await processCompactionModelUsageEvent({
+          usage,
+          state: compactionUsageState,
+          dispatchId: modelUsageDispatchId,
+          settings,
+          db,
+          observability,
+          publish,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+          providerApi: resolvedModel?.provider.api ?? "responses",
+          model: resolvedModel?.configured.id ?? turn.model,
+          externallyBilled: isExternallyBilledTurn,
+          turnAttemptId: input.attemptId,
+          servingCredentialId: effectiveCodexCredentialId,
+          priorSessionCredentialId: priorSessionCodexCredentialId,
+          emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => renewCodexLease("model_usage"),
           leaseLost: () => codexLeaseLost,
           leaseLostMessage: "Codex credential lease expired during context compaction",
-          recordUsage: async () => {
-            compactionUsageCount += 1;
-            const sourceKey = modelUsageSourceKey({
-              responseId: usage.responseId,
-              dispatchId: modelUsageDispatchId,
-              positionalKey: `compaction-${compactionUsageCount}`,
-            });
-            const responseAccountCtx = modelCallAccountContext({
-              servingCredentialId: effectiveCodexCredentialId,
-              priorSessionCredentialId: priorSessionCodexCredentialId,
-              isFirstCallOfTurn: compactionUsageCount === 1,
-            });
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              model: resolvedModel?.configured.id ?? turn.model,
-              isCodexTurn,
-              usage: usage.usage,
-              sourceKey,
-              observability,
-            });
-            await emitModelCallUsage({
-              observability,
-              publish,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-              providerApi: resolvedModel?.provider.api ?? "responses",
-              model: resolvedModel?.configured.id ?? turn.model,
-              sourceKey,
-              usage,
-              servingAccountHash: responseAccountCtx.servingAccountHash,
-              accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-              emittedSourceKeys: emittedModelUsageSourceKeys,
-            });
-          },
         });
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
@@ -3090,7 +3518,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 summarizeForCompaction(s, m, {
                   client: resolvedModel.client,
                   api: resolvedModel.provider.api,
-                  model: resolvedModel.configured.id,
+                  model: turnExecutionPolicy.upstreamModelId,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                   onUsage: recordCompactionUsage,
                   ...(systemInstructions ? { systemInstructions } : {}),
@@ -3099,6 +3527,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
               summarizeForCompaction(s, m, {
+                model: turnExecutionPolicy.upstreamModelId,
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
                 ...(systemInstructions ? { systemInstructions } : {}),
@@ -3175,7 +3604,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                       compacted: false,
                     },
                   },
-                  { type: "session.status.changed", payload: { status: "idle" } },
+                  {
+                    type: "session.status.changed",
+                    payload: { status: "idle" },
+                  },
                 ],
                 turnStatus: "failed",
                 sessionStatus: "idle",
@@ -3290,7 +3722,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       // Redact EVERY exported secret value (rig defaults + session set) from turn
       // output, not just the session set's.
-      redact = createSecretRedactor(
+      registerSecretRedactions(
         Object.entries(sandboxWorkspaceEnvironmentValues).map(([name, value]) => ({ name, value })),
       );
       // EFFECTIVE compute backend, resolved ONCE at turn start (Case B + Stage D
@@ -3363,6 +3795,50 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         settings.sandboxOwnershipEnabled && runSettings.sandboxBackend !== "none"
           ? groupBoxBackend
           : runSettings.sandboxBackend;
+      const effectiveRunCredentialBackend = activeSandboxBackend ?? groupBoxBackend;
+      const runCredentialResolver =
+        effectiveRunCredentialBackend === "none"
+          ? null
+          : await waitForTurnOperation(
+              bindRunCredentialResolver({
+                db,
+                connectionCredentials: connectionCredentials ?? null,
+                accountId: input.accountId,
+                workspaceId: input.workspaceId,
+                session,
+                turn,
+                attemptId: input.attemptId,
+                effectiveSandboxBackend: effectiveRunCredentialBackend,
+                variableSet: workspaceVariableSet
+                  ? {
+                      id: workspaceVariableSet.id,
+                      name: workspaceVariableSet.name,
+                    }
+                  : null,
+              }),
+              cancellationSignal,
+              undefined,
+            );
+      const initialRunCredentialMaterial = runCredentialResolver
+        ? await waitForTurnOperation(
+            runCredentialResolver.resolve({
+              purpose: "provision",
+              forceRefresh: false,
+            }),
+            cancellationSignal,
+            undefined,
+          )
+        : null;
+      if (initialRunCredentialMaterial) {
+        registerSecretRedactions(initialRunCredentialMaterial.redactions);
+        for (const payload of runCredentialAuthNeededPayloads(initialRunCredentialMaterial)) {
+          publishedRunCredentialNotices.add(JSON.stringify(payload));
+          await publish!([{ type: "credential.auth_needed", payload }], true);
+        }
+      }
+      const runCredentialsNote = initialRunCredentialMaterial
+        ? runCredentialModelNote(initialRunCredentialMaterial)
+        : undefined;
       throwIfTurnOperationCancelled(cancellationSignal);
       await waitForTurnOperation(
         ensureTurnModalRegistryImage(runSettings, sandboxCreationBackend),
@@ -3403,12 +3879,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           selection.repositoryIds,
         );
       };
+      // Git and MCP credentials share one lineage snapshot for this turn. A
+      // host that supplies both ports must never see two independently resolved
+      // roots for the same execution merely because the call sites are far apart.
+      const needsHostCredentialRoot = Boolean(
+        connectionCredentials?.gitCredentials || connectionCredentials?.mcpCredentials,
+      );
+      const hostCredentialRootSessionId = needsHostCredentialRoot
+        ? await getSessionRootId(db, input.workspaceId, input.sessionId)
+        : null;
+      if (needsHostCredentialRoot && !hostCredentialRootSessionId) {
+        throw new Error(`cannot resolve host credentials for missing session ${input.sessionId}`);
+      }
+      const gitCredentialAuthority =
+        connectionCredentials?.gitCredentials && hostCredentialRootSessionId
+          ? gitCredentialAuthorityForTurn({
+              sessionId: input.sessionId,
+              rootSessionId: hostCredentialRootSessionId,
+              attemptId: input.attemptId,
+              turn,
+            })
+          : undefined;
+      const toolspaceAuthority = {
+        sessionId: input.sessionId,
+        turnId: turn.id,
+        attemptId: input.attemptId,
+        executionGeneration: turn.executionGeneration,
+      };
       const {
         environment: sandboxEnvironment,
         gitToken: sandboxGitToken,
         gitTokens: sandboxGitTokens,
         gitTokenExpiresAt: sandboxGitTokenExpiresAt,
+        gitCredentialBindings: sandboxGitCredentialBindings,
         toolspaceToken: sandboxToolspaceToken,
+        toolspaceTokenExpiresAt: sandboxToolspaceTokenExpiresAt,
       } = await waitForTurnOperation(
         sandboxEnvironmentForRun(
           runSettings,
@@ -3421,86 +3926,298 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             deferGitHubToken:
               activeSandboxBackend !== "selfhosted" && establishPolicy === "on-demand",
             scope: connectionScope,
+            ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
             gitCredentials: connectionCredentials?.gitCredentials,
             authorizeGitHubTokenMint,
-            sessionId: input.sessionId,
-            runId: turnId,
+            toolspaceAuthority,
           },
         ),
         cancellationSignal,
         undefined,
       );
-
-      const initialGitCredentials: MintedRunGitCredentials | undefined = sandboxGitTokens
-        ? {
-            gitTokens: sandboxGitTokens,
-            expiresAt: sandboxGitTokenExpiresAt ?? {},
-          }
+      const sandboxToolspaceTokenFile = sandboxToolspaceToken
+        ? toolspaceTokenFileFromEnvironment(sandboxEnvironment, input.sessionId)
         : undefined;
+
+      const initialGitCredentials: MintedRunGitCredentials | undefined =
+        sandboxGitCredentialBindings
+          ? {
+              bindings: sandboxGitCredentialBindings,
+              gitTokens: sandboxGitTokens ?? {},
+              expiresAt: sandboxGitTokenExpiresAt ?? {},
+            }
+          : undefined;
       const attachGitCredentialRenewal = async (
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
       ): Promise<void> => {
-        if (!initial || Object.keys(initial.gitTokens).length === 0) return;
-        const previous = gitCredentialRenewal;
-        gitCredentialRenewal = null;
-        await previous?.stop();
+        if (!initial || initial.bindings.length === 0) return;
+        const previous = gitCredentialRenewals;
+        gitCredentialRenewals = [];
+        await Promise.all(previous.map(async (controller) => await controller.stop()));
         if (gitCredentialRenewalClosed) return;
 
-        const providers = Object.keys(initial.gitTokens) as GitCredentialProvider[];
-        const controller = startGitCredentialRenewalLoop({
-          expectedProviders: providers,
-          initialExpiresAt: initial.expiresAt,
-          mint: async () =>
-            await mintRunGitCredentials(runSettings, turnResources, {
-              scope: connectionScope,
-              gitCredentials: connectionCredentials?.gitCredentials,
-              authorizeGitHubTokenMint,
-            }),
-          write: async (tokens) => {
-            const runAs = sandboxRunAs(runSettings);
-            await refreshGitProviderTokenFiles(tokenSession, tokens, {
-              ...(runAs ? { runAs } : {}),
-              ...(toolCancellationFenceRef.current
+        const controllers = initial.bindings.map((initialBinding) => {
+          let pendingBinding: typeof initialBinding | undefined;
+          return startGitCredentialRenewalLoop({
+            expectedProviders: [initialBinding.provider],
+            initialExpiresAt: initialBinding.expiresAt
+              ? { [initialBinding.provider]: initialBinding.expiresAt }
+              : {},
+            mint: async () => {
+              const binding = await mintRunGitCredentialBinding(
+                runSettings,
+                turnResources,
+                initialBinding.provider,
+                initialBinding.credentialBindingId,
+                {
+                  scope: connectionScope,
+                  ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
+                  gitCredentials: connectionCredentials?.gitCredentials,
+                  authorizeGitHubTokenMint,
+                },
+              );
+              if (binding) {
+                assertGitCredentialRenewalTransportUnchanged(initialBinding, binding);
+              }
+              pendingBinding = binding;
+              return binding
                 ? {
-                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      toolCancellationFenceRef.current,
-                    ),
+                    bindings: [binding],
+                    gitTokens: { [binding.provider]: binding.token },
+                    expiresAt: binding.expiresAt ? { [binding.provider]: binding.expiresAt } : {},
                   }
-                : {}),
+                : undefined;
+            },
+            write: async () => {
+              if (!pendingBinding) {
+                throw new Error("credential renewal produced no binding token");
+              }
+              const runAs = sandboxRunAs(runSettings);
+              await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding], {
+                ...(runAs ? { runAs } : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
+              });
+            },
+            onSuccess: ({ providers: renewedProviders }) => {
+              for (const provider of renewedProviders) {
+                observability.incrementCounter({
+                  name: "opengeni_git_credential_renewals_total",
+                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                  labels: { provider, outcome: "completed" },
+                });
+              }
+            },
+            onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
+              for (const provider of failedProviders) {
+                observability.incrementCounter({
+                  name: "opengeni_git_credential_renewals_total",
+                  help: "Host-managed Git credential renewal attempts by provider and outcome.",
+                  labels: { provider, outcome: "error" },
+                });
+              }
+              observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+                sessionId: input.sessionId,
+                turnId,
+                providers: failedProviders.join(","),
+                errorClass,
+                retryDelayMs,
+              });
+            },
+          });
+        });
+        if (gitCredentialRenewalClosed) {
+          await Promise.all(controllers.map(async (controller) => await controller.stop()));
+          return;
+        }
+        gitCredentialRenewals = controllers;
+      };
+
+      const attachToolspaceTokenRenewal = async (
+        tokenSession: ToolspaceTokenWriterSession,
+        initialExpiresAt = sandboxToolspaceTokenExpiresAt,
+      ): Promise<void> => {
+        if (!sandboxToolspaceToken || !initialExpiresAt) return;
+        const previous = toolspaceTokenRenewal;
+        toolspaceTokenRenewal = null;
+        await previous?.stop();
+        if (toolspaceTokenRenewalClosed) return;
+
+        const mint = async () =>
+          await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority);
+        const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
+          const runAs = sandboxRunAs(runSettings);
+          await refreshToolspaceTokenFile(tokenSession, material.token, {
+            ...(runAs ? { runAs } : {}),
+            ...(sandboxToolspaceTokenFile
+              ? {
+                  tokenFile: sandboxToolspaceTokenFile,
+                  legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
+                }
+              : {}),
+            ...(toolCancellationFenceRef.current
+              ? {
+                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                    toolCancellationFenceRef.current,
+                  ),
+                }
+              : {}),
+          });
+        };
+        let renewalExpiresAt = initialExpiresAt;
+        if (renewalExpiresAt.getTime() <= Date.now() + TOOLSPACE_TOKEN_EXPIRY_LEAD_MS) {
+          const fresh = await mint();
+          if (!fresh) {
+            throw new Error("Toolspace token mint became unavailable during sandbox setup");
+          }
+          await write(fresh);
+          renewalExpiresAt = fresh.expiresAt;
+        }
+        const controller = startToolspaceTokenRenewalLoop({
+          initialExpiresAt: renewalExpiresAt,
+          mint,
+          write,
+          onSuccess: () => {
+            observability.incrementCounter({
+              name: "opengeni_toolspace_token_renewals_total",
+              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              labels: { outcome: "completed" },
             });
           },
-          onSuccess: ({ providers: renewedProviders }) => {
-            for (const provider of renewedProviders) {
-              observability.incrementCounter({
-                name: "opengeni_git_credential_renewals_total",
-                help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                labels: { provider, outcome: "completed" },
-              });
-            }
-          },
-          onFailure: ({ providers: failedProviders, retryDelayMs, errorClass }) => {
-            for (const provider of failedProviders) {
-              observability.incrementCounter({
-                name: "opengeni_git_credential_renewals_total",
-                help: "Host-managed Git credential renewal attempts by provider and outcome.",
-                labels: { provider, outcome: "error" },
-              });
-            }
-            observability.warn("Sandbox Git credential renewal failed; retry scheduled", {
+          onFailure: ({ retryDelayMs, errorClass }) => {
+            observability.incrementCounter({
+              name: "opengeni_toolspace_token_renewals_total",
+              help: "Sandbox Toolspace token renewal attempts by outcome.",
+              labels: { outcome: "error" },
+            });
+            observability.warn("Sandbox Toolspace token renewal failed; retry scheduled", {
               sessionId: input.sessionId,
               turnId,
-              providers: failedProviders.join(","),
               errorClass,
               retryDelayMs,
             });
           },
         });
-        if (gitCredentialRenewalClosed) {
+        if (toolspaceTokenRenewalClosed) {
           await controller.stop();
           return;
         }
-        gitCredentialRenewal = controller;
+        toolspaceTokenRenewal = controller;
+      };
+
+      const attachRunCredentialRenewal = async (
+        credentialSession: RunCredentialCommandSession,
+      ): Promise<void> => {
+        if (!runCredentialResolver) return;
+        const previous = runCredentialRenewal;
+        runCredentialRenewal = null;
+        await previous?.stop();
+        if (runCredentialRenewalClosed) return;
+        runCredentialSession = credentialSession;
+
+        if (!initialRunCredentialMaterial) {
+          await clearRunCredentials(
+            credentialSession,
+            input.sessionId,
+            toolCancellationFenceRef.current
+              ? toolCancellationFenceRef.current.runSandboxCommand.bind(
+                  toolCancellationFenceRef.current,
+                )
+              : undefined,
+          );
+          return;
+        }
+
+        const write = async (
+          material: NormalizedRunCredentialMaterial | null,
+          pruneOtherAttempts = false,
+        ): Promise<void> => {
+          if (!material) {
+            await clearRunCredentialsForAttempt(credentialSession, {
+              sessionId: input.sessionId,
+              attemptId: input.attemptId,
+              executionGeneration,
+            });
+            return;
+          }
+          registerSecretRedactions(material.redactions);
+          await materializeRunCredentials(credentialSession, material, {
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            executionGeneration,
+            ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
+            ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
+            ...(material.authNeeded.length > 0 &&
+            Object.keys(material.environment).length === 0 &&
+            material.files.length === 0
+              ? { prunePreviousGenerations: true }
+              : {}),
+            ...(toolCancellationFenceRef.current
+              ? {
+                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                    toolCancellationFenceRef.current,
+                  ),
+                }
+              : {}),
+          });
+          for (const payload of runCredentialAuthNeededPayloads(material)) {
+            const key = JSON.stringify(payload);
+            if (publishedRunCredentialNotices.has(key)) continue;
+            publishedRunCredentialNotices.add(key);
+            await publish!([{ type: "credential.auth_needed", payload }], true);
+          }
+        };
+
+        const initialExpiryMs = initialRunCredentialMaterial.expiresAt?.getTime() ?? null;
+        const seed =
+          initialExpiryMs !== null && initialExpiryMs <= Date.now() + RUN_CREDENTIAL_EXPIRY_LEAD_MS
+            ? await runCredentialResolver.resolve({
+                purpose: "provision",
+                forceRefresh: true,
+              })
+            : initialRunCredentialMaterial;
+        await write(seed, true);
+        if (runCredentialRenewalClosed) return;
+        const controller = startRunCredentialRenewalLoop({
+          initialExpiresAt: seed?.expiresAt ?? null,
+          resolve: async () =>
+            await runCredentialResolver.resolve({
+              purpose: "renewal",
+              forceRefresh: true,
+            }),
+          write: async (material) => await write(material),
+          onSuccess: ({ authNeeded }) => {
+            observability.incrementCounter({
+              name: "opengeni_run_credential_renewals_total",
+              help: "Host-managed run credential renewal attempts by outcome.",
+              labels: { outcome: authNeeded ? "auth_needed" : "completed" },
+            });
+          },
+          onFailure: ({ retryDelayMs, errorClass }) => {
+            observability.incrementCounter({
+              name: "opengeni_run_credential_renewals_total",
+              help: "Host-managed run credential renewal attempts by outcome.",
+              labels: { outcome: "error" },
+            });
+            observability.warn("Host run credential renewal failed; retry scheduled", {
+              sessionId: input.sessionId,
+              turnId,
+              errorClass,
+              retryDelayMs,
+            });
+          },
+        });
+        if (runCredentialRenewalClosed) {
+          await controller.stop();
+          return;
+        }
+        runCredentialRenewal = controller;
       };
 
       // P1.2 ownership inversion (gated, default OFF). With the flag off this
@@ -3720,11 +4437,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       );
       throwIfWorkerShuttingDown();
       throwIfTurnCancelled();
+      const mcpCredentialRootSessionId =
+        connectionCredentials?.mcpCredentials && hostCredentialRootSessionId
+          ? hostCredentialRootSessionId
+          : input.sessionId;
       // Wrap MCP prep in the codex ALS so the codex_apps connect handshake
       // (initialize + tools/list) can resolve the per-workspace bearer from
       // codexRequestStorage (runtime/codexAppsMcpRequestInit). withCodex is the
       // identity on every non-codex turn, so this is a no-op for existing paths.
-      const resolveCredential = buildConnectionTokenResolver(db, runSettings);
+      const resolveCredential = connectionTokenResolverForTurn({
+        db,
+        settings: runSettings,
+        connectionCredentials: connectionCredentials ?? null,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        rootSessionId: mcpCredentialRootSessionId,
+        attemptId: input.attemptId,
+        turn,
+      });
       preparedTools = await waitForTurnOperation(
         withCodex(() =>
           runtime.prepareTools(runSettings, turnTools, {
@@ -3792,6 +4523,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : {};
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
+        ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
         genesisTitleHint: isGenesisTurn,
         persistentSessionSettings: {
           titleIsSet: Boolean(session.title?.trim()),
@@ -3810,6 +4542,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(activeSandboxBackend !== "selfhosted" && sandboxGitTokens
           ? { gitTokenSeeds: sandboxGitTokens }
           : {}),
+        ...(activeSandboxBackend !== "selfhosted" && sandboxGitCredentialBindings
+          ? { gitCredentialBindings: sandboxGitCredentialBindings }
+          : {}),
         ...(activeSandboxBackend !== "selfhosted" && !sandboxGitTokens && sandboxGitToken
           ? { gitTokenSeed: sandboxGitToken }
           : {}),
@@ -3820,7 +4555,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // than toolspace:call for its own session (own-session-bound, turn TTL,
         // budgeted, approval-tools excluded). The runtime seeds it to the box's
         // token file over the same exec channel, off-manifest, on every backend.
-        ...(sandboxToolspaceToken ? { toolspaceTokenSeed: sandboxToolspaceToken } : {}),
+        ...(sandboxToolspaceToken
+          ? {
+              toolspaceTokenSeed: sandboxToolspaceToken,
+              toolspaceTokenSessionId: input.sessionId,
+            }
+          : {}),
         ...(activeSandboxBackend ? { activeSandboxBackend } : {}),
         fileResourceDownloads,
         mcpServers: preparedTools.mcpServers,
@@ -3888,12 +4628,21 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await maybeStartOnTurnRecording(resolvedSandbox, activeSandboxBackend);
         },
         ...(packRuntime.skills.length > 0 ? { packSkills: packRuntime.skills } : {}),
+        ...(skillLibraryRuntime.skillLibrarySkills.length > 0
+          ? {
+              skillLibrarySkills: skillLibraryRuntime.skillLibrarySkills,
+              skillLibrarySelections: skillLibraryRuntime.skillLibrarySelections,
+            }
+          : {}),
         ...(workspaceAgentInstructions ? { instructionsTemplate: workspaceAgentInstructions } : {}),
         ...(workspaceMemory ? { workspaceMemory } : {}),
         // Per-session persona tier (session > workspace > deployment default).
         // Composed system-level AFTER the workspace persona so it refines it for
         // this one session; absent ⇒ byte-identical to today's composition.
         ...(session.instructions ? { sessionInstructions: session.instructions } : {}),
+        // Exact host context captured when this turn was accepted. It is
+        // system-level and disappears with the turn rather than entering chat.
+        ...(turn.turnInstructions ? { turnInstructions: turn.turnInstructions } : {}),
         ...workspaceEnvironmentOption,
         // RIG RUNTIME (M3): the doctrine block, the setup-script hook (only when
         // the frozen version carries a non-empty script), and the rig credential
@@ -3942,10 +4691,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ? undefined
                 : await mintRunGitCredentials(runSettings, turnResources, {
                     scope: connectionScope,
+                    ...(gitCredentialAuthority ? { authority: gitCredentialAuthority } : {}),
                     gitCredentials: connectionCredentials?.gitCredentials,
                     authorizeGitHubTokenMint,
                   });
             const lazyGitTokens = lazyGitCredentials?.gitTokens;
+            const lazyToolspaceToken = sandboxToolspaceToken
+              ? await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority)
+              : undefined;
             const provisioned = await resumeBoxForTurn(
               {
                 db,
@@ -3971,10 +4724,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               lazyHolderId,
             );
             await publishSandboxLifecycleEvents(provisioned);
+            await attachRunCredentialRenewal(
+              provisioned.established.session as RunCredentialCommandSession,
+            );
+            const provisionedSetupSession = initialRunCredentialMaterial
+              ? withRunCredentialsSession(
+                  provisioned.established.session as object,
+                  input.sessionId,
+                )
+              : provisioned.established.session;
             await runOwnedSandboxSetup(
               agent,
               provisioned.established.session as never,
-              provisioned.established.session as never,
+              provisionedSetupSession as never,
               {
                 settings: runSettings,
                 environment: sandboxEnvironment,
@@ -3982,6 +4744,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   await publish?.([{ type: event.type, payload: event.payload }], true);
                 },
                 ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                ...(lazyGitCredentials?.bindings
+                  ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
+                  : {}),
+                ...(lazyToolspaceToken
+                  ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
+                  : {}),
                 ...(toolCancellationFenceRef.current
                   ? {
                       commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
@@ -3990,6 +4758,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     }
                   : {}),
               },
+            );
+            await attachToolspaceTokenRenewal(
+              provisioned.established.session as ToolspaceTokenWriterSession,
+              lazyToolspaceToken?.expiresAt,
             );
             await attachGitCredentialRenewal(
               provisioned.established.session as GitCredentialTokenWriterSession,
@@ -4257,6 +5029,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             turnId: activeTurnId,
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
+            ...(runCredentialsNote ? { runCredentialsNote } : {}),
           },
         );
         runInput = prepared.input;
@@ -4346,13 +5119,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return outcome;
       };
 
+      // Keep response usage identity across every stream attempt in this
+      // activity. Context compaction retries the same logical dispatch by
+      // calling runStreamAttempt again; resetting this state there would reuse
+      // the first no-response-ID fallback key and suppress a real model call.
+      const modelResponseUsageState = createModelResponseUsageEventState(
+        claimedModelUsageSourceKeys,
+      );
       const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
         if (!runInput) {
           throw new Error("Run input was not prepared");
         }
         stream = undefined;
         batcher = null;
-        let responseUsageCount = 0;
         // The SDK emits every processed call item for one model response before
         // it emits any result for that response. Keep that response-local batch
         // in memory so an orphan from an older response cannot pin later stable
@@ -4362,8 +5141,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let currentToolBatchCompletedCallIds = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
-        let lastProviderContextTokensObserved: number | null = null;
-        let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
@@ -4408,13 +5185,37 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   },
                 }
               : {}),
-            contextCompactionSignal: () =>
-              lastProviderContextTokensObserved === null
-                ? null
-                : {
-                    revision: providerContextRevision,
-                    totalTokens: lastProviderContextTokensObserved,
+            ...(sandboxToolspaceToken && sandboxToolspaceTokenExpiresAt && !lazyOwnedSandbox
+              ? {
+                  onToolspaceTokenSessionReady: async (
+                    tokenSession: ToolspaceTokenWriterSession,
+                  ) => {
+                    const renewalSession =
+                      activeSandboxBackend === "selfhosted"
+                        ? tokenSession
+                        : ((setupBoxSession as ToolspaceTokenWriterSession | null) ?? tokenSession);
+                    await attachToolspaceTokenRenewal(renewalSession);
                   },
+                }
+              : {}),
+            ...(runCredentialResolver
+              ? {
+                  runCredentialSessionId: input.sessionId,
+                  ...(!lazyOwnedSandbox
+                    ? {
+                        onRunCredentialSessionReady: async (
+                          credentialSession: RunCredentialCommandSession,
+                        ) => {
+                          const pinnedCredentialSession = setupBoxSession
+                            ? (setupBoxSession as RunCredentialCommandSession)
+                            : credentialSession;
+                          await attachRunCredentialRenewal(pinnedCredentialSession);
+                        },
+                      }
+                    : {}),
+                }
+              : {}),
+            contextCompactionSignal: () => modelResponseUsageContextSignal(modelResponseUsageState),
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
             ...(toolCancellationFenceRef.current
@@ -4453,76 +5254,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
-            const responseUsage = modelResponseUsageFromSdkEvent(next.value);
-            if (responseUsage) {
-              await recordCompletedModelCallBeforeOwnershipFences({
-                renewLease: () => renewCodexLease("model_usage"),
-                leaseLost: () => codexLeaseLost,
-                leaseLostMessage: "Codex credential lease expired during the active turn",
-                recordUsage: async () => {
-                  responseUsageCount += 1;
-                  const responseSourceKey = modelUsageSourceKey({
-                    responseId: responseUsage.responseId,
-                    dispatchId: modelUsageDispatchId,
-                    positionalKey: `response-${responseUsageCount}`,
-                  });
-                  // Within a turn the serving credential is fixed, so a switch can only
-                  // surface on the turn's FIRST model call (vs the session's prior).
-                  const responseAccountCtx = modelCallAccountContext({
-                    servingCredentialId: effectiveCodexCredentialId,
-                    priorSessionCredentialId: priorSessionCodexCredentialId,
-                    isFirstCallOfTurn: responseUsageCount === 1,
-                  });
-                  await recordModelUsageAndDebitCredits(settings, db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    model: turn.model,
-                    isCodexTurn,
-                    usage: responseUsage.usage,
-                    sourceKey: responseSourceKey,
-                    observability,
-                  });
-                  await emitModelCallUsage({
-                    observability,
-                    publish,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                    providerApi: resolvedModel?.provider.api ?? "responses",
-                    model: turn.model,
-                    sourceKey: responseSourceKey,
-                    usage: responseUsage,
-                    servingAccountHash: responseAccountCtx.servingAccountHash,
-                    accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-                    emittedSourceKeys: emittedModelUsageSourceKeys,
-                  });
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
-                    recordModelInputTokens(observability, streamProvider, observed);
-                  }
-                  const observedTotal = providerContextTokens(responseUsage.usage);
-                  if (observedTotal !== null) {
-                    lastProviderContextTokensObserved = observedTotal;
-                    providerContextRevision += 1;
-                  }
-                  // Prompt-cache efficiency for this response — same usage frame as the
-                  // input-token accounting above, so the two are always consistent.
-                  recordModelCacheTokens(observability, streamProvider, {
-                    cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
-                    promptTokens: responseUsage.usage?.inputTokens,
-                  });
-                },
-                recordAttemptSignals: async () => {
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
-                    await setLastInputTokensFenced(observed);
-                  }
-                },
-              });
+            const responseUsageResult = await processModelResponseUsageEvent({
+              event: next.value,
+              state: modelResponseUsageState,
+              dispatchId: modelUsageDispatchId,
+              settings,
+              db,
+              observability,
+              publish,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              turnAttemptId: input.attemptId,
+              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+              providerApi: resolvedModel?.provider.api ?? "responses",
+              model: turn.model,
+              metricProvider: streamProvider,
+              externallyBilled: isExternallyBilledTurn,
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              emittedSourceKeys: emittedModelUsageSourceKeys,
+              renewLease: () => renewCodexLease("model_usage"),
+              leaseLost: () => codexLeaseLost,
+              leaseLostMessage: "Codex credential lease expired during the active turn",
+              setLastInputTokens: setLastInputTokensFenced,
+            });
+            if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
@@ -4532,7 +5290,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   db,
                   input.accountId,
                   input.workspaceId,
-                  isCodexTurn,
+                  isExternallyBilledTurn,
                   entitlements,
                 );
               } catch (limitError) {
@@ -4657,103 +5415,134 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           stream.completed.catch(() => undefined),
           cancellationSignal,
         );
-        if (responseUsageCount === 0) {
+        if (modelResponseUsageState.responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
-          const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
-            ?.inputTokens;
-          if (typeof aggregateInput === "number" && aggregateInput > 0) {
-            const aggregateContext = providerContextTokens(
-              aggregateUsage as {
-                inputTokens?: number;
-                outputTokens?: number;
-                totalTokens?: number;
-              },
-            );
-            if (aggregateContext !== null) {
-              lastProviderContextTokensObserved = aggregateContext;
-              providerContextRevision += 1;
-            }
-          }
+          const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
+          const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,
             dispatchId: modelUsageDispatchId,
             positionalKey: "aggregate",
           });
-          // The single aggregate frame is this turn's only model-usage record, so
-          // it is the first (account-switch surfaces here just like a first response).
-          const aggregateAccountCtx = modelCallAccountContext({
-            servingCredentialId: effectiveCodexCredentialId,
-            priorSessionCredentialId: priorSessionCodexCredentialId,
-            isFirstCallOfTurn: true,
-          });
-          recordModelCacheTokens(observability, streamProvider, {
-            cachedTokens: modelCallUsageTelemetry(
-              aggregateUsage as Parameters<typeof modelCallUsageTelemetry>[0],
-            ).cachedTokens,
-            promptTokens: (aggregateUsage as { inputTokens?: unknown } | undefined)?.inputTokens as
-              | number
-              | undefined,
-          });
-          await recordCompletedModelCallBeforeOwnershipFences({
-            renewLease: () => renewCodexLease("model_usage"),
-            leaseLost: () => codexLeaseLost,
-            leaseLostMessage: "Codex credential lease expired during the active turn",
-            recordUsage: async () => {
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                model: turn.model,
-                isCodexTurn,
-                usage: aggregateUsage,
-                sourceKey: aggregateSourceKey,
-                observability,
-              });
-              await emitModelCallUsage({
-                observability,
-                publish,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: aggregateSourceKey,
-                usage: { usage: aggregateUsage },
-                servingAccountHash: aggregateAccountCtx.servingAccountHash,
-                accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
-                emittedSourceKeys: emittedModelUsageSourceKeys,
-              });
-            },
-            recordAttemptSignals: async () => {
-              if (typeof aggregateInput === "number" && aggregateInput > 0) {
-                await setLastInputTokensFenced(aggregateInput);
-              }
-            },
-          });
+          if (!claimedModelUsageSourceKeys.has(aggregateSourceKey)) {
+            claimedModelUsageSourceKeys.add(aggregateSourceKey);
+            // The single aggregate frame is this turn's only model-usage record, so
+            // it is the first (account-switch surfaces here just like a first response).
+            const aggregateAccountCtx = modelCallAccountContext({
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              isFirstCallOfTurn: true,
+            });
+            let aggregateAuthoritative = false;
+            await recordCompletedModelCallBeforeOwnershipFences({
+              renewLease: () => renewCodexLease("model_usage"),
+              leaseLost: () => codexLeaseLost,
+              leaseLostMessage: "Codex credential lease expired during the active turn",
+              recordUsage: async () => {
+                await recordModelUsageAndDebitCredits(settings, db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  turnAttemptId: input.attemptId,
+                  model: turn.model,
+                  externallyBilled: isExternallyBilledTurn,
+                  usage: aggregateUsage,
+                  normalizedUsage: normalizedAggregateUsage,
+                  sourceKey: aggregateSourceKey,
+                  observability,
+                });
+                aggregateAuthoritative = await emitModelCallUsage({
+                  observability,
+                  publish,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  model: turn.model,
+                  sourceKey: aggregateSourceKey,
+                  usage: { usage: aggregateUsage },
+                  normalizedUsage: normalizedAggregateUsage,
+                  servingAccountHash: aggregateAccountCtx.servingAccountHash,
+                  accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
+                  emittedSourceKeys: emittedModelUsageSourceKeys,
+                });
+                if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
+                  recordModelInputTokens(observability, streamProvider, aggregateInput);
+                }
+              },
+              recordAttemptSignals: async () => {
+                if (!aggregateAuthoritative) return;
+                if (normalizedAggregateUsage.totalTokens !== null) {
+                  modelResponseUsageState.lastProviderContextTokensObserved =
+                    normalizedAggregateUsage.totalTokens;
+                  modelResponseUsageState.providerContextRevision += 1;
+                }
+                if (aggregateInput !== null && aggregateInput > 0) {
+                  await setLastInputTokensFenced(aggregateInput);
+                }
+              },
+            });
+          }
         }
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
           const approvals = runtime.serializeApprovals(stream.interruptions);
-          await saveRunStateFenced({
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            turnId: activeTurnId,
-            expectedExecutionGeneration: executionGeneration,
-            expectedAttemptId: input.attemptId,
-            serializedRunState: stream.state.toString(),
-            pendingApprovals: approvals,
-            // Record the account freezing this state so a resume on a DIFFERENT
-            // codex account strips its account-bound reasoning before replay (HOLE C).
-            frozenCodexCredentialId: effectiveCodexCredentialId,
-          });
+          const humanInputInterruptions =
+            runtime.serializeHumanInputRequests?.(stream.interruptions) ?? [];
+          const humanInputRequests = await Promise.all(
+            humanInputInterruptions.map(async (interruption) => {
+              const id = stableHumanInputRequestId(
+                input.sessionId,
+                activeTurnId,
+                interruption.toolCallId,
+              );
+              const existing = await getSessionHumanInputRequest(
+                db,
+                input.workspaceId,
+                input.sessionId,
+                id,
+              );
+              if (existing && existing.status !== "pending") {
+                throw new Error(`Settled human-input request ${id} reappeared as an interruption`);
+              }
+              const expiresAt = existing?.expiresAt
+                ? new Date(existing.expiresAt)
+                : interruption.input.expiresInSeconds
+                  ? new Date(Date.now() + interruption.input.expiresInSeconds * 1000)
+                  : null;
+              return {
+                id,
+                toolCallId: interruption.toolCallId,
+                questions: interruption.input.questions,
+                allowSkip: interruption.input.allowSkip,
+                expiresAt,
+                isNew: existing === null,
+              };
+            }),
+          );
+          const requestEvents = humanInputRequests
+            .filter((request) => request.isNew)
+            .map((request) => ({
+              type: "session.humanInput.requested" as const,
+              payload: {
+                request: {
+                  id: request.id,
+                  questions: request.questions,
+                  allowSkip: request.allowSkip,
+                  expiresAt: request.expiresAt?.toISOString() ?? null,
+                },
+              },
+            }));
           if (
             !(await settle!({
               events: [
-                { type: "session.requiresAction", payload: { approvals } },
+                ...requestEvents,
+                ...(approvals.length > 0
+                  ? [{ type: "session.requiresAction" as const, payload: { approvals } }]
+                  : []),
                 {
                   type: "session.status.changed",
                   payload: { status: "requires_action" },
@@ -4762,6 +5551,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               turnStatus: "requires_action",
               sessionStatus: "requires_action",
               activeTurnId,
+              runState: {
+                serializedRunState: stream.state.toString(),
+                pendingApprovals: approvals,
+                frozenCodexCredentialId: effectiveCodexCredentialId,
+                humanInputRequests: humanInputRequests.map(
+                  ({ isNew: _isNew, ...request }) => request,
+                ),
+              },
             }))
           ) {
             return claimedResult({ status: "cancelled" });
@@ -4811,6 +5608,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           unit: "run",
           sourceResourceType: "session_turn",
           sourceResourceId: activeTurnId,
+          sessionId: input.sessionId,
+          turnId: activeTurnId,
+          turnAttemptId: input.attemptId,
           idempotencyKey: `usage:agent_run.completed:${activeTurnId}`,
         });
         activityStatus = "idle";
@@ -5105,6 +5905,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           unit: "run",
           sourceResourceType: "session_turn",
           sourceResourceId: turnId,
+          sessionId: input.sessionId,
+          turnId,
+          turnAttemptId: input.attemptId,
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
@@ -5270,12 +6073,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   : {}),
               }
             : null;
-          const cooldownUntil = codexCredentialCooldownUntil(
-            codexCredentialFailure,
-            serving,
-            settings.codexRotationNearExhaustionPct,
-            now,
-          );
+          const cooldownUntil = codexCredentialCooldownUntil(codexCredentialFailure, serving, now);
           const statePersisted =
             codexLeaseHolderId && codexLeaseGeneration !== null
               ? await quarantineCodexCredentialForLease(db, {
@@ -5320,7 +6118,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeCredentialId: rotation.activeCredentialId,
                 priorCredentialId: effectiveCodexCredentialId,
                 accounts,
-                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
                 now: new Date(),
                 usedConnectors: serving?.connectorNamespaces ?? [],
               })
@@ -5443,7 +6240,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             const until = codexCredentialCooldownUntil(
               { kind: "quota", cooldownSeconds: usageLimit.resetsInSeconds },
               serving,
-              settings.codexRotationNearExhaustionPct,
               new Date(),
             )!;
             // Finding 1a: INSPECT the cooldown-write result. A swallowed best-effort
@@ -5481,7 +6277,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               const newHome = shardCredentialForSession({
                 sessionId: input.sessionId,
                 accounts: fresh,
-                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
                 now: new Date(),
               });
               if (newHome) {
@@ -5530,16 +6325,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               } else {
                 // Every account capped/cooling → idle until the earliest reset across all.
                 rotated = true;
-                allCappedResetAt = earliestCodexReset(
-                  fresh,
-                  settings.codexRotationNearExhaustionPct,
-                  new Date(),
-                );
-                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(
-                  fresh,
-                  settings.codexRotationNearExhaustionPct,
-                  new Date(),
-                );
+                allCappedResetAt = earliestCodexReset(fresh, new Date());
+                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(fresh, new Date());
               }
             } else {
               const decision = chooseRotationActive({
@@ -5547,7 +6334,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 activeCredentialId: rotation.activeCredentialId,
                 priorCredentialId: effectiveCodexCredentialId,
                 accounts: fresh,
-                nearExhaustionPct: settings.codexRotationNearExhaustionPct,
                 now: new Date(),
                 // P4: the just-capped serving account's connector set is the proxy for
                 // "what this session has access to" — prefer a covering failover target.
@@ -5574,11 +6360,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               } else if (decision.kind === "allCapped") {
                 rotated = true;
                 allCappedResetAt = decision.earliestResetAt;
-                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(
-                  fresh,
-                  settings.codexRotationNearExhaustionPct,
-                  new Date(),
-                );
+                capacityAuthoritativeResetAt = authoritativeCodexCapacityResetAt(fresh, new Date());
               }
               // kind:"none" → fall through to today's single-account idle.
             }
@@ -5753,6 +6535,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           unit: "run",
           sourceResourceType: "session_turn",
           sourceResourceId: turnId,
+          sessionId: input.sessionId,
+          turnId,
+          turnAttemptId: input.attemptId,
           idempotencyKey: `usage:agent_run.completed:${turnId}`,
         });
         activityStatus = "idle";
@@ -5868,22 +6653,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
       try {
         const toolCancellationFence = toolCancellationFenceRef.current;
-        if (acknowledgeQuiescence && toolCancellationFence) {
-          // This is an AUTHORITATIVE safety wait, not best-effort housekeeping.
-          // It actively interrupts any turn-owned shell process and drains
-          // parallel filesystem/computer operations. Never race it against the
-          // already-aborted Temporal signal: the replacement queue may open only
-          // after the old attempt can no longer mutate the workspace.
-          toolCancellationFence.cancel(
-            cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FENCED"),
-          );
-          await toolCancellationFence.waitForQuiescence();
-          physicalToolQuiescenceConfirmed = true;
-        } else if (acknowledgeQuiescence) {
-          // A cancellation can arrive before sandbox-backed capabilities exist.
-          // At that boundary there are no tool calls to drain. Sandbox agent
-          // construction itself fails closed when a backend is present but no
-          // controller was installed.
+        // Toolspace and run-credential renewals are attempt-owned sandbox
+        // writers. Capture and close them before crossing the same authoritative
+        // boundary as tool calls; none of these drains may race the already-
+        // aborted Temporal signal.
+        toolspaceTokenRenewalClosed = true;
+        const toolspaceRenewalToStop =
+          toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
+        toolspaceTokenRenewal = null;
+        runCredentialRenewalClosed = true;
+        const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
+        runCredentialRenewal = null;
+        await drainAttemptOwnedSandboxWriters({
+          toolCancellationFence: acknowledgeQuiescence ? toolCancellationFence : null,
+          cancellationReason: cancellationSignal?.reason,
+          toolspaceTokenRenewal: toolspaceRenewalToStop,
+          runCredentialRenewal: runRenewalToStop,
+        });
+        if (acknowledgeQuiescence) {
+          // A cancellation before sandbox-backed capabilities exist still has
+          // no tool controller to drain. Sandbox agent construction fails closed
+          // when a backend exists but no controller was installed. Renewal
+          // writers, when present, were drained above in either case.
           physicalToolQuiescenceConfirmed = true;
         }
         if (acknowledgeQuiescence && physicalToolQuiescenceConfirmed) {
@@ -5955,11 +6746,42 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             });
           }
         }
+        // Deleting this attempt's credential generation is post-receipt
+        // housekeeping: pointer mutation is serialized with successor
+        // activation and the attempt-qualified check cannot erase a successor.
+        // It may therefore detach on cancellation without weakening the writer
+        // drain that gates the receipt above.
+        const credentialSessionToClear = runCredentialSession;
+        runCredentialSession = null;
+        if (credentialSessionToClear) {
+          const cleanup = clearRunCredentialsForAttempt(credentialSessionToClear, {
+            sessionId: input.sessionId,
+            attemptId: input.attemptId,
+            executionGeneration,
+          }).catch((error: unknown) => {
+            try {
+              observability.incrementCounter({
+                name: "opengeni_run_credential_cleanup_total",
+                help: "Attempt-owned run credential cleanup outcomes.",
+                labels: { outcome: "error" },
+              });
+              observability.warn("Attempt-owned run credential cleanup failed", {
+                sessionId: input.sessionId,
+                turnId,
+                attemptId: input.attemptId,
+                errorClass: error instanceof Error ? error.name : "UnknownError",
+              });
+            } catch {
+              // Cleanup observability must not own finalizer liveness.
+            }
+          });
+          await waitForTurnFinalizerStep(cleanup, finalizerSignal);
+        }
         gitCredentialRenewalClosed = true;
-        const renewalToStop = gitCredentialRenewal as GitCredentialRenewalController | null;
-        gitCredentialRenewal = null;
-        if (renewalToStop) {
-          await waitForTurnFinalizerStep(renewalToStop.stop(), finalizerSignal);
+        const renewalsToStop = gitCredentialRenewals;
+        gitCredentialRenewals = [];
+        for (const renewal of renewalsToStop) {
+          await waitForTurnFinalizerStep(renewal.stop(), finalizerSignal);
         }
         // Drain the buffered Connected Machine op events (infra failures + healed
         // recoveries) to durable session events — awaited, best-effort, never blocking
@@ -6212,7 +7034,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         observability.observeHistogram({
           name: "opengeni_turn_finalization_duration_seconds",
           help: "Agent turn finalization duration, including workspace housekeeping and lease release.",
-          labels: { cancellation_requested: String(cancellationRequestedAt !== null) },
+          labels: {
+            cancellation_requested: String(cancellationRequestedAt !== null),
+          },
           value: finalizationDurationSeconds,
         });
         if (cancellationRequestedAt !== null) {
@@ -6276,16 +7100,14 @@ async function assertGitHubResourcesRemainAuthorized(
 ): Promise<void> {
   // Must check exactly what sandboxEnvironmentForRun would mint a token for,
   // so the selection is derived from the same extraction as the mint path.
-  const selection = gitHubTokenMintSelection(resources);
-  if (!selection) {
-    return;
+  for (const selection of gitHubTokenMintSelections(resources)) {
+    await assertGitHubTokenMintSelectionAuthorized(
+      db,
+      workspaceId,
+      selection.installationId,
+      selection.repositoryIds,
+    );
   }
-  await assertGitHubTokenMintSelectionAuthorized(
-    db,
-    workspaceId,
-    selection.installationId,
-    selection.repositoryIds,
-  );
 }
 
 async function assertGitHubTokenMintSelectionAuthorized(
@@ -6500,7 +7322,6 @@ export function codexCredentialCooldownUntil(
     CodexAccountStatus,
     "primaryUsedPercent" | "primaryResetAt" | "secondaryUsedPercent" | "secondaryResetAt"
   > | null,
-  nearExhaustionPct: number,
   now: Date,
 ): Date | null {
   if (failure.kind === "auth" || failure.kind === "forbidden") {
@@ -6522,7 +7343,7 @@ export function codexCredentialCooldownUntil(
       ]
         .filter(
           (window): window is { used: number; reset: Date } =>
-            (window.used ?? 0) >= nearExhaustionPct &&
+            (window.used ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT &&
             window.reset instanceof Date &&
             window.reset.getTime() > now.getTime(),
         )
@@ -6726,21 +7547,21 @@ class BudgetExhaustedError extends Error {
   }
 }
 
-// Exported for unit testing the codex-billed bypass (codex-billing.test.ts); not part
-// of the activity surface. Takes BOTH `isCodexTurn` (codex-plan turns bypass the credit
-// and token gates) and the optional §7.5 P3 host `entitlements` port (when bound, its
-// `admitRun` REPLACES the local credit read for a non-codex turn; unset → local ledger).
+// Exported for unit testing the external-billing bypass (codex-billing.test.ts); not
+// part of the activity surface. Takes the accepted policy's billing attribution and
+// the optional §7.5 P3 host `entitlements` port (when bound, its `admitRun` REPLACES
+// the local credit read for an OpenGeni-metered turn; unset → local ledger).
 export async function ensureRunAllowed(
   settings: Settings,
   db: ActivityServices["db"],
   accountId: string,
   workspaceId: string,
-  isCodexTurn: boolean,
+  isExternallyBilledTurn: boolean,
   entitlements?: ActivityServices["entitlements"],
 ): Promise<void> {
-  // Codex-billed turns are paid by the user's ChatGPT/Codex plan: skip the
-  // credit-balance gate and the monthly token cap. The agent-run COUNT cap below
-  // is a volume/fairness quota (not a credit/cost gate) and is intentionally kept.
+  // Externally billed turns are paid outside OpenGeni: skip the credit-balance
+  // gate and monthly token cap. The agent-run COUNT cap below is a
+  // volume/fairness quota (not a credit/cost gate) and is intentionally kept.
   //
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
   // API edge exposes). For a non-codex turn, when the host binds `entitlements`, its
@@ -6754,7 +7575,7 @@ export async function ensureRunAllowed(
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
   // is consulted without ever double-charging.
   if (
-    !isCodexTurn &&
+    !isExternallyBilledTurn &&
     entitlements &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
@@ -6768,7 +7589,7 @@ export async function ensureRunAllowed(
       throw new Error(decision.reason || "insufficient OpenGeni credits");
     }
   } else if (
-    !isCodexTurn &&
+    !isExternallyBilledTurn &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
     const balance = await getBillingBalance(db, accountId);
@@ -6793,7 +7614,7 @@ export async function ensureRunAllowed(
         );
       }
     }
-    if (!isCodexTurn && limits.maxMonthlyTokensPerWorkspace) {
+    if (!isExternallyBilledTurn && limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "model.tokens",
@@ -6806,7 +7627,7 @@ export async function ensureRunAllowed(
   }
 }
 
-// Exported for unit testing the codex-billed bypass; not part of the activity surface.
+// Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
   db: ActivityServices["db"],
@@ -6815,9 +7636,11 @@ export async function recordModelUsageAndDebitCredits(
     workspaceId: string;
     sessionId: string;
     turnId: string;
+    turnAttemptId: string;
     model: string;
-    isCodexTurn: boolean;
-    usage?: ModelUsageInput | null;
+    externallyBilled: boolean;
+    usage?: ModelUsageInput | ModelCallUsageInput | null;
+    normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
     observability?: ActivityServices["observability"];
   },
@@ -6825,10 +7648,12 @@ export async function recordModelUsageAndDebitCredits(
   if (!input.usage) {
     return;
   }
-  const inputTokens = positiveInt(input.usage.inputTokens);
-  const outputTokens = positiveInt(input.usage.outputTokens);
-  const totalTokens = positiveInt(input.usage.totalTokens) || inputTokens + outputTokens;
-  // A codex-subscription turn is paid by the user's ChatGPT/Codex plan, so it
+  const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
+  const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
+  const inputTokens = sanitizedUsage.inputTokens ?? 0;
+  const outputTokens = sanitizedUsage.outputTokens ?? 0;
+  const totalTokens = sanitizedUsage.totalTokens ?? 0;
+  // An externally billed turn is paid outside OpenGeni, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
   // below would throw "Missing model pricing". We:
@@ -6837,7 +7662,7 @@ export async function recordModelUsageAndDebitCredits(
   //     any row would count against maxMonthlyTokensPerWorkspace);
   //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
   //   - never look up pricing and never debit credits.
-  if (input.isCodexTurn) {
+  if (input.externallyBilled) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -6846,6 +7671,9 @@ export async function recordModelUsageAndDebitCredits(
       unit: "usd_micros",
       sourceResourceType: "model_response",
       sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
     });
     return;
@@ -6859,6 +7687,9 @@ export async function recordModelUsageAndDebitCredits(
       unit: "tokens",
       sourceResourceType: "model_response",
       sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+      sessionId: input.sessionId,
+      turnId: input.turnId,
+      turnAttemptId: input.turnAttemptId,
       idempotencyKey: `usage:model.tokens:${input.turnId}:${input.sourceKey}`,
     });
   }
@@ -6869,7 +7700,7 @@ export async function recordModelUsageAndDebitCredits(
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, input.usage);
+  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage);
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -6878,6 +7709,9 @@ export async function recordModelUsageAndDebitCredits(
     unit: "usd_micros",
     sourceResourceType: "model_response",
     sourceResourceId: `${input.turnId}:${input.sourceKey}`,
+    sessionId: input.sessionId,
+    turnId: input.turnId,
+    turnAttemptId: input.turnAttemptId,
     idempotencyKey: `usage:model.cost:${input.turnId}:${input.sourceKey}`,
   });
   if (costMicros > 0) {
@@ -6900,18 +7734,26 @@ export async function recordModelUsageAndDebitCredits(
         // Additive: the prompt-cache slice of this call's input tokens, so the
         // per-call debit record carries cache efficiency alongside the token
         // counts. 0 when the provider did not report cached tokens.
-        cachedTokens: positiveInt(
-          modelCallUsageTelemetry(input.usage as Parameters<typeof modelCallUsageTelemetry>[0])
-            .cachedTokens,
-        ),
+        cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
   }
 }
 
-function positiveInt(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): ModelUsageInput {
+  return {
+    ...(normalized.telemetry.inputTokens !== null
+      ? { inputTokens: normalized.telemetry.inputTokens }
+      : {}),
+    ...(normalized.telemetry.outputTokens !== null
+      ? { outputTokens: normalized.telemetry.outputTokens }
+      : {}),
+    ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
+    ...(normalized.telemetry.cachedTokens !== null
+      ? { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }
+      : {}),
+  };
 }
 
 function startOfUtcMonth(): Date {

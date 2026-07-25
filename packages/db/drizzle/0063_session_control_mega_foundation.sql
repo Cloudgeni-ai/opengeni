@@ -1,5 +1,5 @@
 -- deployment-mode: maintenance
--- OPE-18/OPE-54: one-way queue/control maintenance cutover. Old workers are
+-- tracking-18/tracking-54: one-way queue/control maintenance cutover. Old workers are
 -- drained before this migration; obsolete columns are removed in this same
 -- transaction so no mixed runtime architecture can survive deployment.
 
