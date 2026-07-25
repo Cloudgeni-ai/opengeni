@@ -1,5 +1,11 @@
 import { CODEX_MODEL_ID_PREFIX } from "@opengeni/codex";
-import { configuredAllowedModels, policyProviderIdForModel, type Settings } from "@opengeni/config";
+import {
+  canonicalizeConfiguredModelId,
+  configuredAllowedModels,
+  policyProviderIdForModel,
+  resolveTurnExecutionPolicyV1,
+  type Settings,
+} from "@opengeni/config";
 import {
   CreateSessionRequest,
   ServiceTurnInitiator,
@@ -24,6 +30,7 @@ import {
   type ToolRef,
   type TurnInitiator,
   type TurnInitiatorContext,
+  type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import {
   createSession,
@@ -469,6 +476,7 @@ export async function createAndStartSession(input: {
   clientEventId?: string;
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
+  turnExecutionPolicy: TurnExecutionPolicyV1;
   sandboxBackend: Settings["sandboxBackend"];
   metadata: Record<string, unknown>;
   createdBy?: TurnInitiator;
@@ -627,6 +635,7 @@ async function finishStartSession(
     clientEventId?: string;
     model: string;
     reasoningEffort: Settings["openaiReasoningEffort"];
+    turnExecutionPolicy: TurnExecutionPolicyV1;
     sandboxBackend: Settings["sandboxBackend"];
     variableSet?: { id: string; name: string } | null;
     goal?: GoalSpec | null;
@@ -677,6 +686,7 @@ async function finishStartSession(
     sessionId: session.id,
     ...(input.clientEventId ? { clientEventId: input.clientEventId } : {}),
     reasoningEffortFallback: input.reasoningEffort,
+    turnExecutionPolicy: input.turnExecutionPolicy,
     createdEventPayload: {
       ...(input.variableSet
         ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
@@ -733,12 +743,16 @@ export function workflowIdForSession(sessionId: string): string {
  * later) and the MCP surfaces that share them validate identically and cannot
  * drift.
  */
-export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
+export function canonicalConfiguredModel(
+  settings: Settings,
+  model: string | null | undefined,
+): string | null | undefined {
   if (model === null || model === undefined) {
-    return;
+    return model;
   }
-  if (configuredAllowedModels(settings).includes(model)) {
-    return;
+  const canonicalModel = canonicalizeConfiguredModelId(settings, model);
+  if (configuredAllowedModels(settings).includes(canonicalModel)) {
+    return canonicalModel;
   }
   // Codex subscription models (codex/<slug>) are injected per-workspace by the
   // worker overlay at turn time, so they are never in the deployment-global
@@ -746,10 +760,14 @@ export function assertConfiguredModel(settings: Settings, model: string | null |
   // only surfaces them for a connected workspace, and the worker enforces the
   // actual connection (an unconnected workspace fails the turn with a clear
   // "no Codex subscription connected" error rather than a misleading 422 here).
-  if (settings.codexSubscriptionEnabled && model.startsWith(CODEX_MODEL_ID_PREFIX)) {
-    return;
+  if (settings.codexSubscriptionEnabled && canonicalModel.startsWith(CODEX_MODEL_ID_PREFIX)) {
+    return canonicalModel;
   }
   throw new HTTPException(422, { message: `model is not available: ${model}` });
+}
+
+export function assertConfiguredModel(settings: Settings, model: string | null | undefined): void {
+  canonicalConfiguredModel(settings, model);
 }
 
 /**
@@ -772,18 +790,25 @@ export async function assertWorkspaceModelPolicyAllows(
   if (model === null || model === undefined) {
     return;
   }
+  const canonicalModel = canonicalConfiguredModel(settings, model);
+  if (canonicalModel === null || canonicalModel === undefined) {
+    return;
+  }
   const policy = await getWorkspaceModelPolicy(db, workspaceId);
   if (!policy) {
     return;
   }
-  const providerId = policyProviderIdForModel(settings, model);
-  const verdict = evaluateWorkspaceModelPolicy(policy, { providerId, modelId: model });
+  const providerId = policyProviderIdForModel(settings, canonicalModel);
+  const verdict = evaluateWorkspaceModelPolicy(policy, {
+    providerId,
+    modelId: canonicalModel,
+  });
   if (!verdict.allowed) {
     throw new HTTPException(422, {
       message:
         verdict.reason === "provider"
-          ? `model "${model}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
-          : `model "${model}" is not allowed by this workspace's model policy`,
+          ? `model "${canonicalModel}" is not allowed by this workspace's model policy: provider "${providerId}" is not in the allowed providers`
+          : `model "${canonicalModel}" is not allowed by this workspace's model policy`,
     });
   }
 }
@@ -906,9 +931,11 @@ export async function postUserMessageTurn(input: {
   credentialEncryptionKey?: Uint8Array | null;
   controlEtag?: string | null;
   expectedDraftRevision?: number | null;
+  reasoningEffortFallback?: Settings["openaiReasoningEffort"];
+  turnExecutionPolicy: TurnExecutionPolicyV1;
 }): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
   const { db, bus, workflowClient, settings, accountId, workspaceId, sessionId } = input;
-  const requestedModel = input.model ?? null;
+  const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
   const requestedReasoningEffort = input.reasoningEffort ?? null;
   // Reject an explicit per-message model the host does not expose; an omitted
   // model inherits the session's model downstream (always a configured id).
@@ -939,7 +966,8 @@ export async function postUserMessageTurn(input: {
           tools: input.tools,
           model: requestedModel,
           reasoningEffort: requestedReasoningEffort,
-          reasoningEffortFallback: settings.openaiReasoningEffort,
+          reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
+          turnExecutionPolicy: input.turnExecutionPolicy,
           source: input.origin === "operator" ? "api" : "user",
           toolsProvided: input.toolsProvided ?? true,
           ...(input.promptPayloadIdentity
@@ -1091,19 +1119,23 @@ export async function createSessionForRequest(
       frozenRigVersionId = rig.activeVersion.id;
     }
   }
-  assertConfiguredModel(settings, payload.model);
+  const model = canonicalConfiguredModel(settings, payload.model ?? settings.openaiModel);
+  if (model === null || model === undefined) {
+    throw new Error("effective session model unexpectedly resolved to null");
+  }
   // Session creation persists the EFFECTIVE model — an omitted payload.model
   // stamps the deployment default onto the session — so the policy must vet
   // that effective value, not just explicit ones (a restricted workspace's
   // default-model session would otherwise be born blocked).
-  await assertWorkspaceModelPolicyAllows(
-    db,
-    settings,
-    workspaceId,
-    payload.model ?? settings.openaiModel,
-  );
-  const model = payload.model ?? settings.openaiModel;
+  await assertWorkspaceModelPolicyAllows(db, settings, workspaceId, model);
   const reasoningEffort = payload.reasoningEffort ?? settings.openaiReasoningEffort;
+  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+    modelId: model,
+    requestedModelId: payload.model ?? null,
+    modelSource: payload.model === undefined ? "deployment" : "explicit",
+    reasoningEffort,
+    reasoningSource: payload.reasoningEffort === undefined ? "deployment" : "explicit",
+  });
   // Parent linkage was resolved above, before context validation. A child with
   // no explicit permission override inherits the creating session's effective
   // grant instead of silently expanding to standalone worker defaults.
@@ -1383,6 +1415,7 @@ export async function createSessionForRequest(
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
       model,
       reasoningEffort,
+      turnExecutionPolicy,
       // A shared spawn inherits the box's backend; a caller-supplied
       // sandboxBackend on a shared spawn is ignored (it is the same box). A
       // machine-targeted top-level create labels the home "selfhosted"
@@ -1592,6 +1625,27 @@ export async function acceptSessionUserMessage(
     }
   }
 
+  // Resolve and freeze the effective execution policy only for a genuinely new
+  // request. An already-accepted Send replays above before these mutable
+  // defaults, model policy, or limit inputs are consulted.
+  const requestedModel = canonicalConfiguredModel(settings, input.model ?? null) ?? null;
+  const effectiveModel =
+    canonicalConfiguredModel(settings, requestedModel ?? existingSession.model) ?? null;
+  if (effectiveModel === null) {
+    throw new Error("effective follow-up model unexpectedly resolved to null");
+  }
+  const sessionReasoningEffort = reasoningEffortForSession(
+    existingSession.metadata,
+    settings.openaiReasoningEffort,
+  );
+  const effectiveReasoningEffort = input.reasoningEffort ?? sessionReasoningEffort;
+  const turnExecutionPolicy = resolveTurnExecutionPolicyV1(settings, {
+    modelId: effectiveModel,
+    requestedModelId: input.model ?? null,
+    modelSource: input.model == null ? "session" : "explicit",
+    reasoningEffort: effectiveReasoningEffort,
+    reasoningSource: input.reasoningEffort == null ? "session" : "explicit",
+  });
   const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
     db,
     workspaceId,
@@ -1610,7 +1664,7 @@ export async function acceptSessionUserMessage(
     workspaceId,
     action: "agent_run:create",
     quantity: 1,
-    model: input.model ?? existingSession.model,
+    model: effectiveModel,
   });
   if (requestedResources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -1638,6 +1692,8 @@ export async function acceptSessionUserMessage(
     tools: requestedTools,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
+    reasoningEffortFallback: sessionReasoningEffort,
+    turnExecutionPolicy,
     mcpCredentialUpdates,
     delivery,
     origin,

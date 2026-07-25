@@ -8,6 +8,7 @@ import {
   UpdateWorkspaceRequest,
   UpdateWorkspaceSettingsRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
+  WorkspaceModelCatalogResponse,
   WorkspaceInferenceControlRequest,
   Workspace,
   WorkspaceMember,
@@ -36,6 +37,7 @@ import {
   updateWorkspace,
   updateWorkspaceSettings,
   upsertWorkspaceModelPolicy,
+  workspaceCodexSubscriptionActive,
 } from "@opengeni/db";
 import { boundWorkspaceControlHttpPage } from "@opengeni/events";
 import type { Hono } from "hono";
@@ -51,6 +53,18 @@ import {
 } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
 import { sseWorkspaceControlStream } from "../http/sse";
+import { buildWorkspaceModelCatalog } from "../model-catalog";
+import { canonicalizeConfiguredModelId, type Settings } from "@opengeni/config";
+
+export function canonicalWorkspacePolicyModelIds(
+  settings: Settings,
+  modelIds: string[] | null | undefined,
+): string[] | null {
+  if (modelIds === null || modelIds === undefined) {
+    return null;
+  }
+  return [...new Set(modelIds.map((modelId) => canonicalizeConfiguredModelId(settings, modelId)))];
+}
 
 export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.get("/v1/access/me", async (c) => {
@@ -151,7 +165,27 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Per-workspace model/provider availability policy (the HARD blocker over
   // which providers/models may serve a turn at all). Absent row reads as
-  // unrestricted {null, null}.
+  // unrestricted {null, null}. No Azure AD credential resolver is wired here,
+  // so bearer/federated definitions intentionally fail closed as not ready.
+  app.get("/v1/workspaces/:workspaceId/model-catalog", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    await requireAccessGrant(c, deps, workspaceId, "workspace:read");
+    const [policy, codexSubscriptionActive] = await Promise.all([
+      getWorkspaceModelPolicy(deps.db, workspaceId),
+      workspaceCodexSubscriptionActive(deps.db, deps.settings, workspaceId),
+    ]);
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      WorkspaceModelCatalogResponse.parse(
+        buildWorkspaceModelCatalog({
+          settings: deps.settings,
+          policy,
+          codexSubscriptionActive,
+        }),
+      ),
+    );
+  });
+
   app.get("/v1/workspaces/:workspaceId/model-policy", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     await requireAccessGrant(c, deps, workspaceId, "workspace:read");
@@ -174,7 +208,7 @@ export function registerWorkspaceRoutes(app: Hono, deps: ApiRouteDeps): void {
       accountId: grant.accountId,
       workspaceId,
       allowedProviders: payload.allowedProviders ?? null,
-      allowedModels: payload.allowedModels ?? null,
+      allowedModels: canonicalWorkspacePolicyModelIds(deps.settings, payload.allowedModels),
     });
     return c.json(policy);
   });

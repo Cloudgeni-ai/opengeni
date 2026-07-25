@@ -68,10 +68,18 @@ export type RealtimeVoiceController = RealtimeVoiceState & {
 };
 
 type FinalQueueEntry = {
+  targetKey: string;
   providerAcceptanceId: string;
   clientEventId: string;
   text: string;
+  submit: UseRealtimeVoiceOptions["onFinalTranscript"];
   state: "queued" | "submitting" | "outcome-unknown";
+};
+
+type RealtimeVoiceTarget = {
+  key: string;
+  workspaceId: string;
+  sessionId: string;
 };
 
 const MAX_PROVIDER_ACCEPTANCE_ID_CHARS = 128;
@@ -218,11 +226,12 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
       try {
         while (targetKeyRef.current === ownedTarget) {
           const entry = finalQueue.current[0];
-          if (!entry || entry.state === "outcome-unknown") return;
+          if (!entry || entry.targetKey !== ownedTarget || entry.state === "outcome-unknown")
+            return;
           entry.state = "submitting";
           let accepted = false;
           try {
-            accepted = await onFinalTranscript.current(entry.text, {
+            accepted = await entry.submit(entry.text, {
               providerAcceptanceId: entry.providerAcceptanceId,
               clientEventId: entry.clientEventId,
             });
@@ -253,7 +262,11 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
   );
 
   const enqueueFinal = useCallback(
-    (event: Extract<RealtimeVoiceAdapterEvent, { type: "transcript.final" }>) => {
+    (
+      ownedTarget: RealtimeVoiceTarget,
+      event: Extract<RealtimeVoiceAdapterEvent, { type: "transcript.final" }>,
+    ) => {
+      if (targetKeyRef.current !== ownedTarget.key) return;
       const text = event.text.trim();
       const providerAcceptanceId = event.providerAcceptanceId;
       if (!text) return;
@@ -272,13 +285,15 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
         return;
       }
       finalQueue.current.push({
+        targetKey: ownedTarget.key,
         providerAcceptanceId,
         clientEventId: realtimeVoiceClientEventId(
-          options.workspaceId,
-          options.sessionId,
+          ownedTarget.workspaceId,
+          ownedTarget.sessionId,
           providerAcceptanceId,
         ),
         text,
+        submit: onFinalTranscript.current,
         state: "queued",
       });
       setState((current) => ({
@@ -289,7 +304,7 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
       }));
       void drainFinalQueue();
     },
-    [drainFinalQueue, options.sessionId, options.workspaceId, terminalError],
+    [drainFinalQueue, terminalError],
   );
 
   const scheduleReconnect = useCallback(
@@ -321,8 +336,10 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
   scheduleReconnectRef.current = scheduleReconnect;
 
   const onAdapterEvent = useCallback(
-    (owned: number, event: RealtimeVoiceAdapterEvent) => {
-      if (transportGeneration.current !== owned) return;
+    (owned: number, ownedTarget: RealtimeVoiceTarget, event: RealtimeVoiceAdapterEvent) => {
+      if (transportGeneration.current !== owned || targetKeyRef.current !== ownedTarget.key) {
+        return;
+      }
       switch (event.type) {
         case "connected":
         case "listening":
@@ -332,7 +349,7 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
           setState((current) => ({ ...current, partial: event.text }));
           return;
         case "transcript.final":
-          enqueueFinal(event);
+          enqueueFinal(ownedTarget, event);
           return;
         case "speaking.started":
           setState((current) => ({ ...current, status: "speaking" }));
@@ -353,11 +370,11 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
           } else {
             desiredActive.current = false;
             const terminalGeneration = ++transportGeneration.current;
-            const ownedTarget = targetKeyRef.current;
+            const terminalTargetKey = ownedTarget.key;
             void revokeMedia("realtime-voice-closed").then(() => {
               if (
                 transportGeneration.current !== terminalGeneration ||
-                targetKeyRef.current !== ownedTarget
+                targetKeyRef.current !== terminalTargetKey
               ) {
                 return;
               }
@@ -372,12 +389,16 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
   const connectFresh = useCallback(
     async (reconnecting: boolean): Promise<void> => {
       if (!desiredActive.current) return;
-      const ownedTarget = targetKeyRef.current;
+      const ownedTarget: RealtimeVoiceTarget = {
+        key: targetKeyRef.current,
+        workspaceId: options.workspaceId,
+        sessionId: options.sessionId,
+      };
       const owned = ++transportGeneration.current;
       await revokeMedia(reconnecting ? "realtime-voice-new-generation" : "realtime-voice-start");
       if (
         transportGeneration.current !== owned ||
-        targetKeyRef.current !== ownedTarget ||
+        targetKeyRef.current !== ownedTarget.key ||
         !desiredActive.current
       ) {
         return;
@@ -397,7 +418,7 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
         );
         if (
           transportGeneration.current !== owned ||
-          targetKeyRef.current !== ownedTarget ||
+          targetKeyRef.current !== ownedTarget.key ||
           !desiredActive.current
         ) {
           return;
@@ -425,7 +446,7 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
         pendingConnection.current = controller;
         const connection = adapter.current.connect(
           response.grant,
-          (event) => onAdapterEvent(owned, event),
+          (event) => onAdapterEvent(owned, ownedTarget, event),
           { signal: controller.signal },
         );
         void connection.then(
@@ -443,7 +464,7 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
         );
         if (
           transportGeneration.current !== owned ||
-          targetKeyRef.current !== ownedTarget ||
+          targetKeyRef.current !== ownedTarget.key ||
           controller.signal.aborted ||
           !desiredActive.current
         ) {
@@ -455,7 +476,7 @@ export function useRealtimeVoice(options: UseRealtimeVoiceOptions): RealtimeVoic
       } catch (error) {
         if (
           transportGeneration.current !== owned ||
-          targetKeyRef.current !== ownedTarget ||
+          targetKeyRef.current !== ownedTarget.key ||
           controllerWasDeliberatelyAborted(error)
         ) {
           return;

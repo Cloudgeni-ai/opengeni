@@ -7,6 +7,7 @@ import type {
   SessionVoiceCapability,
   SessionVoiceGrant,
 } from "@opengeni/sdk";
+import { useLayoutEffect } from "react";
 import { createBrowserRealtimeVoiceAdapter } from "../src/realtime-voice/browser-adapter";
 import { RealtimeVoiceOrb } from "../src/components/realtime-voice-orb";
 import {
@@ -568,6 +569,48 @@ describe("useRealtimeVoice", () => {
     await flush();
     expect(adapter.closes).toBe(1);
     expect(hook.result.current.status).toBe("idle");
+    await hook.unmount();
+  });
+
+  test("drops a prior target final emitted before passive target cleanup", async () => {
+    const nextSessionId = "44444444-4444-4444-8444-444444444444";
+    const adapter = new FixtureAdapter();
+    const oldTargetSubmissions: string[] = [];
+    const newTargetSubmissions: string[] = [];
+    let priorTargetListener: ((event: RealtimeVoiceAdapterEvent) => void) | null = null;
+    const hook = await renderHook<RealtimeVoiceController, string>((targetSessionId) => {
+      const controller = useRealtimeVoice(
+        options(adapter, {
+          sessionId: targetSessionId,
+          onFinalTranscript: async (_text, context) => {
+            const submissions =
+              targetSessionId === sessionId ? oldTargetSubmissions : newTargetSubmissions;
+            submissions.push(context.clientEventId);
+            return true;
+          },
+        }),
+      );
+      useLayoutEffect(() => {
+        if (targetSessionId !== nextSessionId) return;
+        priorTargetListener?.({
+          type: "transcript.final",
+          text: "must stay with the old target",
+          providerAcceptanceId: "stale-target-final",
+        });
+      }, [targetSessionId]);
+      return controller;
+    }, sessionId);
+    await flush();
+    await actRun(() => hook.result.current.start());
+    priorTargetListener = adapter.listener;
+
+    await hook.rerender(nextSessionId);
+    await flush();
+
+    expect(oldTargetSubmissions).toEqual([]);
+    expect(newTargetSubmissions).toEqual([]);
+    expect(adapter.closes).toBe(1);
+    expect(hook.result.current.pendingTranscript).toBeNull();
     await hook.unmount();
   });
 

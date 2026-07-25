@@ -6,6 +6,7 @@ import {
   AttachViewerRequest as ContractAttachViewerRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
+  WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
   CreateSessionResponse as ContractCreateSessionResponse,
@@ -82,6 +83,7 @@ import type {
   Workspace,
   WorkspaceMemorySearchResponse,
   ClientConfig,
+  WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
   CreateSessionResponse,
@@ -608,6 +610,9 @@ describe("SDK / contracts parity", () => {
       v: z.infer<typeof ContractSessionCapabilities>,
     ): SessionCapabilities => v;
     const acceptClientConfig = (v: z.infer<typeof ContractClientConfig>): ClientConfig => v;
+    const acceptWorkspaceModelCatalog = (
+      v: z.infer<typeof ContractWorkspaceModelCatalogResponse>,
+    ): WorkspaceModelCatalogResponse => v;
     const acceptViewerHolder = (v: z.infer<typeof ContractViewerHolder>): ViewerHolder => v;
     const acceptHeartbeatResponse = (
       v: z.infer<typeof ContractViewerHeartbeatResponse>,
@@ -625,6 +630,7 @@ describe("SDK / contracts parity", () => {
     const serverToClient = [
       acceptCapabilities,
       acceptClientConfig,
+      acceptWorkspaceModelCatalog,
       acceptViewerHolder,
       acceptHeartbeatResponse,
       acceptAckResponse,

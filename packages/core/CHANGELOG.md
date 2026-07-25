@@ -1,5 +1,59 @@
 # @opengeni/core
 
+## 0.9.7
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+- Updated dependencies [524599e]
+  - @opengeni/config@0.6.8
+  - @opengeni/contracts@0.17.3
+  - @opengeni/db@0.10.6
+  - @opengeni/runtime@0.12.6
+  - @opengeni/documents@0.2.27
+  - @opengeni/storage@0.2.21
+  - @opengeni/events@0.3.18
+
+## 0.9.6
+
+### Patch Changes
+
+- 229902b: Add trustworthy per-subscription Codex quota/reset-credit overview and allocator OCC controls, plus an owning-human managed-cookie-only reset redemption flow with durable ambiguity-safe provider idempotency.
+- Updated dependencies [229902b]
+  - @opengeni/codex@0.2.6
+  - @opengeni/db@0.10.5
+  - @opengeni/config@0.6.7
+  - @opengeni/runtime@0.12.5
+  - @opengeni/documents@0.2.26
+  - @opengeni/events@0.3.17
+  - @opengeni/storage@0.2.20
+
+## 0.9.5
+
+### Patch Changes
+
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/db@0.10.4
+  - @opengeni/config@0.6.6
+  - @opengeni/runtime@0.12.4
+  - @opengeni/documents@0.2.25
+  - @opengeni/events@0.3.16
+  - @opengeni/storage@0.2.19
+
+## 0.9.4
+
+### Patch Changes
+
+- Updated dependencies [2174006]
+- Updated dependencies [4e16410]
+  - @opengeni/runtime@0.12.3
+
 ## 0.9.3
 
 ### Patch Changes

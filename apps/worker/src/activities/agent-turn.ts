@@ -16,7 +16,7 @@ import {
   getLatestRunState,
   getHumanInputResumeForEvent,
   getSessionHumanInputRequest,
-  isCodexBilledTurn,
+  installOrReadTurnExecutionPolicyForAttempt,
   workspaceCodexSubscriptionActive,
   acquireCodexCredentialLease,
   armCodexCapacityWait,
@@ -76,8 +76,8 @@ import { appendAndPublishTurnEventsFenced, publishDurableSessionEvents } from "@
 import {
   sandboxStateEntryFromRunState,
   maxTurnsExceededRunState,
-  modelCallUsageTelemetry,
   modelResponseUsageFromSdkEvent,
+  normalizeModelCallUsage,
   normalizeSdkEvent,
   sanitizeHistoryItemsForModel,
   isEphemeralInternalContext,
@@ -107,6 +107,8 @@ import {
   type OpenGeniRuntime,
   type ComputerToolMode,
   type ModelResponseUsage,
+  type ModelCallUsageInput,
+  type ModelCallUsageNormalization,
   type BuildAgentOptions,
   type TurnToolCancellationFence,
   type BackendUnresolvableCode,
@@ -120,12 +122,13 @@ import {
 } from "@opengeni/runtime";
 import { connectionTokenResolverForTurn } from "./mcp-credentials";
 import {
-  builtinProviderId,
+  assertTurnExecutionPolicyMatchesConfigV1,
   calculateModelUsageCostMicros,
   configuredModelPricing,
   configuredStaticUsageLimits,
   sandboxWarmRateMicrosPerSecond,
   settingsWithResolvedModelContext,
+  resolveTurnExecutionPolicyV1,
   type ModelUsageInput,
   type ModelProviderApi,
   type RegistryProviderKind,
@@ -275,10 +278,13 @@ import {
 import {
   CAPABILITY_DESCRIPTORS,
   evaluateWorkspaceModelPolicy,
+  readTurnExecutionPolicyV1,
   type ResourceRef,
   type SessionEvent,
   type SessionEventType,
   type SessionStatus,
+  type SessionTurn,
+  type TurnExecutionPolicyV1,
 } from "@opengeni/contracts";
 import { createHash, randomUUID } from "node:crypto";
 
@@ -287,6 +293,32 @@ import { createHash, randomUUID } from "node:crypto";
 // throttling is minute-granular; anything shorter mostly burns continuation
 // budget against the same window.
 export const PROVIDER_BACKPRESSURE_DELAY_MS = 60_000;
+
+export function turnExecutionPolicyBillingIdentity(policy: TurnExecutionPolicyV1): {
+  externallyBilled: boolean;
+  codexSubscription: boolean;
+} {
+  return {
+    externallyBilled: policy.billing.metering === "external",
+    codexSubscription:
+      policy.providerId === "codex-subscription" &&
+      policy.credentialSource.kind === "connected_subscription" &&
+      policy.credentialSource.provider === "codex",
+  };
+}
+
+export function legacyTurnExecutionPolicyInput(
+  turn: Pick<SessionTurn, "source" | "model" | "reasoningEffort">,
+): Parameters<typeof resolveTurnExecutionPolicyV1>[1] {
+  const explicit = turn.source === "user" || turn.source === "api";
+  return {
+    modelId: turn.model,
+    requestedModelId: explicit ? turn.model : null,
+    modelSource: explicit ? "explicit" : "continuation",
+    reasoningEffort: turn.reasoningEffort,
+    reasoningSource: explicit ? "explicit" : "continuation",
+  };
+}
 
 /** A retryable provider fault recovers the accepted turn itself. Goal state is
  * irrelevant: autonomous continuation and infrastructure recovery are separate
@@ -734,16 +766,8 @@ export function providerContextTokens(
     | null
     | undefined,
 ): number | null {
-  const total = usage?.totalTokens;
-  if (typeof total === "number" && Number.isFinite(total) && total > 0) {
-    return total;
-  }
-  const input = usage?.inputTokens;
-  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) {
-    return null;
-  }
-  const output = usage?.outputTokens;
-  return input + (typeof output === "number" && Number.isFinite(output) && output > 0 ? output : 0);
+  const total = normalizeModelCallUsage(usage).totalTokens;
+  return total !== null && total > 0 ? total : null;
 }
 
 /**
@@ -774,6 +798,260 @@ type TurnEventPublisher = (
   immediate?: boolean,
 ) => Promise<{ events: SessionEvent[]; accepted: boolean }>;
 
+export type ModelResponseUsageEventState = {
+  responseUsageCount: number;
+  providerContextRevision: number;
+  lastProviderContextTokensObserved: number | null;
+  claimedSourceKeys: Set<string>;
+};
+
+export type CompactionModelUsageEventState = {
+  usageCount: number;
+  claimedSourceKeys: Set<string>;
+};
+
+export function createModelResponseUsageEventState(
+  claimedSourceKeys: Set<string> = new Set<string>(),
+): ModelResponseUsageEventState {
+  return {
+    responseUsageCount: 0,
+    providerContextRevision: 0,
+    lastProviderContextTokensObserved: null,
+    claimedSourceKeys,
+  };
+}
+
+export function createCompactionModelUsageEventState(
+  claimedSourceKeys: Set<string> = new Set<string>(),
+): CompactionModelUsageEventState {
+  return { usageCount: 0, claimedSourceKeys };
+}
+
+export function modelResponseUsageContextSignal(
+  state: ModelResponseUsageEventState,
+): { revision: number; totalTokens: number } | null {
+  return state.lastProviderContextTokensObserved === null
+    ? null
+    : {
+        revision: state.providerContextRevision,
+        totalTokens: state.lastProviderContextTokensObserved,
+      };
+}
+
+/**
+ * Process one SDK stream event through the exact production usage path.
+ *
+ * The pinned Responses SDK mirrors one provider terminal response as both a
+ * normalized `response_done` and a raw `model/response.completed` event. Claim
+ * the stable response/source key before lease renewal or any usage side effect,
+ * and advance the positional ordinal only for a newly claimed response. The
+ * durable `agent.model.usage` source-key fence remains the cross-restart
+ * authority: a replay may retry the idempotent billing write, but it cannot
+ * advance process-local metrics, provider context, or attempt-owned signals.
+ */
+export async function processModelResponseUsageEvent(input: {
+  event: Parameters<typeof modelResponseUsageFromSdkEvent>[0];
+  state: ModelResponseUsageEventState;
+  dispatchId: string | null;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  metricProvider: string;
+  externallyBilled: boolean;
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  emittedSourceKeys: Set<string>;
+  renewLease: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+  setLastInputTokens: (tokens: number) => Promise<void>;
+}): Promise<
+  | { status: "not_usage" }
+  | { status: "duplicate"; sourceKey: string }
+  | { status: "processed"; sourceKey: string; authoritative: boolean }
+> {
+  const responseUsage = modelResponseUsageFromSdkEvent(input.event);
+  if (!responseUsage) {
+    return { status: "not_usage" };
+  }
+
+  const responseOrdinal = input.state.responseUsageCount + 1;
+  const sourceKey = modelUsageSourceKey({
+    responseId: responseUsage.responseId,
+    dispatchId: input.dispatchId,
+    positionalKey: `response-${responseOrdinal}`,
+  });
+  if (input.state.claimedSourceKeys.has(sourceKey)) {
+    return { status: "duplicate", sourceKey };
+  }
+  input.state.claimedSourceKeys.add(sourceKey);
+  input.state.responseUsageCount = responseOrdinal;
+
+  const normalizedUsage = normalizeModelCallUsage(responseUsage.usage);
+  const accountContext = modelCallAccountContext({
+    servingCredentialId: input.servingCredentialId,
+    priorSessionCredentialId: input.priorSessionCredentialId,
+    isFirstCallOfTurn: responseOrdinal === 1,
+  });
+  let authoritative = false;
+  await recordCompletedModelCallBeforeOwnershipFences({
+    renewLease: input.renewLease,
+    leaseLost: input.leaseLost,
+    leaseLostMessage: input.leaseLostMessage,
+    recordUsage: async () => {
+      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        model: input.model,
+        externallyBilled: input.externallyBilled,
+        usage: responseUsage.usage,
+        normalizedUsage,
+        sourceKey,
+        observability: input.observability,
+      });
+      authoritative = await emitModelCallUsage({
+        observability: input.observability,
+        publish: input.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey,
+        usage: responseUsage,
+        normalizedUsage,
+        servingAccountHash: accountContext.servingAccountHash,
+        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+        emittedSourceKeys: input.emittedSourceKeys,
+      });
+      const observedInput = normalizedUsage.telemetry.inputTokens;
+      if (authoritative && observedInput !== null && observedInput > 0) {
+        recordModelInputTokens(input.observability, input.metricProvider, observedInput);
+      }
+    },
+    recordAttemptSignals: async () => {
+      if (!authoritative) return;
+      const observedTotal = normalizedUsage.totalTokens;
+      if (observedTotal !== null) {
+        input.state.lastProviderContextTokensObserved = observedTotal;
+        input.state.providerContextRevision += 1;
+      }
+      const observedInput = normalizedUsage.telemetry.inputTokens;
+      if (observedInput !== null && observedInput > 0) {
+        await input.setLastInputTokens(observedInput);
+      }
+    },
+  });
+  return { status: "processed", sourceKey, authoritative };
+}
+
+/**
+ * Apply the same source-key authority ordering to the compaction summarizer's
+ * usage callback. The summarizer can retry or mirror a terminal response just
+ * like the main stream, so claim before lease renewal, billing, durable usage,
+ * logging, or cache metrics. Durable source-key idempotency remains the
+ * cross-process authority after a worker restart.
+ */
+export async function processCompactionModelUsageEvent(input: {
+  usage: ModelResponseUsage;
+  state: CompactionModelUsageEventState;
+  dispatchId: string | null;
+  settings: Settings;
+  db: ActivityServices["db"];
+  observability: ActivityServices["observability"];
+  publish: TurnEventPublisher | null;
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnAttemptId: string;
+  provider: string;
+  providerApi: ModelProviderApi;
+  model: string;
+  externallyBilled: boolean;
+  servingCredentialId: string | null;
+  priorSessionCredentialId: string | null;
+  emittedSourceKeys: Set<string>;
+  renewLease: () => Promise<void>;
+  leaseLost: () => boolean;
+  leaseLostMessage: string;
+}): Promise<
+  | { status: "duplicate"; sourceKey: string }
+  | { status: "processed"; sourceKey: string; authoritative: boolean }
+> {
+  const usageOrdinal = input.state.usageCount + 1;
+  const sourceKey = modelUsageSourceKey({
+    responseId: input.usage.responseId,
+    dispatchId: input.dispatchId,
+    positionalKey: `compaction-${usageOrdinal}`,
+  });
+  if (input.state.claimedSourceKeys.has(sourceKey)) {
+    return { status: "duplicate", sourceKey };
+  }
+  input.state.claimedSourceKeys.add(sourceKey);
+  input.state.usageCount = usageOrdinal;
+
+  const accountContext = modelCallAccountContext({
+    servingCredentialId: input.servingCredentialId,
+    priorSessionCredentialId: input.priorSessionCredentialId,
+    isFirstCallOfTurn: usageOrdinal === 1,
+  });
+  const normalizedUsage = normalizeModelCallUsage(input.usage.usage);
+  let authoritative = false;
+  await recordCompletedModelCallBeforeOwnershipFences({
+    renewLease: input.renewLease,
+    leaseLost: input.leaseLost,
+    leaseLostMessage: input.leaseLostMessage,
+    recordUsage: async () => {
+      await recordModelUsageAndDebitCredits(input.settings, input.db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        turnAttemptId: input.turnAttemptId,
+        model: input.model,
+        externallyBilled: input.externallyBilled,
+        usage: input.usage.usage,
+        normalizedUsage,
+        sourceKey,
+        observability: input.observability,
+      });
+      authoritative = await emitModelCallUsage({
+        observability: input.observability,
+        publish: input.publish,
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey,
+        usage: input.usage,
+        normalizedUsage,
+        servingAccountHash: accountContext.servingAccountHash,
+        accountChangedFromPrevCall: accountContext.accountChangedFromPrevCall,
+        emittedSourceKeys: input.emittedSourceKeys,
+      });
+    },
+  });
+  return { status: "processed", sourceKey, authoritative };
+}
+
 export async function emitModelCallUsage(input: {
   observability: ActivityServices["observability"];
   publish: TurnEventPublisher | null;
@@ -786,22 +1064,25 @@ export async function emitModelCallUsage(input: {
   model: string;
   sourceKey: string;
   usage: ModelResponseUsage | { usage?: unknown | null } | null;
+  normalizedUsage?: ModelCallUsageNormalization;
   // Prompt-cache research dimensions (log-only; NEVER on a metric label or a
   // durable event). The opaque serving-account tag and whether it changed since
   // the session's previous call — the account-switch hypothesis for cache misses.
   servingAccountHash?: string;
   accountChangedFromPrevCall?: boolean;
   emittedSourceKeys?: Set<string>;
-}): Promise<void> {
+}): Promise<boolean> {
   const usage =
     input.usage && typeof input.usage === "object" && "usage" in input.usage
       ? (input.usage as { usage?: unknown }).usage
       : null;
   if (!usage || typeof usage !== "object") {
-    return;
+    return false;
   }
-  if (input.emittedSourceKeys?.has(input.sourceKey)) return;
-  const telemetry = modelCallUsageTelemetry(usage as Parameters<typeof modelCallUsageTelemetry>[0]);
+  if (input.emittedSourceKeys?.has(input.sourceKey)) return false;
+  const normalizedUsage =
+    input.normalizedUsage ?? normalizeModelCallUsage(usage as ModelCallUsageInput);
+  const telemetry = normalizedUsage.telemetry;
   const appended = await input.publish?.(
     [
       {
@@ -830,7 +1111,7 @@ export async function emitModelCallUsage(input: {
       typeof event.payload === "object" &&
       (event.payload as Record<string, unknown>).sourceKey === input.sourceKey,
   );
-  if (!authoritative) return;
+  if (!authoritative) return false;
   try {
     input.observability.info("model call usage", {
       accountId: input.accountId,
@@ -844,6 +1125,7 @@ export async function emitModelCallUsage(input: {
       inputTokens: telemetry.inputTokens,
       outputTokens: telemetry.outputTokens,
       cachedTokens: telemetry.cachedTokens,
+      cacheWriteTokens: telemetry.cacheWriteTokens,
       reasoningTokens: telemetry.reasoningTokens,
       ...(input.servingAccountHash !== undefined
         ? { servingAccountHash: input.servingAccountHash }
@@ -852,9 +1134,41 @@ export async function emitModelCallUsage(input: {
         ? { accountChangedFromPrevCall: input.accountChangedFromPrevCall }
         : {}),
     });
+    if (normalizedUsage.rejectedFields.length > 0) {
+      input.observability.warn("model call usage fields rejected", {
+        provider: input.provider,
+        providerApi: input.providerApi,
+        model: input.model,
+        sourceKey: input.sourceKey,
+        rejectedFields: normalizedUsage.rejectedFields.join(","),
+      });
+    }
   } catch {
     // Durable event + billing already committed; logging is best-effort only.
   }
+  try {
+    applyCodexCacheTelemetry(input.observability, input.provider, normalizedUsage);
+  } catch {
+    // Durable event + billing already committed; metrics are best-effort only.
+  }
+  return true;
+}
+
+/**
+ * Apply one authoritative, normalized model-call usage frame to the shared
+ * prompt-cache metrics. The durable source-key fence in `emitModelCallUsage`
+ * owns idempotency; this helper must never receive raw provider values.
+ */
+export function applyCodexCacheTelemetry(
+  observability: ActivityServices["observability"],
+  provider: string,
+  normalizedUsage: ModelCallUsageNormalization,
+): void {
+  recordModelCacheTokens(observability, provider, {
+    cachedTokens: normalizedUsage.telemetry.cachedTokens,
+    cacheWriteTokens: normalizedUsage.telemetry.cacheWriteTokens,
+    promptTokens: normalizedUsage.telemetry.inputTokens,
+  });
 }
 
 export function historyRowsToAppend(
@@ -1457,12 +1771,24 @@ async function refreshCappedCodexUsageRows(
   db: ActivityServices["db"],
   settings: Settings,
   workspaceId: string,
-  accounts: CodexAccountStatus[],
+  accounts: Array<
+    Pick<
+      CodexAccountStatus,
+      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+    >
+  >,
   capacitySignals: {
     signalCodexCapacityWorkflow?: ActivityServices["signalCodexCapacityWorkflow"] | undefined;
     wakeSessionWorkflow: ActivityServices["wakeSessionWorkflow"];
   },
-): Promise<CodexAccountStatus[]> {
+): Promise<
+  Array<
+    Pick<
+      CodexAccountStatus,
+      "id" | "status" | "primaryUsedPercent" | "secondaryUsedPercent" | "exhaustedUntil"
+    >
+  >
+> {
   const stale = accounts.filter(
     (a) =>
       a.status === "active" &&
@@ -1561,6 +1887,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       runtimeMetricsHooksForObservability(observability),
     );
     let isCodexTurn = false;
+    let isExternallyBilledTurn = false;
     let executionGeneration = 0;
     // Still required by credential-loss/capacity settlements, whose own
     // recovery transactions fence against worker-death redispatches.
@@ -2139,10 +2466,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         input.workspaceId,
         settings,
       );
-      // Read the active-credential flag ONCE (P2-b) and thread it through both the
-      // routing overlay (settingsWithCodexCredential) and the billed-turn predicate
-      // (isCodexBilledTurn below), so a concurrent disconnect/reconnect cannot make
-      // provider-injection and billing disagree about whether this is a codex turn.
+      // Read the active-credential flag once for the runtime capability overlay.
+      // Accepted billing/provider identity comes from the turn policy below,
+      // never from this mutable health snapshot.
       const codexSubscriptionActive = await workspaceCodexSubscriptionActive(
         db,
         mcpSettings,
@@ -2170,6 +2496,38 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       }
       const turn = claim.turn;
       turnId = turn.id;
+      executionGeneration = turn.executionGeneration;
+      const claimedPolicy = readTurnExecutionPolicyV1(turn.metadata);
+      const policyForAbsent =
+        claimedPolicy.kind === "valid"
+          ? claimedPolicy.policy
+          : resolveTurnExecutionPolicyV1(capabilitySettings, legacyTurnExecutionPolicyInput(turn));
+      const installedPolicy = await installOrReadTurnExecutionPolicyForAttempt(db, {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        policyForAbsent,
+      });
+      if (!installedPolicy.accepted) {
+        throw new TurnAttemptFencedError(
+          `turn execution policy was fenced: ${installedPolicy.reason}`,
+        );
+      }
+      const verifiedExecutionPolicy = assertTurnExecutionPolicyMatchesConfigV1(
+        capabilitySettings,
+        installedPolicy.policy,
+        {
+          modelId: turn.model,
+          reasoningEffort: turn.reasoningEffort,
+        },
+      );
+      const turnExecutionPolicy = verifiedExecutionPolicy.policy;
+      const billingIdentity = turnExecutionPolicyBillingIdentity(turnExecutionPolicy);
+      isExternallyBilledTurn = billingIdentity.externallyBilled;
+      isCodexTurn = billingIdentity.codexSubscription;
       triggerEventId = turn.triggerEventId;
       const trigger = await getSessionEvent(db, input.workspaceId, triggerEventId);
       if (!trigger) {
@@ -2182,7 +2540,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         trigger,
       );
       triggerType = trigger.type;
-      executionGeneration = turn.executionGeneration;
       const latestTurnState = await getLatestRunState(db, input.workspaceId, input.sessionId);
       const continuationCodexCredentialId =
         latestTurnState?.turnId === turnId ? latestTurnState.frozenCodexCredentialId : null;
@@ -2191,21 +2548,8 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           0,
       );
       turnLifecycleMetricsFor(observability).start(turnId);
-      // Canonical codex-billed predicate (codex/<slug> + feature enabled + active
-      // workspace credential). Computed once and threaded through every billing
-      // gate + the usage recorder so a turn paid by the user's ChatGPT/Codex plan
-      // consumes ZERO OpenGeni credits and never feeds an OpenGeni cap. Resolved
-      // here (before resolvedModel at the routing step) because the pre-turn gate
-      // below needs it; mirrors the same active-credential read the codex provider
-      // overlay uses, so billing and routing agree on what "codex" is.
-      isCodexTurn = await isCodexBilledTurn({
-        db,
-        settings,
-        workspaceId: input.workspaceId,
-        model: turn.model,
-        active: codexSubscriptionActive,
-      });
-      // §7.5 P3 — pass BOTH the codex predicate (codex-plan turns bypass the gate)
+      // §7.5 P3 — pass the accepted billing attribution (externally funded turns
+      // bypass OpenGeni credit/token gates)
       // AND the optional host `entitlements` port (when bound, its admitRun replaces
       // the local credit read). Unset port → today's local-ledger path.
       await waitForTurnOperation(
@@ -2214,7 +2558,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           db,
           input.accountId,
           input.workspaceId,
-          isCodexTurn,
+          isExternallyBilledTurn,
           entitlements,
         ),
         cancellationSignal,
@@ -2260,6 +2604,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // one exactly like production.
       codexLeaseHolderId = dispatchId;
       const modelUsageDispatchId = activityContext?.info.activityId ?? dispatchId;
+      const claimedModelUsageSourceKeys = new Set<string>();
       const emittedModelUsageSourceKeys = new Set<string>();
       publish = async (
         events: Array<Omit<AppendEventInput, "producerId" | "producerSeq" | "turnId">>,
@@ -3033,7 +3378,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // a chat-only Fireworks model. Resolving against the default-model settings
       // keeps gating consistent with the router. Cost accounting covers registry
       // models via configuredModelPricing.
-      const resolvedModel = runtime.resolveTurnModel(capabilitySettings, turn.model);
+      const resolvedModel = runtime.resolveTurnModel(
+        capabilitySettings,
+        turnExecutionPolicy.productModelId,
+      );
       // Bind the provider/model catalog's context policy to every model-facing
       // path for this turn. In particular, Codex subscription turns must not
       // inherit the deployment's OpenAI/Azure mode or 1.05M context defaults:
@@ -3048,25 +3396,20 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // and the main run both come later in this scope), so a blocked
       // provider/model can never be reached through ANY stamp path: explicit
       // turn model, inherited session default, goal-continuation inheritance,
-      // or the legacy null-resolution fallback (null → the built-in
-      // OpenAI/Azure client, attributed here via builtinProviderId so a policy
-      // blocking the built-in also blocks that fallback — this exact path is
-      // how bare-model turns silently spent real Azure money in a
-      // codex-intended workspace). Fail-loud, never a silent remap.
+      // or the legacy null-resolution fallback. The frozen execution policy is
+      // the attribution source even if an injected test runtime returns no
+      // concrete resolved model. Fail-loud, never a silent remap.
       {
         const workspaceModelPolicy = await getWorkspaceModelPolicy(db, input.workspaceId);
         if (workspaceModelPolicy) {
-          const effectiveProviderId = resolvedModel
-            ? resolvedModel.provider.id
-            : builtinProviderId(capabilitySettings);
           const verdict = evaluateWorkspaceModelPolicy(workspaceModelPolicy, {
-            providerId: effectiveProviderId,
-            modelId: turn.model,
+            providerId: turnExecutionPolicy.providerId,
+            modelId: turnExecutionPolicy.productModelId,
           });
           if (!verdict.allowed) {
             throw new WorkspaceModelPolicyBlockedError(
-              turn.model,
-              effectiveProviderId,
+              turnExecutionPolicy.productModelId,
+              turnExecutionPolicy.providerId,
               verdict.reason,
             );
           }
@@ -3118,53 +3461,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const promptCacheKey = acceptsPromptCacheKeyForTurn(resolvedModel)
         ? input.sessionId
         : undefined;
-      let compactionUsageCount = 0;
+      const compactionUsageState = createCompactionModelUsageEventState(
+        claimedModelUsageSourceKeys,
+      );
       const recordCompactionUsage = async (usage: ModelResponseUsage) => {
-        await recordCompletedModelCallBeforeOwnershipFences({
+        await processCompactionModelUsageEvent({
+          usage,
+          state: compactionUsageState,
+          dispatchId: modelUsageDispatchId,
+          settings,
+          db,
+          observability,
+          publish,
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          turnId: turn.id,
+          provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+          providerApi: resolvedModel?.provider.api ?? "responses",
+          model: resolvedModel?.configured.id ?? turn.model,
+          externallyBilled: isExternallyBilledTurn,
+          turnAttemptId: input.attemptId,
+          servingCredentialId: effectiveCodexCredentialId,
+          priorSessionCredentialId: priorSessionCodexCredentialId,
+          emittedSourceKeys: emittedModelUsageSourceKeys,
           renewLease: () => renewCodexLease("model_usage"),
           leaseLost: () => codexLeaseLost,
           leaseLostMessage: "Codex credential lease expired during context compaction",
-          recordUsage: async () => {
-            compactionUsageCount += 1;
-            const sourceKey = modelUsageSourceKey({
-              responseId: usage.responseId,
-              dispatchId: modelUsageDispatchId,
-              positionalKey: `compaction-${compactionUsageCount}`,
-            });
-            const responseAccountCtx = modelCallAccountContext({
-              servingCredentialId: effectiveCodexCredentialId,
-              priorSessionCredentialId: priorSessionCodexCredentialId,
-              isFirstCallOfTurn: compactionUsageCount === 1,
-            });
-            await recordModelUsageAndDebitCredits(settings, db, {
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              turnAttemptId: input.attemptId,
-              model: resolvedModel?.configured.id ?? turn.model,
-              isCodexTurn,
-              usage: usage.usage,
-              sourceKey,
-              observability,
-            });
-            await emitModelCallUsage({
-              observability,
-              publish,
-              accountId: input.accountId,
-              workspaceId: input.workspaceId,
-              sessionId: input.sessionId,
-              turnId: turn.id,
-              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-              providerApi: resolvedModel?.provider.api ?? "responses",
-              model: resolvedModel?.configured.id ?? turn.model,
-              sourceKey,
-              usage,
-              servingAccountHash: responseAccountCtx.servingAccountHash,
-              accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-              emittedSourceKeys: emittedModelUsageSourceKeys,
-            });
-          },
         });
       };
       const compactionSummarizerFor = (systemInstructions?: string) =>
@@ -3174,7 +3497,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 summarizeForCompaction(s, m, {
                   client: resolvedModel.client,
                   api: resolvedModel.provider.api,
-                  model: resolvedModel.configured.id,
+                  model: turnExecutionPolicy.upstreamModelId,
                   maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                   onUsage: recordCompactionUsage,
                   ...(systemInstructions ? { systemInstructions } : {}),
@@ -3183,6 +3506,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               )
           : (s: Settings, m: Array<Record<string, unknown>>) =>
               summarizeForCompaction(s, m, {
+                model: turnExecutionPolicy.upstreamModelId,
                 maxOutputTokens: SUMMARY_BUFFER_TOKENS,
                 onUsage: recordCompactionUsage,
                 ...(systemInstructions ? { systemInstructions } : {}),
@@ -4774,13 +5098,19 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         return outcome;
       };
 
+      // Keep response usage identity across every stream attempt in this
+      // activity. Context compaction retries the same logical dispatch by
+      // calling runStreamAttempt again; resetting this state there would reuse
+      // the first no-response-ID fallback key and suppress a real model call.
+      const modelResponseUsageState = createModelResponseUsageEventState(
+        claimedModelUsageSourceKeys,
+      );
       const runStreamAttempt = async (): Promise<RunAgentTurnResult> => {
         if (!runInput) {
           throw new Error("Run input was not prepared");
         }
         stream = undefined;
         batcher = null;
-        let responseUsageCount = 0;
         // The SDK emits every processed call item for one model response before
         // it emits any result for that response. Keep that response-local batch
         // in memory so an orphan from an older response cannot pin later stable
@@ -4790,8 +5120,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         let currentToolBatchCompletedCallIds = new Set<string>();
         // Actual input tokens of the most recent model response this turn; the
         // pre-read trigger for the NEXT turn. Persisted at every turn-end path.
-        let lastProviderContextTokensObserved: number | null = null;
-        let providerContextRevision = 0;
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
@@ -4866,13 +5194,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     : {}),
                 }
               : {}),
-            contextCompactionSignal: () =>
-              lastProviderContextTokensObserved === null
-                ? null
-                : {
-                    revision: providerContextRevision,
-                    totalTokens: lastProviderContextTokensObserved,
-                  },
+            contextCompactionSignal: () => modelResponseUsageContextSignal(modelResponseUsageState),
             contextCompactionRequested: () =>
               isSessionCompactionRequested(db, input.workspaceId, input.sessionId),
             ...(toolCancellationFenceRef.current
@@ -4911,77 +5233,33 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             }
             let stableToolCallIdsToClear: string[] | null = null;
             let completedCurrentToolBatch = false;
-            const responseUsage = modelResponseUsageFromSdkEvent(next.value);
-            if (responseUsage) {
-              await recordCompletedModelCallBeforeOwnershipFences({
-                renewLease: () => renewCodexLease("model_usage"),
-                leaseLost: () => codexLeaseLost,
-                leaseLostMessage: "Codex credential lease expired during the active turn",
-                recordUsage: async () => {
-                  responseUsageCount += 1;
-                  const responseSourceKey = modelUsageSourceKey({
-                    responseId: responseUsage.responseId,
-                    dispatchId: modelUsageDispatchId,
-                    positionalKey: `response-${responseUsageCount}`,
-                  });
-                  // Within a turn the serving credential is fixed, so a switch can only
-                  // surface on the turn's FIRST model call (vs the session's prior).
-                  const responseAccountCtx = modelCallAccountContext({
-                    servingCredentialId: effectiveCodexCredentialId,
-                    priorSessionCredentialId: priorSessionCodexCredentialId,
-                    isFirstCallOfTurn: responseUsageCount === 1,
-                  });
-                  await recordModelUsageAndDebitCredits(settings, db, {
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    turnAttemptId: input.attemptId,
-                    model: turn.model,
-                    isCodexTurn,
-                    usage: responseUsage.usage,
-                    sourceKey: responseSourceKey,
-                    observability,
-                  });
-                  await emitModelCallUsage({
-                    observability,
-                    publish,
-                    accountId: input.accountId,
-                    workspaceId: input.workspaceId,
-                    sessionId: input.sessionId,
-                    turnId: activeTurnId,
-                    provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                    providerApi: resolvedModel?.provider.api ?? "responses",
-                    model: turn.model,
-                    sourceKey: responseSourceKey,
-                    usage: responseUsage,
-                    servingAccountHash: responseAccountCtx.servingAccountHash,
-                    accountChangedFromPrevCall: responseAccountCtx.accountChangedFromPrevCall,
-                    emittedSourceKeys: emittedModelUsageSourceKeys,
-                  });
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
-                    recordModelInputTokens(observability, streamProvider, observed);
-                  }
-                  const observedTotal = providerContextTokens(responseUsage.usage);
-                  if (observedTotal !== null) {
-                    lastProviderContextTokensObserved = observedTotal;
-                    providerContextRevision += 1;
-                  }
-                  // Prompt-cache efficiency for this response — same usage frame as the
-                  // input-token accounting above, so the two are always consistent.
-                  recordModelCacheTokens(observability, streamProvider, {
-                    cachedTokens: modelCallUsageTelemetry(responseUsage.usage).cachedTokens,
-                    promptTokens: responseUsage.usage?.inputTokens,
-                  });
-                },
-                recordAttemptSignals: async () => {
-                  const observed = responseUsage.usage?.inputTokens;
-                  if (typeof observed === "number" && observed > 0) {
-                    await setLastInputTokensFenced(observed);
-                  }
-                },
-              });
+            const responseUsageResult = await processModelResponseUsageEvent({
+              event: next.value,
+              state: modelResponseUsageState,
+              dispatchId: modelUsageDispatchId,
+              settings,
+              db,
+              observability,
+              publish,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              turnId: activeTurnId,
+              turnAttemptId: input.attemptId,
+              provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+              providerApi: resolvedModel?.provider.api ?? "responses",
+              model: turn.model,
+              metricProvider: streamProvider,
+              externallyBilled: isExternallyBilledTurn,
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              emittedSourceKeys: emittedModelUsageSourceKeys,
+              renewLease: () => renewCodexLease("model_usage"),
+              leaseLost: () => codexLeaseLost,
+              leaseLostMessage: "Codex credential lease expired during the active turn",
+              setLastInputTokens: setLastInputTokensFenced,
+            });
+            if (responseUsageResult.status === "processed") {
               currentToolBatchCallIds = new Set<string>();
               currentToolBatchCompletedCallIds = new Set<string>();
               await reconcileConversationTruth();
@@ -4991,7 +5269,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   db,
                   input.accountId,
                   input.workspaceId,
-                  isCodexTurn,
+                  isExternallyBilledTurn,
                   entitlements,
                 );
               } catch (limitError) {
@@ -5116,83 +5394,77 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           stream.completed.catch(() => undefined),
           cancellationSignal,
         );
-        if (responseUsageCount === 0) {
+        if (modelResponseUsageState.responseUsageCount === 0) {
           const aggregateUsage = stream.state.usage;
-          const aggregateInput = (aggregateUsage as { inputTokens?: unknown } | undefined)
-            ?.inputTokens;
-          if (typeof aggregateInput === "number" && aggregateInput > 0) {
-            const aggregateContext = providerContextTokens(
-              aggregateUsage as {
-                inputTokens?: number;
-                outputTokens?: number;
-                totalTokens?: number;
-              },
-            );
-            if (aggregateContext !== null) {
-              lastProviderContextTokensObserved = aggregateContext;
-              providerContextRevision += 1;
-            }
-          }
+          const normalizedAggregateUsage = normalizeModelCallUsage(aggregateUsage);
+          const aggregateInput = normalizedAggregateUsage.telemetry.inputTokens;
           const aggregateSourceKey = modelUsageSourceKey({
             responseId: null,
             dispatchId: modelUsageDispatchId,
             positionalKey: "aggregate",
           });
-          // The single aggregate frame is this turn's only model-usage record, so
-          // it is the first (account-switch surfaces here just like a first response).
-          const aggregateAccountCtx = modelCallAccountContext({
-            servingCredentialId: effectiveCodexCredentialId,
-            priorSessionCredentialId: priorSessionCodexCredentialId,
-            isFirstCallOfTurn: true,
-          });
-          recordModelCacheTokens(observability, streamProvider, {
-            cachedTokens: modelCallUsageTelemetry(
-              aggregateUsage as Parameters<typeof modelCallUsageTelemetry>[0],
-            ).cachedTokens,
-            promptTokens: (aggregateUsage as { inputTokens?: unknown } | undefined)?.inputTokens as
-              | number
-              | undefined,
-          });
-          await recordCompletedModelCallBeforeOwnershipFences({
-            renewLease: () => renewCodexLease("model_usage"),
-            leaseLost: () => codexLeaseLost,
-            leaseLostMessage: "Codex credential lease expired during the active turn",
-            recordUsage: async () => {
-              await recordModelUsageAndDebitCredits(settings, db, {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                turnAttemptId: input.attemptId,
-                model: turn.model,
-                isCodexTurn,
-                usage: aggregateUsage,
-                sourceKey: aggregateSourceKey,
-                observability,
-              });
-              await emitModelCallUsage({
-                observability,
-                publish,
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sessionId: input.sessionId,
-                turnId: activeTurnId,
-                provider: resolvedModel?.provider.id ?? settings.openaiProvider,
-                providerApi: resolvedModel?.provider.api ?? "responses",
-                model: turn.model,
-                sourceKey: aggregateSourceKey,
-                usage: { usage: aggregateUsage },
-                servingAccountHash: aggregateAccountCtx.servingAccountHash,
-                accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
-                emittedSourceKeys: emittedModelUsageSourceKeys,
-              });
-            },
-            recordAttemptSignals: async () => {
-              if (typeof aggregateInput === "number" && aggregateInput > 0) {
-                await setLastInputTokensFenced(aggregateInput);
-              }
-            },
-          });
+          if (!claimedModelUsageSourceKeys.has(aggregateSourceKey)) {
+            claimedModelUsageSourceKeys.add(aggregateSourceKey);
+            // The single aggregate frame is this turn's only model-usage record, so
+            // it is the first (account-switch surfaces here just like a first response).
+            const aggregateAccountCtx = modelCallAccountContext({
+              servingCredentialId: effectiveCodexCredentialId,
+              priorSessionCredentialId: priorSessionCodexCredentialId,
+              isFirstCallOfTurn: true,
+            });
+            let aggregateAuthoritative = false;
+            await recordCompletedModelCallBeforeOwnershipFences({
+              renewLease: () => renewCodexLease("model_usage"),
+              leaseLost: () => codexLeaseLost,
+              leaseLostMessage: "Codex credential lease expired during the active turn",
+              recordUsage: async () => {
+                await recordModelUsageAndDebitCredits(settings, db, {
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  turnAttemptId: input.attemptId,
+                  model: turn.model,
+                  externallyBilled: isExternallyBilledTurn,
+                  usage: aggregateUsage,
+                  normalizedUsage: normalizedAggregateUsage,
+                  sourceKey: aggregateSourceKey,
+                  observability,
+                });
+                aggregateAuthoritative = await emitModelCallUsage({
+                  observability,
+                  publish,
+                  accountId: input.accountId,
+                  workspaceId: input.workspaceId,
+                  sessionId: input.sessionId,
+                  turnId: activeTurnId,
+                  provider: resolvedModel?.provider.id ?? settings.openaiProvider,
+                  providerApi: resolvedModel?.provider.api ?? "responses",
+                  model: turn.model,
+                  sourceKey: aggregateSourceKey,
+                  usage: { usage: aggregateUsage },
+                  normalizedUsage: normalizedAggregateUsage,
+                  servingAccountHash: aggregateAccountCtx.servingAccountHash,
+                  accountChangedFromPrevCall: aggregateAccountCtx.accountChangedFromPrevCall,
+                  emittedSourceKeys: emittedModelUsageSourceKeys,
+                });
+                if (aggregateAuthoritative && aggregateInput !== null && aggregateInput > 0) {
+                  recordModelInputTokens(observability, streamProvider, aggregateInput);
+                }
+              },
+              recordAttemptSignals: async () => {
+                if (!aggregateAuthoritative) return;
+                if (normalizedAggregateUsage.totalTokens !== null) {
+                  modelResponseUsageState.lastProviderContextTokensObserved =
+                    normalizedAggregateUsage.totalTokens;
+                  modelResponseUsageState.providerContextRevision += 1;
+                }
+                if (aggregateInput !== null && aggregateInput > 0) {
+                  await setLastInputTokensFenced(aggregateInput);
+                }
+              },
+            });
+          }
         }
         if (stream.interruptions.length > 0) {
           await reconcileConversationTruth();
@@ -7232,21 +7504,21 @@ class BudgetExhaustedError extends Error {
   }
 }
 
-// Exported for unit testing the codex-billed bypass (codex-billing.test.ts); not part
-// of the activity surface. Takes BOTH `isCodexTurn` (codex-plan turns bypass the credit
-// and token gates) and the optional §7.5 P3 host `entitlements` port (when bound, its
-// `admitRun` REPLACES the local credit read for a non-codex turn; unset → local ledger).
+// Exported for unit testing the external-billing bypass (codex-billing.test.ts); not
+// part of the activity surface. Takes the accepted policy's billing attribution and
+// the optional §7.5 P3 host `entitlements` port (when bound, its `admitRun` REPLACES
+// the local credit read for an OpenGeni-metered turn; unset → local ledger).
 export async function ensureRunAllowed(
   settings: Settings,
   db: ActivityServices["db"],
   accountId: string,
   workspaceId: string,
-  isCodexTurn: boolean,
+  isExternallyBilledTurn: boolean,
   entitlements?: ActivityServices["entitlements"],
 ): Promise<void> {
-  // Codex-billed turns are paid by the user's ChatGPT/Codex plan: skip the
-  // credit-balance gate and the monthly token cap. The agent-run COUNT cap below
-  // is a volume/fairness quota (not a credit/cost gate) and is intentionally kept.
+  // Externally billed turns are paid outside OpenGeni: skip the credit-balance
+  // gate and monthly token cap. The agent-run COUNT cap below is a
+  // volume/fairness quota (not a credit/cost gate) and is intentionally kept.
   //
   // §7.5 P3 — host-entitlements DELEGATION (the worker half of the same seam the
   // API edge exposes). For a non-codex turn, when the host binds `entitlements`, its
@@ -7260,7 +7532,7 @@ export async function ensureRunAllowed(
   // idempotency-keyed writer at recordModelUsageAndDebitCredits), so a PULL host meter
   // is consulted without ever double-charging.
   if (
-    !isCodexTurn &&
+    !isExternallyBilledTurn &&
     entitlements &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
@@ -7274,7 +7546,7 @@ export async function ensureRunAllowed(
       throw new Error(decision.reason || "insufficient OpenGeni credits");
     }
   } else if (
-    !isCodexTurn &&
+    !isExternallyBilledTurn &&
     (settings.billingMode === "stripe" || settings.usageLimitsMode === "managed")
   ) {
     const balance = await getBillingBalance(db, accountId);
@@ -7299,7 +7571,7 @@ export async function ensureRunAllowed(
         );
       }
     }
-    if (!isCodexTurn && limits.maxMonthlyTokensPerWorkspace) {
+    if (!isExternallyBilledTurn && limits.maxMonthlyTokensPerWorkspace) {
       const used = await sumUsageQuantity(db, {
         workspaceId,
         eventType: "model.tokens",
@@ -7312,7 +7584,7 @@ export async function ensureRunAllowed(
   }
 }
 
-// Exported for unit testing the codex-billed bypass; not part of the activity surface.
+// Exported for unit testing the external-billing bypass; not part of the activity surface.
 export async function recordModelUsageAndDebitCredits(
   settings: Settings,
   db: ActivityServices["db"],
@@ -7323,8 +7595,9 @@ export async function recordModelUsageAndDebitCredits(
     turnId: string;
     turnAttemptId: string;
     model: string;
-    isCodexTurn: boolean;
-    usage?: ModelUsageInput | null;
+    externallyBilled: boolean;
+    usage?: ModelUsageInput | ModelCallUsageInput | null;
+    normalizedUsage?: ModelCallUsageNormalization;
     sourceKey: string;
     observability?: ActivityServices["observability"];
   },
@@ -7332,10 +7605,12 @@ export async function recordModelUsageAndDebitCredits(
   if (!input.usage) {
     return;
   }
-  const inputTokens = positiveInt(input.usage.inputTokens);
-  const outputTokens = positiveInt(input.usage.outputTokens);
-  const totalTokens = positiveInt(input.usage.totalTokens) || inputTokens + outputTokens;
-  // A codex-subscription turn is paid by the user's ChatGPT/Codex plan, so it
+  const normalizedUsage = input.normalizedUsage ?? normalizeModelCallUsage(input.usage);
+  const sanitizedUsage = sanitizedModelUsageInput(normalizedUsage);
+  const inputTokens = sanitizedUsage.inputTokens ?? 0;
+  const outputTokens = sanitizedUsage.outputTokens ?? 0;
+  const totalTokens = sanitizedUsage.totalTokens ?? 0;
+  // An externally billed turn is paid outside OpenGeni, so it
   // consumes ZERO OpenGeni credits and must never feed an OpenGeni cap. A
   // codex/<slug> model has no entry in configuredModelPricing, so the normal path
   // below would throw "Missing model pricing". We:
@@ -7344,7 +7619,7 @@ export async function recordModelUsageAndDebitCredits(
   //     any row would count against maxMonthlyTokensPerWorkspace);
   //   - record a `model.cost = 0` audit marker (harmless to the monthly cost cap);
   //   - never look up pricing and never debit credits.
-  if (input.isCodexTurn) {
+  if (input.externallyBilled) {
     await recordUsageEvent(db, {
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -7382,7 +7657,7 @@ export async function recordModelUsageAndDebitCredits(
   if (!configuredModelPricing(settings)[input.model]) {
     throw new Error(`Missing model pricing for ${input.model}`);
   }
-  const costMicros = calculateModelUsageCostMicros(settings, input.model, input.usage);
+  const costMicros = calculateModelUsageCostMicros(settings, input.model, sanitizedUsage);
   await recordUsageEvent(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
@@ -7416,18 +7691,26 @@ export async function recordModelUsageAndDebitCredits(
         // Additive: the prompt-cache slice of this call's input tokens, so the
         // per-call debit record carries cache efficiency alongside the token
         // counts. 0 when the provider did not report cached tokens.
-        cachedTokens: positiveInt(
-          modelCallUsageTelemetry(input.usage as Parameters<typeof modelCallUsageTelemetry>[0])
-            .cachedTokens,
-        ),
+        cachedTokens: normalizedUsage.telemetry.cachedTokens ?? 0,
       },
     });
     recordCreditMicros(input.observability, "usage", result.debitedMicros);
   }
 }
 
-function positiveInt(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): ModelUsageInput {
+  return {
+    ...(normalized.telemetry.inputTokens !== null
+      ? { inputTokens: normalized.telemetry.inputTokens }
+      : {}),
+    ...(normalized.telemetry.outputTokens !== null
+      ? { outputTokens: normalized.telemetry.outputTokens }
+      : {}),
+    ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
+    ...(normalized.telemetry.cachedTokens !== null
+      ? { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }
+      : {}),
+  };
 }
 
 function startOfUtcMonth(): Date {

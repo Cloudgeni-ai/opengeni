@@ -182,7 +182,16 @@ export {
 } from "./skill-library";
 
 export type { RuntimeMetricsHooks } from "./metrics";
-export type { TurnToolCancellationFence } from "./sandbox/turn-tool-cancellation";
+export {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./sandbox/turn-tool-cancellation";
+export type {
+  TurnSandboxCommandArgs,
+  TurnSandboxCommandSession,
+  TurnToolCancellationController,
+  TurnToolCancellationFence,
+} from "./sandbox/turn-tool-cancellation";
 
 // P4.3 computer-use surface (the agent's :0 driver). Re-exported from the barrel
 // so callers (the worker, live proofs) reach SandboxComputer/ComputerUseCapability
@@ -270,8 +279,17 @@ export type {
   CompactionItem,
   PreparedCompactionPromptInput,
 } from "./context-compaction";
-export { modelCallUsageTelemetry } from "./usage-telemetry";
-export type { ModelCallUsageTelemetry } from "./usage-telemetry";
+export {
+  MAX_MODEL_USAGE_TOKEN_COUNT,
+  modelCallUsageTelemetry,
+  modelUsageTokenCountOrNull,
+  normalizeModelCallUsage,
+} from "./usage-telemetry";
+export type {
+  ModelCallUsageInput,
+  ModelCallUsageNormalization,
+  ModelCallUsageTelemetry,
+} from "./usage-telemetry";
 
 ensureReadableStreamFrom();
 
@@ -290,6 +308,18 @@ export type ModelResponseUsage = {
     totalTokens?: number;
     inputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
     outputTokensDetails?: Record<string, number> | Array<Record<string, number>>;
+    requestUsageEntries?: Array<{
+      inputTokens?: number;
+      input_tokens?: number;
+      outputTokens?: number;
+      output_tokens?: number;
+      totalTokens?: number;
+      total_tokens?: number;
+      inputTokensDetails?: Record<string, number>;
+      input_tokens_details?: Record<string, number>;
+      outputTokensDetails?: Record<string, number>;
+      output_tokens_details?: Record<string, number>;
+    }>;
   };
 };
 
@@ -626,7 +656,7 @@ export function resolveTurnModel(
   return {
     provider: resolved.provider,
     client,
-    model: buildModelInstance(resolved.provider, client, resolved.model.id),
+    model: buildModelInstance(resolved.provider, client, resolved.model.upstreamModelId),
     configured: resolved.model,
   };
 }
@@ -4835,6 +4865,7 @@ function usageFromResponse(response: unknown): ModelResponseUsage["usage"] | nul
     ...numberProp(record, "totalTokens", "totalTokens", "total_tokens"),
     ...inputTokenDetailsProp(record),
     ...outputTokenDetailsProp(record),
+    ...requestUsageEntriesProp(record),
   };
   return Object.keys(usage).length > 0 ? usage : null;
 }
@@ -4845,7 +4876,11 @@ function numberProp(
   ...keys: string[]
 ): Partial<ModelResponseUsage["usage"]> {
   const value = keys.map((key) => raw[key]).find((candidate) => candidate !== undefined);
-  return typeof value === "number" && Number.isFinite(value) ? { [outputKey]: value } : {};
+  // Preserve numeric provider values verbatim here, including malformed ones.
+  // The shared usage normalizer is the single bounded validation boundary and
+  // needs to see NaN/infinite/fractional/oversized values so it can emit safe
+  // field-path diagnostics rather than silently erasing the evidence.
+  return typeof value === "number" ? { [outputKey]: value } : {};
 }
 
 function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelResponseUsage["usage"]> {
@@ -4854,7 +4889,7 @@ function inputTokenDetailsProp(raw: Record<string, unknown>): Partial<ModelRespo
     raw.input_tokens_details ??
     raw.promptTokensDetails ??
     raw.prompt_tokens_details;
-  if (!details || typeof details !== "object") {
+  if (details === undefined || details === null) {
     return {};
   }
   return {
@@ -4867,11 +4902,26 @@ function outputTokenDetailsProp(
 ): Partial<ModelResponseUsage["usage"]> {
   const details = raw.outputTokensDetails ?? raw.output_tokens_details;
   const normalized = details ?? raw.completionTokensDetails ?? raw.completion_tokens_details;
-  if (!normalized || typeof normalized !== "object") {
+  if (normalized === undefined || normalized === null) {
     return {};
   }
   return {
     outputTokensDetails: normalized as Record<string, number> | Array<Record<string, number>>,
+  };
+}
+
+function requestUsageEntriesProp(
+  raw: Record<string, unknown>,
+): Partial<ModelResponseUsage["usage"]> {
+  const entries = raw.requestUsageEntries ?? raw.request_usage_entries;
+  if (entries === undefined || entries === null) {
+    return {};
+  }
+  return {
+    // The normalizer validates every entry and all supported field aliases.
+    // Preserve the SDK objects rather than rebuilding them and accidentally
+    // dropping provider detail fields such as cache_write_tokens.
+    requestUsageEntries: entries as NonNullable<ModelResponseUsage["usage"]["requestUsageEntries"]>,
   };
 }
 

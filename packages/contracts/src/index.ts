@@ -5112,8 +5112,34 @@ export const SessionEventSemanticClass = z.enum([
 ]);
 export type SessionEventSemanticClass = z.infer<typeof SessionEventSemanticClass>;
 
+/**
+ * The semantic classes accepted by an exclusive latest lookup. `receipt` is
+ * the concise public spelling for the historical `tool_receipt` class; the
+ * latter remains accepted everywhere for backwards compatibility.
+ */
+export const SessionEventLatestClass = z.enum([
+  "control",
+  "terminal",
+  "failure",
+  "checkpoint",
+  "tool_receipt",
+  "provider_account",
+  "receipt",
+]);
+export type SessionEventLatestClass = z.infer<typeof SessionEventLatestClass>;
+
+export function sessionEventLatestClassToSemanticClass(
+  value: SessionEventLatestClass,
+): SessionEventSemanticClass {
+  return value === "receipt" ? "tool_receipt" : value;
+}
+
 export const SessionEventPayloadMode = z.enum(["none", "summary", "full"]);
 export type SessionEventPayloadMode = z.infer<typeof SessionEventPayloadMode>;
+
+/** Select the compact semantic-result projection instead of an event array. */
+export const SessionEventResultMode = z.enum(["events", "compact"]);
+export type SessionEventResultMode = z.infer<typeof SessionEventResultMode>;
 
 export const SessionEventReadMode = z.enum(["monitoring", "forensic"]);
 export type SessionEventReadMode = z.infer<typeof SessionEventReadMode>;
@@ -5156,6 +5182,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
   ],
   terminal: [
     "turn.completed",
+    "agent.message.completed",
     "turn.failed",
     "turn.cancelled",
     "turn.superseded",
@@ -6008,6 +6035,354 @@ export const SessionEvent = z.object({
   duplicateReason: z.string().min(1).max(1024).nullable().optional(),
 });
 export type SessionEvent = z.infer<typeof SessionEvent>;
+
+export type SessionEventCompactResult = {
+  version: 1;
+  semanticClass: SessionEventSemanticClass;
+  source: {
+    id: string;
+    type: SessionEventType;
+    sequence: number;
+    occurredAt: string;
+    turnId: string | null;
+    turnGeneration: number | null;
+    turnAttemptId: string | null;
+    turnAssociation: SessionEvent["turnAssociation"];
+  };
+  // These identity fields are repeated at the top level intentionally: an
+  // MCP caller can act on the result without unpacking the source envelope.
+  id: string;
+  type: SessionEventType;
+  sequence: number;
+  occurredAt: string;
+  turnId: string | null;
+  turnGeneration: number | null;
+  turnAttemptId: string | null;
+  turnAssociation: SessionEvent["turnAssociation"];
+  coveredSequence: { first: number; last: number };
+  status:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "superseded"
+    | "checkpoint"
+    | "receipt"
+    | "unknown";
+  text: string | null;
+  output: unknown;
+  result: unknown;
+  failure: {
+    error: string | null;
+    code: string | null;
+    retryable: boolean | null;
+    recovery: string | null;
+  } | null;
+  checkpoint: unknown;
+  receipt: unknown;
+  truncation: {
+    truncated: boolean;
+    fields: string[];
+    originalBytes: number | null;
+    deliveredBytes: number;
+  };
+};
+
+const SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES = 12 * 1024;
+// Five independently bounded slots plus identity/metadata must fit below the
+// 64 KiB MCP envelope even when a pathological producer supplies every slot.
+const SESSION_EVENT_COMPACT_RESULT_VALUE_MAX_BYTES = 8 * 1024;
+
+type CompactValue = {
+  value: unknown;
+  truncated: boolean;
+  originalBytes: number | null;
+};
+
+type JsonRecord = Record<string, unknown>;
+
+/**
+ * Build the bounded semantic result used by `latest + result=compact`.
+ *
+ * This is intentionally a pure projection over one already-authoritative
+ * event. It never reads history, invokes a model, follows a URL, or stores an
+ * artifact. The DB/API/MCP layers decide which event is authoritative; this
+ * helper only extracts the small result facts that can cross a client boundary.
+ */
+export function compactSessionEventResult(
+  event: SessionEvent,
+  semanticClass: SessionEventSemanticClass,
+  coveredSequence: { first: number; last: number } = {
+    first: event.sequence,
+    last: event.sequence,
+  },
+): SessionEventCompactResult {
+  const payload = isSessionEventJsonRecord(event.payload) ? event.payload : {};
+  const fields: string[] = [];
+  let originalBytes = 0;
+
+  const textCandidate = typeof payload.text === "string" ? payload.text : null;
+  const outputCandidate = Object.prototype.hasOwnProperty.call(payload, "output")
+    ? payload.output
+    : null;
+  const resultCandidate = Object.prototype.hasOwnProperty.call(payload, "result")
+    ? payload.result
+    : undefined;
+  const textValue = textCandidate ?? (typeof outputCandidate === "string" ? outputCandidate : null);
+  const text = textValue === null ? null : compactResultText(textValue);
+  if (text && text.truncated) {
+    fields.push("text");
+    originalBytes += text.originalBytes ?? 0;
+  }
+
+  const output = compactResultValue(outputCandidate);
+  if (outputCandidate !== null && output.truncated) {
+    fields.push("output");
+    originalBytes += output.originalBytes ?? 0;
+  }
+
+  const result = compactResultValue(
+    resultCandidate === undefined ? (textValue ?? outputCandidate) : resultCandidate,
+  );
+  if (resultCandidate !== undefined && result.truncated) {
+    fields.push("result");
+    originalBytes += result.originalBytes ?? 0;
+  }
+
+  const checkpointField = firstOwnPayloadValue(payload, ["checkpoint", "summary", "snapshot"]);
+  const checkpointCandidate =
+    checkpointField !== undefined
+      ? checkpointField
+      : semanticClass === "checkpoint"
+        ? payload
+        : null;
+  const checkpoint = compactResultValue(checkpointCandidate);
+  if (checkpointCandidate !== null && checkpoint.truncated) {
+    fields.push("checkpoint");
+    originalBytes += checkpoint.originalBytes ?? 0;
+  }
+
+  const receiptCandidate = firstOwnPayloadValue(payload, ["receipt", "receiptData"]);
+  const receipt = compactResultValue(
+    receiptCandidate !== undefined
+      ? receiptCandidate
+      : semanticClass === "tool_receipt"
+        ? payload
+        : null,
+  );
+  if (receipt.truncated) {
+    fields.push("receipt");
+    originalBytes += receipt.originalBytes ?? 0;
+  }
+
+  const failure = compactFailure(payload, event.type);
+  if (failure.truncated) {
+    fields.push("failure");
+    originalBytes += failure.originalBytes ?? 0;
+  }
+
+  if (isSessionEventJsonRecord(payload.truncation) && payload.truncation.truncated === true) {
+    fields.push("payload");
+  }
+
+  const source = {
+    id: event.id,
+    type: event.type,
+    sequence: event.sequence,
+    occurredAt: event.occurredAt,
+    turnId: event.turnId ?? null,
+    turnGeneration: event.turnGeneration ?? null,
+    turnAttemptId: event.turnAttemptId ?? null,
+    turnAssociation: event.turnAssociation ?? null,
+  };
+  const status = compactResultStatus(event.type, semanticClass, payload);
+  const outputValue = outputCandidate === null ? null : output.value;
+  const resultValue = result.value;
+  const checkpointValue = checkpointCandidate === null ? null : checkpoint.value;
+  const receiptValue =
+    receiptCandidate === null && semanticClass !== "tool_receipt" ? null : receipt.value;
+  const compact: SessionEventCompactResult = {
+    version: 1,
+    semanticClass,
+    source,
+    id: source.id,
+    type: source.type,
+    sequence: source.sequence,
+    occurredAt: source.occurredAt,
+    turnId: source.turnId,
+    turnGeneration: source.turnGeneration,
+    turnAttemptId: source.turnAttemptId,
+    turnAssociation: source.turnAssociation,
+    coveredSequence,
+    status,
+    text: text?.value ?? null,
+    output: outputValue,
+    result: resultValue,
+    failure: failure.value,
+    checkpoint: checkpointValue,
+    receipt: receiptValue,
+    truncation: {
+      truncated: fields.length > 0,
+      fields: [...new Set(fields)],
+      originalBytes: fields.length > 0 ? originalBytes || null : null,
+      deliveredBytes: sessionEventJsonBytes({
+        text: text?.value ?? null,
+        output: outputValue,
+        result: resultValue,
+        failure: failure.value,
+        checkpoint: checkpointValue,
+        receipt: receiptValue,
+      }),
+    },
+  };
+  return compact;
+}
+
+function isSessionEventJsonRecord(value: unknown): value is JsonRecord {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function firstOwnPayloadValue(payload: JsonRecord, keys: readonly string[]): unknown | undefined {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(payload, key)) return payload[key];
+  }
+  return undefined;
+}
+
+function compactResultText(value: string): CompactValue & { value: string } {
+  const originalBytes = new TextEncoder().encode(value).byteLength;
+  if (originalBytes <= SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES) {
+    return { value, truncated: false, originalBytes };
+  }
+  let omittedBytes = originalBytes - SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES;
+  let projected = value;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const marker = `…[${omittedBytes} UTF-8 bytes omitted from compact result]…`;
+    const budget = Math.max(0, SESSION_EVENT_COMPACT_RESULT_TEXT_MAX_BYTES - utf8Bytes(marker));
+    const head = utf8PrefixForResult(value, Math.floor(budget * 0.7));
+    const tail = utf8SuffixForResult(value, budget - utf8Bytes(head));
+    projected = `${head}${marker}${tail}`;
+    const nextOmitted = Math.max(0, originalBytes - utf8Bytes(head) - utf8Bytes(tail));
+    if (nextOmitted === omittedBytes) break;
+    omittedBytes = nextOmitted;
+  }
+  return { value: projected, truncated: true, originalBytes };
+}
+
+function compactResultValue(value: unknown): CompactValue {
+  if (value === null || value === undefined) {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  const measurement = measureSessionEventJson(value);
+  const bounded = boundSessionEventPayload(value, {
+    surface: "http_projection",
+    maxBytes: SESSION_EVENT_COMPACT_RESULT_VALUE_MAX_BYTES,
+  });
+  const deliveredBytes = measureSessionEventJson(bounded).bytes;
+  return {
+    value: bounded,
+    truncated:
+      measurement.bytes === null || deliveredBytes === null || measurement.bytes !== deliveredBytes,
+    originalBytes: measurement.bytes,
+  };
+}
+
+function compactFailure(
+  payload: JsonRecord,
+  eventType: SessionEventType,
+): CompactValue & {
+  value: SessionEventCompactResult["failure"];
+} {
+  const isFailure =
+    eventType === "turn.failed" ||
+    eventType === "turn.cancelled" ||
+    eventType === "turn.superseded";
+  const hasFailureField = ["error", "code", "retryable", "recovery"].some((key) =>
+    Object.prototype.hasOwnProperty.call(payload, key),
+  );
+  if (!isFailure && !hasFailureField) {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  const error = compactResultStringField(payload.error);
+  const code = compactResultStringField(payload.code);
+  const recovery = compactResultStringField(payload.recovery);
+  const retryable = typeof payload.retryable === "boolean" ? payload.retryable : null;
+  const value = { error: error.value, code: code.value, retryable, recovery: recovery.value };
+  const originalBytes = [error, code, recovery]
+    .map((field) => field.originalBytes ?? 0)
+    .reduce((sum, bytes) => sum + bytes, 0);
+  return {
+    value,
+    truncated: error.truncated || code.truncated || recovery.truncated,
+    originalBytes: originalBytes || null,
+  };
+}
+
+function compactResultStringField(value: unknown): CompactValue & { value: string | null } {
+  if (typeof value !== "string") {
+    return { value: null, truncated: false, originalBytes: null };
+  }
+  return compactResultText(value);
+}
+
+function compactResultStatus(
+  eventType: SessionEventType,
+  semanticClass: SessionEventSemanticClass,
+  payload: JsonRecord,
+): SessionEventCompactResult["status"] {
+  if (eventType === "turn.failed") return "failed";
+  if (eventType === "turn.cancelled") return "cancelled";
+  if (eventType === "turn.superseded") return "superseded";
+  if (eventType === "turn.completed" || eventType === "agent.message.completed") {
+    return "completed";
+  }
+  if (semanticClass === "checkpoint") return "checkpoint";
+  if (
+    semanticClass === "tool_receipt" ||
+    eventType === "artifact.created" ||
+    eventType === "recording.available"
+  ) {
+    return "receipt";
+  }
+  if (payload.status === "failed") return "failed";
+  if (payload.status === "completed") return "completed";
+  return "unknown";
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function utf8PrefixForResult(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let index = 0;
+  while (index < value.length) {
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    const next = utf8Bytes(character);
+    if (bytes + next > maxBytes) break;
+    bytes += next;
+    index += character.length;
+  }
+  return value.slice(0, index);
+}
+
+function utf8SuffixForResult(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let index = value.length;
+  while (index > 0) {
+    const width =
+      index > 1 && value.charCodeAt(index - 1) >= 0xdc00 && value.charCodeAt(index - 1) <= 0xdfff
+        ? 2
+        : 1;
+    const character = value.slice(index - width, index);
+    const next = utf8Bytes(character);
+    if (bytes + next > maxBytes) break;
+    bytes += next;
+    index -= width;
+  }
+  return value.slice(index);
+}
 
 // --- Durable host export ------------------------------------------------------
 
@@ -7611,21 +7986,372 @@ export const MachineMetricsSeriesResponse = z.object({
 export type MachineMetricsSeriesResponse = z.infer<typeof MachineMetricsSeriesResponse>;
 
 /**
+ * Keep this server-facing schema graph eager when imported while allowing
+ * browser bundlers to discard it when contracts is used only for unrelated
+ * helpers. Keep each call site annotated as pure; the factory argument itself
+ * is side-effect-free until invoked.
+ */
+function defineModelContractSchema<Schema>(factory: () => Schema): Schema {
+  return factory();
+}
+
+export const ModelCapabilitySupportV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["supported", "unsupported", "unknown"]),
+);
+export type ModelCapabilitySupportV1 = z.infer<typeof ModelCapabilitySupportV1>;
+
+export const ModelCapabilityStateV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    upstream: ModelCapabilitySupportV1,
+    runnable: z.boolean(),
+  }),
+);
+export type ModelCapabilityStateV1 = z.infer<typeof ModelCapabilityStateV1>;
+
+export const ModelCapabilitiesV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    reasoning: ModelCapabilityStateV1.extend({
+      efforts: z.array(ReasoningEffort),
+      defaultEffort: ReasoningEffort.nullable(),
+      required: z.boolean(),
+    }),
+    functionCalling: ModelCapabilityStateV1,
+    structuredOutput: ModelCapabilityStateV1,
+    hostedTools: z.object({
+      webSearch: ModelCapabilityStateV1,
+      xSearch: ModelCapabilityStateV1,
+      codeExecution: ModelCapabilityStateV1,
+    }),
+    inputModalities: z.array(z.enum(["text", "image", "audio"])),
+    outputModalities: z.array(z.enum(["text", "image", "audio"])),
+    transports: z.object({
+      sse: ModelCapabilityStateV1,
+      responsesWebSocket: ModelCapabilityStateV1,
+      realtimeAudio: ModelCapabilityStateV1,
+    }),
+    latencyModes: z.array(
+      z.object({
+        id: z.enum(["standard", "priority", "fast"]),
+        upstream: ModelCapabilitySupportV1,
+        runnable: z.boolean(),
+        billingMultiplierBps: z.number().int().positive().optional(),
+      }),
+    ),
+  }),
+);
+export type ModelCapabilitiesV1 = z.infer<typeof ModelCapabilitiesV1>;
+
+export const ModelCredentialSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.union([
+    z
+      .object({ kind: z.literal("deployment"), mechanism: z.enum(["api_key", "azure_ad_bearer"]) })
+      .strict(),
+    z.object({ kind: z.literal("connected_subscription"), provider: z.literal("codex") }).strict(),
+    z.object({ kind: z.literal("workspace_connection"), mechanism: z.literal("api_key") }).strict(),
+  ]),
+);
+export type ModelCredentialSourceV1 = z.infer<typeof ModelCredentialSourceV1>;
+
+export const ModelBillingAttributionV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      upstreamPayer: z.enum(["deployment", "workspace", "connected_subscription"]),
+      metering: z.enum(["opengeni_credits", "external"]),
+    })
+    .strict(),
+);
+export type ModelBillingAttributionV1 = z.infer<typeof ModelBillingAttributionV1>;
+
+export const TURN_EXECUTION_POLICY_METADATA_KEY = "turnExecutionPolicyV1" as const;
+
+export const TurnExecutionModelSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
+export type TurnExecutionModelSourceV1 = z.infer<typeof TurnExecutionModelSourceV1>;
+
+export const TurnExecutionReasoningSourceV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.enum(["explicit", "session", "deployment", "continuation"]),
+);
+export type TurnExecutionReasoningSourceV1 = z.infer<typeof TurnExecutionReasoningSourceV1>;
+
+/**
+ * Secret-safe execution identity frozen onto one accepted logical turn.
+ *
+ * This is deliberately a strict, normalized reference to the deployment
+ * definition rather than a serialized provider client. It must never contain
+ * a key/token, concrete connected credential id, account label, authorization
+ * header, or credential-bearing URL/query value.
+ */
+export const TurnExecutionPolicyV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      schemaVersion: z.literal(1),
+      productModelId: z.string().min(1),
+      requestedModelId: z.string().min(1).nullable(),
+      modelSource: TurnExecutionModelSourceV1,
+      reasoningEffort: ReasoningEffort,
+      reasoningSource: TurnExecutionReasoningSourceV1,
+      providerId: z.string().min(1),
+      upstreamModelId: z.string().min(1),
+      wireApi: z.enum(["responses", "chat"]),
+      credentialSource: ModelCredentialSourceV1,
+      billing: ModelBillingAttributionV1,
+      definitionVersion: z.string().regex(/^sha256:[a-f0-9]{64}$/u),
+    })
+    .strict()
+    .superRefine((policy, context) => {
+      if (policy.modelSource === "explicit" && policy.requestedModelId === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["requestedModelId"],
+          message: "an explicit model source requires a requested model id",
+        });
+      }
+      if (policy.modelSource !== "explicit" && policy.requestedModelId !== null) {
+        context.addIssue({
+          code: "custom",
+          path: ["requestedModelId"],
+          message: "only an explicit model source may retain a requested model id",
+        });
+      }
+    }),
+);
+export type TurnExecutionPolicyV1 = z.infer<typeof TurnExecutionPolicyV1>;
+
+export type TurnExecutionPolicyReadV1 =
+  | { kind: "absent" }
+  | { kind: "valid"; policy: TurnExecutionPolicyV1 };
+
+/**
+ * Read the policy from turn metadata. Only a literally absent key is legacy;
+ * null, undefined, an unknown schema version, extra fields, and every other
+ * malformed present value fail closed. Error text reports paths only and never
+ * reflects the untrusted value into logs or events.
+ */
+export function readTurnExecutionPolicyV1(metadata: unknown): TurnExecutionPolicyReadV1 {
+  if (metadata === null || metadata === undefined) {
+    return { kind: "absent" };
+  }
+  if (typeof metadata !== "object" || Array.isArray(metadata)) {
+    throw new Error("Malformed turn execution policy metadata: turn metadata is not an object");
+  }
+  const record = metadata as Record<string, unknown>;
+  if (!Object.prototype.hasOwnProperty.call(record, TURN_EXECUTION_POLICY_METADATA_KEY)) {
+    return { kind: "absent" };
+  }
+  const parsed = TurnExecutionPolicyV1.safeParse(record[TURN_EXECUTION_POLICY_METADATA_KEY]);
+  if (!parsed.success) {
+    const paths = [
+      ...new Set(
+        parsed.error.issues.map((issue) =>
+          issue.path.length === 0 ? "policy" : `policy.${issue.path.join(".")}`,
+        ),
+      ),
+    ].join(", ");
+    throw new Error(`Malformed turn execution policy metadata at ${paths || "policy"}`);
+  }
+  return { kind: "valid", policy: parsed.data };
+}
+
+/** Merge a trusted policy into metadata without disturbing dispatch/recovery state. */
+export function metadataWithTurnExecutionPolicyV1(
+  metadata: Readonly<Record<string, unknown>> | null | undefined,
+  policy: TurnExecutionPolicyV1,
+): Record<string, unknown> {
+  return {
+    ...(metadata ?? {}),
+    [TURN_EXECUTION_POLICY_METADATA_KEY]: TurnExecutionPolicyV1.parse(policy),
+  };
+}
+
+/**
+ * Minimal, stable evidence projection for command receipts and audit events.
+ * It intentionally excludes aliases, URLs, request metadata, and all concrete
+ * credential-selection identity.
+ */
+export function turnExecutionPolicyAuditMetadata(
+  policy: TurnExecutionPolicyV1,
+  turnId: string,
+): Record<string, unknown> {
+  const parsed = TurnExecutionPolicyV1.parse(policy);
+  return {
+    turnId,
+    requestedModelId: parsed.requestedModelId,
+    effectiveModelId: parsed.productModelId,
+    modelSource: parsed.modelSource,
+    effectiveReasoningEffort: parsed.reasoningEffort,
+    reasoningSource: parsed.reasoningSource,
+    providerId: parsed.providerId,
+    credentialSourceKind: parsed.credentialSource.kind,
+    credentialSourceMechanism:
+      parsed.credentialSource.kind === "connected_subscription"
+        ? parsed.credentialSource.provider
+        : parsed.credentialSource.mechanism,
+    billingOwner: parsed.billing.upstreamPayer,
+    billingMetering: parsed.billing.metering,
+    definitionVersion: parsed.definitionVersion,
+  };
+}
+
+export const ModelPricingV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    inputMicrosPerMillionTokens: z.number().int().nonnegative(),
+    cachedInputMicrosPerMillionTokens: z.number().int().nonnegative().optional(),
+    outputMicrosPerMillionTokens: z.number().int().nonnegative(),
+    marginBps: z.number().int().min(0).max(100_000).optional(),
+  }),
+);
+export type ModelPricingV1 = z.infer<typeof ModelPricingV1>;
+
+export const ModelPricingScheduleV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    default: ModelPricingV1,
+    inputTokenTiers: z
+      .array(
+        z.object({
+          minimumInputTokens: z.number().int().nonnegative(),
+          pricing: ModelPricingV1,
+        }),
+      )
+      .optional(),
+  }),
+);
+export type ModelPricingScheduleV1 = z.infer<typeof ModelPricingScheduleV1>;
+
+/**
  * A single host-exposed model + the provider that serves it, as surfaced to
  * clients (SDK + React composer) by GET /v1/config/client. The wire `api`
  * ("responses" | "chat") lets a client reason about provider capabilities; the
  * provider id/label drive the picker's grouping. This mirrors the runtime's
  * ConfiguredModel (packages/config) projected to the client-safe fields.
  */
-export const ClientModel = z.object({
-  id: z.string(),
-  label: z.string(),
-  provider: z.string(), // provider id
-  providerLabel: z.string(),
-  api: z.enum(["responses", "chat"]),
-  contextWindowTokens: z.number().int().positive().optional(),
-});
+export const ClientModel = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    id: z.string(),
+    label: z.string(),
+    provider: z.string(), // provider id
+    providerLabel: z.string(),
+    api: z.enum(["responses", "chat"]),
+    contextWindowTokens: z.number().int().positive().optional(),
+    // Additive normalized definition metadata. Optional so older server payloads
+    // remain parseable; current servers project the complete V1 set.
+    schemaVersion: z.literal(1).optional(),
+    aliases: z.array(z.string()).optional(),
+    deployment: z
+      .object({
+        upstreamModelId: z.string().min(1),
+        wireApi: z.enum(["responses", "chat"]),
+      })
+      .optional(),
+    executionLimits: z
+      .object({
+        contextWindowTokens: z.number().int().positive().nullable(),
+        effectiveContextWindowTokens: z.number().int().positive().nullable(),
+        autoCompactTokenLimit: z.number().int().positive().nullable(),
+        toolOutputTruncationTokens: z.number().int().positive().nullable(),
+      })
+      .optional(),
+    credentialSource: ModelCredentialSourceV1.optional(),
+    billing: ModelBillingAttributionV1.optional(),
+    capabilities: ModelCapabilitiesV1.optional(),
+    pricing: ModelPricingScheduleV1.optional(),
+    definitionVersion: z
+      .string()
+      .regex(/^sha256:[a-f0-9]{64}$/u)
+      .optional(),
+  }),
+);
 export type ClientModel = z.infer<typeof ClientModel>;
+
+export const ModelCredentialReadinessV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z
+    .object({
+      status: z.enum(["ready", "not_ready", "error"]),
+      reason: z
+        .enum([
+          "missing_credential",
+          "needs_reauth",
+          "prerequisites_missing",
+          "resolver_error",
+          "observation_stale",
+        ])
+        .nullable(),
+      basis: z.enum(["configuration", "connection", "resolver"]),
+      checkedAt: z.string().datetime().nullable(),
+    })
+    .strict()
+    .superRefine((readiness, context) => {
+      if ((readiness.status === "ready") !== (readiness.reason === null)) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message: "ready credential state requires no reason; non-ready state requires a reason",
+        });
+      }
+      if ((readiness.status === "error") !== (readiness.reason === "resolver_error")) {
+        context.addIssue({
+          code: "custom",
+          path: ["reason"],
+          message:
+            "credential errors require resolver_error and resolver_error requires error status",
+        });
+      }
+      if (
+        readiness.basis === "resolver" &&
+        readiness.status === "ready" &&
+        readiness.checkedAt === null
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "resolver readiness requires an observation timestamp",
+        });
+      }
+      if (readiness.reason === "observation_stale" && readiness.checkedAt === null) {
+        context.addIssue({
+          code: "custom",
+          path: ["checkedAt"],
+          message: "a stale observation requires its observation timestamp",
+        });
+      }
+    }),
+);
+export type ModelCredentialReadinessV1 = z.infer<typeof ModelCredentialReadinessV1>;
+
+export const ModelAvailabilityV1 = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    status: z.enum(["available", "unavailable", "degraded", "unknown"]),
+    selectable: z.boolean(),
+    reason: z
+      .enum([
+        "missing_credential",
+        "needs_reauth",
+        "credential_not_ready",
+        "not_entitled",
+        "provider_unhealthy",
+        "policy_blocked",
+        "unsupported",
+      ])
+      .nullable(),
+    checkedAt: z.string().datetime().nullable(),
+  }),
+);
+export type ModelAvailabilityV1 = z.infer<typeof ModelAvailabilityV1>;
+
+export const WorkspaceModelCatalogModel = /* @__PURE__ */ defineModelContractSchema(() =>
+  ClientModel.extend({
+    credentialReadiness: ModelCredentialReadinessV1,
+    availability: ModelAvailabilityV1,
+  }),
+);
+export type WorkspaceModelCatalogModel = z.infer<typeof WorkspaceModelCatalogModel>;
+
+export const WorkspaceModelCatalogResponse = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    models: z.array(WorkspaceModelCatalogModel),
+  }),
+);
+export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalogResponse>;
 
 /**
  * Exact public HTTP protocol revision spoken by this release train.
@@ -7638,46 +8364,48 @@ export type ClientModel = z.infer<typeof ClientModel>;
 export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
-export const ClientConfig = z.object({
-  deploymentRevision: z.string(),
-  apiContractRevision: z.literal(OPENGENI_API_CONTRACT_REVISION),
-  // Release-train version of the server (absent on dev/source builds). The
-  // compatibility policy lives in docs/architecture.md — clients within the
-  // same major are supported; evolution is additive within a major.
-  serverVersion: z.string().optional(),
-  defaultModel: z.string(),
-  allowedModels: z.array(z.string()).min(1),
-  // Richer model list (provider-grouped) for the picker. Defaults to [] for
-  // back-compat: callers that only read allowedModels are unaffected.
-  models: z.array(ClientModel).default([]),
-  defaultReasoningEffort: ReasoningEffort,
-  allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
-  mcpServers: z
-    .array(
-      z.object({
-        id: z.string(),
-        name: z.string(),
-      }),
-    )
-    .default([]),
-  fileUploads: z.object({
-    enabled: z.boolean(),
-    maxSizeBytes: z.number().int().positive(),
+export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
+  z.object({
+    deploymentRevision: z.string(),
+    apiContractRevision: z.literal(OPENGENI_API_CONTRACT_REVISION),
+    // Release-train version of the server (absent on dev/source builds). The
+    // compatibility policy lives in docs/architecture.md — clients within the
+    // same major are supported; evolution is additive within a major.
+    serverVersion: z.string().optional(),
+    defaultModel: z.string(),
+    allowedModels: z.array(z.string()).min(1),
+    // Richer model list (provider-grouped) for the picker. Defaults to [] for
+    // back-compat: callers that only read allowedModels are unaffected.
+    models: z.array(ClientModel).default([]),
+    defaultReasoningEffort: ReasoningEffort,
+    allowedReasoningEfforts: z.array(ReasoningEffort).min(1),
+    mcpServers: z
+      .array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+        }),
+      )
+      .default([]),
+    fileUploads: z.object({
+      enabled: z.boolean(),
+      maxSizeBytes: z.number().int().positive(),
+    }),
+    productAccessMode: ProductAccessMode,
+    auth: ClientAuthConfig.default({ mode: "none" }),
+    // Server-wide hint: does this deployment support Channel-A structured services
+    // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
+    // (it depends on the session's pinned backend); this is the coarse on/off the
+    // client uses to decide whether to even attempt the fs/git/terminal panels.
+    structuredServices: z
+      .object({
+        fileSystem: z.boolean(),
+        git: z.boolean(),
+        terminalEvents: z.boolean(),
+      })
+      .default({ fileSystem: false, git: false, terminalEvents: false }),
   }),
-  productAccessMode: ProductAccessMode,
-  auth: ClientAuthConfig.default({ mode: "none" }),
-  // Server-wide hint: does this deployment support Channel-A structured services
-  // at all (P4.4). Per-session availability is negotiated on /stream-capabilities
-  // (it depends on the session's pinned backend); this is the coarse on/off the
-  // client uses to decide whether to even attempt the fs/git/terminal panels.
-  structuredServices: z
-    .object({
-      fileSystem: z.boolean(),
-      git: z.boolean(),
-      terminalEvents: z.boolean(),
-    })
-    .default({ fileSystem: false, git: false, terminalEvents: false }),
-});
+);
 export type ClientConfig = z.infer<typeof ClientConfig>;
 
 function base64UrlEncode(value: string): string {

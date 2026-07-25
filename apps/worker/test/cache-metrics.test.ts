@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
 import {
@@ -36,6 +36,9 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(metrics).toMatch(
       /opengeni_model_cache_hit_ratio_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
     );
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="codex-subscription"[^}]*status="reported"[^}]*\} 1\b/,
+    );
   });
 
   test("a call with prompt tokens but NO cached tokens records a real 0 ratio (cache did nothing)", async () => {
@@ -57,7 +60,7 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
   });
 
-  test("absent/null cached tokens (providers that don't report it) does not throw and counts nothing", async () => {
+  test("absent/null cached tokens remains unknown and does not fabricate a zero ratio", async () => {
     const observability = worker();
     expect(() =>
       recordModelCacheTokens(observability, "openai", {
@@ -74,9 +77,31 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
-    // The null-cached/prompt=1000 call still recorded a 0 ratio; the all-absent call did not.
+    expect(metrics).not.toMatch(/opengeni_model_cache_hit_ratio/);
     expect(metrics).toMatch(
-      /opengeni_model_cache_hit_ratio_count\{[^}]*provider="openai"[^}]*\} 1\b/,
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 2\b/,
+    );
+  });
+
+  test("counts provider-reported cache writes without inventing absent writes", async () => {
+    const observability = worker();
+    recordModelCacheTokens(observability, "openai", {
+      cachedTokens: 0,
+      cacheWriteTokens: 256,
+      promptTokens: 1024,
+    });
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: 0,
+      cacheWriteTokens: null,
+      promptTokens: 1024,
+    });
+
+    const metrics = await observability.prometheusMetrics();
+    expect(metrics).toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="openai"[^}]*\} 256\b/,
+    );
+    expect(metrics).not.toMatch(
+      /opengeni_model_cache_write_tokens_total\{[^}]*provider="codex-subscription"/,
     );
   });
 
@@ -102,18 +127,115 @@ describe("recordModelCacheTokens — prompt-cache efficiency", () => {
     );
   });
 
-  test("non-finite / negative inputs are ignored, not thrown or counted", async () => {
+  test("malformed, fractional, unsafe, and over-contract inputs cannot poison metrics", async () => {
     const observability = worker();
-    expect(() =>
+    const invalid = [
+      Number.NaN,
+      Number.NEGATIVE_INFINITY,
+      Number.POSITIVE_INFINITY,
+      -5,
+      1.5,
+      Number.MAX_SAFE_INTEGER,
+      1_000_000_001,
+    ];
+    for (const value of invalid) {
+      expect(() =>
+        recordModelCacheTokens(observability, "openai", {
+          cachedTokens: value,
+          cacheWriteTokens: value,
+          promptTokens: value,
+        }),
+      ).not.toThrow();
+    }
+    // Repeated oversized input must remain rejected rather than accumulating
+    // into an unsafe or infinite counter.
+    for (let index = 0; index < 10; index += 1) {
       recordModelCacheTokens(observability, "openai", {
-        cachedTokens: Number.NaN,
-        promptTokens: -5,
-      }),
-    ).not.toThrow();
+        cachedTokens: 1_000_000_001,
+        cacheWriteTokens: 1_000_000_001,
+        promptTokens: 1_000_000_001,
+      });
+    }
 
     const metrics = await observability.prometheusMetrics();
     expect(metrics).not.toMatch(/opengeni_model_cached_tokens_total/);
+    expect(metrics).not.toMatch(/opengeni_model_cache_write_tokens_total/);
     expect(metrics).not.toMatch(/opengeni_model_cache_hit_ratio/);
+    expect(metrics).not.toMatch(/\} \+Inf(?:\n|$)/);
+    expect(metrics).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{[^}]*provider="openai"[^}]*status="missing"[^}]*\} 17\b/,
+    );
+  });
+
+  test("refuses cache-counter increments beyond the process-safe cumulative bound", async () => {
+    const observability = worker();
+    const warn = spyOn(observability, "warn").mockImplementation(() => undefined);
+    try {
+      for (let index = 0; index < 1001; index += 1) {
+        recordModelCacheTokens(observability, "openai", {
+          cachedTokens: 1_000_000_000,
+          cacheWriteTokens: 1_000_000_000,
+          promptTokens: null,
+        });
+      }
+
+      const metrics = await observability.prometheusMetrics();
+      expect(metrics).toMatch(
+        /opengeni_model_cached_tokens_total\{[^}]*provider="openai"[^}]*\} 1000000000000\b/,
+      );
+      expect(metrics).toMatch(
+        /opengeni_model_cache_write_tokens_total\{[^}]*provider="openai"[^}]*\} 1000000000000\b/,
+      );
+      expect(metrics).not.toMatch(/\} \+Inf(?:\n|$)/);
+      expect(warn).toHaveBeenCalledWith("model cache metric cumulative limit reached", {
+        provider: "openai",
+        metric: "opengeni_model_cached_tokens_total",
+      });
+      expect(warn).toHaveBeenCalledWith("model cache metric cumulative limit reached", {
+        provider: "openai",
+        metric: "opengeni_model_cache_write_tokens_total",
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("availability labels stay bounded and the chart alerts on missing Codex telemetry", async () => {
+    const observability = worker();
+    recordModelCacheTokens(observability, "codex-subscription", {
+      cachedTokens: null,
+      promptTokens: 100,
+    });
+    const metrics = await observability.prometheusMetrics();
+    const availabilityLine = metrics
+      .split("\n")
+      .find((line) => line.startsWith("opengeni_model_cache_read_telemetry_total{"));
+    expect(availabilityLine).toContain('provider="codex-subscription"');
+    expect(availabilityLine).toContain('status="missing"');
+    const availabilityLabels = availabilityLine?.slice(
+      availabilityLine.indexOf("{") + 1,
+      availabilityLine.indexOf("}"),
+    );
+    expect(availabilityLabels).not.toMatch(/account|session|workspace|model|source/);
+
+    const rule = await Bun.file("deploy/helm/opengeni/templates/prometheusrule.yaml").text();
+    expect(rule).toContain("OpenGeniCodexPromptCacheTelemetryMissing");
+    expect(rule).toContain("opengeni_model_cache_read_telemetry_total");
+    expect(rule).toContain('provider="codex-subscription",status="missing"');
+    // If a provider/SDK omits the ENTIRE usage object, no availability sample
+    // exists. Successful call traffic must remain an independent denominator so
+    // that compatibility failure cannot make the alert disappear.
+    expect(rule).toContain(
+      'opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}',
+    );
+    expect(rule).toMatch(
+      /opengeni_model_cache_read_telemetry_total\{provider="codex-subscription"\}[\s\S]*<[\s\S]*opengeni_model_calls_total\{provider="codex-subscription",outcome="completed"\}/,
+    );
+    const alertBlock = rule.match(
+      /- alert: OpenGeniCodexPromptCacheTelemetryMissing[\s\S]*?for: 15m/,
+    )?.[0];
+    expect(alertBlock).toBeDefined();
+    expect(alertBlock?.match(/and on\(\)/g)).toHaveLength(1);
   });
 });
 
