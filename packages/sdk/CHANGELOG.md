@@ -1,5 +1,15 @@
 # @opengeni/sdk
 
+## 0.22.1
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+
 ## 0.22.0
 
 ### Minor Changes
