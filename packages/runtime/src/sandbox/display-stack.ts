@@ -409,9 +409,21 @@ type PendingDisplayStackCleanup = {
   markerToken: string;
 };
 
+type DisplayStackOperationWaiter = {
+  epoch: number;
+  settled: boolean;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
+};
+
 type DisplayStackOperationState = {
   /** Incremented before a timed-out operation is reported to its caller. */
   epoch: number;
+  /** One provider operation at a time for each physical sandbox. */
+  owner: DisplayStackOperationWaiter | null;
+  /** Calls that started in the current epoch but are waiting for admission. */
+  waiters: DisplayStackOperationWaiter[];
   /** Raw provider calls from fenced operations; only the in-box proof gates retries. */
   inFlight: Set<Promise<unknown>>;
   /** A bounded advisory drain for provider calls that may never settle. */
@@ -475,6 +487,8 @@ function stableSandboxIdentity(
 function newOperationState(): DisplayStackOperationState {
   return {
     epoch: 0,
+    owner: null,
+    waiters: [],
     inFlight: new Set(),
     drain: null,
     pendingCleanup: new Map(),
@@ -520,6 +534,75 @@ function operationState(
     displayStackOperationStates.set(key, state);
   }
   return state;
+}
+
+function settleOperationWaiter(waiter: DisplayStackOperationWaiter, error?: unknown): void {
+  if (waiter.settled) return;
+  waiter.settled = true;
+  if (waiter.timer) clearTimeout(waiter.timer);
+  if (error === undefined) waiter.resolve();
+  else waiter.reject(error);
+}
+
+function pumpOperationWaiters(state: DisplayStackOperationState): void {
+  if (state.owner) return;
+  while (state.waiters.length > 0) {
+    const waiter = state.waiters.shift()!;
+    if (waiter.settled) continue;
+    if (waiter.epoch !== state.epoch) {
+      settleOperationWaiter(waiter, new DisplayStackOperationFencedError());
+      continue;
+    }
+    state.owner = waiter;
+    settleOperationWaiter(waiter);
+    return;
+  }
+}
+
+function acquireOperation(
+  state: DisplayStackOperationState,
+  deadline: number,
+): Promise<() => void> {
+  return new Promise<() => void>((resolve, reject) => {
+    const waiter: DisplayStackOperationWaiter = {
+      epoch: state.epoch,
+      settled: false,
+      resolve: () => {
+        resolve(() => {
+          if (state.owner !== waiter) return;
+          state.owner = null;
+          pumpOperationWaiters(state);
+        });
+      },
+      reject,
+    };
+    state.waiters.push(waiter);
+    const remainingMs = deadline - monotonicNow();
+    if (remainingMs <= 0) {
+      waiter.settled = true;
+      state.waiters = state.waiters.filter((candidate) => candidate !== waiter);
+      reject(new DisplayStackWallTimeoutError());
+      return;
+    }
+    waiter.timer = setTimeout(() => {
+      if (waiter.settled) return;
+      waiter.settled = true;
+      state.waiters = state.waiters.filter((candidate) => candidate !== waiter);
+      reject(new DisplayStackWallTimeoutError());
+    }, remainingMs);
+    waiter.timer.unref?.();
+    pumpOperationWaiters(state);
+  });
+}
+
+function invalidateQueuedOperations(state: DisplayStackOperationState, epoch: number): void {
+  const retained: DisplayStackOperationWaiter[] = [];
+  for (const waiter of state.waiters) {
+    if (waiter.epoch === epoch)
+      settleOperationWaiter(waiter, new DisplayStackOperationFencedError());
+    else retained.push(waiter);
+  }
+  state.waiters = retained;
 }
 
 function monotonicNow(): number {
@@ -589,9 +672,11 @@ function fenceOperation(
   abortController.abort(new DisplayStackWallTimeoutError());
   if (!state) return;
 
+  if (state.epoch !== epoch) return;
+
   state.pendingCleanup.set(cleanup.markerToken, cleanup);
   state.physicallyQuiescent = false;
-  if (state.epoch !== epoch) return;
+  invalidateQueuedOperations(state, epoch);
 
   // Advance the ownership epoch BEFORE the timeout error is surfaced. Any
   // completion from this operation is now stale. A retry is gated by the
@@ -925,136 +1010,162 @@ export async function ensureDisplayStack(
   );
   const outputParts: string[] = [];
   const state = operationState(session, options);
-  if (state && !state.physicallyQuiescent) {
-    const cleanupDeadline = monotonicNow() + DISPLAY_STACK_CLEANUP_CALL_MS;
-    const quiesced = await reconcilePendingCleanup(s, state, cleanupDeadline);
-    if (!quiesced) {
-      // Fail closed. A new session wrapper may share this physical sandbox,
-      // but without a positive marker/PGID proof it must not issue overlapping
-      // display work merely because the old SDK promise remains unresolved.
-      throw new DisplayStackError(
-        124,
-        "OPENGENI_DISPLAY_TIMEOUT physical cleanup is still pending; retry is fenced",
-      );
-    }
-  }
-  const epoch = state?.epoch ?? 0;
-  const abortController = new AbortController();
-  let activeProviderSessionId: number | null = null;
-  telemetry.emit("request_entry", "started");
-  telemetry.emit("exec_issued", "started");
-
-  try {
-    const initialYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_YIELD_MS, timeoutMs - 1));
-    const initialExec: Promise<ExecResultLike | string> = trackProviderCall<
-      ExecResultLike | string
-    >(
-      state,
-      Promise.resolve(
-        typeof s.exec === "function"
-          ? s.exec({
-              cmd,
-              yieldTimeMs: initialYieldMs,
-              maxOutputTokens: 20_000,
-              signal: abortController.signal,
-            })
-          : s.execCommand!({
-              cmd,
-              yieldTimeMs: initialYieldMs,
-              maxOutputTokens: 20_000,
-              signal: abortController.signal,
-            }),
-      ),
-    );
-    let result: ExecResultLike | string = await beforeDeadline(initialExec, deadline, monotonicNow);
-    assertCurrentOperation(state, epoch);
-    let chunk = execResultOutput(result);
-    outputParts.push(chunk);
-    telemetry.emitSandboxStages(chunk);
-    telemetry.emit("provider_first_result", "completed");
-
-    let providerSessionId = execResultSessionId(result);
-    activeProviderSessionId = providerSessionId;
-    while (providerSessionId !== null) {
-      telemetry.emit("provider_yield", "waiting", { providerSessionId });
-      if (typeof s.writeStdin !== "function") {
+  let release: (() => void) | undefined;
+  if (state) {
+    try {
+      release = await acquireOperation(state, deadline);
+    } catch (error) {
+      if (
+        error instanceof DisplayStackWallTimeoutError ||
+        error instanceof DisplayStackOperationFencedError
+      ) {
         throw new DisplayStackError(
-          -1,
-          `${outputParts.join("\n")}\nprovider yielded process ${providerSessionId} but exposes no writeStdin poll surface`,
+          124,
+          "OPENGENI_DISPLAY_TIMEOUT display operation admission was fenced",
         );
       }
-      assertCurrentOperation(state, epoch);
-      const remainingMs = deadline - monotonicNow();
-      if (remainingMs <= 1) throw new DisplayStackWallTimeoutError();
-      const pollYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_POLL_MS, remainingMs - 1));
-      result = await beforeDeadline(
-        trackProviderCall(
-          state,
-          s.writeStdin({
-            sessionId: providerSessionId,
-            chars: "",
-            yieldTimeMs: pollYieldMs,
-            maxOutputTokens: 20_000,
-            signal: abortController.signal,
-          }),
+      throw error;
+    }
+  }
+
+  try {
+    if (state && !state.physicallyQuiescent) {
+      const cleanupDeadline = monotonicNow() + DISPLAY_STACK_CLEANUP_CALL_MS;
+      const quiesced = await reconcilePendingCleanup(s, state, cleanupDeadline);
+      if (!quiesced) {
+        // Fail closed. A new session wrapper may share this physical sandbox,
+        // but without a positive marker/PGID proof it must not issue overlapping
+        // display work merely because the old SDK promise remains unresolved.
+        throw new DisplayStackError(
+          124,
+          "OPENGENI_DISPLAY_TIMEOUT physical cleanup is still pending; retry is fenced",
+        );
+      }
+    }
+    const epoch = state?.epoch ?? 0;
+    const abortController = new AbortController();
+    let activeProviderSessionId: number | null = null;
+    telemetry.emit("request_entry", "started");
+    telemetry.emit("exec_issued", "started");
+
+    try {
+      const initialYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_YIELD_MS, timeoutMs - 1));
+      const initialExec: Promise<ExecResultLike | string> = trackProviderCall<
+        ExecResultLike | string
+      >(
+        state,
+        Promise.resolve(
+          typeof s.exec === "function"
+            ? s.exec({
+                cmd,
+                yieldTimeMs: initialYieldMs,
+                maxOutputTokens: 20_000,
+                signal: abortController.signal,
+              })
+            : s.execCommand!({
+                cmd,
+                yieldTimeMs: initialYieldMs,
+                maxOutputTokens: 20_000,
+                signal: abortController.signal,
+              }),
         ),
+      );
+      let result: ExecResultLike | string = await beforeDeadline(
+        initialExec,
         deadline,
         monotonicNow,
       );
       assertCurrentOperation(state, epoch);
-      chunk = execResultOutput(result);
+      let chunk = execResultOutput(result);
       outputParts.push(chunk);
       telemetry.emitSandboxStages(chunk);
-      providerSessionId = execResultSessionId(result);
+      telemetry.emit("provider_first_result", "completed");
+
+      let providerSessionId = execResultSessionId(result);
       activeProviderSessionId = providerSessionId;
-    }
-
-    const output = outputParts.join("\n");
-    const exitCode = execResultExitCode(result) ?? inferExitFromOutput(output);
-    telemetry.emit("process_complete", exitCode === 0 ? "completed" : "failed");
-    if (exitCode !== 0) {
-      throw new DisplayStackError(exitCode, output);
-    }
-
-    const marker = (output.match(/OPENGENI_DESKTOP_UP[^\n]*/) ?? [""])[0];
-    telemetry.emit("readiness_complete", "completed");
-    return { port, geometry, marker };
-  } catch (error) {
-    if (
-      error instanceof DisplayStackWallTimeoutError ||
-      error instanceof DisplayStackOperationFencedError
-    ) {
-      const pendingCleanup: PendingDisplayStackCleanup = {
-        markerPath,
-        markerToken: operationToken,
-      };
-      fenceOperation(state, epoch, abortController, pendingCleanup);
-      const cleanupDeadline = monotonicNow() + DISPLAY_STACK_CLEANUP_CALL_MS;
-      telemetry.emit("process_cleanup", "started");
-      await interruptProviderProcess(
-        s,
-        activeProviderSessionId,
-        Math.min(cleanupDeadline, monotonicNow() + 50),
-      );
-      let quiesced = false;
-      if (state) {
-        quiesced = await reconcilePendingCleanup(s, state, cleanupDeadline);
-        if (!quiesced) {
-          await waitForFencedOperation(
-            state,
-            Math.min(cleanupDeadline, monotonicNow() + DISPLAY_STACK_DRAIN_GRACE_MS),
+      while (providerSessionId !== null) {
+        telemetry.emit("provider_yield", "waiting", { providerSessionId });
+        if (typeof s.writeStdin !== "function") {
+          throw new DisplayStackError(
+            -1,
+            `${outputParts.join("\n")}\nprovider yielded process ${providerSessionId} but exposes no writeStdin poll surface`,
           );
         }
-      } else {
-        quiesced = await cleanupDisplayStackProcess(s, pendingCleanup, cleanupDeadline);
+        assertCurrentOperation(state, epoch);
+        const remainingMs = deadline - monotonicNow();
+        if (remainingMs <= 1) throw new DisplayStackWallTimeoutError();
+        const pollYieldMs = Math.max(1, Math.min(DISPLAY_STACK_PROVIDER_POLL_MS, remainingMs - 1));
+        result = await beforeDeadline(
+          trackProviderCall(
+            state,
+            s.writeStdin({
+              sessionId: providerSessionId,
+              chars: "",
+              yieldTimeMs: pollYieldMs,
+              maxOutputTokens: 20_000,
+              signal: abortController.signal,
+            }),
+          ),
+          deadline,
+          monotonicNow,
+        );
+        assertCurrentOperation(state, epoch);
+        chunk = execResultOutput(result);
+        outputParts.push(chunk);
+        telemetry.emitSandboxStages(chunk);
+        providerSessionId = execResultSessionId(result);
+        activeProviderSessionId = providerSessionId;
       }
-      telemetry.emit("process_cleanup", quiesced ? "completed" : "failed");
-      const output = `${outputParts.join("\n")}\nOPENGENI_DISPLAY_TIMEOUT wall_ms=${timeoutMs}`;
-      telemetry.emit("wall_deadline", "failed");
-      throw new DisplayStackError(124, output);
+
+      const output = outputParts.join("\n");
+      const exitCode = execResultExitCode(result) ?? inferExitFromOutput(output);
+      telemetry.emit("process_complete", exitCode === 0 ? "completed" : "failed");
+      if (exitCode !== 0) {
+        throw new DisplayStackError(exitCode, output);
+      }
+
+      const marker = (output.match(/OPENGENI_DESKTOP_UP[^\n]*/) ?? [""])[0];
+      telemetry.emit("readiness_complete", "completed");
+      return { port, geometry, marker };
+    } catch (error) {
+      if (
+        error instanceof DisplayStackWallTimeoutError ||
+        error instanceof DisplayStackOperationFencedError
+      ) {
+        const pendingCleanup: PendingDisplayStackCleanup = {
+          markerPath,
+          markerToken: operationToken,
+        };
+        fenceOperation(state, epoch, abortController, pendingCleanup);
+        const cleanupDeadline = monotonicNow() + DISPLAY_STACK_CLEANUP_CALL_MS;
+        telemetry.emit("process_cleanup", "started");
+        await interruptProviderProcess(
+          s,
+          activeProviderSessionId,
+          Math.min(cleanupDeadline, monotonicNow() + 50),
+        );
+        let quiesced = false;
+        if (state) {
+          quiesced = await reconcilePendingCleanup(s, state, cleanupDeadline);
+          if (!quiesced) {
+            await waitForFencedOperation(
+              state,
+              Math.min(cleanupDeadline, monotonicNow() + DISPLAY_STACK_DRAIN_GRACE_MS),
+            );
+          }
+        } else {
+          quiesced = await cleanupDisplayStackProcess(s, pendingCleanup, cleanupDeadline);
+        }
+        telemetry.emit("process_cleanup", quiesced ? "completed" : "failed");
+        const output = `${outputParts.join("\n")}\nOPENGENI_DISPLAY_TIMEOUT wall_ms=${timeoutMs}`;
+        telemetry.emit("wall_deadline", "failed");
+        throw new DisplayStackError(124, output);
+      }
+      telemetry.emit("request_failed", "failed");
+      throw error;
     }
-    telemetry.emit("request_failed", "failed");
-    throw error;
+  } finally {
+    release?.();
   }
 }
 

@@ -221,21 +221,29 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     let launches = 0;
     let launch: Promise<void> | undefined;
     let up = false;
+    let activeProviderCalls = 0;
+    let maxActiveProviderCalls = 0;
     const session = {
       exec: async () => {
-        if (!up) {
-          if (!launch) {
-            launches += 1;
-            launch = Bun.sleep(25).then(() => {
-              up = true;
-            });
+        activeProviderCalls += 1;
+        maxActiveProviderCalls = Math.max(maxActiveProviderCalls, activeProviderCalls);
+        try {
+          if (!up) {
+            if (!launch) {
+              launches += 1;
+              launch = Bun.sleep(25).then(() => {
+                up = true;
+              });
+            }
+            await launch;
           }
-          await launch;
+          return {
+            output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+            exitCode: 0,
+          };
+        } finally {
+          activeProviderCalls -= 1;
         }
-        return {
-          output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
-          exitCode: 0,
-        };
       },
     };
 
@@ -247,6 +255,93 @@ describe("P4.1 ensureDisplayStack — command sequence + flock-idempotency (fake
     expect(viewer.marker).toContain("OPENGENI_DESKTOP_UP");
     expect(computer.marker).toContain("OPENGENI_DESKTOP_UP");
     expect(launches).toBe(1);
+    expect(maxActiveProviderCalls).toBe(1);
+  });
+
+  test("(3c) a timed-out owner fences a same-sandbox sibling before cleanup permits retry", async () => {
+    const events: string[] = [];
+    let resolveA!: (result: { output: string; exitCode: number }) => void;
+    let workCalls = 0;
+    let allowRetry = false;
+    let notifyWorkA!: () => void;
+    const workAStarted = new Promise<void>((resolve) => {
+      notifyWorkA = resolve;
+    });
+    const session = {
+      state: { sandboxId: "same-sandbox-concurrent-fence-regression" },
+      exec: async ({ cmd, signal }: { cmd: string; signal?: AbortSignal }) => {
+        if (cmd.includes("OPENGENI_DISPLAY_CLEANUP")) {
+          events.push("cleanup-complete");
+          return { output: "OPENGENI_DISPLAY_CLEANUP status=stopped", exitCode: 0 };
+        }
+        workCalls += 1;
+        if (workCalls === 1) {
+          events.push("work-A");
+          notifyWorkA();
+          signal?.addEventListener("abort", () => events.push("abort-A"), { once: true });
+          return await new Promise<{ output: string; exitCode: number }>((resolve) => {
+            resolveA = resolve;
+          });
+        }
+        if (!allowRetry) {
+          events.push("stale-work");
+          throw new Error("stale sibling issued provider work");
+        }
+        events.push("work-C");
+        return {
+          output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+          exitCode: 0,
+        };
+      },
+    };
+
+    const operationA = ensureDisplayStack(session, { timeoutMs: 30 });
+    await workAStarted;
+    // B has begun before A times out, but per-sandbox admission keeps it out of
+    // the provider until A either succeeds or invalidates its generation.
+    const operationB = ensureDisplayStack(session, { timeoutMs: 500 });
+    void operationB.catch(() => undefined);
+    await Promise.resolve();
+    expect(workCalls).toBe(1);
+
+    await expect(operationA).rejects.toMatchObject({ stage: "timeout" });
+    expect(events).toContain("cleanup-complete");
+    allowRetry = true;
+    const operationC = ensureDisplayStack(session, { timeoutMs: 500 });
+    await expect(operationC).resolves.toMatchObject({ port: STREAM_PORT });
+    await expect(operationB).rejects.toMatchObject({ stage: "timeout" });
+
+    expect(events).not.toContain("stale-work");
+    expect(events.indexOf("work-C")).toBeGreaterThan(events.indexOf("cleanup-complete"));
+    resolveA({ output: "late stale result", exitCode: 0 });
+  });
+
+  test("(3d) different physical sandboxes retain independent display admission", async () => {
+    let activeProviderCalls = 0;
+    let maxActiveProviderCalls = 0;
+    const makeSession = (sandboxId: string) => ({
+      state: { sandboxId },
+      exec: async () => {
+        activeProviderCalls += 1;
+        maxActiveProviderCalls = Math.max(maxActiveProviderCalls, activeProviderCalls);
+        try {
+          await Bun.sleep(25);
+          return {
+            output: `OPENGENI_DESKTOP_UP port=${STREAM_PORT} geometry=1280x800 dpi=96`,
+            exitCode: 0,
+          };
+        } finally {
+          activeProviderCalls -= 1;
+        }
+      },
+    });
+
+    await Promise.all([
+      ensureDisplayStack(makeSession("independent-display-box-a")),
+      ensureDisplayStack(makeSession("independent-display-box-b")),
+    ]);
+
+    expect(maxActiveProviderCalls).toBe(2);
   });
 
   test("(4a) a stage failure (exit 12) throws a typed DisplayStackError naming the stage", async () => {
