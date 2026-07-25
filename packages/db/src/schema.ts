@@ -3003,6 +3003,10 @@ export const hostExportOutbox = pgTable(
       "host_export_outbox_kind_check",
       sql`${table.exportKind} in ('session_event', 'usage_event')`,
     ),
+    rootSessionCaptured: check(
+      "host_export_outbox_root_session_check",
+      sql`${table.sessionId} is null or ${table.rootSessionId} is not null`,
+    ),
     sourceUnique: uniqueIndex("host_export_outbox_source_uq").on(table.exportKind, table.sourceId),
     cursorUnique: uniqueIndex("host_export_outbox_cursor_uq")
       .on(table.exportKind, table.exportCursor)

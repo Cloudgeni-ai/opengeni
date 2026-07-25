@@ -168,6 +168,22 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 Merging a changesets Version PR only commits package versions and changelogs; it
 does not publish packages or release images. It produces the versioned source
 required by the manually dispatched `.github/workflows/release-candidate.yml`.
+Release approval is bound to GitHub's native PR author, reviewer, merge actor,
+review state, reviewed head, and submission time:
+
+- a `github-actions[bot]`-authored Version PR requires a native pre-merge
+  `APPROVED` review from the configured human maintainer;
+- the structured `COMMENTED` admin-PASS form is valid only for a
+  single-maintainer PR whose author, exact-head reviewer, and merge actor are
+  that same human; it is never a substitute for approving a bot-authored
+  Version PR;
+- any base/head update invalidates the prior verdict, and a review submitted
+  after merge is not release evidence.
+
+Candidate or operator admission must fail closed when those provider identities
+do not match; do not weaken the provenance check or recreate approval from a
+comment, commit message, or local record.
+
 That workflow requires the exact current `main` SHA, no pending changesets, and
 the exact expected package set (for example, `@opengeni/react@0.15.0`). It
 builds API, worker, web, relay, and stock headless-sandbox images under

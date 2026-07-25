@@ -24753,6 +24753,7 @@ export async function applySessionTurnSettlement(
               effectiveSessionStatus !== input.sessionStatus
               ? { ...payload, status: effectiveSessionStatus }
               : payload,
+            { fullEvidence: event.retainedOutputEvidence },
           ),
           clientEventId: event.clientEventId ?? null,
           turnId: input.turnId,
@@ -26391,40 +26392,85 @@ export async function claimPendingSessionWorkflowWakes(
 }
 
 /**
- * Acknowledge an immediate post-commit signal. An older sender may advance only
- * its own revision; it cannot clear a claim or failure state belonging to a
- * newer revision.
+ * Acknowledge an immediate post-commit signal only after it cannot strand an
+ * accepted Agent Steer. Temporal accepting a signal is transport evidence, not
+ * proof that a closing workflow observed Postgres or admitted its pending
+ * direction. While active control still has an actionable Agent Steer, retain
+ * the revision so the bounded outbox dispatcher retries signalWithStart. The
+ * attempt-fenced claim consumes the update once; a real Pause is the typed
+ * blocker and may acknowledge this revision because Resume commits a new one.
+ *
+ * An older sender may advance only its own revision; it cannot clear a claim or
+ * failure state belonging to a newer revision. The control -> workspace ->
+ * session lock prefix serializes this decision with Steer, Pause/Resume, and
+ * claim without weakening physical-quiescence admission.
  */
+export type SessionWorkflowWakeDeliveryResult =
+  | { action: "acknowledged" }
+  | { action: "pending_admission"; blocker: "pending_agent_steer" };
+
 export async function markSessionWorkflowWakeDelivered(
   db: Database,
   input: Omit<SessionWorkflowWake, "interruptionRequested">,
-): Promise<void> {
-  await withRlsContext(
+): Promise<SessionWorkflowWakeDeliveryResult> {
+  return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
-    async (scopedDb) => {
-      const [row] = await scopedDb
-        .update(schema.sessionWorkflowWakeOutbox)
-        .set({
-          deliveredRevision: sql`greatest(${schema.sessionWorkflowWakeOutbox.deliveredRevision}, ${input.wakeRevision})`,
-          attempts: sql`case when ${schema.sessionWorkflowWakeOutbox.wakeRevision} = ${input.wakeRevision} then 0 else ${schema.sessionWorkflowWakeOutbox.attempts} end`,
-          lastError: sql`case when ${schema.sessionWorkflowWakeOutbox.wakeRevision} = ${input.wakeRevision} then null else ${schema.sessionWorkflowWakeOutbox.lastError} end`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
-            eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
-            gte(schema.sessionWorkflowWakeOutbox.wakeRevision, input.wakeRevision),
-          ),
-        )
-        .returning({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId });
-      if (!row) {
-        throw new Error(
-          `Workflow wake revision ${input.wakeRevision} is not current for session ${input.sessionId}`,
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+          workspaceId: input.workspaceId,
+          controlLock: "share",
+          sessionIds: [input.sessionId],
+        });
+        const session = locks.sessions[0];
+        if (!session) throw new Error(`Session not found: ${input.sessionId}`);
+        const effectiveControl = await evaluateSessionControl(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+          { workspaceControl: locks.control ?? undefined },
         );
-      }
-    },
+        if (effectiveControl.state === "active") {
+          const [pendingAgentSteer] = await tx
+            .select({ id: schema.sessionSystemUpdates.id })
+            .from(schema.sessionSystemUpdates)
+            .where(
+              and(
+                eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+                eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+                eq(schema.sessionSystemUpdates.kind, "agent_steer_instruction"),
+                eq(schema.sessionSystemUpdates.state, "pending"),
+              ),
+            )
+            .limit(1);
+          if (pendingAgentSteer) {
+            return { action: "pending_admission", blocker: "pending_agent_steer" } as const;
+          }
+        }
+        const [row] = await tx
+          .update(schema.sessionWorkflowWakeOutbox)
+          .set({
+            deliveredRevision: sql`greatest(${schema.sessionWorkflowWakeOutbox.deliveredRevision}, ${input.wakeRevision})`,
+            attempts: sql`case when ${schema.sessionWorkflowWakeOutbox.wakeRevision} = ${input.wakeRevision} then 0 else ${schema.sessionWorkflowWakeOutbox.attempts} end`,
+            lastError: sql`case when ${schema.sessionWorkflowWakeOutbox.wakeRevision} = ${input.wakeRevision} then null else ${schema.sessionWorkflowWakeOutbox.lastError} end`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.sessionWorkflowWakeOutbox.workspaceId, input.workspaceId),
+              eq(schema.sessionWorkflowWakeOutbox.sessionId, input.sessionId),
+              gte(schema.sessionWorkflowWakeOutbox.wakeRevision, input.wakeRevision),
+            ),
+          )
+          .returning({ sessionId: schema.sessionWorkflowWakeOutbox.sessionId });
+        if (!row) {
+          throw new Error(
+            `Workflow wake revision ${input.wakeRevision} is not current for session ${input.sessionId}`,
+          );
+        }
+        return { action: "acknowledged" } as const;
+      }),
   );
 }
 

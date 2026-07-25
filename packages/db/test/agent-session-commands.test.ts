@@ -12,6 +12,7 @@ import {
   listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   markSessionAttemptQuiesced,
+  markSessionWorkflowWakeDelivered,
   mutateSessionControlInTransaction,
   sendAgentMessageInTransaction,
   settleSessionAttemptInterruptions,
@@ -120,6 +121,22 @@ async function activeAgent(
     executionGeneration: claim.turn.executionGeneration,
   };
   return { session, turn: claim.turn, attemptId, actor };
+}
+
+async function wakeRow(workspaceId: string, sessionId: string) {
+  return await withWorkspaceRls(client.db, workspaceId, async (db) => {
+    const [row] = await db
+      .select()
+      .from(schema.sessionWorkflowWakeOutbox)
+      .where(
+        and(
+          eq(schema.sessionWorkflowWakeOutbox.workspaceId, workspaceId),
+          eq(schema.sessionWorkflowWakeOutbox.sessionId, sessionId),
+        ),
+      )
+      .limit(1);
+    return row ?? null;
+  });
 }
 
 describe("attempt-fenced Agent session commands", () => {
@@ -382,6 +399,237 @@ describe("attempt-fenced Agent session commands", () => {
     ).toHaveLength(1);
   });
 
+  test("idle repeated Agent Steer keeps stale wake acknowledgements outstanding until one newest-direction claim", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    const steer = (instruction: string) =>
+      withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db.transaction((tx) =>
+          steerAgentSessionInTransaction(tx as typeof db, {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId!,
+            targetSessionId: target.id,
+            actor: caller.actor,
+            operationKey: crypto.randomUUID(),
+            instruction,
+          }),
+        ),
+      );
+    const acknowledge = (wakeRevision: number) =>
+      markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision,
+      });
+
+    const first = await steer("first direction must be superseded");
+    const firstWakeRevision = first.wakeRevision;
+    if (firstWakeRevision === null) throw new Error("Agent Steer did not register a wake");
+    expect(await acknowledge(firstWakeRevision)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_agent_steer",
+    });
+    // An accepted Temporal signal whose response was lost can be delivered and
+    // acknowledged again. Transport duplication still cannot consume DB work.
+    expect(await acknowledge(firstWakeRevision)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_agent_steer",
+    });
+
+    const newest = await steer("only this newest direction may run");
+    const newestWakeRevision = newest.wakeRevision;
+    if (newestWakeRevision === null) throw new Error("Newest Agent Steer did not register a wake");
+    expect(newestWakeRevision).toBe(firstWakeRevision + 1);
+    expect(await acknowledge(firstWakeRevision)).toEqual({
+      action: "pending_admission",
+      blocker: "pending_agent_steer",
+    });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: newestWakeRevision,
+      deliveredRevision: 0,
+    });
+
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Newest Agent Steer was not claimed");
+    expect(claimed.turn.source).toBe("system");
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        target.id,
+        claimed.turn.id,
+      ),
+    ).toMatchObject([{ id: newest.updateId, kind: "agent_steer_instruction" }]);
+
+    const updates = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({
+          id: schema.sessionSystemUpdates.id,
+          state: schema.sessionSystemUpdates.state,
+          deliveredTurnId: schema.sessionSystemUpdates.deliveredTurnId,
+        })
+        .from(schema.sessionSystemUpdates)
+        .where(eq(schema.sessionSystemUpdates.sessionId, target.id)),
+    );
+    expect(updates.find((update) => update.id === first.updateId)).toMatchObject({
+      state: "superseded",
+      deliveredTurnId: null,
+    });
+    expect(updates.find((update) => update.id === newest.updateId)).toMatchObject({
+      state: "delivered",
+      deliveredTurnId: claimed.turn.id,
+    });
+
+    const duplicateClaim = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    expect(duplicateClaim).toEqual({ action: "unclaimed", reason: "no-work" });
+
+    // Once the DB claim adopted the newest direction, an old sender may only
+    // acknowledge its own revision; it cannot hide the newer wake.
+    expect(await acknowledge(firstWakeRevision)).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: newestWakeRevision,
+      deliveredRevision: firstWakeRevision,
+    });
+    expect(await acknowledge(newestWakeRevision)).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: newestWakeRevision,
+      deliveredRevision: newestWakeRevision,
+    });
+    const systemTurns = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ id: schema.sessionTurns.id })
+        .from(schema.sessionTurns)
+        .where(
+          and(
+            eq(schema.sessionTurns.sessionId, target.id),
+            eq(schema.sessionTurns.source, "system"),
+          ),
+        ),
+    );
+    expect(systemTurns).toEqual([{ id: claimed.turn.id }]);
+  });
+
+  test("Pause may acknowledge an Agent Steer wake only because Resume commits a fresh admission revision", async () => {
+    const grant = await fixture();
+    const caller = await activeAgent(grant);
+    const target = await makeSession(grant);
+    const steered = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        steerAgentSessionInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          targetSessionId: target.id,
+          actor: caller.actor,
+          operationKey: crypto.randomUUID(),
+          instruction: "preserve this direction across Pause and Resume",
+        }),
+      ),
+    );
+    const steeredWakeRevision = steered.wakeRevision;
+    if (steeredWakeRevision === null) throw new Error("Agent Steer did not register a wake");
+    const paused = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: target.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "pause",
+        }),
+      ),
+    );
+    expect(paused.control.state).toBe("paused");
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+
+    const resumed = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db.transaction((tx) =>
+        mutateSessionControlInTransaction(tx as typeof db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId!,
+          sessionId: target.id,
+          actor: { type: "human", subjectId: grant.subjectId },
+          operationKey: crypto.randomUUID(),
+          action: "resume",
+        }),
+      ),
+    );
+    expect(resumed.control.state).toBe("active");
+    expect(resumed.wakeCount).toBe(1);
+    const freshWake = await wakeRow(grant.workspaceId!, target.id);
+    expect(freshWake).toMatchObject({
+      wakeRevision: steeredWakeRevision + 1,
+      deliveredRevision: steeredWakeRevision,
+      reason: "session_resume",
+    });
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: freshWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
+
+    const claimed = await claimSessionWorkForAttempt(client.db, grant.workspaceId!, {
+      sessionId: target.id,
+      workflowId: `session-${target.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId: crypto.randomUUID(),
+      dispatchId: crypto.randomUUID(),
+      trigger: { kind: "next" },
+    });
+    if (claimed.action !== "claimed") throw new Error("Resumed Agent Steer was not claimed");
+    expect(
+      await listSessionSystemUpdatesForTurn(
+        client.db,
+        grant.workspaceId!,
+        target.id,
+        claimed.turn.id,
+      ),
+    ).toMatchObject([{ id: steered.updateId, state: "delivered" }]);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: freshWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: freshWake!.wakeRevision,
+      deliveredRevision: freshWake!.wakeRevision,
+    });
+  });
+
   test("Agent Steer waits for the old owner to quiesce then runs before an unchanged human queue", async () => {
     const grant = await fixture();
     const caller = await activeAgent(grant);
@@ -425,7 +673,18 @@ describe("attempt-fenced Agent session commands", () => {
         }),
       ),
     );
+    const steeredWakeRevision = steered.wakeRevision;
+    if (steeredWakeRevision === null) throw new Error("Agent Steer did not register a wake");
     expect(steered.interruptionCount).toBe(1);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
     const afterOrder = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
         .select({ id: schema.sessionTurns.id })
@@ -446,6 +705,15 @@ describe("attempt-fenced Agent session commands", () => {
       target.id,
       targetAttemptId,
     );
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
     const internalAttemptId = crypto.randomUUID();
     const internalClaimInput = {
       sessionId: target.id,
@@ -468,6 +736,17 @@ describe("attempt-fenced Agent session commands", () => {
       attemptId: targetAttemptId,
       temporalWorkflowId: `session-${target.id}`,
     });
+    const receiptWake = await wakeRow(grant.workspaceId!, target.id);
+    expect(receiptWake!.wakeRevision).toBe(steeredWakeRevision + 1);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: receiptWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "pending_admission", blocker: "pending_agent_steer" });
     const internalClaim = await claimSessionWorkForAttempt(
       client.db,
       grant.workspaceId!,
@@ -483,6 +762,28 @@ describe("attempt-fenced Agent session commands", () => {
         internalClaim.turn.id,
       ),
     ).toMatchObject([{ id: steered.updateId, kind: "agent_steer_instruction" }]);
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: steeredWakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
+    expect(await wakeRow(grant.workspaceId!, target.id)).toMatchObject({
+      wakeRevision: receiptWake!.wakeRevision,
+      deliveredRevision: steeredWakeRevision,
+    });
+    expect(
+      await markSessionWorkflowWakeDelivered(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: target.id,
+        temporalWorkflowId: `session-${target.id}`,
+        wakeRevision: receiptWake!.wakeRevision,
+      }),
+    ).toEqual({ action: "acknowledged" });
     const [oldQuiescedAt] = await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
       const [attempt] = await db
         .select({ quiescedAt: schema.sessionTurnAttempts.quiescedAt })
