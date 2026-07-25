@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { shouldRestoreSessionFocus } from "./session-focus";
+import { shouldMoveSessionRowFocus, shouldRestoreSessionFocus } from "./session-focus";
 
 const SESSION_ID = "session-26";
 
@@ -21,6 +21,15 @@ function fakeElement(
 }
 
 describe("session pin focus restoration", () => {
+  test("does not turn a pin remount reorder into a roving row-focus request", () => {
+    // The actions trigger is restored by the pin operation after its row
+    // remount. The subsequent focus-index effect has no keyboard intent and
+    // must leave that restored destination alone.
+    expect(shouldMoveSessionRowFocus(null, SESSION_ID)).toBe(false);
+    expect(shouldMoveSessionRowFocus(SESSION_ID, SESSION_ID)).toBe(true);
+    expect(shouldMoveSessionRowFocus(SESSION_ID, "other-session")).toBe(false);
+  });
+
   test("recognizes focus lost to body, a disconnected node, or the same row's other target", () => {
     const destination = fakeElement({ "data-session-row": SESSION_ID });
     const body = fakeElement();

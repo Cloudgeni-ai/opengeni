@@ -1,5 +1,18 @@
 export type SessionFocusTarget = "row" | "actions";
 
+/**
+ * Roving focus may move real DOM focus only for an explicit keyboard-navigation
+ * intent. A pin mutation can reorder/remount the same row while preserving its
+ * focus index; that derived change must not steal focus from a restored row
+ * actions trigger.
+ */
+export function shouldMoveSessionRowFocus(
+  intentSessionId: string | null,
+  renderedSessionId: string | null,
+): boolean {
+  return intentSessionId !== null && intentSessionId === renderedSessionId;
+}
+
 export function sessionFocusAttribute(
   target: SessionFocusTarget,
 ): "data-session-row" | "data-session-actions" {

@@ -57,6 +57,7 @@ import {
 } from "@/lib/session-rail";
 import {
   sessionFocusAttribute,
+  shouldMoveSessionRowFocus,
   shouldRestoreSessionFocus,
   type SessionFocusTarget,
 } from "@/lib/session-focus";
@@ -783,6 +784,7 @@ export function SessionList() {
   }, [refreshSessionPages]);
 
   const [focusedSessionId, setFocusedSessionId] = useState<string | null>(null);
+  const rowFocusIntent = useRef<string | null>(null);
   const focusIndex = useMemo(() => {
     const preferredId = focusedSessionId ?? activeSessionId;
     const preferred = preferredId ? flat.findIndex((session) => session.id === preferredId) : -1;
@@ -833,6 +835,7 @@ export function SessionList() {
       }
       const next = nextIndex === null ? null : flat[nextIndex];
       if (next) {
+        rowFocusIntent.current = next.id;
         setFocusedSessionId(next.id);
       }
     },
@@ -849,12 +852,21 @@ export function SessionList() {
     );
     row?.scrollIntoView({ block: "nearest" });
     // Arrow/Home/End navigation must move real DOM focus, not just paint a
-    // visual highlight. Do not steal focus when a route/poll changes while the
-    // user is typing elsewhere.
-    if (listRef.current.contains(document.activeElement) && row !== document.activeElement) {
-      row?.focus();
+    // visual highlight. A route/poll/pin reorder has no such intent and must
+    // never steal focus from an actions trigger or another active control.
+    const requestedSessionId = rowFocusIntent.current;
+    const renderedSessionId = flat[focusIndex]?.id ?? null;
+    if (
+      pendingPinFocus.current ||
+      !listRef.current.contains(document.activeElement) ||
+      !shouldMoveSessionRowFocus(requestedSessionId, renderedSessionId)
+    ) {
+      rowFocusIntent.current = null;
+      return;
     }
-  }, [focusIndex]);
+    row?.focus();
+    rowFocusIntent.current = null;
+  }, [flat, focusIndex]);
 
   useEffect(() => {
     if (loading || !search) return;
