@@ -1985,8 +1985,8 @@ export function configuredProviders(settings: Settings): ResolvedModelProvider[]
 /**
  * Pure catalog overlay for a workspace whose existing Codex connection seam
  * reports ready. This describes product/provider identity only; it does not
- * select, lease, refresh, or expose a concrete credential (OPE-21 remains the
- * owner of those runtime operations).
+ * select, lease, refresh, or expose a concrete credential; those runtime
+ * operations remain owned by the credential allocator.
  */
 export function withCodexCatalogProvider(settings: Settings): Settings {
   const providers = parseModelProvidersJson(settings.modelProvidersJson);

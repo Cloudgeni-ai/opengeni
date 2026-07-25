@@ -179,7 +179,7 @@ async function install(
   });
 }
 
-describe("OPE-12 accepted turn execution policy", () => {
+describe("accepted turn execution policy", () => {
   test("installs only when absent and preserves all prior metadata on replay", async () => {
     if (!available) return;
     const seededMetadata = {

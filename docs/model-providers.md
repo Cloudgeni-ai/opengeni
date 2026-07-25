@@ -378,9 +378,9 @@ already-authorized credential and must keep secrets out of logs and fixtures.
 
 ## Ownership boundaries
 
-- OPE-12 owns normalized product/provider/deployment identity, credential and
-  billing classification, capability metadata, availability projection, and
-  the per-turn policy snapshot.
+- The provider architecture owns normalized product/provider/deployment
+  identity, credential and billing classification, capability metadata,
+  availability projection, and the per-turn policy snapshot.
 - Codex subscription account selection, leases, token refresh, allocator
   eligibility, capacity waiting, and portable compaction mechanics remain in
   their dedicated lifecycle/capacity owners.

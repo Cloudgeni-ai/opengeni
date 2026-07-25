@@ -9,8 +9,8 @@
 - **Status:** Accepted at exact revision `b402536b6e90b85575f2273cfb12a0f3be96070f`; implementation in progress
 - **Date:** 2026-07-18
 - **Baseline:** `a906a06881036b7d005ab33940f5ec6c91938482`
-- **Issue:** Linear OPE-12
-- **Owner:** OPE-12 Model Provider Architecture
+- **Scope:** Model provider architecture
+- **Owner:** Model Provider Architecture
 - **Review:** Independent Sol/xhigh reviews of `7a86fb08909045e79207193a8f97d88afaa021f5`
   and `0efab9bff651f33907f7b29e127989cce835cbfa` requested changes. The exact
   resulting revision `b402536b6e90b85575f2273cfb12a0f3be96070f` received independent
@@ -24,7 +24,7 @@ OpenGeni already has useful multi-provider and per-turn seams:
   providers are projected by `configuredModels()`;
 - a connected Codex subscription is injected as a workspace-local synthetic
   provider;
-- the API rejects unknown models and OPE-35 workspace policy rejects blocked
+- the API rejects unknown models and workspace model policy rejects blocked
   provider/model selections before enqueue, while the worker repeats the policy
   check after runtime resolution and before any model call;
 - `sessions.model`, `session_turns.model`, and
@@ -50,7 +50,7 @@ Those seams are not yet one explicit product contract:
    calling, structured output, latency/priority modes, streaming transport, or
    the difference between Responses WebSocket and realtime voice/audio.
 5. Definition, credential readiness, provider health, workspace availability,
-   and OPE-35 policy are not distinct concepts in the client catalog.
+   and workspace model policy are not distinct concepts in the client catalog.
 6. A turn freezes `model` and reasoning effort, but its provider/deployment and
    billing interpretation are re-resolved from mutable configuration on every
    attempt. Recovery cannot silently change `model`, but a catalog edit could
@@ -61,7 +61,7 @@ Those seams are not yet one explicit product contract:
 8. The durable foreground command audit identifies the operation and target but
    omits requested/effective model, reasoning effort, and inheritance source.
 
-The historical OPE-12 branch at
+The historical provider-architecture branch at
 `ff6a1630ab67406e8bd467cb50a175eaf8b2ae29` contains useful identity, alias,
 snapshot, BYOK, billing, and Cursor decisions. It diverges by 142 main-only and
 16 feature-only commits from merge base
@@ -71,20 +71,17 @@ architecture. It must not be replayed wholesale.
 
 ## Ownership boundary
 
-OPE-12 owns product model identity, provider/deployment identity, static model
-capability metadata, credential-source and billing-owner classification,
-availability projection, canonical per-turn model/reasoning semantics, and the
-non-secret execution-policy snapshot.
+The provider architecture owns product model identity, provider/deployment
+identity, static model capability metadata, credential-source and billing-owner
+classification, availability projection, canonical per-turn model/reasoning
+semantics, and the non-secret execution-policy snapshot.
 
-OPE-12 does **not** own:
+The provider architecture does **not** own:
 
-- Codex account selection, leases, fencing, failover, or portable compaction
-  (OPE-21);
-- quota windows, reset credits, entitlements, or allocator eligibility truth
-  (OPE-24);
-- adaptive fleet pressure, health scoring, or admission policy (OPE-32); or
-- tool authorization, discovery, defaults, inheritance, and lazy routing
-  (OPE-16).
+- Codex account selection, leases, fencing, failover, or portable compaction;
+- quota windows, reset credits, entitlements, or allocator eligibility truth;
+- adaptive fleet pressure, health scoring, or admission policy; or
+- tool authorization, discovery, defaults, inheritance, and lazy routing.
 
 Model `functionCalling` and hosted-tool metadata describes an upstream protocol
 capability only. It never grants, discovers, or authorizes a tool. Availability
@@ -152,7 +149,8 @@ model fallback. Changing provider, credential-source kind, upstream payer, or
 metering owner requires a new canonical product id and an explicit user choice;
 an alias cannot move a durable preference across those boundaries.
 
-OPE-35 remains an allowlist over canonical product/provider identity:
+Workspace model policy remains an allowlist over canonical product/provider
+identity:
 
 - new model-policy PUTs canonicalize every known alias before storing it and
   persist canonical ids for all known models; unknown strings retain the
@@ -304,7 +302,7 @@ In particular:
 - SSE token streaming is not Responses WebSocket mode; and
 - Responses WebSocket mode is not realtime audio/voice.
 
-OPE-12 V1 does not add a latency-mode or realtime request field. Those modes stay
+This V1 does not add a latency-mode or realtime request field. Those modes stay
 non-runnable until their request, returned-tier attribution, billing, recovery,
 and compatibility contracts are independently implemented.
 
@@ -334,7 +332,8 @@ Workspace availability is returned only by the new
 `workspace:read`. The existing public `GET /v1/config/client` remains a static
 deployment catalog and may expose
 definition/capability metadata, but it must omit workspace credential readiness,
-connection state, OPE-35 results, account labels, and workspace availability.
+connection state, workspace model-policy results, account labels, and workspace
+availability.
 Existing `ClientModel` fields and the public `allowedModels` list remain
 unchanged.
 
@@ -343,12 +342,13 @@ Availability is the intersection of:
 1. a valid static definition and adapter;
 2. an authorized credential source that is ready for this workspace;
 3. current provider/deployment health, when known; and
-4. OPE-35 workspace model policy.
+4. workspace model policy.
 
 `selectable` is normative and clients must not infer it from `status` alone. It
 is true exactly when the definition is runnable, the workspace credential source
-is currently ready, OPE-35 allows the canonical provider/model, and no typed
-hard-unavailable observation from the entitlement/health owners applies.
+is currently ready, workspace model policy allows the canonical provider/model,
+and no typed hard-unavailable observation from the entitlement/health owners
+applies.
 `available` and `degraded` therefore have `selectable: true`; `unavailable` has
 `selectable: false`. `unknown` may have `selectable: true` only when credential
 readiness and policy are known-good but no current health observation exists;
@@ -358,11 +358,11 @@ a connected subscription is selectable only when the existing authenticated
 connection path reports it ready. The projection is advisory and is rechecked at
 admission and execution. No unavailable definition is silently replaced by
 another provider or model. The worker remains the authoritative post-resolution
-OPE-35 gate before compaction or the main model call.
+workspace model-policy gate before compaction or the main model call.
 
-OPE-24 remains authoritative for entitlement/quota observations and OPE-32 for
-adaptive health/capacity policy. OPE-12 only consumes typed observations if and
-when those owners expose them.
+The entitlement/quota subsystem remains authoritative for entitlement and quota
+observations, while adaptive policy owns health and capacity. The provider
+architecture only consumes typed observations when those owners expose them.
 
 ### 4. Per-turn switching remains explicit, turn-local, durable, and audited
 
@@ -407,9 +407,9 @@ type TurnExecutionPolicyV1 = {
 ```
 
 The snapshot contains no API key, bearer, credential id, account label, secret
-header/query value, or arbitrary URL. OPE-21 may bind and rotate a concrete
-credential inside the accepted credential-source class; that binding remains
-its fenced interface and is not copied into this snapshot.
+header/query value, or arbitrary URL. The credential allocator may bind and
+rotate a concrete credential inside the accepted credential-source class; that
+binding remains its fenced interface and is not copied into this snapshot.
 
 At execution, the worker parses the snapshot and resolves the current provider
 client. A present malformed snapshot, product/provider mismatch, upstream-model
@@ -452,16 +452,17 @@ Provider client construction consumes `credentialSource`; metering consumes
   connection, provider-specific validation, write-only credential handling, and
   a separately reviewed broker-to-worker binding.
 
-OPE-21’s concrete Codex credential id, lease, failover, and capacity wait remain
-unchanged. OPE-24’s quota/reset/entitlement result remains unchanged. OPE-32 may
-later consume the normalized provider/deployment id but owns all adaptive choice.
+The credential allocator's concrete Codex credential id, lease, failover, and
+capacity wait remain unchanged. The quota subsystem's reset and entitlement
+result remains unchanged. Adaptive policy may later consume the normalized
+provider/deployment id but owns all adaptive choice.
 
 The worker must resolve or validate `TurnExecutionPolicyV1` immediately after
 claim and before the credit gate, compaction, or main model call. The credit gate
 and metering consume the snapshot's explicit billing attribution; the current
 pre-resolution Codex-prefix predicate is removed only from this classification
-seam. OPE-21 allocation/leases/failover/compaction and OPE-24
-quota/entitlement decisions are not modified.
+seam. Credential allocation, leases, failover, compaction, and quota/entitlement
+decisions are not modified.
 
 Pricing is keyed by canonical product id and may be a threshold schedule:
 
@@ -514,7 +515,7 @@ Official xAI evidence supports this capability record:
 - Responses WebSocket mode; and
 - best-effort priority service tier, billed at 2x only when priority is granted.
 
-For OPE-12 V1, SSE/Responses/function calling and evidence-backed hosted web
+For this V1, SSE/Responses/function calling and evidence-backed hosted web
 search may be runnable through the existing adapter. X search and code execution
 remain non-runnable until their hosted-tool request contracts are implemented.
 Responses WebSocket remains non-runnable until transport is request-local and
@@ -536,11 +537,11 @@ Cursor officially lists Grok 4.5 and exposes public Cloud Agents APIs and agent
 SDKs billed to Cursor plans. That is a distinct **agent-runtime integration**:
 Cursor owns the agent loop, run model semantics, credential, and billing. Cursor
 BYOK means Cursor consumes a customer’s provider key; it does not export Cursor
-subscription capacity. OPE-12 therefore does not model a Cursor subscription,
-cookie, editor protocol, Cloud Agent key, or SDK session as an xAI/OpenAI raw
-model credential. A future Cursor integration must use the official API/SDK and
-separate agent-runtime contracts. No Cursor key is currently authorized or
-probed.
+subscription capacity. This architecture therefore does not model a Cursor
+subscription, cookie, editor protocol, Cloud Agent key, or SDK session as an
+xAI/OpenAI raw model credential. A future Cursor integration must use the
+official API/SDK and separate agent-runtime contracts. No Cursor key is currently
+authorized or probed.
 
 ## Migration plan
 
@@ -556,9 +557,9 @@ The approved slice is additive and ordered:
    upstream support separately from `runnable` and availability.
 3. **Canonical admission.** Canonicalize explicit aliases at create,
    Send/Steer, schedule, child admission, and model-policy PUT, then apply
-   OPE-35 to canonical product/provider identity. Preserve baseline policy rows
-   as exact canonical-or-unresolved strings; unknown model admissions remain 422
-   and raw alias policy rows fail closed.
+   workspace model policy to canonical product/provider identity. Preserve
+   baseline policy rows as exact canonical-or-unresolved strings; unknown model
+   admissions remain 422 and raw alias policy rows fail closed.
 4. **Turn policy and audit.** Correct omitted-reasoning inheritance, write the
    non-secret V1 snapshot, parse/verify it before model calls, and add secret-safe
    receipt/audit evidence. Use existing turn metadata; no SQL migration is
@@ -589,9 +590,9 @@ The implementation must prove:
 - old `allowedModels` and `ClientModel` clients remain compatible;
 - aliases canonicalize exactly once and collision/cross-provider ambiguity fails
   at boot;
-- OPE-35 stores canonical ids on new writes, preserves baseline exact/unresolved
-  rows, rejects raw alias rows at evaluation, and cannot widen access after
-  alias removal;
+- workspace model policy stores canonical ids on new writes, preserves baseline
+  exact/unresolved rows, rejects raw alias rows at evaluation, and cannot widen
+  access after alias removal;
 - BYOK is not accidentally enabled by generic provider configuration;
 - connected-subscription billing remains external and deployment-key billing
   remains OpenGeni-metered in managed mode;
@@ -603,8 +604,8 @@ The implementation must prove:
   changes `definitionVersion`, while label, alias, health, and same-class secret
   rotation do not;
 - malformed/mismatched present policy fails before any provider call;
-- unknown, unavailable, and OPE-35-blocked models never silently fall through to
-  the built-in provider;
+- unknown, unavailable, and workspace-policy-blocked models never silently fall
+  through to the built-in provider;
 - xAI priority, WebSocket, X search, code execution, and realtime audio cannot be
   selected when `runnable` is false;
 - xAI threshold pricing selects the correct per-request tier at 199,999 and
@@ -630,7 +631,8 @@ Before PR readiness:
    a minimal staging request whose model, returned usage/tier, and secret-safe
    logs are retained as evidence.
 
-OPE-25 alone may release. OPE-12 does not merge, dispatch, or release.
+Only the release owner may release. This provider-architecture change does not
+merge, dispatch, or release itself.
 
 ## Rejected alternatives
 

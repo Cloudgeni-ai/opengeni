@@ -193,9 +193,9 @@ function availabilityFor(input: {
     };
   }
   if (!input.observation) {
-    // Credential readiness and policy are known-good, but OPE-32 has exposed no
-    // current provider-health observation. Unknown is intentionally selectable;
-    // the execution boundary rechecks all authoritative gates.
+    // Credential readiness and policy are known-good, but no current
+    // provider-health observation is available. Unknown is intentionally
+    // selectable; the execution boundary rechecks all authoritative gates.
     return { status: "unknown", selectable: true, reason: null, checkedAt: null };
   }
   if (input.observation.status === "unavailable") {
