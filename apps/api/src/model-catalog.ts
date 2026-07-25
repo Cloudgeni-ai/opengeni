@@ -152,11 +152,64 @@ function credentialReadinessFor(input: {
   });
 }
 
+function isXaiGrokModel(model: ConfiguredModel): boolean {
+  return model.providerId === "xai" && model.id.startsWith("xai/grok-");
+}
+
+function observationTimestamp(observation: ModelAvailabilityObservation | undefined): {
+  checkedAt: string | null;
+  checkedAtMs: number | null;
+} {
+  if (!observation || typeof observation.checkedAt !== "string") {
+    return { checkedAt: null, checkedAtMs: null };
+  }
+  const checkedAtMs = Date.parse(observation.checkedAt);
+  if (!Number.isFinite(checkedAtMs)) {
+    return { checkedAt: null, checkedAtMs: null };
+  }
+  return { checkedAt: new Date(checkedAtMs).toISOString(), checkedAtMs };
+}
+
+function xaiGrokAvailabilityFor(input: {
+  observation: ModelAvailabilityObservation | undefined;
+  nowMs: number;
+  maxAgeMs: number;
+}): ModelAvailabilityV1 {
+  const { checkedAt, checkedAtMs } = observationTimestamp(input.observation);
+  const freshSuccessfulObservation =
+    input.observation?.status === "available" &&
+    input.observation.reason === null &&
+    checkedAtMs !== null &&
+    checkedAtMs <= input.nowMs &&
+    input.nowMs - checkedAtMs <= input.maxAgeMs;
+
+  if (freshSuccessfulObservation) {
+    return {
+      status: "available",
+      selectable: true,
+      reason: null,
+      checkedAt,
+    };
+  }
+
+  return {
+    status: "unavailable",
+    selectable: false,
+    reason:
+      input.observation?.status === "unavailable"
+        ? (input.observation.reason ?? "provider_unhealthy")
+        : "provider_unhealthy",
+    checkedAt,
+  };
+}
+
 function availabilityFor(input: {
   model: ConfiguredModel;
   credentialReadiness: ModelCredentialReadinessV1;
   policy: WorkspaceModelPolicyContract | null;
   observation?: ModelAvailabilityObservation | undefined;
+  nowMs: number;
+  maxAgeMs: number;
 }): ModelAvailabilityV1 {
   if (!modelDefinitionRunnable(input.model)) {
     return {
@@ -191,6 +244,13 @@ function availabilityFor(input: {
       reason: "policy_blocked",
       checkedAt: null,
     };
+  }
+  if (isXaiGrokModel(input.model)) {
+    return xaiGrokAvailabilityFor({
+      observation: input.observation,
+      nowMs: input.nowMs,
+      maxAgeMs: input.maxAgeMs,
+    });
   }
   if (!input.observation) {
     // Credential readiness and policy are known-good, but no current
@@ -268,6 +328,8 @@ export function buildWorkspaceModelCatalog(input: {
         credentialReadiness,
         policy: input.policy,
         observation: input.observations?.[model.definitionVersion],
+        nowMs,
+        maxAgeMs,
       }),
     };
   });

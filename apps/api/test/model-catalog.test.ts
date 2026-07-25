@@ -56,6 +56,106 @@ describe("workspace model catalog availability", () => {
     });
   });
 
+  test("XAI Grok availability requires fresh successful health evidence", () => {
+    const settings = testSettings({
+      codexSubscriptionEnabled: false,
+      modelProvidersJson: JSON.stringify([
+        {
+          id: "xai",
+          label: "xAI",
+          api: "responses",
+          baseUrl: "https://api.x.ai/v1",
+          apiKey: "xai-catalog-test-key",
+          models: [{ id: "xai/grok-4.5", label: "Grok 4.5" }],
+        },
+        {
+          id: "acme",
+          label: "Acme",
+          api: "responses",
+          baseUrl: "https://api.acme.test/v1",
+          apiKey: "acme-catalog-test-key",
+          models: [{ id: "acme/model", label: "Acme model" }],
+        },
+      ]),
+    });
+    const now = new Date("2026-07-25T12:00:00.000Z");
+    const initial = buildWorkspaceModelCatalog({
+      settings,
+      policy: null,
+      codexSubscriptionActive: false,
+      now,
+    });
+    const grok = initial.models.find((model) => model.id === "xai/grok-4.5")!;
+    const acme = initial.models.find((model) => model.id === "acme/model")!;
+    expect(grok.credentialReadiness).toEqual({
+      status: "ready",
+      reason: null,
+      basis: "configuration",
+      checkedAt: null,
+    });
+    expect(grok.availability).toMatchObject({
+      status: "unavailable",
+      selectable: false,
+      reason: "provider_unhealthy",
+    });
+    expect(acme.availability).toEqual({
+      status: "unknown",
+      selectable: true,
+      reason: null,
+      checkedAt: null,
+    });
+
+    const observationKey = grok.definitionVersion!;
+    const catalogFor = (observation: unknown) =>
+      buildWorkspaceModelCatalog({
+        settings,
+        policy: null,
+        codexSubscriptionActive: false,
+        now,
+        observations: { [observationKey]: observation as never },
+      }).models.find((model) => model.id === "xai/grok-4.5")!;
+
+    const fresh = catalogFor({
+      status: "available",
+      reason: null,
+      checkedAt: new Date(now.getTime() - 60_000).toISOString(),
+    });
+    expect(fresh).toMatchObject({
+      credentialReadiness: { status: "ready", basis: "configuration" },
+      availability: { status: "available", selectable: true, reason: null },
+    });
+
+    const stale = catalogFor({
+      status: "available",
+      reason: null,
+      checkedAt: new Date(now.getTime() - 10 * 60_000).toISOString(),
+    });
+    const future = catalogFor({
+      status: "available",
+      reason: null,
+      checkedAt: new Date(now.getTime() + 60_000).toISOString(),
+    });
+    const malformed = catalogFor({
+      status: "available",
+      reason: null,
+      checkedAt: "not-a-timestamp",
+    });
+    const unavailable = catalogFor({
+      status: "unavailable",
+      reason: "provider_unhealthy",
+      checkedAt: now.toISOString(),
+    });
+    const error = catalogFor({
+      status: "error",
+      reason: null,
+      checkedAt: now.toISOString(),
+    });
+    for (const model of [stale, future, malformed, unavailable, error]) {
+      expect(model.credentialReadiness).toMatchObject({ status: "ready" });
+      expect(model.availability).toMatchObject({ status: "unavailable", selectable: false });
+    }
+  });
+
   test("consumes typed available, degraded, unavailable, and entitlement observations", () => {
     const settings = testSettings({ codexSubscriptionEnabled: false });
     const baseline = buildWorkspaceModelCatalog({
