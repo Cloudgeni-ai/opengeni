@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-65: transactional workspace revisions make updated-order discovery and
+-- tracking-65: transactional workspace revisions make updated-order discovery and
 -- its next incremental scan one gap-free handoff independent of application
 -- clocks. Existing sessions remain revision zero until their next activity.
 

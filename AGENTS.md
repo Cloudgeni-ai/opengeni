@@ -87,6 +87,10 @@ For a map of every app, package, and how the parts fit together, start at [`docs
 - Temporal is orchestration only. Token streams do not go through workflow history.
 - OpenAI Agents SDK execution happens inside non-retryable worker activities.
 - Agent activities are side-effectful. Do not add automatic Temporal retries around full agent turns unless each model/tool/sandbox boundary has been made idempotent.
+- Codex rate-limit reset credits are never automatic agent capacity. Their
+  irreversible consume path is managed-cookie owning-human web-only with durable
+  provider idempotency; do not add an SDK, MCP, Toolspace, worker, scheduled, or
+  allocator/rotation consume hook. See `docs/codex-subscription-rotation.md`.
 
 ## Run Lifecycle (read `docs/run-lifecycle.md` before changing the session workflow, the agent turn activity, or memory)
 

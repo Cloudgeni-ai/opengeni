@@ -59,6 +59,10 @@ async function count(table: "sessions" | "session_spawn_denials", workspaceId: s
   return row?.count ?? 0;
 }
 
+async function delay(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("session-depth-policy-current");
   if (!shared) {
@@ -153,6 +157,147 @@ describe("nested-agent depth database admission", () => {
     expect((await getSessionSpawnDenialByIdempotencyKey(db, workspace.workspaceId, key))?.id).toBe(
       firstDenial.id,
     );
+  }, 60_000);
+
+  test("serializes an old source writer with current admission and replays the success winner", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("db depth success race");
+    const key = `success-race-${crypto.randomUUID()}`;
+    const lockKey = `session-create:${workspace.workspaceId}:${key}`;
+
+    // This direct transaction represents a pre-boundary writer. It takes the
+    // same advisory lock as the boundary trigger, reserves the source row, and
+    // holds the transaction open while the current application writer waits.
+    const oldWriter = admin.begin(async (sql) => {
+      await sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      await sql`select pg_sleep(0.1)`;
+      const rows = await sql<{ id: string }[]>`
+        insert into sessions (
+          account_id, workspace_id, initial_message, model, sandbox_backend,
+          sandbox_group_id, create_idempotency_key
+        ) values (
+          ${workspace.accountId}, ${workspace.workspaceId}, 'old writer',
+          'depth-policy-test', 'none', gen_random_uuid(), ${key}
+        )
+        returning id`;
+      await sql`select pg_sleep(0.1)`;
+      return rows[0]?.id ?? null;
+    });
+    await delay(25);
+
+    const currentWriter = createSessionWithIdempotencyKeyResult(
+      db,
+      sessionInput(workspace, "current writer", { createIdempotencyKey: key }),
+    );
+    const [oldSessionId, replay] = await Promise.all([oldWriter, currentWriter]);
+
+    expect(oldSessionId).not.toBeNull();
+    expect(replay.denied).toBe(false);
+    if (replay.denied) return;
+    expect(replay.created).toBe(false);
+    expect(replay.session.id).toBe(oldSessionId);
+    expect(await count("sessions", workspace.workspaceId)).toBe(1);
+
+    // A contradictory denial is suppressed by the BEFORE guard rather than
+    // surfacing a raw 23505 or creating a second outcome row.
+    const denialRows = await admin<{ id: string }[]>`
+      insert into session_spawn_denials (
+        account_id, workspace_id, current_depth, attempted_depth,
+        effective_max_nested_agent_depth, policy_source, code, idempotency_key
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, 0, 1, 0,
+        'default', 'nested_agent_depth_exceeded', ${key}
+      )
+      returning id`;
+    expect(denialRows).toHaveLength(0);
+    expect(await count("session_spawn_denials", workspace.workspaceId)).toBe(0);
+  }, 60_000);
+
+  test("serializes an old denial writer and replays the denial winner", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("db depth denial race");
+    const key = `denial-race-${crypto.randomUUID()}`;
+    const lockKey = `session-create:${workspace.workspaceId}:${key}`;
+
+    const oldWriter = admin.begin(async (sql) => {
+      await sql`select pg_advisory_xact_lock(hashtext(${lockKey}))`;
+      await sql`select pg_sleep(0.1)`;
+      const rows = await sql<{ id: string }[]>`
+        insert into session_spawn_denials (
+          account_id, workspace_id, current_depth, attempted_depth,
+          effective_max_nested_agent_depth, policy_source, code, idempotency_key
+        ) values (
+          ${workspace.accountId}, ${workspace.workspaceId}, 3, 4, 3,
+          'default', 'nested_agent_depth_exceeded', ${key}
+        )
+        returning id`;
+      await sql`select pg_sleep(0.1)`;
+      return rows[0]?.id ?? null;
+    });
+    await delay(25);
+
+    const currentWriter = createSessionWithIdempotencyKeyResult(
+      db,
+      sessionInput(workspace, "current writer", { createIdempotencyKey: key }),
+    );
+    const [oldDenialId, replay] = await Promise.all([oldWriter, currentWriter]);
+
+    expect(oldDenialId).not.toBeNull();
+    expect(replay.denied).toBe(true);
+    const replayedDenial = denied(replay);
+    expect(replayedDenial.id).toBe(oldDenialId);
+    expect(await count("sessions", workspace.workspaceId)).toBe(0);
+    expect(await count("session_spawn_denials", workspace.workspaceId)).toBe(1);
+
+    // The old success-shaped source write is also suppressed by the same
+    // ledger winner, with no raw unique violation and no session artifact.
+    const sessionRows = await admin<{ id: string }[]>`
+      insert into sessions (
+        account_id, workspace_id, initial_message, model, sandbox_backend,
+        sandbox_group_id, create_idempotency_key
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, 'old success',
+        'depth-policy-test', 'none', gen_random_uuid(), ${key}
+      )
+      returning id`;
+    expect(sessionRows).toHaveLength(0);
+    expect(await count("sessions", workspace.workspaceId)).toBe(0);
+  }, 60_000);
+
+  test("installs the guard before insert and cascades its ledger on workspace deletion", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("db depth guard cleanup");
+    const successKey = `guard-success-${crypto.randomUUID()}`;
+    const denialKey = `guard-denial-${crypto.randomUUID()}`;
+    await createSession(db, sessionInput(workspace, "success", { createIdempotencyKey: successKey }));
+    const denial = await createSessionWithIdempotencyKeyResult(db, {
+      ...sessionInput(workspace, "denied", { maxNestedAgentDepthOverride: 5 }),
+      createIdempotencyKey: denialKey,
+    });
+    expect(denied(denial).code).toBe("nested_agent_depth_override_forbidden");
+
+    const [trigger] = await admin<{ definition: string }[]>`
+      select pg_get_triggerdef(oid) as definition
+      from pg_trigger
+      where tgrelid = 'sessions'::regclass
+        and tgname = 'session_idempotency_guard'
+        and not tgisinternal`;
+    expect(trigger?.definition).toContain("BEFORE INSERT");
+
+    const [before] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_create_idempotency_guard
+      where workspace_id = ${workspace.workspaceId}`;
+    expect(before?.count).toBe(2);
+
+    await admin`delete from workspaces where id = ${workspace.workspaceId}`;
+
+    const [after] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_create_idempotency_guard
+      where workspace_id = ${workspace.workspaceId}`;
+    expect(after?.count).toBe(0);
+    expect(await count("session_spawn_denials", workspace.workspaceId)).toBe(0);
   }, 60_000);
 
   test("allows reductions, requires authorization for increases, and inherits session policy", async () => {

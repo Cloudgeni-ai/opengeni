@@ -1,5 +1,11 @@
 # @opengeni/codex
 
+## 0.2.6
+
+### Patch Changes
+
+- 229902b: Add trustworthy per-subscription Codex quota/reset-credit overview and allocator OCC controls, plus an owning-human managed-cookie-only reset redemption flow with durable ambiguity-safe provider idempotency.
+
 ## 0.2.5
 
 ### Patch Changes

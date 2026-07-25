@@ -23,7 +23,7 @@ import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
-import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "./sessions";
+import { assertWorkspaceModelPolicyAllows, canonicalConfiguredModel } from "./sessions";
 import {
   normalizeResources,
   validateFileResources,
@@ -331,15 +331,10 @@ async function validateScheduledTaskAgentConfig(input: {
   // session choke points (a `scheduled_tasks:manage` holder could otherwise set
   // a model the host does not expose). An omitted model inherits the host
   // default downstream, which is always configured.
-  assertConfiguredModel(input.settings, input.payload.agentConfig.model);
+  const model = canonicalConfiguredModel(input.settings, input.payload.agentConfig.model);
   // Same policy vetting as the session choke points; an omitted model flows
   // through session creation later, where the effective default is vetted.
-  await assertWorkspaceModelPolicyAllows(
-    input.db,
-    input.settings,
-    input.workspaceId,
-    input.payload.agentConfig.model,
-  );
+  await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,
@@ -385,6 +380,7 @@ async function validateScheduledTaskAgentConfig(input: {
   }
   return {
     ...input.payload.agentConfig,
+    ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,
     tools,

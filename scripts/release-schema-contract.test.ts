@@ -11,6 +11,15 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
+  test("classifies the Codex quota owning-human cutover as maintenance-only", async () => {
+    const contract = await buildSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0065_codex_subscription_overview.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
   test("is deterministic across creation order and classifies only executable SQL migrations", async () => {
     const first = await fixture([
       ["0002_second.sql", "-- deployment-mode: rolling\nselect 2;"],
@@ -59,6 +68,9 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const contract = await buildSchemaContract();
     const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
+      deploymentMode: "maintenance",
+    });
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",
@@ -102,9 +114,7 @@ describe("release schema contract", () => {
         "0116_nested_agent_depth_index.sql",
       ].filter((file) => migrations.has(file)),
     );
-    expect(contract.fileCount).toBe(
-      95 + currentMainMigrations.length + nestedDepthMigrations.length,
-    );
+    expect(contract.fileCount).toBe(108);
     expect(contract.latestMigration).toBe("0116_nested_agent_depth_index.sql");
     expect(
       contract.migrations

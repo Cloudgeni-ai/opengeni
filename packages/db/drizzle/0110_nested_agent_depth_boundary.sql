@@ -21,22 +21,15 @@ CREATE TABLE "session_create_idempotency_guard" (
   "created_at" timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT "session_create_idempotency_guard_pk"
     PRIMARY KEY ("workspace_id", "idempotency_key"),
+  CONSTRAINT "session_create_idempotency_guard_workspace_fk"
+    FOREIGN KEY ("workspace_id")
+    REFERENCES "workspaces"("id") ON DELETE CASCADE,
   CONSTRAINT "session_create_idempotency_guard_outcome_check"
     CHECK ("outcome" IN ('session', 'denial')),
   CONSTRAINT "session_create_idempotency_guard_target_check"
     CHECK (("outcome" = 'session' AND "session_id" IS NOT NULL AND "denial_id" IS NULL)
        OR ("outcome" = 'denial' AND "session_id" IS NULL AND "denial_id" IS NOT NULL))
 );
-
--- Preserve successes created before this boundary. The session-side partial
--- unique index already proves there is at most one source row per key.
-INSERT INTO "session_create_idempotency_guard" (
-  "workspace_id", "idempotency_key", "outcome", "session_id"
-)
-SELECT "workspace_id", "create_idempotency_key", 'session', "id"
-FROM "sessions"
-WHERE "create_idempotency_key" IS NOT NULL
-ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING;
 
 CREATE TABLE "session_spawn_denials" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -82,9 +75,6 @@ RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
 AS $function$
 DECLARE
   inserted_rows integer;
-  existing_outcome text;
-  existing_session_id uuid;
-  existing_denial_id uuid;
   new_outcome text;
   new_session_id uuid;
   new_denial_id uuid;
@@ -105,6 +95,16 @@ BEGIN
     RETURN NEW;
   END IF;
 
+  -- This is the exact lock used by the application admission path. The
+  -- trigger must take it before reserving the cross-outcome ledger row so an
+  -- old writer and a current writer cannot choose different winners for the
+  -- same workspace/key. Keep this trigger after session_depth_policy_defaults
+  -- (by trigger name) because application admission locks the workspace
+  -- control row before taking this advisory lock.
+  PERFORM pg_advisory_xact_lock(
+    hashtext('session-create:' || NEW.workspace_id::text || ':' || new_idempotency_key)
+  );
+
   EXECUTE format($sql$
     INSERT INTO %I."session_create_idempotency_guard"
       ("workspace_id", "idempotency_key", "outcome", "session_id", "denial_id")
@@ -117,25 +117,12 @@ BEGIN
     RETURN NEW;
   END IF;
 
-  EXECUTE format($sql$
-    SELECT "outcome", "session_id", "denial_id"
-    FROM %I."session_create_idempotency_guard"
-    WHERE "workspace_id" = $1 AND "idempotency_key" = $2
-  $sql$, TG_TABLE_SCHEMA)
-  INTO existing_outcome, existing_session_id, existing_denial_id
-  USING NEW.workspace_id, new_idempotency_key;
-
-  -- A same-row replay is harmless; the source table's own unique index handles
-  -- same-outcome duplicates before this AFTER trigger fires. Any other source
-  -- row is a contradictory success/denial and must fail closed.
-  IF existing_outcome = new_outcome
-     AND ((new_outcome = 'session' AND existing_session_id = NEW.id)
-       OR (new_outcome = 'denial' AND existing_denial_id = NEW.id)) THEN
-    RETURN NEW;
-  END IF;
-  RAISE EXCEPTION 'session create idempotency key already has a different outcome'
-    USING ERRCODE = '23505',
-          CONSTRAINT = 'session_create_idempotency_guard_pk';
+  -- The durable ledger row is the winner. Returning NULL from a BEFORE INSERT
+  -- trigger suppresses this source row without aborting the transaction, so
+  -- old writers and current writers both receive an empty RETURNING result and
+  -- can replay the winner. Raising 23505 here would abort the transaction
+  -- before the application could inspect the durable winner.
+  RETURN NULL;
 END
 $function$;
 
@@ -308,14 +295,72 @@ BEGIN
   EXECUTE format('DROP TRIGGER IF EXISTS session_depth_policy_defaults ON %I.sessions', target_schema);
   EXECUTE format('CREATE TRIGGER session_depth_policy_defaults BEFORE INSERT ON %I.sessions FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_depth_policy_defaults()', target_schema);
   EXECUTE format('DROP TRIGGER IF EXISTS session_create_idempotency_guard ON %I.sessions', target_schema);
-  EXECUTE format('CREATE TRIGGER session_create_idempotency_guard AFTER INSERT ON %I.sessions FOR EACH ROW WHEN (NEW.create_idempotency_key IS NOT NULL) EXECUTE FUNCTION opengeni_private.session_create_idempotency_guard_insert()', target_schema);
+  EXECUTE format('DROP TRIGGER IF EXISTS session_idempotency_guard ON %I.sessions', target_schema);
+  EXECUTE format('CREATE TRIGGER session_idempotency_guard BEFORE INSERT ON %I.sessions FOR EACH ROW WHEN (NEW.create_idempotency_key IS NOT NULL) EXECUTE FUNCTION opengeni_private.session_create_idempotency_guard_insert()', target_schema);
   EXECUTE format('DROP TRIGGER IF EXISTS session_spawn_denials_append_only ON %I.session_spawn_denials', target_schema);
   EXECUTE format('CREATE TRIGGER session_spawn_denials_append_only BEFORE UPDATE OR DELETE ON %I.session_spawn_denials FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_spawn_denials_append_only()', target_schema);
   EXECUTE format('DROP TRIGGER IF EXISTS session_spawn_denials_idempotency_guard ON %I.session_spawn_denials', target_schema);
-  EXECUTE format('CREATE TRIGGER session_spawn_denials_idempotency_guard AFTER INSERT ON %I.session_spawn_denials FOR EACH ROW WHEN (NEW.idempotency_key IS NOT NULL) EXECUTE FUNCTION opengeni_private.session_create_idempotency_guard_insert()', target_schema);
+  EXECUTE format('CREATE TRIGGER session_spawn_denials_idempotency_guard BEFORE INSERT ON %I.session_spawn_denials FOR EACH ROW WHEN (NEW.idempotency_key IS NOT NULL) EXECUTE FUNCTION opengeni_private.session_create_idempotency_guard_insert()', target_schema);
   EXECUTE format('DROP TRIGGER IF EXISTS lock_nested_agent_workspace_policy_update ON %I.workspaces', target_schema);
   EXECUTE format('CREATE TRIGGER lock_nested_agent_workspace_policy_update BEFORE UPDATE OF settings ON %I.workspaces FOR EACH ROW EXECUTE FUNCTION opengeni_private.lock_nested_agent_workspace_policy_update()', target_schema);
 END $triggers$;
+
+-- Preserve successes created before this boundary. The source triggers are
+-- already installed, so any old-writer insert that commits while this rolling
+-- boundary is in flight must reserve the ledger before its source row commits.
+INSERT INTO "session_create_idempotency_guard" (
+  "workspace_id", "idempotency_key", "outcome", "session_id"
+)
+SELECT "workspace_id", "create_idempotency_key", 'session', "id"
+FROM "sessions"
+WHERE "create_idempotency_key" IS NOT NULL
+ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING;
+
+-- Keep the last reconciliation fenced against source-row writers. The table
+-- locks are held to transaction commit, and the final checks make a migration
+-- failure explicit rather than publishing a source row with no ledger entry.
+LOCK TABLE "workspaces", "sessions", "session_spawn_denials" IN SHARE MODE;
+INSERT INTO "session_create_idempotency_guard" (
+  "workspace_id", "idempotency_key", "outcome", "session_id"
+)
+SELECT "workspace_id", "create_idempotency_key", 'session', "id"
+FROM "sessions"
+WHERE "create_idempotency_key" IS NOT NULL
+ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING;
+INSERT INTO "session_create_idempotency_guard" (
+  "workspace_id", "idempotency_key", "outcome", "denial_id"
+)
+SELECT "workspace_id", "idempotency_key", 'denial', "id"
+FROM "session_spawn_denials"
+WHERE "idempotency_key" IS NOT NULL
+ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING;
+
+DO $reconcile$
+DECLARE
+  missing_source_rows integer;
+BEGIN
+  SELECT count(*)::integer
+  INTO missing_source_rows
+  FROM (
+    SELECT "workspace_id", "create_idempotency_key" AS "idempotency_key"
+    FROM "sessions"
+    WHERE "create_idempotency_key" IS NOT NULL
+    UNION ALL
+    SELECT "workspace_id", "idempotency_key"
+    FROM "session_spawn_denials"
+    WHERE "idempotency_key" IS NOT NULL
+  ) source_rows
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM "session_create_idempotency_guard" guard
+    WHERE guard."workspace_id" = source_rows."workspace_id"
+      AND guard."idempotency_key" = source_rows."idempotency_key"
+  );
+  IF missing_source_rows <> 0 THEN
+    RAISE EXCEPTION 'session create idempotency ledger reconciliation missed % source rows', missing_source_rows
+      USING ERRCODE = '23514';
+  END IF;
+END $reconcile$;
 
 ALTER TABLE "session_spawn_denials" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE "session_spawn_denials" FORCE ROW LEVEL SECURITY;

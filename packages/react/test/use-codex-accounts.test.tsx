@@ -27,7 +27,15 @@ function win(percent: number, limitWindowSeconds: number): CodexUsageWindow {
 }
 
 function account(id: string, over: Partial<CodexAccount> = {}): CodexAccount {
-  return { id, label: `acct ${id}`, status: "active", active: id === "a", ...over };
+  return {
+    id,
+    label: `acct ${id}`,
+    status: "active",
+    active: id === "a",
+    allocatorEnabled: true,
+    allocatorVersion: 1,
+    ...over,
+  };
 }
 
 function response(accounts: CodexAccount[]): CodexAccountsResponse {

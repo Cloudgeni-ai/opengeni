@@ -1,5 +1,20 @@
 # @opengeni/config
 
+## 0.6.7
+
+### Patch Changes
+
+- Updated dependencies [229902b]
+  - @opengeni/codex@0.2.6
+
+## 0.6.6
+
+### Patch Changes
+
+- cb188f9: Protect clean rig verification sandboxes with canonical exact-instance leases, make Modal orphan termination revalidate durable ownership immediately before deletion, and add a default-off two-phase rollout flag.
+- Updated dependencies [4966649]
+  - @opengeni/contracts@0.17.2
+
 ## 0.6.5
 
 ### Patch Changes
