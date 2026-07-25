@@ -69,17 +69,23 @@ describe("release schema contract", () => {
         ? []
         : ["0105_session_turn_instructions.sql", "0106_session_attempt_mcp_approval_policies.sql"],
     );
-    expect(contract.fileCount).toBe(96 + currentMainMigrations.length);
-    expect(contract.latestMigration).toBe("0107_host_export_lineage_contract.sql");
+    expect(contract.fileCount).toBe(102 + currentMainMigrations.length);
+    expect(contract.latestMigration).toBe("0113_nested_agent_depth_index.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^010[3-7]_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-3])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       "0107_host_export_lineage_contract.sql",
+      "0108_nested_agent_depth_expand.sql",
+      "0109_nested_agent_depth_backfill.sql",
+      "0110_nested_agent_depth_boundary.sql",
+      "0111_nested_agent_depth_contract.sql",
+      "0112_nested_agent_depth_validate.sql",
+      "0113_nested_agent_depth_index.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
