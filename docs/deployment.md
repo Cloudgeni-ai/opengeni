@@ -514,6 +514,7 @@ The secret must provide runtime values such as:
 - `OPENGENI_AUTH_REQUIRED=true` and `OPENGENI_ACCESS_KEY` only when using the optional deployment shared-key boundary
 - `OPENGENI_BETTER_AUTH_SECRET`, trusted origins, public base URL, Resend key, and delegation secret when `OPENGENI_PRODUCT_ACCESS_MODE=managed`
 - `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` (base64, exactly 32 bytes; generate with `openssl rand -base64 32`) for workspace variable sets; required when `OPENGENI_PRODUCT_ACCESS_MODE=managed` outside local/test, optional otherwise (variable set routes return 503 until it is set). See `docs/variable-sets.md`.
+- `OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET` (a separate base64 secret encoding exactly 32 bytes; generate with `openssl rand -base64 32`) for managed organization-governance recovery approval receipt identities. Provision it before rolling out new managed binaries and keep it stable: rotating it changes committed replay identities, even though rotating `OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY` intentionally revokes outstanding evidence envelopes.
 - `OPENGENI_STRIPE_SECRET_KEY`, publishable key, webhook secret, and model pricing JSON when `OPENGENI_BILLING_MODE=stripe`
 - sandbox backend credentials when required
 

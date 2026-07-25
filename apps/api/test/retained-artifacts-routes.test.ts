@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import {
   RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
@@ -6,6 +6,7 @@ import {
   type Permission,
 } from "@opengeni/contracts";
 import type { ApiRouteDeps } from "@opengeni/core";
+import * as opengeniDb from "@opengeni/db";
 import {
   bootstrapWorkspace,
   completeFileUpload,
@@ -379,12 +380,24 @@ describe("retained artifact metadata and bounded content", () => {
       },
     );
     const deniedApp = routeApp(fixture.storage, poisonedDb as never);
-    const denied = await deniedApp.request(
-      artifactUrl(deniedWorkspace.workspaceId, crypto.randomUUID(), true),
-      { headers: { authorization: deniedWorkspace.authorization } },
-    );
-    expect(denied.status).toBe(403);
-    expect(dbTouched).toBeFalse();
-    expect(fixture.calls).toHaveLength(0);
+    const governance = spyOn(opengeniDb, "getOrganizationGovernanceStatus").mockResolvedValue({
+      accountId: deniedWorkspace.accountId,
+      kind: "team",
+      state: "active",
+      governanceRevision: 0,
+      authoritySubjectId: null,
+      authorizationInvalidatedAt: null,
+    });
+    try {
+      const denied = await deniedApp.request(
+        artifactUrl(deniedWorkspace.workspaceId, crypto.randomUUID(), true),
+        { headers: { authorization: deniedWorkspace.authorization } },
+      );
+      expect(denied.status).toBe(403);
+      expect(dbTouched).toBeFalse();
+      expect(fixture.calls).toHaveLength(0);
+    } finally {
+      governance.mockRestore();
+    }
   });
 });

@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import { signDelegatedAccessToken, type Permission } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
 import { createApp } from "../src/app";
 
@@ -14,8 +15,9 @@ const settings = testSettings({
   delegationSecret: DELEGATION_SECRET,
 });
 
-// db must never be touched on the paths under test (auth from token; start/poll
-// reach the device endpoints, not the database). It throws if it ever is.
+// Route-owned database operations must never run on the paths under test (auth
+// comes from the token; start/poll reach the device endpoints). The access
+// layer's mandatory governance fence is mocked explicitly below.
 const poisonDb = new Proxy(
   {},
   {
@@ -48,8 +50,23 @@ async function bearer(workspaceId: string, permissions: Permission[]): Promise<s
 }
 
 const realFetch = globalThis.fetch;
+const restores: Array<() => void> = [];
+
+beforeEach(() => {
+  const governance = spyOn(opengeniDb, "getOrganizationGovernanceStatus").mockResolvedValue({
+    accountId: ACCOUNT,
+    kind: "team",
+    state: "active",
+    governanceRevision: 0,
+    authoritySubjectId: null,
+    authorizationInvalidatedAt: null,
+  });
+  restores.push(() => governance.mockRestore());
+});
+
 afterEach(() => {
   globalThis.fetch = realFetch;
+  while (restores.length) restores.pop()!();
 });
 
 function mockDevice(handlers: { usercode?: () => Response; token?: () => Response }) {

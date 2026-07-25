@@ -85,17 +85,19 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(97 + currentMainMigrations.length);
-    expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
+    // Main also carries the Codex subscription overview migration alongside this repair.
+    expect(contract.fileCount).toBe(98 + currentMainMigrations.length);
+    expect(contract.latestMigration).toBe("0109_organization_governance_recovery.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^010[3-8]_/.test(path)),
+        .filter((path) => /^010[3-9]_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       "0108_fence_invalidated_warming_epochs.sql",
+      "0109_organization_governance_recovery.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -120,6 +122,9 @@ describe("release schema contract", () => {
     }
     expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
       sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0109_organization_governance_recovery.sql")).toMatchObject({
       deploymentMode: "rolling",
     });
   });

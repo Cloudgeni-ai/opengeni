@@ -43,6 +43,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     toolspaceEnabled: false,
     toolspaceMaxCallsPerTurn: 200,
     environmentsEncryptionKey: undefined,
+    organizationRecoveryReceiptIdentitySecret: Buffer.alloc(32, 8).toString("base64"),
     integrationsEnabled: false,
     integrationsStateSecret: undefined,
     integrationsAllowPrivateNetworkTargets: false,

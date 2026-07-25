@@ -117,6 +117,8 @@ import {
 } from "@opengeni/contracts";
 import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import { boundModelToolOutputItem, isCodexBilledModel } from "@opengeni/codex";
+export * from "./identity-evidence-crypto";
+export * from "./organization-governance";
 // Re-exported so consumers get the whole codex-billed detection surface (the pure
 // prefix test + the credential-aware predicates below) from a single import.
 export { isCodexBilledModel } from "@opengeni/codex";
@@ -1102,6 +1104,7 @@ export async function bootstrapWorkspace(
           name: input.accountName,
           externalSource: input.accountExternalSource,
           externalId: input.accountExternalId,
+          governanceAuthoritySubjectId: input.subjectId,
         })
         .onConflictDoUpdate({
           target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
@@ -1111,15 +1114,46 @@ export async function bootstrapWorkspace(
           },
         })
         .returning();
-    } else if (account.name !== input.accountName) {
+    } else if (
+      account.governanceState === "active" &&
+      (account.name !== input.accountName ||
+        account.governanceAuthoritySubjectId !== input.subjectId)
+    ) {
       [account] = await tx
         .update(schema.managedAccounts)
-        .set({ name: input.accountName, updatedAt: new Date() })
+        .set({
+          name: input.accountName,
+          governanceAuthoritySubjectId: input.subjectId,
+          updatedAt: new Date(),
+        })
         .where(eq(schema.managedAccounts.id, account.id))
         .returning();
     }
     if (!account) {
       throw new Error("Failed to bootstrap account");
+    }
+    if (account.governanceState === "governance_locked") {
+      return {
+        mode: input.accountExternalSource === "opengeni:local" ? "local" : "configured",
+        subjectId: input.subjectId,
+        ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+        accountGrants: [
+          {
+            accountId: account.id,
+            subjectId: input.subjectId,
+            ...(input.subjectLabel ? { subjectLabel: input.subjectLabel } : {}),
+            permissions: [],
+            metadata: {
+              authType: "configured",
+              governanceState: "governance_locked",
+              governanceRevision: account.governanceRevision,
+            },
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: account.id,
+        defaultWorkspaceId: null,
+      };
     }
     let [workspace] = await tx
       .select()
@@ -1279,13 +1313,15 @@ export async function ensureManagedAccessForUser(
           name: accountName,
           externalSource: "better-auth:user",
           externalId: input.userId,
+          organizationKind: "personal",
+          governanceAuthoritySubjectId: subjectId,
         })
         .onConflictDoUpdate({
           target: [schema.managedAccounts.externalSource, schema.managedAccounts.externalId],
           set: { name: accountName, updatedAt: new Date() },
         })
         .returning();
-    } else if (account.name !== accountName) {
+    } else if (account.governanceState === "active" && account.name !== accountName) {
       [account] = await tx
         .update(schema.managedAccounts)
         .set({ name: accountName, updatedAt: new Date() })
@@ -1294,6 +1330,33 @@ export async function ensureManagedAccessForUser(
     }
     if (!account) {
       throw new Error("Failed to ensure managed account");
+    }
+    // Authentication remains available for the explicit recovery surface, but
+    // a governance lock must never recreate an owner membership or return an
+    // ordinary account/workspace capability. This is the hidden-login-bypass
+    // guard: only the custodian recovery transaction can restore authority.
+    if (account.governanceState === "governance_locked") {
+      return {
+        mode: "managed",
+        subjectId,
+        subjectLabel,
+        accountGrants: [
+          {
+            accountId: account.id,
+            subjectId,
+            subjectLabel,
+            permissions: [],
+            metadata: {
+              authType: "managed",
+              governanceState: "governance_locked",
+              governanceRevision: account.governanceRevision,
+            },
+          },
+        ],
+        workspaceGrants: [],
+        defaultAccountId: account.id,
+        defaultWorkspaceId: null,
+      };
     }
     let [defaultWorkspace] = await tx
       .select()
@@ -1417,15 +1480,24 @@ export async function ensureManagedAccessForUser(
       mode: "managed",
       subjectId,
       subjectLabel,
-      accountGrants: [
-        {
-          accountId: account.id,
+      accountGrants: (
+        await tx
+          .select()
+          .from(schema.managedAccounts)
+          .where(eq(schema.managedAccounts.governanceAuthoritySubjectId, subjectId))
+      )
+        .filter((authorityAccount) => authorityAccount.governanceState === "active")
+        .map((authorityAccount) => ({
+          accountId: authorityAccount.id,
           subjectId,
           subjectLabel,
-          role: "owner",
+          role: "owner" as const,
           permissions: allAccountPermissions,
-        },
-      ],
+          metadata: {
+            authType: "managed",
+            governanceRevision: authorityAccount.governanceRevision,
+          },
+        })),
       workspaceGrants: memberships.map((row) => ({
         workspaceId: row.workspace.id,
         accountId: row.workspace.accountId,
@@ -1477,7 +1549,13 @@ export async function listWorkspacesForSubject(
     .select({ workspace: schema.workspaces })
     .from(schema.workspaceMemberships)
     .innerJoin(schema.workspaces, eq(schema.workspaceMemberships.workspaceId, schema.workspaces.id))
-    .where(eq(schema.workspaceMemberships.subjectId, subjectId))
+    .innerJoin(schema.managedAccounts, eq(schema.workspaces.accountId, schema.managedAccounts.id))
+    .where(
+      and(
+        eq(schema.workspaceMemberships.subjectId, subjectId),
+        eq(schema.managedAccounts.governanceState, "active"),
+      ),
+    )
     .orderBy(desc(schema.workspaces.createdAt))
     .limit(limit);
   return await Promise.all(
@@ -29010,6 +29088,11 @@ function mapAccount(row: typeof schema.managedAccounts.$inferSelect): ManagedAcc
     name: row.name,
     externalSource: row.externalSource,
     externalId: row.externalId,
+    organizationKind: row.organizationKind as ManagedAccount["organizationKind"],
+    governanceState: row.governanceState as ManagedAccount["governanceState"],
+    governanceRevision: row.governanceRevision,
+    governanceAuthoritySubjectId: row.governanceAuthoritySubjectId,
+    authorizationInvalidatedAt: row.authorizationInvalidatedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };

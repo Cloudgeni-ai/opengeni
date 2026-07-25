@@ -229,6 +229,10 @@ const SettingsSchema = z.object({
     .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
     .optional(),
   environmentsEncryptionKey: z.string().optional(),
+  // Stable, independent identity root for organization-recovery approval
+  // command receipts. Unlike the AES evidence key, this value must not rotate
+  // with evidence envelopes because committed replay identities depend on it.
+  organizationRecoveryReceiptIdentitySecret: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
@@ -1084,6 +1088,9 @@ export function getSettings(): Settings {
     toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
+    organizationRecoveryReceiptIdentitySecret: optional(
+      "OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET",
+    ),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
     integrationsAllowPrivateNetworkTargets: optional(
@@ -1669,6 +1676,35 @@ export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array |
   if (decoded.length !== 32) {
     throw new Error(
       "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY must be base64 for exactly 32 bytes (generate with: openssl rand -base64 32)",
+    );
+  }
+  return new Uint8Array(decoded);
+}
+
+/**
+ * Decodes the stable organization-recovery approval receipt identity secret.
+ * It is deliberately independent from OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY:
+ * rotating AES evidence envelopes must not change committed approval replay
+ * identities. Returns null only when the setting is absent; callers decide
+ * whether absence is allowed for their deployment mode.
+ */
+export function organizationRecoveryReceiptIdentitySecretBytes(
+  settings: Pick<Settings, "organizationRecoveryReceiptIdentitySecret">,
+): Uint8Array | null {
+  const encoded = settings.organizationRecoveryReceiptIdentitySecret?.replace(/\s/g, "");
+  if (!encoded) {
+    return null;
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) {
+    throw new Error(
+      "OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET must contain valid base64",
+    );
+  }
+  const decoded = Buffer.from(encoded, "base64");
+  const canonical = decoded.toString("base64").replace(/=+$/, "");
+  if (decoded.length !== 32 || canonical !== encoded.replace(/=+$/, "")) {
+    throw new Error(
+      "OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET must be base64 for exactly 32 bytes (generate with: openssl rand -base64 32)",
     );
   }
   return new Uint8Array(decoded);
@@ -2372,6 +2408,7 @@ function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
 
 function validateSettings(settings: Settings): void {
   temporalConnectionOptions(settings);
+  const receiptIdentitySecret = organizationRecoveryReceiptIdentitySecretBytes(settings);
   if (settings.toolspaceEnabled && !settings.delegationSecret) {
     throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   }
@@ -2397,6 +2434,11 @@ function validateSettings(settings: Settings): void {
     if (!["local", "test"].includes(settings.environment) && !settings.environmentsEncryptionKey) {
       throw new Error(
         "OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY is required for managed mode outside local/test",
+      );
+    }
+    if (!["local", "test"].includes(settings.environment) && !receiptIdentitySecret) {
+      throw new Error(
+        "OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET is required for managed mode outside local/test",
       );
     }
   }
