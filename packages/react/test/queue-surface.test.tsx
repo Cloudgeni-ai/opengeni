@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { act, type ReactNode } from "react";
+import { act, type ReactNode, useState } from "react";
 
 import { createQueueSurfaceForTest, QueueSurface } from "../src/components/queue-surface";
+import { queueComposerCheckoutEnabled } from "../src/components/queue-surface-implementation";
 import type { ComposerState } from "../src/hooks/use-composer";
 import type { UseTurnQueueResult } from "../src/hooks/use-turn-queue";
 import { fakeTurn } from "./fake-client";
@@ -359,6 +360,105 @@ describe("QueueSurface", () => {
     );
     expect(mounted.container.textContent).toContain("first queued prompt");
     expect(mounted.container.textContent).toContain("second queued prompt");
+  });
+
+  test("withholds durable queue checkout from a local-only composer", () => {
+    expect(queueComposerCheckoutEnabled(composer({ draftPersistence: "disabled" }), false)).toBe(
+      false,
+    );
+    expect(queueComposerCheckoutEnabled(composer(), false)).toBe(true);
+    expect(queueComposerCheckoutEnabled(undefined, true)).toBe(false);
+  });
+
+  test("returns focus to the composer owned by this queue after removing its final row", async () => {
+    const calls: string[] = [];
+    function Harness() {
+      const [items, setItems] = useState([
+        fakeTurn({
+          id: "11111111-1111-4111-8111-111111111111",
+          prompt: "first queued prompt",
+        }),
+      ]);
+      const state = queue({
+        queue: items,
+        removeTurn: async (turnId) => {
+          calls.push(`delete:${turnId}`);
+          setItems([]);
+          return true;
+        },
+      });
+      return (
+        <QueueSurface
+          queue={state}
+          composer={composer()}
+          onRequestComposerFocus={() => calls.push("focus")}
+        />
+      );
+    }
+    mounted = await renderLoadedQueueSurface(<Harness />);
+
+    await click(mounted.container.querySelector('button[aria-expanded="false"]'));
+    await click(mounted.container.querySelector('button[aria-label="Delete queued prompt 1"]'));
+    await flush();
+
+    expect(calls).toEqual(["delete:11111111-1111-4111-8111-111111111111", "focus"]);
+  });
+
+  test("never moves focus into a different embedded queue after removing its final row", async () => {
+    const calls: string[] = [];
+    function Harness() {
+      const [firstItems, setFirstItems] = useState([
+        fakeTurn({
+          id: "11111111-1111-4111-8111-111111111111",
+          prompt: "first embedded queue",
+        }),
+      ]);
+      return (
+        <>
+          <QueueSurface
+            queue={queue({
+              queue: firstItems,
+              removeTurn: async () => {
+                setFirstItems([]);
+                return true;
+              },
+            })}
+            composer={composer()}
+            onRequestComposerFocus={() => calls.push("first-composer")}
+          />
+          <QueueSurface
+            queue={queue({
+              queue: [
+                fakeTurn({
+                  id: "22222222-2222-4222-8222-222222222222",
+                  prompt: "second embedded queue",
+                }),
+              ],
+            })}
+            composer={composer()}
+            onRequestComposerFocus={() => calls.push("second-composer")}
+          />
+        </>
+      );
+    }
+    mounted = await renderLoadedQueueSurface(<Harness />);
+
+    const toggles = mounted.container.querySelectorAll('button[aria-expanded="false"]');
+    await click(toggles[0] ?? null);
+    await click(toggles[1] ?? null);
+    await click(
+      mounted.container
+        .querySelectorAll('[data-testid="queue-surface"]')[0]
+        ?.querySelector('button[aria-label="Delete queued prompt 1"]') ?? null,
+    );
+    await flush();
+
+    expect(calls).toEqual(["first-composer"]);
+    expect(
+      mounted.container
+        .querySelector('[data-testid="queue-surface"] [data-queue-handle]')
+        ?.contains(document.activeElement),
+    ).toBe(false);
   });
 
   test("bounds hostile prompt previews and discloses the exact source only on demand", async () => {
@@ -836,7 +936,12 @@ describe("QueueSurface", () => {
             blockers: [blocker],
             resumeOptions: [],
             override: null,
-            settlement: { state: "stopping", attemptCount: 1 },
+            settlement: {
+              state: "stopping",
+              attemptCount: 1,
+              interruptionPendingCount: 1,
+              quiescencePendingCount: 0,
+            },
           },
           stoppingPreviousAttempt: true,
         })}

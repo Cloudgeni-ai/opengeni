@@ -6,6 +6,7 @@ import type {
   ResourceRef,
   ToolRef,
 } from "@/types";
+import { defaultRepositoryMountPath, resourceMountPathCollisionKey } from "@opengeni/contracts";
 
 export type RepoDraft = { id: number; url: string; ref: string };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
@@ -102,14 +103,16 @@ export function buildResources(
       throw new Error("Repository ref is required.");
     }
     const parsed = normalizeRepositoryUrl(repo.url);
-    const mountPath = `repos/${parsed.repo}`;
-    if (mountPaths.has(mountPath)) {
+    const uri = `https://${parsed.host}/${parsed.repo}.git`;
+    const mountPath = defaultRepositoryMountPath(uri);
+    const mountKey = resourceMountPathCollisionKey(mountPath);
+    if (mountPaths.has(mountKey)) {
       throw new Error(`Duplicate repository mount path: ${mountPath}`);
     }
-    mountPaths.add(mountPath);
+    mountPaths.add(mountKey);
     return {
       kind: "repository",
-      uri: `https://${parsed.host}/${parsed.repo}.git`,
+      uri,
       ref: repo.ref,
       mountPath,
       ...(repo.private && repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
@@ -123,11 +126,12 @@ export function gitHubRepositoryResource(
   ref: string,
 ): Extract<ResourceRef, { kind: "repository" }> {
   const parsed = normalizeRepositoryUrl(repo.cloneUrl);
+  const uri = `https://${parsed.host}/${parsed.repo}.git`;
   return {
     kind: "repository",
-    uri: `https://${parsed.host}/${parsed.repo}.git`,
+    uri,
     ref: ref.trim() || repo.defaultBranch,
-    mountPath: `repos/${parsed.repo}`,
+    mountPath: defaultRepositoryMountPath(uri),
     ...(repo.private
       ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId }
       : {}),
@@ -171,7 +175,7 @@ export function normalizeRepositoryUrl(value: string): { host: string; repo: str
   if (parts.length < 2) {
     throw new Error("Repository URL must include owner and repo.");
   }
-  return { host: url.hostname.toLowerCase(), repo: parts.join("/") };
+  return { host: url.host.toLowerCase(), repo: parts.join("/") };
 }
 
 export type RepositoryGroup = {

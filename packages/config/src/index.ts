@@ -6,6 +6,7 @@ import {
   ProductAccessMode,
   ReasoningEffort,
   SandboxBackend,
+  SessionMcpApprovalPolicy,
   StaticUsageLimits,
   UsageLimitsMode,
 } from "@opengeni/contracts";
@@ -90,7 +91,7 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
   "You are an OpenGeni workspace agent.",
   "Follow the user's task and any enabled pack or skill instructions for the current role.",
   "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-  "Repository resources are mounted under repos/<owner>/<repo>.",
+  "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
   "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
   "Attached files are mounted read-only; copy them before modifying.",
   "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
@@ -103,14 +104,59 @@ export const DEFAULT_AGENT_INSTRUCTIONS = [
 
 export const McpServerConnectionRefSchema = z
   .object({
-    connectionId: z.string().uuid().optional(),
+    // Standalone ids are UUIDs; embedded hosts may use any stable opaque id.
+    connectionId: z.string().min(1).optional(),
+    provider: z.string().min(1).max(128).optional(),
     providerDomain: z.string().min(1),
     kind: z.enum(["oauth2", "api_key", "app_install", "delegated"]).optional(),
     scopes: z.array(z.string().min(1)).optional(),
     resource: z.string().min(1).optional(),
+    selectedResources: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(512),
+            kind: z.literal("repository"),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(256)
+      .superRefine((resources, context) => {
+        const seen = new Set<string>();
+        for (const [index, resource] of resources.entries()) {
+          const key = `${resource.kind}\0${resource.id}`;
+          if (seen.has(key)) {
+            context.addIssue({
+              code: "custom",
+              message: "selectedResources must not contain duplicates",
+              path: [index],
+            });
+          }
+          seen.add(key);
+        }
+      })
+      .optional(),
     subjectScope: z.enum(["workspace", "subject"]).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((reference, context) => {
+    if (!reference.selectedResources) return;
+    if (!reference.connectionId) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires connectionId",
+        path: ["connectionId"],
+      });
+    }
+    if (!reference.provider) {
+      context.addIssue({
+        code: "custom",
+        message: "selectedResources requires provider",
+        path: ["provider"],
+      });
+    }
+  });
 export type McpServerConnectionRef = z.infer<typeof McpServerConnectionRefSchema>;
 
 const SettingsSchema = z.object({
@@ -135,6 +181,12 @@ const SettingsSchema = z.object({
   temporalHost: z.string().default("127.0.0.1:7233"),
   temporalNamespace: z.string().default("default"),
   temporalTaskQueue: z.string().default("opengeni-runs-ts"),
+  temporalTlsEnabled: EnvBoolean.default(false),
+  temporalApiKey: z.string().optional(),
+  temporalTlsServerName: z.string().optional(),
+  temporalTlsRootCaCertificateBase64: z.string().optional(),
+  temporalTlsClientCertificateBase64: z.string().optional(),
+  temporalTlsClientPrivateKeyBase64: z.string().optional(),
   startupDependencyRetryAttempts: z.coerce.number().int().positive().default(30),
   startupDependencyRetryInitialDelayMs: z.coerce.number().int().positive().default(1000),
   startupDependencyRetryMaxDelayMs: z.coerce.number().int().positive().default(5000),
@@ -169,6 +221,13 @@ const SettingsSchema = z.object({
   streamControlEnabled: EnvBoolean.default(false),
   toolspaceEnabled: EnvBoolean.default(false),
   toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
+  // Optional release-coherent bootstrap hint for custom rigs/connected machines
+  // that do not carry the stock-image ogtool binary. Exact stable versions only:
+  // the agent must never guess a tag or silently install `latest`.
+  ogtoolPackageSpec: z
+    .string()
+    .regex(/^@opengeni\/ogtool@(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .optional(),
   environmentsEncryptionKey: z.string().optional(),
   integrationsEnabled: EnvBoolean.default(false),
   integrationsStateSecret: z.string().optional(),
@@ -258,10 +317,6 @@ const SettingsSchema = z.object({
   // enable. Turning it off restores the legacy sticky selector without a schema
   // rollback; the additive lease table/cursor columns become inert.
   codexCredentialLeasingEnabled: EnvBoolean.default(false),
-  // Multi-account P3 (auto-rotation): an account is "near exhaustion" — ineligible to be
-  // rotated TO — when EITHER usage window (5h/weekly) is at/over this percent. Default 90 to
-  // match the UI danger flip (UsageBar danger at pct >= 90). OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT.
-  codexRotationNearExhaustionPct: z.coerce.number().int().min(1).max(100).default(90),
   openaiReasoningEffort: ReasoningEffort.default("low"),
   openaiAllowedReasoningEfforts: z.string().default("low,medium,high,xhigh"),
   openaiResponsesTransport: z.enum(["http", "websocket"]).default("http"),
@@ -682,14 +737,8 @@ const SettingsSchema = z.object({
         allowedTools: z.array(z.string().min(1)).optional(),
         timeoutMs: z.number().int().positive().optional(),
         cacheToolsList: z.boolean().default(false),
-        /**
-         * Human-approval policy for this server's tools, overlaid per-run from a
-         * session MCP server row (never from OPENGENI_MCP_SERVERS). `true` = all
-         * tools require approval; a string[] = only the listed UNPREFIXED tool
-         * names do; absent = auto-run (the historical default). Enforced in the
-         * runtime by attaching `needsApproval` to the matching MCP tools.
-         */
-        requireApproval: z.union([z.boolean(), z.array(z.string().min(1))]).optional(),
+        /** Runtime approval policy, overlaid from an attempt-frozen session snapshot. */
+        requireApproval: SessionMcpApprovalPolicy.optional(),
         /**
          * Extra request headers sent to this MCP server (credential injection
          * for workspace-enabled capability MCPs). Populated at runtime from
@@ -705,6 +754,19 @@ const SettingsSchema = z.object({
 
 export type Settings = z.infer<typeof SettingsSchema>;
 export type McpServerConfig = Settings["mcpServers"][number];
+export type TemporalTlsConnectionConfig = {
+  serverNameOverride?: string;
+  serverRootCACertificate?: Uint8Array;
+  clientCertPair?: {
+    crt: Uint8Array;
+    key: Uint8Array;
+  };
+};
+export type TemporalConnectionOptions = {
+  address: string;
+  tls?: true | TemporalTlsConnectionConfig;
+  apiKey?: string;
+};
 export type ModelPricing = {
   inputMicrosPerMillionTokens: number;
   cachedInputMicrosPerMillionTokens?: number | undefined;
@@ -979,6 +1041,14 @@ export function getSettings(): Settings {
     temporalHost: optional("OPENGENI_TEMPORAL_HOST"),
     temporalNamespace: optional("OPENGENI_TEMPORAL_NAMESPACE"),
     temporalTaskQueue: optional("OPENGENI_TEMPORAL_TASK_QUEUE"),
+    temporalTlsEnabled: optional("OPENGENI_TEMPORAL_TLS_ENABLED"),
+    temporalApiKey: optional("OPENGENI_TEMPORAL_API_KEY"),
+    temporalTlsServerName: optional("OPENGENI_TEMPORAL_TLS_SERVER_NAME"),
+    temporalTlsRootCaCertificateBase64: optional(
+      "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
+    ),
+    temporalTlsClientCertificateBase64: optional("OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64"),
+    temporalTlsClientPrivateKeyBase64: optional("OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64"),
     startupDependencyRetryAttempts: optional("OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS"),
     startupDependencyRetryInitialDelayMs: optional(
       "OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS",
@@ -1003,6 +1073,7 @@ export function getSettings(): Settings {
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
     toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
     toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
+    ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),
     environmentsEncryptionKey: optional("OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY"),
     integrationsEnabled: optional("OPENGENI_INTEGRATIONS_ENABLED"),
     integrationsStateSecret: optional("OPENGENI_INTEGRATIONS_STATE_SECRET"),
@@ -1039,7 +1110,6 @@ export function getSettings(): Settings {
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
     codexProductSku: optional("OPENGENI_CODEX_PRODUCT_SKU"),
-    codexRotationNearExhaustionPct: optional("OPENGENI_CODEX_ROTATION_NEAR_EXHAUSTION_PCT"),
     openaiReasoningEffort: optional("OPENGENI_OPENAI_REASONING_EFFORT"),
     openaiAllowedReasoningEfforts: optional("OPENGENI_OPENAI_ALLOWED_REASONING_EFFORTS"),
     openaiResponsesTransport: optional("OPENGENI_OPENAI_RESPONSES_TRANSPORT"),
@@ -1593,6 +1663,77 @@ export function environmentsEncryptionKeyBytes(settings: Settings): Uint8Array |
 }
 
 /**
+ * Build one structurally compatible connection policy for both
+ * `@temporalio/client` and `@temporalio/worker`. An API key or any custom TLS
+ * material enables TLS automatically; the explicit flag covers server-auth TLS
+ * without credentials. Secret values are never included in validation errors.
+ */
+export function temporalConnectionOptions(settings: Settings): TemporalConnectionOptions {
+  const apiKey = settings.temporalApiKey?.trim() || undefined;
+  const serverNameOverride = settings.temporalTlsServerName?.trim() || undefined;
+  const rootCa = decodeTemporalTlsMaterial(
+    settings.temporalTlsRootCaCertificateBase64,
+    "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64",
+  );
+  const clientCertificate = decodeTemporalTlsMaterial(
+    settings.temporalTlsClientCertificateBase64,
+    "OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64",
+  );
+  const clientPrivateKey = decodeTemporalTlsMaterial(
+    settings.temporalTlsClientPrivateKeyBase64,
+    "OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64",
+  );
+
+  if (Boolean(clientCertificate) !== Boolean(clientPrivateKey)) {
+    throw new Error(
+      "OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64 and " +
+        "OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64 must both be set or both omitted",
+    );
+  }
+
+  const tls: TemporalTlsConnectionConfig = {};
+  if (serverNameOverride) {
+    tls.serverNameOverride = serverNameOverride;
+  }
+  if (rootCa) {
+    tls.serverRootCACertificate = rootCa;
+  }
+  if (clientCertificate && clientPrivateKey) {
+    tls.clientCertPair = { crt: clientCertificate, key: clientPrivateKey };
+  }
+  const hasCustomTls = Object.keys(tls).length > 0;
+  const tlsEnabled = settings.temporalTlsEnabled || Boolean(apiKey) || hasCustomTls;
+
+  return {
+    address: settings.temporalHost,
+    ...(tlsEnabled ? { tls: hasCustomTls ? tls : true } : {}),
+    ...(apiKey ? { apiKey } : {}),
+  };
+}
+
+function decodeTemporalTlsMaterial(
+  value: string | undefined,
+  settingName: string,
+): Uint8Array | undefined {
+  // RFC 2045 base64 commonly arrives wrapped at 76 columns. Kubernetes
+  // stringData and external secret stores preserve those line breaks, so
+  // normalize whitespace before applying the strict alphabet/canonical check.
+  const encoded = value?.replace(/\s/g, "");
+  if (!encoded) {
+    return undefined;
+  }
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 === 1) {
+    throw new Error(`${settingName} must contain valid base64`);
+  }
+  const decoded = Buffer.from(encoded, "base64");
+  const canonical = decoded.toString("base64").replace(/=+$/, "");
+  if (decoded.length === 0 || canonical !== encoded.replace(/=+$/, "")) {
+    throw new Error(`${settingName} must contain valid base64`);
+  }
+  return new Uint8Array(decoded);
+}
+
+/**
  * The connection `search_path` for OpenGeni's db handles + the managed-auth pool
  * (Step I, §7.8 runtime half). Returns `undefined` when `dbSchema` is unset
  * (standalone) so no `search_path` startup parameter is sent and the server
@@ -1702,6 +1843,9 @@ export function stableSandboxEnvironmentForRun(
   }
   if (settings.toolspaceEnabled) {
     environment.OPENGENI_TOOLSPACE_TOKEN_FILE ??= `${environment.HOME ?? descriptor.workspaceRoot}/.opengeni/toolspace-token`;
+    if (settings.ogtoolPackageSpec) {
+      environment.OPENGENI_OGTOOL_PACKAGE_SPEC ??= settings.ogtoolPackageSpec;
+    }
     if (options.workspaceId) {
       environment.OPENGENI_TOOLSPACE_URL ??= firstPartyMcpWorkspaceUrl(
         settings,
@@ -2215,6 +2359,7 @@ function firstPartyDocumentsMcpServerUrl(mcpUrl: string): string {
 }
 
 function validateSettings(settings: Settings): void {
+  temporalConnectionOptions(settings);
   if (settings.toolspaceEnabled && !settings.delegationSecret) {
     throw new Error("OPENGENI_DELEGATION_SECRET is required when OPENGENI_TOOLSPACE_ENABLED=true");
   }

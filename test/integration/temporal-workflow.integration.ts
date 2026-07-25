@@ -43,7 +43,19 @@ async function hangWithoutHeartbeating(): Promise<{ status: string }> {
 // This finite test ceiling does not change either runtime timeout.
 const workerDeathTestTimeoutMs = 360_000;
 
-const temporalWorkflowTestTimeoutMs = 30_000;
+// The full real-service integration command runs API, upload, and database
+// suites before Temporal. On a saturated shared host, an ordinary workflow can
+// spend more than 30s waiting for its first tasks even though the same recovery
+// case completes in ~6s in the Temporal-only suite. Keep a finite suite-local
+// ceiling that covers that scheduling variance without changing any runtime
+// timeout, retry contract, or behavioral assertion.
+const temporalWorkflowTestTimeoutMs = 60_000;
+
+// This case follows two real 125-second heartbeat-timeout proofs. Temporal can
+// take more than the general 30-second budget to poll and drain its next worker
+// after that accumulated load, even though the same workflow finishes in ~12s
+// in isolation. Keep the bound finite and scoped to this one idle-Pause proof.
+const postHeartbeatIdlePauseTestTimeoutMs = 60_000;
 
 // Goal-continuation cases run real workflow timers and activities after the two
 // long heartbeat-recovery proofs. On a loaded shared runner, task polling and
@@ -56,11 +68,12 @@ const goalContinuationTestTimeoutMs = 60_000;
 // continueAsNew tests legitimately span a continueAsNew chain (the handle only
 // resolves on the FINAL run) plus a possible 5s idle-wait window before the
 // continued run re-claims the durable-queue turn that arrived after the
-// boundary. Run last in the suite, on a server already warmed by 18 prior
-// tests, the 30s default is too tight under CI load — a slow worker poll or
-// bundle reload can blow it even though the workflow logic is correct. The
-// generous bound removes that flakiness without weakening what the test proves.
-const continueAsNewTestTimeoutMs = 120_000;
+// boundary. Run last after two real heartbeat-timeout proofs, a loaded host can
+// spend more than 120s polling and draining the three-run chain even though the
+// same case completes in ~38s in isolation. Keep a finite, suite-local ceiling
+// so a timed-out worker cannot cascade into the following boundary proofs; this
+// does not change any runtime timeout or workflow assertion.
+const continueAsNewTestTimeoutMs = 240_000;
 
 describe("Temporal workflow integration", () => {
   let services: TestServices;
@@ -457,7 +470,7 @@ describe("Temporal workflow integration", () => {
         await run;
       }
     },
-    temporalWorkflowTestTimeoutMs,
+    postHeartbeatIdlePauseTestTimeoutMs,
   );
 
   test(
@@ -736,7 +749,7 @@ describe("Temporal workflow integration", () => {
   );
 
   test(
-    "an exact quiescence proof survives signalWithStart and DB activity retry exhaustion",
+    "an exact quiescence proof survives signalWithStart, control-worker restart, and DB retries",
     async () => {
       const taskQueue = `workflow-test-${crypto.randomUUID()}`;
       const scope = workflowScope();
@@ -755,7 +768,11 @@ describe("Temporal workflow integration", () => {
       let receiptAttempts = 0;
       let replacementRuns = 0;
       const persistedProofs: Array<typeof proof> = [];
-      const worker = await testWorker(nativeConnection, taskQueue, {
+      let firstReceiptAttempted!: () => void;
+      const firstReceiptAttempt = new Promise<void>((resolve) => {
+        firstReceiptAttempted = resolve;
+      });
+      const activities = {
         peekSessionWork: async () => {
           if (waitingForReceipt) {
             return { kind: "cancellation-wait", attemptId: proof.attemptId } as const;
@@ -767,6 +784,7 @@ describe("Temporal workflow integration", () => {
         persistSessionAttemptQuiescence: async (input: typeof proof) => {
           persistedProofs.push(input);
           receiptAttempts += 1;
+          if (receiptAttempts === 1) firstReceiptAttempted();
           // Fail multiple real Temporal activity attempts. The workflow's
           // unbounded control-activity retry must retain the signal-owned proof
           // and may not peek/admit replacement work until this succeeds.
@@ -784,8 +802,12 @@ describe("Temporal workflow integration", () => {
         markSessionIdle: async () => undefined,
         failSessionAttempt: async () => undefined,
         settleSessionInterruptions: async () => ({ action: "continue" as const }),
-      });
-      const run = worker.run();
+      };
+      const firstWorker = await testWorker(nativeConnection, taskQueue, activities);
+      const firstRun = firstWorker.run();
+      let restartedWorker: Awaited<ReturnType<typeof testWorker>> | undefined;
+      let restartedRun: Promise<void> | undefined;
+      let firstWorkerStopped = false;
       try {
         const client = new Client({ connection });
         const handle = await client.workflow.signalWithStart("sessionWorkflow", {
@@ -796,6 +818,16 @@ describe("Temporal workflow integration", () => {
           signal: "sessionAttemptQuiesced",
           signalArgs: [proof],
         });
+        // The proof is already accepted into durable workflow history. Stop the
+        // worker after its first DB activity attempt fails, leave the workflow
+        // briefly without a poller, then let a fresh worker execute the exact
+        // retained proof's remaining retries.
+        await firstReceiptAttempt;
+        firstWorker.shutdown();
+        await firstRun;
+        firstWorkerStopped = true;
+        restartedWorker = await testWorker(nativeConnection, taskQueue, activities);
+        restartedRun = restartedWorker.run();
         // A duplicate transport signal in the same run is coalesced; the
         // control activity's own retries still execute until the DB succeeds.
         await handle.signal("sessionAttemptQuiesced", proof);
@@ -805,8 +837,9 @@ describe("Temporal workflow integration", () => {
         expect(persistedProofs).toEqual([proof, proof, proof]);
         expect(replacementRuns).toBe(1);
       } finally {
-        worker.shutdown();
-        await run;
+        if (!firstWorkerStopped) firstWorker.shutdown();
+        restartedWorker?.shutdown();
+        await Promise.all([firstWorkerStopped ? undefined : firstRun, restartedRun]);
       }
     },
     temporalWorkflowTestTimeoutMs,

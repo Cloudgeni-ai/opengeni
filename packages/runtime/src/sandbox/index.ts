@@ -106,6 +106,11 @@ export {
   ensureDisplayStack,
   tearDownDisplayStack,
   type DesktopGeometry,
+  type DisplayStackCallerKind,
+  type DisplayStackClassification,
+  type DisplayStackTelemetryContext,
+  type DisplayStackTelemetryEvent,
+  type DisplayStackTelemetryStatus,
   type EnsureDisplayStackOptions,
   type EnsureDisplayStackResult,
 } from "./display-stack";
@@ -124,6 +129,39 @@ export {
   type EnsureTerminalServerOptions,
   type EnsureTerminalServerResult,
 } from "./terminal-server";
+
+// Host-owned rotating run credentials. Material lives outside the persisted
+// workspace/manifest and is activated atomically per session generation.
+export {
+  RunCredentialValidationError,
+  normalizeRunCredentialsResolution,
+  runCredentialRoot,
+  runCredentialPointerFile,
+  materializeRunCredentials,
+  clearRunCredentials,
+  clearRunCredentialsForAttempt,
+  withRunCredentialEnvironment,
+  withRunCredentialsSession,
+  withRunCredentialsClient,
+  type RunCredentialExpectedScope,
+  type NormalizedRunCredentialMaterial,
+  type RunCredentialCommandSession,
+  type RunCredentialCommandRunner,
+  type RunCredentialSessionReady,
+  type MaterializeRunCredentialsOptions,
+} from "./run-credentials";
+
+// Session-specific Toolspace token routing. The manifest retains one stable
+// legacy pointer for warm-box env parity; every session command selects its own
+// hashed token file off-manifest.
+export {
+  ToolspaceTokenPathError,
+  toolspaceTokenFileForSession,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenEnvironment,
+  withToolspaceTokenSession,
+  withToolspaceTokenClient,
+} from "./toolspace-token";
 
 // The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
 // for port 6080 (client → provider-tunnel direct), assembles the WS URL, and

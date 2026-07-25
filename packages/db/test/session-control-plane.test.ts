@@ -54,6 +54,7 @@ import {
   recordPendingSessionToolCallResult,
   recordUsageEvent,
   recordSkippedContextCompaction,
+  saveRunState,
   setSessionLastInputTokensForTurnAttempt,
   settleSessionIdleWithParentOutbox,
   settleSessionAttemptInterruptions,
@@ -296,6 +297,7 @@ describe("clean session control plane", () => {
     });
     expect(pageOne).toMatchObject({ total: 3, hasMore: true });
     expect(pageOne.sessions).toHaveLength(2);
+    expect(pageOne.sessions.every((entry) => entry.latestMessage === null)).toBeTrue();
     expect(pageOne.nextCursor).toBeTruthy();
 
     const pageTwo = await listSessionDiscoverySummaries(client.db, grant.workspaceId!, {
@@ -303,6 +305,7 @@ describe("clean session control plane", () => {
       cursor: pageOne.nextCursor!,
     });
     expect(pageTwo.sessions).toHaveLength(1);
+    expect(pageTwo.sessions[0]!.latestMessage).toBeNull();
     expect(pageTwo.hasMore).toBe(false);
     expect(new Set([...pageOne.sessions, ...pageTwo.sessions].map((entry) => entry.id))).toEqual(
       new Set([first.id, second.id, third.id]),
@@ -3178,7 +3181,12 @@ describe("clean session control plane", () => {
       ),
     ).toMatchObject({
       state: "active",
-      settlement: { state: "stopping", attemptCount: 1 },
+      settlement: {
+        state: "stopping",
+        attemptCount: 1,
+        interruptionPendingCount: 1,
+        quiescencePendingCount: 0,
+      },
     });
   });
 
@@ -3770,6 +3778,18 @@ describe("clean session control plane", () => {
       { attemptId: firstAttemptId },
     );
     if (!turn) throw new Error("approval test turn was not claimed");
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: firstAttemptId,
+        serializedRunState: "approval-race-state",
+        pendingApprovals: [{ id: "approval-race" }],
+      }),
+    ).toBe(true);
     await applySessionTurnSettlement(client.db, grant.workspaceId!, {
       sessionId: session.id,
       turnId: turn.id,
@@ -3831,6 +3851,66 @@ describe("clean session control plane", () => {
       triggerEventId: accepted.event.id,
       executionGeneration: turn.executionGeneration + 1,
     });
+  });
+
+  test("approval admission rejects an id outside the current saved run boundary", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "wait for the exact approval");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    if (!turn) throw new Error("approval identity test turn was not claimed");
+    expect(
+      await saveRunState(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn.id,
+        expectedExecutionGeneration: turn.executionGeneration,
+        expectedAttemptId: attemptId,
+        serializedRunState: "approval-identity-state",
+        pendingApprovals: [{ id: "approval-current" }, { rawItem: { callId: "approval-second" } }],
+      }),
+    ).toBe(true);
+    await applySessionTurnSettlement(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn.id,
+      triggerEventId: turn.triggerEventId,
+      attemptId,
+      turnStatus: "requires_action",
+      sessionStatus: "requires_action",
+      activeTurnId: turn.id,
+      events: [
+        {
+          type: "session.requiresAction",
+          payload: { approvals: [{ id: "approval-current" }] },
+        },
+      ],
+    });
+
+    expect(
+      await acceptSessionApprovalDecision(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        payload: { approvalId: "approval-stale", decision: "approve" },
+        clientEventId: crypto.randomUUID(),
+      }),
+    ).toEqual({ action: "conflict", sessionStatus: "requires_action" });
+
+    const accepted = await acceptSessionApprovalDecision(client.db, {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      payload: { approvalId: "approval-current", decision: "approve" },
+      clientEventId: crypto.randomUUID(),
+    });
+    expect(accepted.action).toBe("accepted");
   });
 
   test("a committed session control command replays before its stale control fence is checked", async () => {

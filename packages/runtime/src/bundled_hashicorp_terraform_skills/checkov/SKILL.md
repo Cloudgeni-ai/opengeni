@@ -9,7 +9,7 @@ Use this skill when the user asks to scan Terraform or infrastructure-as-code fo
 
 ## Workflow
 
-1. Confirm the repository path before scanning. Repository resources are usually mounted under `/workspace/repos/<owner>/<repo>`.
+1. Confirm the repository path before scanning. Repository resources are usually mounted under `/workspace/repos/<host>/<owner>/<repo>`; use the session's resolved resource path instead of guessing.
 2. Run Checkov from the repository root or the relevant Terraform subdirectory:
 
 ```bash

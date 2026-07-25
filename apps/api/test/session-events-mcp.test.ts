@@ -176,6 +176,49 @@ describe("session_events MCP model boundary (real PostgreSQL)", () => {
     ]);
   });
 
+  test("supports the bounded exact-type recovery input advertised by sessions_list", async () => {
+    const oversized = "界🙂".repeat(8_000);
+    await appendSessionEvents(client.db, workspaceId, sessionId, [
+      { type: "user.message", payload: { text: "older message" } },
+      { type: "agent.message.completed", payload: { text: oversized } },
+    ]);
+
+    const recovered = await callMcpTool<{
+      events: Array<{ type: string; payload: unknown }>;
+      bytes: number;
+      maxBytes: number;
+    }>("session_events", {
+      sessionId,
+      includeTypes: ["agent.message.completed"],
+      direction: "before",
+      limit: 1,
+      mode: "monitoring",
+      payloadMode: "summary",
+    });
+    expect(recovered.events).toHaveLength(1);
+    expect(recovered.events[0]).toMatchObject({ type: "agent.message.completed" });
+    expect(recovered.events[0]!.payload).toMatchObject({
+      _monitoring: {
+        payloadMode: "summary",
+        payloadTruncated: true,
+      },
+    });
+    expect(JSON.stringify(recovered)).not.toContain(oversized);
+    expect(recovered.bytes).toBe(Buffer.byteLength(JSON.stringify(recovered, null, 2), "utf8"));
+    expect(recovered.bytes).toBeLessThanOrEqual(recovered.maxBytes);
+
+    await expect(
+      callMcpTool("session_events", {
+        sessionId: crypto.randomUUID(),
+        includeTypes: ["agent.message.completed"],
+        direction: "before",
+        limit: 1,
+        mode: "monitoring",
+        payloadMode: "summary",
+      }),
+    ).rejects.toThrow("Session not found");
+  });
+
   test("rejects filters that could displace or exclude an exclusive latest lookup", async () => {
     for (const filters of [
       { includeTypes: ["machine.op.failed"] },

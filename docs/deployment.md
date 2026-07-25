@@ -166,32 +166,142 @@ For production Helm releases, pin API, worker, web, and migration images by dige
 ## Verified public release
 
 Merging a changesets Version PR only commits package versions and changelogs; it
-does not publish packages or release images. Public release is an explicit
-dispatch of `.github/workflows/release.yml` from a ref pinned to the exact
-accepted source SHA. The dispatch fails closed unless it receives retained
-staging, production, and 72-hour production-canary evidence URLs, the sanitized
-acceptance bundle's direct HTTPS URL and SHA-256, and an explicit confirmation
-that there are zero known defects, skipped/late cycles, or unverified acceptance
-rows. It also
-requires the exact expected package set (for example,
-`@opengeni/react@0.15.0`). The selected
-dispatch ref, `source_sha`, checked-out commit, and a commit reachable from
-`main` must all identify the same revision.
+does not publish packages or release images. It produces the versioned source
+required by the manually dispatched `.github/workflows/release-candidate.yml`.
+Release approval is bound to GitHub's native PR author, reviewer, merge actor,
+review state, reviewed head, and submission time:
 
-The dispatch downloads the exact acceptance JSON, verifies its digest, and
-validates every machine-readable contract row before re-running the package
-typecheck, builds, SDK parity test, and publish closure guard. Before touching
-npm it rejects any unlisted unpublished package,
+- a `github-actions[bot]`-authored Version PR requires a native pre-merge
+  `APPROVED` review from the configured human maintainer;
+- the structured `COMMENTED` admin-PASS form is valid only for a
+  single-maintainer PR whose author, exact-head reviewer, and merge actor are
+  that same human; it is never a substitute for approving a bot-authored
+  Version PR;
+- any base/head update invalidates the prior verdict, and a review submitted
+  after merge is not release evidence.
+
+Candidate or operator admission must fail closed when those provider identities
+do not match; do not weaken the provenance check or recreate approval from a
+comment, commit message, or local record.
+
+That workflow requires the exact current `main` SHA, no pending changesets, and
+the exact expected package set (for example, `@opengeni/react@0.15.0`). It
+builds API, worker, web, relay, and stock headless-sandbox images under
+full-source-SHA candidate tags. Migrations explicitly reuse the API manifest.
+Each manifest is built at most once; retries reuse existing partial results.
+Before acceptance, the same workflow packages the Helm chart twice through the
+deterministic release packager, requires byte-for-byte equality, and freezes the
+resulting `.tgz` and SHA-256 in the candidate Actions artifact. It does **not**
+occupy the official OCI version yet. The immutable GitHub release tag
+`opengeni-candidate-<full-source-sha>` retains `release-candidate.json`, its
+SHA-256 sidecar, and the chart assets. Retries that fail before this immutable
+boundary reconcile existing image state and regenerate the same deterministic
+chart bytes; once the candidate release exists, the workflow refuses to rerun
+because its producer run-attempt binding is itself immutable. Release admission
+must use the original successful candidate run ID instead of trying to rewrite
+that release.
+
+The public OCI location is a release authority, not a hard-coded provider.
+`OPENGENI_RELEASE_OCI_PREFIX` is a registry host plus an optional repository
+namespace (default `ghcr.io/cloudgeni-ai`). `OPENGENI_RELEASE_REGISTRY_AUTH`
+selects either built-in `github` auth for that default host or `azure-oidc` for
+an Azure Container Registry. The Azure mode accepts only an `*.azurecr.io`
+host, uses the environment-scoped `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, and
+`AZURE_SUBSCRIPTION_ID` variables, pins the Azure actions and CLI version, and
+mints a short-lived data-plane token; no registry password is stored.
+Federated credentials must bind the exact `public-release`,
+`embedded-release`, and `production-release` GitHub environments, and the
+workload identity must have the narrow push role on the selected registry.
+
+Whichever registry is selected must permit anonymous pulls. Candidate creation
+logs out before it writes a receipt and proves all five image digests through
+the unauthenticated path. Embedded and final promotion repeat that proof for
+the published image aliases and chart bytes. A private or inconsistently
+configured registry therefore fails closed before becoming distribution
+authority. The candidate receipt records the full image repository names, and
+every later workflow verifies them against the same source-controlled prefix.
+
+Self-hosted embedding consumers have a narrower distribution boundary:
+`.github/workflows/release-embedded.yml` publishes only an exact versioned
+source that already has an immutable candidate receipt from the canonical
+candidate workflow. Its dispatcher supplies the trusted candidate run ID, not a
+caller-selected receipt URL or digest. The workflow re-runs the public package
+gates, verifies npm `gitHead` and integrity, publishes or reconciles the exact
+candidate chart, promotes the receipt's unchanged manifests to version and
+full-source-SHA tags, and writes one source-bound package/image/chart BOM. It
+deliberately does not create or update `latest`, and its immutable distribution
+receipt makes no hosted Workbench, staging, production, or canary claim.
+
+After staging, production, and the 72-hour canary have consumed those exact
+digests and chart bytes, the protected operator-controlled
+`.github/workflows/release-acceptance.yml` workflow produces the sanitized
+schema-v2 acceptance bundle. Its `production-acceptance` environment is the
+canonical acceptance boundary. That environment pins the operator repository
+and canonical workflow path and holds a narrow artifact-read credential. A
+dispatcher supplies only the operator run ID: OpenGeni requires a successful
+`workflow_dispatch` run from the configured operator `main`, proves that run's
+head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
+and its provider digest, and accepts only the two expected sanitized files.
+OpenGeni then replaces all operator-supplied candidate/public-producer authority
+with its independently verified candidate and current acceptance-run metadata
+before validating every schema-v2 row. No dispatcher can select an evidence
+URL, hash, repository, workflow path, or artifact name.
+
+Public release is then an explicit dispatch of `.github/workflows/release.yml`
+from a ref pinned to the accepted source SHA. Evidence admission accepts the
+candidate and acceptance **run IDs**, not caller-controlled URLs, hashes,
+workflow paths, or repository identities. The provenance verifier queries the
+GitHub API and requires the canonical repository/workflow, a completed
+successful `workflow_dispatch` run, exact commit/tree SHA and run attempt, one
+owned unexpired Actions artifact with its provider digest, and the expected
+artifact name. URLs and archive digests are derived only after those checks. The
+same exact expected package set (including an empty set for an application-only
+release) and an explicit zero-gap confirmation are still required. The product
+release identity comes from the exact SemVer `version`/`appVersion` pair
+committed in `deploy/helm/opengeni/Chart.yaml`; it is independent of whichever
+npm packages changed. The selected dispatch ref, `source_sha`, checked-out
+commit, and a commit reachable from `main` must identify the same revision.
+Candidate admission rejects a product version already occupied by any official
+image or chart. A final-release retry permits only aliases that already resolve
+to the exact accepted digest.
+
+The dispatch downloads the validated candidate and acceptance artifacts,
+verifies their provider ZIP digests and retained sidecars, rejects any changed,
+missing, or extra image role, requires migration to equal API, requires the
+candidate/staging/production chart version and packaged-byte hash to match, and
+validates every machine-readable contract row
+before re-running the package typecheck, builds, SDK parity test, and publish
+closure guard. Before touching npm it rejects any unlisted unpublished package,
 rejects local version drift or an occupied version from another git source, and
 retains a pre-publication plan. Afterward it requires every expected registry
-entry to bind the accepted source through `gitHead` and a SHA-512 integrity
-value before release images can build. That reconciliation also makes an
+entry to bind the accepted source through `gitHead` and a SHA-512 integrity value
+before release image aliases can be promoted. That reconciliation also makes an
 interrupted post-publication run safely resumable. The final
-`verified-release-receipt-<sha>` binds the source, acceptance evidence, bundle
-digest, and exact registry package identities. Ordinary pushes to `main` can
-open/update the Version PR but cannot publish.
+`verified-release-receipt-<sha>` binds the source, trusted producer provenance,
+candidate/acceptance artifact identities, accepted chart bytes, registry identities,
+and complete publishable package inventory. The final job is protected by the
+`production-release` environment, compares any existing immutable BOM before
+mutating version, full-SHA, or `latest` aliases, then verifies every alias and
+the anonymous OCI chart pull against the accepted bytes. The final job publishes
+or reconciles that exact accepted archive under the official chart version,
+records its resulting OCI manifest digest in the BOM, and never rebuilds an
+image or repackages the chart after acceptance.
 
-The sandbox image remains separate:
+The workflow emits `release-bom-<sha>` containing one deterministic
+`release-bom.json`: exact
+source SHA, release version, every publishable package version plus npm `gitHead`
+and SHA-512 integrity, every release image's immutable SHA-256 digest, and the
+official chart reference/version, OCI manifest digest, exact `.tgz` byte hash,
+and artifact name. Hosts should consume this BOM as one unit and reject missing,
+extra, mutable-tag-only, or version-mismatched components. The same bytes and a
+SHA-256 sidecar are published once on the immutable GitHub release tag
+`opengeni-release-<full-source-sha>`; a retry compares the existing public assets
+byte for byte and fails instead of overwriting them. No moving BOM alias is
+created. Ordinary pushes to `main` can open/update the Version PR but cannot
+publish.
+
+The stock sandbox remains a separate workload image, but the public release publishes it and
+binds its immutable digest in the same BOM:
 
 ```bash
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
@@ -211,15 +321,18 @@ and migration images are pinned.
 
 ## Helm
 
-Released OpenGeni charts are published to GHCR as OCI artifacts. For release
-installs, pin the chart version explicitly; the release pipeline packages the
-chart with `appVersion` set to the same OpenGeni version, and the default image
-tags resolve to that appVersion:
+Released OpenGeni charts are published as public OCI artifacts. The immutable
+release BOM is authoritative for the chart reference and manifest digest. For
+release installs, use that `chart.reference` and pin the chart version
+explicitly; the release pipeline packages the chart with `appVersion` set to
+the same OpenGeni version, and the default image tags resolve to that
+appVersion:
 
 ```bash
 OPENGENI_VERSION="<published-version>"
+OPENGENI_CHART_OCI="<release-bom chart.reference>"
 
-helm upgrade --install opengeni oci://ghcr.io/cloudgeni-ai/charts/opengeni \
+helm upgrade --install opengeni "$OPENGENI_CHART_OCI" \
   --namespace opengeni \
   --create-namespace \
   --version "$OPENGENI_VERSION" \
@@ -228,10 +341,12 @@ helm upgrade --install opengeni oci://ghcr.io/cloudgeni-ai/charts/opengeni \
 
 Use the repo checkout chart path only for development, chart edits, local
 rendering, or smoke tests against locally built images. `deploy/helm/opengeni`
-keeps a source-tree `Chart.yaml` version for development; releases do not commit
-Chart.yaml bumps. If you install from a clone instead of the OCI chart, set
-`api.image.tag`, `worker.image.tag`, `web.image.tag`, `migrations.image.tag`,
-and, when enabled, `relay.image.tag` to the image tag you intend to run.
+keeps the canonical product release identity in the exact SemVer
+`version`/`appVersion` pair in `Chart.yaml`; bump both together before producing
+a candidate for a new product release, even when no npm package changed. If you
+install from a clone instead of the OCI chart, set `api.image.tag`,
+`worker.image.tag`, `web.image.tag`, `migrations.image.tag`, and, when enabled,
+`relay.image.tag` to the image tag you intend to run.
 
 Render the development chart path with an existing secret:
 
@@ -360,8 +475,9 @@ TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME=opengeni-postgres-ca
 Use an encrypted OpenGeni application database URL for the same service, for
 example `OPENGENI_DATABASE_URL=postgres://.../opengeni?sslmode=require` for AWS
 RDS. If a different provider or customer database requires a custom CA, mount
-that CA through a private ConfigMap/Secret and set the same Temporal TLS env
-vars before running `bun run deployment:temporal-values`.
+that CA through a private ConfigMap/Secret before running
+`bun run deployment:temporal-values`. That database-to-Temporal-server TLS is
+separate from the OpenGeni-to-Temporal client settings below.
 
 After the upstream Temporal chart is running, the stack wrapper applies
 `deploy/stacks/official-temporal-namespace-job.yaml` to register the Temporal
@@ -373,7 +489,7 @@ Use this boundary when building a production cluster:
 | Capability | Production source | OpenGeni wiring |
 | --- | --- | --- |
 | NATS | Existing endpoint or official NATS chart from `https://nats-io.github.io/k8s/helm/charts/` | `nats.enabled=false` plus `nats.url` or `OPENGENI_NATS_URL` |
-| Temporal | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST` |
+| Temporal | Temporal Cloud, existing endpoint, or official Temporal chart from `https://go.temporal.io/helm-charts` with external persistence | `temporal.enabled=false` plus `OPENGENI_TEMPORAL_HOST`; add `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud |
 | Postgres | Managed cloud Postgres, existing database, or CloudNativePG from `https://cloudnative-pg.github.io/charts` | `postgres.enabled=false` plus `OPENGENI_DATABASE_URL` |
 | Secrets | External Secrets Operator from `https://charts.external-secrets.io`, Vault, or cloud-native secret delivery | `externalSecret.enabled=true` or `secret.existingSecret` |
 | TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
@@ -383,6 +499,9 @@ The secret must provide runtime values such as:
 
 - `OPENGENI_DATABASE_URL`
 - `OPENGENI_TEMPORAL_HOST`
+- `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
+- `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS without an API key
+- optional `OPENGENI_TEMPORAL_TLS_SERVER_NAME`, `OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64`, and the paired `OPENGENI_TEMPORAL_TLS_CLIENT_CERTIFICATE_BASE64` / `OPENGENI_TEMPORAL_TLS_CLIENT_PRIVATE_KEY_BASE64` for custom SNI, CA roots, or mTLS; any of these TLS materials also enables TLS
 - `OPENGENI_NATS_URL` when not using in-cluster NATS
 - `OPENGENI_STARTUP_DEPENDENCY_RETRY_*` when dependencies need longer startup windows
 - `OPENGENI_OPENAI_API_KEY` or Azure OpenAI equivalents
@@ -600,7 +719,7 @@ OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not rou
 Service endpoints:
 
 - API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /readyz` checks Postgres, NATS, and Temporal with bounded timeouts.
-- Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness checks the same dependencies.
+- Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
 Useful settings:

@@ -24,6 +24,7 @@ export OPENGENI_RELEASE=1
 # right before bytes leave the building.
 bun run build:packages
 bun scripts/publish-closure-guard.ts
+bun run test:ogtool-package
 
 # Rewrite `workspace:*` specs in the publishable packages to concrete `^x.y.z`
 # ranges. This MUST run after `changeset version` (which already bumped the

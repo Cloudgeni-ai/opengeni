@@ -7,7 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { ResourceRef } from "@opengeni/contracts";
-import { gitHubTokenMintSelection } from "../src/activities/environment";
+import { gitHubTokenMintSelection, gitHubTokenMintSelections } from "../src/activities/environment";
 
 const repo = (overrides: Record<string, unknown>): ResourceRef =>
   ({
@@ -49,12 +49,23 @@ describe("gitHubTokenMintSelection", () => {
     expect(gitHubTokenMintSelection([repo({ installationId: 123, repositoryId: 456 })])).toBeNull();
   });
 
-  test("throws on refs spanning two installations, matching the mint path", () => {
-    expect(() =>
-      gitHubTokenMintSelection([
-        repo({ githubInstallationId: 123, githubRepositoryId: 456 }),
-        repo({ githubInstallationId: 124, githubRepositoryId: 789 }),
+  test("selects every GitHub installation independently", () => {
+    expect(
+      gitHubTokenMintSelections([
+        repo({
+          uri: "https://github.com/acme/one.git",
+          githubInstallationId: 123,
+          githubRepositoryId: 456,
+        }),
+        repo({
+          uri: "https://github.com/acme/two.git",
+          githubInstallationId: 124,
+          githubRepositoryId: 789,
+        }),
       ]),
-    ).toThrow("GitHub App repository resources must belong to one installation");
+    ).toEqual([
+      { installationId: 123, repositoryIds: [456] },
+      { installationId: 124, repositoryIds: [789] },
+    ]);
   });
 });

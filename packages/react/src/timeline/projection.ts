@@ -436,7 +436,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
-      case "tool.auth_needed": {
+      case "tool.auth_needed":
+      case "credential.auth_needed": {
         // Keep the whole structured payload — the renderer turns it into a clean
         // inline reconnect card, and the app starts the recovery flow off the
         // connectionId/resource. Losing it to a plain-text notice was the ugly
@@ -818,6 +819,7 @@ function isTurnExecutionEvidence(type: string): boolean {
     type === "turn.capacity_waiting" ||
     type === "session.requiresAction" ||
     type === "tool.auth_needed" ||
+    type === "credential.auth_needed" ||
     type.startsWith("rig.setup.") ||
     type === "codex.capacity.waiting" ||
     type === "codex.capacity.resumed"
@@ -1197,6 +1199,8 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "expired",
   "insufficient_scope",
   "refresh_failed",
+  "unsupported_auth",
+  "resource_scope_unavailable",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {

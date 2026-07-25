@@ -21,6 +21,11 @@ const plateauSeconds = positiveInteger("OPENGENI_DENSITY_PLATEAU_SECONDS", 15);
 const hardLimitMiB = positiveNumber("OPENGENI_DENSITY_HARD_LIMIT_MIB_PER_TURN", 100);
 const targetMiB = positiveNumber("OPENGENI_DENSITY_TARGET_MIB_PER_TURN", 50);
 const runId = crypto.randomUUID();
+const profileInitiator = {
+  kind: "service" as const,
+  subjectId: "turn-density-profile",
+  label: "Turn density profile",
+};
 
 const productionSettings = getSettings();
 const settings: Settings = {
@@ -98,6 +103,7 @@ try {
       resources: [],
       tools: [],
       metadata: {},
+      createdBy: profileInitiator,
       model: "scripted-density-model",
       sandboxBackend: "none",
     });
@@ -129,12 +135,14 @@ try {
       sandboxBackend: "none",
       metadata: { densityProfileRunId: runId },
       placement: "tail",
+      initiator: profileInitiator,
     });
     turnInputs.push({
       accountId,
       workspaceId,
       sessionId: session.id,
       workflowId,
+      workflowRunId: `density-profile-run-${runId}-${index}`,
       attemptId: crypto.randomUUID(),
       trigger: { kind: "next" } as const,
     });
