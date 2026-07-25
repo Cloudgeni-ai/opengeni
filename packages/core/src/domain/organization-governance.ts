@@ -1,4 +1,8 @@
-import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
+import {
+  environmentsEncryptionKeyBytes,
+  organizationRecoveryReceiptIdentitySecretBytes,
+  type Settings,
+} from "@opengeni/config";
 import type {
   AccessContext,
   ApproveOrganizationRecoveryRequest,
@@ -30,6 +34,7 @@ export async function requireOrganizationGovernanceAdmin(
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
+  requireManagedGovernanceMode(context);
   const grant = context.accountGrants.find((candidate) => candidate.accountId === accountId);
   if (!grant?.permissions.includes("account:admin")) {
     throw new HTTPException(403, { message: "organization access denied" });
@@ -53,6 +58,7 @@ export async function requireOrganizationGovernanceAdminOrLockedReplay(
   context: AccessContext,
   accountId: string,
 ): Promise<OrganizationGovernance> {
+  requireManagedGovernanceMode(context);
   const governance = await getOrganizationGovernance(deps.db, accountId);
   if (!governance) throw new HTTPException(404, { message: "organization not found" });
   if (governance.state === "active") {
@@ -199,6 +205,7 @@ export async function approveOrganizationRecoveryForRequest(
 ): Promise<OrganizationRecoveryOperation> {
   await requireOrganizationRecoveryCustodianOrReplay(deps, context, accountId);
   const encryptionKey = requireOrganizationEvidenceEncryption(deps.settings);
+  const receiptIdentitySecret = requireOrganizationReceiptIdentitySecret(deps.settings);
   return await mapGovernanceError(() =>
     approveOrganizationRecovery(deps.db, {
       accountId,
@@ -206,6 +213,7 @@ export async function approveOrganizationRecoveryForRequest(
       actorSubjectId: context.subjectId,
       evidence: request.evidence,
       encryptionKey,
+      receiptIdentitySecret,
       idempotencyKey: request.idempotencyKey,
     }),
   );
@@ -273,6 +281,20 @@ export function requireOrganizationEvidenceEncryption(settings: Settings): Uint8
     throw new HTTPException(503, { message: "organization recovery is unavailable" });
   }
   return key;
+}
+
+export function requireOrganizationReceiptIdentitySecret(settings: Settings): Uint8Array {
+  const secret = organizationRecoveryReceiptIdentitySecretBytes(settings);
+  if (!secret) {
+    throw new HTTPException(503, { message: "organization recovery is unavailable" });
+  }
+  return secret;
+}
+
+function requireManagedGovernanceMode(context: AccessContext): void {
+  if (context.mode !== "managed") {
+    throw new HTTPException(403, { message: "organization governance requires managed access" });
+  }
 }
 
 async function mapGovernanceError<T>(fn: () => Promise<T>): Promise<T> {

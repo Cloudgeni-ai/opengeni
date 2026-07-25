@@ -593,6 +593,9 @@ describe("validateSettings registry checks", () => {
           OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
           OPENGENI_RESEND_API_KEY: "re_test",
           OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+          OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: Buffer.alloc(32, 7).toString(
+            "base64",
+          ),
           OPENGENI_BILLING_MODE: "stripe",
           OPENGENI_STRIPE_SECRET_KEY: "sk_test",
           OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",
@@ -622,6 +625,9 @@ describe("validateSettings registry checks", () => {
         OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
         OPENGENI_RESEND_API_KEY: "re_test",
         OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64"),
+        OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: Buffer.alloc(32, 7).toString(
+          "base64",
+        ),
         OPENGENI_BILLING_MODE: "stripe",
         OPENGENI_STRIPE_SECRET_KEY: "sk_test",
         OPENGENI_STRIPE_WEBHOOK_SECRET: "whsec_test",

@@ -1,11 +1,23 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  hkdfSync,
+  randomBytes,
+} from "node:crypto";
 
 const ENVELOPE_VERSION = "iev1";
 const IV_BYTES = 12;
 const GCM_TAG_BYTES = 16;
 const KEY_BYTES = 32;
 const ENCRYPTION_KEY_CONTEXT = "opengeni/organization-governance/evidence-encryption/v1";
-const IDEMPOTENCY_KEY_CONTEXT = "opengeni/organization-governance/evidence-idempotency/v1";
+export const IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_SALT =
+  "opengeni/organization-governance/receipt-identity-salt/v1" as const;
+const RECEIPT_IDENTITY_KDF_SALT = Buffer.from(IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_SALT, "utf8");
+export const IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_INFO =
+  "opengeni/organization-governance/receipt-identity/v1" as const;
+const RECEIPT_IDENTITY_HMAC_PURPOSE = "opengeni/organization-governance/receipt-identity-hmac/v1\0";
 
 export const IDENTITY_EVIDENCE_AUDIENCE = "opengeni:organization-governance" as const;
 export const IDENTITY_EVIDENCE_PURPOSE = "governance-recovery-approval" as const;
@@ -108,13 +120,32 @@ export function identityEvidenceKeyVersion(key: Uint8Array): string {
 }
 
 /**
- * Produce a non-reversible, key-bound digest for actor-scoped idempotency.
- * A distinct derived subkey prevents reuse of the AES-GCM key across
- * cryptographic purposes while keeping raw evidence out of command receipts.
+ * Produce the stable, non-reversible identity used by the approval command
+ * receipt. This secret is independent from the rotating AES envelope key, so
+ * an exact lost-response retry can replay after envelope-key rotation without
+ * making a changed request look like the original one.
+ *
+ * HKDF separates the receipt root from every other secret purpose, while the
+ * framed HMAC input separates this receipt identity from any raw HMAC use of
+ * that root. The evidence itself is never returned, logged, or stored in the
+ * receipt hash input object.
  */
-export function identityEvidenceIdempotencyDigest(key: Uint8Array, evidence: string): string {
-  assertKey(key);
-  return createHmac("sha256", deriveSubkey(key, IDEMPOTENCY_KEY_CONTEXT))
+export function identityEvidenceReceiptIdentityHash(
+  receiptIdentitySecret: Uint8Array,
+  evidence: string,
+): string {
+  assertReceiptIdentitySecret(receiptIdentitySecret);
+  const receiptRoot = Buffer.from(
+    hkdfSync(
+      "sha256",
+      receiptIdentitySecret,
+      RECEIPT_IDENTITY_KDF_SALT,
+      IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_INFO,
+      KEY_BYTES,
+    ),
+  );
+  return createHmac("sha256", receiptRoot)
+    .update(RECEIPT_IDENTITY_HMAC_PURPOSE, "utf8")
     .update(evidence, "utf8")
     .digest("hex");
 }
@@ -153,6 +184,12 @@ function assertContext(context: IdentityEvidenceContext): void {
 function assertKey(key: Uint8Array): void {
   if (key.length !== KEY_BYTES) {
     throw new Error("identity evidence encryption key must be exactly 32 bytes");
+  }
+}
+
+function assertReceiptIdentitySecret(secret: Uint8Array): void {
+  if (secret.length !== KEY_BYTES) {
+    throw new Error("organization recovery receipt identity secret must be exactly 32 bytes");
   }
 }
 

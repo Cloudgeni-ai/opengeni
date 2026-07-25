@@ -6,6 +6,7 @@ import { Hono } from "hono";
 import { requireAccessGrant, type AccessDeps } from "../src/access";
 import {
   requireOrganizationGovernanceAdmin,
+  requireOrganizationGovernanceAdminOrLockedReplay,
   requireOrganizationRecoveryCustodian,
   requireOrganizationRecoveryCustodianOrReplay,
 } from "../src/domain/organization-governance";
@@ -182,6 +183,38 @@ describe("organization governance access fence", () => {
       await expect(
         requireOrganizationGovernanceAdmin(deps(), context, ACCOUNT_ID),
       ).rejects.toMatchObject({ status: 403 });
+      expect(governance).not.toHaveBeenCalled();
+    } finally {
+      governance.mockRestore();
+    }
+  });
+
+  test("rejects local and configured governance policy or lock admission before database access", async () => {
+    const governance = spyOn(opengeniDb, "getOrganizationGovernance");
+    const activeContext = (mode: "local" | "configured"): AccessContext => ({
+      mode,
+      subjectId: "configured:admin",
+      accountGrants: [
+        {
+          accountId: ACCOUNT_ID,
+          subjectId: "configured:admin",
+          permissions: ["account:admin"],
+        },
+      ],
+      workspaceGrants: [],
+      defaultAccountId: ACCOUNT_ID,
+      defaultWorkspaceId: null,
+    });
+    try {
+      for (const mode of ["local", "configured"] as const) {
+        const context = activeContext(mode);
+        await expect(
+          requireOrganizationGovernanceAdmin(deps(), context, ACCOUNT_ID),
+        ).rejects.toMatchObject({ status: 403 });
+        await expect(
+          requireOrganizationGovernanceAdminOrLockedReplay(deps(), context, ACCOUNT_ID),
+        ).rejects.toMatchObject({ status: 403 });
+      }
       expect(governance).not.toHaveBeenCalled();
     } finally {
       governance.mockRestore();

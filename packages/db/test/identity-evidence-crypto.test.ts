@@ -1,12 +1,14 @@
 import { describe, expect, test } from "bun:test";
-import { createHmac } from "node:crypto";
+import { createHmac, hkdfSync } from "node:crypto";
 import {
   decryptIdentityEvidence,
   encryptIdentityEvidence,
   IDENTITY_EVIDENCE_AUDIENCE,
   IDENTITY_EVIDENCE_MAX_BYTES,
   IDENTITY_EVIDENCE_PURPOSE,
-  identityEvidenceIdempotencyDigest,
+  IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_INFO,
+  IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_SALT,
+  identityEvidenceReceiptIdentityHash,
   identityEvidenceKeyVersion,
   type IdentityEvidenceContext,
 } from "../src/identity-evidence-crypto";
@@ -38,15 +40,27 @@ describe("identity recovery evidence envelope", () => {
     );
   });
 
-  test("uses a distinct derived key for non-reversible idempotency digests", () => {
+  test("uses purpose-separated HMAC input under a stable receipt identity root", () => {
     const proof = "minimal-sensitive-proof";
-    const digest = identityEvidenceIdempotencyDigest(key, proof);
-    const rawKeyDigest = createHmac("sha256", key).update(proof, "utf8").digest("hex");
-    expect(digest).toHaveLength(64);
-    expect(digest).not.toBe(rawKeyDigest);
-    expect(digest).toBe(identityEvidenceIdempotencyDigest(key, proof));
-    expect(digest).not.toBe(identityEvidenceIdempotencyDigest(key, `${proof}-different`));
-    expect(digest).not.toContain(proof);
+    const receiptIdentitySecret = new Uint8Array(32).fill(9);
+    const identity = identityEvidenceReceiptIdentityHash(receiptIdentitySecret, proof);
+    const receiptRoot = Buffer.from(
+      hkdfSync(
+        "sha256",
+        receiptIdentitySecret,
+        Buffer.from(IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_SALT, "utf8"),
+        IDENTITY_EVIDENCE_RECEIPT_IDENTITY_KDF_INFO,
+        32,
+      ),
+    );
+    const rawHmac = createHmac("sha256", receiptRoot).update(proof, "utf8").digest("hex");
+    expect(identity).toHaveLength(64);
+    expect(identity).not.toBe(rawHmac);
+    expect(identity).toBe(identityEvidenceReceiptIdentityHash(receiptIdentitySecret, proof));
+    expect(identity).not.toBe(
+      identityEvidenceReceiptIdentityHash(receiptIdentitySecret, `${proof}-different`),
+    );
+    expect(identity).not.toContain(proof);
   });
 
   test("fails closed when tenant, operation, subject, purpose-bound expiry, or bytes change", () => {

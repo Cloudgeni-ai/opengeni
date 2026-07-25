@@ -27,6 +27,7 @@ let otherAccountId = "";
 let workspaceId = "";
 const keyA = new Uint8Array(32).fill(3);
 const keyB = new Uint8Array(32).fill(4);
+const receiptIdentitySecret = new Uint8Array(32).fill(5);
 
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("organization-governance-recovery");
@@ -153,6 +154,7 @@ describe("organization governance recovery persistence", () => {
       actorSubjectId: "user:a",
       evidence: "identity-proof-a",
       encryptionKey: keyA,
+      receiptIdentitySecret,
       idempotencyKey: "approval-a-1",
     });
     expect(approvedA.approvalCount).toBe(1);
@@ -161,6 +163,42 @@ describe("organization governance recovery persistence", () => {
       where account_id = ${accountId} and subject_id = 'user:a'`;
     expect(encryptedEvidence?.ciphertext).toStartWith("iev1:");
     expect(encryptedEvidence?.ciphertext).not.toContain("identity-proof");
+
+    // The first response is intentionally treated as lost. Retrying the exact
+    // request after rotating the AES envelope key must replay the committed
+    // receipt, while changing the evidence under that idempotency key must
+    // remain a conflict.
+    const lostResponse = await approveOrganizationRecovery(db, {
+      accountId,
+      operationId: operation.id,
+      actorSubjectId: "user:a",
+      evidence: "identity-proof-a-lost-response",
+      encryptionKey: keyA,
+      receiptIdentitySecret,
+      idempotencyKey: "approval-a-lost-response",
+    });
+    const retriedAfterEnvelopeRotation = await approveOrganizationRecovery(db, {
+      accountId,
+      operationId: operation.id,
+      actorSubjectId: "user:a",
+      evidence: "identity-proof-a-lost-response",
+      encryptionKey: keyB,
+      receiptIdentitySecret,
+      idempotencyKey: "approval-a-lost-response",
+    });
+    expect(retriedAfterEnvelopeRotation).toEqual(lostResponse);
+    await expect(
+      approveOrganizationRecovery(db, {
+        accountId,
+        operationId: operation.id,
+        actorSubjectId: "user:a",
+        evidence: "identity-proof-a-changed-request",
+        encryptionKey: keyB,
+        receiptIdentitySecret,
+        idempotencyKey: "approval-a-lost-response",
+      }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict" });
+
     const revoked = await revokeOrganizationRecoveryApproval(db, {
       accountId,
       operationId: operation.id,
@@ -174,6 +212,7 @@ describe("organization governance recovery persistence", () => {
       actorSubjectId: "user:a",
       evidence: "identity-proof-a-fresh",
       encryptionKey: keyA,
+      receiptIdentitySecret,
       idempotencyKey: "approval-a-2",
     });
     await expect(
@@ -192,6 +231,7 @@ describe("organization governance recovery persistence", () => {
       actorSubjectId: "user:b",
       evidence: "identity-proof-b",
       encryptionKey: keyA,
+      receiptIdentitySecret,
       idempotencyKey: "approval-b-1",
     });
     await expect(
@@ -209,6 +249,7 @@ describe("organization governance recovery persistence", () => {
       actorSubjectId: "user:c",
       evidence: "identity-proof-c-before-rotation",
       encryptionKey: keyA,
+      receiptIdentitySecret,
       idempotencyKey: "approval-c-1",
     });
     await expect(
@@ -230,6 +271,7 @@ describe("organization governance recovery persistence", () => {
       actorSubjectId: "user:a",
       evidence: "identity-proof-a-after-rotation",
       encryptionKey: keyB,
+      receiptIdentitySecret,
       idempotencyKey: "approval-a-rotated",
     });
     await approveOrganizationRecovery(db, {
@@ -238,6 +280,7 @@ describe("organization governance recovery persistence", () => {
       actorSubjectId: "user:b",
       evidence: "identity-proof-b-after-rotation",
       encryptionKey: keyB,
+      receiptIdentitySecret,
       idempotencyKey: "approval-b-rotated",
     });
     const finalized = await finalizeOrganizationRecovery(db, {

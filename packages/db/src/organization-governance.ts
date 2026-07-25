@@ -14,7 +14,7 @@ import {
   IDENTITY_EVIDENCE_AUDIENCE,
   IDENTITY_EVIDENCE_MAX_TTL_MS,
   IDENTITY_EVIDENCE_PURPOSE,
-  identityEvidenceIdempotencyDigest,
+  identityEvidenceReceiptIdentityHash,
   identityEvidenceKeyVersion,
 } from "./identity-evidence-crypto";
 
@@ -340,6 +340,7 @@ export async function approveOrganizationRecovery(
     actorSubjectId: string;
     evidence: string;
     encryptionKey: Uint8Array;
+    receiptIdentitySecret: Uint8Array;
     idempotencyKey: string;
   },
 ): Promise<OrganizationRecoveryOperation> {
@@ -347,7 +348,10 @@ export async function approveOrganizationRecovery(
     const account = await lockAccount(tx, input.accountId);
     const request = {
       operationId: input.operationId,
-      evidenceDigest: identityEvidenceIdempotencyDigest(input.encryptionKey, input.evidence),
+      evidenceReceiptIdentity: identityEvidenceReceiptIdentityHash(
+        input.receiptIdentitySecret,
+        input.evidence,
+      ),
     };
     const replay = await commandReplay<OrganizationRecoveryOperation>(
       tx,

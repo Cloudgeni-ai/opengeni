@@ -45,21 +45,61 @@ ALTER TABLE "managed_accounts"
 
 DO $$
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managed_accounts_organization_kind_check') THEN
-    ALTER TABLE "managed_accounts" ADD CONSTRAINT "managed_accounts_organization_kind_check"
-      CHECK ("organization_kind" IN ('personal', 'team'));
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class r ON r.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = r.relnamespace
+    WHERE c.conname = 'managed_accounts_organization_kind_check'
+      AND n.nspname = current_schema()
+      AND r.relname = 'managed_accounts'
+  ) THEN
+    EXECUTE format(
+      'ALTER TABLE %I.%I ADD CONSTRAINT %I CHECK ("organization_kind" IN (''personal'', ''team''))',
+      current_schema(), 'managed_accounts', 'managed_accounts_organization_kind_check'
+    );
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managed_accounts_governance_state_check') THEN
-    ALTER TABLE "managed_accounts" ADD CONSTRAINT "managed_accounts_governance_state_check"
-      CHECK ("governance_state" IN ('active', 'governance_locked'));
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class r ON r.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = r.relnamespace
+    WHERE c.conname = 'managed_accounts_governance_state_check'
+      AND n.nspname = current_schema()
+      AND r.relname = 'managed_accounts'
+  ) THEN
+    EXECUTE format(
+      'ALTER TABLE %I.%I ADD CONSTRAINT %I CHECK ("governance_state" IN (''active'', ''governance_locked''))',
+      current_schema(), 'managed_accounts', 'managed_accounts_governance_state_check'
+    );
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managed_accounts_governance_revision_check') THEN
-    ALTER TABLE "managed_accounts" ADD CONSTRAINT "managed_accounts_governance_revision_check"
-      CHECK ("governance_revision" >= 0 AND "recovery_policy_revision" >= 0);
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class r ON r.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = r.relnamespace
+    WHERE c.conname = 'managed_accounts_governance_revision_check'
+      AND n.nspname = current_schema()
+      AND r.relname = 'managed_accounts'
+  ) THEN
+    EXECUTE format(
+      'ALTER TABLE %I.%I ADD CONSTRAINT %I CHECK ("governance_revision" >= 0 AND "recovery_policy_revision" >= 0)',
+      current_schema(), 'managed_accounts', 'managed_accounts_governance_revision_check'
+    );
   END IF;
-  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'managed_accounts_recovery_quorum_check') THEN
-    ALTER TABLE "managed_accounts" ADD CONSTRAINT "managed_accounts_recovery_quorum_check"
-      CHECK ("recovery_quorum" IS NULL OR "recovery_quorum" BETWEEN 1 AND 10);
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint c
+    JOIN pg_class r ON r.oid = c.conrelid
+    JOIN pg_namespace n ON n.oid = r.relnamespace
+    WHERE c.conname = 'managed_accounts_recovery_quorum_check'
+      AND n.nspname = current_schema()
+      AND r.relname = 'managed_accounts'
+  ) THEN
+    EXECUTE format(
+      'ALTER TABLE %I.%I ADD CONSTRAINT %I CHECK ("recovery_quorum" IS NULL OR "recovery_quorum" BETWEEN 1 AND 10)',
+      current_schema(), 'managed_accounts', 'managed_accounts_recovery_quorum_check'
+    );
   END IF;
 END $$;
 

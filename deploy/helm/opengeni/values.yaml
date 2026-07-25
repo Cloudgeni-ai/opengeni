@@ -68,6 +68,11 @@ secret:
   existingSecret: opengeni-runtime
   # Provide OPENGENI_ACCESS_KEY for deployment shared-key access.
   # Provide OPENGENI_DELEGATION_SECRET for configured/managed product access.
+  # Managed organization recovery also requires
+  # OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: a separate,
+  # stable base64-encoded 32-byte secret. Provision it before rolling out new
+  # binaries and keep it unchanged because rotation changes committed replay
+  # identities. Generate with: openssl rand -base64 32.
   # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
   # NATS, Temporal, sandbox, and object-storage secrets through this secret or
   # an ExternalSecret. Never commit real secrets in values.

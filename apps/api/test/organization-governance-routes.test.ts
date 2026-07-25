@@ -1,7 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { signDelegatedAccessToken } from "@opengeni/contracts";
+import * as opengeniDb from "@opengeni/db";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { testSettings } from "@opengeni/testing";
 import { Hono } from "hono";
@@ -28,6 +30,54 @@ function deps(
 }
 
 describe("organization governance recovery routes", () => {
+  test("rejects local/configured policy and lock requests before parsing or mutating", async () => {
+    const accountId = "00000000-0000-4000-8000-000000000001";
+    const workspaceId = "00000000-0000-4000-8000-000000000002";
+    const settings = testSettings({
+      productAccessMode: "configured",
+      delegationSecret: "organization-route-configured-secret",
+    });
+    const status = spyOn(opengeniDb, "getOrganizationGovernanceStatus").mockResolvedValue({
+      accountId,
+      kind: "team",
+      state: "active",
+      governanceRevision: 0,
+      authoritySubjectId: "user:owner",
+      authorizationInvalidatedAt: null,
+    });
+    const governance = spyOn(opengeniDb, "getOrganizationGovernance");
+    const token = await signDelegatedAccessToken(settings.delegationSecret!, {
+      accountId,
+      workspaceId,
+      subjectId: "configured:admin",
+      permissions: ["account:admin"],
+      exp: Math.floor(Date.now() / 1_000) + 60,
+    });
+    const app = new Hono();
+    registerOrganizationRoutes(app, { settings, db: {} } as unknown as ApiRouteDeps);
+    try {
+      for (const [method, path, body] of [
+        ["PUT", `/v1/accounts/${accountId}/governance/recovery-policy`, "not-json"],
+        ["POST", `/v1/accounts/${accountId}/governance/lock`, "not-json"],
+      ] as const) {
+        const response = await app.request(`http://example.test${path}`, {
+          method,
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body,
+        });
+        expect(response.status).toBe(403);
+      }
+      expect(governance).not.toHaveBeenCalled();
+      expect(status).toHaveBeenCalled();
+    } finally {
+      status.mockRestore();
+      governance.mockRestore();
+    }
+  });
+
   test("rejects an unauthenticated approval before parsing sensitive evidence", async () => {
     const app = new Hono();
     registerOrganizationRoutes(app, deps());

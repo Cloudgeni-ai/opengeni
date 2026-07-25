@@ -17,6 +17,7 @@ import {
   parseMcpServers,
   McpServerConnectionRefSchema,
   requiredSandboxEnvForBackend,
+  organizationRecoveryReceiptIdentitySecretBytes,
   resolveStreamTokenSecret,
   retryStartupDependency,
   SANDBOX_REQUIRED_ENV,
@@ -1017,6 +1018,7 @@ describe("workspace environments encryption key", () => {
         {
           ...managedEnv,
           OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validKey,
+          OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: validKey,
         },
         () => getSettings(),
       ).environmentsEncryptionKey,
@@ -1032,6 +1034,54 @@ describe("workspace environments encryption key", () => {
         () => getSettings(),
       ).environmentsEncryptionKey,
     ).toBeUndefined();
+  });
+});
+
+describe("organization recovery receipt identity secret", () => {
+  const validSecret = Buffer.alloc(32, 8).toString("base64");
+  const managedProductionEnv = {
+    OPENGENI_ENVIRONMENT: "production",
+    OPENGENI_PRODUCT_ACCESS_MODE: "managed",
+    OPENGENI_PUBLIC_BASE_URL: "https://managed.example.test",
+    OPENGENI_BETTER_AUTH_SECRET: "managed-better-auth-secret",
+    OPENGENI_DELEGATION_SECRET: "managed-delegation-secret",
+    OPENGENI_RESEND_API_KEY: "re_test",
+    OPENGENI_ENVIRONMENTS_ENCRYPTION_KEY: validSecret,
+  };
+
+  test("decodes a managed production secret of exactly 32 bytes", () => {
+    const settings = withEnv(
+      {
+        ...managedProductionEnv,
+        OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: validSecret,
+      },
+      () => getSettings(),
+    );
+    expect(organizationRecoveryReceiptIdentitySecretBytes(settings)).toEqual(
+      new Uint8Array(32).fill(8),
+    );
+  });
+
+  test("rejects a managed production secret with the wrong decoded length", () => {
+    expect(() =>
+      withEnv(
+        {
+          ...managedProductionEnv,
+          OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET: Buffer.alloc(16, 8).toString(
+            "base64",
+          ),
+        },
+        () => getSettings(),
+      ),
+    ).toThrow(
+      "OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET must be base64 for exactly 32 bytes",
+    );
+  });
+
+  test("requires the secret for managed production", () => {
+    expect(() => withEnv(managedProductionEnv, () => getSettings())).toThrow(
+      "OPENGENI_ORGANIZATION_RECOVERY_RECEIPT_IDENTITY_SECRET is required for managed mode outside local/test",
+    );
   });
 });
 
