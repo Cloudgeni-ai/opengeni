@@ -18,6 +18,7 @@ import {
   type Permission,
   type ResourceRef,
   type SessionAuthorizationOperation,
+  type Session,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
@@ -111,6 +112,9 @@ import {
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
+  sessionWithEffectiveToolPolicy,
+  workspaceSessionToolPolicyDefaultServerIds,
+  workspaceSessionToolPolicyServerIds,
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
@@ -1406,7 +1410,14 @@ function registerWorkspaceOrchestrationTools(
           },
           authorization?.relatedSessionAccess ?? "root",
         );
-        return json(boundSessionDetailMcp(projected));
+        return json(
+          boundSessionDetailMcp(
+            await withMcpEffectivePolicy(deps, grant.workspaceId, {
+              ...projected,
+              effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
+            }),
+          ),
+        );
       },
     );
 
@@ -1611,7 +1622,8 @@ function registerWorkspaceOrchestrationTools(
         if (callerSessionId !== null) {
           await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
         }
-        return json(await createSessionForRequest(deps, grant, grant.workspaceId, args));
+        const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
+        return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
       },
     );
   }
@@ -2571,4 +2583,16 @@ function parseMcpDate(raw: string, label: string): Date {
     throw new Error(`${label} must be an ISO date-time`);
   }
   return date;
+}
+
+async function withMcpEffectivePolicy(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+  ]);
+  return sessionWithEffectiveToolPolicy(session, workspaceServerIds, workspaceDefaultServerIds);
 }

@@ -262,6 +262,35 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  optional?: boolean | undefined;
+};
+
+export type SessionToolPolicy = {
+  mode: "workspace_default" | "explicit" | "inherited" | "legacy";
+  inheritedFromSessionId: string | null;
+};
+
+export type SessionEffectiveToolPolicy = {
+  mode: SessionToolPolicy["mode"];
+  inheritedFromSessionId: string | null;
+  selectedIds: string[];
+  effectiveIds: string[];
+  mandatoryIds: string[];
+  lazyRouter: {
+    state: "required" | "disabled";
+    deferredIds: string[];
+  };
+  configuredIds: string[];
+  droppedIds: string[];
+  counts: {
+    selected: number;
+    effective: number;
+    mandatory: number;
+    deferred: number;
+    configured: number;
+    dropped: number;
+  };
+  idsTruncated: boolean;
 };
 
 export type GoalSpec = {
@@ -436,6 +465,8 @@ export type Session = {
   instructions: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolPolicy?: SessionToolPolicy | undefined;
+  effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
   /** Frozen creator fact; later turns carry their own independent initiator. */
   createdBy: TurnInitiator;
@@ -556,6 +587,7 @@ export type SessionTurn = {
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolsProvided?: boolean | undefined;
   model: string;
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
@@ -664,6 +696,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
   "credential.auth_needed",
@@ -2215,6 +2248,8 @@ export type ComposerDraft = {
   text: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /** False inherits the session policy; true preserves an explicit array. */
+  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
@@ -3090,6 +3125,17 @@ export type CapabilityRuntime = {
   mcpServerId?: string | undefined;
   transport?: string | undefined;
   notes: string | null;
+  /** Secret-safe server-derived registry exposure state. */
+  catalogTrust?:
+    | {
+        state: "trusted" | "legacy_active" | "unverified";
+        reason:
+          | "trusted_source"
+          | "verified_probe"
+          | "active_installation_compatibility"
+          | "missing_verification";
+      }
+    | undefined;
 };
 
 export type CapabilityCatalogItem = {

@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
   CODEX_TRANSPORT_ERROR_HEADER,
+  CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+  type CodexModelRequestEvent,
   type CodexRequestContext,
   type CodexTokenSnapshot,
   type CodexUsageHeaderSnapshot,
   type FetchLike,
   classifyCodexUsageLimitError,
+  classifyCodexResponseTimeoutError,
   codexRequestStorage,
   codexSubscriptionFetch,
   isCodexTransportError,
@@ -157,6 +160,9 @@ describe("codexSubscriptionFetch", () => {
     expect(refreshed).toBe(1);
     expect(captures.length).toBe(2);
     expect(new Headers(captures[1]?.init?.headers).get("authorization")).toBe("Bearer AC2");
+    expect(new Headers(captures[0]?.init?.headers).get("idempotency-key")).not.toBe(
+      new Headers(captures[1]?.init?.headers).get("idempotency-key"),
+    );
     expect(res.status).toBe(200);
   });
 
@@ -341,6 +347,305 @@ describe("codexSubscriptionFetch", () => {
     }
     expect(String(observed)).toContain("injected partial stream failure");
     expect(calls).toBe(1);
+  });
+
+  test("a pre-headers timeout never replays an acceptance-unknown request and returns a typed 504", async () => {
+    const events: CodexModelRequestEvent[] = [];
+    const idempotencyKeys: string[] = [];
+    let calls = 0;
+    const base: FetchLike = async (_input, init) => {
+      calls += 1;
+      idempotencyKeys.push(new Headers(init?.headers).get("idempotency-key") ?? "");
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener(
+          "abort",
+          () => reject(init.signal?.reason ?? new Error("aborted")),
+          { once: true },
+        );
+      });
+    };
+    const response = await codexRequestStorage.run(
+      ctx({
+        nextRequestId: () => "dispatch-1:1",
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 15,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 200,
+          noByteRetries: 1,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          events.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(base)("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true }),
+        }),
+    );
+    expect(calls).toBe(1);
+    expect(idempotencyKeys).toEqual(["dispatch-1:1"]);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    const body = (await response.json()) as { error: Record<string, unknown> };
+    expect(body.error.type).toBe(CODEX_RESPONSE_TIMEOUT_ERROR_TYPE);
+    expect(body.error.timeout_class).toBe("headers");
+    expect(body.error.response_observed).toBe(false);
+    expect(events.map((event) => event.phase)).toEqual(["started", "timed_out"]);
+    expect(events[0]?.timeoutPolicy.noByteRetries).toBe(0);
+    expect(events[1]?.willRetry).toBe(false);
+  });
+
+  test("a late response after a pre-headers timeout does not trigger a second upstream call", async () => {
+    let calls = 0;
+    let resolveUpstream!: (response: Response) => void;
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 15,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 100,
+          noByteRetries: 1,
+          retryBackoffMs: 0,
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return await new Promise<Response>((resolve) => {
+            resolveUpstream = resolve;
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true }),
+        }),
+    );
+
+    resolveUpstream(new Response('data: {"type":"response.completed"}\n\n', { status: 200 }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(1);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toMatchObject({
+      error: {
+        type: CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+        response_observed: false,
+      },
+    });
+  });
+
+  test("a pre-headers timeout stays typed when audit persistence rejects", async () => {
+    let calls = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 15,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 100,
+          noByteRetries: 0,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          if (event.phase === "timed_out") {
+            throw new Error("injected audit write failure");
+          }
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async (_input, init) => {
+          calls += 1;
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener(
+              "abort",
+              () => reject(init.signal?.reason ?? new Error("aborted")),
+              { once: true },
+            );
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true }),
+        }),
+    );
+
+    expect(calls).toBe(1);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toMatchObject({
+      error: {
+        type: CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+        timeout_class: "headers",
+        response_observed: false,
+      },
+    });
+  });
+
+  test("a native connect timeout is typed and never retried", async () => {
+    const events: CodexModelRequestEvent[] = [];
+    let calls = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 100,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 500,
+          noByteRetries: 1,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          events.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          throw Object.assign(new Error("Connect Timeout Error"), {
+            name: "ConnectTimeoutError",
+            code: "UND_ERR_CONNECT_TIMEOUT",
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: true }),
+        }),
+    );
+    expect(calls).toBe(1);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(events.find((event) => event.phase === "timed_out")?.timeoutClass).toBe("connect");
+    expect(events.find((event) => event.phase === "timed_out")?.willRetry).toBe(false);
+  });
+
+  test("an idle timeout after the first byte stays typed without replay when audit persistence rejects", async () => {
+    const events: CodexModelRequestEvent[] = [];
+    let calls = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        nextRequestId: () => "dispatch-2:1",
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 100,
+          streamIdleTimeoutMs: 15,
+          wholeRequestTimeoutMs: 200,
+          noByteRetries: 1,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          events.push(event);
+          if (event.phase === "timed_out") {
+            throw new Error("injected audit write failure");
+          }
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode('data: {"type":"response.created"}\n\n'),
+                );
+              },
+            }),
+            { status: 200 },
+          );
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: true }),
+        }),
+    );
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(calls).toBe(1);
+    expect(classifyCodexResponseTimeoutError(observed)).toMatchObject({
+      timeoutClass: "idle_stream",
+      requestId: "dispatch-2:1",
+      responseObserved: true,
+    });
+    expect(events.map((event) => event.phase)).toContain("first_byte");
+    expect(events.at(-1)).toMatchObject({
+      phase: "timed_out",
+      timeoutClass: "idle_stream",
+      responseObserved: true,
+    });
+  });
+
+  test("whole-request deadline wins over a longer stream-idle deadline", async () => {
+    const events: CodexModelRequestEvent[] = [];
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 100,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 15,
+          noByteRetries: 0,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          events.push(event);
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(
+          async () => new Response(new ReadableStream<Uint8Array>({}), { status: 200 }),
+        )("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ stream: true }),
+        }),
+    );
+    await response.text().catch(() => undefined);
+    expect(events.at(-1)).toMatchObject({
+      phase: "timed_out",
+      timeoutClass: "whole_request",
+      responseObserved: true,
+    });
+  });
+
+  test("external cancellation after headers cancels the body without a timeout retry", async () => {
+    const events: CodexModelRequestEvent[] = [];
+    const controller = new AbortController();
+    const abortReason = new Error("pause requested");
+    let calls = 0;
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 100,
+          streamIdleTimeoutMs: 1_000,
+          wholeRequestTimeoutMs: 2_000,
+          noByteRetries: 1,
+          retryBackoffMs: 0,
+        },
+        onModelRequestEvent: (event) => {
+          events.push(event);
+          if (event.phase === "failed") {
+            throw new Error("injected audit write failure");
+          }
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return new Response(new ReadableStream<Uint8Array>({}), { status: 200 });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          signal: controller.signal,
+          body: JSON.stringify({ stream: true }),
+        }),
+    );
+    controller.abort(abortReason);
+    let observed: unknown;
+    try {
+      await response.text();
+    } catch (error) {
+      observed = error;
+    }
+    expect(calls).toBe(1);
+    expect(events.some((event) => event.phase === "timed_out")).toBe(false);
+    expect(events.at(-1)?.phase).toBe("failed");
+    expect(observed).toBe(abortReason);
   });
 
   // A realistic codex stream: the terminal response.completed leaves output EMPTY,

@@ -227,12 +227,12 @@ export type NoticeItem = {
 };
 
 /**
- * A tool call hit a connection that needs action or cannot satisfy the selected
- * endpoint/resource contract. Carries the
- * structured `tool.auth_needed` or `credential.auth_needed` payload so the renderer can draw a clean inline
- * reconnect affordance when recovery is possible, or a calm unavailable state
- * for incompatible auth/resource containment. The app can start the right
- * recovery flow (OAuth reconnect for the surviving connection, or credential
+ * A tool call hit a missing or lapsed connection. The broker reports that
+ * condition as a tool error and the turn continues; reconnecting never resumes
+ * or replays the original call. Carries the structured `tool.auth_needed`
+ * payload so the renderer can draw a clean inline recovery affordance (provider
+ * logo + one human line + a Connect/Reconnect button) and the app can start the
+ * right flow (OAuth reconnect for the surviving connection, or credential
  * re-entry for an api-key one). The `reason` shapes the human copy but is never
  * shown raw.
  */
@@ -244,14 +244,7 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  reason:
-    | "missing_connection"
-    | "expired"
-    | "insufficient_scope"
-    | "refresh_failed"
-    | "unsupported_auth"
-    | "resource_scope_unavailable"
-    | null;
+  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed" | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
   scopes: string[];
   /** The OAuth `resource` (RFC 8707) the reconnect should target, when supplied. */

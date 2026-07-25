@@ -44,6 +44,7 @@ function delivery(
 function fullComposer(overrides: Partial<ComposerState> = {}): ComposerState {
   return {
     ...delivery("hello", () => {}),
+    hasDraftContent: () => true,
     pause: async () => {},
     pausing: false,
     resume: async () => {},
