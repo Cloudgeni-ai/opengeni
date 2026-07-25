@@ -106,6 +106,11 @@ export {
   ensureDisplayStack,
   tearDownDisplayStack,
   type DesktopGeometry,
+  type DisplayStackCallerKind,
+  type DisplayStackClassification,
+  type DisplayStackTelemetryContext,
+  type DisplayStackTelemetryEvent,
+  type DisplayStackTelemetryStatus,
   type EnsureDisplayStackOptions,
   type EnsureDisplayStackResult,
 } from "./display-stack";
