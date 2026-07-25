@@ -1017,9 +1017,10 @@ export class SandboxChannelAService {
   /**
    * Detect repo roots within every supported workspace layout.
    *
-   * The platform seeds GitHub repositories at
-   * `repos/<owner>/<repo>`, which puts the `.git` marker at depth four from the
-   * workspace root. Do not reintroduce a fixed maxdepth here. Traversal is
+   * The platform normally seeds repositories at
+   * `repos/<encoded-host>/<owner>/<repo>`, while explicit mount paths and
+   * connected-machine layouts can be deeper. Do not reintroduce a fixed
+   * maxdepth here. Traversal is
    * bounded instead by pruning known machine/build residue, a wall-clock
    * timeout, and a result limit. `.git` may be either a directory (ordinary
    * clone/submodule) or a file (linked worktree).

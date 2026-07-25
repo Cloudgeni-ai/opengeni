@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
   RunRawModelStreamEvent,
@@ -19,16 +31,21 @@ import {
   azureCliLoginCommand,
   azureOpenAIDefaultQuery,
   buildOpenGeniAgent,
+  HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   composeAgentInstructions,
   coreInstructions,
   appendPersistentSessionSettings,
+  appendTurnInstructions,
   appendToolspaceInstructions,
   appendWorkspaceMemory,
   TOOLSPACE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
   oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
+  effectiveSkillSelectionsForAgent,
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   materializeSandboxFileDownloads,
@@ -49,6 +66,9 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  serializeApprovals,
+  serializeHumanInputRequests,
+  refreshToolspaceTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxFileDownloadsForAgent,
@@ -63,6 +83,7 @@ import {
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
+import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -97,6 +118,148 @@ const CODEX_APPS_ENTRY = (url: string) => ({
   name: "codex_apps",
   url,
   cacheToolsList: false,
+});
+
+describe("structured human-input runtime boundary", () => {
+  const interruption = {
+    name: HUMAN_INPUT_TOOL_NAME,
+    rawItem: {
+      callId: "human-call-1",
+      name: HUMAN_INPUT_TOOL_NAME,
+      arguments: JSON.stringify({
+        questions: [
+          {
+            id: "choice",
+            kind: "single_select",
+            prompt: "Choose one",
+            options: [{ id: "a", label: "A" }],
+          },
+        ],
+        allowSkip: true,
+        expiresInSeconds: 60,
+      }),
+    },
+  };
+
+  test("partitions human requests out of ordinary approval payloads", () => {
+    const ordinary = {
+      name: "dangerous_tool",
+      rawItem: { callId: "approval-1", name: "dangerous_tool", arguments: "{}" },
+    };
+    expect(serializeApprovals([interruption, ordinary])).toEqual([
+      {
+        id: "approval-1",
+        name: "dangerous_tool",
+        arguments: "{}",
+        raw: ordinary,
+      },
+    ]);
+    expect(serializeHumanInputRequests([ordinary, interruption])).toEqual([
+      {
+        toolCallId: "human-call-1",
+        input: {
+          questions: [
+            {
+              id: "choice",
+              kind: "single_select",
+              prompt: "Choose one",
+              options: [{ id: "a", label: "A" }],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: true,
+          expiresInSeconds: 60,
+        },
+      },
+    ]);
+  });
+
+  test("the built-in tool always interrupts and only returns its injected durable response", async () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const unresolvedAgent = buildOpenGeniAgent(settings, []);
+    const unresolvedTool = unresolvedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    expect(unresolvedTool?.type).toBe("function");
+    if (!unresolvedTool || unresolvedTool.type !== "function") throw new Error("tool missing");
+    expect(unresolvedTool.needsApproval).toBeDefined();
+    await expect(
+      unresolvedTool.invoke(
+        new RunContext(),
+        JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "human-call-1",
+            name: HUMAN_INPUT_TOOL_NAME,
+            arguments: "{}",
+          },
+        },
+      ),
+    ).rejects.toThrow(/without a durable response/i);
+
+    const resumedAgent = buildOpenGeniAgent(settings, [], {
+      humanInputResponse: {
+        requestId: "00000000-0000-4000-8000-000000000001",
+        toolCallId: "human-call-1",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "q", values: ["Because"] }],
+        },
+      },
+    });
+    const resumedTool = resumedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    if (!resumedTool || resumedTool.type !== "function") throw new Error("tool missing");
+    expect(
+      JSON.parse(
+        String(
+          await resumedTool.invoke(
+            new RunContext(),
+            JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+            {
+              toolCall: {
+                type: "function_call",
+                callId: "human-call-1",
+                name: HUMAN_INPUT_TOOL_NAME,
+                arguments: "{}",
+              },
+            },
+          ),
+        ),
+      ),
+    ).toEqual({
+      requestId: "00000000-0000-4000-8000-000000000001",
+      outcome: "answered",
+      answers: [{ questionId: "q", values: ["Because"] }],
+    });
+  });
+
+  test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          ...interruption,
+          rawItem: { ...interruption.rawItem, arguments: "not-json" },
+        },
+      ]),
+    ).toThrow(/invalid JSON/i);
+  });
+
+  test("rejects a human-input interruption without a stable tool-call identity", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          toolName: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [{ id: "q", kind: "text", prompt: "Why?" }],
+          }),
+        },
+      ]),
+    ).toThrow(/stable tool-call identity/i);
+  });
 });
 
 describe("runtime event normalization", () => {
@@ -1340,7 +1503,7 @@ describe("runtime event normalization", () => {
     "You are an OpenGeni workspace agent.",
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-    "Repository resources are mounted under repos/<owner>/<repo>.",
+    "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
@@ -1436,6 +1599,27 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Be terse.",
     });
     expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
+  });
+
+  test("per-turn instructions compose after the durable session persona and disappear when absent", () => {
+    expect(appendTurnInstructions("base")).toBe("base");
+    expect(appendTurnInstructions("base", "   ")).toBe("base");
+
+    const withTurnContext = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Persistent session rule.",
+      turnInstructions: "Current host context: record 42 is selected.",
+    });
+    expect(withTurnContext.instructions).toBe(
+      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule. Current host context: record 42 is selected.`,
+    );
+
+    const nextTurn = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Persistent session rule.",
+    });
+    expect(nextTurn.instructions).toBe(
+      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule.`,
+    );
+    expect(nextTurn.instructions).not.toContain("record 42");
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
@@ -1544,6 +1728,7 @@ describe("runtime event normalization", () => {
   test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     // Default (feature off, no seed) never carries it — the historical preamble.
@@ -1558,6 +1743,7 @@ describe("runtime event normalization", () => {
       [],
       {
         toolspaceTokenSeed: "ogd_seed",
+        toolspaceTokenSessionId: "session-instructions",
       },
     );
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
@@ -1575,12 +1761,21 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
+  test("a Toolspace bearer cannot be built without its durable session identity", () => {
+    expect(() =>
+      buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+        toolspaceTokenSeed: "ogd_unscoped",
+      }),
+    ).toThrow("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  });
+
   test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       instructionsTemplate: template,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     // Exact ordering: workspace persona + CORE, then the toolspace directive,
     // then the session slice last (host/session specificity wins).
@@ -1600,6 +1795,7 @@ describe("runtime event normalization", () => {
       workspaceMemory,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
 
     expect(agent.instructions).toBe(
@@ -1618,6 +1814,7 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
@@ -1638,7 +1835,7 @@ describe("runtime event normalization", () => {
     // It must name only generic substrate handles (ogtool, $OPENGENI_TOOLSPACE_*),
     // never a host/product name.
     expect(TOOLSPACE_PROGRAMMATIC_DIRECTIVE).toBe(
-      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
+      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
     );
   });
 
@@ -1930,12 +2127,89 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
       type: "git_repo",
       host: "github.com",
       repo: "acme/app",
       ref: "main",
     });
+  });
+
+  test("materializes same-name cross-provider repositories at distinct default paths", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/app",
+        ref: "main",
+      },
+    ]);
+    expect(Object.keys(manifest.entries).sort()).toEqual([
+      "repos/dev.azure.com/acme/project/_git/app",
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+    ]);
+  });
+
+  test("preserves a custom Git HTTPS port in the manifest remote", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://git.example.com:8443/acme/app.git",
+        ref: "main",
+      },
+    ]);
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+      type: "git_repo",
+      host: "git.example.com:8443",
+      repo: "acme/app",
+    });
+  });
+
+  test("fails before sandbox execution on case-folded explicit mount collisions", () => {
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+        mountPath: "repos/Shared/App",
+      },
+      {
+        kind: "repository" as const,
+        uri: "https://gitlab.com/acme/two.git",
+        ref: "main",
+        mountPath: "repos/shared/app",
+      },
+    ];
+    expect(() => buildManifest(testSettings(), resources)).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand(resources)).toThrow(
+      "resource mount path is already attached",
+    );
+  });
+
+  test("fails before sandbox execution on a repeated identical resource", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    expect(() => buildManifest(testSettings(), [resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand([resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
   });
 
   test("keeps GitHub App repository resources out of SDK git repo materialization", () => {
@@ -1948,7 +2222,7 @@ describe("runtime event normalization", () => {
         githubRepositoryId: 456,
       },
     ]);
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1969,7 +2243,7 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -2015,7 +2289,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -2398,6 +2672,8 @@ describe("runtime event normalization", () => {
         },
         runAs: "sandbox",
         toolspaceTokenSeed: "ogd_toolspace_live",
+        toolspaceTokenFile:
+          "/workspace/.opengeni/toolspace-tokens/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       } as any,
     );
 
@@ -2408,6 +2684,37 @@ describe("runtime event normalization", () => {
     expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
       cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
     );
+  });
+
+  test("TOOLSPACE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opengeni-toolspace-refresh-"));
+    try {
+      const session = {
+        exec: async (args: { cmd: string }) => {
+          const proc = Bun.spawn(["sh", "-lc", args.cmd], {
+            cwd: home,
+            env: { ...process.env, HOME: home },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+            proc.exited,
+          ]);
+          return { exitCode, stdout, stderr };
+        },
+      };
+
+      await refreshToolspaceTokenFile(session as never, "ogd_renewed");
+      const tokenDir = join(home, ".opengeni");
+      const tokenFile = join(tokenDir, "toolspace-token");
+      expect(readFileSync(tokenFile, "utf8")).toBe("ogd_renewed");
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(readdirSync(tokenDir)).toEqual(["toolspace-token"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("fails repository clone hook when sandbox command is still running", async () => {
@@ -2495,7 +2802,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -2667,7 +2974,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -2733,7 +3040,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -4221,6 +4528,33 @@ describe("pack skills in the sandbox skill index", () => {
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
+    expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
+  });
+
+  test("an explicit curated library selection is materialized and indexed", () => {
+    const entry = listSkillLibraryEntries().find(
+      (candidate) => candidate.id === "azure-verified-modules",
+    );
+    expect(entry).toBeDefined();
+    const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
+    const source = lazySkillSourceWithPackSkills(
+      [],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children[loaded.skill.name].type).toBe("dir");
+    expect(sourceDir.children[loaded.skill.name].children["SKILL.md"].content).toContain(
+      "Azure Verified Modules",
+    );
+    expect((source.getIndex?.(emptyManifest, ".agents") ?? []).map((item) => item.name)).toContain(
+      "azure-verified-modules",
+    );
   });
 
   test("pack skills join the bundled skills in one lazy skill index", () => {
@@ -4278,6 +4612,31 @@ describe("pack skills in the sandbox skill index", () => {
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
     expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+  });
+
+  test("a pack skill has precedence over an explicitly selected curated skill", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const source = lazySkillSourceWithPackSkills(
+      [
+        {
+          name: loaded.skill.name,
+          description: "Pack override.",
+          files: [{ path: "SKILL.md", content: "# Pack override\n" }],
+        },
+      ],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const entries = (source.getIndex?.(emptyManifest, ".agents") ?? []).filter(
+      (entry) => entry.name === loaded.skill.name,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.description).toBe("Pack override.");
   });
 
   test("rejects unsafe pack skill content instead of mounting it", () => {
@@ -4341,6 +4700,102 @@ describe("pack skills in the sandbox skill index", () => {
       }>
     ).find((capability) => capability.type === "skills");
     expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+  });
+
+  test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+      skillLibrarySkills: [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+      skillLibrarySelections: [
+        {
+          id: loaded.entry.id,
+          name: loaded.entry.name,
+          source: "library",
+          version: loaded.entry.version,
+          contentSha256: loaded.entry.contentSha256,
+          reason: "enabled workspace capability installation",
+        },
+      ],
+    });
+    expect(effectiveSkillSelectionsForAgent(agent)).toContainEqual({
+      id: loaded.entry.id,
+      name: loaded.entry.name,
+      source: "library",
+      version: loaded.entry.version,
+      contentSha256: loaded.entry.contentSha256,
+      reason: "enabled workspace capability installation",
+    });
+  });
+});
+
+describe("curated skill-library artifact integrity", () => {
+  function withArtifact(run: (root: string) => void): void {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-skill-library-"));
+    try {
+      mkdirSync(join(root, "references"));
+      writeFileSync(join(root, "SKILL.md"), "# Reviewed skill\n", "utf8");
+      writeFileSync(join(root, "references", "runbook.md"), "Runbook bytes.\n", "utf8");
+      run(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function baseline(root: string): string {
+    return readSkillLibraryArtifact(root).contentSha256;
+  }
+
+  test("hashes and verifies every recursively materialized file", () => {
+    withArtifact((root) => {
+      const artifact = readSkillLibraryArtifact(root);
+      expect(artifact.files.map((file) => file.path)).toEqual([
+        "SKILL.md",
+        "references/runbook.md",
+      ]);
+      expect(verifySkillLibraryArtifact(root, artifact.contentSha256)).toEqual(artifact);
+    });
+  });
+
+  test("rejects an added file under an unchanged reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "injected.md"), "Unreviewed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a modified file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "runbook.md"), "Changed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a deleted file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      rmSync(join(root, "references", "runbook.md"));
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects unsafe paths and symbolic links before hashing", () => {
+    withArtifact((root) => {
+      writeFileSync(join(root, "unsafe\\path.md"), "Unsafe path.\n", "utf8");
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/unsafe path/);
+    });
+
+    withArtifact((root) => {
+      symlinkSync("SKILL.md", join(root, "linked.md"));
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
+    });
   });
 });
 

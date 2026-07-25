@@ -1,9 +1,16 @@
 import type { Settings } from "@opengeni/config";
 import {
+  gitCredentialBindingIdForRepository,
+  gitCredentialProviderForRepository,
+  defaultRepositoryMountPath,
   mergeResourceRefs as mergeContractResourceRefs,
   mergeToolRefs,
+  normalizeRepositorySubpath,
+  normalizeResourceMountPath,
   resourceIdentityKey,
+  resourceMountPathCollisionKey,
   ResourceRefConflictError,
+  ResourceMountPathError,
   stableJson,
   type ResourceRef,
   type ToolRef,
@@ -71,6 +78,7 @@ export function withDefaultEnabledCapabilityMcpTools(
 export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
   const mountPaths = new Map<string, string>();
   const identities = new Map<string, string>();
+  const credentialBindingProviders = new Map<string, string>();
   const seenResources = new Set<string>();
   const out: ResourceRef[] = [];
   for (const resource of resources) {
@@ -93,14 +101,40 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
         throw new HTTPException(422, { message: "repository URL must include owner and repo" });
       }
       const repo = parts.join("/");
-      const mountPath = normalizeMountPath(resource.mountPath ?? `repos/${repo}`);
+      const normalizedUri = `https://${url.host.toLowerCase()}/${repo}.git`;
+      const mountPath = normalizeMountPath(
+        resource.mountPath ?? defaultRepositoryMountPath(normalizedUri),
+      );
+      const credentialProvider = gitCredentialProviderForRepository(resource);
+      const credentialBindingId = gitCredentialBindingIdForRepository(resource, credentialProvider);
+      if (
+        (resource.credentialBindingId || resource.connectionId || resource.access) &&
+        !credentialProvider
+      ) {
+        throw new HTTPException(422, {
+          message: "repository credential bindings and access intent require a Git provider",
+        });
+      }
+      if (credentialProvider && credentialBindingId) {
+        const boundProvider = credentialBindingProviders.get(credentialBindingId);
+        if (boundProvider && boundProvider !== credentialProvider) {
+          throw new HTTPException(422, {
+            message: `credential binding ${credentialBindingId} is assigned to multiple Git providers`,
+          });
+        }
+        credentialBindingProviders.set(credentialBindingId, credentialProvider);
+      }
       normalized = {
         kind: "repository",
-        uri: `https://${url.hostname.toLowerCase()}/${repo}.git`,
+        uri: normalizedUri,
         ref: resource.ref.trim(),
         mountPath,
-        ...(resource.subpath ? { subpath: normalizeMountPath(resource.subpath) } : {}),
+        ...(resource.subpath ? { subpath: normalizeRepositorySubpath(resource.subpath) } : {}),
         ...(resource.provider ? { provider: resource.provider } : {}),
+        ...(resource.credentialBindingId
+          ? { credentialBindingId: resource.credentialBindingId }
+          : {}),
+        ...(resource.access ? { access: resource.access } : {}),
         ...(resource.repositoryId !== undefined ? { repositoryId: resource.repositoryId } : {}),
         ...(resource.installationId !== undefined
           ? { installationId: resource.installationId }
@@ -114,14 +148,17 @@ export function normalizeResources(resources: ResourceRef[]): ResourceRef[] {
       };
     }
     const key = stableJson(normalized);
-    const mounted = normalized.mountPath ? mountPaths.get(normalized.mountPath) : undefined;
+    const mountCollisionKey = normalized.mountPath
+      ? resourceMountPathCollisionKey(normalized.mountPath)
+      : undefined;
+    const mounted = mountCollisionKey ? mountPaths.get(mountCollisionKey) : undefined;
     if (mounted && mounted !== key) {
       throw new HTTPException(422, {
         message: `duplicate resource mount path: ${normalized.mountPath}`,
       });
     }
     if (normalized.mountPath) {
-      mountPaths.set(normalized.mountPath, key);
+      mountPaths.set(mountCollisionKey!, key);
     }
     const identity = resourceIdentityKey(normalized);
     const seenIdentity = identities.get(identity);
@@ -153,18 +190,23 @@ export function mergeResourceRefs(
   }
 }
 
-export function validateGitHubRepositorySelectionShape(resources: ResourceRef[]): number | null {
+export function validateGitHubRepositorySelectionShapes(resources: ResourceRef[]): number[] {
   const selected = gitHubRepositorySelections(resources);
   if (selected.length === 0) {
-    return null;
+    return [];
   }
-  const installationId = selected[0]!.installationId;
-  if (selected.some((item) => item.installationId !== installationId)) {
+  return [...new Set(selected.map((item) => item.installationId))];
+}
+
+/** @deprecated Use validateGitHubRepositorySelectionShapes for multi-installation sessions. */
+export function validateGitHubRepositorySelectionShape(resources: ResourceRef[]): number | null {
+  const installationIds = validateGitHubRepositorySelectionShapes(resources);
+  if (installationIds.length > 1) {
     throw new HTTPException(422, {
       message: "GitHub App repository resources must belong to one installation",
     });
   }
-  return installationId;
+  return installationIds[0] ?? null;
 }
 
 function gitHubRepositorySelections(
@@ -203,25 +245,28 @@ export async function validateGitHubRepositorySelection(
   workspaceId: string,
   resources: ResourceRef[],
 ): Promise<void> {
-  const installationId = validateGitHubRepositorySelectionShape(resources);
-  if (installationId === null) {
+  const installationIds = validateGitHubRepositorySelectionShapes(resources);
+  if (installationIds.length === 0) {
     return;
   }
-  const repositoryIds = gitHubRepositorySelections(resources).map(
-    (selection) => selection.repositoryId,
-  );
-  if (
-    !(await areGitHubRepositoriesAllowedForWorkspace(
-      db,
-      workspaceId,
-      installationId,
-      repositoryIds,
-    ))
-  ) {
-    throw new HTTPException(422, {
-      message:
-        "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
-    });
+  const selections = gitHubRepositorySelections(resources);
+  for (const installationId of installationIds) {
+    const repositoryIds = selections
+      .filter((selection) => selection.installationId === installationId)
+      .map((selection) => selection.repositoryId);
+    if (
+      !(await areGitHubRepositoriesAllowedForWorkspace(
+        db,
+        workspaceId,
+        installationId,
+        repositoryIds,
+      ))
+    ) {
+      throw new HTTPException(422, {
+        message:
+          "GitHub App repository resources must be authorized for a GitHub App installation linked to this workspace",
+      });
+    }
   }
 }
 
@@ -252,11 +297,12 @@ export async function validateFileResources(
 }
 
 function normalizeMountPath(path: string): string {
-  const normalized = path.trim().replace(/^\/+|\/+$/g, "");
-  if (!normalized || normalized.includes("..")) {
+  try {
+    return normalizeResourceMountPath(path);
+  } catch (error) {
+    if (!(error instanceof ResourceMountPathError)) throw error;
     throw new HTTPException(422, { message: `invalid resource mount path: ${path}` });
   }
-  return normalized;
 }
 
 function parseResourceUrl(uri: string): URL {

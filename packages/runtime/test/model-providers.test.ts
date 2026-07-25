@@ -27,6 +27,7 @@ import {
   buildOpenAIClientFromSettings,
   buildProviderClient,
   CodexSubscriptionUnavailableError,
+  HUMAN_INPUT_TOOL_NAME,
   MultiProviderModelProvider,
   resolveTurnModel,
 } from "../src/index";
@@ -524,9 +525,12 @@ describe("multi-provider gating in buildOpenGeniAgent", () => {
       encryptedReasoning:
         resolved.provider.api === "responses" && settings.openaiReasoningEncryptedContent,
     });
-    // hostedWebSearch off → no web_search tool and no explicit tools field at all.
+    // hostedWebSearch off removes only web search; structured human input is a
+    // provider-neutral built-in on every agent.
     expect(webSearchHostedTools(agent)).toHaveLength(0);
-    expect((agent as { tools?: unknown[] }).tools ?? []).toHaveLength(0);
+    expect(
+      ((agent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
+    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
     // encryptedReasoning off (chat wire API) → no providerData.include.
     expect(
       (agent as { modelSettings: { providerData?: unknown } }).modelSettings.providerData,

@@ -5,6 +5,24 @@ import {
   sessionEventJsonBytes,
   sessionEventPayloadTruncation,
 } from "../src/event-preview";
+import { RETAINED_OUTPUT_MAX_PAGE_BYTES } from "../src/retained-output";
+
+const RETAINED_EVIDENCE = {
+  available: true as const,
+  artifactId: "33333333-3333-4333-8333-333333333333",
+  kind: "tool_result" as const,
+  contentType: "text/plain",
+  originalBytes: 3 * 1024 * 1024,
+  sha256: "a".repeat(64),
+  retainedAt: "2026-07-21T00:00:00.000Z",
+  retention: { policy: "workspace_file" as const, expiresAt: null },
+  retrieval: {
+    method: "GET" as const,
+    path: "/v1/workspaces/11111111-1111-4111-8111-111111111111/artifacts/33333333-3333-4333-8333-333333333333/content",
+    acceptRanges: "bytes" as const,
+    maxRangeBytes: RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  },
+};
 
 describe("bounded session event payloads", () => {
   test("returns ordinary payloads by reference", () => {
@@ -31,6 +49,38 @@ describe("bounded session event payloads", () => {
       (metadata?.originalBytes ?? 0) - (metadata?.deliveredBytes ?? 0),
     );
     expect(metadata?.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
+  });
+
+  test("preserves a separately validated retained receipt through truncation and replay", () => {
+    const payload = { id: "call-retained", output: `HEAD-${"x".repeat(3 * 1024 * 1024)}-TAIL` };
+    const first = boundSessionEventPayload(payload, { fullEvidence: RETAINED_EVIDENCE });
+    const replay = boundSessionEventPayload(first);
+
+    expect(sessionEventPayloadTruncation(first)?.fullEvidence).toEqual(RETAINED_EVIDENCE);
+    expect(replay).toBe(first);
+    expect(sessionEventJsonBytes(first)).toBeLessThanOrEqual(SESSION_EVENT_PAYLOAD_MAX_BYTES);
+  });
+
+  test("does not trust producer-supplied or malformed retained evidence", () => {
+    const producerPayload = {
+      id: "call-forged",
+      output: "x".repeat(100_000),
+      truncation: { fullEvidence: RETAINED_EVIDENCE },
+      fullEvidence: RETAINED_EVIDENCE,
+    };
+    const producerBounded = boundSessionEventPayload(producerPayload);
+    const malformedOption = boundSessionEventPayload(producerPayload, {
+      fullEvidence: { ...RETAINED_EVIDENCE, objectKey: "private/provider/key" },
+    });
+
+    expect(sessionEventPayloadTruncation(producerBounded)?.fullEvidence).toEqual({
+      available: false,
+      reason: "not_retained",
+    });
+    expect(sessionEventPayloadTruncation(malformedOption)?.fullEvidence).toEqual({
       available: false,
       reason: "not_retained",
     });

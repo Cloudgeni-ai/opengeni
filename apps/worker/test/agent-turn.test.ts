@@ -38,6 +38,7 @@ import {
   createCompactionModelUsageEventState,
   createModelResponseUsageEventState,
   createTurnSandboxProvisioner,
+  drainAttemptOwnedSandboxWriters,
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   filterUnmaterializedSandboxFileDownloads,
@@ -58,6 +59,7 @@ import {
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
+  stableHumanInputRequestId,
   turnOperationCancellationFailure,
   waitForTurnOperation,
   waitForTurnFinalizerStep,
@@ -91,6 +93,16 @@ function functionResult(callId: string) {
     output: { type: "text", text: "ok" },
   };
 }
+
+describe("structured human-input identity", () => {
+  test("is stable for one logical tool call and distinct across calls or turns", () => {
+    const first = stableHumanInputRequestId("session-1", "turn-1", "call-1");
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-1")).toBe(first);
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-2")).not.toBe(first);
+    expect(stableHumanInputRequestId("session-1", "turn-2", "call-1")).not.toBe(first);
+    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+});
 
 async function actualCodexStreamingFailure(event: Record<string, unknown>): Promise<{
   calls: number;
@@ -757,6 +769,7 @@ describe("production model-response usage callback authority", () => {
           workspaceId: "ws-1",
           sessionId: "sess-1",
           turnId: "turn-1",
+          turnAttemptId: "attempt-1",
           provider: "codex-subscription",
           providerApi: "responses",
           model: "codex/gpt-5.6-sol",
@@ -853,6 +866,7 @@ describe("production model-response usage callback authority", () => {
         workspaceId: "ws-1",
         sessionId: "sess-1",
         turnId: "turn-1",
+        turnAttemptId: "attempt-2",
         provider: "codex-subscription",
         providerApi: "responses",
         model: "codex/gpt-5.6-sol",
@@ -882,6 +896,109 @@ describe("production model-response usage callback authority", () => {
       expect(metricsAfterRestart).toMatch(
         /opengeni_model_input_tokens_count\{[^}]*provider="codex-subscription"[^}]*\} 1\b/,
       );
+    } finally {
+      recordUsageSpy.mockRestore();
+    }
+  });
+
+  test("keeps no-id response ordinals unique across an in-activity compaction retry", async () => {
+    const observability = createObservability(testSettings(), { component: "worker" });
+    const billingRows = new Map<string, Record<string, unknown>>();
+    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
+      async (_db, input) => {
+        if (!billingRows.has(input.idempotencyKey)) {
+          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
+        }
+      },
+    );
+    try {
+      const durableUsageSourceKeys = new Set<string>();
+      const publish = async (batch: any[]) => ({
+        accepted: true,
+        events: batch.map((event) => {
+          const sourceKey = event.payload?.sourceKey as string;
+          const duplicate = durableUsageSourceKeys.has(sourceKey);
+          durableUsageSourceKeys.add(sourceKey);
+          return {
+            ...event,
+            id: crypto.randomUUID(),
+            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+          };
+        }),
+      });
+      const terminal = (inputTokens: number, outputTokens: number) =>
+        new RunRawModelStreamEvent({
+          type: "response_done",
+          response: {
+            output: [],
+            usage: {
+              inputTokens,
+              outputTokens,
+              totalTokens: inputTokens + outputTokens,
+            },
+          },
+        } as any);
+      const state = createModelResponseUsageEventState();
+      const emittedSourceKeys = new Set<string>();
+      const process = (event: RunRawModelStreamEvent) =>
+        processModelResponseUsageEvent({
+          event,
+          state,
+          dispatchId: "activity-A",
+          settings: testSettings(),
+          db: {} as any,
+          observability,
+          publish: publish as any,
+          accountId: "acct-1",
+          workspaceId: "ws-1",
+          sessionId: "sess-1",
+          turnId: "turn-1",
+          turnAttemptId: "attempt-1",
+          provider: "codex-subscription",
+          providerApi: "responses",
+          model: "codex/gpt-5.6-sol",
+          metricProvider: "codex-subscription",
+          isCodexTurn: true,
+          servingCredentialId: "credential-1",
+          priorSessionCredentialId: "credential-1",
+          emittedSourceKeys,
+          renewLease: async () => undefined,
+          leaseLost: () => false,
+          leaseLostMessage: "lease lost",
+          setLastInputTokens: async () => undefined,
+        });
+
+      const beforeCompaction = await process(terminal(100, 20));
+      // The compaction retry re-enters the stream callback with this same
+      // activity-wide state rather than resetting responseUsageCount.
+      const afterCompaction = await process(terminal(200, 30));
+
+      expect(beforeCompaction).toMatchObject({
+        status: "processed",
+        sourceKey: "activity-A:response-1",
+        authoritative: true,
+      });
+      expect(afterCompaction).toMatchObject({
+        status: "processed",
+        sourceKey: "activity-A:response-2",
+        authoritative: true,
+      });
+      expect(state.responseUsageCount).toBe(2);
+      expect(durableUsageSourceKeys).toEqual(
+        new Set(["activity-A:response-1", "activity-A:response-2"]),
+      );
+      expect([...billingRows.values()]).toEqual([
+        expect.objectContaining({
+          eventType: "model.cost",
+          quantity: 0,
+          idempotencyKey: "usage:model.cost:turn-1:activity-A:response-1",
+        }),
+        expect.objectContaining({
+          eventType: "model.cost",
+          quantity: 0,
+          idempotencyKey: "usage:model.cost:turn-1:activity-A:response-2",
+        }),
+      ]);
     } finally {
       recordUsageSpy.mockRestore();
     }
@@ -941,6 +1058,7 @@ describe("production model-response usage callback authority", () => {
           workspaceId: "ws-1",
           sessionId: "sess-1",
           turnId: "turn-1",
+          turnAttemptId: "attempt-1",
           provider: "codex-subscription",
           providerApi: "responses",
           model: "codex/gpt-5.6-sol",
@@ -1794,6 +1912,76 @@ describe("worker shutdown preemption", () => {
         failure: persistenceFailure,
       }),
     ).not.toThrow();
+  });
+
+  test("does not publish quiescence until tool and credential writers physically drain", async () => {
+    const steps: string[] = [];
+    let releaseTools!: () => void;
+    let releaseToolspaceWrite!: () => void;
+    let releaseRunCredentialWrite!: () => void;
+    const toolsDrained = new Promise<void>((resolve) => {
+      releaseTools = resolve;
+    });
+    const toolspaceWriteDrained = new Promise<void>((resolve) => {
+      releaseToolspaceWrite = resolve;
+    });
+    const runCredentialWriteDrained = new Promise<void>((resolve) => {
+      releaseRunCredentialWrite = resolve;
+    });
+
+    let receipts = 0;
+    const boundary = drainAttemptOwnedSandboxWriters({
+      toolCancellationFence: {
+        cancel: () => steps.push("tools-cancelled"),
+        waitForQuiescence: async () => {
+          steps.push("tools-draining");
+          await toolsDrained;
+          steps.push("tools-drained");
+        },
+      },
+      cancellationReason: new Error("STEER"),
+      toolspaceTokenRenewal: {
+        stop: async () => {
+          steps.push("toolspace-draining");
+          await toolspaceWriteDrained;
+          steps.push("toolspace-drained");
+        },
+      },
+      runCredentialRenewal: {
+        stop: async () => {
+          steps.push("run-credentials-draining");
+          await runCredentialWriteDrained;
+          steps.push("run-credentials-drained");
+        },
+      },
+    }).then(() => {
+      receipts += 1;
+      steps.push("receipt");
+    });
+
+    await Bun.sleep(0);
+    expect(steps).toEqual(["tools-cancelled", "tools-draining"]);
+    expect(receipts).toBe(0);
+
+    releaseTools();
+    await Bun.sleep(0);
+    expect(steps).toEqual([
+      "tools-cancelled",
+      "tools-draining",
+      "tools-drained",
+      "toolspace-draining",
+    ]);
+    expect(receipts).toBe(0);
+
+    releaseToolspaceWrite();
+    await Bun.sleep(0);
+    expect(steps.at(-1)).toBe("run-credentials-draining");
+    expect(receipts).toBe(0);
+
+    releaseRunCredentialWrite();
+    await boundary;
+    expect(steps.at(-1)).toBe("receipt");
+    expect(receipts).toBe(1);
   });
 
   test("retries one immutable quiescence proof after receipt exhaustion", async () => {

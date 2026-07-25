@@ -229,9 +229,10 @@ export async function verifyGitHubInstallationAccessForUser(
 
 /**
  * Exchange a GitHub App user-authorization code and discover the installations
- * and repositories the user can explicitly access. Repository permission bits
- * are returned so the API can require admin authority before delegating an
- * app's write-capable installation to an OpenGeni workspace.
+ * and repositories the user can explicitly access. This is compatibility
+ * discovery metadata only: visibility and repository permission bits do not
+ * prove that the human may install, configure, or bind the App installation.
+ * No production binding path may treat this result as authority.
  */
 export async function authorizeGitHubAppUser(
   settings: Settings,
