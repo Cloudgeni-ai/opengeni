@@ -427,7 +427,6 @@ type MountedGroupWindow = {
 type KeyedTimelineGroup = {
   group: TimelineGroup;
   key: string;
-  itemIds: string[];
 };
 
 /**
@@ -441,15 +440,10 @@ type KeyedTimelineGroup = {
 function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
   const previousRef = useRef<KeyedTimelineGroup[]>([]);
   const keyedGroups = useMemo(() => {
-    const previousByItemId = new Map<string, KeyedTimelineGroup[]>();
+    const previousByItemId = new Map<string, KeyedTimelineGroup>();
     for (const previous of previousRef.current) {
-      for (const itemId of previous.itemIds) {
-        const matches = previousByItemId.get(itemId);
-        if (matches) {
-          matches.push(previous);
-        } else {
-          previousByItemId.set(itemId, [previous]);
-        }
+      for (const itemId of timelineGroupItemIds(previous.group)) {
+        previousByItemId.set(itemId, previous);
       }
     }
 
@@ -458,9 +452,8 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
       const itemIds = timelineGroupItemIds(group);
       let retainedKey: string | undefined;
       for (const itemId of itemIds) {
-        const previousMatches = previousByItemId.get(itemId);
-        const previous = previousMatches?.find((candidate) => !usedKeys.has(candidate.key));
-        if (previous) {
+        const previous = previousByItemId.get(itemId);
+        if (previous && !usedKeys.has(previous.key)) {
           retainedKey = previous.key;
           break;
         }
@@ -474,7 +467,7 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
         collision += 1;
       }
       usedKeys.add(key);
-      return { group, key, itemIds };
+      return { group, key };
     });
   }, [allGroups]);
 
@@ -506,8 +499,10 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
   const previousGroupKeysRef = useRef<string[]>([]);
   const groupKeys = useMemo(() => {
     const nextKeys = allGroups.map((group) => group.key);
-    return equalGroupKeys(previousGroupKeysRef.current, nextKeys)
-      ? previousGroupKeysRef.current
+    const previousKeys = previousGroupKeysRef.current;
+    return nextKeys.length === previousKeys.length &&
+      nextKeys.every((key, index) => key === previousKeys[index])
+      ? previousKeys
       : nextKeys;
   }, [allGroups]);
   useLayoutEffect(() => {
@@ -515,21 +510,23 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
   }, [groupKeys]);
   const [window, setWindow] = useState<MountedGroupWindow>(() => ({
     groupKeys,
-    visibleStart: initialVisibleGroupIndex(allGroups.length),
+    visibleStart: Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS),
   }));
 
   const lastPossibleStart = Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS);
   let visibleStart = 0;
   if (allGroups.length > 0) {
     const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
-    const previousMountedKeys = window.groupKeys.slice(window.visibleStart);
-    const retainedStart = previousMountedKeys
-      .map((key) => currentIndexByKey.get(key))
-      .find((index): index is number => index !== undefined);
+    let retainedStart: number | undefined;
+    for (const key of window.groupKeys.slice(window.visibleStart)) {
+      const index = currentIndexByKey.get(key);
+      if (index !== undefined) {
+        retainedStart = index;
+        break;
+      }
+    }
     visibleStart =
-      retainedStart === undefined
-        ? initialVisibleGroupIndex(allGroups.length)
-        : Math.min(retainedStart, lastPossibleStart);
+      retainedStart === undefined ? lastPossibleStart : Math.min(retainedStart, lastPossibleStart);
   }
 
   useEffect(() => {
@@ -555,10 +552,6 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
     mountedGroups: allGroups.slice(visibleStart),
     mountingOlderGroups: visibleStart > 0,
   };
-}
-
-function initialVisibleGroupIndex(groupCount: number): number {
-  return Math.max(0, groupCount - INITIAL_MOUNTED_GROUPS);
 }
 
 function requestFrame(callback: FrameRequestCallback): number {
@@ -701,10 +694,6 @@ function timelineGroupKey(group: TimelineGroup): string {
     case "turn":
       return group.id;
   }
-}
-
-function equalGroupKeys(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((key, index) => key === right[index]);
 }
 
 function timelineGroupItemIds(group: TimelineGroup): string[] {
