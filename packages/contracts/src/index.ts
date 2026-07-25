@@ -7397,6 +7397,9 @@ export const SessionCapabilities = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // Echoed on viewer heartbeats (the split-brain fence).
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveComplete: z.boolean().default(false),
   viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
   FileSystem: z.object({
     available: z.boolean(),
@@ -7501,6 +7504,9 @@ export const ViewerHolder = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // The epoch the viewer is fenced on; echoed back on heartbeats.
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   viewerHeartbeatIntervalMs: z.number().int().positive(),
   // The desktop pixel tunnel URL the viewer connects to directly; null until
   // a viewer grant is minted (gated until then).
@@ -7864,6 +7870,9 @@ export const MachineView = z.object({
   state: MachineState,
   active: z.boolean(),
   isSessionGroup: z.boolean(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   os: z.string(),
   arch: z.string(),
   hasDisplay: z.boolean(),
@@ -7923,6 +7932,9 @@ export const SwapActiveSandboxResponse = z.object({
       "unsupported_backend_context",
       "transient_establishment",
       "concurrent_swap",
+      "recovery_in_progress",
+      "recovery_degraded",
+      "recovery_unrecoverable",
     ])
     .optional(),
 });

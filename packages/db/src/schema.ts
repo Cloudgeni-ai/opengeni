@@ -2309,6 +2309,14 @@ export const sandboxLeases = pgTable(
     // Epochs never approach 2^31, so the narrower type loses nothing.
     leaseEpoch: integer("lease_epoch").notNull().default(0),
 
+    // Monotonic mutation intent for the live workspace. Every acknowledged
+    // filesystem-writing operation advances this under the exact lease epoch +
+    // provider-instance fence BEFORE it reaches the provider. A verified
+    // archive fold copies the exact captured value into archive_generation in
+    // the same row update; equality is the only durable completeness proof.
+    workspaceGeneration: integer("workspace_generation").notNull().default(0),
+    archiveGeneration: integer("archive_generation"),
+
     // The group box-envelope (the "envelope split" Critical): the small recovery
     // descriptor to resume()-by-id the group's box without a per-session join.
     resumeBackendId: text("resume_backend_id"),
@@ -2362,6 +2370,87 @@ export const sandboxLeaseHolders = pgTable(
     ),
     staleIdx: index("sandbox_lease_holders_stale_idx").on(table.kind, table.lastHeartbeatAt),
     leaseIdx: index("sandbox_lease_holders_lease_idx").on(table.leaseId),
+  }),
+);
+
+// Durable admission ledger for every provider operation that may mutate a
+// persistable /workspace. The row is inserted atomically with the lease's
+// workspace_generation increment before the provider is invoked, then marked
+// physically settled after the provider promise resolves OR rejects. Capture
+// remains blocked by an unsettled row until either settlement lands or the
+// exact attempt carries the existing authoritative quiesced_at receipt.
+export const sandboxWorkspaceMutationAdmissions = pgTable(
+  "sandbox_workspace_mutation_admissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    leaseId: uuid("lease_id")
+      .notNull()
+      .references(() => sandboxLeases.id, { onDelete: "cascade" }),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    turnId: uuid("turn_id").notNull(),
+    attemptId: uuid("attempt_id").notNull(),
+    executionGeneration: integer("execution_generation").notNull(),
+    holderId: text("holder_id").notNull(),
+    leaseEpoch: integer("lease_epoch").notNull(),
+    providerInstanceId: text("provider_instance_id").notNull(),
+    workspaceGeneration: integer("workspace_generation").notNull(),
+    operation: text("operation").notNull(),
+    providerOutcome: text("provider_outcome", { enum: ["resolved", "rejected"] }),
+    admittedAt: timestamp("admitted_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    workspaceTurn: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceAttempt: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    leaseGeneration: uniqueIndex("sandbox_workspace_mutation_admissions_lease_generation_uq").on(
+      table.leaseId,
+      table.workspaceGeneration,
+    ),
+    blocking: index("sandbox_workspace_mutation_admissions_blocking_idx")
+      .on(table.leaseId, table.workspaceGeneration)
+      .where(sql`${table.settledAt} is null`),
+    attempt: index("sandbox_workspace_mutation_admissions_attempt_idx").on(
+      table.workspaceId,
+      table.attemptId,
+    ),
+    generationValid: check(
+      "sandbox_workspace_mutation_admissions_generation_check",
+      sql`${table.workspaceGeneration} > 0 and ${table.executionGeneration} > 0 and ${table.leaseEpoch} >= 0`,
+    ),
+    operationValid: check(
+      "sandbox_workspace_mutation_admissions_operation_check",
+      sql`octet_length(${table.operation}) between 1 and 128`,
+    ),
+    outcomeValid: check(
+      "sandbox_workspace_mutation_admissions_outcome_check",
+      sql`${table.providerOutcome} is null or ${table.providerOutcome} in ('resolved', 'rejected')`,
+    ),
+    settlementConsistent: check(
+      "sandbox_workspace_mutation_admissions_settlement_check",
+      sql`(${table.providerOutcome} is null and ${table.settledAt} is null)
+        or (${table.providerOutcome} is not null and ${table.settledAt} is not null)`,
+    ),
   }),
 );
 

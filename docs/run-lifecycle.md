@@ -288,6 +288,45 @@ does return, the worker immediately records the provider instance id on the
 warming lease before readiness/display/setup work; any later setup failure
 terminates that just-created sandbox before the lease can be retried.
 
+Lease liveness is not provider or workspace truth. The durable recovery
+projection independently records provider existence, archive availability,
+restore progress, and verified workspace readiness alongside lease liveness and
+epoch. API attach/swap paths therefore resume the exact live instance and pass a
+bounded command probe before reporting success. A legacy `warm` row projects to
+`unknown` until that verification succeeds; a provider `NOT_FOUND` instead
+retires only the exact `(lease_epoch, instance_id)` and advances the epoch once.
+
+A lost provider is rematerialized by one cold-to-warming winner. Under the lease
+row lock it selects one versioned archive revision containing archive byte/hash
+metadata and a deterministic workspace-tree fingerprint. Repeated starts with
+the same rematerialization id are idempotent; rivals and stale progress/commit
+writes are fenced. The runtime verifies archive bytes before hydration and the
+restored tree before `warm` publication. A partial hydrate or fingerprint
+mismatch terminates the unpublished box and leaves typed degraded/unrecoverable
+state; it never publishes a clean replacement, a previous revision, or a mixed
+snapshot. A legacy per-session archive can participate only after its archive
+fields—never provider identity—are imported and selected under that same lock.
+
+Concurrent routed calls may all discover the same missing provider. Exactly one
+observer wins the lease-loss transition; the others receive typed `superseded`
+recovery. Each ambiguous operation is invoked at most once and is never replayed
+on a replacement backend. During idle drain, a resumable cloud box is deleted
+only after a verified workspace capture is durably folded onto the fenced lease.
+Definitive `NOT_FOUND` before capture preserves any existing archive or records
+typed unrecoverable truth when no durable revision exists.
+
+Every operation that may mutate a persistable `/workspace` first enters a
+lease-scoped admission ledger. In one transaction, admission validates the exact
+attempt, session group, canonical turn-attempt holder, warm lease epoch, and
+provider identity, increments `workspace_generation`, and inserts the operation
+row. The exact provider promise is physically settled as `resolved` or
+`rejected`; a resolved result then passes the current attempt/holder/lease/provider
+acceptance fences before its output is accepted. Capture preflight and archive
+fold block on any unsettled admission at or below the captured generation. Only
+authoritative `session_turn_attempts.quiesced_at` for that exact attempt makes an
+abandoned admission non-blocking. No admitted operation is replayed after a
+provider rejection, provider loss, or failed acceptance fence.
+
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
 reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
@@ -469,10 +508,12 @@ the same one-frame 96-KiB connection queue, and REST pages use a separate 1-MiB
 byte envelope plus the last delivered sequence as the resume cursor. Replaying
 one guarded poison row must still advance to every later durable revision.
 
-Sandbox recovery state is persisted separately again, in
-`sandbox_session_envelopes`: the small versioned descriptor (provider handle /
-snapshot reference / manifest) used to reattach, snapshot-restore, or rebuild
-the session's sandbox on its next turn — decoupled from the RunState blob.
+Sandbox recovery state is persisted separately again. The group lease owns the
+authoritative provider/archive/restore/workspace projection and epoch;
+`sandbox_session_envelopes` stores the small per-session provider/manifest
+descriptor used to reattach and can supply a legacy archive only through the
+lease's atomic revision-selection step. Both are decoupled from the RunState
+blob.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.

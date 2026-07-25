@@ -94,6 +94,15 @@ export interface ResolvedActiveBackend {
   sandboxId: string | null;
   /** A label for diagnostics ("modal" | "selfhosted" | the sandbox name). */
   kind: string;
+  /** Exact durable home-lease epoch for a persistable provider. Absent for
+   * connected-machine and other non-persistable route targets. */
+  leaseEpoch?: number;
+  /** Exact durable provider identity paired with `leaseEpoch`. This is internal
+   * routing metadata only; it is never projected to an agent or public API. */
+  providerInstanceId?: string;
+  /** Active-pointer epoch observed when this route was resolved. The proxy fills
+   * this internally even when a resolver omits it. */
+  activeEpoch?: number;
 }
 
 export interface RoutingSandboxSessionDeps {
@@ -127,7 +136,38 @@ export interface RoutingSandboxSessionDeps {
   maxFenceRetries?: number;
   /** Optional structured-log sink for swap/fence transitions (diagnostics). */
   onTransition?: (event: RoutingTransitionEvent) => void;
+  /** Admit a filesystem-writing operation after resolving its exact route but
+   * before invoking the provider. A rejection fails closed and is deliberately
+   * outside provider fence-retry/error handling, so it can never replay the op
+   * against a rival backend. */
+  beforeMutation?: (input: { op: string; backend: ResolvedActiveBackend }) => Promise<unknown>;
+  /** Mark a mutation physically settled after its provider promise resolves OR
+   * rejects. A resolved result is also revalidated against the same durable
+   * route and attempt fence before its output is accepted. Settlement rejection
+   * leaves a fail-closed blocker and the mutation must never be replayed. */
+  afterMutation?: (input: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    admission: unknown;
+    outcome: "resolved" | "rejected";
+  }) => Promise<void>;
+  /** Called only when an operation against the default/home backend throws a
+   * non-fence error. Wiring may classify definitive provider disappearance and
+   * atomically retire the exact lease epoch. Returning a result makes dispatch
+   * throw a typed recovery-required error WITHOUT replaying the operation (the
+   * original mutation may have reached the provider). */
+  onDefaultBackendError?: (input: {
+    op: string;
+    error: unknown;
+    kind: string;
+    backend: ResolvedActiveBackend;
+  }) => Promise<DefaultBackendLossResult | null>;
 }
+
+export type DefaultBackendLossResult = {
+  leaseEpoch: number;
+  recovery: "pending" | "degraded" | "unrecoverable" | "superseded";
+};
 
 export interface RoutingTransitionEvent {
   type: "resolved" | "fenced-retry" | "epoch-changed";
@@ -143,6 +183,38 @@ export class RoutingUnsupportedError extends Error {
   readonly name = "RoutingUnsupportedError";
   constructor(op: string, kind: string) {
     super(`the active sandbox (${kind}) does not support "${op}"`);
+  }
+}
+
+export class RoutingBackendRecoveryRequiredError extends Error {
+  readonly name = "RoutingBackendRecoveryRequiredError";
+  readonly retryable: boolean;
+
+  constructor(
+    public readonly op: string,
+    public readonly leaseEpoch: number,
+    public readonly recovery: DefaultBackendLossResult["recovery"],
+  ) {
+    super(
+      `sandbox backend disappeared during ${op}; recovery is ${recovery} at epoch ${leaseEpoch}`,
+    );
+    this.retryable = recovery === "pending" || recovery === "superseded";
+  }
+}
+
+/** A mutating provider call was admitted but could not be settled against the
+ * exact route that admitted it. The provider may have applied the effect, so the
+ * proxy rejects the output and explicitly forbids an automatic replay. */
+export class RoutingMutationOutcomeUnknownError extends Error {
+  readonly name = "RoutingMutationOutcomeUnknownError";
+  readonly retryable = false;
+
+  constructor(
+    public readonly op: string,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
   }
 }
 
@@ -233,14 +305,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const def = deps.defaultResolved?.session;
     if (typeof def?.desktopInput === "function" && typeof def?.screenshot === "function") {
       this.desktopInput = (event: unknown) =>
-        this.dispatch("desktopInput", async (s) => {
+        this.dispatch("desktopInput", true, async (s) => {
           if (!s.desktopInput) {
             throw new RoutingUnsupportedError("desktopInput", this.cached?.kind ?? "unknown");
           }
           return s.desktopInput(event);
         });
       this.screenshot = () =>
-        this.dispatch("screenshot", async (s) => {
+        this.dispatch("screenshot", false, async (s) => {
           if (!s.screenshot) {
             throw new RoutingUnsupportedError("screenshot", this.cached?.kind ?? "unknown");
           }
@@ -296,10 +368,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         "RoutingSandboxSession.resolveActiveBackend returned the proxy itself as the active backend (re-entrancy) — the resolver must return the underlying box session, not the routing proxy.",
       );
     }
+    const routed: ResolvedActiveBackend = {
+      ...resolved,
+      activeEpoch: pointer.activeEpoch,
+    };
     this.cachedEpoch = pointer.activeEpoch;
     this.cachedSandboxId = pointer.activeSandboxId;
-    this.cached = resolved;
-    this.lastResolved = resolved;
+    this.cached = routed;
+    this.lastResolved = routed;
     this.deps.onTransition?.({
       type:
         this.cachedEpoch !== undefined && fromEpoch !== pointer.activeEpoch
@@ -307,10 +383,23 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           : "resolved",
       fromEpoch,
       toEpoch: pointer.activeEpoch,
-      sandboxId: resolved.sandboxId,
-      kind: resolved.kind,
+      sandboxId: routed.sandboxId,
+      kind: routed.kind,
     });
-    return resolved;
+    return routed;
+  }
+
+  private invalidate(backend: ResolvedActiveBackend): void {
+    this.cachedEpoch = undefined;
+    this.cachedSandboxId = undefined;
+    this.cached = undefined;
+    this.deps.onTransition?.({
+      type: "fenced-retry",
+      fromEpoch: backend.activeEpoch ?? 0,
+      toEpoch: 0,
+      sandboxId: backend.sandboxId,
+      kind: backend.kind,
+    });
   }
 
   /**
@@ -326,34 +415,126 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    */
   private async dispatch<T>(
     op: string,
+    mutatesWorkspace: boolean,
     fn: (session: RoutableBackendSession) => Promise<T>,
   ): Promise<T> {
     let attempt = 0;
     let lastError: unknown;
     while (attempt <= this.maxFenceRetries) {
       const backend = await this.resolve();
+      // Admission failures are NOT provider fence errors and must never enter
+      // the retry/rebind loop. If this exact route cannot advance its durable
+      // mutation generation, fail before the provider sees the operation.
+      const admission = mutatesWorkspace
+        ? await this.deps.beforeMutation?.({ op, backend })
+        : undefined;
+      let result: T;
       try {
-        return await fn(backend.session);
+        result = await fn(backend.session);
       } catch (error) {
+        if (mutatesWorkspace && this.deps.afterMutation) {
+          try {
+            await this.deps.afterMutation({
+              op,
+              backend,
+              admission,
+              outcome: "rejected",
+            });
+          } catch (settlementError) {
+            this.invalidate(backend);
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              `Mutating sandbox operation "${op}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+              { cause: settlementError },
+            );
+          }
+        }
         if (!isFenceError(error)) {
+          if (backend.sandboxId === null && this.deps.onDefaultBackendError) {
+            const loss = await this.deps.onDefaultBackendError({
+              op,
+              error,
+              kind: backend.kind,
+              backend,
+            });
+            if (loss) {
+              // Never replay an operation after provider disappearance. Even a
+              // read may race a route change, and a mutation's provider outcome
+              // is ambiguous. The next independently-admitted call observes the
+              // advanced epoch and elected recovery state.
+              this.invalidate(backend);
+              throw new RoutingBackendRecoveryRequiredError(op, loss.leaseEpoch, loss.recovery);
+            }
+          }
           throw error;
+        }
+        this.invalidate(backend);
+        if (mutatesWorkspace) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" was fenced after provider admission; its outcome is unknown and it was not replayed`,
+            { cause: error },
+          );
         }
         // Stale-epoch fence: the active pointer moved mid-op. Drop the cache so
         // the next resolve re-reads the NEW pointer and the op lands on the new
         // active sandbox (the fenced-retry role). Bounded by maxFenceRetries.
         lastError = error;
-        this.cachedEpoch = undefined;
-        this.cachedSandboxId = undefined;
-        this.cached = undefined;
-        this.deps.onTransition?.({
-          type: "fenced-retry",
-          fromEpoch: backend.sandboxId === null ? 0 : 0,
-          toEpoch: 0,
-          sandboxId: backend.sandboxId,
-          kind: backend.kind,
-        });
         attempt += 1;
+        continue;
       }
+
+      if (mutatesWorkspace && this.deps.afterMutation) {
+        try {
+          await this.deps.afterMutation({
+            op,
+            backend,
+            admission,
+            outcome: "resolved",
+          });
+        } catch (error) {
+          this.invalidate(backend);
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" returned from the provider but lost its durable route settlement; its outcome is unknown and it was not replayed`,
+            { cause: error },
+          );
+        }
+      }
+
+      // Reject output produced by a route that changed while the provider call
+      // was in flight. Reads can safely retry on the new route. Mutations cannot:
+      // their provider effect may already have happened on the old route.
+      let current: ActivePointer;
+      try {
+        current = await this.deps.readPointer();
+      } catch (error) {
+        if (mutatesWorkspace) {
+          this.invalidate(backend);
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" returned from the provider but its route could not be revalidated; its outcome is unknown and it was not replayed`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      if (
+        current.activeEpoch !== backend.activeEpoch ||
+        current.activeSandboxId !== backend.sandboxId
+      ) {
+        this.invalidate(backend);
+        if (mutatesWorkspace) {
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Mutating sandbox operation "${op}" completed on a superseded route; its output was rejected and it was not replayed`,
+          );
+        }
+        lastError = new Error(`sandbox route changed while "${op}" was in flight`);
+        attempt += 1;
+        continue;
+      }
+      return result;
     }
     // Exhausted retries against a relentless swap-storm: surface the fence so the
     // caller (turn) backs off — never loop forever.
@@ -391,7 +572,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // degrades via the natural fallback or RoutingUnsupportedError.
 
   async exec(args: unknown): Promise<unknown> {
-    return this.dispatch("exec", async (s) => {
+    return this.dispatch("exec", true, async (s) => {
       if (s.exec) {
         return s.exec(args);
       }
@@ -405,7 +586,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
 
   async execCommand(args: unknown): Promise<string> {
     try {
-      return await this.dispatch("execCommand", async (s) => {
+      return await this.dispatch("execCommand", true, async (s) => {
         if (s.execCommand) {
           return s.execCommand(args);
         }
@@ -423,7 +604,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async writeStdin(args: unknown): Promise<string> {
-    return this.dispatch("writeStdin", async (s) => {
+    return this.dispatch("writeStdin", true, async (s) => {
       if (!s.writeStdin) {
         throw new RoutingUnsupportedError("writeStdin", this.cached?.kind ?? "unknown");
       }
@@ -432,14 +613,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async cancelExecCommand(opId: string): Promise<boolean> {
-    return await this.dispatch("cancelExecCommand", async (session) => {
+    return await this.dispatch("cancelExecCommand", false, async (session) => {
       if (!session.cancelExecCommand) return false;
       return await session.cancelExecCommand(opId);
     });
   }
 
   async readFile(args: unknown): Promise<string | Uint8Array> {
-    return this.dispatch("readFile", async (s) => {
+    return this.dispatch("readFile", false, async (s) => {
       if (!s.readFile) {
         throw new RoutingUnsupportedError("readFile", this.cached?.kind ?? "unknown");
       }
@@ -448,7 +629,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async writeFile(args: unknown): Promise<unknown> {
-    return this.dispatch("writeFile", async (s) => {
+    return this.dispatch("writeFile", true, async (s) => {
       if (!s.writeFile) {
         throw new RoutingUnsupportedError("writeFile", this.cached?.kind ?? "unknown");
       }
@@ -457,7 +638,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async listDir(args: unknown): Promise<unknown> {
-    return this.dispatch("listDir", async (s) => {
+    return this.dispatch("listDir", false, async (s) => {
       if (!s.listDir) {
         throw new RoutingUnsupportedError("listDir", this.cached?.kind ?? "unknown");
       }
@@ -466,7 +647,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async pathExists(path: string, runAs?: string): Promise<boolean> {
-    return this.dispatch("pathExists", async (s) => {
+    return this.dispatch("pathExists", false, async (s) => {
       if (!s.pathExists) {
         throw new RoutingUnsupportedError("pathExists", this.cached?.kind ?? "unknown");
       }
@@ -475,7 +656,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async viewImage(args: unknown): Promise<unknown> {
-    return this.dispatch("viewImage", async (s) => {
+    return this.dispatch("viewImage", false, async (s) => {
       if (!s.viewImage) {
         throw new RoutingUnsupportedError("viewImage", this.cached?.kind ?? "unknown");
       }
@@ -484,7 +665,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async materializeEntry(args: unknown): Promise<void> {
-    return this.dispatch("materializeEntry", async (s) => {
+    return this.dispatch("materializeEntry", true, async (s) => {
       if (!s.materializeEntry) {
         throw new RoutingUnsupportedError("materializeEntry", this.cached?.kind ?? "unknown");
       }
@@ -512,16 +693,15 @@ export class RoutingSandboxSession implements RoutableBackendSession {
    *  direct delegate returns undefined and every lazy turn would die at bind. Return a
    *  LAZY EDITOR PROXY instead: a non-null editor whose async ops resolve the active
    *  backend (establishing the box on first use, via `dispatch`) and delegate to its
-   *  real editor — mirroring how this proxy defers exec/readFile. */
+   *  real editor — mirroring how this proxy defers exec/readFile. Even when an
+   *  eager editor already exists, returning it directly would bypass per-edit
+   *  route resolution and mutation-generation admission, so every editor is
+   *  represented by this dispatching proxy. */
   createEditor(runAs?: string): unknown {
-    const eager = (this.lastResolved ?? this.deps.defaultResolved)?.session.createEditor?.(runAs);
-    if (eager) {
-      return eager;
-    }
     const op =
       (name: "createFile" | "updateFile" | "deleteFile") =>
       (operation: unknown, context?: unknown): Promise<unknown> =>
-        this.dispatch(`editor.${name}`, async (s) => {
+        this.dispatch(`editor.${name}`, true, async (s) => {
           const editor = s.createEditor?.(runAs) as
             | Record<string, (operation: unknown, context?: unknown) => Promise<unknown>>
             | undefined;
@@ -538,7 +718,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async resolveExposedPort(port: number): Promise<ExposedPortEndpoint> {
-    return this.dispatch("resolveExposedPort", async (s) => {
+    return this.dispatch("resolveExposedPort", false, async (s) => {
       if (!s.resolveExposedPort) {
         throw new RoutingUnsupportedError("resolveExposedPort", this.cached?.kind ?? "unknown");
       }
@@ -549,7 +729,7 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   /** Serialize the active backend's session state. Used by the resume-by-id seam
    *  to fold the live box onto the lease. Dispatches to the active backend. */
   async serializeSessionState(): Promise<unknown> {
-    return this.dispatch("serializeSessionState", async (s) => {
+    return this.dispatch("serializeSessionState", false, async (s) => {
       if (!s.serializeSessionState) {
         // No-op for a backend with no serializable state (selfhosted state is
         // re-addressed, not snapshotted) — surface undefined, not an error.

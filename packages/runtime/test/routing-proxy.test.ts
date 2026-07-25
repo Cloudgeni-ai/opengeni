@@ -19,6 +19,8 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  RoutingBackendRecoveryRequiredError,
+  RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   makeActiveBackendResolver,
@@ -66,6 +68,13 @@ class FakeBackend implements RoutableBackendSession {
   }
 
   async readFile(): Promise<Uint8Array> {
+    if (this.fenceUntilEpoch !== null && this.epochProvider() <= this.fenceUntilEpoch) {
+      const err = new Error("sandbox lease superseded; read fenced by a stale epoch") as Error & {
+        fenced: boolean;
+      };
+      err.fenced = true;
+      throw err;
+    }
     return new TextEncoder().encode(this.tag);
   }
 }
@@ -104,6 +113,220 @@ function mutablePointer(initial: ActivePointer = { activeSandboxId: null, active
 }
 
 describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () => {
+  test("mutation admission runs after exact route resolution and before the provider", async () => {
+    const events: string[] = [];
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        events.push("provider");
+        return "written";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 4 }),
+      resolveActiveBackend: async () => {
+        events.push("resolved");
+        return {
+          session: backend,
+          sandboxId: null,
+          kind: "modal",
+          leaseEpoch: 12,
+          providerInstanceId: "sb-current",
+        };
+      },
+      beforeMutation: async ({ op, backend: resolved }) => {
+        events.push("admitted");
+        expect(op).toBe("writeFile");
+        expect(resolved).toMatchObject({
+          sandboxId: null,
+          activeEpoch: 4,
+          leaseEpoch: 12,
+          providerInstanceId: "sb-current",
+        });
+        return 7;
+      },
+      afterMutation: async ({ admission, outcome }) => {
+        events.push("settled");
+        expect(admission).toBe(7);
+        expect(outcome).toBe("resolved");
+      },
+    });
+
+    expect(await proxy.writeFile({ path: "/workspace/a", content: "a" })).toBe("written");
+    expect(events).toEqual(["resolved", "admitted", "provider", "settled"]);
+  });
+
+  test("a rejected provider promise physically settles before its original error propagates", async () => {
+    const events: string[] = [];
+    const rejected = new Error("provider rejected");
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        events.push("provider");
+        throw rejected;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => {
+        events.push("admitted");
+        return 11;
+      },
+      afterMutation: async ({ admission, outcome }) => {
+        events.push(`settled:${outcome}`);
+        expect(admission).toBe(11);
+      },
+    });
+
+    expect(await proxy.writeFile({ path: "/workspace/a" }).catch((error) => error)).toBe(rejected);
+    expect(events).toEqual(["admitted", "provider", "settled:rejected"]);
+  });
+
+  test("a rejected provider promise with failed physical settlement is non-replayable unknown", async () => {
+    let providerCalls = 0;
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        providerCalls += 1;
+        throw new Error("provider rejected");
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => 12,
+      afterMutation: async ({ outcome }) => {
+        expect(outcome).toBe("rejected");
+        throw new Error("database unavailable");
+      },
+    });
+
+    const error = await proxy.writeFile({ path: "/workspace/a" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retryable).toBe(false);
+    expect(providerCalls).toBe(1);
+  });
+
+  test("read-only operations never invoke mutation admission or settlement", async () => {
+    let admissions = 0;
+    let settlements = 0;
+    const backend = new FakeBackend("read-only");
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => {
+        admissions += 1;
+      },
+      afterMutation: async () => {
+        settlements += 1;
+      },
+    });
+
+    expect(new TextDecoder().decode(await proxy.readFile({ path: "/workspace/a" }))).toBe(
+      "read-only",
+    );
+    expect(admissions).toBe(0);
+    expect(settlements).toBe(0);
+  });
+
+  test("the eager editor path cannot bypass route resolution or mutation admission", async () => {
+    const events: string[] = [];
+    const eagerEditor = {
+      async createFile() {
+        events.push("provider-editor");
+        return { ok: true };
+      },
+    };
+    const backend: RoutableBackendSession = {
+      createEditor() {
+        events.push("create-editor");
+        return eagerEditor;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 2 }),
+      resolveActiveBackend: async () => {
+        events.push("resolved");
+        return { session: backend, sandboxId: null, kind: "modal" };
+      },
+      beforeMutation: async ({ op }) => {
+        events.push(`admitted:${op}`);
+      },
+    });
+
+    const editor = proxy.createEditor() as {
+      createFile: (operation: unknown) => Promise<unknown>;
+    };
+    expect(editor).not.toBe(eagerEditor);
+    await editor.createFile({ path: "/workspace/new.ts" });
+    expect(events).toEqual([
+      "resolved",
+      "admitted:editor.createFile",
+      "create-editor",
+      "provider-editor",
+    ]);
+  });
+
+  test("admission rejection reaches neither provider, provider-loss handling, nor route retry", async () => {
+    const rejected = new Error("turn attempt fenced");
+    let providerCalls = 0;
+    let resolves = 0;
+    let lossCallbacks = 0;
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        providerCalls += 1;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => {
+        resolves += 1;
+        return { session: backend, sandboxId: null, kind: "modal" };
+      },
+      beforeMutation: async () => {
+        throw rejected;
+      },
+      onDefaultBackendError: async () => {
+        lossCallbacks += 1;
+        return null;
+      },
+    });
+
+    expect(await proxy.writeFile({ path: "never" }).catch((error) => error)).toBe(rejected);
+    expect(providerCalls).toBe(0);
+    expect(resolves).toBe(1);
+    expect(lossCallbacks).toBe(0);
+  });
+
+  test("provider disappearance fences an ambiguous mutation and never replays it", async () => {
+    let writes = 0;
+    let lossCallbacks = 0;
+    const missing = Object.assign(new Error("provider sandbox missing"), { status: 404 });
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        writes += 1;
+        throw missing;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: backend, sandboxId: null, kind: "modal" },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      onDefaultBackendError: async ({ error, op }) => {
+        expect(error).toBe(missing);
+        expect(op).toBe("writeFile");
+        lossCallbacks += 1;
+        return { leaseEpoch: 8, recovery: "pending" };
+      },
+    });
+
+    const error = await proxy.writeFile({ path: "maybe-written" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingBackendRecoveryRequiredError);
+    expect((error as RoutingBackendRecoveryRequiredError).leaseEpoch).toBe(8);
+    expect((error as RoutingBackendRecoveryRequiredError).retryable).toBe(true);
+    expect(writes).toBe(1);
+    expect(lossCallbacks).toBe(1);
+  });
+
   test("(1) active-epoch fence: a swap mid-turn routes the NEXT op to the new backend", async () => {
     const modal = new FakeBackend("modal");
     const selfhosted = new FakeBackend("selfhosted");
@@ -142,7 +365,7 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(selfhosted.calls).toEqual(["c"]);
   });
 
-  test("(2) stale-epoch in-flight op: the backend fences a stale epoch -> the proxy retries against the new active sandbox", async () => {
+  test("(2) stale-epoch in-flight read: the backend fences a stale epoch -> the proxy retries against the new active sandbox", async () => {
     // The default (modal) box fences any op while the pointer is still at epoch 0
     // (simulating an in-flight op the active_epoch bumped under). After a swap to
     // selfhosted (epoch 1), the proxy must re-resolve and land the op on selfhosted.
@@ -172,14 +395,69 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
       },
     });
 
-    const r = (await proxy.exec({ cmd: "in-flight" })) as { stdout: string };
-    // The op was NOT lost: it retried and landed on the NEW active (selfhosted).
-    expect(r.stdout).toBe("selfhosted");
-    expect(selfhosted.calls).toEqual(["in-flight"]);
-    // modal never recorded the call (it only ever fenced).
-    expect(modal.calls).toEqual([]);
+    const r = await proxy.readFile({ path: "in-flight" });
+    // The read safely retried and landed on the NEW active (selfhosted).
+    expect(new TextDecoder().decode(r)).toBe("selfhosted");
     // Re-resolved at least twice (initial + post-fence).
     expect(resolveCount).toBeGreaterThanOrEqual(2);
+  });
+
+  test("a provider fence after mutation admission never replays the ambiguous write", async () => {
+    let calls = 0;
+    let resolves = 0;
+    const fenced = Object.assign(new Error("provider fenced stale epoch"), { fenced: true });
+    const backend: RoutableBackendSession = {
+      async writeFile() {
+        calls += 1;
+        throw fenced;
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => {
+        resolves += 1;
+        return { session: backend, sandboxId: null, kind: "modal" };
+      },
+      beforeMutation: async () => 1,
+    });
+
+    const error = await proxy.writeFile({ path: "ambiguous" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retryable).toBe(false);
+    expect(calls).toBe(1);
+    expect(resolves).toBe(1);
+  });
+
+  test("a route change before mutation output settlement rejects the old output without replay", async () => {
+    const ptr = mutablePointer();
+    let oldCalls = 0;
+    let newCalls = 0;
+    const oldBackend: RoutableBackendSession = {
+      async writeFile() {
+        oldCalls += 1;
+        ptr.swap("sbx-new");
+        return "stale-output";
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async writeFile() {
+        newCalls += 1;
+        return "new-output";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "selfhosted" },
+      beforeMutation: async () => 1,
+    });
+
+    const error = await proxy.writeFile({ path: "ambiguous" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(oldCalls).toBe(1);
+    expect(newCalls).toBe(0);
   });
 
   test("(3) heterogeneous swap (>=2 flips): ops land on the new active box each flip", async () => {
@@ -331,6 +609,43 @@ describe("makeActiveBackendResolver — heterogeneous default/modal/selfhosted d
     expect(r.sandboxId).toBeNull();
     expect(r.kind).toBe("modal");
     expect(r.session).toBe(defaultBackend);
+  });
+
+  test("null pointer after a home repair uses the current durable backend, not the stale default handle", async () => {
+    const original = new FakeBackend("group-before-repair");
+    const replacement = new FakeBackend("group-after-repair");
+    let reboundCalls = 0;
+    const resolve = makeActiveBackendResolver({
+      workspaceId: WS,
+      defaultBackend: original,
+      defaultKind: "modal",
+      resolveDefaultBackend: async (pointer) => {
+        reboundCalls += 1;
+        if (pointer.activeEpoch === 0) {
+          return { session: original, sandboxId: null, kind: "modal" };
+        }
+        expect(pointer).toEqual({ activeSandboxId: null, activeEpoch: 1 });
+        return { session: replacement, sandboxId: null, kind: "modal" };
+      },
+      getSandbox: async () => null,
+      controlRpcFactory: () => new MockAgentResponder(),
+      relay: RELAY,
+    });
+    const ptr = mutablePointer();
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: { session: original, sandboxId: null, kind: "modal" },
+      readPointer: ptr.read,
+      resolveActiveBackend: resolve,
+    });
+
+    await proxy.exec({ cmd: "before" });
+    ptr.swap(null); // same home target, but a repair advanced the route epoch
+    const result = (await proxy.exec({ cmd: "after" })) as { stdout: string };
+
+    expect(result.stdout).toBe("group-after-repair");
+    expect(original.calls).toEqual(["before"]);
+    expect(replacement.calls).toEqual(["after"]);
+    expect(reboundCalls).toBe(2);
   });
 
   test("selfhosted target -> a SelfhostedSession bound to the enrollment agentId, fenced under active_epoch", async () => {

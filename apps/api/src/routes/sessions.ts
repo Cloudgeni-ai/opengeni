@@ -131,6 +131,7 @@ import {
   viewerHeartbeatIntervalMs,
   type DesktopStreamMint,
   type TerminalStreamMint,
+  type ViewerServices,
 } from "../sandbox/viewer";
 import {
   acceptSessionUserMessage,
@@ -154,7 +155,9 @@ import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
 import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
 
-export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
+
+export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const requestSessionAuthorization = new WeakMap<Request, ResolvedSessionAuthorization>();
   const relatedSessionAccessFor = (c: Context): "target" | "root" =>
@@ -210,6 +213,15 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await next();
   };
   app.use("/v1/workspaces/:workspaceId/sessions/:sessionId/*", authorizeSessionHttp);
+
+  const viewerServices: ViewerServices = {
+    db,
+    settings,
+    bus,
+    ...(deps.establishSandboxSession
+      ? { establishSandboxSession: deps.establishSandboxSession }
+      : {}),
+  };
 
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -1351,6 +1363,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       os: session.sandboxOs,
       liveness: lease?.liveness ?? "cold",
       leaseEpoch: lease?.leaseEpoch ?? 0,
+      workspaceGeneration: lease?.workspaceGeneration ?? null,
+      archiveGeneration: lease?.archiveGeneration ?? null,
+      archiveComplete: lease?.archiveComplete ?? false,
       desktopEnabled: settings.sandboxDesktopEnabled,
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
@@ -1538,6 +1553,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewerId,
         liveness: "warm",
         leaseEpoch: session.activeEpoch,
+        workspaceGeneration: null,
+        archiveGeneration: null,
+        archiveComplete: false,
         sandboxGroupId: session.sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
         dataPlaneUrl: null,
@@ -1547,40 +1565,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         !streamTokenDegraded(settings)
       ) {
         if (wantDesktop && settings.sandboxDesktopEnabled) {
-          stream = await mintDesktopStream(
-            { db, settings, bus },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId,
-              // No Modal lease for selfhosted-active; the mint routes to the relay.
-            },
-          );
+          stream = await mintDesktopStream(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
+          });
         }
         if (settings.sandboxTerminalEnabled) {
-          terminal = await mintTerminalStream(
-            { db, settings, bus },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId,
-              // No Modal lease for selfhosted-active; the mint routes to the relay.
-            },
-          );
+          terminal = await mintTerminalStream(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
+          });
         }
       }
     } else {
-      result = await attachViewer(
-        { db, settings },
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          session,
-          ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
-        },
-      );
+      result = await attachViewer(viewerServices, {
+        accountId: grant.accountId,
+        workspaceId,
+        session,
+        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+      });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
       // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
@@ -1602,31 +1611,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           // (and consented above). A terminal-only attach skips it — the box is warm,
           // the terminal mint below still runs.
           if (wantDesktop && settings.sandboxDesktopEnabled) {
-            stream = await mintDesktopStream(
-              { db, settings, bus },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                session,
-                viewerId: result.viewerId,
-                lease,
-              },
-            );
+            stream = await mintDesktopStream(viewerServices, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
           }
           // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
           // address (independent of the desktop toggle). A degraded mint leaves the
           // terminal fields null → the client falls back to the sse-events firehose.
           if (settings.sandboxTerminalEnabled) {
-            terminal = await mintTerminalStream(
-              { db, settings, bus },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                session,
-                viewerId: result.viewerId,
-                lease,
-              },
-            );
+            terminal = await mintTerminalStream(viewerServices, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
           }
         }
       }
