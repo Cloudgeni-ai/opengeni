@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-16: persist the origin of a session's tool allow-list. NULL is a
+-- Persist the origin of a session's tool allow-list. NULL is a
 -- deliberate legacy marker for rows created before policy provenance existed.
 ALTER TABLE "sessions"
   ADD COLUMN IF NOT EXISTS "tool_policy" jsonb;

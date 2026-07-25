@@ -724,8 +724,9 @@ export const sessions = pgTable(
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
-    // OPE-16 policy origin. NULL is retained for pre-migration rows; mapSession
-    // exposes those rows as `legacy` instead of guessing omitted vs explicit [].
+    // Durable tool-policy origin. NULL is retained for pre-migration rows;
+    // mapSession exposes those rows as `legacy` instead of guessing omitted vs
+    // explicit [].
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>(),
     // The manager session that spawned this one via session_create. Set only
     // when the creating grant carried a worker-signed sessionId claim (a session

@@ -459,5 +459,14 @@ function registryRow(overrides: {
     tier: overrides.tier,
     provenance: overrides.provenance,
     logoAssetPath: overrides.logoAssetPath ?? null,
+    metadata: {
+      mcpProbe: {
+        status: "real" as const,
+        checkedAt: "2026-07-04T00:00:00.000Z",
+        transport: "streamable-http" as const,
+        protocolVersion: "2025-06-18",
+        toolCount: 1,
+      },
+    },
   };
 }

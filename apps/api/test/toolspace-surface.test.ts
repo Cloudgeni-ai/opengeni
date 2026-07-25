@@ -203,8 +203,6 @@ function grantFor(input: {
   workspaceId: string;
   sessionId: string;
   accountId?: string;
-  turnId: string | null;
-  attemptId: string | null;
 }): AccessGrant {
   return {
     workspaceId: input.workspaceId,
@@ -213,9 +211,6 @@ function grantFor(input: {
     permissions: ["toolspace:call"],
     metadata: {
       sessionId: input.sessionId,
-      turnId: input.turnId ?? crypto.randomUUID(),
-      attemptId: input.attemptId ?? crypto.randomUUID(),
-      executionGeneration: 3,
     },
   } as AccessGrant;
 }
@@ -489,6 +484,26 @@ describe("prepareToolspaceMcpSurface", () => {
     await surface!.close();
   }, 60_000);
 
+  test("does not dial upstreams while the owned turn is recovering", async () => {
+    if (!available) return;
+    const seeded = await seedSession({
+      selects: ["thirdparty"],
+      withActiveTurn: true,
+    });
+    await admin`
+      update session_turns
+      set status = 'recovering'
+      where id = ${seeded.turnId}`;
+    const callsBefore = upstream!.calls.length;
+    const surface = await prepareToolspaceMcpSurface({
+      deps: makeDeps(200),
+      grant: grantFor(seeded),
+    });
+    expect(surface!.tools).toHaveLength(0);
+    expect(upstream!.calls).toHaveLength(callsBefore);
+    await surface!.close();
+  }, 60_000);
+
   test("distinguishes no-active-turn from budget-exhausted on call", async () => {
     if (!available) return;
     const seeded = await seedSession({
@@ -522,7 +537,7 @@ describe("prepareToolspaceMcpSurface", () => {
     await surface!.close();
   }, 60_000);
 
-  test("a stale surface cannot spend or execute under a successor attempt", async () => {
+  test("one session bearer resolves a successor attempt while a stale surface remains fenced", async () => {
     if (!available) return;
     const seeded = await seedSession({
       selects: ["thirdparty"],
@@ -569,7 +584,7 @@ describe("prepareToolspaceMcpSurface", () => {
 
     const successorSurface = await prepareToolspaceMcpSurface({
       deps,
-      grant: grantFor({ ...seeded, attemptId: successorAttemptId }),
+      grant: grantFor(seeded),
     });
     const successorTool = successorSurface!.tools.find(
       (tool) => tool.name === "thirdparty__search_documents",

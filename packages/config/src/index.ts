@@ -1316,9 +1316,7 @@ export function getSettings(): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
-    sessionTurnToolReplacementEnabled: optional(
-      "OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED",
-    ),
+    sessionTurnToolReplacementEnabled: optional("OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED"),
     toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
     toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),

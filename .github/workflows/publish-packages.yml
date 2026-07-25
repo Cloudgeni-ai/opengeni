@@ -1,0 +1,100 @@
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: "Exact versioned main commit to publish"
+        required: true
+        type: string
+      confirm:
+        description: "Publish every unpublished package version at this commit"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: publish-packages-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: ${{ inputs.confirm }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify exact versioned main
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
+          if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
+            echo "Version PR has not consumed every changeset" >&2
+            exit 1
+          fi
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - run: bun install --frozen-lockfile
+
+      - name: Verify publishable closure
+        run: |
+          bun run typecheck
+          bun run build:packages
+          bun scripts/publish-closure-guard.ts
+          bun run test:publish-consumer
+          bun run test:runtime-embedding-consumer
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish unpublished package versions
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d
+        with:
+          publish: bun run release:publish
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
+
+      - name: Verify SDK and React registry identity
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          for package in sdk react; do
+            version="$(jq -r .version "packages/$package/package.json")"
+            for attempt in $(seq 1 24); do
+              metadata="$(npm view "@opengeni/$package@$version" --json 2>/dev/null || true)"
+              git_head="$(jq -r '.gitHead // empty' <<<"$metadata")"
+              integrity="$(jq -r '.dist.integrity // empty' <<<"$metadata")"
+              if [ "$git_head" = "$SOURCE_SHA" ] && [[ "$integrity" == sha512-* ]]; then
+                break
+              fi
+              if [ "$attempt" -eq 24 ]; then
+                echo "@opengeni/$package@$version did not settle to $SOURCE_SHA" >&2
+                exit 1
+              fi
+              sleep 5
+            done
+            test "$(npm view "@opengeni/$package" version)" = "$version"
+          done

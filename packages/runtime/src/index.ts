@@ -14,6 +14,7 @@ import {
 import {
   approvalIdentifier,
   CAPABILITY_DESCRIPTORS,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   assertUniqueResourceMountPaths,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -2999,7 +3000,7 @@ async function signFirstPartyDelegatedBearer(
     workspaceId: options.workspaceId,
     subjectId: options.subjectId ?? "worker:first-party-mcp",
     ...(options.subjectLabel ? { subjectLabel: options.subjectLabel } : {}),
-    permissions: options.firstPartyPermissions ?? firstPartyMcpPermissions,
+    permissions: options.firstPartyPermissions ?? [...DEFAULT_FIRST_PARTY_MCP_PERMISSIONS],
     ...(options.sessionId ? { sessionId: options.sessionId } : {}),
     ...(options.turnId ? { turnId: options.turnId } : {}),
     ...(options.attemptId ? { attemptId: options.attemptId } : {}),
@@ -3083,22 +3084,6 @@ async function codexAppsMcpRequestInit(
 // level scopes (billing/account/members/api_keys/workspace:admin) are
 // intentionally excluded: they gate no first-party tool and are not agent
 // capabilities. (A finer-grained capability model comes later.)
-const firstPartyMcpPermissions: Permission[] = [
-  "workspace:read",
-  "files:read",
-  "documents:search",
-  "scheduled_tasks:manage",
-  "scheduled_tasks:run",
-  "goals:manage",
-  "sessions:read",
-  "sessions:create",
-  "sessions:control",
-  "variable-sets:use",
-  "variable-sets:manage",
-  "rigs:use",
-  "github:use",
-];
-
 // codex_apps is third-party-by-trust (the external ChatGPT connectors backend)
 // but needs DYNAMIC auth, so it is its own category — deliberately NOT folded
 // into the first-party allowlist, which would wrongly sign an OpenGeni delegated

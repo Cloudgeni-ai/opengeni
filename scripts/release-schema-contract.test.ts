@@ -86,6 +86,7 @@ describe("release schema contract", () => {
           ],
     );
     expect(contract.fileCount).toBe(99 + currentMainMigrations.length);
+    expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
     expect(contract.latestMigration).toBe("0109_sandbox_recovery_generations.sql");
     expect(
       contract.migrations

@@ -806,6 +806,7 @@ describe("buildConnectionTokenResolver", () => {
     let loadCalls = 0;
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -874,6 +875,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a transient refresh failure (AS 5xx / network) does not poison the connection", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -904,6 +906,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a 429 from the token endpoint is transient — no needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),
@@ -1036,6 +1039,10 @@ describe("buildConnectionTokenResolver", () => {
         }),
         { providerDomain: "oauth.example.com", kind: "oauth2" },
         settings,
+        {
+          fetchImpl: globalThis.fetch,
+          dnsLookup: async () => [{ address: "93.184.216.34", family: 4 }],
+        },
       );
       expect(refreshed.credential).toMatchObject({ access_token: "AC2" });
       expect(capturedBody!.get("client_id")).toBe(
@@ -1051,6 +1058,7 @@ describe("buildConnectionTokenResolver", () => {
   test("a rejected refresh grant (4xx) marks the connection needs_reauth", async () => {
     const stale = brokerCredential({
       id: "conn_oauth",
+      providerDomain: "oauth.example.com",
       kind: "oauth2",
       credential: { access_token: "AC", refresh_token: "RF", token_type: "Bearer" },
       expiresAt: new Date(Date.now() - 1_000),

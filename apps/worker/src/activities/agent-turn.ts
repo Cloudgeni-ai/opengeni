@@ -4013,9 +4013,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : undefined;
       const toolspaceAuthority = {
         sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
       };
       const {
         environment: sandboxEnvironment,
@@ -4731,9 +4728,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // token skip does NOT transfer: that token is inert on a connected
         // machine (it uses its own git creds), but the toolspace token is the
         // machine's ONLY path to programmatic tool calling and grants no more
-        // than toolspace:call for its own session (own-session-bound, turn TTL,
-        // budgeted, approval-tools excluded). The runtime seeds it to the box's
-        // token file over the same exec channel, off-manifest, on every backend.
+        // than toolspace:call for its own session (own-session-bound,
+        // short-lived and renewable, per-active-turn budgeted, approval-tools
+        // excluded). The runtime seeds it to the box's token file over the same
+        // exec channel, off-manifest, on every backend.
         ...(sandboxToolspaceToken
           ? {
               toolspaceTokenSeed: sandboxToolspaceToken,
