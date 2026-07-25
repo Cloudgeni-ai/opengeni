@@ -82,25 +82,29 @@ describe("release schema contract", () => {
     );
     const nestedDepthMigrations = [
       "0109_nested_agent_depth_expand.sql",
-      "0110_nested_agent_depth_backfill.sql",
-      "0111_nested_agent_depth_boundary.sql",
+      "0110_nested_agent_depth_boundary.sql",
+      "0111_nested_agent_depth_backfill.sql",
       "0112_nested_agent_depth_contract.sql",
       "0113_nested_agent_depth_validate.sql",
-      "0114_nested_agent_depth_index.sql",
-      "0115_nested_agent_depth_final_contract.sql",
+      "0114_nested_agent_depth_contract.sql",
+      "0115_nested_agent_depth_validate.sql",
       "0116_nested_agent_depth_index.sql",
     ].filter((file) => migrations.has(file));
-    expect(nestedDepthMigrations).toEqual([
-      "0109_nested_agent_depth_expand.sql",
-      "0110_nested_agent_depth_backfill.sql",
-      "0111_nested_agent_depth_boundary.sql",
-      "0112_nested_agent_depth_contract.sql",
-      "0113_nested_agent_depth_validate.sql",
-      "0114_nested_agent_depth_index.sql",
-      "0115_nested_agent_depth_final_contract.sql",
-      "0116_nested_agent_depth_index.sql",
-    ].filter((file) => migrations.has(file)));
-    expect(contract.fileCount).toBe(96 + currentMainMigrations.length + nestedDepthMigrations.length);
+    expect(nestedDepthMigrations).toEqual(
+      [
+        "0109_nested_agent_depth_expand.sql",
+        "0110_nested_agent_depth_boundary.sql",
+        "0111_nested_agent_depth_backfill.sql",
+        "0112_nested_agent_depth_contract.sql",
+        "0113_nested_agent_depth_validate.sql",
+        "0114_nested_agent_depth_contract.sql",
+        "0115_nested_agent_depth_validate.sql",
+        "0116_nested_agent_depth_index.sql",
+      ].filter((file) => migrations.has(file)),
+    );
+    expect(contract.fileCount).toBe(
+      95 + currentMainMigrations.length + nestedDepthMigrations.length,
+    );
     expect(contract.latestMigration).toBe("0116_nested_agent_depth_index.sql");
     expect(
       contract.migrations

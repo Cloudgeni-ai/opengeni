@@ -1,4 +1,7 @@
 -- deployment-mode: rolling
+-- Finalize only from validated helper checks. PostgreSQL 14 can prove each
+-- SET NOT NULL from those checks without rescanning the table while holding
+-- ACCESS EXCLUSIVE; the data-read validation work is isolated in 0113.
 SET lock_timeout = '5s';
 SET statement_timeout = '30s';
 
@@ -8,26 +11,9 @@ ALTER TABLE "sessions"
   ALTER COLUMN "effective_max_nested_agent_depth" SET NOT NULL,
   ALTER COLUMN "nested_agent_depth_policy_source" SET NOT NULL;
 
-ALTER TABLE "sessions" ADD CONSTRAINT "sessions_nested_agent_depth_check"
-  CHECK ("nested_agent_depth" >= 0 AND "nested_agent_depth" <= 2147483647
-    AND "effective_max_nested_agent_depth" >= 0
-    AND "effective_max_nested_agent_depth" <= 2147483647
-    AND ("max_nested_agent_depth_override" IS NULL
-      OR "max_nested_agent_depth_override" BETWEEN 0 AND 2147483647)) NOT VALID;
-ALTER TABLE "sessions" ADD CONSTRAINT "sessions_nested_agent_policy_source_check"
-  CHECK ("nested_agent_depth_policy_source" IN ('session', 'workspace', 'deployment', 'default')) NOT VALID;
-ALTER TABLE "sessions" ADD CONSTRAINT "sessions_nested_agent_policy_snapshot_check"
-  CHECK (("nested_agent_depth_policy_source" = 'session'
-      AND "nested_agent_depth_policy_session_id" IS NOT NULL)
-    OR ("nested_agent_depth_policy_source" <> 'session'
-      AND "nested_agent_depth_policy_session_id" IS NULL
-      AND "max_nested_agent_depth_override" IS NULL)) NOT VALID;
-ALTER TABLE "sessions" ADD CONSTRAINT "sessions_nested_agent_override_check"
-  CHECK ("max_nested_agent_depth_override" IS NULL
-    OR ("nested_agent_depth_policy_source" = 'session'
-      AND "nested_agent_depth_policy_session_id" = "id"
-      AND "effective_max_nested_agent_depth" = "max_nested_agent_depth_override")) NOT VALID;
-
+-- Cross-workspace lineage references are installed after the checks prove
+-- their source columns are complete. They remain NOT VALID until 0115 so this
+-- migration only takes the short catalog lock.
 ALTER TABLE "sessions" ADD CONSTRAINT "sessions_workspace_root_session_fk"
   FOREIGN KEY ("workspace_id", "root_session_id")
   REFERENCES "sessions"("workspace_id", "id") DEFERRABLE INITIALLY DEFERRED NOT VALID;

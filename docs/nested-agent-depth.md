@@ -55,11 +55,14 @@ concurrency, Pause/Resume, and model-call limits.
 
 ## Rolling migration
 
-Migrations `0108`–`0113` use an expand/backfill/boundary/contract/validation/
-concurrent-index sequence. Existing trees remain readable, including legacy
-trees deeper than the current policy. New descendants are admitted only when
-their attempted depth is within their selected immutable policy, or when an
-authorized explicit override raises that policy.
+Migration `0108` fences invalidated warming epochs. The nested-agent repair
+then uses `0109` expand, `0110` mixed-version boundary, `0111` backfill, `0112`
+NOT VALID checks, `0113` validation, `0114` metadata-only finalization, `0115`
+foreign-key validation, and `0116` concurrent indexing. Existing trees remain
+readable, including legacy trees deeper than the current policy. New
+descendants are admitted only when their attempted depth is within their
+selected immutable policy, or when an authorized explicit override raises
+that policy.
 
 Canonical implementation: `packages/contracts/src/index.ts`,
 `packages/db/src/schema.ts`, `packages/db/src/index.ts`,

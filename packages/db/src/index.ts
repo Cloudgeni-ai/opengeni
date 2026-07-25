@@ -12079,8 +12079,9 @@ async function lockSessionCreateIdempotencyKey(
 ): Promise<void> {
   // Successes live in `sessions` while denials live in `session_spawn_denials`;
   // their separate unique indexes cannot by themselves serialize a success
-  // racing a denial. A transaction-scoped advisory lock gives both outcomes
-  // one workspace/key boundary without serializing unrelated workspace creates.
+  // racing a denial. The database guard trigger is authoritative for every
+  // writer; this transaction-scoped advisory lock keeps application callers
+  // on one workspace/key path without serializing unrelated workspace creates.
   await tx.execute(
     sql`select pg_advisory_xact_lock(hashtext(${`session-create:${workspaceId}:${createIdempotencyKey}`}))`,
   );
@@ -12157,6 +12158,13 @@ async function createSessionInTransaction(
     // A committed success always wins over a denial on a later retry.
     const existing = await existingSessionForCreateKey(tx, input.workspaceId, createIdempotencyKey);
     if (existing) {
+      // A keyed replay is allowed to return the original session only when a
+      // caller-provided identity agrees with the winning request. Check this
+      // before any first-turn repair so a retry cannot hide a requested-ID
+      // conflict behind an apparently successful replay.
+      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+        throw new SessionIdConflictError(input.requestedSessionId);
+      }
       const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
         existing.id,
       ]);
@@ -12232,6 +12240,9 @@ async function createSessionInTransaction(
         createIdempotencyKey,
       );
       if (existing) {
+        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+          throw new SessionIdConflictError(input.requestedSessionId);
+        }
         const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
           existing.id,
         ]);

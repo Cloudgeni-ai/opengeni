@@ -39,7 +39,6 @@ import {
   getSandbox,
   getSession,
   SessionIdConflictError,
-  getSessionByCreateIdempotencyKey,
   getSessionSpawnDenialByIdempotencyKey,
   getSessionEvent,
   getWorkspaceControlEvent,
@@ -539,29 +538,11 @@ export async function createAndStartSession(input: {
     model: input.model,
     reasoningEffort: input.reasoningEffort,
   };
-  // Fast path with a key: return a session already created under this key
-  // (the sequential retry / double-submit case) without inserting again.
+  // Keyed creation is intentionally handled only by the database admission
+  // transaction below. Its workspace/key lock replays either the successful
+  // session or the committed denial atomically; an application-side lookup
+  // cannot serialize those two source tables against an older writer.
   if (input.createIdempotencyKey) {
-    const existing = await getSessionByCreateIdempotencyKey(
-      input.db,
-      input.workspaceId,
-      input.createIdempotencyKey,
-    );
-    if (existing) {
-      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-        throw new SessionIdConflictError(input.requestedSessionId);
-      }
-      return await finishStartSession(
-        existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-        existing,
-      );
-    }
-    // No prior session: insert under the key, racing concurrent creates. The
-    // partial unique index lets exactly one insert win; a loser gets back the
-    // winner's row with created=false. Both callers may enter the idempotent
-    // initializer; exactly one creates the first events/turn. Each retry
-    // advances the coalesced wake revision so an in-flight stale delivery can
-    // never acknowledge work committed by the other caller.
     const keyedResult = await createSessionWithIdempotencyKeyResult(input.db, {
       ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,

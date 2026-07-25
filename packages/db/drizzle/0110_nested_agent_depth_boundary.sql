@@ -1,7 +1,42 @@
 -- deployment-mode: rolling
--- Authoritative admission boundary, denial evidence, policy lock/read, and RLS.
+-- Mixed-version admission boundary, denial evidence, idempotency fencing,
+-- policy lock/read, and RLS. This boundary must be installed before the
+-- batched lineage backfill: old writers remain allowed to insert sessions and
+-- this trigger supplies the new snapshot while the backfill is in flight.
 SET lock_timeout = '5s';
 SET statement_timeout = '30s';
+
+-- A partial unique index on sessions and a separate partial unique index on
+-- denials cannot prevent one old writer from committing a success while a
+-- newer writer commits a denial for the same workspace/key. This small
+-- cross-outcome ledger is the database authority for that decision. It is
+-- intentionally private to the trigger functions; callers replay the outcome
+-- from the durable source row.
+CREATE TABLE "session_create_idempotency_guard" (
+  "workspace_id" uuid NOT NULL,
+  "idempotency_key" text NOT NULL,
+  "outcome" text NOT NULL,
+  "session_id" uuid,
+  "denial_id" uuid,
+  "created_at" timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT "session_create_idempotency_guard_pk"
+    PRIMARY KEY ("workspace_id", "idempotency_key"),
+  CONSTRAINT "session_create_idempotency_guard_outcome_check"
+    CHECK ("outcome" IN ('session', 'denial')),
+  CONSTRAINT "session_create_idempotency_guard_target_check"
+    CHECK (("outcome" = 'session' AND "session_id" IS NOT NULL AND "denial_id" IS NULL)
+       OR ("outcome" = 'denial' AND "session_id" IS NULL AND "denial_id" IS NOT NULL))
+);
+
+-- Preserve successes created before this boundary. The session-side partial
+-- unique index already proves there is at most one source row per key.
+INSERT INTO "session_create_idempotency_guard" (
+  "workspace_id", "idempotency_key", "outcome", "session_id"
+)
+SELECT "workspace_id", "create_idempotency_key", 'session', "id"
+FROM "sessions"
+WHERE "create_idempotency_key" IS NOT NULL
+ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING;
 
 CREATE TABLE "session_spawn_denials" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
@@ -41,6 +76,68 @@ CREATE INDEX "session_spawn_denials_parent_idx"
 CREATE UNIQUE INDEX "session_spawn_denials_workspace_idempotency_idx"
   ON "session_spawn_denials" ("workspace_id", "idempotency_key")
   WHERE "idempotency_key" IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION opengeni_private.session_create_idempotency_guard_insert()
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog
+AS $function$
+DECLARE
+  inserted_rows integer;
+  existing_outcome text;
+  existing_session_id uuid;
+  existing_denial_id uuid;
+  new_outcome text;
+  new_session_id uuid;
+  new_denial_id uuid;
+  new_idempotency_key text;
+BEGIN
+  IF TG_TABLE_NAME = 'sessions' THEN
+    new_idempotency_key := NEW.create_idempotency_key;
+    new_outcome := 'session';
+    new_session_id := NEW.id;
+    new_denial_id := NULL;
+  ELSE
+    new_idempotency_key := NEW.idempotency_key;
+    new_outcome := 'denial';
+    new_session_id := NULL;
+    new_denial_id := NEW.id;
+  END IF;
+  IF new_idempotency_key IS NULL THEN
+    RETURN NEW;
+  END IF;
+
+  EXECUTE format($sql$
+    INSERT INTO %I."session_create_idempotency_guard"
+      ("workspace_id", "idempotency_key", "outcome", "session_id", "denial_id")
+    VALUES ($1, $2, $3, $4, $5)
+    ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING
+  $sql$, TG_TABLE_SCHEMA)
+  USING NEW.workspace_id, new_idempotency_key, new_outcome, new_session_id, new_denial_id;
+  GET DIAGNOSTICS inserted_rows = ROW_COUNT;
+  IF inserted_rows = 1 THEN
+    RETURN NEW;
+  END IF;
+
+  EXECUTE format($sql$
+    SELECT "outcome", "session_id", "denial_id"
+    FROM %I."session_create_idempotency_guard"
+    WHERE "workspace_id" = $1 AND "idempotency_key" = $2
+  $sql$, TG_TABLE_SCHEMA)
+  INTO existing_outcome, existing_session_id, existing_denial_id
+  USING NEW.workspace_id, new_idempotency_key;
+
+  -- A same-row replay is harmless; the source table's own unique index handles
+  -- same-outcome duplicates before this AFTER trigger fires. Any other source
+  -- row is a contradictory success/denial and must fail closed.
+  IF existing_outcome = new_outcome
+     AND ((new_outcome = 'session' AND existing_session_id = NEW.id)
+       OR (new_outcome = 'denial' AND existing_denial_id = NEW.id)) THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'session create idempotency key already has a different outcome'
+    USING ERRCODE = '23505',
+          CONSTRAINT = 'session_create_idempotency_guard_pk';
+END
+$function$;
 
 DO $lock_function$
 DECLARE target_schema text := current_schema();
@@ -210,8 +307,12 @@ DECLARE target_schema text := current_schema();
 BEGIN
   EXECUTE format('DROP TRIGGER IF EXISTS session_depth_policy_defaults ON %I.sessions', target_schema);
   EXECUTE format('CREATE TRIGGER session_depth_policy_defaults BEFORE INSERT ON %I.sessions FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_depth_policy_defaults()', target_schema);
+  EXECUTE format('DROP TRIGGER IF EXISTS session_create_idempotency_guard ON %I.sessions', target_schema);
+  EXECUTE format('CREATE TRIGGER session_create_idempotency_guard AFTER INSERT ON %I.sessions FOR EACH ROW WHEN (NEW.create_idempotency_key IS NOT NULL) EXECUTE FUNCTION opengeni_private.session_create_idempotency_guard_insert()', target_schema);
   EXECUTE format('DROP TRIGGER IF EXISTS session_spawn_denials_append_only ON %I.session_spawn_denials', target_schema);
   EXECUTE format('CREATE TRIGGER session_spawn_denials_append_only BEFORE UPDATE OR DELETE ON %I.session_spawn_denials FOR EACH ROW EXECUTE FUNCTION opengeni_private.session_spawn_denials_append_only()', target_schema);
+  EXECUTE format('DROP TRIGGER IF EXISTS session_spawn_denials_idempotency_guard ON %I.session_spawn_denials', target_schema);
+  EXECUTE format('CREATE TRIGGER session_spawn_denials_idempotency_guard AFTER INSERT ON %I.session_spawn_denials FOR EACH ROW WHEN (NEW.idempotency_key IS NOT NULL) EXECUTE FUNCTION opengeni_private.session_create_idempotency_guard_insert()', target_schema);
   EXECUTE format('DROP TRIGGER IF EXISTS lock_nested_agent_workspace_policy_update ON %I.workspaces', target_schema);
   EXECUTE format('CREATE TRIGGER lock_nested_agent_workspace_policy_update BEFORE UPDATE OF settings ON %I.workspaces FOR EACH ROW EXECUTE FUNCTION opengeni_private.lock_nested_agent_workspace_policy_update()', target_schema);
 END $triggers$;
