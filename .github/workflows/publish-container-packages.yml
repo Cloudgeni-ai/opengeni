@@ -16,6 +16,32 @@ jobs:
     name: Make OpenGeni images public
     runs-on: ubuntu-latest
     steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Link packages to this repository
+        run: |
+          set -euo pipefail
+          context="$RUNNER_TEMP/opengeni-package-link"
+          mkdir -p "$context"
+          cat >"$context/Dockerfile" <<'EOF'
+          FROM scratch
+          LABEL org.opencontainers.image.source="https://github.com/Cloudgeni-ai/opengeni"
+          LABEL org.opencontainers.image.description="OpenGeni public distribution"
+          EOF
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          for role in api worker web relay sandbox; do
+            docker buildx build \
+              --file "$context/Dockerfile" \
+              --tag "ghcr.io/${owner}/opengeni-${role}:repository-link" \
+              --push \
+              "$context"
+          done
+
       - name: Publish package visibility
         env:
           GH_TOKEN: ${{ github.token }}
