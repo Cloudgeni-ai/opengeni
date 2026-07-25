@@ -1,5 +1,25 @@
 # @opengeni/api-router
 
+## 0.8.7
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+- Updated dependencies [524599e]
+  - @opengeni/config@0.6.8
+  - @opengeni/contracts@0.17.3
+  - @opengeni/core@0.9.7
+  - @opengeni/db@0.10.6
+  - @opengeni/runtime@0.12.6
+  - @opengeni/documents@0.2.27
+  - @opengeni/github@0.3.9
+  - @opengeni/storage@0.2.21
+  - @opengeni/events@0.3.18
+
 ## 0.8.6
 
 ### Patch Changes
