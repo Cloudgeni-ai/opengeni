@@ -76,7 +76,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         turnId: "turn-1",
         turnAttemptId: "attempt-1",
         model: "codex/gpt-5.6-sol", // has NO OpenGeni pricing
-        isCodexTurn: true,
+        externallyBilled: true,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
@@ -111,7 +111,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         turnId: "turn-2",
         turnAttemptId: "attempt-2",
         model: "scripted-model",
-        isCodexTurn: false,
+        externallyBilled: false,
         usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
         sourceKey: "response-1",
       });
@@ -160,7 +160,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
           turnId: "turn-malformed",
           turnAttemptId: `attempt-malformed-${index}`,
           model: "gpt-5.6-sol",
-          isCodexTurn: false,
+          externallyBilled: false,
           usage,
           sourceKey: `response-${index}`,
         });
@@ -204,7 +204,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
         turnId: "turn-aggregate",
         turnAttemptId: "attempt-aggregate",
         model: "gpt-5.6-sol",
-        isCodexTurn: false,
+        externallyBilled: false,
         usage: {
           inputTokens: 3000,
           outputTokens: 30,
@@ -315,7 +315,7 @@ describe("worker recordModelUsageAndDebitCredits — codex usage recording", () 
           turnId: "turn-inconsistent",
           turnAttemptId: `attempt-inconsistent-${value.expectedTotal}`,
           model: "scripted-model",
-          isCodexTurn: false,
+          externallyBilled: false,
           usage: value.usage,
           sourceKey: value.sourceKey,
         });
