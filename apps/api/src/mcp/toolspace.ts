@@ -156,6 +156,14 @@ export class ToolspaceToolListCache {
     this.retainedBytes = 0;
   }
 
+  snapshot(): { entries: number; bytes: number; keys: string[] } {
+    return {
+      entries: this.values.size,
+      bytes: this.retainedBytes,
+      keys: [...this.values.keys()],
+    };
+  }
+
   private delete(key: string): void {
     const existing = this.values.get(key);
     if (!existing) return;

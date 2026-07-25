@@ -363,9 +363,17 @@ export function createApp(deps: AppDependencies): Hono {
         throw error;
       }
     }
-    const toolspace = toolspaceGrant
-      ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
-      : null;
+    let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
+    if (toolspaceGrant) {
+      try {
+        toolspace = await prepareToolspaceMcpSurface({ deps: routeDeps, grant });
+      } catch (error) {
+        if (error instanceof McpPayloadTooLargeError) {
+          throw new HTTPException(413, { message: "MCP tool list exceeds the safety limit" });
+        }
+        throw error;
+      }
+    }
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -459,6 +467,9 @@ export function allowedCorsOrigin(pattern: string, origin: string): boolean {
 export function httpStatusForError(error: unknown): number {
   if (error instanceof HTTPException) {
     return error.status;
+  }
+  if (error instanceof McpPayloadTooLargeError) {
+    return 413;
   }
   return 500;
 }

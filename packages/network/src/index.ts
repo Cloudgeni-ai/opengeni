@@ -201,10 +201,7 @@ export class DestinationPolicyError extends Error {
 
 const defaultDnsLookup: DnsLookup = async (hostname) => {
   const answers = await nodeLookup(hostname, { all: true });
-  return answers.map((entry) => ({
-    address: entry.address,
-    family: entry.family === 6 ? (6 as const) : (4 as const),
-  }));
+  return answers.map((entry) => normalizeDnsAnswer(entry));
 };
 
 const defaultFetch: FetchLike = (input, init) =>
@@ -255,7 +252,10 @@ export async function resolvePinnedDestination(
     addresses = literalFamily
       ? [{ address: hostname, family: literalFamily === 6 ? 6 : 4 }]
       : await (options.dnsLookup ?? defaultDnsLookup)(hostname);
-  } catch {
+  } catch (error) {
+    if (error instanceof DestinationPolicyError && error.reason === "invalid_dns_answer") {
+      throw error;
+    }
     throw new DestinationPolicyError("dns_failed", `${label} hostname could not be resolved`);
   }
 
@@ -510,20 +510,50 @@ function isLoopbackIpv4(hostname: string): boolean {
 function dedupeAddresses(addresses: readonly DnsAddress[]): DnsAddress[] {
   const out: DnsAddress[] = [];
   const seen = new Set<string>();
+  if (!Array.isArray(addresses)) {
+    throw invalidDnsAnswer();
+  }
   for (const entry of addresses) {
-    const address = stripAddressBrackets(entry.address.trim().toLowerCase());
-    const family = isIP(address);
-    if (family !== 4 && family !== 6) {
-      out.push({ address, family: 4 });
-      continue;
-    }
-    const key = `${family}:${address}`;
+    const normalized = normalizeDnsAnswer(entry);
+    const key = `${normalized.family}:${normalized.address}`;
     if (!seen.has(key)) {
       seen.add(key);
-      out.push({ address, family });
+      out.push(normalized);
     }
   }
   return out;
+}
+
+/**
+ * Validate resolver metadata before it can influence either policy checks or
+ * the pinned dispatcher. Never infer a family from the address while retaining
+ * a conflicting resolver claim: an invalid answer is an invalid answer.
+ */
+function normalizeDnsAnswer(entry: unknown): DnsAddress {
+  if (!entry || typeof entry !== "object") {
+    throw invalidDnsAnswer();
+  }
+  const candidate = entry as { address?: unknown; family?: unknown };
+  if (typeof candidate.address !== "string") {
+    throw invalidDnsAnswer();
+  }
+  const family = candidate.family;
+  if (family !== 4 && family !== 6) {
+    throw invalidDnsAnswer();
+  }
+  const address = stripAddressBrackets(candidate.address.trim().toLowerCase());
+  const actualFamily = isIP(address);
+  if (actualFamily !== family) {
+    throw invalidDnsAnswer();
+  }
+  return { address, family };
+}
+
+function invalidDnsAnswer(): DestinationPolicyError {
+  return new DestinationPolicyError(
+    "invalid_dns_answer",
+    "hostname returned an invalid DNS answer",
+  );
 }
 
 function isNonPublicIpv4(address: string): boolean {

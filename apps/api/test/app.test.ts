@@ -33,6 +33,7 @@ import {
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
   OPENGENI_API_CONTRACT_HEADER,
@@ -452,6 +453,7 @@ describe("API helpers", () => {
 
   test("preserves HTTPException status codes in error metrics", () => {
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
+    expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
   });
 

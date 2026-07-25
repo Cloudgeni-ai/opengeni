@@ -4,6 +4,7 @@ import {
   isNonPublicAddress,
   pinnedFetch,
   readResponseBodyBounded,
+  resolvePinnedDestination,
   ResponseBodyLimitError,
   validateHttpUrl,
   type DispatcherLifecycle,
@@ -22,6 +23,45 @@ const testEscape: OutboundNetworkSettings = {
 };
 
 describe("DNS-pinned outbound transport", () => {
+  test.each([
+    ["IPv4 marked as IPv6", { address: "1.1.1.1", family: 6 }],
+    ["IPv6 marked as IPv4", { address: "2606:4700:4700::1111", family: 4 }],
+    ["malformed address", { address: "not-an-ip", family: 4 }],
+    ["unknown numeric family", { address: "1.1.1.1", family: 0 }],
+    ["non-numeric family", { address: "1.1.1.1", family: "4" }],
+  ] as const)("rejects %s DNS answers without relabeling them", async (_label, answer) => {
+    await expect(
+      resolvePinnedDestination("https://invalid-answer.example.test/", production, {
+        dnsLookup: async () => [answer] as unknown as DnsAddress[],
+      }),
+    ).rejects.toMatchObject<Partial<DestinationPolicyError>>({
+      reason: "invalid_dns_answer",
+    });
+  });
+
+  test("rejects a malformed runtime answer before any fetch or dispatcher is created", async () => {
+    let fetchCalls = 0;
+    let agentCalls = 0;
+    await expect(
+      pinnedFetch("https://invalid-runtime-answer.example.test/", undefined, production, {
+        dnsLookup: async () =>
+          [{ address: "8.8.8.8", family: 6 }] as unknown as DnsAddress[],
+        agentFactory: () => {
+          agentCalls += 1;
+          return fakeDispatcher();
+        },
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          return new Response("unexpected");
+        },
+      }),
+    ).rejects.toMatchObject<Partial<DestinationPolicyError>>({
+      reason: "invalid_dns_answer",
+    });
+    expect(fetchCalls).toBe(0);
+    expect(agentCalls).toBe(0);
+  });
+
   test("rejects a public-then-private DNS answer before the request implementation", async () => {
     let fetchCalls = 0;
     let agentCalls = 0;

@@ -42,6 +42,7 @@ import {
 } from "@opengeni/db";
 import {
   prepareToolspaceMcpSurface,
+  ToolspaceToolListCache,
   toolspaceCanProxyServerId,
   type ToolspaceMcpSurface,
 } from "../src/mcp/toolspace";
@@ -228,6 +229,22 @@ describe("toolspaceCanProxyServerId (recursion guard predicate)", () => {
     expect(toolspaceCanProxyServerId("docs")).toBe(false);
     expect(toolspaceCanProxyServerId("thirdparty")).toBe(true);
     expect(toolspaceCanProxyServerId("github-mcp")).toBe(true);
+  });
+});
+
+describe("ToolspaceToolListCache", () => {
+  test("does not admit an oversized listing after an aggregate failure", () => {
+    const cache = new ToolspaceToolListCache(4, 256, 1_000);
+    const oversized = [
+      {
+        serverId: "overflow",
+        tool: { name: "large", description: "x".repeat(512) },
+        requireApproval: false,
+      },
+    ];
+    expect(cache.write("aggregate-failure", oversized)).toBe(false);
+    expect(cache.read("aggregate-failure")).toBeNull();
+    expect(cache.snapshot()).toEqual({ entries: 0, bytes: 0, keys: [] });
   });
 });
 

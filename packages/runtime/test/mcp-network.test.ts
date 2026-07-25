@@ -129,6 +129,44 @@ describe("MCP network and payload boundary", () => {
     expect(budget.snapshot()).toEqual({ entries: 1, bytes: exactBytes });
   });
 
+  test("rejects aggregate entry overflow across providers without committing the failed source", () => {
+    const budget = new McpAggregateToolListBudget(
+      "aggregate test",
+      4_096,
+      Number.MAX_SAFE_INTEGER,
+    );
+    const firstProvider = Array.from({ length: 4_096 }, (_, index) => ({
+      name: `provider-a-${index}`,
+    }));
+    budget.replace("provider-a", firstProvider);
+
+    expect(() => budget.replace("provider-b", [{ name: "one-more" }])).toThrow(
+      McpPayloadTooLargeError,
+    );
+    expect(budget.snapshot().entries).toBe(4_096);
+  });
+
+  test("rejects aggregate serialized-byte overflow across providers without committing the failed source", () => {
+    const budget = new McpAggregateToolListBudget(
+      "aggregate test",
+      Number.MAX_SAFE_INTEGER,
+      16 * 1024 * 1024,
+    );
+    const providerTools = Array.from({ length: 40 }, (_, index) => ({
+      name: `large-tool-${index}`,
+      description: "x".repeat(100_000),
+    }));
+    for (let index = 0; index < 4; index += 1) {
+      budget.replace(`provider-${index}`, providerTools);
+    }
+    const before = budget.snapshot();
+    expect(before.bytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(() => budget.replace("provider-overflow", providerTools)).toThrow(
+      McpPayloadTooLargeError,
+    );
+    expect(budget.snapshot()).toEqual(before);
+  });
+
   test("bounded parallel map preserves order and never exceeds its concurrency", async () => {
     let active = 0;
     let maxActive = 0;

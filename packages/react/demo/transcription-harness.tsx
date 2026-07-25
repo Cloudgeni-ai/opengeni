@@ -213,6 +213,7 @@ function Harness() {
   const composer: ComposerState = {
     value,
     setValue,
+    hasDraftContent: () => value.length > 0,
     send: async () => {
       setSent((current) => [...current, { id: current.length + 1, message: value }]);
       return true;
