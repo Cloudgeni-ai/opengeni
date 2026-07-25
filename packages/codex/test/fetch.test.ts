@@ -349,7 +349,7 @@ describe("codexSubscriptionFetch", () => {
     expect(calls).toBe(1);
   });
 
-  test("a pre-headers timeout retries once with the same durable request id, then returns a typed 504", async () => {
+  test("a pre-headers timeout never replays an acceptance-unknown request and returns a typed 504", async () => {
     const events: CodexModelRequestEvent[] = [];
     const idempotencyKeys: string[] = [];
     let calls = 0;
@@ -384,8 +384,8 @@ describe("codexSubscriptionFetch", () => {
           body: JSON.stringify({ model: "gpt-5.6-sol", stream: true }),
         }),
     );
-    expect(calls).toBe(2);
-    expect(idempotencyKeys).toEqual(["dispatch-1:1", "dispatch-1:1"]);
+    expect(calls).toBe(1);
+    expect(idempotencyKeys).toEqual(["dispatch-1:1"]);
     expect(response.status).toBe(504);
     expect(response.headers.get("x-should-retry")).toBe("false");
     const body = (await response.json()) as { error: Record<string, unknown> };
@@ -395,11 +395,47 @@ describe("codexSubscriptionFetch", () => {
     expect(events.map((event) => event.phase)).toEqual([
       "started",
       "timed_out",
-      "started",
-      "timed_out",
     ]);
-    expect(events[1]?.willRetry).toBe(true);
-    expect(events[3]?.willRetry).toBe(false);
+    expect(events[0]?.timeoutPolicy.noByteRetries).toBe(0);
+    expect(events[1]?.willRetry).toBe(false);
+  });
+
+  test("a late response after a pre-headers timeout does not trigger a second upstream call", async () => {
+    let calls = 0;
+    let resolveUpstream!: (response: Response) => void;
+    const response = await codexRequestStorage.run(
+      ctx({
+        responseTimeoutPolicy: {
+          headersTimeoutMs: 15,
+          streamIdleTimeoutMs: 100,
+          wholeRequestTimeoutMs: 100,
+          noByteRetries: 1,
+          retryBackoffMs: 0,
+        },
+      }),
+      () =>
+        codexSubscriptionFetch(async () => {
+          calls += 1;
+          return await new Promise<Response>((resolve) => {
+            resolveUpstream = resolve;
+          });
+        })("https://chatgpt.com/backend-api/responses", {
+          method: "POST",
+          body: JSON.stringify({ model: "gpt-5.6-sol", stream: true }),
+        }),
+    );
+
+    resolveUpstream(new Response('data: {"type":"response.completed"}\n\n', { status: 200 }));
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(calls).toBe(1);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
+    expect(await response.json()).toMatchObject({
+      error: {
+        type: CODEX_RESPONSE_TIMEOUT_ERROR_TYPE,
+        response_observed: false,
+      },
+    });
   });
 
   test("a pre-headers timeout stays typed when audit persistence rejects", async () => {
@@ -447,7 +483,7 @@ describe("codexSubscriptionFetch", () => {
     });
   });
 
-  test("a native connect timeout is retried only before headers", async () => {
+  test("a native connect timeout is typed and never retried", async () => {
     const events: CodexModelRequestEvent[] = [];
     let calls = 0;
     const response = await codexRequestStorage.run(
@@ -466,21 +502,20 @@ describe("codexSubscriptionFetch", () => {
       () =>
         codexSubscriptionFetch(async () => {
           calls += 1;
-          if (calls === 1) {
-            throw Object.assign(new Error("Connect Timeout Error"), {
-              name: "ConnectTimeoutError",
-              code: "UND_ERR_CONNECT_TIMEOUT",
-            });
-          }
-          return new Response("data: {}\n\n", { status: 200 });
+          throw Object.assign(new Error("Connect Timeout Error"), {
+            name: "ConnectTimeoutError",
+            code: "UND_ERR_CONNECT_TIMEOUT",
+          });
         })("https://chatgpt.com/backend-api/responses", {
           method: "POST",
           body: JSON.stringify({ stream: true }),
         }),
     );
-    expect(calls).toBe(2);
-    expect(response.status).toBe(200);
+    expect(calls).toBe(1);
+    expect(response.status).toBe(504);
+    expect(response.headers.get("x-should-retry")).toBe("false");
     expect(events.find((event) => event.phase === "timed_out")?.timeoutClass).toBe("connect");
+    expect(events.find((event) => event.phase === "timed_out")?.willRetry).toBe(false);
   });
 
   test("an idle timeout after the first byte stays typed without replay when audit persistence rejects", async () => {

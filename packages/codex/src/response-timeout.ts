@@ -37,10 +37,10 @@ export function resolveCodexResponseTimeoutPolicy(
       override?.wholeRequestTimeoutMs,
       DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY.wholeRequestTimeoutMs,
     ),
-    noByteRetries:
-      override?.noByteRetries !== undefined && Number.isFinite(override.noByteRetries)
-        ? Math.max(0, Math.floor(override.noByteRetries))
-        : DEFAULT_CODEX_RESPONSE_TIMEOUT_POLICY.noByteRetries,
+    // Automatic replay is fail-closed until the provider operation can be
+    // durably read/reconciled. Keep the field for policy/event compatibility,
+    // but never let a caller opt back into an unproved retry.
+    noByteRetries: 0,
     retryBackoffMs:
       override?.retryBackoffMs !== undefined &&
       Number.isFinite(override.retryBackoffMs) &&

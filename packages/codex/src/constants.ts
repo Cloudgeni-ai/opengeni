@@ -65,7 +65,11 @@ export const CODEX_REFRESH_FALLBACK_MS = 8 * 24 * 60 * 60 * 1000; // 8 days when
 export const CODEX_RESPONSE_HEADERS_TIMEOUT_MS = 4 * 60_000;
 export const CODEX_RESPONSE_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
 export const CODEX_RESPONSE_WHOLE_TIMEOUT_MS = 30 * 60_000;
-export const CODEX_RESPONSE_NO_BYTE_RETRIES = 1;
+// Kept as a compatibility-shaped policy field, but automatic replay is disabled
+// until a provider-specific operation receipt can prove non-acceptance or resume
+// the same operation identity. An absent response does not prove that the
+// provider never accepted the request.
+export const CODEX_RESPONSE_NO_BYTE_RETRIES = 0;
 export const CODEX_RESPONSE_RETRY_BACKOFF_MS = 1_000;
 // Must exceed the transport-owned whole-response deadline. This SDK guard is a
 // last-resort envelope; the inner transport emits the typed/durable failure.

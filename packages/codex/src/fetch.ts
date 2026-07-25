@@ -160,22 +160,6 @@ function providerRequestId(headers: Headers): string | undefined {
   return headers.get("x-request-id") ?? headers.get("request-id") ?? undefined;
 }
 
-async function delayBeforeRetry(ms: number, signal: AbortSignal | null | undefined): Promise<void> {
-  if (ms <= 0) return;
-  if (signal?.aborted) throw signal.reason;
-  await new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(signal?.reason);
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
 async function fetchBeforeHeaders(
   base: FetchLike,
   input: string,
@@ -408,7 +392,6 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
     const requestId = ctx.nextRequestId?.() ?? randomUUID();
     const logicalStartedAt = Date.now();
     let transportAttempt = 0;
-    let noByteRetriesUsed = 0;
 
     const attempt = async (
       auth: CodexTokenSnapshot,
@@ -471,66 +454,58 @@ export function codexSubscriptionFetch(base: FetchLike = globalThis.fetch): Fetc
         );
       }
       let res: Response;
-      for (;;) {
-        transportAttempt += 1;
-        const audit: RequestAudit = {
-          ctx,
-          requestId,
-          transportAttempt,
-          ...(model ? { model } : {}),
-          logicalStartedAt,
-          attemptStartedAt: Date.now(),
-          policy,
-        };
+      transportAttempt += 1;
+      const audit: RequestAudit = {
+        ctx,
+        requestId,
+        transportAttempt,
+        ...(model ? { model } : {}),
+        logicalStartedAt,
+        attemptStartedAt: Date.now(),
+        policy,
+      };
+      await emitRequestEvent(audit, {
+        phase: "started",
+        responseObserved: false,
+      });
+      try {
+        res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
+        const upstreamRequestId = providerRequestId(res.headers);
         await emitRequestEvent(audit, {
-          phase: "started",
-          responseObserved: false,
+          phase: "headers",
+          responseObserved: true,
+          status: res.status,
+          ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
         });
-        try {
-          res = await fetchBeforeHeaders(base, rewritten, nextInit, audit);
-          const upstreamRequestId = providerRequestId(res.headers);
+        const observed = await observedResponse(res, audit, nextInit.signal);
+        res = observed;
+      } catch (error) {
+        if (nextInit.signal?.aborted) {
           await emitRequestEvent(audit, {
-            phase: "headers",
-            responseObserved: true,
-            status: res.status,
-            ...(upstreamRequestId ? { providerRequestId: upstreamRequestId } : {}),
-          });
-          const observed = await observedResponse(res, audit, nextInit.signal);
-          res = observed;
-          break;
-        } catch (error) {
-          if (nextInit.signal?.aborted) {
-            await emitRequestEvent(audit, {
-              phase: "failed",
-              responseObserved: false,
-            }).catch(() => undefined);
-            throw error;
-          }
-          const klass = isPreHeadersTimeoutError(error);
-          if (!klass) {
-            await emitRequestEvent(audit, {
-              phase: "failed",
-              responseObserved: false,
-            });
-            throw error;
-          }
-          const canRetry =
-            noByteRetriesUsed < policy.noByteRetries &&
-            Date.now() - logicalStartedAt + policy.retryBackoffMs < policy.wholeRequestTimeoutMs;
-          // Audit persistence must not replace the transport timeout: the
-          // caller still needs the typed error to make the retry/504 decision.
-          await emitRequestEvent(audit, {
-            phase: "timed_out",
+            phase: "failed",
             responseObserved: false,
-            timeoutClass: klass,
-            willRetry: canRetry,
           }).catch(() => undefined);
-          if (!canRetry) {
-            throw new CodexResponseTimeoutError(klass, requestId, false);
-          }
-          noByteRetriesUsed += 1;
-          await delayBeforeRetry(policy.retryBackoffMs, nextInit.signal);
+          throw error;
         }
+        const klass = isPreHeadersTimeoutError(error);
+        if (!klass) {
+          await emitRequestEvent(audit, {
+            phase: "failed",
+            responseObserved: false,
+          });
+          throw error;
+        }
+        // An absent response does not prove that the provider never accepted
+        // this operation. Until a provider-specific receipt can prove
+        // non-acceptance or resume the same operation, never replay it.
+        // Audit persistence must not replace the typed transport timeout.
+        await emitRequestEvent(audit, {
+          phase: "timed_out",
+          responseObserved: false,
+          timeoutClass: klass,
+          willRetry: false,
+        }).catch(() => undefined);
+        throw new CodexResponseTimeoutError(klass, requestId, false);
       }
       // Multi-account P4 (Part A): scrape the usage headers ONCE, before the
       // OK/!res.ok branch, so the same fire-and-forget read also covers the 429

@@ -7258,10 +7258,10 @@ export function agentRunFailurePayload(
   if (codexTimeout) {
     return {
       error: codexTimeout.responseObserved
-        ? "The Codex response timed out after streaming began. Observed output was checkpointed; continuation must re-check side effects before doing more work."
-        : "The Codex response timed out before any response was observed. The session can continue safely.",
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed; automatic replay is disabled because the upstream operation may still be active."
+        : "The Codex response timed out before any response was observed. Upstream acceptance is unknown, so automatic replay is disabled.",
       code: "codex_response_timeout",
-      retryable: true,
+      retryable: false,
       timeoutClass: codexTimeout.timeoutClass,
       responseObserved: codexTimeout.responseObserved,
       ...(codexTimeout.requestId ? { requestId: codexTimeout.requestId } : {}),

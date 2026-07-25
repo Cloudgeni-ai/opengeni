@@ -2300,7 +2300,7 @@ describe("escaped MCP transport timeout classifier", () => {
   });
 });
 
-describe("Codex response timeout recovery", () => {
+describe("Codex response timeout fail-closed settlement", () => {
   test("recognizes the production OpenAI timeout only inside a confirmed Codex turn", () => {
     const legacy = Object.assign(new Error("Request timed out."), {
       name: "APIConnectionTimeoutError",
@@ -2308,13 +2308,13 @@ describe("Codex response timeout recovery", () => {
     expect(agentRunFailurePayload(legacy).retryable).toBeUndefined();
     expect(agentRunFailurePayload(legacy, { isCodexTurn: true })).toMatchObject({
       code: "codex_response_timeout",
-      retryable: true,
+      retryable: false,
       timeoutClass: "headers",
       responseObserved: false,
     });
   });
 
-  test("preserves structured partial-stream timeout evidence for safe continuation", () => {
+  test("preserves structured partial-stream timeout evidence without same-turn replay", () => {
     const structured = Object.assign(new Error("Codex response idle stream timed out"), {
       name: "CodexResponseTimeoutError",
       type: "opengeni_codex_response_timeout",
@@ -2324,7 +2324,7 @@ describe("Codex response timeout recovery", () => {
     });
     expect(agentRunFailurePayload(structured)).toMatchObject({
       code: "codex_response_timeout",
-      retryable: true,
+      retryable: false,
       timeoutClass: "idle_stream",
       responseObserved: true,
       requestId: "dispatch-7:3",
@@ -2343,7 +2343,7 @@ describe("Codex response timeout recovery", () => {
     });
     expect(agentRunFailurePayload(apiError)).toMatchObject({
       code: "codex_response_timeout",
-      retryable: true,
+      retryable: false,
       timeoutClass: "whole_request",
       responseObserved: false,
       requestId: "dispatch-9:2",

@@ -37,9 +37,13 @@ export type CodexResponseTimeoutPolicy = {
   headersTimeoutMs: number;
   /** Maximum silence between response-body chunks after headers arrive. */
   streamIdleTimeoutMs: number;
-  /** Maximum wall time for one logical Responses request, including retries. */
+  /** Maximum wall time for one logical Responses request. */
   wholeRequestTimeoutMs: number;
-  /** Safe retries allowed only before any response headers/body are observed. */
+  /**
+   * Reserved compatibility field. It is currently normalized to zero because
+   * an absent response does not prove that the provider never accepted a
+   * request, so automatic replay is not safe without an operation receipt.
+   */
   noByteRetries: number;
   retryBackoffMs: number;
 };
