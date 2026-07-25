@@ -13740,6 +13740,14 @@ export type ListSessionEventsOptions = {
   excludeClasses?: readonly SessionEventSemanticClass[];
   defaultExcludeTypes?: readonly SessionEventType[];
   payloadMode?: SessionEventPayloadMode;
+  /**
+   * Internal exclusive-latest selector. Eligible legacy rows with a null
+   * association remain visible, while late-rejected and duplicate callbacks do
+   * not compete with current truth. Durable session sequence is authoritative
+   * across distinct turns; turn generation is metadata only here. Callers must
+   * pair this with a single semantic class and limit 1.
+   */
+  authoritativeLatest?: boolean;
 };
 
 export type ListSessionEventPageOptions = ListSessionEventsOptions & {
@@ -13836,6 +13844,20 @@ export async function listSessionEventPage(
         eq(schema.sessionEvents.sessionId, sessionId),
         gt(schema.sessionEvents.sequence, after),
       ];
+      if (options.authoritativeLatest) {
+        // Historical rows predate association stamping and intentionally carry
+        // null. They remain eligible; explicitly stale/duplicate rows and rows
+        // carrying a duplicate reference cannot compete with current truth.
+        filters.push(
+          and(
+            or(
+              isNull(schema.sessionEvents.turnAssociation),
+              eq(schema.sessionEvents.turnAssociation, "current"),
+            )!,
+            isNull(schema.sessionEvents.duplicateOfEventId),
+          )!,
+        );
+      }
       if (typeFilters.includeTypes.length > 0) {
         filters.push(inArray(schema.sessionEvents.type, typeFilters.includeTypes));
       }
@@ -13858,9 +13880,11 @@ export async function listSessionEventPage(
         .from(schema.sessionEvents)
         .where(and(...filters))
         .orderBy(
-          direction === "before"
+          options.authoritativeLatest
             ? desc(schema.sessionEvents.sequence)
-            : asc(schema.sessionEvents.sequence),
+            : direction === "before"
+              ? desc(schema.sessionEvents.sequence)
+              : asc(schema.sessionEvents.sequence),
         )
         .limit(queryLimit);
       if (rows.length === 0) break;
