@@ -1,0 +1,45 @@
+name: Publish container packages
+
+# GHCR creates a package as private on its first push. OpenGeni's release
+# candidates are public distribution artifacts, so the repository that owns
+# those packages must explicitly make them public before anonymous verification.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Make OpenGeni images public
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish package visibility
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for role in api worker web relay sandbox; do
+            gh api \
+              --method PATCH \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "/orgs/${GITHUB_REPOSITORY_OWNER}/packages/container/opengeni-${role}" \
+              -f visibility=public
+          done
+
+      - name: Verify anonymous pull
+        run: |
+          set -euo pipefail
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          for role in api worker web relay sandbox; do
+            token_response="$(curl -fsSL \
+              "https://ghcr.io/token?scope=repository:${owner}/opengeni-${role}:pull&service=ghcr.io")"
+            token="$(jq -er '.token' <<<"$token_response")"
+            curl -fsSL \
+              -H "Authorization: Bearer ${token}" \
+              "https://ghcr.io/v2/${owner}/opengeni-${role}/tags/list" |
+              jq -e '.tags | length > 0' >/dev/null
+          done
