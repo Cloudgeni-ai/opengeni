@@ -177,7 +177,6 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               // was created/updated. Preserve that explicit policy if a broader
               // workspace/deployment limit is narrowed before a later fire.
               allowNestedAgentDepthIncrease: true,
-              deploymentMaxNestedAgentDepth: settings.maxNestedAgentDepth ?? null,
               subjectId: `scheduled_task:${task.id}`,
             });
           } catch (error) {

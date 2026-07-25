@@ -258,6 +258,11 @@ export type SessionSpawnDenial = {
   createdAt: string;
 };
 
+export type NestedAgentDepthDeploymentPolicy = {
+  maxNestedAgentDepth: number;
+  policySource: "deployment" | "default";
+};
+
 /** DB session shape with the creation-time depth-policy projection made explicit. */
 export type DbSession = Session & SessionDepthPolicy;
 
@@ -10773,10 +10778,36 @@ export async function listSessionMcpServersForRun(
 
 const DEFAULT_MAX_NESTED_AGENT_DEPTH = 3;
 
-type DeploymentDepthPolicy = {
-  maxNestedAgentDepth: number;
-  policySource: "deployment" | "default";
-};
+type DeploymentDepthPolicy = NestedAgentDepthDeploymentPolicy;
+
+/**
+ * Read the deployment fallback persisted by the migration boundary.
+ *
+ * Session admission locks and reads the same row through the narrow
+ * SECURITY DEFINER function below. Non-admission validation (for example,
+ * scheduled-task creation) must consume this persisted value too; process
+ * settings can be stale during a rolling deployment and are not policy
+ * authority.
+ */
+export async function getNestedAgentDepthDeploymentPolicy(
+  db: Database,
+): Promise<NestedAgentDepthDeploymentPolicy> {
+  const [row] = await db
+    .select({
+      maxNestedAgentDepth: schema.nestedAgentDepthConfiguration.maxNestedAgentDepth,
+      policySource: schema.nestedAgentDepthConfiguration.policySource,
+    })
+    .from(schema.nestedAgentDepthConfiguration)
+    .where(eq(schema.nestedAgentDepthConfiguration.singleton, true))
+    .limit(1);
+  if (!row) {
+    throw new Error("Nested-agent deployment policy is not configured");
+  }
+  return {
+    maxNestedAgentDepth: row.maxNestedAgentDepth,
+    policySource: row.policySource,
+  };
+}
 
 export type SessionCreateInput = {
   accountId: string;

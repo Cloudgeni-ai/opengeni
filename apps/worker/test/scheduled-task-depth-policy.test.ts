@@ -41,7 +41,7 @@ afterAll(async () => {
 describe("scheduled-task nested-agent policy dispatch (real PostgreSQL)", () => {
   test("persists the durable agent override on the dispatched root session", async () => {
     if (!available) return;
-    await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 1 });
+    await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 7 });
     try {
       const [account] = await admin<{ id: string }[]>`
       insert into managed_accounts (name) values ('worker scheduled depth') returning id`;

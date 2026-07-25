@@ -9,6 +9,7 @@ import type {
 import {
   createScheduledTask,
   deleteScheduledTask,
+  getNestedAgentDepthDeploymentPolicy,
   getRig,
   getScheduledTask,
   requireWorkspace,
@@ -368,10 +369,11 @@ async function validateScheduledTaskAgentConfig(input: {
   if (requestedMaxDepth !== undefined) {
     const workspace = await requireWorkspace(input.db, input.workspaceId);
     const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
+    const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
     const inheritedMaxDepth =
       typeof workspaceMaxDepth === "number"
         ? workspaceMaxDepth
-        : (input.settings.maxNestedAgentDepth ?? 3);
+        : deploymentPolicy.maxNestedAgentDepth;
     if (
       requestedMaxDepth > inheritedMaxDepth &&
       !hasPermission(input.grant.permissions, "workspace:admin")

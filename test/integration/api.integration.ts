@@ -525,95 +525,149 @@ describe("API component integration", () => {
   });
 
   test("scheduled-task agent depth policy persists and privilege-gates increases", async () => {
-    const wf = new FakeWorkflowClient();
-    const delegationSecret = "test-scheduled-agent-depth-secret";
-    const grant = await bootstrapMcpGrant(dbClient.db);
-    const app = createApp({
-      settings: testSettings({
-        databaseUrl: services.databaseUrl,
-        productAccessMode: "configured",
-        delegationSecret,
-        maxNestedAgentDepth: 1,
-      }),
-      db: dbClient.db,
-      bus: new MemoryEventBus(),
-      workflowClient: wf,
-    });
-    const managerAuth = await signDelegatedBearer(delegationSecret, grant, {
-      subjectId: "test:scheduled-depth-manager",
-      permissions: ["workspace:read", "scheduled_tasks:manage"],
-    });
-    const taskBody = (maxNestedAgentDepth: number) => ({
-      name: `depth-${maxNestedAgentDepth}`,
-      schedule: { type: "once", runAt: "2035-01-01T00:00:00.000Z", timeZone: "UTC" },
-      agentConfig: {
-        prompt: "test scheduled nested policy",
-        maxNestedAgentDepth,
-      },
-    });
+    await migrate(services.databaseUrl, undefined, { maxNestedAgentDepth: 1 });
+    try {
+      const wf = new FakeWorkflowClient();
+      const delegationSecret = "test-scheduled-agent-depth-secret";
+      const grant = await bootstrapMcpGrant(dbClient.db);
+      const app = createApp({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          productAccessMode: "configured",
+          delegationSecret,
+          maxNestedAgentDepth: 1,
+        }),
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient: wf,
+      });
+      const managerAuth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "test:scheduled-depth-manager",
+        permissions: ["workspace:read", "scheduled_tasks:manage"],
+      });
+      const taskBody = (maxNestedAgentDepth: number) => ({
+        name: `depth-${maxNestedAgentDepth}`,
+        schedule: { type: "once", runAt: "2035-01-01T00:00:00.000Z", timeZone: "UTC" },
+        agentConfig: {
+          prompt: "test scheduled nested policy",
+          maxNestedAgentDepth,
+        },
+      });
 
-    const forbidden = await app.request(workspacePath(grant.workspaceId, "/scheduled-tasks"), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: managerAuth },
-      body: JSON.stringify(taskBody(2)),
-    });
-    expect(forbidden.status).toBe(403);
-    expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toHaveLength(0);
-
-    const adminAuth = await signDelegatedBearer(delegationSecret, grant, {
-      subjectId: "test:scheduled-depth-admin",
-      permissions: ["workspace:admin"],
-    });
-    const createdResponse = await app.request(
-      workspacePath(grant.workspaceId, "/scheduled-tasks"),
-      {
+      const forbidden = await app.request(workspacePath(grant.workspaceId, "/scheduled-tasks"), {
         method: "POST",
-        headers: { "content-type": "application/json", authorization: adminAuth },
-        body: JSON.stringify(taskBody(5)),
-      },
-    );
-    expect(createdResponse.status).toBe(201);
-    const created = (await createdResponse.json()) as {
-      id: string;
-      agentConfig: { maxNestedAgentDepth?: number };
-    };
-    expect(created.agentConfig.maxNestedAgentDepth).toBe(5);
+        headers: { "content-type": "application/json", authorization: managerAuth },
+        body: JSON.stringify(taskBody(2)),
+      });
+      expect(forbidden.status).toBe(403);
+      expect(await listScheduledTasks(dbClient.db, grant.workspaceId)).toHaveLength(0);
 
-    const loweredResponse = await app.request(
-      workspacePath(grant.workspaceId, `/scheduled-tasks/${created.id}`),
-      {
-        method: "PATCH",
+      const adminAuth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "test:scheduled-depth-admin",
+        permissions: ["workspace:admin"],
+      });
+      const createdResponse = await app.request(
+        workspacePath(grant.workspaceId, "/scheduled-tasks"),
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: adminAuth },
+          body: JSON.stringify(taskBody(5)),
+        },
+      );
+      expect(createdResponse.status).toBe(201);
+      const created = (await createdResponse.json()) as {
+        id: string;
+        agentConfig: { maxNestedAgentDepth?: number };
+      };
+      expect(created.agentConfig.maxNestedAgentDepth).toBe(5);
+
+      const loweredResponse = await app.request(
+        workspacePath(grant.workspaceId, `/scheduled-tasks/${created.id}`),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json", authorization: managerAuth },
+          body: JSON.stringify({
+            agentConfig: {
+              prompt: "lowered scheduled nested policy",
+              maxNestedAgentDepth: 1,
+            },
+          }),
+        },
+      );
+      expect(loweredResponse.status).toBe(200);
+      expect(await loweredResponse.json()).toMatchObject({
+        agentConfig: { maxNestedAgentDepth: 1 },
+      });
+
+      const forbiddenUpdate = await app.request(
+        workspacePath(grant.workspaceId, `/scheduled-tasks/${created.id}`),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json", authorization: managerAuth },
+          body: JSON.stringify({
+            agentConfig: {
+              prompt: "forbidden scheduled nested policy increase",
+              maxNestedAgentDepth: 2,
+            },
+          }),
+        },
+      );
+      expect(forbiddenUpdate.status).toBe(403);
+      expect(
+        (await getScheduledTask(dbClient.db, grant.workspaceId, created.id))?.agentConfig,
+      ).toMatchObject({ maxNestedAgentDepth: 1 });
+    } finally {
+      await migrate(services.databaseUrl, undefined, {});
+    }
+  });
+
+  test("scheduled-task depth validation uses persisted deployment policy over stale runtime settings", async () => {
+    await migrate(services.databaseUrl, undefined, { maxNestedAgentDepth: 7 });
+    try {
+      const delegationSecret = "test-scheduled-agent-depth-persisted-policy-secret";
+      const grant = await bootstrapMcpGrant(dbClient.db);
+      const app = createApp({
+        settings: testSettings({
+          databaseUrl: services.databaseUrl,
+          productAccessMode: "configured",
+          delegationSecret,
+          // Simulate a rolling deployment whose process settings are stale.
+          maxNestedAgentDepth: 1,
+        }),
+        db: dbClient.db,
+        bus: new MemoryEventBus(),
+        workflowClient: new FakeWorkflowClient(),
+      });
+      const managerAuth = await signDelegatedBearer(delegationSecret, grant, {
+        subjectId: "test:scheduled-depth-persisted-policy-manager",
+        permissions: ["workspace:read", "scheduled_tasks:manage"],
+      });
+      const response = await app.request(workspacePath(grant.workspaceId, "/scheduled-tasks"), {
+        method: "POST",
         headers: { "content-type": "application/json", authorization: managerAuth },
         body: JSON.stringify({
+          name: "persisted deployment policy",
+          schedule: { type: "once", runAt: "2035-01-01T00:00:00.000Z", timeZone: "UTC" },
           agentConfig: {
-            prompt: "lowered scheduled nested policy",
-            maxNestedAgentDepth: 1,
+            prompt: "accept the persisted deployment depth",
+            maxNestedAgentDepth: 5,
           },
         }),
-      },
-    );
-    expect(loweredResponse.status).toBe(200);
-    expect(await loweredResponse.json()).toMatchObject({
-      agentConfig: { maxNestedAgentDepth: 1 },
-    });
+      });
 
-    const forbiddenUpdate = await app.request(
-      workspacePath(grant.workspaceId, `/scheduled-tasks/${created.id}`),
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json", authorization: managerAuth },
-        body: JSON.stringify({
-          agentConfig: {
-            prompt: "forbidden scheduled nested policy increase",
-            maxNestedAgentDepth: 2,
-          },
-        }),
-      },
-    );
-    expect(forbiddenUpdate.status).toBe(403);
-    expect(
-      (await getScheduledTask(dbClient.db, grant.workspaceId, created.id))?.agentConfig,
-    ).toMatchObject({ maxNestedAgentDepth: 1 });
+      expect(response.status).toBe(201);
+      const created = (await response.json()) as {
+        id: string;
+        agentConfig: { maxNestedAgentDepth?: number };
+      };
+      expect(created.agentConfig.maxNestedAgentDepth).toBe(5);
+      expect(await getScheduledTask(dbClient.db, grant.workspaceId, created.id)).toMatchObject({
+        id: created.id,
+        agentConfig: { maxNestedAgentDepth: 5 },
+      });
+    } finally {
+      await migrate(services.databaseUrl, undefined, {});
+    }
   });
 
   test("keeps array session lists stable while pin pages are idempotent and OCC-fenced", async () => {
