@@ -67,7 +67,6 @@ function leasedAcct(
 const base = {
   rotationStrategy: "most_remaining" as const,
   priorCredentialId: null,
-  nearExhaustionPct: 90,
   now: NOW,
 };
 
@@ -102,9 +101,9 @@ describe("chooseRotationActive — most_remaining", () => {
     });
   });
 
-  test("active near-capped → rotate to the account with the most remaining quota", () => {
+  test("new allocation ranks usable accounts by remaining quota without a 90% cliff", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 95 }), // active, near-cap → ineligible
+      acct("a", { primaryUsedPercent: 95 }), // still eligible, but least remaining
       acct("b", { primaryUsedPercent: 40 }), // 60 remaining
       acct("c", { primaryUsedPercent: 10 }), // 90 remaining ← winner
     ];
@@ -117,8 +116,8 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("weekly window binds as hard as 5h (worst-window used pct)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99 }), // active, capped
-      acct("b", { primaryUsedPercent: 10, secondaryUsedPercent: 95 }), // weekly near-cap → ineligible
+      acct("a", { primaryUsedPercent: 100 }), // active, capped
+      acct("b", { primaryUsedPercent: 10, secondaryUsedPercent: 95 }), // still eligible; weekly is binding
       acct("c", { primaryUsedPercent: 50, secondaryUsedPercent: 50 }), // eligible (50 remaining)
     ];
     expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts })).toEqual({
@@ -130,7 +129,7 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("remaining = min across windows (the scarcer window wins the ranking)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99 }), // active, capped
+      acct("a", { primaryUsedPercent: 100 }), // active, capped
       acct("b", { primaryUsedPercent: 10, secondaryUsedPercent: 70 }), // remaining = min(90,30)=30
       acct("c", { primaryUsedPercent: 20, secondaryUsedPercent: 20 }), // remaining = min(80,80)=80 ← winner
     ];
@@ -143,7 +142,7 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("a cooling account is excluded even when it has the most remaining quota", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99 }), // active, capped
+      acct("a", { primaryUsedPercent: 100 }), // active, capped
       acct("b", { primaryUsedPercent: 0, exhaustedUntil: new Date(NOW.getTime() + HOUR) }), // most remaining BUT cooling
       acct("c", { primaryUsedPercent: 40 }), // eligible
     ];
@@ -156,7 +155,7 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("a cooldown in the past does NOT exclude (self-clears via now comparison)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99 }), // active, capped
+      acct("a", { primaryUsedPercent: 100 }), // active, capped
       acct("b", { primaryUsedPercent: 10, exhaustedUntil: new Date(NOW.getTime() - HOUR) }), // expired cooldown → eligible
     ];
     expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts })).toEqual({
@@ -168,7 +167,7 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("needs_relogin / error accounts are never eligible", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99 }), // active, capped
+      acct("a", { primaryUsedPercent: 100 }), // active, capped
       acct("b", { status: "needs_relogin", primaryUsedPercent: 0 }), // unusable
       acct("c", { status: "error", primaryUsedPercent: 0 }), // unusable
     ];
@@ -178,7 +177,7 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("ties broken deterministically by list (created_at) order", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99 }), // active, capped
+      acct("a", { primaryUsedPercent: 100 }), // active, capped
       acct("b", { primaryUsedPercent: 30 }), // 70 remaining ← first in order wins the tie
       acct("c", { primaryUsedPercent: 30 }), // 70 remaining
     ];
@@ -191,8 +190,8 @@ describe("chooseRotationActive — most_remaining", () => {
 
   test("all eligible accounts capped → allCapped with the EARLIEST reset across all", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99, primaryResetAt: new Date(NOW.getTime() + 3 * HOUR) }),
-      acct("b", { primaryUsedPercent: 99, primaryResetAt: new Date(NOW.getTime() + 1 * HOUR) }), // soonest
+      acct("a", { primaryUsedPercent: 100, primaryResetAt: new Date(NOW.getTime() + 3 * HOUR) }),
+      acct("b", { primaryUsedPercent: 100, primaryResetAt: new Date(NOW.getTime() + 1 * HOUR) }), // soonest
       acct("c", { exhaustedUntil: new Date(NOW.getTime() + 2 * HOUR) }),
     ];
     const decision = chooseRotationActive({ ...base, activeCredentialId: "a", accounts });
@@ -220,7 +219,7 @@ describe("chooseRotationActive — most_remaining", () => {
 });
 
 // P3 all-capped infinite-loop bugfix. The original availableAt() seeded EPOCH0 (1970)
-// and used it as the fallback for a null/elapsed reset, so an over-threshold account
+// and used it as the fallback for a null/elapsed reset, so an exhausted account
 // with a NULL or already-elapsed cached reset yielded a PAST instant; earliestReset MINs
 // across accounts → allCapped.earliestResetAt in the deep past → continueDelayMs =
 // max(0, past − now) = 0 → a tight CPU/DB-hammering re-dispatch loop (invariant 4 violated).
@@ -229,8 +228,8 @@ const MAX_RESUME_MS = 60 * 60_000; // mirrors CODEX_USAGE_LIMIT_MAX_RESUME_MS (1
 describe("P3 all-capped idle — POSITIVE bounded delay, never 0 (invariant 4: NO THRASH)", () => {
   test("(a) all-capped with a NULL resetAt → future earliestReset → positive bounded delay (>= MIN_IDLE_MS), never 0", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99, primaryResetAt: null }), // over-threshold, unknown reset
-      acct("b", { primaryUsedPercent: 99, primaryResetAt: null }),
+      acct("a", { primaryUsedPercent: 100, primaryResetAt: null }), // exhausted, unknown reset
+      acct("b", { primaryUsedPercent: 100, primaryResetAt: null }),
     ];
     const decision = chooseRotationActive({ ...base, activeCredentialId: "a", accounts });
     expect(decision.kind).toBe("allCapped");
@@ -245,8 +244,11 @@ describe("P3 all-capped idle — POSITIVE bounded delay, never 0 (invariant 4: N
 
   test("(b) elapsed provider windows clear stale capped cache immediately", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99, primaryResetAt: new Date(NOW.getTime() - HOUR) }), // 5h reset already passed
-      acct("b", { secondaryUsedPercent: 99, secondaryResetAt: new Date(NOW.getTime() - 5 * HOUR) }), // weekly reset already passed
+      acct("a", { primaryUsedPercent: 100, primaryResetAt: new Date(NOW.getTime() - HOUR) }), // 5h reset already passed
+      acct("b", {
+        secondaryUsedPercent: 100,
+        secondaryResetAt: new Date(NOW.getTime() - 5 * HOUR),
+      }), // weekly reset already passed
     ];
     const decision = chooseRotationActive({ ...base, activeCredentialId: "a", accounts });
     expect(decision.kind).toBe("active");
@@ -266,35 +268,33 @@ describe("P3 all-capped idle — POSITIVE bounded delay, never 0 (invariant 4: N
   });
 });
 
-describe("availableAt — never a past instant for an over-threshold account (invariant 4)", () => {
-  test("(c) over-threshold account with a NULL reset → now + default cooldown, NOT the past", () => {
-    const at = availableAt(acct("a", { primaryUsedPercent: 99, primaryResetAt: null }), 90, NOW);
+describe("availableAt — never a past instant for an exhausted account (invariant 4)", () => {
+  test("(c) exhausted account with a NULL reset → now + default cooldown, NOT the past", () => {
+    const at = availableAt(acct("a", { primaryUsedPercent: 100, primaryResetAt: null }), NOW);
     expect(at.getTime()).toBe(NOW.getTime() + DEFAULT_RESET_COOLDOWN_MS);
     expect(at.getTime()).toBeGreaterThan(NOW.getTime());
   });
 
-  test("(c) over-threshold account with an ELAPSED reset → future, not the stale past instant", () => {
+  test("(c) exhausted account with an ELAPSED reset → future, not the stale past instant", () => {
     const at = availableAt(
-      acct("a", { secondaryUsedPercent: 99, secondaryResetAt: new Date(NOW.getTime() - HOUR) }),
-      90,
+      acct("a", { secondaryUsedPercent: 100, secondaryResetAt: new Date(NOW.getTime() - HOUR) }),
       NOW,
     );
     expect(at.getTime()).toBeGreaterThan(NOW.getTime());
   });
 
   test("(c) needs_relogin / error account (ineligible, no quota block) → future cooldown, not EPOCH0", () => {
-    expect(availableAt(acct("a", { status: "needs_relogin" }), 90, NOW).getTime()).toBeGreaterThan(
+    expect(availableAt(acct("a", { status: "needs_relogin" }), NOW).getTime()).toBeGreaterThan(
       NOW.getTime(),
     );
-    expect(availableAt(acct("b", { status: "error" }), 90, NOW).getTime()).toBeGreaterThan(
+    expect(availableAt(acct("b", { status: "error" }), NOW).getTime()).toBeGreaterThan(
       NOW.getTime(),
     );
   });
 
   test("a KNOWN future reset is honored exactly (the cooldown default only fills unknown/elapsed)", () => {
     const at = availableAt(
-      acct("a", { primaryUsedPercent: 99, primaryResetAt: new Date(NOW.getTime() + 3 * HOUR) }),
-      90,
+      acct("a", { primaryUsedPercent: 100, primaryResetAt: new Date(NOW.getTime() + 3 * HOUR) }),
       NOW,
     );
     expect(at.getTime()).toBe(NOW.getTime() + 3 * HOUR);
@@ -303,11 +303,10 @@ describe("availableAt — never a past instant for an over-threshold account (in
   test("clears EVERY block: a future cooldown AND a future window reset ⇒ the LATER instant", () => {
     const at = availableAt(
       acct("a", {
-        primaryUsedPercent: 99,
+        primaryUsedPercent: 100,
         primaryResetAt: new Date(NOW.getTime() + HOUR),
         exhaustedUntil: new Date(NOW.getTime() + 2 * HOUR),
       }),
-      90,
       NOW,
     );
     expect(at.getTime()).toBe(NOW.getTime() + 2 * HOUR);
@@ -316,14 +315,14 @@ describe("availableAt — never a past instant for an over-threshold account (in
 
 describe("P3 self-heal + bounded reactive walk (invariant 4)", () => {
   test("(d) SELF-HEAL: a refreshed (genuinely-reset) window makes the account eligible again — no permanent idle", () => {
-    // Stale cache: both over-threshold → allCapped (the would-be idle).
-    const stale = [acct("a", { primaryUsedPercent: 99 }), acct("b", { primaryUsedPercent: 99 })];
+    // Stale cache: both exhausted → allCapped (the would-be idle).
+    const stale = [acct("a", { primaryUsedPercent: 100 }), acct("b", { primaryUsedPercent: 100 })];
     expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts: stale }).kind).toBe(
       "allCapped",
     );
     // After the all-capped path refreshes usage, b's 5h window has ACTUALLY reset (low pct):
     // the re-rank must now pick b instead of idling forever on the stale percent.
-    const healed = [acct("a", { primaryUsedPercent: 99 }), acct("b", { primaryUsedPercent: 5 })];
+    const healed = [acct("a", { primaryUsedPercent: 100 }), acct("b", { primaryUsedPercent: 5 })];
     expect(chooseRotationActive({ ...base, activeCredentialId: "a", accounts: healed })).toEqual({
       kind: "active",
       credentialId: "b",
@@ -407,7 +406,7 @@ describe("chooseRotationActive — legacy strategies normalize to sharded rankin
   });
 
   test("stored round_robin with a capped account still ranks (old behavior picked the successor)", () => {
-    const accounts = [acct("a"), acct("b", { primaryUsedPercent: 99 }), acct("c")];
+    const accounts = [acct("a"), acct("b", { primaryUsedPercent: 100 }), acct("c")];
     // Old round_robin skipped capped "b" to pick "c". Normalized: "a" is eligible
     // and first on the equal-load tie — stay.
     expect(
@@ -426,7 +425,7 @@ describe("chooseRotationActive — legacy strategies normalize to sharded rankin
     const accounts = [
       acct("disabled-healthy", { allocatorEnabled: false }),
       acct("enabled-capped", {
-        primaryUsedPercent: 99,
+        primaryUsedPercent: 100,
         primaryResetAt: enabledReset,
       }),
     ];
@@ -454,7 +453,7 @@ describe("chooseRotationActive — legacy strategies normalize to sharded rankin
       }),
     ).toEqual({ kind: "active", credentialId: "a", moved: false });
     // Cap failover is strategy-independent and must keep working.
-    const capped = [acct("a", { primaryUsedPercent: 99 }), acct("b")];
+    const capped = [acct("a", { primaryUsedPercent: 100 }), acct("b")];
     expect(
       chooseRotationActive({
         ...base,
@@ -474,7 +473,7 @@ describe("chooseRotationActive — legacy strategies normalize to sharded rankin
 describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => {
   test("empty usedConnectors → byte-identical to P3 (max remaining wins, no dropped note)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 95 }), // active, near-cap
+      acct("a", { primaryUsedPercent: 95 }), // active and still usable
       acct("b", { primaryUsedPercent: 40, connectorNamespaces: ["github"] }), // 60 remaining
       acct("c", { primaryUsedPercent: 10, connectorNamespaces: [] }), // 90 remaining ← winner
     ];
@@ -485,7 +484,7 @@ describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => 
 
   test("PREFERS a covering target even when a non-covering one has MORE remaining quota", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 95, connectorNamespaces: ["github"] }), // active, near-cap (leaving)
+      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github"] }), // exhausted leaving account
       acct("b", { primaryUsedPercent: 50, connectorNamespaces: ["github", "gmail"] }), // covers github, 50 remaining ← winner
       acct("c", { primaryUsedPercent: 5, connectorNamespaces: ["gmail"] }), // 95 remaining BUT lacks github
     ];
@@ -503,8 +502,8 @@ describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => 
 
   test("FAILS OVER to a non-covering account when it is the ONLY one with quota (+ dropped note)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99, connectorNamespaces: ["github"] }), // active, capped (leaving)
-      acct("b", { primaryUsedPercent: 99, connectorNamespaces: ["github", "gmail"] }), // covers BUT also capped
+      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github"] }), // active, capped (leaving)
+      acct("b", { primaryUsedPercent: 100, connectorNamespaces: ["github", "gmail"] }), // covers BUT also capped
       acct("c", { primaryUsedPercent: 10, connectorNamespaces: ["gmail"] }), // eligible BUT lacks github
     ];
     // Tier 1 (covering) is empty among eligibles → Tier 2 = {c}: failover preserved,
@@ -521,7 +520,7 @@ describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => 
 
   test("null (never-probed) connector set is UNKNOWN: never Tier 1, never excluded, dropped note lists the used set", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99, connectorNamespaces: ["github"] }), // active, capped (leaving)
+      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github"] }), // active, capped (leaving)
       acct("b", { primaryUsedPercent: 10, connectorNamespaces: null }), // unprobed → Tier 2 only, but eligible
     ];
     // No covering eligible (b is unknown) → Tier 2 picks b (failover), and since we
@@ -555,7 +554,7 @@ describe("chooseRotationActive — connector-aware (P4, most_remaining)", () => 
 
   test("a covering target that is a strict SUPERSET covers (multi-connector session)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 99, connectorNamespaces: ["github", "linear"] }), // capped (leaving)
+      acct("a", { primaryUsedPercent: 100, connectorNamespaces: ["github", "linear"] }), // capped (leaving)
       acct("b", { primaryUsedPercent: 50, connectorNamespaces: ["github", "linear", "gmail"] }), // superset ← covers
       acct("c", { primaryUsedPercent: 5, connectorNamespaces: ["github"] }), // most quota but missing linear
     ];
@@ -680,7 +679,6 @@ describe("shardCredentialForSession — deterministic session sharding (AM-6)", 
     const first = shardCredentialForSession({
       sessionId: "session-xyz",
       accounts: pool,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     for (let i = 0; i < 5; i++) {
@@ -688,7 +686,6 @@ describe("shardCredentialForSession — deterministic session sharding (AM-6)", 
         shardCredentialForSession({
           sessionId: "session-xyz",
           accounts: pool,
-          nearExhaustionPct: 90,
           now: NOW,
         }),
       ).toBe(first);
@@ -701,7 +698,6 @@ describe("shardCredentialForSession — deterministic session sharding (AM-6)", 
       const home = shardCredentialForSession({
         sessionId: `s-${i}`,
         accounts: pool,
-        nearExhaustionPct: 90,
         now: NOW,
       })!;
       counts.set(home, (counts.get(home) ?? 0) + 1);
@@ -713,20 +709,34 @@ describe("shardCredentialForSession — deterministic session sharding (AM-6)", 
     }
   });
 
+  test("keeps every 90–99% account in the deterministic shard set", () => {
+    const usable = [
+      acct("a", { primaryUsedPercent: 90 }),
+      acct("b", { secondaryUsedPercent: 94 }),
+      acct("c", { primaryUsedPercent: 99 }),
+    ];
+    const selected = new Set<string>();
+    for (let i = 0; i < 300; i++) {
+      selected.add(
+        shardCredentialForSession({ sessionId: `remaining-${i}`, accounts: usable, now: NOW })!,
+      );
+    }
+    expect(selected).toEqual(new Set(["a", "b", "c"]));
+  });
+
   test("excludes capped/cooling accounts from the shard set (re-shard picks a survivor)", () => {
     // Cap every account EXCEPT 'c' → every session must shard to 'c'.
     const oneHealthy = [
-      acct("a", { primaryUsedPercent: 95 }),
+      acct("a", { primaryUsedPercent: 100 }),
       acct("b", { exhaustedUntil: new Date(NOW.getTime() + HOUR) }),
       acct("c"),
-      acct("d", { secondaryUsedPercent: 99 }),
+      acct("d", { secondaryUsedPercent: 100 }),
     ];
     for (let i = 0; i < 25; i++) {
       expect(
         shardCredentialForSession({
           sessionId: `s-${i}`,
           accounts: oneHealthy,
-          nearExhaustionPct: 90,
           now: NOW,
         }),
       ).toBe("c");
@@ -736,14 +746,13 @@ describe("shardCredentialForSession — deterministic session sharding (AM-6)", 
   test("re-shard SPREADS the survivors, never re-concentrates on one first-eligible (AM-5)", () => {
     // 'a' capped; sessions that were on 'a' re-shard over {b,c,d}. Confirm they land on
     // DIFFERENT survivors (a first-eligible pick would send them all to 'b').
-    const survivors = [acct("a", { primaryUsedPercent: 96 }), acct("b"), acct("c"), acct("d")];
+    const survivors = [acct("a", { primaryUsedPercent: 100 }), acct("b"), acct("c"), acct("d")];
     const landed = new Set<string>();
     for (let i = 0; i < 60; i++) {
       landed.add(
         shardCredentialForSession({
           sessionId: `hot-${i}`,
           accounts: survivors,
-          nearExhaustionPct: 90,
           now: NOW,
         })!,
       );
@@ -754,30 +763,27 @@ describe("shardCredentialForSession — deterministic session sharding (AM-6)", 
 
   test("all accounts capped → null (caller idles until reset)", () => {
     const allCapped = [
-      acct("a", { primaryUsedPercent: 95 }),
+      acct("a", { primaryUsedPercent: 100 }),
       acct("b", { exhaustedUntil: new Date(NOW.getTime() + HOUR) }),
     ];
     expect(
       shardCredentialForSession({
         sessionId: "s",
         accounts: allCapped,
-        nearExhaustionPct: 90,
         now: NOW,
       }),
     ).toBeNull();
   });
 
-  test("isCodexAccountEligible mirrors the ranker's eligibility (active, not cooling, under threshold)", () => {
-    expect(isCodexAccountEligible(acct("a"), 90, NOW)).toBe(true);
-    expect(isCodexAccountEligible(acct("a", { primaryUsedPercent: 95 }), 90, NOW)).toBe(false);
+  test("isCodexAccountEligible keeps 90–99% usable and blocks actual exhaustion", () => {
+    expect(isCodexAccountEligible(acct("a"), NOW)).toBe(true);
+    expect(isCodexAccountEligible(acct("a", { primaryUsedPercent: 90 }), NOW)).toBe(true);
+    expect(isCodexAccountEligible(acct("a", { primaryUsedPercent: 99 }), NOW)).toBe(true);
+    expect(isCodexAccountEligible(acct("a", { primaryUsedPercent: 100 }), NOW)).toBe(false);
     expect(
-      isCodexAccountEligible(
-        acct("a", { exhaustedUntil: new Date(NOW.getTime() + HOUR) }),
-        90,
-        NOW,
-      ),
+      isCodexAccountEligible(acct("a", { exhaustedUntil: new Date(NOW.getTime() + HOUR) }), NOW),
     ).toBe(false);
-    expect(isCodexAccountEligible(acct("a", { status: "needs_relogin" }), 90, NOW)).toBe(false);
+    expect(isCodexAccountEligible(acct("a", { status: "needs_relogin" }), NOW)).toBe(false);
   });
 });
 
@@ -789,7 +795,6 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
       sessionId: "s1",
       currentPolicyPin: null,
       accounts: pool,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(decision.kind).toBe("home");
@@ -800,7 +805,6 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
         shardCredentialForSession({
           sessionId: "s1",
           accounts: pool,
-          nearExhaustionPct: 90,
           now: NOW,
         }),
       );
@@ -812,22 +816,32 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
     const home = shardCredentialForSession({
       sessionId: "s1",
       accounts: pool,
-      nearExhaustionPct: 90,
       now: NOW,
     })!;
     const decision = chooseShardedHome({
       sessionId: "s1",
       currentPolicyPin: home,
       accounts: pool,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(decision).toEqual({ kind: "home", credentialId: home, rewritePin: false });
   });
 
+  test("a 99%-used policy home remains sticky and is not re-sharded", () => {
+    const accounts = [acct("a", { primaryUsedPercent: 99 }), acct("b")];
+    expect(
+      chooseShardedHome({
+        sessionId: "sticky-near-full",
+        currentPolicyPin: "a",
+        accounts,
+        now: NOW,
+      }),
+    ).toEqual({ kind: "home", credentialId: "a", rewritePin: false });
+  });
+
   test("capped policy pin → re-shard to a survivor and rewrite the pin durably (AM-4)", () => {
     const accounts = [
-      acct("a", { primaryUsedPercent: 97 }), // the (capped) current home
+      acct("a", { primaryUsedPercent: 100 }), // the exhausted current home
       acct("b"),
       acct("c"),
       acct("d"),
@@ -836,7 +850,6 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
       sessionId: "s1",
       currentPolicyPin: "a",
       accounts,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(decision.kind).toBe("home");
@@ -845,7 +858,7 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
       expect(decision.credentialId).not.toBe("a");
       // it is the deterministic re-shard over the ELIGIBLE survivors
       expect(decision.credentialId).toBe(
-        shardCredentialForSession({ sessionId: "s1", accounts, nearExhaustionPct: 90, now: NOW }),
+        shardCredentialForSession({ sessionId: "s1", accounts, now: NOW }),
       );
     }
   });
@@ -853,14 +866,13 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
   test("all accounts capped → allCapped with the earliest reset (caller idles)", () => {
     const resetAt = new Date(NOW.getTime() + HOUR);
     const accounts = [
-      acct("a", { primaryUsedPercent: 95, primaryResetAt: resetAt }),
+      acct("a", { primaryUsedPercent: 100, primaryResetAt: resetAt }),
       acct("b", { exhaustedUntil: resetAt }),
     ];
     const decision = chooseShardedHome({
       sessionId: "s1",
       currentPolicyPin: "a",
       accounts,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(decision.kind).toBe("allCapped");
@@ -874,7 +886,6 @@ describe("chooseShardedHome — proactive home decision (AM-4/AM-7)", () => {
       sessionId: "s1",
       currentPolicyPin: "gone",
       accounts: pool,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(decision.kind).toBe("home");
@@ -1099,10 +1110,25 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: "manual",
       sessionPinnedCredentialId: "a",
       sessionLastCredentialId: null,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(selected.credentialId).toBe("a");
+  });
+
+  test("a 99%-used manual pin remains usable and never waits or switches early", () => {
+    const selected = selectCodexCredentialLeaseForTurn({
+      context: context([leasedAcct("a", { primaryUsedPercent: 99 }), leasedAcct("b")]),
+      leasingEnabled: true,
+      sessionId: "manual-near-full",
+      sessionPinSource: "manual",
+      sessionPinnedCredentialId: "a",
+      sessionLastCredentialId: "a",
+      now: NOW,
+    });
+    expect(selected).toMatchObject({
+      credentialId: "a",
+      decision: { kind: "active", credentialId: "a", moved: false },
+    });
   });
 
   test("a capped stale policy pin leaves a non-sharded strategy free to select healthy capacity", () => {
@@ -1119,7 +1145,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: "policy",
       sessionPinnedCredentialId: "a",
       sessionLastCredentialId: "a",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(selected.credentialId).toBe("b");
@@ -1139,7 +1164,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: "manual",
       sessionPinnedCredentialId: "a",
       sessionLastCredentialId: "a",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(selected.credentialId).toBeNull();
@@ -1159,7 +1183,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: "policy",
       sessionPinnedCredentialId: "outside-scope",
       sessionLastCredentialId: "outside-scope",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(["pool-b-1", "pool-b-2"]).toContain(selected.credentialId);
@@ -1174,7 +1197,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
       sessionLastCredentialId: null,
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(selected.credentialId).toBe("b");
@@ -1191,7 +1213,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
       sessionLastCredentialId: "a",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     // Pre-0053 most_remaining keeps a still-eligible active pointer sticky.
@@ -1212,7 +1233,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
       sessionLastCredentialId: "a",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(selected.credentialId).toBe("a");
@@ -1223,7 +1243,7 @@ describe("credential allocator pin and rollout policy", () => {
       context: {
         ...context([
           leasedAcct("a", {
-            primaryUsedPercent: 99,
+            primaryUsedPercent: 100,
             primaryResetAt: new Date(NOW.getTime() + HOUR),
           }),
           leasedAcct("b", {
@@ -1246,7 +1266,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
       sessionLastCredentialId: "a",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     // The old selector knows only capacity and picks b (90% remaining), not c.
@@ -1265,7 +1284,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
       sessionLastCredentialId: "b",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     expect(selected.credentialId).toBe("a");
@@ -1293,7 +1311,6 @@ describe("credential allocator pin and rollout policy", () => {
       sessionPinSource: null,
       sessionPinnedCredentialId: null,
       sessionLastCredentialId: "b",
-      nearExhaustionPct: 90,
       now: NOW,
     });
     // Old round_robin advanced past session-last "b" to "c". Normalized: the
@@ -1326,7 +1343,6 @@ describe("credential allocator pin and rollout policy", () => {
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: "frozen",
         continuationCredentialId: "frozen",
-        nearExhaustionPct: 90,
         now: NOW,
       }).credentialId,
     ).toBe("frozen");
@@ -1338,7 +1354,6 @@ describe("credential allocator pin and rollout policy", () => {
         sessionPinSource: null,
         sessionPinnedCredentialId: null,
         sessionLastCredentialId: "frozen",
-        nearExhaustionPct: 90,
         now: NOW,
       }).credentialId,
     ).toBe("eligible");

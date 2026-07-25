@@ -1,3 +1,5 @@
+import type { WorkspaceTranscriptionPolicy } from "./transcription";
+
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // The SDK keeps zero runtime dependencies so it stays framework-agnostic and
 // publishable on its own; `test/contract-parity.test.ts` pins these types to
@@ -222,14 +224,24 @@ export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
+export type GitCredentialBindingId = string;
+export type GitRepositoryAccess = "read" | "write";
 
 export type RepositoryResourceRef = {
   kind: "repository";
   uri: string;
   ref: string;
+  /**
+   * Optional workspace-relative override. When omitted, OpenGeni persists
+   * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
+   * providers do not collide. Explicit paths are portable, traversal-free, and
+   * collision-checked case-insensitively before sandbox execution.
+   */
   mountPath?: string | undefined;
   subpath?: string | undefined;
   provider?: GitCredentialProvider | undefined;
+  credentialBindingId?: GitCredentialBindingId | undefined;
+  access?: GitRepositoryAccess | undefined;
   repositoryId?: number | string | undefined;
   installationId?: number | string | undefined;
   projectId?: number | string | undefined;
@@ -241,6 +253,7 @@ export type RepositoryResourceRef = {
 export type FileResourceRef = {
   kind: "file";
   fileId: string;
+  /** Optional workspace-relative override; defaults to `files/<file-id>`. */
   mountPath?: string | undefined;
 };
 
@@ -264,7 +277,10 @@ export type SessionMcpServerInput = {
   allowedTools?: string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
+  /** Require human approval for every tool, or only the listed unprefixed tool names. */
+  requireApproval?: boolean | string[] | undefined;
   headers?: Record<string, string> | undefined;
+  connectionRef?: McpServerConnectionRef | undefined;
 };
 
 export type SessionMcpCredentialUpdateInput = {
@@ -272,12 +288,25 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type SessionMcpApprovalPolicy = boolean | string[];
+
 export type SessionMcpServerMetadata = {
   id: string;
   name: string | null;
   url: string;
   headerNames: string[];
   credentialVersion: number;
+  requireApproval: SessionMcpApprovalPolicy;
+  connectionRef: McpServerConnectionRef | null;
+};
+
+export type UpdateSessionMcpApprovalPolicyRequest = {
+  requireApproval: SessionMcpApprovalPolicy;
+};
+
+export type UpdateSessionMcpApprovalPolicyResponse = {
+  server: SessionMcpServerMetadata;
+  effectiveFrom: "next_attempt";
 };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
@@ -285,10 +314,17 @@ export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
+  selectedResources?:
+    | Array<{
+        id: string;
+        kind: "repository";
+      }>
+    | undefined;
   subjectScope?: "workspace" | "subject" | undefined;
 };
 
@@ -364,6 +400,20 @@ export type OAuthStartResponse = {
   expiresAt: string;
 };
 
+/** The immutable principal whose authority accepted a session or turn. */
+export type TurnInitiator = {
+  kind: "subject" | "service";
+  subjectId: string;
+  /** Display-only snapshot; never an authorization input. */
+  label?: string | undefined;
+};
+
+/** A trusted embedding host's causal machine/service principal. */
+export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
+
+/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+export type ServiceTurnInitiatorContext = Record<string, unknown>;
+
 export type IntegrationClientMetadata = {
   client_id: string;
   client_name: "OpenGeni";
@@ -387,6 +437,9 @@ export type Session = {
   resources: ResourceRef[];
   tools: ToolRef[];
   metadata: Record<string, unknown>;
+  /** Frozen creator fact; later turns carry their own independent initiator. */
+  createdBy: TurnInitiator;
+  createdByContext: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs;
@@ -437,6 +490,11 @@ export type Session = {
     | undefined;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Additive receipt returned by POST /sessions. */
+export type CreateSessionResponse = Session & {
+  initialTurnId: string | null;
 };
 
 export type SessionSummary = Session;
@@ -507,10 +565,73 @@ export type SessionTurn = {
   executionGeneration: number;
   activeAttemptId: string | null;
   lineage: Record<string, unknown>;
+  initiator: TurnInitiator;
+  initiatorContext: Record<string, unknown>;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HumanInputQuestionKind = "text" | "single_select" | "multi_select";
+
+export type HumanInputOption = {
+  id: string;
+  label: string;
+  description?: string | null | undefined;
+};
+
+export type HumanInputQuestion = {
+  id: string;
+  kind: HumanInputQuestionKind;
+  prompt: string;
+  label?: string | null | undefined;
+  helpText?: string | null | undefined;
+  options: HumanInputOption[];
+  required: boolean;
+  allowOther: boolean;
+  validation?:
+    | {
+        minLength?: number | null | undefined;
+        maxLength?: number | null | undefined;
+        minSelections?: number | null | undefined;
+        maxSelections?: number | null | undefined;
+      }
+    | null
+    | undefined;
+};
+
+export type HumanInputAnswer = {
+  questionId: string;
+  values: string[];
+  other?: string | null | undefined;
+};
+
+export type HumanInputResponse =
+  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | { outcome: "skipped" | "expired" | "cancelled" };
+
+export type SubmitHumanInputResponseRequest =
+  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | { outcome: "skipped" };
+
+export type SessionHumanInputRequest = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnGeneration: number;
+  creationAttemptId: string;
+  toolCallId: string;
+  status: "pending" | "answered" | "skipped" | "expired" | "cancelled";
+  questions: HumanInputQuestion[];
+  allowSkip: boolean;
+  response: HumanInputResponse | null;
+  respondedBy: string | null;
+  respondedAt: string | null;
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -521,6 +642,7 @@ export const SESSION_EVENT_TYPES = [
   "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
+  "session.humanInput.requested",
   "session.context.compaction.requested",
   "session.context.compacted",
   "session.context.compaction.skipped",
@@ -528,6 +650,7 @@ export const SESSION_EVENT_TYPES = [
   "user.message",
   "user.pause",
   "user.approvalDecision",
+  "user.humanInputResponse",
   "turn.queued",
   "turn.started",
   "turn.completed",
@@ -543,6 +666,7 @@ export const SESSION_EVENT_TYPES = [
   "agent.toolCall.output",
   "agent.model.usage",
   "tool.auth_needed",
+  "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
   "rig.setup.completed",
@@ -591,6 +715,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.mcp.approval_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   // credential allocator metadata-only per-turn credential selection audit.
@@ -711,10 +836,18 @@ export type ToolAuthNeededPayload = {
   serverId: string;
   toolName?: string | null | undefined;
   providerDomain: string;
+  provider?: string | undefined;
   connectionId?: string | null | undefined;
-  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
+  reason:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "unsupported_auth"
+    | "resource_scope_unavailable";
   scopes?: string[] | undefined;
   resource?: string | undefined;
+  selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
   authorizationUrl?: string | undefined;
   subjectId?: string | null | undefined;
 };
@@ -1198,7 +1331,13 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  // Optional UUID preallocated by an embedding host so it can durably link its
+  // projection before OpenGeni admits the initial turn. Replays must retain the
+  // same UUID and idempotency key.
+  requestedSessionId?: string | undefined;
   initialMessage: string;
+  /** System instructions scoped to the initial turn; never visible timeline text. */
+  turnInstructions?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -1465,7 +1604,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 /**
@@ -1517,6 +1656,8 @@ export type AccessGrant = {
   subjectLabel?: string | undefined;
   permissions: Permission[];
   metadata?: Record<string, unknown> | undefined;
+  serviceInitiator?: ServiceTurnInitiator | undefined;
+  serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;
 };
 
 export type AccessContext = {
@@ -1552,11 +1693,13 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
   [key: string]: unknown;
 };
 
@@ -1710,7 +1853,12 @@ export type EffectiveSessionControl = {
   blockers: EffectiveControlBlocker[];
   resumeOptions: EffectiveControlResumeOption[];
   override: { rootSessionId: string; revision: number } | null;
-  settlement: { state: "stopping"; attemptCount: number } | null;
+  settlement: {
+    state: "stopping";
+    attemptCount: number;
+    interruptionPendingCount: number;
+    quiescencePendingCount: number;
+  } | null;
 };
 
 export type SessionCommandReceipt = {
@@ -2112,6 +2260,67 @@ export type FileAsset = {
   objectKey: string;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Mirrors the closed, provider-neutral retained-output contract. */
+export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
+export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
+
+export type RetainedOutputKind =
+  | "tool_result"
+  | "assistant_completion"
+  | "internal_update"
+  | "event_media"
+  | "file";
+
+export type RetainedOutputUnavailableReason =
+  | "not_retained"
+  | "pending"
+  | "failed"
+  | "expired"
+  | "deleted"
+  | "missing_storage"
+  | "storage_write_failed"
+  | "unsupported";
+
+export type RetainedArtifactReference = {
+  available: true;
+  artifactId: string;
+  kind: RetainedOutputKind;
+  contentType: string;
+  originalBytes: number;
+  sha256: string;
+  retainedAt: string;
+  retention: { policy: "workspace_file"; expiresAt: null };
+  retrieval: {
+    method: "GET";
+    path: string;
+    acceptRanges: "bytes";
+    maxRangeBytes: number;
+  };
+};
+
+export type RetainedArtifactUnavailable = {
+  available: false;
+  artifactId: string;
+  reason: RetainedOutputUnavailableReason;
+};
+
+export type RetainedArtifactMetadata = RetainedArtifactReference | RetainedArtifactUnavailable;
+
+export type RetainedArtifactContentOptions = {
+  /** One RFC-style bytes range, for example `bytes=1048576-2097151`. */
+  range?: string | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+export type RetainedArtifactContent = {
+  bytes: Uint8Array;
+  status: 200 | 206;
+  contentType: string;
+  contentLength: number;
+  contentRange: string | null;
+  acceptRanges: "bytes";
 };
 
 export type CreateFileUploadRequest = {
@@ -2528,6 +2737,7 @@ export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
 
 export type CapabilitySource =
   | "built_in"
+  | "library"
   | "configured"
   | "public_registry"
   | "registry"
@@ -2661,13 +2871,29 @@ export type GitHubRepository = {
   accountType: string | null;
 };
 
+export type GitHubRepositoryScope = "all" | "selected";
+
+export type GitHubInstallationBinding = {
+  installationId: number;
+  accountLogin: string | null;
+  accountType: string | null;
+  repositoryScope: GitHubRepositoryScope;
+  repositoryCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type GitHubAppInfo = {
   configured: boolean;
   appId: string | null;
   clientId: string | null;
   appSlug: string | null;
-  /** Ready-to-open GitHub install URL (carries the signed state), if configured. */
+  /** Reserved compatibility field; null while new installation binding is disabled. */
   installUrl: string | null;
+  /** Reserved compatibility field; null while new installation binding is disabled. */
+  linkUrl: string | null;
+  /** Installation bindings owned independently by this workspace. */
+  installations: GitHubInstallationBinding[];
   /** Setting names still missing when `configured` is false. */
   missing: string[];
 };
@@ -2777,6 +3003,7 @@ export type UserMessageEventInput = {
   clientEventId?: string | undefined;
   payload: {
     text: string;
+    turnInstructions?: string | undefined;
     resources?: ResourceRef[] | undefined;
     tools?: ToolRef[] | undefined;
     model?: string | undefined;
@@ -2795,8 +3022,20 @@ export type UserApprovalDecisionEventInput = {
   };
 };
 
+export type UserHumanInputResponseEventInput = {
+  type: "user.humanInputResponse";
+  clientEventId?: string | undefined;
+  payload: {
+    requestId: string;
+    response: SubmitHumanInputResponseRequest;
+  };
+};
+
 /** Control/user events a client may POST to a session's event log. */
-export type ClientSessionEventInput = UserMessageEventInput | UserApprovalDecisionEventInput;
+export type ClientSessionEventInput =
+  | UserMessageEventInput
+  | UserApprovalDecisionEventInput
+  | UserHumanInputResponseEventInput;
 
 // ── Bring-your-own-compute: Machines dashboard + per-machine metrics (M10) ────
 // Hand-written mirrors of the `@opengeni/contracts` MetricSample / MachineView /

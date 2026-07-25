@@ -125,6 +125,26 @@ spec:
           annotations:
             summary: OpenGeni codex prompt-cache hit ratio p50 below 40% over 30m
             description: The codex-subscription prompt cache is serving under 40% of prompt tokens from cache (median call) for 30m. Suspect prompt-cache thrash — an account rotation cold-starts the provider's per-account cache. Cross-check the per-call usage logs' accountChangedFromPrevCall against cachedTokens.
+        - alert: OpenGeniCodexPromptCacheTelemetryMissing
+          # A missing cached-token field is unknown, not a truthful 0% hit. Keep
+          # that semantics while separately alerting whenever Codex calls are
+          # flowing with unavailable cache-read telemetry.
+          expr: |
+            (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
+            or
+            (
+              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0
+              and on()
+              (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0))
+              <
+              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m]))
+            )
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni Codex prompt-cache telemetry is missing on active calls
+            description: Codex-subscription model calls have omitted cached-token telemetry for 15m. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility and worker rejected-field diagnostics.
         # ── Connected Machines (op-outcome plane) ────────────────────────────
         - alert: OpenGeniMachineOpInfraFailuresHigh
           expr: sum(rate(opengeni_machine_op_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1) > 0.1

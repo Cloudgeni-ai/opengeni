@@ -169,6 +169,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
 
         <div className="mt-8">
           <ConsoleComposer
+            workspaceId={workspaceId}
             composer={createComposer}
             attachments={attachments}
             autoFocus
@@ -329,6 +330,8 @@ function WorkspaceRepositoryPicker({
     <RepositoryContextPicker
       configured={context.githubStatus?.configured === true}
       installUrl={context.githubStatus?.installUrl ?? null}
+      linkUrl={context.githubStatus?.linkUrl ?? null}
+      installations={context.githubStatus?.installations ?? []}
       repositories={context.githubRepos}
       groups={context.repositoryGroups}
       selectedRepoIds={context.selectedRepoIds}
@@ -359,6 +362,9 @@ function WorkspaceRepositoryPicker({
       onGitHubAppOpenChange={context.setGithubAppOpen}
       onOrgChange={context.setGithubOrg}
       onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
+      onDisconnectInstallation={(installationId) =>
+        context.disconnectGitHubInstallation(workspaceId, installationId)
+      }
     />
   );
 }

@@ -52,6 +52,9 @@ import {
   ChannelAUnsupportedError,
   ChannelAUnavailableError,
   ChannelAValidationError,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenSession,
+  withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
 } from "@opengeni/runtime/sandbox";
@@ -294,9 +297,16 @@ export async function withChannelA<T>(
           established,
         ).session
       : established.session;
+    const credentialSession = withRunCredentialsSession(routedSession as object, session.id);
+    const scopedSession = environment.OPENGENI_TOOLSPACE_TOKEN_FILE
+      ? withToolspaceTokenSession(
+          credentialSession,
+          toolspaceTokenFileFromEnvironment(environment, session.id),
+        )
+      : credentialSession;
 
     const service = new SandboxChannelAService({
-      session: routedSession as ChannelASession,
+      session: scopedSession as ChannelASession,
       leaseEpoch: leaseSnapshot.leaseEpoch,
       emit,
     });

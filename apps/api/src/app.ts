@@ -24,7 +24,14 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { hasPermission, requireAccessGrant, requirePermission } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrant,
+  requirePermission,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+} from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
@@ -65,6 +72,7 @@ export {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateGitHubRepositorySelectionShape,
+  validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
@@ -323,7 +331,29 @@ export function createApp(deps: AppDependencies): Hono {
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
-    const toolspace = isToolspaceGrant(routeDeps.settings, grant)
+    const toolspaceGrant = isToolspaceGrant(routeDeps.settings, grant);
+    const boundSessionId = grant.metadata?.sessionId;
+    if (toolspaceGrant || typeof boundSessionId === "string") {
+      if (typeof boundSessionId !== "string") {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+      try {
+        await requireSessionAuthorization(routeDeps, grant, {
+          sessionId: boundSessionId,
+          operation: toolspaceGrant ? "session.toolspace.call" : "session.first_party_mcp.call",
+          surface: toolspaceGrant ? "toolspace" : "first_party_mcp",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found" });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, { message: "session authorization is unavailable" });
+        }
+        throw error;
+      }
+    }
+    const toolspace = toolspaceGrant
       ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
       : null;
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
@@ -633,6 +663,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
     label: "/v1/workspaces/:workspaceId/files/:id",
   },
   {
+    pattern: /^\/v1\/workspaces\/[^/]+\/artifacts\/[^/]+\/content$/,
+    label: "/v1/workspaces/:workspaceId/artifacts/:id/content",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/artifacts\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/artifacts/:id",
+  },
+  {
     pattern: /^\/v1\/workspaces\/[^/]+\/api-keys$/,
     label: "/v1/workspaces/:workspaceId/api-keys",
   },
@@ -711,6 +749,18 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/repositories\/sync$/,
     label: "/v1/workspaces/:workspaceId/github/repositories/sync",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/connect$/,
+    label: "/v1/workspaces/:workspaceId/github/connect",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations$/,
+    label: "/v1/workspaces/:workspaceId/github/installations",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/github\/installations\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/github/installations/:installationId",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/github\/app-manifest$/,

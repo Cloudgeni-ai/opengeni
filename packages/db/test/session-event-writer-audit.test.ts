@@ -8,7 +8,6 @@ type LockContract = "canonical" | "turn_attempt_fence" | "owned_suffix";
 type ExpectedWriter = {
   inserts: number;
   contract: LockContract;
-  requiresControlShare?: boolean;
   requiresControlRevalidation?: boolean;
 };
 
@@ -18,7 +17,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#armCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
-    requiresControlShare: true,
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#supersedeCodexCapacityWaitInTransaction": {
@@ -28,7 +26,6 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   "packages/db/src/index.ts#reconcileCodexCapacityWait": {
     inserts: 1,
     contract: "canonical",
-    requiresControlShare: true,
     requiresControlRevalidation: true,
   },
   "packages/db/src/index.ts#applyContextCompaction": {
@@ -90,6 +87,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/index.ts#acceptSessionHumanInputResponse": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/index.ts#appendSessionEventsForTurnAttempt": {
     inserts: 1,
     contract: "turn_attempt_fence",
@@ -130,6 +131,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-queue-commands.ts#supersedeSessionCurrentDirectionInTransaction": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-queue-commands.ts#sendAgentMessageInTransaction": {
     inserts: 1,
     contract: "canonical",
@@ -144,8 +149,26 @@ const expectedWriters: Record<string, ExpectedWriter> = {
   },
 };
 
+const genericControlWriters = new Set([
+  "packages/db/src/index.ts#acceptSessionApprovalDecision",
+  "packages/db/src/index.ts#acceptSessionHumanInputResponse",
+  "packages/db/src/index.ts#appendSessionEvents",
+  "packages/db/src/index.ts#appendSessionEventsAndUpdateSession",
+  "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
+  "packages/db/src/index.ts#clearSessionGoal",
+]);
+
+const callerOwnedControlWriters = new Set([
+  "packages/db/src/session-queue-commands.ts#supersedeSessionCurrentDirectionInTransaction",
+]);
+
 const expectedOwnedSuffixCallers: Record<string, string[]> = {
   supersedeCodexCapacityWaitInTransaction: ["reconcileCodexCapacityWait"],
+  supersedeSessionCurrentDirectionInTransaction: [
+    "steerAgentSessionInTransaction",
+    "steerQueuedTurnInTransaction",
+    "submitHumanPromptInTransaction",
+  ],
   closePendingSessionToolCallsInTransaction: [
     "armCodexCapacityWait",
     "supersedeSessionCurrentDirectionInTransaction",
@@ -259,16 +282,31 @@ function functionCalls(functionNode: ts.FunctionLikeDeclaration, expectedName: s
   return found;
 }
 
-function functionCallsWithStringProperty(
+function callHasProperty(node: ts.CallExpression, propertyName: string): boolean {
+  return node.arguments.some(
+    (argument) =>
+      ts.isObjectLiteralExpression(argument) &&
+      argument.properties.some(
+        (property) =>
+          ts.isPropertyAssignment(property) &&
+          ((ts.isIdentifier(property.name) && property.name.text === propertyName) ||
+            (ts.isStringLiteral(property.name) && property.name.text === propertyName)),
+      ),
+  );
+}
+
+function callPositionsWithStringProperty(
   functionNode: ts.FunctionLikeDeclaration,
   expectedName: string,
   propertyName: string,
   propertyValue: string,
-): boolean {
-  let found = false;
+): number[] {
+  const positions: number[] = [];
   const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && callName(node) === expectedName) {
-      found = node.arguments.some(
+    if (
+      ts.isCallExpression(node) &&
+      callName(node) === expectedName &&
+      node.arguments.some(
         (argument) =>
           ts.isObjectLiteralExpression(argument) &&
           argument.properties.some(
@@ -279,12 +317,67 @@ function functionCallsWithStringProperty(
               ts.isStringLiteral(property.initializer) &&
               property.initializer.text === propertyValue,
           ),
-      );
+      )
+    ) {
+      positions.push(node.getStart());
     }
-    if (!found) ts.forEachChild(node, visit);
+    ts.forEachChild(node, visit);
   };
   ts.forEachChild(functionNode, visit);
-  return found;
+  return positions.sort((left, right) => left - right);
+}
+
+function callPositionsWithStringArgument(
+  functionNode: ts.FunctionLikeDeclaration,
+  expectedName: string,
+  argumentIndex: number,
+  argumentValue: string,
+): number[] {
+  const positions: number[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node) && callName(node) === expectedName) {
+      const argument = node.arguments[argumentIndex];
+      if (
+        argument !== undefined &&
+        ts.isStringLiteral(argument) &&
+        argument.text === argumentValue
+      ) {
+        positions.push(node.getStart());
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(functionNode, visit);
+  return positions.sort((left, right) => left - right);
+}
+
+function controlAwarePrefixPositions(functionNode: ts.FunctionLikeDeclaration): number[] {
+  return [
+    ...callPositionsWithStringProperty(
+      functionNode,
+      "lockSessionEventWriteRows",
+      "controlLock",
+      "share",
+    ),
+    ...callPositionsWithStringProperty(
+      functionNode,
+      "lockSessionEventWriteRows",
+      "controlLock",
+      "update",
+    ),
+    ...callPositionsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "share"),
+    ...callPositionsWithStringArgument(functionNode, "lockWorkspaceInferenceControl", 2, "update"),
+    ...callPositions(functionNode, "lockChildLifecycleOutboxWriteRowsTx"),
+  ].sort((left, right) => left - right);
+}
+
+function genericPrefixPositions(functionNode: ts.FunctionLikeDeclaration): number[] {
+  return callPositionsWithStringProperty(
+    functionNode,
+    "lockSessionEventWriteRows",
+    "controlLock",
+    "none",
+  );
 }
 
 function callPositions(functionNode: ts.FunctionLikeDeclaration, expectedName: string): number[] {
@@ -318,6 +411,7 @@ describe("session_events writer inventory", () => {
       { count: number; sourceFile: ts.SourceFile; functionNode: ts.FunctionLikeDeclaration }
     >();
     const rawSqlWriters: string[] = [];
+    const implicitControlLockCalls: string[] = [];
     const functionDefinitions = new Map<
       string,
       Array<{ sourceFile: ts.SourceFile; functionNode: ts.FunctionLikeDeclaration }>
@@ -373,6 +467,11 @@ describe("session_events writer inventory", () => {
             });
           }
           const called = callName(node);
+          if (called === "lockSessionEventWriteRows" && !callHasProperty(node, "controlLock")) {
+            implicitControlLockCalls.push(
+              `${file}:${sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1}`,
+            );
+          }
           if (called && ownedSuffixCallers.has(called) && enclosing) {
             ownedSuffixCallers.get(called)!.add(enclosing.name);
           }
@@ -394,6 +493,7 @@ describe("session_events writer inventory", () => {
     }
 
     expect(rawSqlWriters).toEqual([]);
+    expect(implicitControlLockCalls).toEqual([]);
     expect(Object.fromEntries([...writers].map(([key, value]) => [key, value.count]))).toEqual(
       Object.fromEntries(
         Object.entries(expectedWriters).map(([key, value]) => [key, value.inserts]),
@@ -409,16 +509,19 @@ describe("session_events writer inventory", () => {
         ].sort((left, right) => left - right);
         expect(canonicalLocks.length).toBeGreaterThan(0);
         const firstLock = canonicalLocks[0];
-        expect(firstLock).toBeLessThan(insertPositions(writer.functionNode)[0]!);
-        if (expected.requiresControlShare) {
-          expect(
-            functionCallsWithStringProperty(
-              writer.functionNode,
-              "lockSessionEventWriteRows",
-              "controlLock",
-              "share",
-            ),
-          ).toBe(true);
+        const firstInsert = insertPositions(writer.functionNode)[0]!;
+        expect(firstLock).toBeLessThan(firstInsert);
+        if (genericControlWriters.has(key)) {
+          const prefixes = genericPrefixPositions(writer.functionNode);
+          expect(prefixes.length).toBeGreaterThan(0);
+          expect(prefixes[0]).toBeLessThan(firstInsert);
+        } else if (callerOwnedControlWriters.has(key)) {
+          const writerName = key.slice(key.lastIndexOf("#") + 1);
+          expect(Object.hasOwn(expectedOwnedSuffixCallers, writerName)).toBe(true);
+        } else {
+          const prefixes = controlAwarePrefixPositions(writer.functionNode);
+          expect(prefixes.length).toBeGreaterThan(0);
+          expect(prefixes[0]).toBeLessThan(firstInsert);
         }
         if (expected.requiresControlRevalidation) {
           expect(functionCalls(writer.functionNode, "evaluateSessionControl")).toBe(true);
@@ -453,6 +556,11 @@ describe("session_events writer inventory", () => {
           ...callPositions(callerNode, "lockChildLifecycleOutboxWriteRowsTx"),
         ].sort((left, right) => left - right);
         expect(canonicalLocks.length).toBeGreaterThan(0);
+        expect(
+          controlAwarePrefixPositions(callerNode).length > 0 ||
+            genericPrefixPositions(callerNode).length > 0 ||
+            Object.hasOwn(expectedOwnedSuffixCallers, caller),
+        ).toBe(true);
         const firstLock = canonicalLocks[0];
         const delegatedCalls = [...ownedSuffixCallers.keys()].flatMap((ownedWriter) =>
           callPositions(callerNode, ownedWriter),
@@ -483,6 +591,9 @@ describe("session_events writer inventory", () => {
         expect(functionCalls(writer.functionNode, "retryRlsPersistence")).toBe(true);
         const firstLock = callPositions(writer.functionNode, "lockSessionEventWriteRows")[0];
         expect(firstLock).toBeLessThan(callPositions(writer.functionNode, "insert")[0]!);
+        const genericPrefixes = genericPrefixPositions(writer.functionNode);
+        expect(genericPrefixes.length).toBeGreaterThan(0);
+        expect(genericPrefixes[0]).toBeLessThan(callPositions(writer.functionNode, "insert")[0]!);
       }
     }
     for (const caller of expectedFailedChildOutboxCallers) {
@@ -495,6 +606,19 @@ describe("session_events writer inventory", () => {
       const enqueue = callPositions(callerNode, "enqueueFailedChildOutboxForTurnTx")[0];
       expect(firstLock).toBeLessThan(enqueue!);
     }
+
+    const turnAttemptFence = functionDefinitions.get("lockTurnAttemptWriteFenceTx") ?? [];
+    expect(turnAttemptFence).toHaveLength(1);
+    expect(controlAwarePrefixPositions(turnAttemptFence[0]!.functionNode).length).toBeGreaterThan(
+      0,
+    );
+
+    const childLifecyclePrefix =
+      functionDefinitions.get("lockChildLifecycleOutboxWriteRowsTx") ?? [];
+    expect(childLifecyclePrefix).toHaveLength(1);
+    expect(
+      controlAwarePrefixPositions(childLifecyclePrefix[0]!.functionNode).length,
+    ).toBeGreaterThan(0);
   });
 
   test("generic append and Agent commands keep external effects outside bounded retry", () => {

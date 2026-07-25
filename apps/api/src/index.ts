@@ -5,6 +5,7 @@ import {
   resolveNatsControlPlaneAuth,
   retryStartupDependency,
   startupRetryOptions,
+  temporalConnectionOptions,
 } from "@opengeni/config";
 import type {
   ScheduledTask,
@@ -61,7 +62,7 @@ export async function createTemporalWorkflowClient(
   documentIndexer: DocumentIndexClient;
   close: () => Promise<void>;
 }> {
-  const connection = await Connection.connect({ address: settings.temporalHost });
+  const connection = await Connection.connect(temporalConnectionOptions(settings));
   const temporal = new TemporalClient({
     connection,
     namespace: settings.temporalNamespace,

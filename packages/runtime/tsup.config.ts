@@ -10,11 +10,22 @@ export default defineConfig({
   entry: {
     index: "src/index.ts",
     "sandbox/index": "src/sandbox/index.ts",
+    "skill-library": "src/skill-library.ts",
   },
   format: ["esm"],
   target: "es2022",
   dts: true,
   sourcemap: true,
   clean: true,
-  external: [/^@opengeni\//],
+  external: [
+    /^@opengeni\//,
+    /^@modelcontextprotocol\/sdk(?:$|\/)/,
+    /^debug$/,
+    /^openai(?:$|\/)/,
+    /^ws$/,
+  ],
+  // The OpenAI Agents packages require Zod 4 as a peer. Bundle that complete
+  // implementation boundary so an embedding host can use another Zod major
+  // without changing Agents' runtime schema identity underneath it.
+  noExternal: [/^@openai\/agents(?:$|\/|-)/, /^zod(?:$|\/)/],
 });

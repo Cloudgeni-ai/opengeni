@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  AccessGrant as ContractAccessGrant,
   AccessContext as ContractAccessContext,
   ApiKey as ContractApiKey,
   BillingBalance as ContractBillingBalance,
@@ -26,8 +27,18 @@ import {
   EnablePackRequest as ContractEnablePackRequest,
   FileAsset as ContractFileAsset,
   FileStatus as ContractFileStatus,
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES as CONTRACT_RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES as CONTRACT_RETAINED_OUTPUT_MAX_PAGE_BYTES,
+  RetainedArtifactMetadataSchema as ContractRetainedArtifactMetadata,
+  RetainedArtifactReferenceSchema as ContractRetainedArtifactReference,
+  RetainedArtifactUnavailableSchema as ContractRetainedArtifactUnavailable,
+  RetainedOutputKind as ContractRetainedOutputKind,
+  RetainedOutputUnavailableReason as ContractRetainedOutputUnavailableReason,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
+  GitHubAppInfo as ContractGitHubAppInfo,
+  GitHubInstallationBinding as ContractGitHubInstallationBinding,
   GitHubRepository as ContractGitHubRepository,
+  GitHubRepositoryScope as ContractGitHubRepositoryScope,
   PackInstallation as ContractPackInstallation,
   PackInstallationStatus as ContractPackInstallationStatus,
   Permission as ContractPermission,
@@ -36,6 +47,8 @@ import {
   ScheduledTaskRun as ContractScheduledTaskRun,
   ScheduledTaskRunStatus as ContractScheduledTaskRunStatus,
   ScheduledTaskTriggerType as ContractScheduledTaskTriggerType,
+  ServiceTurnInitiator as ContractServiceTurnInitiator,
+  ServiceTurnInitiatorContext as ContractServiceTurnInitiatorContext,
   SessionGoal as ContractSessionGoal,
   SessionGoalCreatedBy as ContractSessionGoalCreatedBy,
   SessionGoalStatus as ContractSessionGoalStatus,
@@ -51,8 +64,14 @@ import {
   WorkspaceRegisteredPack as ContractWorkspaceRegisteredPack,
 } from "@opengeni/contracts";
 import type { z } from "zod";
-import { KNOWN_PERMISSIONS, KNOWN_USAGE_EVENT_TYPES } from "../src/types";
+import {
+  KNOWN_PERMISSIONS,
+  KNOWN_USAGE_EVENT_TYPES,
+  RETAINED_OUTPUT_DEFAULT_PAGE_BYTES,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+} from "../src/types";
 import type {
+  AccessGrant,
   AccessContext,
   ApiKey,
   BillingBalance,
@@ -80,7 +99,15 @@ import type {
   EnablePackRequest,
   FileAsset,
   FileStatus,
+  RetainedArtifactMetadata,
+  RetainedArtifactReference,
+  RetainedArtifactUnavailable,
+  RetainedOutputKind,
+  RetainedOutputUnavailableReason,
   GitHubRepository,
+  GitHubAppInfo,
+  GitHubInstallationBinding,
+  GitHubRepositoryScope,
   PackInstallation,
   PackInstallationStatus,
   ProductAccessMode,
@@ -91,6 +118,8 @@ import type {
   SessionGoal,
   SessionGoalCreatedBy,
   SessionGoalStatus,
+  ServiceTurnInitiator,
+  ServiceTurnInitiatorContext,
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateWorkspaceEnvironmentRequest,
@@ -115,6 +144,38 @@ describe("SDK / contracts parity (full coverage)", () => {
     expect([...KNOWN_USAGE_EVENT_TYPES].sort()).toEqual([...ContractUsageEventType.options].sort());
   });
 
+  test("GitHub installation binding literals and response shapes match", () => {
+    const scopes: readonly GitHubRepositoryScope[] = ContractGitHubRepositoryScope.options;
+    expect(scopes).toEqual(ContractGitHubRepositoryScope.options);
+    const acceptBinding = (
+      value: z.infer<typeof ContractGitHubInstallationBinding>,
+    ): GitHubInstallationBinding => value;
+    const acceptInfo = (value: z.infer<typeof ContractGitHubAppInfo>): GitHubAppInfo => value;
+    expect([acceptBinding, acceptInfo].every((fn) => typeof fn === "function")).toBe(true);
+  });
+
+  test("delegated service initiator grant fields match the contracts", () => {
+    const serviceInitiator: ServiceTurnInitiator = ContractServiceTurnInitiator.parse({
+      kind: "service",
+      subjectId: "external-scheduler",
+      label: "External scheduler",
+    });
+    const serviceInitiatorContext: ServiceTurnInitiatorContext =
+      ContractServiceTurnInitiatorContext.parse({ occurrenceId: "occurrence-42" });
+    const grant: AccessGrant = {
+      workspaceId: "00000000-0000-4000-8000-000000000001",
+      accountId: "00000000-0000-4000-8000-000000000002",
+      subjectId: "host:automation-gateway",
+      permissions: ["sessions:create"],
+      serviceInitiator,
+      serviceInitiatorContext,
+    };
+    expect(ContractAccessGrant.parse(grant)).toMatchObject({
+      serviceInitiator,
+      serviceInitiatorContext,
+    });
+  });
+
   test("status/enum literals match the contracts", () => {
     const accessModes: readonly ProductAccessMode[] = ContractProductAccessMode.options;
     const goalStatuses: readonly SessionGoalStatus[] = ContractSessionGoalStatus.options;
@@ -123,6 +184,9 @@ describe("SDK / contracts parity (full coverage)", () => {
     const triggerTypes: readonly ScheduledTaskTriggerType[] =
       ContractScheduledTaskTriggerType.options;
     const fileStatuses: readonly FileStatus[] = ContractFileStatus.options;
+    const retainedKinds: readonly RetainedOutputKind[] = ContractRetainedOutputKind.options;
+    const unavailableReasons: readonly RetainedOutputUnavailableReason[] =
+      ContractRetainedOutputUnavailableReason.options;
     const documentStatuses: readonly DocumentStatus[] = ContractDocumentStatus.options;
     const packStatuses: readonly PackInstallationStatus[] = ContractPackInstallationStatus.options;
     const capabilityKinds: readonly CapabilityKind[] = ContractCapabilityKind.options;
@@ -133,6 +197,10 @@ describe("SDK / contracts parity (full coverage)", () => {
     expect(runStatuses).toEqual(ContractScheduledTaskRunStatus.options);
     expect(triggerTypes).toEqual(ContractScheduledTaskTriggerType.options);
     expect(fileStatuses).toEqual(ContractFileStatus.options);
+    expect(retainedKinds).toEqual(ContractRetainedOutputKind.options);
+    expect(unavailableReasons).toEqual(ContractRetainedOutputUnavailableReason.options);
+    expect(RETAINED_OUTPUT_DEFAULT_PAGE_BYTES).toBe(CONTRACT_RETAINED_OUTPUT_DEFAULT_PAGE_BYTES);
+    expect(RETAINED_OUTPUT_MAX_PAGE_BYTES).toBe(CONTRACT_RETAINED_OUTPUT_MAX_PAGE_BYTES);
     expect(documentStatuses).toEqual(ContractDocumentStatus.options);
     expect(packStatuses).toEqual(ContractPackInstallationStatus.options);
     expect(capabilityKinds).toEqual(ContractCapabilityKind.options);
@@ -150,6 +218,15 @@ describe("SDK / contracts parity (full coverage)", () => {
       value: z.infer<typeof ContractWorkspaceEnvironment>,
     ): WorkspaceEnvironment => value;
     const acceptFile = (value: z.infer<typeof ContractFileAsset>): FileAsset => value;
+    const acceptRetainedReference = (
+      value: z.infer<typeof ContractRetainedArtifactReference>,
+    ): RetainedArtifactReference => value;
+    const acceptRetainedUnavailable = (
+      value: z.infer<typeof ContractRetainedArtifactUnavailable>,
+    ): RetainedArtifactUnavailable => value;
+    const acceptRetainedMetadata = (
+      value: z.infer<typeof ContractRetainedArtifactMetadata>,
+    ): RetainedArtifactMetadata => value;
     const acceptUploadBegin = (
       value: z.infer<typeof ContractCreateFileUploadResponse>,
     ): CreateFileUploadResponse => value;
@@ -186,6 +263,9 @@ describe("SDK / contracts parity (full coverage)", () => {
       acceptRun,
       acceptEnvironment,
       acceptFile,
+      acceptRetainedReference,
+      acceptRetainedUnavailable,
+      acceptRetainedMetadata,
       acceptUploadBegin,
       acceptDocumentBase,
       acceptDocument,

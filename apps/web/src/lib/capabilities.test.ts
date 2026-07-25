@@ -11,6 +11,7 @@ import {
   capabilitySourceLabel,
   connectionHealth,
   connectionToReuseForApiKey,
+  curatedSkillProvenance,
   domainFromUrl,
   emptyCapabilityForm,
   filterCapabilityCatalogItems,
@@ -123,6 +124,7 @@ describe("human labels", () => {
 
   test("source labels are human", () => {
     expect(capabilitySourceLabel("built_in")).toBe("Built in");
+    expect(capabilitySourceLabel("library")).toBe("Curated library");
     expect(capabilitySourceLabel("public_registry")).toBe("Public registry");
     expect(capabilitySourceLabel("manual")).toBe("Added");
   });
@@ -130,6 +132,48 @@ describe("human labels", () => {
   test("filter labels are plural human forms", () => {
     expect(capabilityFilterLabel("mcp")).toBe("MCP servers");
     expect(capabilityFilterLabel("all")).toBe("All");
+  });
+});
+
+describe("curated skill provenance", () => {
+  test("projects immutable public metadata and effective selection", () => {
+    const skill = item({
+      kind: "skill",
+      source: "library",
+      enabled: true,
+      enabledReason: "explicitly selected",
+      provenance: "Reviewed curated entry",
+      metadata: {
+        libraryId: "azure-verified-modules",
+        version: "1.0.0",
+        contentSha256: "a".repeat(64),
+        sourceCommit: "b".repeat(40),
+        provenance: "Reviewed curated entry",
+        sourceUrl: "https://example.com/source",
+        license: "MPL-2.0",
+        documentationUrl: "https://example.com/docs",
+        artifactPath: "azure-verified-modules",
+      },
+    });
+
+    expect(curatedSkillProvenance(skill)).toEqual({
+      libraryId: "azure-verified-modules",
+      version: "1.0.0",
+      contentSha256: "a".repeat(64),
+      sourceCommit: "b".repeat(40),
+      provenance: "Reviewed curated entry",
+      sourceUrl: "https://example.com/source",
+      license: "MPL-2.0",
+      documentationUrl: "https://example.com/docs",
+      artifactPath: "azure-verified-modules",
+      status: "enabled",
+      effectiveSelection: "explicitly selected",
+    });
+  });
+
+  test("does not treat non-library capabilities as curated skills", () => {
+    expect(curatedSkillProvenance(item({ kind: "skill", source: "manual" }))).toBeNull();
+    expect(curatedSkillProvenance(item({ kind: "api", source: "library" }))).toBeNull();
   });
 });
 

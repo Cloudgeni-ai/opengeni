@@ -44,6 +44,7 @@ export * from "./sandbox/routing";
 
 // Access layer (transport-neutral grant resolution + permission checks).
 export * from "./access";
+export * from "./session-authorization";
 
 // Billing / usage-limit admission (checkLimit / requireLimit / recordWorkspaceUsage).
 export * from "./billing/limits";

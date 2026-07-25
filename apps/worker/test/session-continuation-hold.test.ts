@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { continuationHoldMs, deferredResultMayContinue } from "../src/workflows/session";
+import {
+  continuationHoldMs,
+  deferredResultMayContinue,
+  humanInputDeadlineWaitMs,
+} from "../src/workflows/session";
 
 // P3 all-capped infinite-loop bugfix (fix #6). session.ts must treat a rotation
 // all-capped idle (`idleUntilReset`) as a MANDATORY hold: a 0/elapsed continueDelayMs
@@ -7,6 +11,15 @@ import { continuationHoldMs, deferredResultMayContinue } from "../src/workflows/
 // THRASH). A NORMAL continueDelayMs:0 (a rotation candidate is ready) still re-dispatches
 // immediately — the two cases must stay distinct.
 const FLOOR = 60_000; // ROTATION_IDLE_FLOOR_MS
+
+describe("structured human-input deadline waits", () => {
+  test("holds until a future durable deadline and fires immediately after expiry", () => {
+    const now = Date.parse("2026-07-21T12:00:00.000Z");
+    expect(humanInputDeadlineWaitMs("2026-07-21T12:01:00.000Z", now)).toBe(60_000);
+    expect(humanInputDeadlineWaitMs("2026-07-21T11:59:00.000Z", now)).toBe(0);
+    expect(humanInputDeadlineWaitMs("invalid", now)).toBe(0);
+  });
+});
 
 describe("continuationHoldMs — the all-capped idle is a real wait", () => {
   test("(f) an all-capped idle with continueDelayMs:0 STILL holds the floor (a 0 cannot skip the hold)", () => {

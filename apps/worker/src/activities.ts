@@ -25,6 +25,8 @@ export type {
   ActivityDependencies,
   DispatchScheduledTaskRunInput,
   DispatchScheduledTaskRunResult,
+  ExpireSessionHumanInputInput,
+  ExpireSessionHumanInputResult,
   IndexDocumentInput,
   MaybeContinueGoalInput,
   MaybeContinueGoalResult,
@@ -161,6 +163,7 @@ export const persistSessionAttemptQuiescence =
   defaultControlActivities.persistSessionAttemptQuiescence;
 export const recoverDispatch = defaultControlActivities.recoverDispatch;
 export const peekSessionWork = defaultControlActivities.peekSessionWork;
+export const expireSessionHumanInput = defaultControlActivities.expireSessionHumanInput;
 export const markSessionIdle = defaultControlActivities.markSessionIdle;
 export const dispatchScheduledTaskRun = defaultControlActivities.dispatchScheduledTaskRun;
 export const enqueueGoalRetryWake = defaultControlActivities.enqueueGoalRetryWake;

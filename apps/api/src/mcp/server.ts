@@ -1,5 +1,6 @@
 import {
   CreateScheduledTaskRequest,
+  defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
   SessionEventReadDirection,
@@ -12,6 +13,7 @@ import {
   type GitHubRepository,
   type Permission,
   type ResourceRef,
+  type SessionAuthorizationOperation,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
@@ -27,11 +29,13 @@ import {
   getSessionTurn,
   getVariableSet,
   getVariableSetByName,
-  listGitHubInstallationIdsForWorkspace,
+  areGitHubRepositoriesAllowedForWorkspace,
   listScheduledTaskRuns,
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  projectEffectiveControlForRelatedAccess,
+  projectSessionForRelatedAccess,
   type SessionDiscoveryCursor,
   type SessionDiscoveryOrderBy,
   listRigs,
@@ -48,6 +52,7 @@ import {
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
+  serializeEffectiveSessionControl,
   setSessionGoalStatus,
   setVariableSetVariable,
   updateScheduledTask,
@@ -59,17 +64,20 @@ import {
 import { appendAndPublishEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
-  createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
-  listGitHubAppRepositories,
-  stateMaxAgeSeconds,
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
-import { hasPermission } from "@opengeni/core";
+import {
+  hasPermission,
+  requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
+  type ResolvedSessionAuthorization,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
+import { listWorkspaceGitHubRepositories } from "../github-access";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -120,9 +128,9 @@ import {
 import type { ToolspaceMcpSurface } from "./toolspace";
 
 export type McpServerOptions = {
-  // Origin of the HTTP request that reached the MCP route; last-resort base
-  // for links the server mints (github_connect_link) when neither
-  // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
+  // Origin of the HTTP request that reached the MCP route. Retained in the
+  // options ABI for browser-oriented tools; github_connect_link does not use
+  // it or mint state while new installation binding is disabled.
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
   workspaceMemoryEnabled?: boolean | undefined;
@@ -161,7 +169,8 @@ export function buildOpenGeniMcpServer(
         inputSchema: { title: z4.string().min(1).max(200) },
       },
       async ({ title }) => {
-        const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.title.write");
+        const result = await updateSessionTitle(deps, grant, sessionId, title, "agent");
         return json({
           ok: true,
           updated: result.updated,
@@ -195,19 +204,20 @@ export function buildOpenGeniMcpServer(
     registerRigTools(server, deps, grant, can, sessionId, json);
   }
 
-  // Orchestration, variableSet, and GitHub-connect tools are permission-gated
+  // Orchestration, variableSet, and GitHub status/token tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
   // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
-  // so agents can spawn/read sessions, manage variable set variables,
-  // and mint GitHub install links out of the box. A user DEMOTES a specific
+  // so agents can spawn/read sessions, manage variable set variables, inspect
+  // GitHub connection availability, and refresh scoped tokens for already-bound
+  // repositories out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, options, json);
+    registerGitHubConnectTool(server, deps, json);
     // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
     // worker-signed sessionId claim so it mints for THIS session's repos), gated on
     // the same github:use capability as github_connect_link.
@@ -265,13 +275,7 @@ export function buildOpenGeniMcpServer(
       },
       async ({ limit }) => {
         try {
-          const installationIds = await listGitHubInstallationIdsForWorkspace(
-            deps.db,
-            grant.workspaceId,
-          );
-          const repositories = await listGitHubAppRepositories(deps.settings, {
-            installationIds,
-          });
+          const repositories = await listWorkspaceGitHubRepositories(deps, grant.workspaceId);
           const visible = typeof limit === "number" ? repositories.slice(0, limit) : repositories;
           return json({
             repositories: visible.map((repository) =>
@@ -719,6 +723,7 @@ function registerGoalTools(
       },
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const callerTurnId =
         typeof grant.metadata?.["turnId"] === "string"
@@ -763,6 +768,7 @@ function registerGoalTools(
       },
     },
     async ({ text, successCriteria, progressNote }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
@@ -800,6 +806,7 @@ function registerGoalTools(
       inputSchema: { evidence: z4.string().min(1) },
     },
     async ({ evidence }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
@@ -829,6 +836,7 @@ function registerGoalTools(
       inputSchema: { rationale: z4.string().min(1) },
     },
     async ({ rationale }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
@@ -862,6 +870,19 @@ function registerGoalTools(
 type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
 };
+
+async function authorizeFirstPartySession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  operation: SessionAuthorizationOperation,
+): Promise<ResolvedSessionAuthorization | null> {
+  return await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation,
+    surface: "first_party_mcp",
+  });
+}
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
 
@@ -1290,6 +1311,7 @@ function exactAgentCommandContext(
   return {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
     callerSessionId,
     callerTurnId: turnId,
     callerAttemptId: attemptId,
@@ -1310,8 +1332,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description:
-          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
+        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -1321,6 +1342,11 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ limit, cursor, includeLastMessage, orderBy: requestedOrderBy, updatedAfter }) => {
+        const authorizationScope = await requireSessionAuthorizationListScope(
+          deps,
+          grant,
+          "first_party_mcp",
+        );
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const orderBy: SessionDiscoveryOrderBy =
           requestedOrderBy ?? decodedCursor?.orderBy ?? "createdAt";
@@ -1343,6 +1369,7 @@ function registerWorkspaceOrchestrationTools(
           includeLastMessage: includeLastMessage === true,
           orderBy,
           ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
         });
         return json(capSessionDiscoveryPage(page, includeLastMessage === true));
       },
@@ -1356,12 +1383,25 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: { sessionId: z4.string().uuid() },
       },
       async ({ sessionId }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.read",
+        );
         const session = await getSession(deps.db, grant.workspaceId, sessionId);
         if (!session) {
           throw new Error("session not found");
         }
         const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
-        return json(boundSessionDetailMcp(session, queue?.effectiveControl ?? null));
+        const projected = projectSessionForRelatedAccess(
+          {
+            ...session,
+            effectiveControl: queue?.effectiveControl ?? session.effectiveControl,
+          },
+          authorization?.relatedSessionAccess ?? "root",
+        );
+        return json(boundSessionDetailMcp(projected));
       },
     );
 
@@ -1405,6 +1445,7 @@ function registerWorkspaceOrchestrationTools(
         excludeClasses,
         latest,
       }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
         await requireSession(deps.db, grant.workspaceId, sessionId);
         if (
           latest &&
@@ -1495,7 +1536,14 @@ function registerWorkspaceOrchestrationTools(
           idempotencyKey: z4.string().min(1).max(200).optional(),
           // First-party MCP token permissions for the spawned session; every
           // permission must be held by this grant (validated in the domain).
-          firstPartyMcpPermissions: z4.array(z4.string()).optional(),
+          // A goal requires goals:manage in the resulting set; it is never
+          // silently added beyond the inherited or explicit authority.
+          firstPartyMcpPermissions: z4
+            .array(z4.string())
+            .optional()
+            .describe(
+              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+            ),
           // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
           // creator's box — one filesystem/repo/desktop, N independent conversations;
           // this is the SAFE DEFAULT. Pass "new" for a fresh isolated box (a different
@@ -1529,7 +1577,12 @@ function registerWorkspaceOrchestrationTools(
           // arbitrary session's wake channel without sessions:control on it.
         },
       },
-      async (args) => json(await createSessionForRequest(deps, grant, grant.workspaceId, args)),
+      async (args) => {
+        if (callerSessionId !== null) {
+          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+        }
+        return json(await createSessionForRequest(deps, grant, grant.workspaceId, args));
+      },
     );
   }
 
@@ -1549,6 +1602,7 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
+        await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
         if (callerSessionId !== null) {
           if ((mcpCredentialUpdates?.length ?? 0) > 0) {
             throw new Error("internal session updates cannot change MCP credentials");
@@ -1599,6 +1653,12 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.control",
+        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
@@ -1612,27 +1672,37 @@ function registerWorkspaceOrchestrationTools(
           );
           return json({
             receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
+            effectiveControl: projectEffectiveControlForRelatedAccess(
+              serializeEffectiveSessionControl(controlled.control),
+              sessionId,
+              authorization?.relatedSessionAccess ?? "root",
+            ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
           });
         }
-        return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
-            },
-            {
-              action: "pause",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
-            },
-          ),
+        const controlled = await controlHumanSessionWorkstream(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "pause",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
         );
+        return json({
+          ...controlled,
+          effectiveControl: projectEffectiveControlForRelatedAccess(
+            controlled.effectiveControl,
+            sessionId,
+            authorization?.relatedSessionAccess ?? "root",
+          ),
+        });
       },
     );
 
@@ -1648,6 +1718,12 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.control",
+        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
@@ -1661,27 +1737,37 @@ function registerWorkspaceOrchestrationTools(
           );
           return json({
             receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
+            effectiveControl: projectEffectiveControlForRelatedAccess(
+              serializeEffectiveSessionControl(controlled.control),
+              sessionId,
+              authorization?.relatedSessionAccess ?? "root",
+            ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
           });
         }
-        return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
-            },
-            {
-              action: "resume",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
-            },
-          ),
+        const controlled = await controlHumanSessionWorkstream(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "resume",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
         );
+        return json({
+          ...controlled,
+          effectiveControl: projectEffectiveControlForRelatedAccess(
+            controlled.effectiveControl,
+            sessionId,
+            authorization?.relatedSessionAccess ?? "root",
+          ),
+        });
       },
     );
 
@@ -1698,6 +1784,7 @@ function registerWorkspaceOrchestrationTools(
           },
         },
         async ({ sessionId, instruction, idempotencyKey }) => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.steer");
           const result = await steerAgentSession(
             deps,
             exactAgentCommandContext(grant, callerSessionId),
@@ -1725,14 +1812,9 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ session_id, title }) => {
+        await authorizeFirstPartySession(deps, grant, session_id, "session.title.write");
         await requireSession(deps.db, grant.workspaceId, session_id);
-        const result = await updateSessionTitle(
-          deps,
-          grant.workspaceId,
-          session_id,
-          title,
-          "agent",
-        );
+        const result = await updateSessionTitle(deps, grant, session_id, title, "agent");
         return json({
           ok: true,
           updated: result.updated,
@@ -1893,22 +1975,15 @@ function registerVariableSetTools(
   }
 }
 
-// GitHub connect link for manager-style agents: mirrors GET .../github/app but
-// returns a browser entry URL (.../github/connect) that plants the CSRF state
-// cookie before forwarding to GitHub, because an MCP-issued link is opened in
-// a browser that never called the API directly.
-function registerGitHubConnectTool(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  options: McpServerOptions,
-  json: JsonResult,
-): void {
+// The tool remains registered for compatibility, but every new installation
+// binding entry point is fail-closed until a provider-supported authority
+// proof stronger than installation visibility is available.
+function registerGitHubConnectTool(server: McpServer, deps: ApiRouteDeps, json: JsonResult): void {
   server.registerTool(
     "github_connect_link",
     {
       description:
-        "Create a workspace-bound GitHub App install link to share with a human. Opening it redirects to GitHub to install the app and select repositories for this workspace; completing the connection requires the person to be signed in to this OpenGeni deployment with github:manage. The link expires.",
+        "Report GitHub App connection availability. New installation binding is disabled until GitHub installation authority can be proven, so installUrl and linkUrl are null.",
       inputSchema: {},
     },
     async () => {
@@ -1920,29 +1995,15 @@ function registerGitHubConnectTool(
           configured: false,
           appSlug: slug,
           installUrl: null,
+          linkUrl: null,
           missing,
         });
       }
-      const base = (
-        settings.publicBaseUrl ??
-        settings.githubAppManifestBaseUrl ??
-        options.requestOrigin ??
-        ""
-      ).replace(/\/+$/, "");
-      if (!base) {
-        throw new Error(
-          "github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment",
-        );
-      }
-      const state = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-      });
       return json({
         configured: true,
         appSlug: slug,
-        installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(state)}`,
-        expiresInSeconds: stateMaxAgeSeconds,
+        installUrl: null,
+        linkUrl: null,
         missing: [],
       });
     },
@@ -1993,9 +2054,20 @@ function registerGitHubTokenTool(
       if (selected.some((item) => item.installationId !== installationId)) {
         throw new Error("GitHub App repository resources must belong to one installation");
       }
+      const repositoryIds = selected.map((item) => item.repositoryId);
+      if (
+        !(await areGitHubRepositoriesAllowedForWorkspace(
+          deps.db,
+          grant.workspaceId,
+          installationId,
+          repositoryIds,
+        ))
+      ) {
+        throw new Error("this workspace no longer authorizes the session's GitHub repositories");
+      }
       const token = await createGitHubAppInstallationToken(deps.settings, {
         installationId,
-        repositoryIds: selected.map((item) => item.repositoryId),
+        repositoryIds,
       });
       return json({
         token,
@@ -2029,7 +2101,7 @@ function repositoryWithScheduledTaskResource(
       kind: "repository",
       uri,
       ref: repository.defaultBranch,
-      mountPath: repositoryMountPath(uri),
+      mountPath: defaultRepositoryMountPath(uri),
       ...(repository.private
         ? {
             githubInstallationId: repository.installationId,
@@ -2043,12 +2115,7 @@ function repositoryWithScheduledTaskResource(
 function normalizedRepositoryUri(value: string): string {
   const url = new URL(value);
   const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-  return `https://${url.hostname.toLowerCase()}/${path}.git`;
-}
-
-function repositoryMountPath(uri: string): string {
-  const url = new URL(uri);
-  return `repos/${url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`;
+  return `https://${url.host.toLowerCase()}/${path}.git`;
 }
 
 function boundedMcpLimit(limit: number | undefined): number {
@@ -2071,7 +2138,24 @@ function boundedSessionEventMcpLimit(limit: number | undefined): number {
 const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;
 const SESSION_DISCOVERY_MAX_LIMIT = 100;
 const SESSION_DISCOVERY_TEXT_CHARS = 600;
+const SESSION_DISCOVERY_PREVIEW_MAX_BYTES = 16_384;
+const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as const;
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  direction: "before",
+  limit: 1,
+  mode: "monitoring",
+  payloadMode: "summary",
+} as const;
+
+function sessionDiscoveryPreviewDrillDownInput(sessionId: string, type: SessionEventType) {
+  return {
+    sessionId,
+    includeTypes: [type],
+    ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+  };
+}
 
 function boundedSessionDiscoveryLimit(limit: number | undefined): number {
   if (!limit || !Number.isFinite(limit)) return SESSION_DISCOVERY_DEFAULT_LIMIT;
@@ -2322,8 +2406,58 @@ export function capSessionDiscoveryPage(
     };
   });
 
-  let kept = projected;
+  // The database order is already the useful discovery order. Spend the
+  // separate preview budget in that order so the first page retains previews
+  // for the most relevant rows and later rows remain discoverable by status.
+  let budgetBytes = 0;
+  const budgeted = includeLastMessage
+    ? projected.map((session) => {
+        const latestMessage = session.latestMessage;
+        if (!latestMessage || latestMessage.preview === null) return session;
+        const candidateBytes = Buffer.byteLength(latestMessage.preview, "utf8");
+        if (budgetBytes + candidateBytes <= SESSION_DISCOVERY_PREVIEW_MAX_BYTES) {
+          budgetBytes += candidateBytes;
+          return session;
+        }
+        return {
+          ...session,
+          latestMessage: {
+            ...latestMessage,
+            preview: null,
+            previewOmitted: true,
+            previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+            previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+            previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+              session.id,
+              latestMessage.type,
+            ),
+          },
+        };
+      })
+    : projected;
+
+  let kept = budgeted;
   const build = () => {
+    const previewBytes = includeLastMessage
+      ? kept.reduce(
+          (total, session) =>
+            total +
+            (session.latestMessage?.preview === null || !session.latestMessage
+              ? 0
+              : Buffer.byteLength(session.latestMessage.preview, "utf8")),
+          0,
+        )
+      : 0;
+    const previewOmittedCount = includeLastMessage
+      ? kept.filter((session) => {
+          const latestMessage = session.latestMessage;
+          return (
+            latestMessage != null &&
+            "previewOmitted" in latestMessage &&
+            latestMessage.previewOmitted === true
+          );
+        }).length
+      : 0;
     const lastKept = kept.at(-1);
     const droppedForByteCap = kept.length < projected.length;
     const sourceLast = lastKept
@@ -2354,6 +2488,23 @@ export function capSessionDiscoveryPage(
       snapshotRevision: page.snapshotRevision,
       updatedAfter: page.updatedAfter,
       updatedThrough: page.updatedThrough,
+      ...(includeLastMessage
+        ? {
+            latestMessagePreviewBudget: {
+              bytes: previewBytes,
+              maxBytes: SESSION_DISCOVERY_PREVIEW_MAX_BYTES,
+              omittedCount: previewOmittedCount,
+              truncated: previewOmittedCount > 0,
+              omissionReason:
+                previewOmittedCount > 0 ? SESSION_DISCOVERY_PREVIEW_OMISSION_REASON : null,
+              drillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              drillDownInput: {
+                includeTypes: ["user.message", "agent.message.completed"] as const,
+                ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+              },
+            },
+          }
+        : {}),
       responseTruncated: droppedForByteCap,
       ...(droppedForByteCap
         ? {

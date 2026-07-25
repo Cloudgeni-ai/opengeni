@@ -46,6 +46,7 @@ import type {
   CreateKnowledgeMemoryRequest,
   CreateScheduledTaskRequest,
   CreateSessionRequest,
+  CreateSessionResponse,
   CreateVariableSetRequest,
   CreateRigRequest,
   CreateWorkspaceRequest,
@@ -81,6 +82,9 @@ import type {
   ListWorkspaceMembersResponse,
   PackInstallation,
   ReasoningEffort,
+  RetainedArtifactContent,
+  RetainedArtifactContentOptions,
+  RetainedArtifactMetadata,
   RegisterCapabilityPackRequest,
   ResourceRef,
   ScheduledTask,
@@ -92,8 +96,11 @@ import type {
   SessionEventListOptions,
   SessionEventPage,
   SessionGoal,
+  SessionHumanInputRequest,
   SessionLineageResponse,
   SessionMcpCredentialUpdateInput,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   SessionQueueSnapshot,
   SessionQueueMutationResponse,
   ComposerDraft,
@@ -106,6 +113,7 @@ import type {
   WorkspaceInferenceControlResponse,
   WorkspaceControlEvent,
   SessionTurn,
+  SubmitHumanInputResponseRequest,
   // Stream surfacing (Phase 5): capability negotiation + viewer lifecycle + config.
   SessionCapabilities,
   AttachViewerRequest,
@@ -174,7 +182,11 @@ import type {
   OAuthStartRequest,
   OAuthStartResponse,
 } from "./types";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "./types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  RETAINED_OUTPUT_MAX_PAGE_BYTES,
+} from "./types";
 
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -203,6 +215,8 @@ export type OpenGeniRequestOptions = {
 
 export type SendMessageInput = {
   text: string;
+  /** System instructions scoped to this exact turn; never visible timeline text. */
+  turnInstructions?: string;
   resources?: ResourceRef[];
   tools?: ToolRef[];
   model?: string;
@@ -239,8 +253,11 @@ export class OpenGeniClient {
 
   // --- Session lifecycle ---------------------------------------------------
 
-  async createSession(workspaceId: string, request: CreateSessionRequest): Promise<Session> {
-    return await this.requestJson<Session>(
+  async createSession(
+    workspaceId: string,
+    request: CreateSessionRequest,
+  ): Promise<CreateSessionResponse> {
+    return await this.requestJson<CreateSessionResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/sessions`,
       request,
@@ -262,6 +279,24 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /**
+   * Replace one attached MCP server's approval policy. The change is captured
+   * by the next claimed attempt; already-claimed work keeps its immutable
+   * policy snapshot.
+   */
+  async updateSessionMcpApprovalPolicy(
+    workspaceId: string,
+    sessionId: string,
+    serverId: string,
+    request: UpdateSessionMcpApprovalPolicyRequest,
+  ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
+    return await this.requestJson<UpdateSessionMcpApprovalPolicyResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/mcp-servers/${encodeURIComponent(serverId)}/approval-policy`,
       request,
     );
   }
@@ -660,6 +695,47 @@ export class OpenGeniClient {
       type: "user.approvalDecision",
       ...(clientEventId !== undefined ? { clientEventId } : {}),
       payload,
+    });
+  }
+
+  async listHumanInputRequests(
+    workspaceId: string,
+    sessionId: string,
+    options: {
+      status?: SessionHumanInputRequest["status"];
+    } = {},
+  ): Promise<SessionHumanInputRequest[]> {
+    const result = await this.requestJson<{ requests: SessionHumanInputRequest[] }>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests`,
+      undefined,
+      options.status ? { status: options.status } : undefined,
+    );
+    return result.requests;
+  }
+
+  async getHumanInputRequest(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+  ): Promise<SessionHumanInputRequest> {
+    return await this.requestJson<SessionHumanInputRequest>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests/${requestId}`,
+    );
+  }
+
+  async submitHumanInputResponse(
+    workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    response: SubmitHumanInputResponseRequest,
+    options: { clientEventId?: string } = {},
+  ): Promise<SessionEvent> {
+    return await this.sendEvent(workspaceId, sessionId, {
+      type: "user.humanInputResponse",
+      ...(options.clientEventId ? { clientEventId: options.clientEventId } : {}),
+      payload: { requestId, response },
     });
   }
 
@@ -1829,6 +1905,80 @@ export class OpenGeniClient {
     );
   }
 
+  /** Read provider-neutral retained evidence metadata; never returns a storage location. */
+  async getRetainedArtifact(
+    workspaceId: string,
+    artifactId: string,
+  ): Promise<RetainedArtifactMetadata> {
+    return await this.requestJson<RetainedArtifactMetadata>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/artifacts/${artifactId}`,
+    );
+  }
+
+  /**
+   * Read at most one authenticated retained-evidence range from the API. This
+   * deliberately does not use the ordinary signed file-download URL.
+   */
+  async getRetainedArtifactContent(
+    workspaceId: string,
+    artifactId: string,
+    options: RetainedArtifactContentOptions = {},
+  ): Promise<RetainedArtifactContent> {
+    if (options.range && (options.range.length > 128 || /[^\x20-\x7e]/.test(options.range))) {
+      throw new RangeError("retained artifact range must be at most 128 printable ASCII bytes");
+    }
+    const response = await this.fetchImpl(
+      this.url(`/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`),
+      {
+        method: "GET",
+        headers: {
+          ...this.headers(),
+          Accept: "application/octet-stream",
+          ...(options.range ? { Range: options.range } : {}),
+        },
+        ...(options.signal ? { signal: options.signal } : {}),
+      },
+    );
+    try {
+      assertApiContractResponse(response);
+    } catch (error) {
+      await cancelResponseBody(response, "retained artifact API contract mismatch");
+      throw error;
+    }
+    if (!response.ok) {
+      throw new OpenGeniApiError(response.status, await safeBoundedText(response));
+    }
+    if (response.status !== 200 && response.status !== 206) {
+      await cancelResponseBody(response, "unexpected retained artifact response status");
+      throw new OpenGeniApiError(response.status, "unexpected retained artifact response status");
+    }
+    if (response.headers.get("accept-ranges") !== "bytes") {
+      await cancelResponseBody(response, "retained artifact response omitted byte-range support");
+      throw new OpenGeniApiError(502, "retained artifact response omitted byte-range support");
+    }
+    let declaredLength: number | null;
+    try {
+      declaredLength = parseBoundedContentLength(response.headers.get("content-length"));
+    } catch (error) {
+      await cancelResponseBody(response, "invalid retained artifact content-length");
+      throw error;
+    }
+    const bytes = await readBoundedResponseBytes(
+      response,
+      RETAINED_OUTPUT_MAX_PAGE_BYTES,
+      declaredLength,
+    );
+    return {
+      bytes,
+      status: response.status,
+      contentType: response.headers.get("content-type") ?? "application/octet-stream",
+      contentLength: bytes.byteLength,
+      contentRange: response.headers.get("content-range"),
+      acceptRanges: "bytes",
+    };
+  }
+
   /** Mint a short-lived signed download URL for a ready file. */
   async createFileDownloadUrl(
     workspaceId: string,
@@ -2189,15 +2339,14 @@ export class OpenGeniClient {
 
   // --- GitHub ----------------------------------------------------------------------------------
 
-  /** GitHub App configuration status + a signed install URL when configured. */
+  /** GitHub App configuration status; install/link URLs are null while new binding is disabled. */
   async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
     return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
   }
 
   /**
-   * Browser entry point that plants the CSRF cookie and forwards to GitHub's
-   * install page. Open this in a browser (it redirects); `state` comes from
-   * `getGitHubApp().installUrl` or a github_connect_link tool.
+   * Compatibility URL for previously issued state. New installation binding is
+   * disabled, so the endpoint validates state and terminates with HTTP 410.
    */
   githubConnectUrl(workspaceId: string, state: string): string {
     return this.url(`/v1/workspaces/${workspaceId}/github/connect`, { state });
@@ -2215,6 +2364,14 @@ export class OpenGeniClient {
     return await this.requestJson<GitHubRepositoriesResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/github/repositories/sync`,
+    );
+  }
+
+  /** Remove one workspace binding without uninstalling the GitHub App itself. */
+  async unlinkGitHubInstallation(workspaceId: string, installationId: number): Promise<void> {
+    await this.requestVoid(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/github/installations/${installationId}`,
     );
   }
 
@@ -2494,4 +2651,70 @@ async function safeText(response: Response): Promise<string> {
   } catch {
     return "";
   }
+}
+
+async function safeBoundedText(response: Response): Promise<string> {
+  try {
+    return new TextDecoder().decode(await readBoundedResponseBytes(response, 64 * 1024, null));
+  } catch {
+    return "";
+  }
+}
+
+async function cancelResponseBody(response: Response, reason: string): Promise<void> {
+  await response.body?.cancel(reason).catch(() => undefined);
+}
+
+function parseBoundedContentLength(value: string | null): number | null {
+  if (value === null) return null;
+  if (!/^\d+$/.test(value)) {
+    throw new OpenGeniApiError(502, "invalid retained artifact content-length");
+  }
+  const length = Number(value);
+  if (!Number.isSafeInteger(length) || length > RETAINED_OUTPUT_MAX_PAGE_BYTES) {
+    throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+  }
+  return length;
+}
+
+async function readBoundedResponseBytes(
+  response: Response,
+  maxBytes: number,
+  expectedBytes: number | null,
+): Promise<Uint8Array> {
+  if (!response.body) {
+    if (expectedBytes !== null && expectedBytes !== 0) {
+      throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+    }
+    return new Uint8Array();
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader
+          .cancel("retained artifact response exceeded the SDK byte limit")
+          .catch(() => undefined);
+        throw new OpenGeniApiError(502, "retained artifact response exceeds the SDK byte limit");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (expectedBytes !== null && totalBytes !== expectedBytes) {
+    throw new OpenGeniApiError(502, "retained artifact response length mismatch");
+  }
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
