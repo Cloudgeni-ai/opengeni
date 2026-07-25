@@ -1,5 +1,11 @@
 # @opengeni/db
 
+## 0.10.3
+
+### Patch Changes
+
+- 495c62c: Preserve published host-export migrations and enforce lineage with a bounded forward-only repair.
+
 ## 0.10.2
 
 ### Patch Changes
