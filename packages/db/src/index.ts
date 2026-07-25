@@ -16846,8 +16846,9 @@ export async function acquireLease(
         // (2) Serialize ALL concurrent arrivals on this group's row. Plain FOR
         // UPDATE (block, do NOT skip) — unlike concurrent enrollment scans,
         // because we WANT the loser to block then attach, not skip and lose.
-        const rows = await tx.execute<LeaseRow>(sql`
-        select * from sandbox_leases
+        const rows = await tx.execute<LeaseRow & { draining_expired: boolean }>(sql`
+        select *, (liveness = 'draining' and expires_at <= now()) as draining_expired
+        from sandbox_leases
         where workspace_id = ${workspaceId} and sandbox_group_id = ${sandboxGroupId}
         for update
       `);
@@ -16855,6 +16856,16 @@ export async function acquireLease(
         if (!row) throw new Error(`Lease row vanished post-insert: ${sandboxGroupId}`);
 
         let liveness = row.liveness;
+
+        // An expired DRAINING row is owned by the reaper's provider teardown,
+        // not by a new arrival. In particular, do this before image/rig conflict
+        // handling: a conflicting successor must not take the SOLO-recreate path
+        // and clear the attributed instance while the reaper/old creator still
+        // owns its termination. The row remains drainable until confirmDrainCold
+        // settles it, so callers fail closed and retry after the box is cold.
+        if (liveness === "draining" && row.draining_expired) {
+          return { role: "fenced" as const, lease: mapLeaseRow(row) };
+        }
 
         // -- SHARED STATE CONFLICT (B3 image + M3 rig): a LIVE box (warm/draining/warming)
         // was created under a specific image AND rig version. If this run resolves a
@@ -16918,7 +16929,9 @@ export async function acquireLease(
           liveness = "cold";
         }
 
-        // -- draining: late arrival re-arms (D1). Box still alive (grace open).
+        // -- draining: late arrival re-arms (D1) only while the grace is open.
+        // An expired row was fenced above because the reaper owns its provider
+        // teardown and must not lose the attributed instance race.
         if (liveness === "draining") {
           await upsertLeaseHolder(tx, row.id, accountId, workspaceId, kind, holderId, subjectId);
           const updated = await recomputeAndStampLease(tx, row.id, input.leaseTtlMs, "warm");
@@ -17748,6 +17761,7 @@ export async function reArmDrainingLease(
           updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining'
+          and expires_at > now()
         returning id
       `);
       return { rearmed: rows.length > 0 };
