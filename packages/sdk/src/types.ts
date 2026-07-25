@@ -1526,6 +1526,68 @@ export type Permission = KnownPermission | (string & {});
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
+export type ModelCapabilitySupportV1 = "supported" | "unsupported" | "unknown";
+
+export type ModelCapabilityStateV1 = {
+  upstream: ModelCapabilitySupportV1;
+  runnable: boolean;
+};
+
+export type ModelCapabilitiesV1 = {
+  reasoning: ModelCapabilityStateV1 & {
+    efforts: ReasoningEffort[];
+    defaultEffort: ReasoningEffort | null;
+    required: boolean;
+  };
+  functionCalling: ModelCapabilityStateV1;
+  structuredOutput: ModelCapabilityStateV1;
+  hostedTools: {
+    webSearch: ModelCapabilityStateV1;
+    xSearch: ModelCapabilityStateV1;
+    codeExecution: ModelCapabilityStateV1;
+  };
+  inputModalities: Array<"text" | "image" | "audio">;
+  outputModalities: Array<"text" | "image" | "audio">;
+  transports: {
+    sse: ModelCapabilityStateV1;
+    responsesWebSocket: ModelCapabilityStateV1;
+    realtimeAudio: ModelCapabilityStateV1;
+  };
+  latencyModes: Array<{
+    id: "standard" | "priority" | "fast";
+    upstream: ModelCapabilitySupportV1;
+    runnable: boolean;
+    billingMultiplierBps?: number | undefined;
+  }>;
+};
+
+export type ModelCredentialSourceV1 =
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "workspace_connection"; mechanism: "api_key" };
+
+export type ModelBillingAttributionV1 = {
+  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  metering: "opengeni_credits" | "external";
+};
+
+export type ModelPricingV1 = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+  marginBps?: number | undefined;
+};
+
+export type ModelPricingScheduleV1 = {
+  default: ModelPricingV1;
+  inputTokenTiers?:
+    | Array<{
+        minimumInputTokens: number;
+        pricing: ModelPricingV1;
+      }>
+    | undefined;
+};
+
 /**
  * One model a client may select at send time, plus the provider that serves it.
  * The wire API (`responses` | `chat`) lets a client reason about provider
@@ -1540,6 +1602,64 @@ export type ClientModel = {
   providerLabel: string;
   api: "responses" | "chat";
   contextWindowTokens?: number | undefined;
+  schemaVersion?: 1 | undefined;
+  aliases?: string[] | undefined;
+  deployment?:
+    | {
+        upstreamModelId: string;
+        wireApi: "responses" | "chat";
+      }
+    | undefined;
+  executionLimits?:
+    | {
+        contextWindowTokens: number | null;
+        effectiveContextWindowTokens: number | null;
+        autoCompactTokenLimit: number | null;
+        toolOutputTruncationTokens: number | null;
+      }
+    | undefined;
+  credentialSource?: ModelCredentialSourceV1 | undefined;
+  billing?: ModelBillingAttributionV1 | undefined;
+  capabilities?: ModelCapabilitiesV1 | undefined;
+  pricing?: ModelPricingScheduleV1 | undefined;
+  definitionVersion?: string | undefined;
+};
+
+export type ModelAvailabilityV1 = {
+  status: "available" | "unavailable" | "degraded" | "unknown";
+  selectable: boolean;
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "credential_not_ready"
+    | "not_entitled"
+    | "provider_unhealthy"
+    | "policy_blocked"
+    | "unsupported"
+    | null;
+  checkedAt: string | null;
+};
+
+export type ModelCredentialReadinessV1 = {
+  status: "ready" | "not_ready" | "error";
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "prerequisites_missing"
+    | "resolver_error"
+    | "observation_stale"
+    | null;
+  basis: "configuration" | "connection" | "resolver";
+  checkedAt: string | null;
+};
+
+export type WorkspaceModelCatalogModel = ClientModel & {
+  credentialReadiness: ModelCredentialReadinessV1;
+  availability: ModelAvailabilityV1;
+};
+
+export type WorkspaceModelCatalogResponse = {
+  models: WorkspaceModelCatalogModel[];
 };
 
 /**
@@ -1591,6 +1711,8 @@ export type CodexUsagePayload = {
   weekly: CodexUsageWindow | null;
   limitReached: boolean;
   fetchedAt: string;
+  /** Authoritative count-only summary from /wham/usage; never synthesized rows. */
+  rateLimitResetCredits?: { availableCount: number; credits: null } | null;
   /** Present only on an auth/refresh failure path. */
   reason?: "needs_relogin";
   additionalLimits?: Array<{
@@ -1627,6 +1749,76 @@ export type CodexAccount = {
   // P3 rotation cooldown: ISO timestamp until which this account is cooling-down
   // (rotated-off after a usage cap). null/absent ⇒ not cooling.
   exhaustedUntil?: string | null;
+  /** Controls only NEW automatic allocations. */
+  allocatorEnabled: boolean;
+  /** Independent OCC sequence; credential/token `version` is never exposed. */
+  allocatorVersion: number;
+  allocatorUpdatedAt?: string | null;
+  /** Cached authoritative summary count, never detailed redemption authority. */
+  resetCreditAvailableCount?: number | null;
+  resetCreditsCheckedAt?: string | null;
+};
+
+export type CodexResetCredit = {
+  id: string;
+  resetType: "codexRateLimits" | "unknown";
+  status: "available" | "redeeming" | "redeemed" | "unknown";
+  /** Unix seconds from the provider contract. */
+  grantedAt: number;
+  /** Unix seconds, or null when the provider reports no expiry. */
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
+  /** True only for fresh, complete, owning-human provider detail. */
+  actionable: boolean;
+};
+
+/** Owning-human recovery metadata. It contains no token, browser-session hash, or provider key. */
+export type CodexResetRedemptionRecovery = {
+  attemptId: string;
+  creditId: string;
+  status: "provider_started" | "completed";
+  outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed" | null;
+  providerStartedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CodexAccountOverview = {
+  accountId: string;
+  usage: {
+    source: "provider" | "cache" | "none";
+    fetchedAt: string | null;
+    stale: boolean;
+    error: string | null;
+    value: CodexUsagePayload | null;
+  };
+  resetCredits: {
+    source: "provider" | "cache" | "none";
+    fetchedAt: string | null;
+    stale: boolean;
+    error: string | null;
+    detailState: "detailed" | "count_only" | "capped" | "unsupported" | "unknown" | "error";
+    detailsComplete: boolean;
+    availableCount: number | null;
+    credits: CodexResetCredit[];
+  };
+  canRedeem: boolean;
+  /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
+  canResumeRedemption: boolean;
+  /** Durable owner-scoped ambiguity/completion discovery; never redemption authority for agents. */
+  redemptions: CodexResetRedemptionRecovery[];
+};
+
+/** Independently settled live overview keyed by workspace credential id. */
+export type CodexOverviewResponse = { accounts: Record<string, CodexAccountOverview> };
+
+export type CodexAllocatorUpdate = {
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt: string | null;
+  changed: boolean;
 };
 
 /** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */

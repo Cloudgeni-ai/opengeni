@@ -1,4 +1,4 @@
--- OPE-44: session list reads are serializable and subject-scoped. Performing a
+-- tracking-44: session list reads are serializable and subject-scoped. Performing a
 -- global expired-row delete inside every read makes concurrent API replicas
 -- conflict on the same rows. Move TTL cleanup to one bounded SKIP LOCKED
 -- reaper operation and keep the request transaction strictly request-local.

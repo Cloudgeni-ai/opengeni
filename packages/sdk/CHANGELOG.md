@@ -1,5 +1,27 @@
 # @opengeni/sdk
 
+## 0.22.1
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+
+## 0.22.0
+
+### Minor Changes
+
+- 229902b: Add trustworthy per-subscription Codex quota/reset-credit overview and allocator OCC controls, plus an owning-human managed-cookie-only reset redemption flow with durable ambiguity-safe provider idempotency.
+
+## 0.21.2
+
+### Patch Changes
+
+- 4966649: Add bounded authoritative terminal-result projections to session event monitoring APIs and SDK types.
+
 ## 0.21.1
 
 ### Patch Changes

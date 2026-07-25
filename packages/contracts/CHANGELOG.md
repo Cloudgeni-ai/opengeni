@@ -1,5 +1,21 @@
 # @opengeni/contracts
 
+## 0.17.3
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+
+## 0.17.2
+
+### Patch Changes
+
+- 4966649: Add bounded authoritative terminal-result projections to session event monitoring APIs and SDK types.
+
 ## 0.17.1
 
 ### Patch Changes

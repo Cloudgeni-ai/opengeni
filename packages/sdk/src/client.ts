@@ -16,6 +16,8 @@ import type {
   CodexAccount,
   CodexAccountsResponse,
   CodexRotationSettings,
+  CodexOverviewResponse,
+  CodexAllocatorUpdate,
   CodexConnectionStatus,
   CodexConnectPoll,
   CodexConnectStart,
@@ -28,6 +30,7 @@ import type {
   CapabilityInstallation,
   AddDocumentRequest,
   ClientConfig,
+  WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CompactSessionContextResult,
   CompleteFileUploadResponse,
@@ -1488,6 +1491,14 @@ export class OpenGeniClient {
     return config;
   }
 
+  /** Authenticated model definitions plus workspace-specific selectability. */
+  async getWorkspaceModelCatalog(workspaceId: string): Promise<WorkspaceModelCatalogResponse> {
+    return await this.requestJson<WorkspaceModelCatalogResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/model-catalog`,
+    );
+  }
+
   /** The caller's access context: subject, account + workspace grants, defaults. */
   async getAccessContext(): Promise<AccessContext> {
     return await this.requestJson<AccessContext>("GET", "/v1/access/me");
@@ -2560,6 +2571,14 @@ export class OpenGeniClient {
     );
   }
 
+  /** Live independently-settled quota + reset-credit overview for every account. */
+  async codexOverview(workspaceId: string): Promise<CodexOverviewResponse> {
+    return await this.requestJson<CodexOverviewResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/codex/overview`,
+    );
+  }
+
   /** Disconnect ALL accounts (legacy workspace-wide). Prefer `disconnectCodexAccount`. */
   async codexDisconnect(workspaceId: string): Promise<{ disconnected: boolean }> {
     return await this.requestJson<{ disconnected: boolean }>(
@@ -2599,6 +2618,19 @@ export class OpenGeniClient {
       "PATCH",
       `/v1/workspaces/${workspaceId}/codex/settings`,
       patch,
+    );
+  }
+
+  /** Toggle only NEW automatic allocations under independent allocator OCC. */
+  async setCodexAccountAllocator(
+    workspaceId: string,
+    accountId: string,
+    input: { enabled: boolean; expectedVersion: number },
+  ): Promise<CodexAllocatorUpdate> {
+    return await this.requestJson<CodexAllocatorUpdate>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}/allocator`,
+      input,
     );
   }
 
