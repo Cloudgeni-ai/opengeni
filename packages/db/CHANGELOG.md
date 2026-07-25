@@ -1,5 +1,15 @@
 # @opengeni/db
 
+## 0.10.4
+
+### Patch Changes
+
+- 4966649: Add bounded authoritative terminal-result projections to session event monitoring APIs and SDK types.
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/config@0.6.6
+
 ## 0.10.3
 
 ### Patch Changes
