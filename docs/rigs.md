@@ -7,13 +7,14 @@ A workspace owns named **rigs**: versioned sandbox machine definitions (a base i
 1. **Versions are append-only and content-immutable.** `rig_versions` rows are never updated in place; only the `active` flag flips. Exactly one version per rig can be active at a time (a partial unique index on `(rig_id) WHERE active`).
 2. **A session's rig binding is frozen at creation.** `sessions.rig_id`/`sessions.rig_version_id` are set once, from the explicit `rigId` on create or the workspace's default rig, and never move — even if the rig is promoted to a new active version mid-session. A shared box (`sandbox: 'shared'` or an explicit group) must carry the same frozen `rig_version_id` as the rest of its group; a mismatch 422s at create.
 3. **Two change kinds, two trust levels.** `setup_append` is additive (one already-verified-in-a-live-box shell command) and **auto-merges into a new active version on a green clean-replay run** — no `rigs:manage` needed. `definition_edit` is a full next-version edit (image/script/checks/credential hooks/default variable sets) that still runs the same clean-replay verification but always lands `proposed`; promoting it to a new active version requires `rigs:manage`.
-4. **Verification runs in a throwaway, secret-free sandbox.** Rig CI establishes its own sandbox session (id `rig-verification-<changeId>` / `rig-version-verification-<versionId>`), runs the rig-setup hook and (for `setup_append`) the proposed command, then every declared check, and always terminates the box in a `finally` — nothing from a rig verification run persists.
+4. **Verification runs in an exactly leased, throwaway, secret-free sandbox.** Rig CI uses the change/version UUID as a canonical `sandbox_leases.sandbox_group_id`, accepts only the `cold -> warming` spawner role, records the exact provider instance before setup, and commits it warm before running the rig-setup hook, proposed command, or checks. Provider tags are diagnostic only. Cleanup quiesces commands before termination and never erases an unconfirmed provider pointer; failed direct cleanup is handed to the ordinary lease reaper. Sandbox contents do not persist.
 5. **Workspace isolation.** `rigs`, `rig_versions`, and `rig_changes` are all FORCE-RLS workspace-scoped tables, same as every other workspace table.
 6. **Rig setup never touches selfhosted.** The rig-setup hook is part of the same owned-hooks block as the repository-clone and credential hooks, which is skipped entirely when the turn's effective sandbox backend is `selfhosted` (a [Connected Machine](connected-machines.md) is the user's own computer; the platform never runs setup against it). A machine-targeted turn therefore always behaves as if rig-less for setup purposes, even when the session carries a rig binding.
 
 ## Configuration
 
 - `OPENGENI_RIG_SETUP_TIMEOUT_MS` — the budget for the rig's own setup script, separate from the general 120s sandbox-lifecycle-hook default. Defaults to 600000 (10 minutes). Applies to both a live turn's setup hook and a rig-CI verification run.
+- `OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED` — default `false`. When false, rig CI fails before lease acquire/provider create rather than falling back to an unowned sandbox. Enable only after every worker capable of running the global sandbox reaper has the matching pre-termination lease revalidation behavior; see [Operational rollout](#operational-rollout).
 - No dedicated encryption key: a rig's `setupScript`/`image`/`checks` are not secret material — secrets are attached only via the rig's `defaultVariableSetIds`, which reference workspace variable-sets and are subject to their own encryption (see [`variable-sets.md`](variable-sets.md)).
 
 ## Rig setup at runtime
@@ -76,11 +77,14 @@ A session's rig binding resolves at create as: the explicit `rigId` on the creat
 
 Every proposed change is verified the same way, in a throwaway sandbox with no attached secrets:
 
-1. Establish a fresh sandbox session (`rig-verification-<changeId>` or `rig-version-verification-<versionId>`), applying the candidate version's image via the same `rig > pack > deployment` precedence as a live turn.
-2. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it.
-3. For a `setup_append` change, run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
-4. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check.
-5. Classify the outcome and always tear the sandbox down in a `finally`, whether verification passed, failed, or the whole run threw:
+1. Acquire the canonical sandbox lease keyed by the change UUID (or version UUID for an active-version recheck), using the candidate's effective backend/image and a bounded 20-minute lease/warming TTL. Only the `spawner` role is valid: `attached`, `rearmed`, or `fenced` means this run cannot prove a clean box and fails without reuse. The activity touches its holder every 10 seconds until cleanup.
+2. Establish a fresh sandbox session (`rig-verification-<changeId>-...` or `rig-version-verification-<versionId>-...`). The create callback retains the exact handle before any await, persists the provider instance on the warming lease before readiness/setup, and best-effort tags Modal with the same lease identity. Modal stores an exact instance pointer with no resume envelope; other resumable backends store their serialized envelope.
+3. Commit the warming lease to warm under its epoch fence **before** verifier work. A failed or acknowledgement-ambiguous commit fails closed; cleanup tries the mutually exclusive warming and warm exact-fenced transitions after provider termination.
+4. If the candidate version has a non-empty `setupScript`, run the rig-setup hook against it. For a `setup_append` change, then run the proposed command; a nonzero exit rejects the change immediately without running the declared checks.
+5. Run every declared check (`RigCheck.command`), recording `exitCode`/`output` per check, then classify the outcome.
+6. In `finally`, cancel and wait for every verifier-owned command before provider teardown. If direct termination is confirmed, clear the exact warm/warming pointer under the epoch fence. A failed or expired warming transition advances the lease epoch before a successor can reacquire, so a non-abortable old create cannot record, commit, fail, or clean up against the successor even when the old numeric epoch would otherwise match. Always release the holder with a minimal drain grace; if termination or DB cleanup is inconclusive, retain the provider pointer so the ordinary reaper retries instead of manufacturing an orphan.
+
+The Temporal activity heartbeats every 10 seconds, reserves up to two minutes of its 15-minute start-to-close budget for cleanup, and uses `WAIT_CANCELLATION_COMPLETED` so workflow cancellation does not report completion before the physical command/provider fence has run.
 
 | Kind | Checks passed? | Infra error? | Outcome |
 |---|---|---|---|
@@ -92,6 +96,15 @@ Every proposed change is verified the same way, in a throwaway sandbox with no a
 A `definition_edit` promote (`POST .../changes/:changeId/promote`) re-validates that the change is `proposed` with `verification.passed === true` before minting the new version from the change's base version plus its payload overrides (fields the payload omits inherit from the base). Both promotion paths (`setup_append` auto-merge and `definition_edit` explicit promote) mint the new version with `activate: true` in the same call, so a rig never has a moment with zero active versions.
 
 Rig audit events (`rig.change.proposed`, `rig.verification.started`/`.passed`/`.failed`, `rig.change.merged`/`.rejected`/`.failed`, `rig.version.activated`/`.promoted`) are recorded through the standard workspace audit log for every step above.
+
+### Operational rollout
+
+Lease-aware rig verification and destructive Modal orphan revalidation are one rollout contract, but the verifier is intentionally activated separately:
+
+1. Pause rig-verification dispatch. Deploy the worker revision containing canonical verifier leases and the Modal orphan sweep's immediate pre-terminate durable re-read, with `OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED=false`.
+2. Prove every worker consuming the shared reaper/rig-verification queues is on that revision. Then enable `OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED=true` as a separate configuration change and resume dispatch.
+
+Rollback is the reverse safety order: disable the flag first, drain/stop verifier dispatch, wait until no active verifier lease remains, and only then roll the worker back. A mixed fleet must never create owned verifier boxes that an older orphan reaper cannot recognize. Disabling the flag never falls back to the legacy unleased path.
 
 ## Composition with variable sets
 

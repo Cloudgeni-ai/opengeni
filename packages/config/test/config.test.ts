@@ -55,6 +55,20 @@ describe(".env.example", () => {
   });
 });
 
+describe("rig verification lease ownership rollout", () => {
+  test("is default-off and parses explicit false and true without truthy-string coercion", () => {
+    expect(withEnv({}, () => getSettings()).rigVerificationLeaseOwnershipEnabled).toBe(false);
+    expect(
+      withEnv({ OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED: "false" }, () => getSettings())
+        .rigVerificationLeaseOwnershipEnabled,
+    ).toBe(false);
+    expect(
+      withEnv({ OPENGENI_RIG_VERIFICATION_LEASE_OWNERSHIP_ENABLED: "true" }, () => getSettings())
+        .rigVerificationLeaseOwnershipEnabled,
+    ).toBe(true);
+  });
+});
+
 describe("Temporal connection security", () => {
   test("keeps the local default plaintext and enables TLS for an API key", () => {
     expect(temporalConnectionOptions(withEnv({}, () => getSettings()))).toEqual({
