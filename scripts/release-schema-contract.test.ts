@@ -11,6 +11,15 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
+  test("classifies the Codex quota owning-human cutover as maintenance-only", async () => {
+    const contract = await buildSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0065_codex_subscription_overview.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
   test("is deterministic across creation order and classifies only executable SQL migrations", async () => {
     const first = await fixture([
       ["0002_second.sql", "-- deployment-mode: rolling\nselect 2;"],
@@ -76,7 +85,7 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(96 + currentMainMigrations.length);
+    expect(contract.fileCount).toBe(97 + currentMainMigrations.length);
     expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
     expect(
       contract.migrations
