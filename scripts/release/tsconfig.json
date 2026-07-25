@@ -3,5 +3,5 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["../release-bom.ts", "../verify-release-packages.ts"]
+  "include": ["../release-bom.ts", "../release-review.ts", "../verify-release-packages.ts"]
 }

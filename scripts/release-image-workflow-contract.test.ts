@@ -212,6 +212,39 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain('--tag "${name}:latest"');
   });
 
+  test("package-only publication is exact-source, CI-gated, and evidence-bound", async () => {
+    const publish = await workflow("publish-packages.yml");
+    const sourceGate = publish.indexOf("Require successful protected source CI");
+    const plan = publish.indexOf("Plan exact package publication");
+    const retainedPlan = publish.indexOf("Retain pre-publication package plan");
+    const mutation = publish.indexOf("Publish unpublished package versions");
+    const reconciliation = publish.indexOf("Reconcile exact registry package identity");
+
+    expect(publish).toContain("expected_packages:");
+    expect(publish).toContain("checks: read");
+    expect(publish).toContain("filter=latest&per_page=100");
+    for (const required of [
+      "Typecheck and unit tests",
+      "Deployment artifacts",
+      "Workload image builds",
+    ]) {
+      expect(publish).toContain(required);
+    }
+    expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: plan");
+    expect(publish).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
+    expect(publish).toContain("bun scripts/verify-release-packages.ts");
+    expect(publish).toContain("actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10");
+    expect(publish).toContain("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6");
+    expect(publish).toContain("actions/setup-node@820762786026740c76f36085b0efc47a31fe5020");
+    expect(publish).not.toMatch(/actions\/(?:checkout|setup-node)@v[0-9]/);
+    expect(publish).not.toMatch(/oven-sh\/setup-bun@v[0-9]/);
+    expect(sourceGate).toBeGreaterThan(-1);
+    expect(plan).toBeGreaterThan(sourceGate);
+    expect(retainedPlan).toBeGreaterThan(plan);
+    expect(mutation).toBeGreaterThan(retainedPlan);
+    expect(reconciliation).toBeGreaterThan(mutation);
+  });
+
   test("public registry authentication is portable, short-lived, and version-bound", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");
