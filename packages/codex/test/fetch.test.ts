@@ -392,10 +392,7 @@ describe("codexSubscriptionFetch", () => {
     expect(body.error.type).toBe(CODEX_RESPONSE_TIMEOUT_ERROR_TYPE);
     expect(body.error.timeout_class).toBe("headers");
     expect(body.error.response_observed).toBe(false);
-    expect(events.map((event) => event.phase)).toEqual([
-      "started",
-      "timed_out",
-    ]);
+    expect(events.map((event) => event.phase)).toEqual(["started", "timed_out"]);
     expect(events[0]?.timeoutPolicy.noByteRetries).toBe(0);
     expect(events[1]?.willRetry).toBe(false);
   });
