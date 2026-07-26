@@ -1,11 +1,11 @@
 <!-- docs-refs: record -->
 
-> **Point-in-time OPE-75 landing record.** The additive PR branch is based on
+> **Point-in-time cancellation-settlement lane landing record.** The additive PR branch is based on
 > `3dadb5555f1612a7bf9e2568f74168a64f652ed0`; the independently reconciled
 > `origin/main` was `77986e28331519bd9f224c9033ee62930465b01a`. The open
-> draft dependency heads were OPE-59 PR #459
-> `1540bc659170c7747d7366c214493ca70b89c9bf`, OPE-63 draft head
-> PR #467 `80de16cae51216c314c29f3721894e41186b5401`, and OPE-73
+> draft dependency heads were durable-wake lane PR #459
+> `1540bc659170c7747d7366c214493ca70b89c9bf`, canonical-persistence lane draft head
+> PR #467 `80de16cae51216c314c29f3721894e41186b5401`, and post-effect-receipt lane
 > PR #475
 > `19cb1d4c84e4bd19c1fa56553b0efba7d1c48cb3`. These branches are not merged
 > dependencies. Paths and symbols may move. Shipped code and current-tier docs
@@ -15,8 +15,8 @@
 
 ## Status
 
-OPE-75 has a deterministic real-service pre-fix control on draft PR #490, branch
-`fix/ope-75-bounded-cancellation-settlement`:
+The cancellation-settlement lane has a deterministic real-service pre-fix
+control on draft PR #490:
 
 ```text
 test/integration/steer-cancellation-deadlock.fixture.test.ts
@@ -70,20 +70,21 @@ not claims about the current-main fixture. The adapted fixture remains an
 evidence-only lane and does not modify runtime code.
 
 Implementation is intentionally blocked from the overlapping runtime and
-database files until the OPE-63 and OPE-73 final reviewed heads land and root
-serializes the OPE-59 integration. Their owners supplied the typed boundaries
-listed below, but all three PRs remain draft/nonfinal. Racing those owners would
-be less safe than preserving this fixture and exact landing plan.
+database files until the canonical-persistence and post-effect-receipt lanes'
+final reviewed heads land and root serializes the durable-wake integration.
+Their owners supplied the typed boundaries listed below, but all three PRs
+remain draft/nonfinal. Racing those owners would be less safe than preserving
+this fixture and exact landing plan.
 
 ## Historical pre-v2 production fixture (incident evidence)
 
 ```text
-Workspace:       c77bf2b8-3d09-4963-a40d-30588f5139f7
-Session:         b4827af4-c042-4e05-bf5a-0b531f6dccef
-Superseded turn: 43d6772c-1580-4bb5-a074-07b4ccbe18eb
-Attempt:         49307539-468b-4725-bcb9-01b88299695b
-Workflow:        session-b4827af4-c042-4e05-bf5a-0b531f6dccef
-Run:             e72e54fe-d36b-4b16-be16-58fe1a3cc7d5
+Workspace:       anonymized fixture workspace
+Session:         anonymized fixture session
+Superseded turn: anonymized target turn
+Attempt:         anonymized target attempt
+Workflow:        stable session workflow identity
+Run:             anonymized workflow run
 ```
 
 Durable state at diagnosis:
@@ -113,11 +114,11 @@ A later mutation-free recovery inspection proved the same split-brain can
 survive Temporal workflow failure rather than only an indefinitely open run:
 
 ```text
-Session:             94488075-bc13-4d03-b38a-cf9529d1bfca
-Attempt:             c2466b48-a615-4251-9f3f-168baaa2dc42
-Interruption:        d81b9ac6-f11e-42b5-89ed-ba2a6cc3d092
-Workflow:            session-94488075-bc13-4d03-b38a-cf9529d1bfca
-Run:                 a8c81b2e-db68-469c-a667-1b9879321db4
+Session:             anonymized failed-workflow session
+Attempt:             anonymized predecessor attempt
+Interruption:        anonymized interruption
+Workflow:            stable session workflow identity
+Run:                 anonymized failed workflow run
 Workflow disposition FAILED after unacknowledged cancellation + heartbeat timeout
 Attempt disposition  closed/superseded, quiesced_at=NULL
 Interruption         settled
@@ -150,36 +151,25 @@ receipt may not keep `stoppingPreviousAttempt` true forever.
 Read-only reconciliation found two related but distinct production classes.
 They require one convergent contract, not one guessed recovery operation:
 
-- **Null-active-turn admission hole:** sessions
-  `95de2cfb-136e-4f38-9f00-b0af98007d8d` (OPE-20),
-  `27c5cb1a-a2e6-45f0-8a1a-a2cc1cc01f90` (OPE-16), and
-  `04fa0eb1-fc06-4187-b50c-6ddd7a44f683` (OPE-61) all durably superseded
-  their prior turn, rejected late events, and reached `queued` with
+- **Null-active-turn admission hole:** three anonymized sessions
+  (supersession cases A-C) all durably superseded their prior turn, rejected
+  late events, and reached `queued` with
   `active_turn_id=NULL`, queue head/tail `0/1`, active control, and an
   unassigned Steer direction. Resume/wake signals did not admit replacement
-  work. OPE-13 correction leaf `02f8cef1-6c96-4987-bf00-4cb03b871bb0`
-  reached the same `queued`, null-active-turn, queue `0/1`, active-control
-  projection after superseding turn `e6d22129-70c9-44d5-a309-07a93fe231c4`;
-  its late event was rejected at sequence 1491, two internal updates remained
-  pending, Resume at sequence 1496 admitted nothing, and its sandbox was later
-  reaped at sequence 1497. OPE-16 additionally accumulated newer Steer
-  directions after the first settlement, proving that an immutable single
-  `replacementUpdateId` can orphan the newest instruction.
-- **Post-tool stall contrast:** session
-  `ec2049d9-32c7-490c-8760-5b3300035fc0` completed model usage at event 28540
-  and an `apply_patch` at event 28541, then stalled before its next canonical
-  event. It eventually admitted a later turn at events 30584-30586 and
-  cold-rematerialized its sandbox. It is evidence for durable
+  work. An anonymized correction case reached the same `queued`,
+  null-active-turn, queue `0/1`, active-control projection after superseding its
+  prior turn; its late event was rejected, two internal updates remained
+  pending, Resume admitted nothing, and its sandbox was later reaped.
+  Supersession case B additionally accumulated newer Steer directions after the
+  first settlement, proving that an immutable single `replacementUpdateId` can
+  orphan the newest instruction.
+- **Post-tool stall contrast:** an anonymized session completed model usage and
+  an `apply_patch`, then stalled before its next canonical event. It eventually
+  admitted a later turn and cold-rematerialized its sandbox. It is evidence for durable
   computer/file-operation receipts, but it was not the same indefinitely
   `CANCEL_REQUESTED` activity state.
-- **Closed-attempt stale holders:** OPE-25 session
-  `7b955a73-f74c-4565-9437-9278cc31bf26`, attempt
-  `9697dd1a-f592-4411-b596-659096f31cf4`, holder
-  `9efcc061-7e8a-4441-b5a4-82fffc2e0228`; and OPE-27 session
-  `4fc324f3-5b4c-46e5-8d89-8e2f9cab00e9`, attempt
-  `f691b598-ce9a-480e-8100-fd7bf58f4dd1`, holder
-  `99579fa1-460c-4ab1-845d-d63d44e85b8c`, are closed/recoverable yet retain
-  heartbeating exact sandbox holders. Cleanup must fence the exact
+- **Closed-attempt stale holders:** two anonymized closed/recoverable attempts
+  retain heartbeating exact sandbox holders. Cleanup must fence the exact
   attempt/holder/lease epoch, preserve the sandbox and unpushed filesystem, and
   never release a successor holder.
 
@@ -287,7 +277,7 @@ a test observes them through the real provider path.
    identity, and transition decisions are deterministic across workflow replay
    and continue-as-new.
 10. **Canonical lock order.** Every new receipt/materialization transaction uses
-    OPE-63's control-aware workspace -> actual workspace -> session -> exact
+    canonical-persistence lane's control-aware workspace -> actual workspace -> session -> exact
     turn -> exact attempt prefix before receipt/update/event/wake rows.
 11. **Workflow failure is recoverable orchestration truth, not quiescence.** An
     exact failed run is retained on the cancellation episode. A typed recovery
@@ -303,9 +293,9 @@ a test observes them through the real provider path.
 
 ## Required dependency seams
 
-### OPE-63: canonical event/persistence prefix
+### canonical-persistence lane: canonical event/persistence prefix
 
-OPE-75 consumes, but does not reimplement:
+The cancellation-settlement lane consumes, but does not reimplement:
 
 - `lockSessionEventWriteRows` (or its final successor) for the exact
   workspace/session/turn/attempt prefix;
@@ -314,19 +304,19 @@ OPE-75 consumes, but does not reimplement:
 - the final migration number and export path.
 
 The cancellation receipt, replacement materialization, queue event, and wake
-outbox write must run under that prefix. No OPE-75 transaction may lock a receipt
+outbox write must run under that prefix. No cancellation-settlement lane transaction may lock a receipt
 or internal update first and then request a workspace/session lock.
 
-### OPE-73: post-effect persistence truth
+### post-effect-receipt lane: post-effect persistence truth
 
-OPE-75 consumes the final PostgreSQL-owned persistence/model-call receipt
-contract rather than inspecting or rewriting its internals. OPE-73 exclusively
+The cancellation-settlement lane consumes the final PostgreSQL-owned persistence/model-call receipt
+contract rather than inspecting or rewriting its internals. post-effect-receipt lane exclusively
 owns `session_turn_model_call_admissions`,
 `session_turn_persistence_receipts`, their migration and DB functions, provider
 and pending-tool handoff, persistence-only recovery, and worker-death replay
-decisions. OPE-75 first consumes its authoritative exact-attempt disposition:
+decisions. cancellation-settlement lane first consumes its authoritative exact-attempt disposition:
 
-| OPE-73 durable truth | OPE-75 cancellation decision |
+| post-effect-receipt lane durable truth | cancellation-settlement lane cancellation decision |
 | --- | --- |
 | no model-call admission and no persistence receipt | no provider dispatch is evidenced; continue reconciliation of other effect classes |
 | admitted but unlinked model call | `ambiguous_model_call`, `effect_unknown`, non-retryable; quarantine/fail closed |
@@ -352,18 +342,19 @@ cancellation receipt resolves it. The old physical activity must pass the
 attempt fence before creating/updating an admission or invoking a provider, so
 a late activity cannot begin a new call.
 
-OPE-73 remains sole owner of receipt validation, obligation digesting,
+post-effect-receipt lane remains sole owner of receipt validation, obligation digesting,
 model/history/usage settlement, tool-call registration, quarantine, and
-persistence-only retry. OPE-75 consumes its final typed result through a narrow
+persistence-only retry. cancellation-settlement lane consumes its final typed result through a narrow
 cancellation adapter; `accepted:false`, `fenced`, `missing`, or
 `effect_unknown` is never permission to rerun an external effect.
 
-### OPE-59/OPE-50: revisioned workflow wake
+### durable-wake lane/workflow-wake precursor: revisioned workflow wake
 
-Replacement materialization uses OPE-59's
+Replacement materialization uses durable-wake lane's
 `enqueueSessionWorkflowWakeInTransaction` contract in the same transaction as
 exact-attempt settlement, active-turn clearance, replacement/update exposure,
-and canonical event append. Post-OPE-63, that transaction begins with
+and canonical event append. After the canonical-persistence lane lands, that
+transaction begins with
 `lockSessionEventWriteRows(tx, { workspaceId, controlLock: "share",
 sessionIds: [sessionId] })`, reuses the held workspace/control/session rows,
 then locks the exact turn, attempt, receipt/episode, and updates. The wake UPSERT
@@ -371,13 +362,13 @@ is the final mutation and returns the exact monotonic committed `wakeRevision`.
 
 It does not create a scanner, recurring model poll, parallel outbox,
 independent goal revision, or direct-signal-only correctness path. Direct
-delivery remains a latency optimization; OPE-59's revision-aware dispatcher
+delivery remains a latency optimization; durable-wake lane's revision-aware dispatcher
 repairs commit-to-signal loss, and an older delivery cannot acknowledge a newer
 revision.
 
 ## Proposed durable cancellation episode
 
-Use a new additive table owned by OPE-75 (final name may follow the merged schema
+Use a new additive table owned by cancellation-settlement lane (final name may follow the merged schema
 convention), keyed uniquely by the exact attempt/interruption pair. It is a
 stable replacement episode, not an immutable pointer to the first Steer update:
 
@@ -518,7 +509,7 @@ captured in workflow input/versioned state. It races:
 
 If the activity terminates and the existing physical fence writes
 `attempt_quiesced`, the normal path wins. The receipt records physical
-quiescence, reconciles OPE-73 persistence truth, and materializes the
+quiescence, reconciles post-effect-receipt lane persistence truth, and materializes the
 replacement.
 
 ### 4. Exact Temporal terminalization
@@ -563,15 +554,15 @@ run provider, tool, sandbox, model, or customer code.
 
 ### 5. Reconcile effect truth and decide admission
 
-After ordinary termination or forced Temporal terminalization, consume OPE-73's
+After ordinary termination or forced Temporal terminalization, consume post-effect-receipt lane's
 exact model-call/persistence disposition, then reconcile every other operation
 receipt owned by the old attempt.
 
-- A settled/confirmed OPE-73 receipt, with no active durable operation, yields
+- A settled/confirmed post-effect-receipt lane receipt, with no active durable operation, yields
   `effectDisposition=safe`.
 - An admitted-but-unlinked provider call yields `effect_unknown`; it does not
   auto-admit or redispatch.
-- A linked pending OPE-73 receipt runs persistence-only recovery before the
+- A linked pending post-effect-receipt lane receipt runs persistence-only recovery before the
   admission decision.
 - A durable sandbox operation with a reconstructable exact cancellation handle
   is cancelled through that handle. Only a positive process/op quiescence proof
@@ -629,7 +620,7 @@ type RecoverFailedCancellationWorkflowResult =
   | { action: "not_failed" | "stale" | "blocked" };
 ```
 
-The command uses the OPE-63 lock prefix, then locks the exact cancellation
+The command uses the canonical-persistence lane lock prefix, then locks the exact cancellation
 episode, predecessor attempt/interruption, canonical direction batch, session,
 and replacement row. It verifies all of the following:
 
@@ -638,21 +629,21 @@ and replacement row. It verifies all of the following:
    closing;
 3. the old attempt remains logically fenced and cannot establish a new
    pre-effect receipt;
-4. OPE-73 and every other operation class have reached either positive safe
+4. post-effect-receipt lane and every other operation class have reached either positive safe
    truth or a typed `effect_unknown`/`quarantined` disposition; and
 5. physical disposition is either positively `quiesced` or explicitly
    `not_confirmed` for a `requires_action` replacement.
 
 It then materializes or reuses the one stable replacement turn and assigns the
 existing direction/update batch exactly once. As the final mutation in that
-same transaction it calls OPE-59's
+same transaction it calls durable-wake lane's
 `enqueueSessionWorkflowWakeInTransaction(...)`, stores the returned new
 `recoveryWakeRevision`, and marks `workflowDisposition=restart_pending`. This
 new revision is required even when the failed run's prior wake is already fully
 delivered. Replay with the same `operationKey` returns the original replacement
 and revision; it does not increment the outbox again.
 
-The existing OPE-59 dispatcher uses `signalWithStart` for the same stable
+The existing durable-wake lane dispatcher uses `signalWithStart` for the same stable
 session workflow ID with `ALLOW_DUPLICATE`, allowing Temporal to create one new
 run after the failed run. The new workflow re-peeks PostgreSQL and may claim the
 replacement only when `admissionDisposition=admit_replacement`; a
@@ -674,7 +665,7 @@ provider/tool effect.
 One canonical transaction:
 
 1. locks the cancellation episode and all direction updates in its bounded
-   batch after the canonical OPE-63 prefix;
+   batch after the canonical-persistence lane prefix;
 2. creates one `source=system` replacement turn with stable identity derived
    from the episode, or reuses the exact existing unclaimed turn after a lost
    response;
@@ -710,7 +701,7 @@ PID/PGID identities, connected-machine operation IDs, and in-flight operation
 promises only in worker memory. That is sufficient for cooperative finalization
 but insufficient for a separate settlement activity.
 
-OPE-75 needs a bounded, attempt-fenced operation ledger established before each
+The cancellation-settlement lane needs a bounded, attempt-fenced operation ledger established before each
 sandbox/tool operation starts. Its state machine is explicit:
 
 ```text
@@ -860,7 +851,7 @@ newer attempt is running or complete.
 - Steer during MCP/function/computer/hosted-computer/`apply_patch`: durable
   pre-effect and terminal receipt where supported, otherwise explicit
   unknown-effect approval and no retry;
-- Steer during OPE-73 model/tool/compaction persistence settlement:
+- Steer during post-effect-receipt lane model/tool/compaction persistence settlement:
   persistence-only reconciliation, no inference/tool replay;
 - settlement while the physical old activity later attempts a new effect:
   pre-effect receipt fence rejects it;
@@ -890,7 +881,7 @@ newer attempt is running or complete.
 - a failed workflow with `wakeRevision=deliveredRevision` gets exactly one new
   recovery revision; replay of the recovery command returns that revision and
   never copies or redelivers the Steer direction;
-- OPE-63 barrier tests race receipt/materialization writers against title,
+- canonical-persistence lane barrier tests race receipt/materialization writers against title,
   usage, streaming, goal, and child-lifecycle writers in both arrival orders.
 
 ### Real-service fixture
@@ -942,7 +933,7 @@ recovery command:
 
 ## Production-safe canary design
 
-No canary runs merely because this code exists. OPE-25/root owns the release
+No canary runs merely because this code exists. operations-owner lane/root owns the release
 lane and must explicitly authorize it.
 
 ### Default no-effects canary
@@ -975,7 +966,7 @@ is `FAILED` and the old wake exhausted, invokes only the supported typed
 failed-run recovery command, and requires one new wake revision/run plus one
 replacement or `requires_action`. It must not use raw SQL, `temporal workflow
 start`, a human prompt, or any incident session. This slower variant is not a
-routine deployment smoke test; root/OPE-25 must grant it explicitly.
+routine deployment smoke test; the release owner must authorize it explicitly.
 
 ### Optional sandbox canary
 
@@ -988,15 +979,16 @@ shared worker pod.
 
 ## Collision-free landing sequence
 
-1. Keep the failing fixture and this record additive on the OPE-75 branch.
-2. Freeze/land OPE-63's canonical lock and persistence-only retry exports.
-3. Freeze/land OPE-73's model-call admissions and persistence receipts; consume
-   the final typed dispositions through a narrow cancellation adapter. OPE-75
+1. Keep the failing fixture and this record additive on the cancellation-settlement lane branch.
+2. Freeze/land canonical-persistence lane's canonical lock and persistence-only retry exports.
+3. Freeze/land post-effect-receipt lane's model-call admissions and persistence receipts; consume
+   the final typed dispositions through a narrow cancellation adapter. cancellation-settlement lane
    does not cherry-pick partial owner internals or migrations.
-4. Freeze/land OPE-59's wake export after OPE-63 lock integration; call it only
-   as the final write in OPE-75's same transaction.
-5. Root grants OPE-75 explicit ownership of the narrow overlapping call sites.
-6. Implement new OPE-75 modules first, then the smallest integrations:
+4. Freeze/land durable-wake lane's wake export after canonical-persistence lane lock integration; call it only
+   as the final write in cancellation-settlement lane's same transaction.
+5. Root grants the cancellation-settlement lane explicit ownership of the
+   narrow overlapping call sites.
+6. Implement new cancellation-settlement lane modules first, then the smallest integrations:
    - deterministic activity identity and bounded workflow race;
    - exact Temporal terminalization control activity;
    - cancellation-settlement DB module and migration;
@@ -1010,8 +1002,8 @@ shared worker pod.
    implementation commit, not in the reproducer-only commit.
 8. Run focused tests, real PostgreSQL/NATS/Temporal suites, full typecheck/lint/
    format/docs checks, exact-head CI, and independent Sol/xhigh review.
-9. Open or update the OPE-75 PR. Do not merge, release, deploy, or run a canary;
-   root and OPE-25 serialize those lanes.
+9. Open or update the cancellation-settlement lane PR. Do not merge, release, deploy, or run a canary;
+   root and operations-owner lane serialize those lanes.
 
 ## Rejected shortcuts
 
@@ -1034,6 +1026,6 @@ shared worker pod.
 - adding another wake scanner or recurring model poll;
 - expecting a fully delivered old wake revision to restart a failed workflow,
   or starting one without a committed idempotent recovery revision;
-- writing cancellation receipts outside OPE-63's canonical lock prefix; and
+- writing cancellation receipts outside canonical-persistence lane's canonical lock prefix; and
 - placing raw model/tool payloads, command text, credentials, or sandbox output
   in Temporal payloads, cancellation receipts, heartbeats, errors, or logs.

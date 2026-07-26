@@ -46,7 +46,7 @@ type RequiredServices = Pick<
   "databaseUrl" | "natsUrl" | "temporalHost" | "migrate" | "down"
 >;
 
-describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
+describe("cancellation-settlement lane Agent Steer cancellation deadlock production fixture", () => {
   let services: RequiredServices;
   let dbClient: ReturnType<typeof createDb>;
   let bus: EventBus;
@@ -76,12 +76,12 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       const suffix = crypto.randomUUID();
       const access = await bootstrapWorkspace(dbClient.db, {
         accountExternalSource: "test",
-        accountExternalId: `ope75-account-${suffix}`,
-        accountName: "OPE-75 cancellation fixture",
+        accountExternalId: `cancellation-settlement-account-${suffix}`,
+        accountName: "cancellation-settlement lane cancellation fixture",
         workspaceExternalSource: "test",
-        workspaceExternalId: `ope75-workspace-${suffix}`,
-        workspaceName: "OPE-75 cancellation fixture",
-        subjectId: `ope75-subject-${suffix}`,
+        workspaceExternalId: `cancellation-settlement-workspace-${suffix}`,
+        workspaceName: "cancellation-settlement lane cancellation fixture",
+        subjectId: `cancellation-settlement-subject-${suffix}`,
       });
       const grant = access.workspaceGrants[0]!;
       const workspaceId = grant.workspaceId!;
@@ -149,7 +149,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         reasoningEffortFallback: "low",
       });
 
-      const taskQueue = `ope75-cancellation-${crypto.randomUUID()}`;
+      const taskQueue = `cancellation-settlement-cancellation-${crypto.randomUUID()}`;
       const settings = testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -248,7 +248,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
             kind: "agent_message",
             classification: "info",
             sourceId: `fixture-source-${index}`,
-            dedupeKey: `ope75-update-${index}-${suffix}`,
+            dedupeKey: `cancellation-settlement-update-${index}-${suffix}`,
             summary: `pending fixture update ${index}`,
             payload: {
               type: "agent_message",
@@ -266,7 +266,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
               workspaceId,
               targetSessionId: target.id,
               actor,
-              operationKey: `ope75-steer-${suffix}`,
+              operationKey: `cancellation-settlement-steer-${suffix}`,
               instruction: "replace the superseded direction exactly once",
             }),
           ),
@@ -389,7 +389,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       } finally {
         releaseZombie = true;
         try {
-          await handle.terminate("OPE-75 fixture final cleanup");
+          await handle.terminate("cancellation-settlement lane fixture final cleanup");
         } catch {
           // The workflow already completed naturally after exact-activity cleanup.
         }
@@ -406,12 +406,12 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       const suffix = crypto.randomUUID();
       const access = await bootstrapWorkspace(dbClient.db, {
         accountExternalSource: "test",
-        accountExternalId: `ope75-failed-account-${suffix}`,
-        accountName: "OPE-75 failed workflow fixture",
+        accountExternalId: `cancellation-settlement-failed-account-${suffix}`,
+        accountName: "cancellation-settlement lane failed workflow fixture",
         workspaceExternalSource: "test",
-        workspaceExternalId: `ope75-failed-workspace-${suffix}`,
-        workspaceName: "OPE-75 failed workflow fixture",
-        subjectId: `ope75-failed-subject-${suffix}`,
+        workspaceExternalId: `cancellation-settlement-failed-workspace-${suffix}`,
+        workspaceName: "cancellation-settlement lane failed workflow fixture",
+        subjectId: `cancellation-settlement-failed-subject-${suffix}`,
       });
       const grant = access.workspaceGrants[0]!;
       const workspaceId = grant.workspaceId!;
@@ -477,7 +477,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         reasoningEffortFallback: "low",
       });
 
-      const taskQueue = `ope75-failed-workflow-${crypto.randomUUID()}`;
+      const taskQueue = `cancellation-settlement-failed-workflow-${crypto.randomUUID()}`;
       const settings = testSettings({
         databaseUrl: services.databaseUrl,
         natsUrl: services.natsUrl,
@@ -577,7 +577,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
               workspaceId,
               targetSessionId: target.id,
               actor,
-              operationKey: `ope75-failed-steer-${suffix}`,
+              operationKey: `cancellation-settlement-failed-steer-${suffix}`,
               instruction: "deliver this existing direction exactly once after typed recovery",
             }),
           ),
@@ -635,7 +635,9 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       } finally {
         releaseHungActivity = true;
         try {
-          await handle.terminate("OPE-75 failed-workflow fixture final cleanup");
+          await handle.terminate(
+            "cancellation-settlement lane failed-workflow fixture final cleanup",
+          );
         } catch {
           // The workflow already closed after its bounded cancellation wait.
         }
@@ -660,7 +662,8 @@ async function fixtureWorker(
     ...activities,
   };
   const { runAgentTurn, ...controlActivities } = defaults;
-  if (!runAgentTurn) throw new Error("turn activity is missing from OPE-75 fixture");
+  if (!runAgentTurn)
+    throw new Error("turn activity is missing from cancellation-settlement lane fixture");
   const [control, turns] = await Promise.all([
     Worker.create({
       connection: nativeConnection,
@@ -696,7 +699,7 @@ async function requiredServices(): Promise<RequiredServices> {
   const configured = [databaseUrl, natsUrl, temporalHost].filter(Boolean).length;
   if (configured !== 0 && configured !== 3) {
     throw new Error(
-      "OPE-75 fixture requires OPENGENI_TEST_DATABASE_URL, OPENGENI_TEST_NATS_URL, and OPENGENI_TEST_TEMPORAL_HOST together",
+      "cancellation-settlement lane fixture requires OPENGENI_TEST_DATABASE_URL, OPENGENI_TEST_NATS_URL, and OPENGENI_TEST_TEMPORAL_HOST together",
     );
   }
   if (databaseUrl && natsUrl && temporalHost) {
