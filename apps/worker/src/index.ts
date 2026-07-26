@@ -7,7 +7,13 @@ import {
   temporalConnectionOptions,
   type Settings,
 } from "@opengeni/config";
-import { createDb, markSessionWorkflowWakeDelivered, type Database } from "@opengeni/db";
+import {
+  assertRuntimeDatabasePosture,
+  createDb,
+  markSessionWorkflowWakeDelivered,
+  type Database,
+  type RuntimeDatabasePostureOptions,
+} from "@opengeni/db";
 import { createNatsEventBus, type EventBus } from "@opengeni/events";
 import {
   createObservability,
@@ -472,6 +478,11 @@ export async function registerSessionWorkflowWakeDispatcherSchedule(
 export type OpenGeniWorkerServiceOptions = Omit<WorkerOptions, "activityDependencies"> & {
   activityDependencies: ActivityDependencies & { db: Database; bus: EventBus };
   /**
+   * Exact catalog posture required by the standalone runtime. Embedded hosts
+   * may omit this when they own an equivalent database isolation contract.
+   */
+  databasePosture?: RuntimeDatabasePostureOptions;
+  /**
    * `role-default` registers OpenGeni's internal maintenance schedules on a
    * control worker only. These are engine maintenance schedules, not a host's
    * product-level scheduled-agent jobs. Use `none` when another control worker
@@ -588,7 +599,7 @@ export async function createOpenGeniWorkerService(
         settings,
         observability,
         checks: {
-          db: dbReadyCheck(options.activityDependencies.db),
+          db: dbReadyCheck(options.activityDependencies.db, options.databasePosture),
           nats: natsReadyCheck(options.activityDependencies.bus),
           temporal: temporalReadyCheck(workerBundle.connection),
         },
@@ -693,9 +704,19 @@ export async function startWorker() {
     ...(searchPath ? { searchPath } : {}),
     rlsStrategy: settings.rlsStrategy,
   });
+  const databasePosture = {
+    rlsStrategy: settings.rlsStrategy,
+    expectedRole: settings.runtimeDatabaseRole,
+    targetSchema: settings.dbSchema.trim() || "public",
+  } as const;
   const controlPlaneAuth = resolveNatsControlPlaneAuth(settings);
   let bus: Awaited<ReturnType<typeof createNatsEventBus>> | undefined;
   try {
+    await retryStartupDependency(
+      "PostgreSQL runtime posture",
+      () => assertRuntimeDatabasePosture(dbClient.db, databasePosture),
+      { ...retryOptions, onRetry },
+    );
     bus = await retryStartupDependency(
       "NATS",
       () =>
@@ -711,6 +732,7 @@ export async function startWorker() {
     await runOpenGeniWorker({
       role,
       settings,
+      databasePosture,
       activityDependencies: {
         observability,
         db: dbClient.db,

@@ -31,6 +31,7 @@ Manual equivalent:
    ```bash
    docker compose up -d postgres nats temporal minio minio-init
    bun run db:migrate
+   bun run db:provision-roles
    ```
 
 3. Build the local sandbox image when using Docker sandbox:
