@@ -989,7 +989,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       }),
     ).toBeNull();
 
-    // This column is the existing OPE-73 physical-quiescence authority. The
+    // This column is the existing durable physical-quiescence authority. The
     // production writer is markSessionAttemptQuiesced; the fixture stamps the
     // exact row directly so this test isolates capture-ledger behavior.
     await admin`

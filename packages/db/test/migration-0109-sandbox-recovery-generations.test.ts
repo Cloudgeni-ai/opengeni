@@ -362,7 +362,7 @@ describe("0109 durable sandbox recovery generations (real PostgreSQL)", () => {
   test("applies and grants the protocol in a dedicated data schema", async () => {
     await withBlankDatabase("migration-0109-dedicated", async (admin, databaseUrl) => {
       await ensureAppRole(admin);
-      const schema = `ope60_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const schema = `sandbox_recovery_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
       await migrate(databaseUrl, schema);
       await provisionRoles(databaseUrl, {
         targetSchema: schema,

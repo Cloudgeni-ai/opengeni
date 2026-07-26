@@ -410,7 +410,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     });
   }, 60_000);
 
-  test("OPE-11/OPE-25/OPE-83: loss retires once and the stable proxy drops the dead backend", async () => {
+  test("provider loss retires once and the stable proxy drops the dead backend", async () => {
     if (!available) return;
     const [a] = await admin<
       { id: string }[]
@@ -431,7 +431,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       sandboxBackend: "modal",
     });
 
-    const archive = Buffer.from("ope-60-concurrent-route-archive").toString("base64");
+    const archive = Buffer.from("concurrent-route-archive").toString("base64");
     const archiveBytes = Buffer.from(archive, "base64");
     const archiveSha256 = new Bun.CryptoHasher("sha256").update(archiveBytes).digest("hex");
     const descriptor = {

@@ -380,7 +380,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(1b-2) pre-create timeout advances epoch, preserves the selected archive, and fences late callbacks", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    const archive = Buffer.from("ope-60-pre-create-timeout-archive").toString("base64");
+    const archive = Buffer.from("pre-create-timeout-archive").toString("base64");
     const archiveHash = "d".repeat(64);
     const descriptor = {
       version: 1 as const,
@@ -505,7 +505,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(1b-3) workspace-scoped warming reset preserves the same archive/epoch invariant", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    const archive = Buffer.from("ope-60-scoped-timeout-archive").toString("base64");
+    const archive = Buffer.from("scoped-timeout-archive").toString("base64");
     const archiveHash = "f".repeat(64);
     const descriptor = {
       version: 1 as const,
@@ -1913,7 +1913,7 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
   test("(19) provider loss elects one epoch-fenced rematerialization and publishes only its verified revision", async () => {
     if (!available) return;
     const { accountId, workspaceId, groupId } = await freshWorkspace();
-    const archive = Buffer.from("ope-60-exact-durable-revision").toString("base64");
+    const archive = Buffer.from("exact-durable-revision").toString("base64");
     const archiveHash = "a".repeat(64);
     const descriptor = {
       version: 1 as const,

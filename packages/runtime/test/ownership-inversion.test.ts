@@ -508,7 +508,7 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
   });
 });
 
-describe("OPE-60 routed-operation sandbox disappearance discriminator", () => {
+describe("routed-operation sandbox disappearance discriminator", () => {
   test("generic 404 and NOT_FOUND subresource errors do not retire the provider sandbox", () => {
     expect(isProviderSandboxGoneDuringRoutedOperation("modal", { status: 404 })).toBe(false);
     expect(

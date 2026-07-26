@@ -1,5 +1,5 @@
 -- deployment-mode: maintenance
--- OPE-60: activate the durable workspace-generation, mutation-admission, and
+-- Activate the durable workspace-generation, mutation-admission, and
 -- retained-process protocol. Old API/control/turn workers MUST be stopped: they
 -- cannot name exact direct/process authority and do not set the v2 marker.
 
