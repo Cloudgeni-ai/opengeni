@@ -1,10 +1,10 @@
 /* ----------------------------------------------------------------------------
    ChatComposer's opt-in `attachments` prop: the built-in attach button, the
    attachment-chips strip, the paste->addFromPaste wiring, and the send-gate
-   that blocks BOTH the button and Enter while files are uploading.
+   that blocks BOTH the button and Enter while files are unresolved.
    -------------------------------------------------------------------------- */
 import { afterEach, describe, expect, test } from "bun:test";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { ChatComposer } from "../src/components/chat-composer";
 import type { ComposerState } from "../src/hooks/use-composer";
@@ -63,8 +63,10 @@ function makeAttachments(
     attachments: [],
     readyResources: [],
     uploading: false,
+    hasUnresolved: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
     clear: () => {},
@@ -174,6 +176,7 @@ describe("ChatComposer attachments", () => {
     });
     const attachments = makeAttachments({
       uploading: true,
+      hasUnresolved: true,
       attachments: [{ ...readyChip("a.png"), status: "uploading" }],
     });
     const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
@@ -194,6 +197,83 @@ describe("ChatComposer attachments", () => {
       await Promise.resolve();
     });
     expect(sent).toBe(0);
+  });
+
+  test("a failed attachment blocks the send button and Enter instead of being silently omitted", async () => {
+    let sent = 0;
+    const composer = makeComposer({
+      send: async () => {
+        sent += 1;
+        return true;
+      },
+    });
+    const attachments = makeAttachments({
+      hasUnresolved: true,
+      attachments: [
+        {
+          ...readyChip("failed.png"),
+          status: "failed",
+          error: "storage unavailable",
+        },
+      ],
+    });
+    const container = await mount(<ChatComposer composer={composer} attachments={attachments} />);
+
+    expect(sendButton(container)!.disabled).toBe(true);
+    expect(container.querySelector('[aria-label="Retry failed.png"]')).not.toBeNull();
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+      sendButton(container)!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(sent).toBe(0);
+  });
+
+  test("removing the failed attachment unblocks send without dropping the typed prompt", async () => {
+    let sent = 0;
+    function Harness() {
+      const [failed, setFailed] = useState(true);
+      return (
+        <ChatComposer
+          composer={makeComposer({
+            send: async () => {
+              sent += 1;
+              return true;
+            },
+          })}
+          attachments={makeAttachments({
+            hasUnresolved: failed,
+            attachments: failed
+              ? [{ ...readyChip("failed.png"), status: "failed", error: "try again" }]
+              : [],
+            remove: () => setFailed(false),
+          })}
+        />
+      );
+    }
+    const container = await mount(<Harness />);
+    expect(sendButton(container)!.disabled).toBe(true);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Remove failed.png"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(sendButton(container)!.disabled).toBe(false);
+
+    await act(async () => {
+      container
+        .querySelector("textarea")!
+        .dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+        );
+      await Promise.resolve();
+    });
+    expect(sent).toBe(1);
   });
 
   test("with uploads settled, Enter sends and the button is enabled", async () => {
@@ -246,6 +326,7 @@ describe("ChatComposer attachments", () => {
     const composer = makeComposer({ value: "", canSend: false });
     const attachments = makeAttachments({
       uploading: true,
+      hasUnresolved: true,
       attachments: [readyChip("ready.png"), { ...readyChip("pending.png"), status: "uploading" }],
       readyResources: [{ kind: "file", fileId: "f1" }],
     });

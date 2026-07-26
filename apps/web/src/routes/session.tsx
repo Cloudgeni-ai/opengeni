@@ -621,6 +621,7 @@ function SessionChatPane(props: {
         reasoningEffort,
       };
     },
+    sendBlocked: () => attachments.hasUnresolved,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
     onSent: () => attachments.clear(),

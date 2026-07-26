@@ -69,8 +69,10 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     attachments: [],
     readyResources: [],
     uploading: false,
+    hasUnresolved: false,
     addFiles: () => {},
     addFromPaste: () => {},
+    restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
     clear: () => {},
@@ -190,7 +192,7 @@ describe("compound composer framework", () => {
             return true;
           },
         }),
-        attachments: attachments({ uploading: true }),
+        attachments: attachments({ uploading: true, hasUnresolved: true }),
       });
       return (
         <Composer.Root controller={controller}>

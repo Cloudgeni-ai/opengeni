@@ -1254,6 +1254,36 @@ describe("useComposer file-only send", () => {
     await hook.unmount();
   });
 
+  test("sendBlocked gates canSend and direct send() calls until the host resolves attachments", async () => {
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      (blocked: boolean) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "ready-file" }] }),
+          sendBlocked: () => blocked,
+        }),
+      true as boolean,
+    );
+
+    expect(hook.result.current.canSend).toBe(false);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(false));
+    expect(sent).toEqual([]);
+
+    await hook.rerender(false);
+    expect(hook.result.current.canSend).toBe(true);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent).toHaveLength(1);
+    await hook.unmount();
+  });
+
   test("sending a file-only message dispatches the resources with a minimal default text", async () => {
     const sent: { text: string; resources?: unknown }[] = [];
     const client = fakeClient({

@@ -23,6 +23,12 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
      * surrounding UI state (attachment pickers, model selectors, ...).
      */
     sendExtras?: ComposerSendExtras | (() => ComposerSendExtras) | undefined;
+    /**
+     * Fail-closed delivery guard evaluated at send time. Attachment hosts use
+     * this to preserve unresolved upload cards until the operator waits,
+     * retries, or removes them; direct hook callers cannot bypass the UI gate.
+     */
+    sendBlocked?: (() => boolean) | undefined;
     /** Latest server-derived workstream control; bound into Send/Steer OCC. */
     effectiveControl?: EffectiveSessionControl | null | undefined;
     /** Apply durable model/tool/reasoning settings in the host's controlled UI. */
@@ -106,6 +112,8 @@ export function useComposer(
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
   sendExtrasRef.current = options.sendExtras;
+  const sendBlockedRef = useRef(options.sendBlocked);
+  sendBlockedRef.current = options.sendBlocked;
   const liveExtrasVersion = JSON.stringify(resolveSendExtras(options.sendExtras));
 
   // A composer is bound to one session: switching targets must not leak the
@@ -378,6 +386,7 @@ export function useComposer(
         (!hasText && !hasResources) ||
         !sessionId ||
         sending ||
+        sendBlockedRef.current?.() === true ||
         targetKeyRef.current !== ownedTargetKey
       ) {
         return false;
@@ -498,8 +507,8 @@ export function useComposer(
   // A send is possible with non-empty text OR with ≥1 attached resource (a
   // file-only message). Resources ride in `sendExtras`, so we resolve them here
   // — keeping useComposer attachment-agnostic while still lighting up the send
-  // affordance the moment a file is ready. ChatComposer additionally gates this
-  // on its `attachments.uploading` flag so a message never departs mid-upload.
+  // affordance the moment a file is ready. Attachment hosts bind `sendBlocked`
+  // to unresolved uploads so direct send()/steer() calls fail closed too.
   const hasReadyResources =
     restoredResources.length > 0 ||
     (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
@@ -717,6 +726,7 @@ export function useComposer(
       identityMatches &&
       Boolean(sessionId) &&
       !sending &&
+      sendBlockedRef.current?.() !== true &&
       (value.trim().length > 0 || hasReadyResources),
     pause,
     pausing: identityMatches ? pausing : false,
