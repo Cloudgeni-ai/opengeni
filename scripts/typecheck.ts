@@ -24,6 +24,7 @@ const projects = [
   "packages/db",
   "packages/events",
   "packages/github",
+  "packages/network",
   "packages/storage",
   "packages/documents",
   "packages/observability",
@@ -36,6 +37,8 @@ const projects = [
   "apps/worker",
   "apps/web",
   "examples/northstar-support",
+  "scripts/operator",
+  "scripts/release",
 ];
 
 const tsgo = join(process.cwd(), "node_modules", ".bin", "tsgo");

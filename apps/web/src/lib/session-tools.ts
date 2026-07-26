@@ -4,8 +4,10 @@ import type {
   GitHubRepository,
   ReasoningEffort,
   ResourceRef,
+  Session,
   ToolRef,
 } from "@/types";
+import { defaultRepositoryMountPath, resourceMountPathCollisionKey } from "@opengeni/contracts";
 
 export type RepoDraft = { id: number; url: string; ref: string };
 // The composer's effort picker spans the FULL host enum, not a UI-only subset:
@@ -72,6 +74,53 @@ export function buildTools(
   return out;
 }
 
+function canonicalToolIds(tools: ToolRef[]): string[] {
+  return [...new Set(tools.map((tool) => `${tool.kind}:${tool.id}`))].sort();
+}
+
+/**
+ * Materialize the picker's selection only when it narrows/pins the inherited
+ * baseline. `undefined` is the wire-level omitted-tools contract; `[]` is an
+ * intentional empty selection. Canonicalization includes hidden helpers such
+ * as docs → files, so UI-only representation differences do not pin a turn.
+ */
+export function toolsForPolicySelection(input: {
+  existing?: ToolRef[];
+  selectedMcpServerIds: Iterable<string>;
+  baselineMcpServerIds: Iterable<string>;
+  forceExplicit?: boolean;
+}): ToolRef[] | undefined {
+  const selected = buildTools(input.existing, [...input.selectedMcpServerIds]);
+  if (input.forceExplicit === true) {
+    return selected;
+  }
+  const baseline = buildTools(undefined, [...input.baselineMcpServerIds]);
+  return canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000")
+    ? undefined
+    : selected;
+}
+
+/**
+ * Project the server-authoritative session policy into currently selectable
+ * picker IDs. Workspace-default sessions follow the live capability baseline;
+ * fixed policies use their effective IDs (or their persisted refs for rolling
+ * compatibility). Unavailable IDs remain visible in policy truth/inspector but
+ * cannot be selected by a picker that cannot execute them.
+ */
+export function sessionPolicyPickerIds(
+  session: Pick<Session, "tools" | "toolPolicy" | "effectiveToolPolicy">,
+  selectableIds: Iterable<string>,
+  workspaceDefaultIds: Iterable<string>,
+): Set<string> {
+  const selectable = new Set(selectableIds);
+  const mode = session.effectiveToolPolicy?.mode ?? session.toolPolicy?.mode ?? "legacy";
+  const policyIds =
+    mode === "workspace_default"
+      ? [...workspaceDefaultIds]
+      : (session.effectiveToolPolicy?.effectiveIds ?? session.tools.map((tool) => tool.id));
+  return new Set(policyIds.filter((id) => selectable.has(id)));
+}
+
 export function buildResources(
   manualRepos: RepoDraft[],
   repos: GitHubRepository[],
@@ -102,14 +151,16 @@ export function buildResources(
       throw new Error("Repository ref is required.");
     }
     const parsed = normalizeRepositoryUrl(repo.url);
-    const mountPath = `repos/${parsed.repo}`;
-    if (mountPaths.has(mountPath)) {
+    const uri = `https://${parsed.host}/${parsed.repo}.git`;
+    const mountPath = defaultRepositoryMountPath(uri);
+    const mountKey = resourceMountPathCollisionKey(mountPath);
+    if (mountPaths.has(mountKey)) {
       throw new Error(`Duplicate repository mount path: ${mountPath}`);
     }
-    mountPaths.add(mountPath);
+    mountPaths.add(mountKey);
     return {
       kind: "repository",
-      uri: `https://${parsed.host}/${parsed.repo}.git`,
+      uri,
       ref: repo.ref,
       mountPath,
       ...(repo.private && repo.repositoryId ? { githubRepositoryId: repo.repositoryId } : {}),
@@ -123,11 +174,12 @@ export function gitHubRepositoryResource(
   ref: string,
 ): Extract<ResourceRef, { kind: "repository" }> {
   const parsed = normalizeRepositoryUrl(repo.cloneUrl);
+  const uri = `https://${parsed.host}/${parsed.repo}.git`;
   return {
     kind: "repository",
-    uri: `https://${parsed.host}/${parsed.repo}.git`,
+    uri,
     ref: ref.trim() || repo.defaultBranch,
-    mountPath: `repos/${parsed.repo}`,
+    mountPath: defaultRepositoryMountPath(uri),
     ...(repo.private
       ? { githubRepositoryId: repo.id, githubInstallationId: repo.installationId }
       : {}),
@@ -171,7 +223,7 @@ export function normalizeRepositoryUrl(value: string): { host: string; repo: str
   if (parts.length < 2) {
     throw new Error("Repository URL must include owner and repo.");
   }
-  return { host: url.hostname.toLowerCase(), repo: parts.join("/") };
+  return { host: url.host.toLowerCase(), repo: parts.join("/") };
 }
 
 export type RepositoryGroup = {
@@ -242,11 +294,12 @@ export function selectedAvailableCapabilityToolIds(
   current: Set<string>,
   availableIds: string[],
   previouslyAvailableIds: Set<string> = new Set(),
+  defaultIds: string[] = availableIds,
 ): Set<string> {
   const available = new Set(availableIds);
   const next = new Set([...current].filter((id) => available.has(id)));
-  for (const id of availableIds) {
-    if (id && !previouslyAvailableIds.has(id)) {
+  for (const id of defaultIds) {
+    if (id && available.has(id) && !previouslyAvailableIds.has(id)) {
       next.add(id);
     }
   }

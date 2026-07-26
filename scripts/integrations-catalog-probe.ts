@@ -83,7 +83,7 @@ export async function probeCatalogSnapshot(
               timeoutMs: Math.min(timeoutMs, Math.max(1, deadline - now())),
             });
       outcomes[index] = { domain: row.domain, mcpUrl: row.mcpUrl, outcome };
-      if (outcome.status !== "junk") {
+      if (outcome.status === "real") {
         keptRows[index] = withProbeMetadata(row, outcome);
       }
     }
@@ -97,7 +97,7 @@ export async function probeCatalogSnapshot(
   const compactOutcomes = outcomes.filter(
     (item): item is ProbedCatalogSnapshot["probe"]["outcomes"][number] => !!item,
   );
-  const dropped = compactOutcomes.filter((item) => item.outcome.status === "junk").length;
+  const dropped = compactOutcomes.filter((item) => item.outcome.status !== "real").length;
   const unverified = compactOutcomes.filter((item) => item.outcome.status === "unverified").length;
   const real = compactOutcomes.filter((item) => item.outcome.status === "real").length;
   const googleapisDropped = compactOutcomes.filter(
@@ -115,7 +115,7 @@ export async function probeCatalogSnapshot(
     skipped: [
       ...normalized.skipped,
       ...compactOutcomes
-        .filter((item) => item.outcome.status === "junk")
+        .filter((item) => item.outcome.status !== "real")
         .map((item) => ({
           domain: item.domain,
           mcpUrl: null,

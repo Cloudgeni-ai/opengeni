@@ -38,6 +38,10 @@ export type ModalOrphanSweepResult = {
   skipped: number;
 };
 
+export type RevalidateModalOrphanTermination = (
+  candidate: ModalOrphanSweepTermination,
+) => Promise<boolean>;
+
 export function modalSandboxAttributionEnvironment(
   input: ModalSandboxAttribution,
 ): Record<string, string> {
@@ -337,6 +341,9 @@ export async function sweepModalOrphanSandboxes(
     maxTerminations?: number;
     unattributedGraceMs?: number;
     client?: ModalClientLike;
+    /** Re-read durable ownership immediately before provider termination. A
+     * false result or callback failure skips the destructive action. */
+    revalidateTermination?: RevalidateModalOrphanTermination;
   } = {},
 ): Promise<ModalOrphanSweepResult> {
   const nowMs = options.now?.getTime() ?? Date.now();
@@ -437,10 +444,30 @@ export async function sweepModalOrphanSandboxes(
           skipped += 1;
           continue;
         }
+        const candidate = { sandboxId: info.id, reason, tags };
+        let sandbox: Awaited<ReturnType<typeof modal.sandboxes.fromId>>;
         try {
-          const sandbox = await modal.sandboxes.fromId(info.id);
+          sandbox = await modal.sandboxes.fromId(info.id);
+        } catch {
+          skipped += 1;
+          continue;
+        }
+        if (options.revalidateTermination) {
+          try {
+            if (!(await options.revalidateTermination(candidate))) {
+              skipped += 1;
+              continue;
+            }
+          } catch {
+            // Destructive provider cleanup fails closed when the fresh durable
+            // ownership read is unavailable or otherwise inconclusive.
+            skipped += 1;
+            continue;
+          }
+        }
+        try {
           await sandbox.terminate();
-          terminated.push({ sandboxId: info.id, reason, tags });
+          terminated.push(candidate);
         } catch {
           skipped += 1;
         }

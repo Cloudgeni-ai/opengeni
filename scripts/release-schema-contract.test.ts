@@ -11,6 +11,15 @@ afterEach(async () => {
 });
 
 describe("release schema contract", () => {
+  test("classifies the Codex quota owning-human cutover as maintenance-only", async () => {
+    const contract = await buildSchemaContract();
+    expect(
+      contract.migrations.find(
+        (migration) => migration.path === "0065_codex_subscription_overview.sql",
+      ),
+    ).toMatchObject({ deploymentMode: "maintenance" });
+  });
+
   test("is deterministic across creation order and classifies only executable SQL migrations", async () => {
     const first = await fixture([
       ["0002_second.sql", "-- deployment-mode: rolling\nselect 2;"],
@@ -43,6 +52,85 @@ describe("release schema contract", () => {
     const baselineHash = (await buildSchemaContract(baseline)).sha256;
     expect((await buildSchemaContract(changedContent)).sha256).not.toBe(baselineHash);
     expect((await buildSchemaContract(changedPath)).sha256).not.toBe(baselineHash);
+  });
+
+  test("rejects an unclassified migration in the governed deployment-mode era", async () => {
+    const directory = await fixture([
+      ["0062_historical.sql", "select 1;"],
+      ["0063_classified.sql", "select 2;"],
+    ]);
+
+    await expect(buildSchemaContract(directory)).rejects.toThrow(
+      "0063_classified.sql: classified migrations require -- deployment-mode: rolling or -- deployment-mode: maintenance on the first line",
+    );
+  });
+
+  test("preserves published host-export history and appends the forward repair", async () => {
+    const contract = await buildSchemaContract();
+    const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    const currentMainMigrations = [
+      "0105_session_turn_instructions.sql",
+      "0106_session_attempt_mcp_approval_policies.sql",
+      "0107_host_export_lineage_contract.sql",
+    ].filter((file) => migrations.has(file));
+
+    expect(currentMainMigrations).toEqual(
+      currentMainMigrations.length === 0
+        ? []
+        : [
+            "0105_session_turn_instructions.sql",
+            "0106_session_attempt_mcp_approval_policies.sql",
+            ...(currentMainMigrations.includes("0107_host_export_lineage_contract.sql")
+              ? ["0107_host_export_lineage_contract.sql"]
+              : []),
+          ],
+    );
+    expect(contract.fileCount).toBe(98 + currentMainMigrations.length + 1);
+    expect(contract.sha256).toBe(
+      "d5522079a0b2f1a0beb0726183e97072841996fc8de608bc83e56ec7ed889ec3",
+    );
+    expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
+    expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
+    expect(
+      contract.migrations
+        .map((migration) => migration.path)
+        .filter((path) => /^(?:010[3-8]|0119)_/.test(path)),
+    ).toEqual([
+      "0103_host_export_root_session.sql",
+      "0104_host_export_root_session_backfill.sql",
+      ...currentMainMigrations,
+      "0108_fence_invalidated_warming_epochs.sql",
+      "0119_pending_tool_output_policy.sql",
+    ]);
+    expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
+      contract.fileCount,
+    );
+    expect(migrations.get("0097_host_export_outbox.sql")).toMatchObject({
+      sha256: "918763f2438efd06232f221305db6acac76e2bee5fa436e9665a860794c43d03",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0103_host_export_root_session.sql")).toMatchObject({
+      sha256: "7a1a5c22bd7f0f5e38c5641257f709c99d7cfa0b4816fcdab2f8cbe0ba9db743",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0104_host_export_root_session_backfill.sql")).toMatchObject({
+      sha256: "42d29994ac12b7118f0a1e3c252615509e887ee84bb1854056c9bf90e578760d",
+      deploymentMode: "maintenance",
+    });
+    if (migrations.has("0107_host_export_lineage_contract.sql")) {
+      expect(migrations.get("0107_host_export_lineage_contract.sql")).toMatchObject({
+        sha256: "82dfa0f18f59d6a6c65c02bdfca72d4e728cc67d12fb075a85b2233d7affe091",
+        deploymentMode: "rolling",
+      });
+    }
+    expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
+      sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
+      sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
+      deploymentMode: "rolling",
+    });
   });
 });
 

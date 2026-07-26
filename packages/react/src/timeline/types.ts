@@ -1,4 +1,4 @@
-import type { ResourceRef, SessionStatus, ToolRef } from "@opengeni/sdk";
+import type { ResourceRef, SessionStatus, ToolAuthNeededPayload, ToolRef } from "@opengeni/sdk";
 
 /* ----------------------------------------------------------------------------
    Timeline item types
@@ -140,6 +140,66 @@ export type MemoryItem = {
   occurredAt: string;
 };
 
+export type FleetDecisionScoreItem = {
+  candidateKey: string;
+  eligible: boolean;
+  rejectionReason:
+    | "allocator_disabled"
+    | "unavailable"
+    | "cooling"
+    | "quota_ceiling"
+    | "overlay_isolation"
+    | null;
+  total: number;
+  confidence: "unknown" | "low" | "medium" | "high";
+};
+
+/**
+ * One production-vs-shadow placement explanation. Candidate keys are
+ * event-local aliases only; no credential/account identity reaches this item.
+ */
+export type FleetDecisionItem = {
+  kind: "fleet-decision";
+  id: string;
+  turnId: string | null;
+  policyVersion: "adaptive-shadow-v1";
+  actualOutcome: "selected" | "waiting" | "none";
+  actualCandidateKey: string | null;
+  actualReason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  shadowOutcome: "selected" | "paced" | "none";
+  shadowCandidateKey: string | null;
+  shadowReason:
+    | "fenced_in_flight"
+    | "fenced_candidate_missing"
+    | "admission_paced"
+    | "no_eligible_candidate"
+    | "overlay_isolated_empty"
+    | "best_score"
+    | "affinity_best"
+    | "hysteresis_hold";
+  comparison: "match" | "different_candidate" | "different_outcome" | "not_comparable_truncated";
+  confidence: "unknown" | "low" | "medium" | "high";
+  admissionOutcome: "admit" | "pace";
+  admissionReason:
+    | "fenced_in_flight"
+    | "pacing_disabled"
+    | "capacity_unknown"
+    | "capacity_available"
+    | "work_conserving_borrow"
+    | "manager_priority"
+    | "standard_starvation_bound"
+    | "capacity_saturated"
+    | "emergency_fuse";
+  borrowedIdleCapacity: boolean;
+  borrowedOverlayCapacity: boolean;
+  strandedEligibleCount: number;
+  candidateCount: number;
+  truncatedCandidateCount: number;
+  scoreRowsTruncatedCount: number;
+  scores: FleetDecisionScoreItem[];
+  occurredAt: string;
+};
+
 export type SessionStatusItem = {
   kind: "session-status";
   id: string;
@@ -167,13 +227,14 @@ export type NoticeItem = {
 };
 
 /**
- * A tool call hit a connection whose credential lapsed — the broker asked the
- * user to reconnect the provider before the turn can continue. Carries the
- * structured `tool.auth_needed` payload so the renderer can draw a clean inline
- * reconnect affordance (provider logo + one human line + a Reconnect button)
- * and the app can start the right recovery flow (OAuth reconnect for the
- * surviving connection, or credential re-entry for an api-key one). The `reason`
- * shapes the human copy but is never shown raw.
+ * A tool call hit a missing or lapsed connection. The broker reports that
+ * condition as a tool error and the turn continues; reconnecting never resumes
+ * or replays the original call. Carries the structured `tool.auth_needed`
+ * payload so the renderer can draw a clean inline recovery affordance (provider
+ * logo + one human line + a Connect/Reconnect button) and the app can start the
+ * right flow (OAuth reconnect for the surviving connection, or credential
+ * re-entry for an api-key one). The `reason` shapes the human copy but is never
+ * shown raw.
  */
 export type AuthNeededItem = {
   kind: "auth-needed";
@@ -183,7 +244,7 @@ export type AuthNeededItem = {
   providerDomain: string;
   /** The lapsed connection to reconnect, when the row survived. */
   connectionId: string | null;
-  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed" | null;
+  reason: ToolAuthNeededPayload["reason"] | null;
   /** Scopes the provider now needs; may inform the copy, never shown as a raw label. */
   scopes: string[];
   /** The OAuth `resource` (RFC 8707) the reconnect should target, when supplied. */
@@ -219,10 +280,17 @@ export type TimelineItem =
   | NoticeItem
   | AuthNeededItem
   | MemoryItem
+  | FleetDecisionItem
   | TurnEndItem;
 
 /** Activity items cluster between chat messages (reasoning, tools, workers, sandbox, memory). */
-export type ActivityItem = ReasoningItem | ToolCallItem | WorkerItem | SandboxItem | MemoryItem;
+export type ActivityItem =
+  | ReasoningItem
+  | ToolCallItem
+  | WorkerItem
+  | SandboxItem
+  | MemoryItem
+  | FleetDecisionItem;
 
 export type TimelineGroup =
   | { kind: "item"; item: TimelineItem }

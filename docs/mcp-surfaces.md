@@ -7,10 +7,10 @@ page exists so you pick the right one in one read.
 | Surface | Who configures it | Scope / lifecycle | Credentials | Use it when |
 | --- | --- | --- | --- | --- |
 | **First-party OpenGeni MCP** (`/v1/workspaces/:id/mcp`) | Nobody — built in | Always available; tools mirror the REST API (session create/send/interrupt, packs, environments…) capped by the caller's grant | The caller's own bearer; internally delegated `ogd_` tokens per session | An AGENT (often a manager session) should orchestrate OpenGeni itself — spawn workers, steer sessions |
-| **Toolspace MCP** (`/v1/workspaces/:id/mcp` with `toolspace:call` + `sessionId`) | OpenGeni worker, when `OPENGENI_TOOLSPACE_ENABLED=true` | One running session turn; session-selected safe first-party tools plus selected capability/per-session MCP tools, minus approval-required tools | Narrow `ogd_` token written to a sandbox file; upstream MCP headers stay server-side | Sandbox code needs to list/call the session's tools programmatically without a model round-trip |
+| **Toolspace MCP** (`/v1/workspaces/:id/mcp` with `toolspace:call` + `sessionId`) | OpenGeni worker, when `OPENGENI_TOOLSPACE_ENABLED=true` | One running session turn; session-selected safe first-party tools plus selected capability/per-session MCP tools, minus approval-required tools | Narrow `ogd_` token written to a sandbox file; upstream credentials resolve server-side through the same standalone/host broker as normal MCP | Sandbox code needs to list/call the session's tools programmatically without a model round-trip |
 | **Docs MCP** (`/mcp/docs`) | Nobody — built in | Always available | Caller's bearer | An agent should search the workspace's documents store |
 | **Capability MCP servers** | Workspace admin (capabilities settings) | Workspace-wide; on for every session while enabled | Admin-supplied headers, encrypted, write-only | A third-party tool (e.g. a SaaS MCP) should be available to *all* sessions in a workspace |
-| **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; credentials rotatable on every user turn | Host-supplied headers, encrypted, write-only, `credentialVersion`-bumped | An embedding host injects its OWN tool server with per-session, short-lived bearers |
+| **Per-session MCP servers** (`mcpServers` on session create) | The embedding host, per session | One session; static headers rotatable on every user turn; host connection refs resolved per request | Encrypted write-only headers or a non-secret opaque `connectionRef` resolved by the standalone/host broker | An embedding host injects its own tool server or binds an existing provider connection without duplicating it |
 | **Codex Apps MCP** | Automatic for Codex-subscription runs | Per turn, only on the ChatGPT/Codex model path | Workspace's Codex tokens | You don't — it rides along with the Codex subscription provider |
 
 First-party OpenGeni MCP memory tools:
@@ -38,6 +38,10 @@ Rules of thumb:
 - Do not proxy one MCP surface through another, except the Toolspace path above:
   it is a deliberate server-side proxy through the first-party gate for a
   session-bound `toolspace:call` bearer.
+- Embedded hosts that already own provider connections should bind
+  `ConnectionCredentialsPort.mcpCredentials` on both the API and worker. The
+  host's connection remains authoritative; the sandbox bearer is never treated
+  as a second GitHub/GitLab/Azure identity.
 
 Details: first-party tools and grants in [architecture.md](architecture.md),
 per-session servers in [session-mcp-servers.md](session-mcp-servers.md),

@@ -6,6 +6,7 @@ import {
   advanceSessionPageIdentity,
   emptySessionContinuation,
   mergeSessionContinuation,
+  rebaseSessionContinuation,
   sessionPageKey,
 } from "./session-pagination";
 
@@ -56,5 +57,32 @@ describe("session continuation pagination", () => {
     expect(merged.failed).toBe(false);
 
     expect(activeSessionContinuation(merged, 4)).toEqual(emptySessionContinuation(4));
+  });
+
+  test("rebases an expired cursor without discarding already loaded rows", () => {
+    const retained = {
+      generation: 7,
+      sessions: [row("older-a"), row("older-b")],
+      nextCursor: "expired",
+      failed: true,
+    };
+
+    expect(rebaseSessionContinuation(retained, 7, 7, "fresh-next")).toEqual({
+      generation: 7,
+      sessions: retained.sessions,
+      nextCursor: "fresh-next",
+      failed: false,
+    });
+  });
+
+  test("rejects a delayed cursor rebase after the query generation changes", () => {
+    const current = {
+      generation: 9,
+      sessions: [row("current")],
+      nextCursor: "current-next",
+      failed: false,
+    };
+
+    expect(rebaseSessionContinuation(current, 9, 8, "stale-next")).toBe(current);
   });
 });

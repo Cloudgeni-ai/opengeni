@@ -7,14 +7,20 @@ import {
   type SlashCommandContext,
   type UseFileAttachmentsResult,
 } from "@opengeni/react";
-import type { EffectiveSessionControl } from "@opengeni/sdk";
+import {
+  resolveWorkspaceTranscriptionPolicy,
+  type EffectiveSessionControl,
+  type TranscriptionAdapter,
+} from "@opengeni/sdk";
 import { type ReactNode } from "react";
+import { useAppContext } from "@/context";
 
 export function useDraftAttachments(workspaceId: string): UseFileAttachmentsResult {
   return useFileAttachments({ workspaceId });
 }
 
 export function ConsoleComposer(props: {
+  workspaceId: string;
   composer: ComposerState;
   attachments: UseFileAttachmentsResult;
   effectiveControl?: EffectiveSessionControl | null;
@@ -31,7 +37,12 @@ export function ConsoleComposer(props: {
   controls?: ReactNode;
   commandContext?: SlashCommandContext;
   onClearView?: () => void;
+  /** Optional approved host adapter; the web bundle ships no paid provider adapter. */
+  transcriptionAdapter?: TranscriptionAdapter | null;
 }) {
+  const context = useAppContext();
+  const workspace = context.workspaces.find((candidate) => candidate.id === props.workspaceId);
+  const transcriptionPolicy = resolveWorkspaceTranscriptionPolicy(workspace?.settings);
   return (
     <ChatComposer
       composer={props.composer}
@@ -46,6 +57,10 @@ export function ConsoleComposer(props: {
       {...(props.commandContext ? { commandContext: props.commandContext } : {})}
       {...(props.onClearView ? { onClearView: props.onClearView } : {})}
       controlsStart={props.controls}
+      transcription={{
+        adapter: props.transcriptionAdapter ?? null,
+        policy: transcriptionPolicy,
+      }}
     />
   );
 }

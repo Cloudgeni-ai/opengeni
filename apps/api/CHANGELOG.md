@@ -1,5 +1,359 @@
 # @opengeni/api-router
 
+## 0.9.0
+
+### Minor Changes
+
+- 0d60720: Add capability-first session tool policies with omission-as-discovery defaults,
+  explicit per-turn narrowing and child inheritance, secret-safe effective-policy
+  projections, stable lazy `tool_search` catalogs, and matching API, SDK, React,
+  worker, embedding, and audit contracts.
+
+  Harden credential-bearing MCP and OAuth traffic with destination-bound
+  credentials, single-resolution DNS-pinned transport, bounded catalogs, schemas,
+  results, request and response bodies, and independently validated manual
+  redirects. Extend renewable, session-bound Toolspace access to connected
+  machines while dynamically fencing every call to the session's active attempt.
+
+### Patch Changes
+
+- Updated dependencies [0d60720]
+- Updated dependencies [bdd531c]
+  - @opengeni/config@0.6.9
+  - @opengeni/contracts@0.18.0
+  - @opengeni/core@0.10.0
+  - @opengeni/db@0.10.7
+  - @opengeni/network@0.1.1
+  - @opengeni/runtime@0.13.0
+  - @opengeni/codex@0.2.7
+  - @opengeni/documents@0.2.28
+  - @opengeni/github@0.3.10
+  - @opengeni/storage@0.2.22
+  - @opengeni/events@0.3.19
+
+## 0.8.7
+
+### Patch Changes
+
+- 524599e: Normalize model, provider, upstream deployment, credential source, billing,
+  capability, health, and pricing identity; expose a secret-safe authenticated
+  workspace catalog with separate fail-closed credential readiness for federated
+  providers; and persist the accepted model/reasoning execution policy on new
+  logical turns.
+- Updated dependencies [524599e]
+  - @opengeni/config@0.6.8
+  - @opengeni/contracts@0.17.3
+  - @opengeni/core@0.9.7
+  - @opengeni/db@0.10.6
+  - @opengeni/runtime@0.12.6
+  - @opengeni/documents@0.2.27
+  - @opengeni/github@0.3.9
+  - @opengeni/storage@0.2.21
+  - @opengeni/events@0.3.18
+
+## 0.8.6
+
+### Patch Changes
+
+- 229902b: Add trustworthy per-subscription Codex quota/reset-credit overview and allocator OCC controls, plus an owning-human managed-cookie-only reset redemption flow with durable ambiguity-safe provider idempotency.
+- Updated dependencies [229902b]
+  - @opengeni/codex@0.2.6
+  - @opengeni/db@0.10.5
+  - @opengeni/core@0.9.6
+  - @opengeni/config@0.6.7
+  - @opengeni/runtime@0.12.5
+  - @opengeni/documents@0.2.26
+  - @opengeni/events@0.3.17
+  - @opengeni/github@0.3.8
+  - @opengeni/storage@0.2.20
+
+## 0.8.5
+
+### Patch Changes
+
+- Updated dependencies [4966649]
+- Updated dependencies [cb188f9]
+  - @opengeni/contracts@0.17.2
+  - @opengeni/db@0.10.4
+  - @opengeni/config@0.6.6
+  - @opengeni/runtime@0.12.4
+  - @opengeni/core@0.9.5
+  - @opengeni/documents@0.2.25
+  - @opengeni/events@0.3.16
+  - @opengeni/github@0.3.7
+  - @opengeni/storage@0.2.19
+
+## 0.8.4
+
+### Patch Changes
+
+- 2174006: Bound Modal display startup ownership, parse terminal state only from trusted provider metadata, poll yielded processes to completion, and prevent detached desktop processes from retaining startup locks.
+- Updated dependencies [2174006]
+- Updated dependencies [4e16410]
+  - @opengeni/runtime@0.12.3
+  - @opengeni/core@0.9.4
+
+## 0.8.3
+
+### Patch Changes
+
+- Updated dependencies [495c62c]
+  - @opengeni/db@0.10.3
+  - @opengeni/core@0.9.3
+  - @opengeni/documents@0.2.24
+  - @opengeni/events@0.3.15
+
+## 0.8.2
+
+### Patch Changes
+
+- ff23da5: Keep oversized event previews bounded while optionally linking them to integrity-addressed workspace-file evidence, and expose access-controlled metadata plus capped provider-native range retrieval through the API and SDK.
+- Updated dependencies [ff23da5]
+  - @opengeni/contracts@0.17.1
+  - @opengeni/db@0.10.2
+  - @opengeni/events@0.3.14
+  - @opengeni/storage@0.2.18
+  - @opengeni/config@0.6.5
+  - @opengeni/core@0.9.2
+  - @opengeni/documents@0.2.23
+  - @opengeni/github@0.3.6
+  - @opengeni/runtime@0.12.2
+
+## 0.8.1
+
+### Patch Changes
+
+- Updated dependencies [eed3438]
+  - @opengeni/db@0.10.1
+  - @opengeni/core@0.9.1
+  - @opengeni/documents@0.2.22
+  - @opengeni/events@0.3.13
+
+## 0.8.0
+
+### Minor Changes
+
+- d1dee7a: Let embedding hosts read and update an existing session MCP server's approval
+  policy through the public API, SDK, and React session hook. Each claimed
+  attempt freezes its policy under the session lock, so updates affect the next
+  attempt without reinterpreting work already running; model MCP and
+  Toolspace/Code Mode consume the same exact snapshot. Toolspace tokens and
+  side-effect receipts bind every proxied call to the exact active attempt, so
+  Pause, Steer, recovery, and late outputs preserve one authoritative owner.
+
+### Patch Changes
+
+- Updated dependencies [d1dee7a]
+  - @opengeni/contracts@0.17.0
+  - @opengeni/config@0.6.4
+  - @opengeni/core@0.9.0
+  - @opengeni/db@0.10.0
+  - @opengeni/documents@0.2.21
+  - @opengeni/events@0.3.12
+  - @opengeni/github@0.3.5
+  - @opengeni/runtime@0.12.1
+  - @opengeni/storage@0.2.17
+
+## 0.7.4
+
+### Patch Changes
+
+- Updated dependencies [b9cec61]
+- Updated dependencies [c978676]
+  - @opengeni/contracts@0.16.0
+  - @opengeni/runtime@0.12.0
+  - @opengeni/config@0.6.3
+  - @opengeni/core@0.8.1
+  - @opengeni/db@0.9.4
+  - @opengeni/documents@0.2.20
+  - @opengeni/events@0.3.11
+  - @opengeni/github@0.3.4
+  - @opengeni/storage@0.2.16
+
+## 0.7.3
+
+### Patch Changes
+
+- Updated dependencies [9f84cc9]
+  - @opengeni/contracts@0.15.0
+  - @opengeni/core@0.8.0
+  - @opengeni/db@0.9.3
+  - @opengeni/runtime@0.11.0
+  - @opengeni/config@0.6.2
+  - @opengeni/documents@0.2.19
+  - @opengeni/events@0.3.10
+  - @opengeni/github@0.3.3
+  - @opengeni/storage@0.2.15
+
+## 0.7.2
+
+### Patch Changes
+
+- Updated dependencies [136227e]
+- Updated dependencies [3aee519]
+  - @opengeni/contracts@0.14.0
+  - @opengeni/core@0.7.0
+  - @opengeni/runtime@0.10.0
+  - @opengeni/config@0.6.1
+  - @opengeni/db@0.9.2
+  - @opengeni/documents@0.2.18
+  - @opengeni/events@0.3.9
+  - @opengeni/github@0.3.2
+  - @opengeni/storage@0.2.14
+
+## 0.7.1
+
+### Patch Changes
+
+- 1f0ed18: Restore immutable concurrent-index migration history, stage populated-table migrations safely, and reject goal-bearing child sessions whose resulting first-party authority lacks `goals:manage`.
+- Updated dependencies [1f0ed18]
+- Updated dependencies [00e1cdc]
+  - @opengeni/core@0.6.1
+  - @opengeni/db@0.9.1
+  - @opengeni/documents@0.2.17
+  - @opengeni/events@0.3.8
+
+## 0.7.0
+
+### Minor Changes
+
+- 1f9305b: Add a host-owned session authorization port for embedded deployments. The port
+  receives server-resolved root lineage and live agent-attempt authority, scopes
+  session listing inside database queries, distinguishes exact from whole-tree
+  projection access, gates HTTP/core/first-party MCP/Toolspace surfaces, and
+  periodically reauthorizes idle SSE streams while standalone deployments retain
+  their existing behavior when the port is unset.
+- a11a7fc: Support mixed GitHub, GitLab, and Azure DevOps repositories—including multiple
+  accounts or installations for one provider—in a single session through bounded,
+  host-opaque credential bindings and optional read/write access intent.
+
+  Validate binding/provider/host echoes before token injection, isolate tokens in
+  hashed binding files, select Git credentials by remote path, fail provider CLIs
+  closed on ambiguous bindings, and renew each binding independently while keeping
+  legacy one-binding-per-provider request and file aliases compatible.
+
+- dda6398: Add durable structured human-input tool calls with exact-turn ownership,
+  answer/skip/expiry/cancellation outcomes, restart-safe Temporal resumption,
+  authorized API and SDK methods, and headless plus styled React embed surfaces.
+- e8ca4f6: Let trusted embedding hosts sign a service-only causal initiator separately
+  from the delegated subject that authorizes a create, Send, or Steer command.
+  Freeze that service and its non-secret provenance onto the new session/turn,
+  while rejecting human impersonation, exact agent-attempt replacement, reserved
+  lineage fields, the legacy migration sentinel, and oversized provenance.
+  Service-provenance HTTP tokens use a prefix-bound `ogd2_` envelope so older
+  rolling-deploy verifiers fail closed instead of silently stripping attribution.
+- 736f4fe: Persist and expose one immutable subject-or-service initiator for every accepted turn, including creator-safe idempotent repair, queue-edit preservation, exact live-attempt fencing for agent-created sessions, signed agent inheritance, causally dominant Agent Steer attribution, explicit service producers, rolling legacy backfill, and database-enforced immutability.
+  Bounded agent provenance now retains its first causal hop together with the
+  newest hops, so deep child chains do not discard their root authority when the
+  middle of the audit path is truncated.
+
+### Patch Changes
+
+- 1fcd83d: Make repository mount paths provider-neutral and collision-free. Omitted paths
+  now resolve to a canonical host-aware default that distinguishes GitHub,
+  GitLab, Azure DevOps, and custom hosts, while one shared portable-path validator
+  rejects traversal and case-folded collisions before sandbox execution.
+
+  Hosts upgrading sessions persisted without `mountPath` should expect those
+  repositories to materialize at the new host-aware location. To preserve an
+  existing warm workspace location, stamp the session's former effective
+  `repos/<owner>/<repo>` path explicitly before upgrading. Previously accepted
+  explicit paths that are non-portable or collide after Unicode normalization and
+  case folding now fail validation and must be renamed.
+
+- 4401ce7: Add a scope-checked host MCP credential resolver to the public embedding port and use it consistently for model-visible MCP tools and Toolspace/Code Mode while preserving the standalone connection broker as the default. Requests carry both the immediate session and its workspace-scoped lineage root so embedded hosts can authorize child sessions through one durable root binding. Provider-neutral bindings now carry a provider family, provider host, opaque host binding id, and exact selected-repository set; successful credentials must echo the complete binding before headers are accepted. Incompatible endpoint authentication and unenforceable resource containment surface as explicit unavailable states instead of starting a duplicate OpenGeni provider connection.
+- c389adc: Add a provider-neutral host run-credential port with frozen turn/session lineage,
+  off-manifest environment and file generations, proactive renewal, attempt-safe
+  cleanup with bounded generation retention, output redaction hints, and structured
+  reconnect UI support. Hosts can explicitly opt a frozen target out, and the
+  POSIX materializer supports both Linux `flock` and a portable directory-lock
+  fallback with cross-platform base64 decoding.
+- 8c66185: Let agent-created child sessions inherit omitted repository, MCP tool, and
+  per-session MCP server context from their trusted immediate parent. Explicit
+  arrays remain authoritative, mixed Git providers and multiple bindings are
+  preserved, and credential headers are copied only as encrypted ciphertext.
+- 3ce795b: Route Toolspace token seeding, renewal, agent commands, and Channel-A terminal
+  commands through deterministic per-session files when several sessions share a
+  sandbox group. Preserve the box manifest's stable legacy pointer for warm-box
+  compatibility, remove any legacy bearer during seeding, and prevent the
+  group-global ttyd process from inheriting session-bound Toolspace authority.
+- d249403: Allow embedding hosts to preallocate a session UUID before OpenGeni admits the
+  initial turn. Session creation preserves idempotent replays of the same UUID and
+  returns a conflict for UUID reuse or an idempotency replay that changes identity.
+  The additive create response also returns `initialTurnId`, so an embedding host
+  can correlate a preallocated host run without misusing the nullable
+  `activeTurnId` execution pointer.
+- 0c4796d: Bound opt-in `sessions_list` latest-message previews by a deterministic aggregate UTF-8 budget.
+  Rows that exceed the budget remain discoverable with explicit omission metadata and a
+  `session_events` drill-down route, while the existing response envelope and pagination cap remain
+  independent.
+- 5529945: Support Temporal Cloud and secured external Temporal endpoints across every API
+  and worker connection. API-key authentication enables TLS automatically, while
+  optional server-auth TLS, SNI override, custom root CA, and paired mTLS
+  certificate settings share one validated connection policy.
+- Updated dependencies [3a2258b]
+- Updated dependencies [1fcd83d]
+- Updated dependencies [32011f1]
+- Updated dependencies [3983021]
+- Updated dependencies [4401ce7]
+- Updated dependencies [c389adc]
+- Updated dependencies [1f9305b]
+- Updated dependencies [8c66185]
+- Updated dependencies [3ce795b]
+- Updated dependencies [334b63f]
+- Updated dependencies [d249403]
+- Updated dependencies [a11a7fc]
+- Updated dependencies [94f2580]
+- Updated dependencies [b9d6e58]
+- Updated dependencies [44ff327]
+- Updated dependencies [dda6398]
+- Updated dependencies [5529945]
+- Updated dependencies [e8ca4f6]
+- Updated dependencies [736f4fe]
+  - @opengeni/core@0.6.0
+  - @opengeni/contracts@0.13.0
+  - @opengeni/runtime@0.9.0
+  - @opengeni/config@0.6.0
+  - @opengeni/db@0.9.0
+  - @opengeni/documents@0.2.16
+  - @opengeni/events@0.3.7
+  - @opengeni/github@0.3.1
+  - @opengeni/storage@0.2.13
+
+## 0.6.0
+
+### Minor Changes
+
+- dbb6232: Support linking an existing GitHub App installation to multiple OpenGeni workspaces with independent repository allowlists.
+
+  - Discover installations through GitHub App user OAuth, require repository-level administrator permission, and configure the OAuth callback in generated App manifests.
+  - Persist workspace-scoped installation bindings and repository selections while retaining legacy `all` bindings for compatibility.
+  - Enforce the current binding during repository listing, session admission, MCP token minting, and GitHub-authenticated worker turn startup.
+  - Add SDK and web controls to link, rescope, and unlink a workspace without uninstalling the GitHub App or affecting another workspace.
+
+### Patch Changes
+
+- Bound model-facing tool output, complete input accounting, compact session discovery,
+  event and realtime projections, authorized evidence retrieval, and compaction failure
+  convergence with explicit truncation and loss metadata throughout the output lifecycle.
+  Session event `latest` lookups are now class-exclusive across REST, MCP, and SDK clients.
+  Updated-order session discovery now uses a transactional workspace activity-revision fence,
+  and the workspace-control bounds migration rewrites only historical cap violations.
+- Updated dependencies [77d65f9]
+- Updated dependencies
+- Updated dependencies [dbb6232]
+- Updated dependencies [3e65c23]
+  - @opengeni/db@0.8.0
+  - @opengeni/core@0.5.0
+  - @opengeni/codex@0.2.5
+  - @opengeni/config@0.5.3
+  - @opengeni/contracts@0.12.0
+  - @opengeni/events@0.3.6
+  - @opengeni/runtime@0.8.2
+  - @opengeni/github@0.3.0
+  - @opengeni/documents@0.2.15
+  - @opengeni/storage@0.2.12
+
 ## 0.5.9
 
 ### Patch Changes
