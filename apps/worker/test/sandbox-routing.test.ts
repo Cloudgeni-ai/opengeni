@@ -572,9 +572,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     );
     expect(reResolvedFailures.every((error) => error.recovery === "pending")).toBe(true);
     expect(
-      recoveryErrors.every(
-        (error) => error.leaseEpoch === warmEpoch + 1 && error.retryable,
-      ),
+      recoveryErrors.every((error) => error.leaseEpoch === warmEpoch + 1 && error.retryable),
     ).toBe(true);
     expect(operationCalls.every((calls) => calls === 0 || calls === 1)).toBe(true);
     expect(operationCalls.reduce((sum, calls) => sum + calls, 0)).toBe(deadProviderCalls);
