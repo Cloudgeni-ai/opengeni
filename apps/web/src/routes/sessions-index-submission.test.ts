@@ -60,12 +60,12 @@ describe("sessions-index post-create authority", () => {
     let settlementAttempts = 0;
     const navigations: string[] = [];
     const newerDraft = { text: "edited during create", fileId: "newer-ready-file" };
-    let durableDraft: typeof newerDraft | null = null;
+    const durableDrafts: (typeof newerDraft)[] = [];
 
     const settleDraft = async () => {
       settlementAttempts += 1;
       if (settlementAttempts === 1) return false;
-      durableDraft = { ...newerDraft };
+      durableDrafts.push({ ...newerDraft });
       return true;
     };
     const create = async () => {
@@ -83,7 +83,7 @@ describe("sessions-index post-create authority", () => {
       await runNewSessionRouteSubmission({ authority, create, navigate, onAuthorityChange }),
     ).toBe(false);
     expect(creates).toBe(1);
-    expect(durableDraft).toBeNull();
+    expect(durableDrafts).toEqual([]);
     expect(navigations).toEqual([]);
     expect((authority as CreatedSessionRouteAuthority | null)?.sessionId).toBe(
       "created-before-transient-failure",
@@ -95,7 +95,7 @@ describe("sessions-index post-create authority", () => {
     ).toBe(true);
     expect(creates).toBe(1);
     expect(settlementAttempts).toBe(2);
-    expect(durableDraft).toEqual(newerDraft);
+    expect(durableDrafts).toEqual([newerDraft]);
     expect(navigations).toEqual(["created-before-transient-failure"]);
     expect(authority).toBeNull();
   });
