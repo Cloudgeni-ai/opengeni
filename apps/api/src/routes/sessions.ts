@@ -93,6 +93,7 @@ import {
   setSessionGoalStatus,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   SessionContextBusyError,
@@ -107,7 +108,7 @@ import {
   coalesceSessionEventDeltas,
   publishDurableSessionEvents,
 } from "@opengeni/events";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import { withChannelA } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
@@ -140,10 +141,12 @@ import {
   createSessionForRequest,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
+  getActorNewSessionDraft,
   getHumanComposerDraft,
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
+  saveActorNewSessionDraft,
   SessionSpawnDeniedError,
   sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
@@ -218,14 +221,78 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    let payload: unknown;
     try {
-      const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
-      return c.json(await withEffectivePolicy(deps, workspaceId, session), 202);
+      payload = await c.req.json();
+    } catch {
+      return c.json(
+        {
+          code: "INVALID_SESSION_CREATE_REQUEST",
+          message: "Invalid session create request: request body must contain valid JSON",
+        },
+        422,
+      );
+    }
+    let session: Session;
+    try {
+      session = await createSessionForRequest(deps, grant, workspaceId, payload);
     } catch (error) {
-      if (error instanceof SessionSpawnDeniedError) {
+      return sessionCreateErrorResponse(c, error);
+    }
+    // Creation has committed by this point. Keep response projection outside
+    // the create-rejection boundary so a post-commit policy read cannot be
+    // misreported as though the session itself was rejected.
+    return c.json(await withEffectivePolicy(deps, workspaceId, session), 202);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await getActorNewSessionDraft({ settings, db }, grant, workspaceId));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json(
+        {
+          code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
+          message: "Invalid new-session draft request: request body must contain valid JSON",
+        },
+        422,
+      );
+    }
+    try {
+      return c.json(
+        await saveActorNewSessionDraft(
+          { settings, db, objectStorage },
+          grant,
+          workspaceId,
+          payload,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof NewSessionDraftConflictError) {
         return c.json(
-          sessionSpawnDenialEnvelope(error),
-          error.denial.code === "nested_agent_depth_override_forbidden" ? 403 : 409,
+          {
+            code: "NEW_SESSION_DRAFT_CONFLICT",
+            message: error.message,
+            currentRevision: error.currentRevision,
+          },
+          409,
+        );
+      }
+      if (error instanceof ZodError) {
+        return c.json(
+          {
+            code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
+            message: `Invalid new-session draft request: ${zodErrorFields(error)} failed schema validation`,
+          },
+          422,
         );
       }
       throw error;
@@ -2369,6 +2436,49 @@ function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean 
   }
   const payload = (value as { payload?: unknown }).payload;
   return hasOwnProperty(payload, key);
+}
+
+/** Stable, value-free JSON errors for only the create-session boundary. */
+export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionSpawnDeniedError) {
+    return c.json(
+      sessionSpawnDenialEnvelope(error),
+      error.denial.code === "nested_agent_depth_override_forbidden" ? 403 : 409,
+    );
+  }
+  if (error instanceof ZodError) {
+    return c.json(
+      {
+        code: "INVALID_SESSION_CREATE_REQUEST",
+        message: `Invalid session create request: ${zodErrorFields(error)} failed schema validation`,
+      },
+      422,
+    );
+  }
+  if (error instanceof HTTPException && error.status === 422) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+      },
+      422,
+    );
+  }
+  throw error;
+}
+
+function zodErrorFields(error: ZodError): string {
+  const paths = [
+    ...new Set(
+      error.issues.map((issue) => {
+        const path = issue.path.map(String).join(".");
+        return path || "request";
+      }),
+    ),
+  ];
+  const shown = paths.slice(0, 5);
+  const remainder = paths.length - shown.length;
+  return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {
