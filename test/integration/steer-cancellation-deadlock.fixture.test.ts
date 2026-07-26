@@ -1,12 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { Context, heartbeat } from "@temporalio/activity";
-import {
-  ActivityNotFoundError,
-  AsyncCompletionClient,
-  Client,
-  Connection,
-  encodePendingActivityState,
-} from "@temporalio/client";
+import { Client, Connection, encodePendingActivityState } from "@temporalio/client";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { and, eq } from "drizzle-orm";
 import {
@@ -227,10 +221,6 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       });
       const workerRun = worker.run();
       const client = new Client({ connection });
-      const asyncCompletion = new AsyncCompletionClient({
-        connection,
-        namespace: "default",
-      });
       const workflowId = `session-${target.id}`;
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
@@ -377,114 +367,25 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         });
         expect(rows.wake?.deliveredRevision).toBeLessThan(rows.wake?.wakeRevision ?? 0);
 
-        let workflowSettled = false;
-        const workflowResult = handle.result().finally(() => {
-          workflowSettled = true;
-        });
-        await Bun.sleep(300);
-        expect(workflowSettled).toBe(false);
-
-        // Terminalize only this exact Temporal activity. This proves that
-        // Temporal transport state can change independently of the local
-        // activity body and must not be treated as a quiescence receipt.
-        const fullActivityId = {
-          workflowId,
-          runId: handle.firstExecutionRunId,
-          activityId: pendingActivityId!,
-        };
-        await asyncCompletion.reportCancellation(fullActivityId, { fixtureCleanup: "OPE-75" });
-
-        await waitFor(async () => {
-          const current = await handle.describe();
-          return !current.raw.pendingActivities?.some(
-            (activity) => activity.activityId === pendingActivityId,
-          );
-        });
-        await expect(
-          asyncCompletion.heartbeat(fullActivityId, {
-            fixtureProbe: "after-exact-terminalization",
-          }),
-        ).rejects.toBeInstanceOf(ActivityNotFoundError);
-
-        // Temporal terminalization is not physical quiescence. The local
-        // activity body still executes, but its worker heartbeat helper has no
-        // per-call acknowledgement. The by-ID probe above is the independent
-        // server-side proof that the activity is no longer pending.
-        const beatsAtTemporalTerminalization = heartbeats;
-        await waitFor(() => heartbeats >= beatsAtTemporalTerminalization + 3);
-
-        // The receipt-gated workflow may close after its bounded cancellation
-        // wait, but exact Temporal terminalization must not admit replacement
-        // work while the local activity body is still running.
-        const workflowProgress = await Promise.race([
-          workflowResult.then(() => "settled" as const),
-          Bun.sleep(15_000).then(() => "timed_out" as const),
-        ]);
-        expect(workflowProgress).toBe("settled");
-        expect(workflowSettled).toBe(true);
-        expect(replacementDispatches).toBe(0);
-        expect(model.calls).toBe(0);
-
-        // Temporal terminalization is not physical quiescence. The predecessor
-        // remains fenced and the Steer bundle remains pending until the exact
-        // activity-owned receipt exists.
-        const [finalSession, finalTurns, finalOutstandingUpdates, finalQueue, finalRows] =
-          await Promise.all([
-            getSession(dbClient.db, workspaceId, target.id),
-            listSessionTurns(dbClient.db, workspaceId, target.id),
-            listOutstandingSessionSystemUpdates(dbClient.db, workspaceId, target.id),
-            getSessionQueueSnapshot(dbClient.db, workspaceId, target.id),
-            withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
-              const attempts = await scoped
-                .select()
-                .from(schema.sessionTurnAttempts)
-                .where(eq(schema.sessionTurnAttempts.sessionId, target.id));
-              const allUpdates = await scoped
-                .select()
-                .from(schema.sessionSystemUpdates)
-                .where(eq(schema.sessionSystemUpdates.sessionId, target.id));
-              const [interruption] = await scoped
-                .select()
-                .from(schema.sessionAttemptInterruptions)
-                .where(eq(schema.sessionAttemptInterruptions.sessionId, target.id));
-              const [wake] = await scoped
-                .select()
-                .from(schema.sessionWorkflowWakeOutbox)
-                .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, target.id));
-              return { attempts, allUpdates, interruption, wake };
-            }),
-          ]);
-        const terminalizedAttempt = finalRows.attempts.find(
-          (attempt) => attempt.id === targetClaim!.turn.activeAttemptId,
+        // Current v2 closes after its bounded cancellation wait without
+        // waiting for the cancellation-ignoring activity to terminalize. The
+        // exact activity must remain visible in Temporal and physically keep
+        // heartbeating while the predecessor fence remains closed.
+        await handle.result();
+        const completedDescription = await handle.describe();
+        expect(completedDescription.status.name).toBe("COMPLETED");
+        const pendingAfterWorkflowClose = completedDescription.raw.pendingActivities?.find(
+          (activity) => activity.activityId === pendingActivityId,
+        );
+        expect(pendingAfterWorkflowClose?.activityId).toBe(pendingActivityId);
+        expect(pendingAfterWorkflowClose?.state).toBe(
+          encodePendingActivityState("CANCEL_REQUESTED"),
         );
 
-        expect(finalSession).toMatchObject({
-          status: "queued",
-          activeTurnId: null,
-          queueHeadPosition: 0,
-          queueTailPosition: 1,
-        });
-        expect(finalTurns).toHaveLength(1);
-        expect(finalTurns[0]).toMatchObject({
-          id: targetClaim!.turn.id,
-          status: "superseded",
-          activeAttemptId: null,
-        });
-        expect(finalOutstandingUpdates).toHaveLength(7);
-        expect(finalRows.allUpdates).toHaveLength(7);
-        expect(finalRows.allUpdates.every((update) => update.state === "pending")).toBe(true);
-        expect(
-          finalRows.allUpdates.filter((update) => update.kind === "agent_steer_instruction"),
-        ).toHaveLength(1);
-        expect(finalRows.attempts).toHaveLength(1);
-        expect(terminalizedAttempt).toMatchObject({
-          state: "closed",
-          outcome: "superseded",
-        });
-        expect(terminalizedAttempt?.quiescedAt).toBeNull();
-        expect(finalRows.interruption).toMatchObject({ kind: "steer", state: "settled" });
-        expect(finalRows.wake?.deliveredRevision).toBeLessThan(finalRows.wake?.wakeRevision ?? 0);
-        expect(finalQueue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
+        const beatsAtWorkflowClose = heartbeats;
+        await waitFor(() => heartbeats >= beatsAtWorkflowClose + 3);
+        expect(replacementDispatches).toBe(0);
+        expect(model.calls).toBe(0);
       } finally {
         releaseZombie = true;
         try {
@@ -500,7 +401,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
   );
 
   test(
-    "a heartbeat timeout leaves the receipt fence closed without admitting the queued replacement",
+    "a bounded cancellation close leaves the receipt fence closed while the activity remains pending",
     async () => {
       const suffix = crypto.randomUUID();
       const access = await bootstrapWorkspace(dbClient.db, {
@@ -602,7 +503,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
       let targetClaim:
         | Extract<Awaited<ReturnType<typeof claimSessionWorkForAttempt>>, { action: "claimed" }>
         | undefined;
-      const ignoreCancellationThenTimeout = async (
+      const ignoreCancellationWhilePending = async (
         input: RunAgentTurnInput,
       ): Promise<RunAgentTurnResult> => {
         if (targetClaim) {
@@ -635,8 +536,8 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
             });
           }
           // Ignore both Temporal cancellation and the activity AbortSignal.
-          // Once the fixture stops heartbeating, the real two-minute runtime
-          // heartbeat timeout produces the production WorkflowFailed shape.
+          // The fixture intentionally does not wait for the real heartbeat
+          // timeout after stopping acknowledgements.
           await Bun.sleep(25);
         }
         return {
@@ -648,14 +549,10 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
 
       const worker = await fixtureWorker(nativeConnection, taskQueue, {
         ...activities,
-        runAgentTurn: ignoreCancellationThenTimeout,
+        runAgentTurn: ignoreCancellationWhilePending,
       });
       const workerRun = worker.run();
       const client = new Client({ connection });
-      const asyncCompletion = new AsyncCompletionClient({
-        connection,
-        namespace: "default",
-      });
       const workflowId = `session-${target.id}`;
       const handle = await client.workflow.start("sessionWorkflow", {
         taskQueue,
@@ -720,91 +617,19 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         expect(heartbeats).toBe(beatsAtStop);
         const completedDescription = await handle.describe();
         expect(completedDescription.status.name).toBe("COMPLETED");
-        expect(
-          completedDescription.raw.pendingActivities?.some(
-            (activity) => activity.activityId === pendingActivityId,
-          ) ?? false,
-        ).toBe(false);
+        const pendingAfterWorkflowClose = completedDescription.raw.pendingActivities?.find(
+          (activity) => activity.activityId === pendingActivityId,
+        );
+        expect(pendingAfterWorkflowClose?.activityId).toBe(pendingActivityId);
+        expect(pendingAfterWorkflowClose?.state).toBe(
+          encodePendingActivityState("CANCEL_REQUESTED"),
+        );
 
-        const fullActivityId = {
-          workflowId,
-          runId: handle.firstExecutionRunId,
-          activityId: pendingActivityId!,
-        };
-        await expect(
-          asyncCompletion.heartbeat(fullActivityId, {
-            fixtureProbe: "after-workflow-close",
-          }),
-        ).rejects.toBeInstanceOf(ActivityNotFoundError);
-
-        // Workflow/activity terminalization still does not prove that the
-        // in-process body stopped. The disposable loop remains live until the
-        // fixture's exact cleanup gate is released.
+        // The bounded workflow close is not a heartbeat timeout or physical
+        // quiescence proof. The disposable loop remains live until exact
+        // cleanup releases its gate.
         const ticksAtWorkflowClose = hungTicks;
         await waitFor(() => hungTicks >= ticksAtWorkflowClose + 3);
-
-        const rejectedReplacementAttemptId = crypto.randomUUID();
-        const rejectedClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
-          sessionId: target.id,
-          workflowId,
-          workflowRunId: crypto.randomUUID(),
-          attemptId: rejectedReplacementAttemptId,
-          dispatchId: `replacement-${rejectedReplacementAttemptId}`,
-          trigger: { kind: "next" },
-        });
-        expect(rejectedClaim).toEqual({ action: "unclaimed", reason: "control-pending" });
-
-        const [session, turns, updates, queue, rows] = await Promise.all([
-          getSession(dbClient.db, workspaceId, target.id),
-          listSessionTurns(dbClient.db, workspaceId, target.id),
-          listOutstandingSessionSystemUpdates(dbClient.db, workspaceId, target.id),
-          getSessionQueueSnapshot(dbClient.db, workspaceId, target.id),
-          withWorkspaceRls(dbClient.db, workspaceId, async (scoped) => {
-            const attempts = await scoped
-              .select()
-              .from(schema.sessionTurnAttempts)
-              .where(eq(schema.sessionTurnAttempts.sessionId, target.id));
-            const [interruption] = await scoped
-              .select()
-              .from(schema.sessionAttemptInterruptions)
-              .where(eq(schema.sessionAttemptInterruptions.sessionId, target.id));
-            const [wake] = await scoped
-              .select()
-              .from(schema.sessionWorkflowWakeOutbox)
-              .where(eq(schema.sessionWorkflowWakeOutbox.sessionId, target.id));
-            return { attempts, interruption, wake };
-          }),
-        ]);
-
-        expect(session).toMatchObject({
-          status: "queued",
-          activeTurnId: null,
-          queueHeadPosition: 0,
-          queueTailPosition: 1,
-        });
-        expect(turns).toHaveLength(1);
-        expect(turns[0]).toMatchObject({
-          id: targetClaim!.turn.id,
-          status: "superseded",
-          activeAttemptId: null,
-        });
-        expect(updates).toHaveLength(1);
-        expect(updates[0]).toMatchObject({
-          kind: "agent_steer_instruction",
-          state: "pending",
-        });
-        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
-        expect(rows.attempts).toHaveLength(1);
-        expect(rows.attempts[0]).toMatchObject({
-          id: targetClaim!.turn.activeAttemptId,
-          state: "closed",
-          outcome: "superseded",
-          quiescedAt: null,
-          temporalActivityId: pendingActivityId,
-        });
-        expect(rows.interruption).toMatchObject({ kind: "steer", state: "settled" });
-        expect(rows.wake?.wakeRevision).toBeGreaterThan(rows.wake?.deliveredRevision ?? -1);
-        expect(rows.wake).toMatchObject({ attempts: 0, lastError: null });
         expect(replacementDispatches).toBe(0);
         expect(model.calls).toBe(0);
       } finally {

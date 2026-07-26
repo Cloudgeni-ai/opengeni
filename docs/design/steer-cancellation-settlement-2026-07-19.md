@@ -22,18 +22,21 @@ OPE-75 has a deterministic real-service pre-fix control on draft PR #490, branch
 test/integration/steer-cancellation-deadlock.fixture.test.ts
 ```
 
-The fixture passes as a reproduction against real PostgreSQL 17, NATS 2.14.3,
-and Temporal 1.28.0. It first reproduces the blocked materialization state while
-the exact activity remains `CANCEL_REQUESTED` and heartbeating, then terminalizes
-that activity by exact ID and proves a second current defect: Temporal
-terminalization is mistaken for physical quiescence and a replacement runs while
-the zombie is still executing. A second control stops heartbeats without
-releasing the local activity body, waits for the production two-minute heartbeat
-timeout, and proves the workflow fails while the delivered wake is exhausted and
-the fenced queued replacement remains unadmitted. The exact-head run completed in
-192.91 seconds with 2 tests passing, 0 failures, and 61 expectations. Both
-controls pass by asserting broken pre-fix states; they do not claim cancellation
-settlement is implemented.
+The fixture runs against real PostgreSQL 17, NATS 2.14.3, and Temporal 1.28.0.
+Against the pinned current-main v2 workflow, its first control reproduces the
+bounded-close state while the exact activity remains `CANCEL_REQUESTED` and
+heartbeating. Its second control stops heartbeats after `CANCEL_REQUESTED` but
+does not wait for the production heartbeat timeout; it observes the same bounded
+workflow close while the exact activity remains pending and the local activity
+body continues. Neither control calls `reportCancellation`, probes a
+post-terminal activity, or claims a heartbeat-timeout/`FAILED` workflow. Both
+controls pass by asserting the still-open physical cancellation boundary; they do
+not claim cancellation settlement is implemented.
+
+The historical incident evidence below is separate replay-only pre-v2 evidence:
+it records the old `WAIT_CANCELLATION_COMPLETED` path, false-quiescence
+terminalization, heartbeat-timeout `FAILED` workflows, and exhausted wakes. Those
+states are not what the current v2 fixture observes.
 
 ### Current-main reconciliation
 
@@ -43,10 +46,10 @@ is now reconciled onto current `main` at
 projections intentionally change several expected assertions in the fixture:
 
 - `session-attempt-quiescence-v2` requests `TRY_CANCEL` and may close its
-  bounded cancellation wait without physical quiescence. The exact
-  `reportCancellation` probe therefore proves Temporal terminalization and
-  stale-activity heartbeat rejection, but never supplies `quiesced_at` or
-  replacement admission.
+  bounded cancellation wait without physical quiescence. The exact activity
+  remains pending as `CANCEL_REQUESTED`; no `reportCancellation` probe is used,
+  and no Temporal terminalization supplies `quiesced_at` or replacement
+  admission.
 - While the Agent Steer remains actionable, wake delivery returns
   `{ action: "pending_admission", blocker: "pending_agent_steer" }`. The
   wake remains undelivered (`deliveredRevision < wakeRevision`) rather than
@@ -54,10 +57,11 @@ projections intentionally change several expected assertions in the fixture:
 - The current queue projection reports `stoppingPreviousAttempt=true` while
   the latest attempt has `quiesced_at=NULL`, even though Agent Steer creates no
   visible user/API queue item.
-- The heartbeat-timeout control now asserts bounded workflow completion, the
-  still-running local activity body, stale by-ID heartbeat rejection, and
-  `control-pending` replacement-claim rejection. It does not expect a
-  `FAILED` workflow, wake exhaustion, replacement dispatch, or model call.
+- The second bounded-close control stops heartbeats without waiting for the real
+  timeout. It asserts the exact activity remains pending as `CANCEL_REQUESTED`,
+  the still-running local activity body, and no replacement dispatch or model
+  call. It does not expect a `FAILED` workflow, wake exhaustion, stale by-ID
+  heartbeat rejection, or a direct replacement-claim result.
 
 Thus, phrases later in this record such as “workflow `FAILED`”, “wake
 exhausted”, or “the replacement runs” describe the historical pre-reconciliation
@@ -71,7 +75,7 @@ serializes the OPE-59 integration. Their owners supplied the typed boundaries
 listed below, but all three PRs remain draft/nonfinal. Racing those owners would
 be less safe than preserving this fixture and exact landing plan.
 
-## Exact production fixture
+## Historical pre-v2 production fixture (incident evidence)
 
 ```text
 Workspace:       c77bf2b8-3d09-4963-a40d-30588f5139f7
@@ -103,7 +107,7 @@ The public queue currently reports `items=[]` and
 Steer because it derives the stop flag only when a visible queued user/API turn
 exists. Agent Steer is an internal update and creates no such row.
 
-### Failed-workflow and exhausted-wake fixture
+### Historical pre-v2 failed-workflow and exhausted-wake fixture
 
 A later mutation-free recovery inspection proved the same split-brain can
 survive Temporal workflow failure rather than only an indefinitely open run:
@@ -184,9 +188,9 @@ queue wake alone is therefore insufficient. The second stale-holder class may
 still have an active physical resource; setting `active_turn_id=NULL` alone is
 therefore insufficient.
 
-## Proven failure mechanism
+## Historical pre-v2 failure mechanism (replay-only evidence)
 
-`sessionWorkflow.runTurn` currently:
+The pre-v2 `sessionWorkflow.runTurn` path:
 
 1. starts `runAgentTurn` with
    `ActivityCancellationType.WAIT_CANCELLATION_COMPLETED`;
@@ -219,7 +223,7 @@ run. A correct fence has become a permanent liveness failure. Recovery needs a
 new, idempotent, exact-run workflow-restart obligation after it classifies
 physical and effect truth; it must not weaken the claim fence.
 
-The real-service fixture additionally proves:
+The historical pre-v2 real-service fixture additionally recorded:
 
 - `AsyncCompletionClient.reportCancellation` can terminalize the exact Temporal
   activity: the matching entry disappears from `pendingActivities`, a by-ID
@@ -232,6 +236,24 @@ The real-service fixture additionally proves:
 - the current workflow nevertheless writes `quiesced_at` after that Temporal
   cancellation result, exposing the false-quiescence bug; therefore the fixed
   contract must never set it from Temporal terminalization alone.
+
+## Current pinned v2 fixture boundary
+
+Current `session-attempt-quiescence-v2` histories use `TRY_CANCEL`. After Steer
+settlement, the workflow requests cancellation and waits only for its bounded
+`cancellation-wait`; it can complete while the exact `runAgentTurn` activity is
+still pending in Temporal as `CANCEL_REQUESTED`. The activity-owned receipt has
+not arrived, so the predecessor remains fenced and the pending Agent Steer is
+not admitted. The current fixture proves this state directly: it preserves the
+exact activity ID, observes `CANCEL_REQUESTED` after workflow completion, and
+observes the local heartbeat/activity loop continue.
+
+The current fixture deliberately does not wait for the real two-minute heartbeat
+timeout. It therefore does not prove activity disappearance, by-ID
+`ActivityNotFoundError`, workflow `FAILED`, wake exhaustion, a direct
+`control-pending` claim, post-timeout database state, replacement dispatch, or a
+model call. Those remain historical evidence or future post-fix coverage unless
+a test observes them through the real provider path.
 
 ## Non-negotiable invariants
 
@@ -873,45 +895,37 @@ newer attempt is running or complete.
 
 ### Real-service fixture
 
-The PostgreSQL/NATS/Temporal fixture contains two pre-fix controls. The first
-proves exact cancellation releases the workflow and exposes the current unsafe
-auto-admission/false-quiescence fallback. The second stops heartbeats only after
-the activity reaches `CANCEL_REQUESTED`, waits for the real two-minute runtime
-heartbeat timeout, and proves the workflow fails with the predecessor still
-closed-but-unquiesced, the Steer update pending, the wake fully delivered, and
-the next claim rejected. The first retains its physical zombie until after it
-asserts:
+The current pinned v2 PostgreSQL/NATS/Temporal fixture contains two bounded
+controls. The first settles and fences the predecessor, requests `TRY_CANCEL`,
+and waits for the bounded workflow close while the exact activity remains
+pending as `CANCEL_REQUESTED`. It asserts:
 
-- the exact Temporal activity disappears from `pendingActivities` before any
-  workflow termination;
-- a by-ID post-terminal heartbeat is rejected with `ActivityNotFoundError` and
-  the workflow promise progresses naturally;
-- the pre-fix workflow falsely writes `quiesced_at` while the zombie still
-  runs; the post-fix variant must instead require positive physical proof;
-- the workflow materializes exactly one replacement or typed `requires_action`
-  state within the deterministic bound, and does not make a replacement
-  runnable before positive physical quiescence;
-- the old local activity loop still calls its heartbeat helper physically,
-  independent of the server-side rejection;
-- a late canonical event is rejected;
-- the replacement runs once;
-- all seven internal updates are assigned once;
-- public and database truth agree; and
-- cleanup targets only the disposable workflow/activity and zombie gate.
+- the exact activity ID is unchanged after workflow completion and remains in
+  `pendingActivities` as `CANCEL_REQUESTED`;
+- the local activity continues heartbeating after workflow close;
+- the wake remains pending admission while the predecessor has no
+  activity-owned quiescence receipt; and
+- no replacement dispatch or model call occurs.
 
-The failed-workflow control separately retains its local activity loop until
-after it asserts:
+The second reaches the same exact `CANCEL_REQUESTED` state, stops heartbeats,
+and awaits only the bounded workflow close. It asserts:
 
-- the activity first reaches `CANCEL_REQUESTED` and then stops heartbeating
-  without acknowledging cancellation;
-- the real heartbeat timeout removes the exact pending activity, rejects a
-  by-ID heartbeat, and leaves the workflow `FAILED`;
-- the attempt stays `closed/superseded` with `quiesced_at=NULL` and the
-  interruption stays settled;
-- the one Steer update remains pending, the wake revision equals its delivered
-  revision with no error/retry, and a direct claim returns `control-pending`;
-- no replacement dispatch or model call occurs; and
-- the in-process loop continues executing until exact disposable cleanup.
+- the exact activity remains pending as `CANCEL_REQUESTED` without waiting for
+  the real two-minute heartbeat timeout;
+- the in-process activity loop continues until exact disposable cleanup; and
+- no replacement dispatch or model call occurs.
+
+Neither current-v2 control calls `reportCancellation`, performs a by-ID
+post-terminal heartbeat, directly claims a replacement, or asserts activity
+disappearance, heartbeat-timeout `FAILED` state, wake exhaustion, or
+post-timeout database state. Those assertions belong to the historical pre-v2
+incident evidence above or to separately authorized future recovery coverage.
+
+The historical pre-v2 controls retain their original evidence separately: exact
+Temporal terminalization was observed to remove the pending activity and reject
+a by-ID heartbeat while the physical loop continued, and stopping heartbeats
+eventually produced the real timeout/`FAILED` and exhausted-wake state. Neither
+observation is inferred by the current bounded v2 fixture.
 
 The failed-workflow post-fix variant must additionally assert that the typed
 recovery command:
