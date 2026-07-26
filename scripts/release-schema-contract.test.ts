@@ -87,17 +87,17 @@ describe("release schema contract", () => {
     );
     expect(contract.fileCount).toBe(99 + currentMainMigrations.length);
     expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
-    expect(contract.latestMigration).toBe("0109_new_session_drafts.sql");
+    expect(contract.latestMigration).toBe("0118_new_session_drafts.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^010[3-9]_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|0118)_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       "0108_fence_invalidated_warming_epochs.sql",
-      "0109_new_session_drafts.sql",
+      "0118_new_session_drafts.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -124,7 +124,7 @@ describe("release schema contract", () => {
       sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0109_new_session_drafts.sql")).toMatchObject({
+    expect(migrations.get("0118_new_session_drafts.sql")).toMatchObject({
       sha256: "69ae71b80392eea964c47cadff876cff58db699d6c2470482d35aaf0931de70c",
       deploymentMode: "rolling",
     });
