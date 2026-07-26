@@ -9,6 +9,7 @@ import {
 import {
   CreateSessionRequest,
   DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
+  SessionSpawnDenial,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
@@ -36,7 +37,7 @@ import {
 } from "@opengeni/contracts";
 import {
   createSession,
-  createSessionWithIdempotencyKey,
+  createSessionWithIdempotencyKeyResult,
   encryptVariableSetValue,
   getAnySessionInGroup,
   getEnrollment,
@@ -47,7 +48,7 @@ import {
   getSandbox,
   getSession,
   SessionIdConflictError,
-  getSessionByCreateIdempotencyKey,
+  getSessionSpawnDenialByIdempotencyKey,
   getSessionEvent,
   getWorkspaceControlEvent,
   getSessionLineage,
@@ -66,6 +67,7 @@ import {
   type UpdateSessionMcpServerCredentialsInput,
   QueueCommandConflictError,
   AgentCommandAuthorityError,
+  SessionSpawnDeniedDbError,
   SessionControlConflictError,
   type SessionCommandActor,
 } from "@opengeni/db";
@@ -104,6 +106,34 @@ const maxSessionMcpCredentialHeaders = 16;
 const maxSessionMcpCredentialHeaderValueLength = 4096;
 // RFC 9110 field-name token characters.
 const sessionMcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+
+/** Transport-neutral typed denial raised only after its audit row committed. */
+export class SessionSpawnDeniedError extends Error {
+  readonly denial: SessionSpawnDenial;
+
+  constructor(denial: SessionSpawnDenial) {
+    super(sessionSpawnDeniedMessage(denial));
+    this.name = "SessionSpawnDeniedError";
+    this.denial = denial;
+  }
+}
+
+function sessionSpawnDeniedMessage(denial: SessionSpawnDenial): string {
+  if (denial.code === "nested_agent_depth_override_forbidden") {
+    return `requested nested-agent depth limit ${denial.requestedMaxNestedAgentDepthOverride ?? "unknown"} exceeds inherited limit ${denial.effectiveMaxNestedAgentDepth}; workspace:admin is required to increase it`;
+  }
+  return `nested-agent depth ${denial.attemptedDepth} exceeds effective limit ${denial.effectiveMaxNestedAgentDepth} (current parent depth ${denial.currentDepth})`;
+}
+
+export function sessionSpawnDenialEnvelope(error: SessionSpawnDeniedError) {
+  return {
+    error: {
+      code: error.denial.code,
+      message: error.message,
+      details: { denial: error.denial },
+    },
+  } as const;
+}
 
 type ValidatedSessionMcpServers = {
   runtimeServers: Settings["mcpServers"];
@@ -513,36 +543,24 @@ export async function createAndStartSession(input: {
   // `workingDir` (optional) is the path/cwd base the chosen machine runs under,
   // seeded alongside the pointer through the epoch-fenced CAS.
   seedTargetSandbox?: { sandboxId: string; settings: Settings; workingDir?: string | null } | null;
+  // A child may lower its inherited nested-agent depth limit freely; increases
+  // are authorized by the caller's workspace:admin grant and checked again by
+  // the database admission transaction.
+  maxNestedAgentDepthOverride?: number | null;
+  allowNestedAgentDepthIncrease?: boolean;
+  subjectId?: string | null;
 }): Promise<CreateSessionResponse> {
   const sessionMetadata = {
     ...input.metadata,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
   };
-  // Fast path with a key: return a session already created under this key
-  // (the sequential retry / double-submit case) without inserting again.
+  // Keyed creation is intentionally handled only by the database admission
+  // transaction below. Its workspace/key lock replays either the successful
+  // session or the committed denial atomically; an application-side lookup
+  // cannot serialize those two source tables against an older writer.
   if (input.createIdempotencyKey) {
-    const existing = await getSessionByCreateIdempotencyKey(
-      input.db,
-      input.workspaceId,
-      input.createIdempotencyKey,
-    );
-    if (existing) {
-      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-        throw new SessionIdConflictError(input.requestedSessionId);
-      }
-      return await finishStartSession(
-        existing.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
-        existing,
-      );
-    }
-    // No prior session: insert under the key, racing concurrent creates. The
-    // partial unique index lets exactly one insert win; a loser gets back the
-    // winner's row with created=false. Both callers may enter the idempotent
-    // initializer; exactly one creates the first events/turn. Each retry
-    // advances the coalesced wake revision so an in-flight stale delivery can
-    // never acknowledge work committed by the other caller.
-    const { session: keyed, created } = await createSessionWithIdempotencyKey(input.db, {
+    const keyedResult = await createSessionWithIdempotencyKeyResult(input.db, {
       ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
       accountId: input.accountId,
       workspaceId: input.workspaceId,
@@ -567,7 +585,14 @@ export async function createAndStartSession(input: {
       sandboxGroupId: input.sandboxGroupId ?? null,
       ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
       mcpServers: input.mcpServers ?? [],
+      maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
+      allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
+      subjectId: input.subjectId ?? null,
     });
+    if (keyedResult.denied) {
+      throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(keyedResult.denial));
+    }
+    const { session: keyed, created } = keyedResult;
     if (!created) {
       return await finishStartSession(
         keyed.temporalWorkflowId ? { ...input, seedTargetSandbox: null } : input,
@@ -576,31 +601,42 @@ export async function createAndStartSession(input: {
     }
     return await finishStartSession(input, keyed);
   }
-  const session = await createSession(input.db, {
-    ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    initialMessage: input.initialMessage,
-    initialTurnInstructions: input.turnInstructions ?? null,
-    resources: input.resources,
-    tools: input.tools,
-    ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
-    metadata: sessionMetadata,
-    ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-    ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
-    createdByActor: input.createdByActor ?? null,
-    model: input.model,
-    sandboxBackend: input.sandboxBackend,
-    variableSetId: input.variableSet?.id ?? null,
-    rigId: input.rigId ?? null,
-    rigVersionId: input.rigVersionId ?? null,
-    firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-    instructions: input.instructions ?? null,
-    parentSessionId: input.parentSessionId ?? null,
-    sandboxGroupId: input.sandboxGroupId ?? null,
-    ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
-    mcpServers: input.mcpServers ?? [],
-  });
+  let session: Session;
+  try {
+    session = await createSession(input.db, {
+      ...(input.requestedSessionId ? { requestedSessionId: input.requestedSessionId } : {}),
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      initialTurnInstructions: input.turnInstructions ?? null,
+      resources: input.resources,
+      tools: input.tools,
+      ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
+      metadata: sessionMetadata,
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
+      createdByActor: input.createdByActor ?? null,
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      variableSetId: input.variableSet?.id ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
+      sandboxGroupId: input.sandboxGroupId ?? null,
+      ...(input.sandboxOs ? { sandboxOs: input.sandboxOs } : {}),
+      mcpServers: input.mcpServers ?? [],
+      maxNestedAgentDepthOverride: input.maxNestedAgentDepthOverride ?? null,
+      allowNestedAgentDepthIncrease: input.allowNestedAgentDepthIncrease ?? false,
+      subjectId: input.subjectId ?? null,
+    });
+  } catch (error) {
+    if (error instanceof SessionSpawnDeniedDbError) {
+      throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(error.denial));
+    }
+    throw error;
+  }
   return await finishStartSession(input, session);
 }
 
@@ -980,6 +1016,20 @@ export async function createSessionForRequest(
 ): Promise<Session> {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   const payload = CreateSessionRequest.parse(rawPayload);
+  // A committed keyed denial is the idempotent outcome even if mutable
+  // resources, policy, authorization, or budget have changed since the first
+  // attempt. Replay it before any of those checks, just as a keyed successful
+  // session is returned rather than recreated later in createAndStartSession.
+  if (payload.idempotencyKey) {
+    const denial = await getSessionSpawnDenialByIdempotencyKey(
+      db,
+      workspaceId,
+      payload.idempotencyKey,
+    );
+    if (denial) {
+      throw new SessionSpawnDeniedError(SessionSpawnDenial.parse(denial));
+    }
+  }
   // Parent linkage and execution-context inheritance come ONLY from the
   // worker-signed sessionId claim. A caller cannot nominate a parent in the
   // payload, so inheriting an existing repository/tool/credential snapshot does
@@ -1469,6 +1519,9 @@ export async function createSessionForRequest(
       sessionMcpServers: sessionMcpServers.metadata,
       parentSessionId,
       createIdempotencyKey: payload.idempotencyKey ?? null,
+      maxNestedAgentDepthOverride: payload.maxNestedAgentDepth ?? null,
+      allowNestedAgentDepthIncrease: hasPermission(grant.permissions, "workspace:admin"),
+      subjectId: grant.subjectId,
       // Create-time machine targeting (A-2a): when a target sandbox is named, the
       // active-sandbox pointer is seeded race-free inside createAndStartSession
       // (after the row exists, before the first turn dispatches). Validation

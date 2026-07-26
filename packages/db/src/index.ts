@@ -264,6 +264,68 @@ export type RlsContext = {
   workspaceId?: string | null;
 };
 
+export type NestedAgentDepthPolicySource = "session" | "workspace" | "deployment" | "default";
+
+export type SessionDepthPolicy = {
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  maxNestedAgentDepthOverride: number | null;
+  effectiveMaxNestedAgentDepth: number;
+  nestedAgentDepthPolicySource: NestedAgentDepthPolicySource;
+  nestedAgentDepthPolicySessionId: string | null;
+};
+
+export type SessionSpawnDenialCode =
+  | "nested_agent_depth_exceeded"
+  | "nested_agent_depth_override_forbidden";
+
+export type SessionSpawnDenial = {
+  id: string;
+  accountId: string;
+  workspaceId: string;
+  parentSessionId: string | null;
+  rootSessionId: string | null;
+  currentDepth: number;
+  attemptedDepth: number;
+  effectiveMaxNestedAgentDepth: number;
+  requestedMaxNestedAgentDepthOverride: number | null;
+  policySource: NestedAgentDepthPolicySource;
+  policySessionId: string | null;
+  subjectId: string | null;
+  code: SessionSpawnDenialCode;
+  idempotencyKey: string | null;
+  createdAt: string;
+};
+
+export type NestedAgentDepthDeploymentPolicy = {
+  maxNestedAgentDepth: number;
+  policySource: "deployment" | "default";
+};
+
+export type DbSession = Session & SessionDepthPolicy;
+
+export type SessionCreateSuccessResult = {
+  denied: false;
+  session: DbSession;
+  created: boolean;
+};
+
+export type SessionCreateDeniedResult = {
+  denied: true;
+  created: false;
+  denial: SessionSpawnDenial;
+};
+
+export type SessionCreateResult = SessionCreateSuccessResult | SessionCreateDeniedResult;
+
+/** Thrown only after a denied create transaction has committed its evidence. */
+export class SessionSpawnDeniedDbError extends Error {
+  constructor(readonly denial: SessionSpawnDenial) {
+    super(denial.code);
+    this.name = "SessionSpawnDeniedDbError";
+  }
+}
+
 /**
  * RLS posture for the connection OpenGeni's query layer runs over (Step I, §7.7).
  *
@@ -1622,6 +1684,49 @@ export async function updateWorkspaceSettings(
   workspaceId: string,
   patch: Record<string, unknown>,
 ): Promise<Workspace> {
+  if (Object.prototype.hasOwnProperty.call(patch, "maxNestedAgentDepth")) {
+    const requested = patch.maxNestedAgentDepth;
+    if (
+      requested !== null &&
+      !(
+        typeof requested === "number" &&
+        Number.isSafeInteger(requested) &&
+        requested >= 0 &&
+        requested <= 2_147_483_647
+      )
+    ) {
+      throw new Error("maxNestedAgentDepth must be null or a non-negative 32-bit integer");
+    }
+    const nextPatch = { ...patch };
+    if (requested === null) delete nextPatch.maxNestedAgentDepth;
+    return await withWorkspaceRls(
+      db,
+      workspaceId,
+      async (scopedDb) =>
+        await scopedDb.transaction(async (tx) => {
+          // Keep settings writers in the same control-row -> workspace-row order
+          // as session admission. This makes a narrowing atomic with respect to
+          // every create that could otherwise observe a mixed policy snapshot.
+          await lockWorkspaceInferenceControl(tx as unknown as Database, workspaceId, "update");
+          const [row] = await tx
+            .update(schema.workspaces)
+            .set({
+              settings:
+                requested === null
+                  ? sql`(${schema.workspaces.settings} - 'maxNestedAgentDepth') || ${JSON.stringify(nextPatch)}::jsonb`
+                  : sql`${schema.workspaces.settings} || ${JSON.stringify(nextPatch)}::jsonb`,
+              updatedAt: new Date(),
+            })
+            .where(eq(schema.workspaces.id, workspaceId))
+            .returning();
+          if (!row) throw new Error(`Workspace not found: ${workspaceId}`);
+          return mapWorkspace(
+            row,
+            await workspaceControlProjection(tx as unknown as Database, workspaceId),
+          );
+        }),
+    );
+  }
   const [row] = await db
     .update(schema.workspaces)
     .set({
@@ -12722,16 +12827,25 @@ export async function listSessionMcpServersForRun(
   });
 }
 
-async function lockWorkspaceForSessionCreate(tx: Database, workspaceId: string): Promise<void> {
-  await lockWorkspaceInferenceControl(tx, workspaceId, "share");
-  const [workspace] = await tx
-    .select()
-    .from(schema.workspaces)
-    .where(eq(schema.workspaces.id, workspaceId))
+type DeploymentDepthPolicy = NestedAgentDepthDeploymentPolicy;
+
+/** Read the persisted deployment fallback; process configuration is not policy authority. */
+export async function getNestedAgentDepthDeploymentPolicy(
+  db: Database,
+): Promise<NestedAgentDepthDeploymentPolicy> {
+  const [row] = await db
+    .select({
+      maxNestedAgentDepth: schema.nestedAgentDepthConfiguration.maxNestedAgentDepth,
+      policySource: schema.nestedAgentDepthConfiguration.policySource,
+    })
+    .from(schema.nestedAgentDepthConfiguration)
+    .where(eq(schema.nestedAgentDepthConfiguration.singleton, true))
     .limit(1);
-  if (!workspace) {
-    throw new Error(`Workspace not found: ${workspaceId}`);
-  }
+  if (!row) throw new Error("Nested-agent deployment policy is not configured");
+  return {
+    maxNestedAgentDepth: row.maxNestedAgentDepth,
+    policySource: row.policySource,
+  };
 }
 
 type AgentSessionCreationActor = Extract<SessionCommandActor, { type: "agent_attempt" }>;
@@ -12773,146 +12887,523 @@ async function frozenSessionCreatorForInsert(
   return await frozenInitiatorForCommandActor(tx, input.workspaceId, input.createdByActor);
 }
 
-export async function createSession(
-  db: Database,
-  input: {
-    requestedSessionId?: string;
-    accountId: string;
-    workspaceId: string;
-    initialMessage: string;
-    initialTurnInstructions?: string | null;
-    resources: ResourceRef[];
-    tools?: ToolRef[];
-    toolPolicy?: SessionToolPolicy | null;
-    metadata: Record<string, unknown>;
-    /**
-     * Frozen creator authority. Legacy/test-only callers may omit this and get
-     * an explicit unattributed service sentinel; production producers must pass
-     * an authenticated subject or named service.
-     */
-    createdBy?: TurnInitiator;
-    createdByContext?: TurnInitiatorContext;
-    createdByActor?: AgentSessionCreationActor | null;
-    model: string;
-    sandboxBackend: SandboxBackend;
-    variableSetId?: string | null;
-    // The rig + frozen active rig version resolved at create (M3). Both omitted/null
-    // ⇒ a rig-less session (byte-for-byte today's behavior).
-    rigId?: string | null;
-    rigVersionId?: string | null;
-    firstPartyMcpPermissions?: Permission[] | null;
-    // Per-session agent persona/system instructions (org-visible, not a secret).
-    // Null/omitted ⇒ the session carries none (composed instructions unchanged).
-    instructions?: string | null;
-    parentSessionId?: string | null;
-    createIdempotencyKey?: string | null;
-    // The shared-sandbox group to join. Omit (or null) for a singleton group:
-    // the new row's own id is used (group === session), today's 1:1 behavior. A
-    // shared spawn passes the parent's sandboxGroupId so both run in ONE box.
-    sandboxGroupId?: string | null;
-    sandboxOs?: SandboxOs;
-    mcpServers?: CreateSessionMcpServerInput[];
-  },
-): Promise<Session> {
+export type SessionCreateInput = {
+  requestedSessionId?: string;
+  accountId: string;
+  workspaceId: string;
+  initialMessage: string;
+  initialTurnInstructions?: string | null;
+  resources: ResourceRef[];
+  tools?: ToolRef[];
+  toolPolicy?: SessionToolPolicy | null;
+  metadata: Record<string, unknown>;
+  createdBy?: TurnInitiator;
+  createdByContext?: TurnInitiatorContext;
+  createdByActor?: AgentSessionCreationActor | null;
+  model: string;
+  sandboxBackend: SandboxBackend;
+  variableSetId?: string | null;
+  rigId?: string | null;
+  rigVersionId?: string | null;
+  firstPartyMcpPermissions?: Permission[] | null;
+  instructions?: string | null;
+  parentSessionId?: string | null;
+  createIdempotencyKey?: string | null;
+  sandboxGroupId?: string | null;
+  sandboxOs?: SandboxOs;
+  mcpServers?: CreateSessionMcpServerInput[];
+  maxNestedAgentDepthOverride?: number | null;
+  allowNestedAgentDepthIncrease?: boolean;
+  subjectId?: string | null;
+};
+
+type SessionDepthDecision =
+  | ({ denied: false } & SessionDepthPolicy)
+  | {
+      denied: true;
+      id: string;
+      parentSessionId: string | null;
+      rootSessionId: string | null;
+      currentParentDepth: number;
+      attemptedDepth: number;
+      effectiveMaxNestedAgentDepth: number;
+      requestedOverride: number | null;
+      nestedAgentDepthPolicySource: NestedAgentDepthPolicySource;
+      nestedAgentDepthPolicySessionId: string | null;
+      code: SessionSpawnDenialCode;
+    };
+
+function nonNegativeIntegerOrNull(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= 0 &&
+    value <= 2_147_483_647
+    ? value
+    : null;
+}
+
+function requireDepthInput(value: number | null | undefined, name: string): number | null {
+  if (value === null || value === undefined) return null;
+  const normalized = nonNegativeIntegerOrNull(value);
+  if (normalized === null) {
+    throw new Error(`${name} must be a non-negative 32-bit integer`);
+  }
+  return normalized;
+}
+
+function workspaceDepthPolicy(
+  workspace: typeof schema.workspaces.$inferSelect,
+  deploymentPolicy: DeploymentDepthPolicy,
+): Pick<
+  SessionDepthPolicy,
+  | "effectiveMaxNestedAgentDepth"
+  | "nestedAgentDepthPolicySource"
+  | "nestedAgentDepthPolicySessionId"
+> {
+  const workspaceValue = nonNegativeIntegerOrNull(workspace.settings?.maxNestedAgentDepth);
+  if (workspaceValue !== null) {
+    return {
+      effectiveMaxNestedAgentDepth: workspaceValue,
+      nestedAgentDepthPolicySource: "workspace",
+      nestedAgentDepthPolicySessionId: null,
+    };
+  }
+  return {
+    effectiveMaxNestedAgentDepth: deploymentPolicy.maxNestedAgentDepth,
+    nestedAgentDepthPolicySource: deploymentPolicy.policySource,
+    nestedAgentDepthPolicySessionId: null,
+  };
+}
+
+async function lockWorkspaceForSessionCreate(
+  tx: Database,
+  workspaceId: string,
+  accountId: string,
+): Promise<{
+  workspace: typeof schema.workspaces.$inferSelect;
+  deploymentPolicy: DeploymentDepthPolicy;
+}> {
+  await lockWorkspaceInferenceControl(tx, workspaceId, "share");
+  const [workspace] = await tx
+    .select()
+    .from(schema.workspaces)
+    .where(eq(schema.workspaces.id, workspaceId))
+    .limit(1);
+  if (!workspace) {
+    throw new Error(`Workspace not found: ${workspaceId}`);
+  }
+  if (workspace.accountId !== accountId) {
+    throw new Error(`Workspace ${workspaceId} does not belong to account ${accountId}`);
+  }
+  // PostgreSQL requires UPDATE privilege for SELECT ... FOR SHARE. The app role
+  // deliberately cannot mutate this singleton, so use the target-schema-local
+  // SECURITY DEFINER lock/read capability; its row lock remains held by this
+  // outer transaction.
+  const [deploymentPolicy] = await tx.execute<DeploymentDepthPolicy>(sql`
+    select
+      max_nested_agent_depth as "maxNestedAgentDepth",
+      policy_source as "policySource"
+    from lock_nested_agent_depth_configuration()
+  `);
+  if (!deploymentPolicy) {
+    throw new Error("Nested-agent deployment policy is not configured");
+  }
+  return { workspace, deploymentPolicy };
+}
+
+function mapSessionSpawnDenial(
+  row: typeof schema.sessionSpawnDenials.$inferSelect,
+): SessionSpawnDenial {
+  return {
+    id: row.id,
+    accountId: row.accountId,
+    workspaceId: row.workspaceId,
+    parentSessionId: row.parentSessionId ?? null,
+    rootSessionId: row.rootSessionId ?? null,
+    currentDepth: row.currentDepth,
+    attemptedDepth: row.attemptedDepth,
+    effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,
+    requestedMaxNestedAgentDepthOverride: row.requestedMaxNestedAgentDepthOverride ?? null,
+    policySource: row.policySource as NestedAgentDepthPolicySource,
+    policySessionId: row.policySessionId ?? null,
+    subjectId: row.subjectId ?? null,
+    code: row.code as SessionSpawnDenialCode,
+    idempotencyKey: row.idempotencyKey ?? null,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+async function resolveSessionDepthDecision(
+  tx: Database,
+  input: SessionCreateInput,
+  id: string,
+  workspace: typeof schema.workspaces.$inferSelect,
+  deploymentPolicy: DeploymentDepthPolicy,
+): Promise<SessionDepthDecision> {
+  const parentSessionId = input.parentSessionId ?? null;
+  const requestedOverride = requireDepthInput(
+    input.maxNestedAgentDepthOverride,
+    "maxNestedAgentDepthOverride",
+  );
+  const explicitOverride = requestedOverride !== null;
+  let parent: typeof schema.sessions.$inferSelect | undefined;
+  if (parentSessionId) {
+    [parent] = await tx
+      .select()
+      .from(schema.sessions)
+      .where(
+        and(
+          eq(schema.sessions.workspaceId, input.workspaceId),
+          eq(schema.sessions.id, parentSessionId),
+        ),
+      )
+      .for("share")
+      .limit(1);
+    if (!parent) {
+      throw new Error(`Parent session not found: ${parentSessionId}`);
+    }
+  }
+
+  const currentParentDepth = parent?.nestedAgentDepth ?? 0;
+  const attemptedDepth = parent ? currentParentDepth + 1 : 0;
+  const rootSessionId = parent?.rootSessionId ?? null;
+  const inheritedPolicy =
+    parent?.nestedAgentDepthPolicySource === "session"
+      ? {
+          effectiveMaxNestedAgentDepth: parent.effectiveMaxNestedAgentDepth,
+          nestedAgentDepthPolicySource:
+            parent.nestedAgentDepthPolicySource as NestedAgentDepthPolicySource,
+          nestedAgentDepthPolicySessionId: parent.nestedAgentDepthPolicySessionId ?? null,
+        }
+      : workspaceDepthPolicy(workspace, deploymentPolicy);
+
+  if (
+    explicitOverride &&
+    requestedOverride > inheritedPolicy.effectiveMaxNestedAgentDepth &&
+    input.allowNestedAgentDepthIncrease !== true
+  ) {
+    return {
+      denied: true,
+      id,
+      parentSessionId,
+      rootSessionId,
+      currentParentDepth,
+      attemptedDepth,
+      effectiveMaxNestedAgentDepth: inheritedPolicy.effectiveMaxNestedAgentDepth,
+      requestedOverride,
+      nestedAgentDepthPolicySource: inheritedPolicy.nestedAgentDepthPolicySource,
+      nestedAgentDepthPolicySessionId: inheritedPolicy.nestedAgentDepthPolicySessionId,
+      code: "nested_agent_depth_override_forbidden",
+    };
+  }
+
+  const selected = explicitOverride
+    ? {
+        effectiveMaxNestedAgentDepth: requestedOverride,
+        nestedAgentDepthPolicySource: "session" as const,
+        nestedAgentDepthPolicySessionId: id,
+      }
+    : inheritedPolicy;
+  if (attemptedDepth > selected.effectiveMaxNestedAgentDepth) {
+    return {
+      denied: true,
+      id,
+      parentSessionId,
+      rootSessionId,
+      currentParentDepth,
+      attemptedDepth,
+      effectiveMaxNestedAgentDepth: selected.effectiveMaxNestedAgentDepth,
+      requestedOverride,
+      nestedAgentDepthPolicySource: selected.nestedAgentDepthPolicySource,
+      nestedAgentDepthPolicySessionId:
+        selected.nestedAgentDepthPolicySource === "session" &&
+        selected.nestedAgentDepthPolicySessionId === id
+          ? null
+          : selected.nestedAgentDepthPolicySessionId,
+      code: "nested_agent_depth_exceeded",
+    };
+  }
+
+  return {
+    denied: false,
+    rootSessionId: rootSessionId ?? id,
+    nestedAgentDepth: attemptedDepth,
+    maxNestedAgentDepthOverride: explicitOverride ? requestedOverride : null,
+    effectiveMaxNestedAgentDepth: selected.effectiveMaxNestedAgentDepth,
+    nestedAgentDepthPolicySource: selected.nestedAgentDepthPolicySource,
+    nestedAgentDepthPolicySessionId: selected.nestedAgentDepthPolicySessionId,
+  };
+}
+
+async function existingSessionForCreateKey(
+  tx: Database,
+  workspaceId: string,
+  createIdempotencyKey: string,
+): Promise<typeof schema.sessions.$inferSelect | undefined> {
+  const [existing] = await tx
+    .select()
+    .from(schema.sessions)
+    .where(
+      and(
+        eq(schema.sessions.workspaceId, workspaceId),
+        eq(schema.sessions.createIdempotencyKey, createIdempotencyKey),
+      ),
+    )
+    .limit(1);
+  return existing;
+}
+
+async function lockSessionCreateIdempotencyKey(
+  tx: Database,
+  workspaceId: string,
+  createIdempotencyKey: string,
+): Promise<void> {
+  // Successes live in `sessions` while denials live in `session_spawn_denials`;
+  // their separate unique indexes cannot by themselves serialize a success
+  // racing a denial. The database guard trigger is authoritative for every
+  // writer; this transaction-scoped advisory lock keeps application callers
+  // on one workspace/key path without serializing unrelated workspace creates.
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtext(${`session-create:${workspaceId}:${createIdempotencyKey}`}))`,
+  );
+}
+
+async function existingSpawnDenialForKey(
+  tx: Database,
+  workspaceId: string,
+  createIdempotencyKey: string,
+): Promise<SessionSpawnDenial | null> {
+  const [existing] = await tx
+    .select()
+    .from(schema.sessionSpawnDenials)
+    .where(
+      and(
+        eq(schema.sessionSpawnDenials.workspaceId, workspaceId),
+        eq(schema.sessionSpawnDenials.idempotencyKey, createIdempotencyKey),
+      ),
+    )
+    .limit(1);
+  return existing ? mapSessionSpawnDenial(existing) : null;
+}
+
+async function recordSessionSpawnDenial(
+  tx: Database,
+  input: SessionCreateInput,
+  decision: Extract<SessionDepthDecision, { denied: true }>,
+): Promise<SessionSpawnDenial> {
+  const [inserted] = await tx
+    .insert(schema.sessionSpawnDenials)
+    .values({
+      id: decision.id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      parentSessionId: decision.parentSessionId,
+      rootSessionId: decision.rootSessionId,
+      currentDepth: decision.currentParentDepth,
+      attemptedDepth: decision.attemptedDepth,
+      effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
+      requestedMaxNestedAgentDepthOverride: decision.requestedOverride,
+      policySource: decision.nestedAgentDepthPolicySource,
+      policySessionId: decision.nestedAgentDepthPolicySessionId,
+      subjectId: input.subjectId ?? null,
+      code: decision.code,
+      idempotencyKey: input.createIdempotencyKey ?? null,
+    })
+    .onConflictDoNothing({
+      target: [schema.sessionSpawnDenials.workspaceId, schema.sessionSpawnDenials.idempotencyKey],
+      where: sql`${schema.sessionSpawnDenials.idempotencyKey} is not null`,
+    })
+    .returning();
+  if (inserted) return mapSessionSpawnDenial(inserted);
+  const key = input.createIdempotencyKey;
+  if (key !== null && key !== undefined) {
+    const existing = await existingSpawnDenialForKey(tx, input.workspaceId, key);
+    if (existing) return existing;
+  }
+  throw new Error("Failed to record session spawn denial");
+}
+
+async function createSessionInTransaction(
+  tx: Database,
+  input: SessionCreateInput,
+  id: string,
+): Promise<SessionCreateResult> {
+  const createIdempotencyKey = input.createIdempotencyKey ?? null;
+  const { workspace, deploymentPolicy } = await lockWorkspaceForSessionCreate(
+    tx,
+    input.workspaceId,
+    input.accountId,
+  );
+  if (createIdempotencyKey !== null) {
+    // Keyed admission retains the control -> advisory order used by old
+    // binaries during the rolling migration. The database depth trigger takes
+    // the same advisory lock after its control-row prefix, so an old writer
+    // holding control cannot deadlock a new writer holding the advisory lock.
+    await lockSessionCreateIdempotencyKey(tx, input.workspaceId, createIdempotencyKey);
+    // A committed success always wins over a denial on a later retry.
+    const existing = await existingSessionForCreateKey(tx, input.workspaceId, createIdempotencyKey);
+    if (existing) {
+      // A keyed replay is allowed to return the original session only when a
+      // caller-provided identity agrees with the winning request. Check this
+      // before any first-turn repair so a retry cannot hide a requested-ID
+      // conflict behind an apparently successful replay.
+      if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+        throw new SessionIdConflictError(input.requestedSessionId);
+      }
+      const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+        existing.id,
+      ]);
+      return {
+        session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+        created: false,
+        denied: false,
+      };
+    }
+    const existingDenial = await existingSpawnDenialForKey(
+      tx,
+      input.workspaceId,
+      createIdempotencyKey,
+    );
+    if (existingDenial) {
+      return {
+        created: false,
+        denied: true,
+        denial: existingDenial,
+      };
+    }
+  }
+
+  const decision = await resolveSessionDepthDecision(tx, input, id, workspace, deploymentPolicy);
+  if (decision.denied) {
+    return {
+      created: false,
+      denied: true,
+      denial: await recordSessionSpawnDenial(tx, input, decision),
+    };
+  }
+
+  // Do not run mutable creator validation before keyed denial replay above.
+  const frozenCreator = await frozenSessionCreatorForInsert(tx, input);
+  const [inserted] = await tx
+    .insert(schema.sessions)
+    .values({
+      id,
+      accountId: input.accountId,
+      workspaceId: input.workspaceId,
+      initialMessage: input.initialMessage,
+      initialTurnInstructions: input.initialTurnInstructions ?? null,
+      resources: input.resources,
+      tools: input.tools ?? [],
+      toolPolicy: input.toolPolicy ?? null,
+      metadata: input.metadata,
+      ...creatorColumns(frozenCreator),
+      model: input.model,
+      sandboxBackend: input.sandboxBackend,
+      sandboxOs: input.sandboxOs ?? "linux",
+      sandboxGroupId: input.sandboxGroupId ?? id,
+      variableSetId: input.variableSetId ?? null,
+      rigId: input.rigId ?? null,
+      rigVersionId: input.rigVersionId ?? null,
+      firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
+      instructions: input.instructions ?? null,
+      parentSessionId: input.parentSessionId ?? null,
+      createIdempotencyKey,
+      rootSessionId: decision.rootSessionId,
+      nestedAgentDepth: decision.nestedAgentDepth,
+      maxNestedAgentDepthOverride: decision.maxNestedAgentDepthOverride,
+      effectiveMaxNestedAgentDepth: decision.effectiveMaxNestedAgentDepth,
+      nestedAgentDepthPolicySource: decision.nestedAgentDepthPolicySource,
+      nestedAgentDepthPolicySessionId: decision.nestedAgentDepthPolicySessionId,
+      status: "queued",
+    })
+    .onConflictDoNothing()
+    .returning();
+  if (!inserted) {
+    if (createIdempotencyKey) {
+      const existing = await existingSessionForCreateKey(
+        tx,
+        input.workspaceId,
+        createIdempotencyKey,
+      );
+      if (existing) {
+        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
+          throw new SessionIdConflictError(input.requestedSessionId);
+        }
+        const grouped = await sessionMcpServerMetadataForSessions(tx, input.workspaceId, [
+          existing.id,
+        ]);
+        return {
+          session: await mapSessionWithControl(tx, existing, grouped.get(existing.id) ?? []),
+          created: false,
+          denied: false,
+        };
+      }
+      // A BEFORE guard trigger suppresses a losing source row instead of
+      // aborting the transaction with 23505. The durable cross-outcome ledger
+      // may therefore have selected a denial; replay it just as the initial
+      // admission check does, rather than reporting a phantom create failure.
+      const existingDenial = await existingSpawnDenialForKey(
+        tx,
+        input.workspaceId,
+        createIdempotencyKey,
+      );
+      if (existingDenial) {
+        return {
+          created: false,
+          denied: true,
+          denial: existingDenial,
+        };
+      }
+    }
+    if (input.requestedSessionId) throw new SessionIdConflictError(input.requestedSessionId);
+    throw new Error("Failed to create session");
+  }
+  const mcpServers = await insertSessionMcpServers(tx, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    sessionId: inserted.id,
+    servers: input.mcpServers ?? [],
+  });
+  return {
+    session: await mapSessionWithControl(tx, inserted, mcpServers),
+    created: true,
+    denied: false,
+  };
+}
+
+export async function createSession(db: Database, input: SessionCreateInput): Promise<DbSession> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
   const id = input.requestedSessionId ?? crypto.randomUUID();
-  return await withRlsContext(
+  const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await lockWorkspaceForSessionCreate(tx as unknown as Database, input.workspaceId);
-        const frozenCreator = await frozenSessionCreatorForInsert(tx as unknown as Database, input);
-        const [row] = await tx
-          .insert(schema.sessions)
-          .values({
-            id,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            initialMessage: input.initialMessage,
-            initialTurnInstructions: input.initialTurnInstructions ?? null,
-            resources: input.resources,
-            tools: input.tools ?? [],
-            toolPolicy: input.toolPolicy ?? null,
-            metadata: input.metadata,
-            ...creatorColumns(frozenCreator),
-            model: input.model,
-            sandboxBackend: input.sandboxBackend,
-            sandboxOs: input.sandboxOs ?? "linux",
-            sandboxGroupId: input.sandboxGroupId ?? id,
-            variableSetId: input.variableSetId ?? null,
-            rigId: input.rigId ?? null,
-            rigVersionId: input.rigVersionId ?? null,
-            firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-            instructions: input.instructions ?? null,
-            parentSessionId: input.parentSessionId ?? null,
-            createIdempotencyKey: input.createIdempotencyKey ?? null,
-            status: "queued",
-          })
-          .onConflictDoNothing({ target: schema.sessions.id })
-          .returning();
-        if (!row) {
-          if (input.requestedSessionId) {
-            throw new SessionIdConflictError(input.requestedSessionId);
-          }
-          throw new Error("Failed to create session");
-        }
-        const mcpServers = await insertSessionMcpServers(tx as unknown as Database, {
-          accountId: input.accountId,
-          workspaceId: input.workspaceId,
-          sessionId: row.id,
-          servers: input.mcpServers ?? [],
-        });
-        return await mapSessionWithControl(tx as unknown as Database, row, mcpServers);
-      }),
+      await scopedDb.transaction(
+        async (tx) => await createSessionInTransaction(tx as unknown as Database, input, id),
+      ),
   );
+  if (result.denied) {
+    // Throw only after withRlsContext's outer transaction commits the denial.
+    throw new SessionSpawnDeniedDbError(result.denial);
+  }
+  return result.session;
 }
 
 /**
  * Inserts a session under a workspace-scoped CREATE idempotency key, collapsing
- * a concurrent race on the same key to a single row. On the unique-violation
- * the conflicting insert does nothing (`onConflictDoNothing` on the partial
- * unique index) and the now-existing winning row is fetched and returned, so
- * two near-simultaneous creates with the same key yield ONE session and both
- * callers see the same id. `created` distinguishes the winner (true: this call
- * inserted and must run the rest of the start flow) from the loser/dup (false:
- * the row already existed and must be returned as-is).
+ * a concurrent race on the same key to a single row. A losing source insert
+ * is either handled by `onConflictDoNothing` on the partial unique index or
+ * suppressed by the database BEFORE guard, and the durable winner is fetched
+ * and returned. Two near-simultaneous creates with the same key therefore
+ * yield ONE session and both callers see the same id. `created` distinguishes
+ * the winner (true: this call inserted and must run the rest of the start flow)
+ * from the loser/dup (false: the row already existed and must be returned as-is).
  */
-export async function createSessionWithIdempotencyKey(
+export async function createSessionWithIdempotencyKeyResult(
   db: Database,
-  input: {
-    requestedSessionId?: string;
-    accountId: string;
-    workspaceId: string;
-    initialMessage: string;
-    initialTurnInstructions?: string | null;
-    resources: ResourceRef[];
-    tools?: ToolRef[];
-    toolPolicy?: SessionToolPolicy | null;
-    metadata: Record<string, unknown>;
-    createdBy?: TurnInitiator;
-    createdByContext?: TurnInitiatorContext;
-    createdByActor?: AgentSessionCreationActor | null;
-    model: string;
-    sandboxBackend: SandboxBackend;
-    variableSetId?: string | null;
-    // The rig + frozen active rig version resolved at create (M3). Both omitted/null
-    // ⇒ a rig-less session (byte-for-byte today's behavior).
-    rigId?: string | null;
-    rigVersionId?: string | null;
-    firstPartyMcpPermissions?: Permission[] | null;
-    // Per-session agent persona/system instructions (org-visible, not a secret).
-    instructions?: string | null;
-    parentSessionId?: string | null;
-    createIdempotencyKey: string;
-    // The shared-sandbox group to join. Omit (or null) for a singleton group
-    // (group === the new row's own id); a shared spawn passes the parent's group.
-    sandboxGroupId?: string | null;
-    sandboxOs?: SandboxOs;
-    mcpServers?: CreateSessionMcpServerInput[];
-  },
-): Promise<{ session: Session; created: boolean }> {
+  input: SessionCreateInput & { createIdempotencyKey: string },
+): Promise<SessionCreateResult> {
   // Generate the id up front so the same uuid can seed sandbox_group_id for a
   // singleton group (sandbox_group_id cannot SQL-default to id).
   const id = input.requestedSessionId ?? crypto.randomUUID();
@@ -12920,94 +13411,26 @@ export async function createSessionWithIdempotencyKey(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
-      await scopedDb.transaction(async (tx) => {
-        await lockWorkspaceForSessionCreate(tx as unknown as Database, input.workspaceId);
-        const frozenCreator = await frozenSessionCreatorForInsert(tx as unknown as Database, input);
-        const [inserted] = await tx
-          .insert(schema.sessions)
-          .values({
-            id,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            initialMessage: input.initialMessage,
-            initialTurnInstructions: input.initialTurnInstructions ?? null,
-            resources: input.resources,
-            tools: input.tools ?? [],
-            toolPolicy: input.toolPolicy ?? null,
-            metadata: input.metadata,
-            ...creatorColumns(frozenCreator),
-            model: input.model,
-            sandboxBackend: input.sandboxBackend,
-            sandboxOs: input.sandboxOs ?? "linux",
-            sandboxGroupId: input.sandboxGroupId ?? id,
-            variableSetId: input.variableSetId ?? null,
-            rigId: input.rigId ?? null,
-            rigVersionId: input.rigVersionId ?? null,
-            firstPartyMcpPermissions: input.firstPartyMcpPermissions ?? null,
-            instructions: input.instructions ?? null,
-            parentSessionId: input.parentSessionId ?? null,
-            createIdempotencyKey: input.createIdempotencyKey,
-            status: "queued",
-          })
-          // No target deliberately handles either the idempotency-key race or a
-          // caller-preallocated primary-key collision. We classify the exact
-          // winner below instead of turning the latter into an opaque 500.
-          .onConflictDoNothing()
-          .returning();
-        if (inserted) {
-          const mcpServers = await insertSessionMcpServers(tx as unknown as Database, {
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: inserted.id,
-            servers: input.mcpServers ?? [],
-          });
-          return {
-            session: await mapSessionWithControl(tx as unknown as Database, inserted, mcpServers),
-            created: true,
-          };
-        }
-        const [existing] = await tx
-          .select()
-          .from(schema.sessions)
-          .where(
-            and(
-              eq(schema.sessions.workspaceId, input.workspaceId),
-              eq(schema.sessions.createIdempotencyKey, input.createIdempotencyKey),
-            ),
-          )
-          .limit(1);
-        if (!existing) {
-          if (input.requestedSessionId) {
-            // The insert did nothing and no row owns this idempotency key. With
-            // a caller-supplied primary key, the only remaining conflict is that
-            // UUID. Do not try to confirm it through workspace RLS: an owner in
-            // another workspace is intentionally invisible but must still map
-            // to the same non-leaking 409.
-            throw new SessionIdConflictError(input.requestedSessionId);
-          }
-          // No row inserted and none found: the conflict target did not actually
-          // collide (should never happen for a present key) — surface it rather
-          // than silently returning a phantom.
-          throw new Error("Failed to create session under idempotency key");
-        }
-        if (input.requestedSessionId && existing.id !== input.requestedSessionId) {
-          throw new SessionIdConflictError(input.requestedSessionId);
-        }
-        const grouped = await sessionMcpServerMetadataForSessions(
-          tx as unknown as Database,
-          input.workspaceId,
-          [existing.id],
-        );
-        return {
-          session: await mapSessionWithControl(
-            tx as unknown as Database,
-            existing,
-            grouped.get(existing.id) ?? [],
-          ),
-          created: false,
-        };
-      }),
+      await scopedDb.transaction(
+        async (tx) => await createSessionInTransaction(tx as unknown as Database, input, id),
+      ),
   );
+}
+
+/**
+ * Backward-compatible keyed create API. Denials are committed by the
+ * admission transaction and then surfaced as SessionSpawnDeniedDbError;
+ * callers that need a structured result use createSessionWithIdempotencyKeyResult.
+ */
+export async function createSessionWithIdempotencyKey(
+  db: Database,
+  input: SessionCreateInput & { createIdempotencyKey: string },
+): Promise<SessionCreateSuccessResult> {
+  const result = await createSessionWithIdempotencyKeyResult(db, input);
+  if (result.denied) {
+    throw new SessionSpawnDeniedDbError(result.denial);
+  }
+  return result;
 }
 
 export async function getSessionByCreateIdempotencyKey(
@@ -13046,6 +13469,71 @@ export async function getSession(
     if (!row) return null;
     const grouped = await sessionMcpServerMetadataForSessions(scopedDb, workspaceId, [row.id]);
     return await mapSessionWithControl(scopedDb, row, grouped.get(row.id) ?? []);
+  });
+}
+
+export async function getSessionSpawnDenial(
+  db: Database,
+  workspaceId: string,
+  denialId: string,
+): Promise<SessionSpawnDenial | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionSpawnDenials)
+      .where(
+        and(
+          eq(schema.sessionSpawnDenials.workspaceId, workspaceId),
+          eq(schema.sessionSpawnDenials.id, denialId),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionSpawnDenial(row) : null;
+  });
+}
+
+export async function getSessionSpawnDenialByIdempotencyKey(
+  db: Database,
+  workspaceId: string,
+  createIdempotencyKey: string,
+): Promise<SessionSpawnDenial | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.sessionSpawnDenials)
+      .where(
+        and(
+          eq(schema.sessionSpawnDenials.workspaceId, workspaceId),
+          eq(schema.sessionSpawnDenials.idempotencyKey, createIdempotencyKey),
+        ),
+      )
+      .limit(1);
+    return row ? mapSessionSpawnDenial(row) : null;
+  });
+}
+
+export async function listSessionSpawnDenials(
+  db: Database,
+  workspaceId: string,
+  options: { limit?: number; parentSessionId?: string | null } = {},
+): Promise<SessionSpawnDenial[]> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const rows = await scopedDb
+      .select()
+      .from(schema.sessionSpawnDenials)
+      .where(
+        and(
+          eq(schema.sessionSpawnDenials.workspaceId, workspaceId),
+          options.parentSessionId === undefined
+            ? undefined
+            : options.parentSessionId === null
+              ? isNull(schema.sessionSpawnDenials.parentSessionId)
+              : eq(schema.sessionSpawnDenials.parentSessionId, options.parentSessionId),
+        ),
+      )
+      .orderBy(desc(schema.sessionSpawnDenials.createdAt), desc(schema.sessionSpawnDenials.id))
+      .limit(Math.max(1, Math.min(options.limit ?? 100, 1000)));
+    return rows.map(mapSessionSpawnDenial);
   });
 }
 
@@ -29217,6 +29705,12 @@ function mapSession(
     firstPartyMcpPermissions: (row.firstPartyMcpPermissions as Permission[] | null) ?? null,
     mcpServers,
     parentSessionId: row.parentSessionId ?? null,
+    rootSessionId: row.rootSessionId,
+    nestedAgentDepth: row.nestedAgentDepth,
+    maxNestedAgentDepthOverride: row.maxNestedAgentDepthOverride ?? null,
+    effectiveMaxNestedAgentDepth: row.effectiveMaxNestedAgentDepth,
+    nestedAgentDepthPolicySource: row.nestedAgentDepthPolicySource as NestedAgentDepthPolicySource,
+    nestedAgentDepthPolicySessionId: row.nestedAgentDepthPolicySessionId ?? null,
     createIdempotencyKey: row.createIdempotencyKey ?? null,
     temporalWorkflowId: row.temporalWorkflowId,
     activeTurnId: row.activeTurnId,
