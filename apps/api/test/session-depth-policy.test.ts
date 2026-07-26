@@ -419,78 +419,83 @@ describe("nested-agent depth at HTTP/MCP creation boundaries (real PostgreSQL)",
 
   test("scheduled-task agent policy requires admin only for increases", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace("scheduled agent depth policy");
-    const workflow = new WorkflowStub();
-    const app = createApp(
-      dependencies(
-        testSettings({
-          databaseUrl: shared!.appUrl,
-          productAccessMode: "managed",
-          delegationSecret: DELEGATION_SECRET,
-          sandboxBackend: "none",
-          maxNestedAgentDepth: 1,
-        }),
-        workflow,
-      ),
-    );
-    const managerAuth = await bearer(workspace, "schedule-manager", [
-      "workspace:read",
-      "scheduled_tasks:manage",
-    ]);
-    const body = (maxNestedAgentDepth: number) => ({
-      name: `depth ${maxNestedAgentDepth}`,
-      schedule: { type: "once", runAt: "2035-01-01T00:00:00.000Z", timeZone: "UTC" },
-      agentConfig: { prompt: "scheduled depth policy", maxNestedAgentDepth },
-    });
-    const forbidden = await app.request(path(workspace.workspaceId, "/scheduled-tasks"), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: managerAuth },
-      body: JSON.stringify(body(2)),
-    });
-    expect(forbidden.status).toBe(403);
-    const [countAfterForbidden] = await admin<{ count: number }[]>`
-      select count(*)::int as count from scheduled_tasks where workspace_id = ${workspace.workspaceId}`;
-    expect(countAfterForbidden?.count).toBe(0);
-
-    const adminAuth = await bearer(workspace, "schedule-admin", ["workspace:admin"]);
-    const createdResponse = await app.request(path(workspace.workspaceId, "/scheduled-tasks"), {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: adminAuth },
-      body: JSON.stringify(body(5)),
-    });
-    expect(createdResponse.status).toBe(201);
-    const created = (await createdResponse.json()) as {
-      id: string;
-      agentConfig: { maxNestedAgentDepth?: number };
-    };
-    expect(created.agentConfig.maxNestedAgentDepth).toBe(5);
-
-    const lowered = await app.request(
-      path(workspace.workspaceId, `/scheduled-tasks/${created.id}`),
-      {
-        method: "PATCH",
+    await migrate(shared!.adminUrl, undefined, { maxNestedAgentDepth: 1 });
+    try {
+      const workspace = await freshWorkspace("scheduled agent depth policy");
+      const workflow = new WorkflowStub();
+      const app = createApp(
+        dependencies(
+          testSettings({
+            databaseUrl: shared!.appUrl,
+            productAccessMode: "managed",
+            delegationSecret: DELEGATION_SECRET,
+            sandboxBackend: "none",
+            maxNestedAgentDepth: 1,
+          }),
+          workflow,
+        ),
+      );
+      const managerAuth = await bearer(workspace, "schedule-manager", [
+        "workspace:read",
+        "scheduled_tasks:manage",
+      ]);
+      const body = (maxNestedAgentDepth: number) => ({
+        name: `depth ${maxNestedAgentDepth}`,
+        schedule: { type: "once", runAt: "2035-01-01T00:00:00.000Z", timeZone: "UTC" },
+        agentConfig: { prompt: "scheduled depth policy", maxNestedAgentDepth },
+      });
+      const forbidden = await app.request(path(workspace.workspaceId, "/scheduled-tasks"), {
+        method: "POST",
         headers: { "content-type": "application/json", authorization: managerAuth },
-        body: JSON.stringify({
-          agentConfig: { prompt: "lowered depth policy", maxNestedAgentDepth: 1 },
-        }),
-      },
-    );
-    expect(lowered.status).toBe(200);
-    expect(await lowered.json()).toMatchObject({ agentConfig: { maxNestedAgentDepth: 1 } });
+        body: JSON.stringify(body(2)),
+      });
+      expect(forbidden.status).toBe(403);
+      const [countAfterForbidden] = await admin<{ count: number }[]>`
+        select count(*)::int as count from scheduled_tasks where workspace_id = ${workspace.workspaceId}`;
+      expect(countAfterForbidden?.count).toBe(0);
 
-    const forbiddenUpdate = await app.request(
-      path(workspace.workspaceId, `/scheduled-tasks/${created.id}`),
-      {
-        method: "PATCH",
-        headers: { "content-type": "application/json", authorization: managerAuth },
-        body: JSON.stringify({
-          agentConfig: { prompt: "forbidden increase", maxNestedAgentDepth: 2 },
-        }),
-      },
-    );
-    expect(forbiddenUpdate.status).toBe(403);
-    expect(
-      (await getScheduledTask(client.db, workspace.workspaceId, created.id))?.agentConfig,
-    ).toMatchObject({ maxNestedAgentDepth: 1 });
+      const adminAuth = await bearer(workspace, "schedule-admin", ["workspace:admin"]);
+      const createdResponse = await app.request(path(workspace.workspaceId, "/scheduled-tasks"), {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: adminAuth },
+        body: JSON.stringify(body(5)),
+      });
+      expect(createdResponse.status).toBe(201);
+      const created = (await createdResponse.json()) as {
+        id: string;
+        agentConfig: { maxNestedAgentDepth?: number };
+      };
+      expect(created.agentConfig.maxNestedAgentDepth).toBe(5);
+
+      const lowered = await app.request(
+        path(workspace.workspaceId, `/scheduled-tasks/${created.id}`),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json", authorization: managerAuth },
+          body: JSON.stringify({
+            agentConfig: { prompt: "lowered depth policy", maxNestedAgentDepth: 1 },
+          }),
+        },
+      );
+      expect(lowered.status).toBe(200);
+      expect(await lowered.json()).toMatchObject({ agentConfig: { maxNestedAgentDepth: 1 } });
+
+      const forbiddenUpdate = await app.request(
+        path(workspace.workspaceId, `/scheduled-tasks/${created.id}`),
+        {
+          method: "PATCH",
+          headers: { "content-type": "application/json", authorization: managerAuth },
+          body: JSON.stringify({
+            agentConfig: { prompt: "forbidden increase", maxNestedAgentDepth: 2 },
+          }),
+        },
+      );
+      expect(forbiddenUpdate.status).toBe(403);
+      expect(
+        (await getScheduledTask(client.db, workspace.workspaceId, created.id))?.agentConfig,
+      ).toMatchObject({ maxNestedAgentDepth: 1 });
+    } finally {
+      await migrate(shared!.adminUrl, undefined, {});
+    }
   }, 60_000);
 });
