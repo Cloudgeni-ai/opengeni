@@ -67,6 +67,7 @@ import {
   getSessionForSubject,
   getSessionGoal,
   getSessionHumanInputRequest,
+  getSessionGoalWithContinuation,
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
@@ -90,7 +91,7 @@ import {
   SessionListSnapshotLimitError,
   decodeSessionListCursor,
   revokeViewer,
-  setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
   NewSessionDraftConflictError,
@@ -675,7 +676,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const goal = await getSessionGoal(db, workspaceId, sessionId);
+    const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
     if (!goal) {
       throw new HTTPException(404, { message: "session goal not found" });
     }
@@ -698,27 +699,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       });
     }
     if (payload.status === "paused") {
-      const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
+      const { goal, events } = await setSessionGoalStatusWithEvent(db, workspaceId, sessionId, {
         status: "paused",
         ...(payload.rationale ? { rationale: payload.rationale } : {}),
         pausedReason: "api",
+        event: {
+          type: "goal.paused",
+          actor: "api",
+          reason: "api",
+          ...(payload.rationale ? { rationale: payload.rationale } : {}),
+        },
       });
-      if (changed) {
-        await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-          {
-            type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "api",
-              reason: "api",
-              ...(payload.rationale ? { rationale: payload.rationale } : {}),
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
-          },
-        ]);
+      if (events.length > 0) {
+        await bus.publish(workspaceId, sessionId, events);
       }
-      return c.json(goal);
+      return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
     }
     // Resume: only valid from paused; resets counters and re-arms the loop.
     if (existing.status !== "paused") {
@@ -726,32 +721,24 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         message: `session goal is ${existing.status}; only paused goals can be resumed`,
       });
     }
-    const { goal, changed, workflowWakeRevision } = await setSessionGoalStatus(
+    const { goal, changed, workflowWakeRevision, events } = await setSessionGoalStatusWithEvent(
       db,
       workspaceId,
       sessionId,
       {
         status: "active",
+        event: { type: "goal.resumed", actor: "api" },
       },
     );
     // `changed` guards the racing-PATCH case: both requests can pass the
     // status pre-check, but only the transition winner emits and wakes.
     if (changed) {
-      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-        {
-          type: "goal.resumed",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            version: goal.version,
-            actor: "api",
-          },
-        },
-      ]);
-      // signalWithStart restarts an eligible idle workflow so maybeContinueGoal
-      // fires. A closed workspace/session gate keeps the resumed goal durable
-      // and inert until that gate's own Resume mutation commits its wake.
+      if (events.length > 0) {
+        await bus.publish(workspaceId, sessionId, events);
+      }
+      // signalWithStart restarts an eligible idle workflow so the durable goal
+      // revision is evaluated. A closed workspace/session gate keeps the
+      // revision inert until that gate's own Resume mutation commits its wake.
       if (workflowWakeRevision !== null) {
         await workflowClient.wakeSessionWorkflow({
           accountId: grant.accountId,
@@ -762,7 +749,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         });
       }
     }
-    return c.json(goal);
+    return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
   });
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
