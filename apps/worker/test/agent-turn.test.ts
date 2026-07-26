@@ -2300,6 +2300,57 @@ describe("escaped MCP transport timeout classifier", () => {
   });
 });
 
+describe("Codex response timeout fail-closed settlement", () => {
+  test("recognizes the production OpenAI timeout only inside a confirmed Codex turn", () => {
+    const legacy = Object.assign(new Error("Request timed out."), {
+      name: "APIConnectionTimeoutError",
+    });
+    expect(agentRunFailurePayload(legacy).retryable).toBeUndefined();
+    expect(agentRunFailurePayload(legacy, { isCodexTurn: true })).toMatchObject({
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: "headers",
+      responseObserved: false,
+    });
+  });
+
+  test("preserves structured partial-stream timeout evidence without same-turn replay", () => {
+    const structured = Object.assign(new Error("Codex response idle stream timed out"), {
+      name: "CodexResponseTimeoutError",
+      type: "opengeni_codex_response_timeout",
+      timeoutClass: "idle_stream",
+      requestId: "dispatch-7:3",
+      responseObserved: true,
+    });
+    expect(agentRunFailurePayload(structured)).toMatchObject({
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: "idle_stream",
+      responseObserved: true,
+      requestId: "dispatch-7:3",
+    });
+  });
+
+  test("recovers timeout metadata from the buffered OpenAI APIError body shape", () => {
+    const apiError = Object.assign(new Error("504 Codex response timed out"), {
+      status: 504,
+      error: {
+        type: "opengeni_codex_response_timeout",
+        timeout_class: "whole_request",
+        response_observed: false,
+        request_id: "dispatch-9:2",
+      },
+    });
+    expect(agentRunFailurePayload(apiError)).toMatchObject({
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: "whole_request",
+      responseObserved: false,
+      requestId: "dispatch-9:2",
+    });
+  });
+});
+
 // A model-provider 5xx / overload / dropped connection is transient backpressure,
 // not a session fault. It must classify retryable so the turn routes into the idle +
 // goal-continuation recovery instead of a terminal session.failed — the gap that

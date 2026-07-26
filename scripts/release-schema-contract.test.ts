@@ -75,11 +75,10 @@ describe("release schema contract", () => {
     // nested-depth branch was cut before it landed. Account for it explicitly
     // instead of renumbering the nested-depth chain or freezing main.
     const currentMainToolPolicyMigration = "0065_session_tool_policy.sql";
-    if (migrations.has(currentMainToolPolicyMigration)) {
-      expect(migrations.get(currentMainToolPolicyMigration)).toMatchObject({
-        deploymentMode: "rolling",
-      });
-    }
+    expect(migrations.has(currentMainToolPolicyMigration)).toBe(true);
+    expect(migrations.get(currentMainToolPolicyMigration)).toMatchObject({
+      deploymentMode: "rolling",
+    });
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",

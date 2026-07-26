@@ -233,6 +233,9 @@ const SettingsSchema = z.object({
   // holder of stream:control gets 403 until this flips. Keeps stream:control a
   // declared-but-inert permission so later hardening is a flag flip.
   streamControlEnabled: EnvBoolean.default(false),
+  // Existing-session explicit tool replacement is gated until every API and
+  // worker instance understands durable tools_provided provenance.
+  sessionTurnToolReplacementEnabled: EnvBoolean.default(false),
   toolspaceEnabled: EnvBoolean.default(false),
   toolspaceMaxCallsPerTurn: z.coerce.number().int().positive().default(200),
   // Optional release-coherent bootstrap hint for custom rigs/connected machines
@@ -1317,6 +1320,7 @@ export function getSettings(): Settings {
     delegationSecret: optional("OPENGENI_DELEGATION_SECRET"),
     streamTokenSecret: optional("OPENGENI_STREAM_TOKEN_SECRET"),
     streamControlEnabled: optional("OPENGENI_STREAM_CONTROL_ENABLED"),
+    sessionTurnToolReplacementEnabled: optional("OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED"),
     toolspaceEnabled: optional("OPENGENI_TOOLSPACE_ENABLED"),
     toolspaceMaxCallsPerTurn: optional("OPENGENI_TOOLSPACE_MAX_CALLS_PER_TURN"),
     ogtoolPackageSpec: optional("OPENGENI_OGTOOL_PACKAGE_SPEC"),

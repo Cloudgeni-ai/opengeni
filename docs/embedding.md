@@ -493,6 +493,27 @@ rotations on parent and child are independent. A `connectionRef` remains the
 preferred host integration because normal model MCP and Toolspace resolve fresh
 transport credentials at request time.
 
+### Credential-bearing outbound transport
+
+Canonical sources: `@opengeni/network`, `@opengeni/runtime/mcp-network`, and
+[`credentials.md`](credentials.md).
+
+Standalone and embedded runtimes use the same fail-closed network boundary for
+MCP and OAuth: one DNS resolution is policy-checked, the actual request is made
+through an Undici Agent pinned to that answer, TLS still verifies the URL
+hostname, response bodies are bounded, and redirects are handled manually so
+each hop is independently validated. `prepareAgentTools` accepts
+`mcpFetchImpl` for tests and embedded transport integration, but the injected
+fetch remains behind `guardedMcpFetch` and must honor the supplied Undici
+`dispatcher`; it is not a bypass for destination policy.
+
+Private integration targets are denied by default. A self-hosted operator may
+explicitly enable `OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS` for
+trusted internal MCP/OAuth endpoints; local/test already has the narrow
+loopback escape needed by fixtures. Keep credential resolution outside the
+pinned final transport so headers are attached only to the exact request URL
+that the broker audience-checks.
+
 ### Persistence
 
 Canonical sources: `packages/db/src/index.ts`, `packages/db/src/migrate.ts`, `packages/db/src/provision-roles.ts`, and `dbSearchPath` in `packages/config/src/index.ts`.

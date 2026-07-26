@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.12.6",
+  "version": "0.13.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -28,6 +28,10 @@
     "./skill-library": {
       "types": "./src/skill-library.ts",
       "default": "./src/skill-library.ts"
+    },
+    "./mcp-network": {
+      "types": "./src/mcp-network.ts",
+      "default": "./src/mcp-network.ts"
     }
   },
   "publishConfig": {
@@ -48,6 +52,7 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "debug": "4.4.3",
     "modal": "0.7.6",
     "openai": "6.47.0",

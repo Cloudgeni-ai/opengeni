@@ -40,6 +40,7 @@ import {
 import { DropdownMenu } from "radix-ui";
 import type { ComposerState } from "../hooks/use-composer";
 import type { QueueMutationKind, UseTurnQueueResult } from "../hooks/use-turn-queue";
+import { requestQueueDraftEdit } from "./queue-draft-policy";
 import { QueueErrorAlert, QueueStoppingStatus } from "./queue-surface-state";
 
 /** The sole human prompt queue: compact above Goal, Agents, and composer. */
@@ -217,16 +218,11 @@ export function QueueSurface({
   const requestEdit = useCallback(
     (turn: SessionTurn) => {
       if (!composer || !canEditInComposer) return;
-      const draftDirty =
-        composer.value.length > 0 ||
-        composer.restoredResources.length > 0 ||
-        (composer.draft?.tools.length ?? 0) > 0 ||
-        (composer.draft?.sourceTurnId !== null && composer.draft?.sourceTurnId !== undefined);
-      if (draftDirty) {
-        setReplaceDraftFor(turn.id);
-      } else {
-        void edit(turn, false);
-      }
+      requestQueueDraftEdit(
+        composer,
+        () => setReplaceDraftFor(turn.id),
+        () => void edit(turn, false),
+      );
     },
     [canEditInComposer, composer, edit],
   );

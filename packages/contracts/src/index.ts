@@ -600,6 +600,30 @@ export const Permission = z.enum([
 ]);
 export type Permission = z.infer<typeof Permission>;
 
+/**
+ * Capability-first permissions signed into a session's first-party OpenGeni
+ * MCP token when a top-level creator does not explicitly narrow them.
+ *
+ * Keep this contract shared by admission and runtime signing: a worker-signed
+ * child whose parent was narrowed must inherit the parent's effective subset,
+ * never fall back to a different runtime-local default.
+ */
+export const DEFAULT_FIRST_PARTY_MCP_PERMISSIONS = [
+  "workspace:read",
+  "files:read",
+  "documents:search",
+  "scheduled_tasks:manage",
+  "scheduled_tasks:run",
+  "goals:manage",
+  "sessions:read",
+  "sessions:create",
+  "sessions:control",
+  "variable-sets:use",
+  "variable-sets:manage",
+  "rigs:use",
+  "github:use",
+] as const satisfies readonly Permission[];
+
 export function prefixedMcpToolName(registryId: string, toolName: string): string {
   return `${registryId}__${toolName}`;
 }
@@ -2061,6 +2085,8 @@ export type McpCredentialsRequest = {
   /** Immediate technical caller, retained only as non-authoritative audit context. */
   callerSubjectId?: string;
   surface: "model" | "toolspace";
+  /** Canonical MCP destination that will receive the resolved headers. */
+  destinationUrl: string;
   serverId: string;
   toolName?: string;
   connectionRef: McpServerConnectionRef;
@@ -2703,6 +2729,61 @@ export type ToolRef = z.infer<typeof ToolRef>;
 const registryId = /^[A-Za-z0-9_-]+$/;
 export const SessionMcpServerId = z.string().min(1).regex(registryId);
 export type SessionMcpServerId = z.infer<typeof SessionMcpServerId>;
+
+// How a session's persisted `tools` snapshot was selected. `legacy` is
+// reserved for rows written before this descriptor existed; those rows must
+// keep their materialized historical allow-list rather than being guessed to
+// mean either omitted or explicitly empty.
+export const SessionToolPolicy = z.object({
+  mode: z.enum(["workspace_default", "explicit", "inherited", "legacy"]),
+  inheritedFromSessionId: z.string().uuid().nullable(),
+});
+export type SessionToolPolicy = z.infer<typeof SessionToolPolicy>;
+
+export const SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT = 64;
+export const SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH = 200;
+const SessionEffectiveToolPolicyId = z
+  .string()
+  .min(1)
+  .max(SESSION_EFFECTIVE_TOOL_POLICY_ID_MAX_LENGTH)
+  .regex(registryId);
+const SessionEffectiveToolPolicyIds = z
+  .array(SessionEffectiveToolPolicyId)
+  .max(SESSION_EFFECTIVE_TOOL_POLICY_ID_LIMIT);
+
+// Secret-safe, read-time policy truth. This projection contains only bounded
+// MCP registry ids and exact counts: never URLs, names, headers, credentials,
+// connector configuration, or tool schemas. IDs are samples when capped;
+// counts remain exact and idsTruncated makes that explicit to clients.
+export const SessionEffectiveToolPolicy = z
+  .object({
+    mode: z.enum(["workspace_default", "explicit", "inherited", "legacy"]),
+    inheritedFromSessionId: z.string().uuid().nullable(),
+    selectedIds: SessionEffectiveToolPolicyIds,
+    effectiveIds: SessionEffectiveToolPolicyIds,
+    mandatoryIds: SessionEffectiveToolPolicyIds,
+    lazyRouter: z
+      .object({
+        state: z.enum(["required", "disabled"]),
+        deferredIds: SessionEffectiveToolPolicyIds,
+      })
+      .strict(),
+    configuredIds: SessionEffectiveToolPolicyIds,
+    droppedIds: SessionEffectiveToolPolicyIds,
+    counts: z
+      .object({
+        selected: z.number().int().nonnegative(),
+        effective: z.number().int().nonnegative(),
+        mandatory: z.number().int().nonnegative(),
+        deferred: z.number().int().nonnegative(),
+        configured: z.number().int().nonnegative(),
+        dropped: z.number().int().nonnegative(),
+      })
+      .strict(),
+    idsTruncated: z.boolean(),
+  })
+  .strict();
+export type SessionEffectiveToolPolicy = z.infer<typeof SessionEffectiveToolPolicy>;
 const httpsUrl = z
   .string()
   .url()
@@ -3270,6 +3351,10 @@ export const SessionTurn = z.object({
   prompt: z.string().min(1),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  // Omitted/default discovery and explicit `tools: []` are distinct. False
+  // inherits the durable session policy; true replaces it for this turn after
+  // admission proves the selection is a subset.
+  toolsProvided: z.boolean().optional(),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sandboxBackend: SandboxBackend,
@@ -3359,6 +3444,9 @@ export const ComposerDraft = z.object({
   text: z.string(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  // False means the draft inherits the session policy. True preserves an
+  // explicit array, including [], across autosave/reload and queue checkout.
+  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   sourceTurnId: z.string().uuid().nullable(),
@@ -3415,6 +3503,7 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
   text: true,
   resources: true,
   tools: true,
+  toolsProvided: true,
   model: true,
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
@@ -4513,6 +4602,19 @@ export const CapabilityRuntime = z.object({
   mcpServerId: z.string().min(1).optional(),
   transport: z.string().min(1).optional(),
   notes: z.string().nullable().default(null),
+  // Registry exposure provenance is server-derived and contains no endpoint or
+  // credential material.
+  catalogTrust: z
+    .object({
+      state: z.enum(["trusted", "legacy_active", "unverified"]),
+      reason: z.enum([
+        "trusted_source",
+        "verified_probe",
+        "active_installation_compatibility",
+        "missing_verification",
+      ]),
+    })
+    .optional(),
 });
 export type CapabilityRuntime = z.infer<typeof CapabilityRuntime>;
 
@@ -4563,6 +4665,34 @@ export const CapabilityCatalogItem = z.object({
   updatedAt: z.string().optional(),
 });
 export type CapabilityCatalogItem = z.infer<typeof CapabilityCatalogItem>;
+
+/**
+ * Shared trust gate for catalog visibility and runtime selection. Registry rows
+ * remain durable for provenance and audit, but only a reviewed real-MCP probe
+ * with known authentication is exposable. API-key rows additionally need a
+ * machine-actionable header contract; prose credential instructions are not a
+ * runtime contract and must fail closed.
+ */
+export function capabilityCatalogItemIsTrustedForExposure(
+  item: Pick<CapabilityCatalogItem, "source" | "stale" | "authKind" | "metadata">,
+): boolean {
+  if (item.stale) return false;
+  if (item.source !== "registry") return true;
+  const probe = item.metadata.mcpProbe;
+  if (!probe || typeof probe !== "object" || Array.isArray(probe)) return false;
+  if ((probe as Record<string, unknown>).status !== "real") return false;
+  if (item.authKind === null || item.authKind === "unknown") return false;
+  if (item.authKind !== "api_key") return true;
+  const contract = item.metadata.authContract;
+  if (!contract || typeof contract !== "object" || Array.isArray(contract)) return false;
+  const record = contract as Record<string, unknown>;
+  return (
+    typeof record.headerName === "string" &&
+    /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(record.headerName) &&
+    typeof record.scheme === "string" &&
+    record.scheme.trim().length > 0
+  );
+}
 
 export const CapabilityInstallation = z.object({
   id: z.string().uuid(),
@@ -4643,6 +4773,13 @@ export const Session = z.object({
   instructions: z.string().nullable(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  // Origin of the persisted tool allow-list. Optional for rolling client
+  // compatibility; current servers emit it and legacy rows map to `legacy`.
+  toolPolicy: SessionToolPolicy.optional(),
+  // Secret-safe current resolution, computed at an API/read or execution
+  // boundary from IDs only. Optional because internal DB readers need not load
+  // the workspace runtime registry.
+  effectiveToolPolicy: SessionEffectiveToolPolicy.optional(),
   metadata: z.record(z.string(), z.unknown()),
   /** Frozen creator fact used only for creation attribution/idempotent repair. */
   createdBy: TurnInitiator,
@@ -4822,6 +4959,9 @@ export const SessionEventType = z.enum([
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  // Attempt-fenced Codex Responses lifecycle metadata (request identity,
+  // deadlines, first-byte/terminal phase, provider request id). Never body/auth.
+  "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
   "credential.auth_needed",

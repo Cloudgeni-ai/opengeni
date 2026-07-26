@@ -30,6 +30,7 @@ const packageDirectories = [
   "packages/contracts",
   "packages/codex",
   "packages/config",
+  "packages/network",
   "packages/runtime",
 ] as const;
 

@@ -165,15 +165,24 @@ try {
   const react = await stageTarball("packages/react", stagingRoot, tarballRoot, versions);
   const runtime = await stageTarball("packages/runtime", stagingRoot, tarballRoot, versions);
   const runtimeLocalDependencies = await Promise.all(
-    ["packages/agent-proto", "packages/codex", "packages/config", "packages/contracts"].map(
-      (directory) => stageTarball(directory, stagingRoot, tarballRoot, versions),
-    ),
+    [
+      "packages/agent-proto",
+      "packages/codex",
+      "packages/config",
+      "packages/contracts",
+      "packages/network",
+    ].map((directory) => stageTarball(directory, stagingRoot, tarballRoot, versions)),
   );
   const runtimeLocalDependencyFiles = Object.fromEntries(
     runtimeLocalDependencies.map(({ manifest, tarball }) => [manifest.name, `file:${tarball}`]),
   );
   const runtimeTarballContents = await run(["tar", "-tzf", runtime.tarball], consumerRoot, true);
-  for (const artifact of ["package/dist/skill-library.js", "package/dist/skill-library.d.ts"]) {
+  for (const artifact of [
+    "package/dist/skill-library.js",
+    "package/dist/skill-library.d.ts",
+    "package/dist/mcp-network.js",
+    "package/dist/mcp-network.d.ts",
+  ]) {
     if (!runtimeTarballContents.split("\n").includes(artifact)) {
       throw new Error(`runtime tarball is missing ${artifact}`);
     }

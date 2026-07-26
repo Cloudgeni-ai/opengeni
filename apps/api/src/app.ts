@@ -38,6 +38,7 @@ import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
+import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -323,6 +324,15 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    let boundedRequest: Request;
+    try {
+      boundedRequest = await boundedMcpRequest(c.req.raw);
+    } catch (error) {
+      if (error instanceof McpPayloadTooLargeError) {
+        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+      }
+      throw error;
+    }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
     const toolspaceGrant = isToolspaceGrant(routeDeps.settings, grant);
     const boundSessionId = grant.metadata?.sessionId;
@@ -346,9 +356,17 @@ export function createApp(deps: AppDependencies): Hono {
         throw error;
       }
     }
-    const toolspace = toolspaceGrant
-      ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
-      : null;
+    let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
+    if (toolspaceGrant) {
+      try {
+        toolspace = await prepareToolspaceMcpSurface({ deps: routeDeps, grant });
+      } catch (error) {
+        if (error instanceof McpPayloadTooLargeError) {
+          throw new HTTPException(413, { message: "MCP tool list exceeds the safety limit" });
+        }
+        throw error;
+      }
+    }
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -361,7 +379,7 @@ export function createApp(deps: AppDependencies): Hono {
     });
     try {
       await mcp.connect(transport);
-      return await transport.handleRequest(c.req.raw);
+      return await transport.handleRequest(boundedRequest);
     } finally {
       await toolspace?.close().catch(() => undefined);
     }
@@ -442,6 +460,9 @@ export function allowedCorsOrigin(pattern: string, origin: string): boolean {
 export function httpStatusForError(error: unknown): number {
   if (error instanceof HTTPException) {
     return error.status;
+  }
+  if (error instanceof McpPayloadTooLargeError) {
+    return 413;
   }
   return 500;
 }

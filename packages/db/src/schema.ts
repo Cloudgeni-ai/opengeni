@@ -1,5 +1,6 @@
 import type { McpServerConnectionRef, SessionMcpApprovalPolicy } from "@opengeni/contracts";
 import { sql } from "drizzle-orm";
+import type { SessionToolPolicy } from "@opengeni/contracts";
 import type { HumanInputQuestion, HumanInputResponse } from "@opengeni/contracts";
 import {
   bigint,
@@ -751,6 +752,10 @@ export const sessions = pgTable(
     // Non-default first-party MCP token permissions (manager-style sessions);
     // null means the fixed worker default set in @opengeni/runtime.
     firstPartyMcpPermissions: jsonb("first_party_mcp_permissions").$type<string[]>(),
+    // Durable tool-policy origin. NULL is retained for pre-migration rows;
+    // mapSession exposes those rows as `legacy` instead of guessing omitted vs
+    // explicit [].
+    toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>(),
     // The manager session that spawned this one via session_create. Set only
     // when the creating grant carried a worker-signed sessionId claim (a session
     // spawning a worker); null for direct API creates and scheduled-task runs.
@@ -1334,6 +1339,9 @@ export const sessionTurns = pgTable(
     turnInstructions: text("turn_instructions"),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+    // false = inherit the durable session policy; true = this turn explicitly
+    // replaces it with `tools` after the core subset fence.
+    toolsProvided: boolean("tools_provided").notNull().default(false),
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     sandboxBackend: text("sandbox_backend").notNull(),
@@ -1684,6 +1692,7 @@ export const composerDrafts = pgTable(
     text: text("text").notNull().default(""),
     resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
     tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+    toolsProvided: boolean("tools_provided").notNull().default(false),
     model: text("model").notNull(),
     reasoningEffort: text("reasoning_effort").notNull(),
     sourceTurnId: uuid("source_turn_id"),

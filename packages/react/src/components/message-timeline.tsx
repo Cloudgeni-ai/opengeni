@@ -427,7 +427,6 @@ type MountedGroupWindow = {
 type KeyedTimelineGroup = {
   group: TimelineGroup;
   key: string;
-  itemIds: string[];
 };
 
 /**
@@ -441,15 +440,10 @@ type KeyedTimelineGroup = {
 function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGroup[] {
   const previousRef = useRef<KeyedTimelineGroup[]>([]);
   const keyedGroups = useMemo(() => {
-    const previousByItemId = new Map<string, KeyedTimelineGroup[]>();
+    const previousByItemId = new Map<string, KeyedTimelineGroup>();
     for (const previous of previousRef.current) {
-      for (const itemId of previous.itemIds) {
-        const matches = previousByItemId.get(itemId);
-        if (matches) {
-          matches.push(previous);
-        } else {
-          previousByItemId.set(itemId, [previous]);
-        }
+      for (const itemId of timelineGroupItemIds(previous.group)) {
+        previousByItemId.set(itemId, previous);
       }
     }
 
@@ -458,9 +452,8 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
       const itemIds = timelineGroupItemIds(group);
       let retainedKey: string | undefined;
       for (const itemId of itemIds) {
-        const previousMatches = previousByItemId.get(itemId);
-        const previous = previousMatches?.find((candidate) => !usedKeys.has(candidate.key));
-        if (previous) {
+        const previous = previousByItemId.get(itemId);
+        if (previous && !usedKeys.has(previous.key)) {
           retainedKey = previous.key;
           break;
         }
@@ -474,7 +467,7 @@ function useStableTimelineGroupKeys(allGroups: TimelineGroup[]): KeyedTimelineGr
         collision += 1;
       }
       usedKeys.add(key);
-      return { group, key, itemIds };
+      return { group, key };
     });
   }, [allGroups]);
 
@@ -506,8 +499,10 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
   const previousGroupKeysRef = useRef<string[]>([]);
   const groupKeys = useMemo(() => {
     const nextKeys = allGroups.map((group) => group.key);
-    return equalGroupKeys(previousGroupKeysRef.current, nextKeys)
-      ? previousGroupKeysRef.current
+    const previousKeys = previousGroupKeysRef.current;
+    return nextKeys.length === previousKeys.length &&
+      nextKeys.every((key, index) => key === previousKeys[index])
+      ? previousKeys
       : nextKeys;
   }, [allGroups]);
   useLayoutEffect(() => {
@@ -515,21 +510,23 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
   }, [groupKeys]);
   const [window, setWindow] = useState<MountedGroupWindow>(() => ({
     groupKeys,
-    visibleStart: initialVisibleGroupIndex(allGroups.length),
+    visibleStart: Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS),
   }));
 
   const lastPossibleStart = Math.max(0, allGroups.length - INITIAL_MOUNTED_GROUPS);
   let visibleStart = 0;
   if (allGroups.length > 0) {
     const currentIndexByKey = new Map(groupKeys.map((key, index) => [key, index]));
-    const previousMountedKeys = window.groupKeys.slice(window.visibleStart);
-    const retainedStart = previousMountedKeys
-      .map((key) => currentIndexByKey.get(key))
-      .find((index): index is number => index !== undefined);
+    let retainedStart: number | undefined;
+    for (const key of window.groupKeys.slice(window.visibleStart)) {
+      const index = currentIndexByKey.get(key);
+      if (index !== undefined) {
+        retainedStart = index;
+        break;
+      }
+    }
     visibleStart =
-      retainedStart === undefined
-        ? initialVisibleGroupIndex(allGroups.length)
-        : Math.min(retainedStart, lastPossibleStart);
+      retainedStart === undefined ? lastPossibleStart : Math.min(retainedStart, lastPossibleStart);
   }
 
   useEffect(() => {
@@ -555,10 +552,6 @@ function useProgressivelyMountedGroups(allGroups: KeyedTimelineGroup[]): {
     mountedGroups: allGroups.slice(visibleStart),
     mountingOlderGroups: visibleStart > 0,
   };
-}
-
-function initialVisibleGroupIndex(groupCount: number): number {
-  return Math.max(0, groupCount - INITIAL_MOUNTED_GROUPS);
 }
 
 function requestFrame(callback: FrameRequestCallback): number {
@@ -701,10 +694,6 @@ function timelineGroupKey(group: TimelineGroup): string {
     case "turn":
       return group.id;
   }
-}
-
-function equalGroupKeys(left: string[], right: string[]): boolean {
-  return left.length === right.length && left.every((key, index) => key === right[index]);
 }
 
 function timelineGroupItemIds(group: TimelineGroup): string[] {
@@ -1172,12 +1161,12 @@ function NoticeRow({ item }: { item: NoticeItem }) {
 }
 
 /**
- * The inline connection card: a lapsed connection surfaces as a calm, tappable
- * reconnect affordance, while an incompatible host-owned endpoint/resource
- * contract remains informative and non-actionable. The `reason` only shapes
- * the helper copy; no domain or enum code is shown as a label.
- * `onReconnect` (from the app, which owns the SDK client) runs the flow; without
- * it, a pre-minted authorization link is offered, or the card stays informative.
+ * The inline connection-recovery card: missing or lapsed access surfaces as a
+ * calm, tappable affordance instead of a raw provider-domain error. The `reason`
+ * only shapes human copy; no domain or enum code is shown as a label.
+ * `onReconnect` (from the app, which owns the SDK client) starts the flow;
+ * without it, a pre-minted authorization link is offered, or the card stays
+ * informative. Recovery never claims to resume/replay the failed tool call.
  */
 function AuthNeededRow({
   item,
@@ -1194,6 +1183,8 @@ function AuthNeededRow({
   const provider = providerLabel(item.providerDomain);
   const unavailable =
     item.reason === "unsupported_auth" || item.reason === "resource_scope_unavailable";
+  const missing = item.reason === "missing_connection";
+  const actionLabel = missing ? "Connect" : "Reconnect";
 
   const start = async () => {
     if (!onReconnect || busy) {
@@ -1204,6 +1195,7 @@ function AuthNeededRow({
     try {
       // On success the app redirects to consent (or routes to credential entry),
       // so this row unmounts; a resolve without navigation just relaxes the button.
+      // The callback starts authorization only. It never resumes this tool call.
       await onReconnect(item);
       setBusy(false);
     } catch {
@@ -1222,7 +1214,7 @@ function AuthNeededRow({
           />
           <div className="min-w-0">
             <p className="truncate text-og-md font-medium text-og-fg">
-              {unavailable ? `${provider} tools unavailable` : `Reconnect ${provider}`}
+              {unavailable ? `${provider} tools unavailable` : `${actionLabel} ${provider}`}
             </p>
             <p className="truncate text-og-sm text-og-fg-subtle">{authReasonLine(item.reason)}</p>
           </div>
@@ -1238,7 +1230,7 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className={cn("size-3.5", busy && "animate-og-spin")} aria-hidden />
-            {busy ? "Reconnecting…" : "Reconnect"}
+            {busy ? "Opening…" : actionLabel}
           </button>
         ) : !unavailable && item.authorizationUrl ? (
           <a
@@ -1251,13 +1243,19 @@ function AuthNeededRow({
             )}
           >
             <RefreshCwIcon className="size-3.5" aria-hidden />
-            Reconnect
+            {actionLabel}
           </a>
         ) : null}
       </div>
+      {!unavailable ? (
+        <p className="px-1 text-og-xs text-og-fg-subtle">
+          This tool call wasn't replayed. After {missing ? "connecting" : "reconnecting"}, send a
+          new message to try again.
+        </p>
+      ) : null}
       {failed ? (
         <p className="px-1 text-og-xs text-og-status-failed">
-          Couldn't start reconnecting {provider}. Try again.
+          Couldn't start {missing ? "connecting" : "reconnecting"} {provider}. Try again.
         </p>
       ) : null}
     </div>
