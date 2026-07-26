@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createObservability } from "@opengeni/observability";
 import { testSettings } from "@opengeni/testing";
+import type { Database } from "@opengeni/db";
 import {
   createOpenGeniWorker,
   resolveOpenGeniWorkflowDefinition,
@@ -12,6 +13,7 @@ import {
 } from "../src";
 import {
   createWorkerHttpHandler,
+  dbReadyCheck,
   type ReadinessChecks,
   type WorkerLifecycleState,
 } from "../src/http";
@@ -216,6 +218,75 @@ describe("embedded worker lifecycle contract", () => {
     expect(() =>
       resolveOpenGeniWorkflowDefinition(pathToFileURL(join(dist, "index.js")).href),
     ).toThrow("OpenGeni workflow bundle is missing");
+  });
+
+  test("worker database readiness enforces supplied posture and retains the embedded probe", async () => {
+    let directExecutions = 0;
+    let catalogQueries = 0;
+    const catalogResults: unknown[] = [
+      [
+        {
+          current_user: "opengeni_app",
+          session_user: "opengeni_app",
+          database_owner: "opengeni_migrator",
+          can_connect_database: true,
+          can_create_in_database: false,
+          row_security: "on",
+          rolcanlogin: true,
+          rolsuper: false,
+          rolinherit: false,
+          rolcreaterole: false,
+          rolcreatedb: false,
+          rolreplication: false,
+          rolbypassrls: false,
+        },
+      ],
+      [],
+      [
+        { name: "opengeni_private", owner: "opengeni_migrator", usage: true, create: false },
+        { name: "public", owner: "opengeni_migrator", usage: true, create: false },
+      ],
+      [],
+      [],
+      [],
+      [
+        {
+          name: "workspace_rls_visible(uuid, uuid)",
+          owner: "opengeni_migrator",
+          can_execute: true,
+        },
+      ],
+    ];
+    const db = {
+      execute: async () => {
+        directExecutions += 1;
+        return [];
+      },
+      transaction: async (
+        callback: (tx: { execute: () => Promise<unknown> }) => Promise<unknown>,
+      ) =>
+        callback({
+          execute: async () => {
+            const result = catalogResults[catalogQueries];
+            catalogQueries += 1;
+            return result;
+          },
+        }),
+    } as unknown as Database;
+
+    await dbReadyCheck(db, {
+      rlsStrategy: "force",
+      expectedRole: "opengeni_app",
+      targetSchema: "public",
+      protectedTables: [],
+      tablePrivileges: {},
+      protectedNoDirectDmlTables: [],
+    })();
+    expect(catalogQueries).toBe(catalogResults.length);
+    expect(directExecutions).toBe(0);
+
+    await dbReadyCheck(db)();
+    expect(directExecutions).toBe(1);
   });
 
   test("readiness follows role lifecycle while health stays live during drain", async () => {
