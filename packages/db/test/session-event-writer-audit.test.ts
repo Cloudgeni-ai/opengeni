@@ -40,7 +40,27 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
-  "packages/db/src/index.ts#clearSessionGoal": { inserts: 1, contract: "canonical" },
+  "packages/db/src/index.ts#clearSessionGoal": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#upsertSessionGoalWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#updateSessionGoalWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#setSessionGoalStatusWithEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
+  "packages/db/src/index.ts#materializeGoalContinuation": {
+    inserts: 2,
+    contract: "canonical",
+    requiresControlRevalidation: true,
+  },
   "packages/db/src/index.ts#initializeSessionStartAtomically": {
     inserts: 2,
     contract: "canonical",
@@ -155,7 +175,6 @@ const genericControlWriters = new Set([
   "packages/db/src/index.ts#appendSessionEvents",
   "packages/db/src/index.ts#appendSessionEventsAndUpdateSession",
   "packages/db/src/index.ts#appendSessionEventToSandboxGroup",
-  "packages/db/src/index.ts#clearSessionGoal",
 ]);
 
 const callerOwnedControlWriters = new Set([

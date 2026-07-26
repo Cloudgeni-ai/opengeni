@@ -126,12 +126,13 @@ describe("release schema contract", () => {
       108 +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
-        (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0),
+        (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
+        2,
     );
     expect(contract.sha256).toBe(
-      "0dc2b0f34ed8c8d0982d1ff0c65ea0e6bc80c4b72e1a93fdf0d56e2de65201bf",
+      "f427b98a02f6ed3feaf59be9ea1b89b709ad6fc42d9b3648f0e240ffea42ff67",
     );
-    expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
+    expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
 
     const boundarySql = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
@@ -153,7 +154,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-6]|011[89])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-6]|011[89]|012[01])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -161,6 +162,8 @@ describe("release schema contract", () => {
       ...nestedDepthMigrations,
       "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
+      "0120_durable_goal_wake.sql",
+      "0121_goal_update_idempotency.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -195,6 +198,14 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
       sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0120_durable_goal_wake.sql")).toMatchObject({
+      sha256: "5c24fb49679513e2a7cc387e738b2bbdc9b5b3f465c023ea97921882f035d983",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0121_goal_update_idempotency.sql")).toMatchObject({
+      sha256: "e90f030e9dfb3c2dc040b2192cdd874fad264020f06b9c82f1c3dcd30a9769ca",
       deploymentMode: "rolling",
     });
   });
