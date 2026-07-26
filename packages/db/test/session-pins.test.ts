@@ -359,7 +359,21 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       message: "cycle grandchild",
       parentSessionId: child.id,
     });
-    await admin`update sessions set parent_session_id = ${grandchild.id} where id = ${root.id}`;
+    // This is a legacy graph from before 0114 made lineage snapshots immutable.
+    // Model that historical write only inside one admin transaction; the named
+    // production trigger is re-enabled before the transaction can commit.
+    await admin.begin(async (transaction) => {
+      await transaction.unsafe(
+        'alter table "sessions" disable trigger "session_depth_snapshot_immutable"',
+      );
+      try {
+        await transaction`update sessions set parent_session_id = ${grandchild.id} where id = ${root.id}`;
+      } finally {
+        await transaction.unsafe(
+          'alter table "sessions" enable trigger "session_depth_snapshot_immutable"',
+        );
+      }
+    });
     const stats = await withWorkspaceRls(db, workspace.workspaceId, async (scoped) =>
       sessionTreeStatsForSessions(scoped, workspace.workspaceId, [root.id]),
     );
