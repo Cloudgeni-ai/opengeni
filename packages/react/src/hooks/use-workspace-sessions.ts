@@ -42,14 +42,14 @@ export function useWorkspaceSessions(
   const search = options.search;
   const pinsOnly = options.pinsOnly;
   const enabled = options.enabled ?? true;
-  const queryKey = JSON.stringify({
+  const queryKey = [
     workspaceId,
-    limit,
-    parentSessionId,
-    cursor,
-    search,
-    pinsOnly,
-  });
+    limit ?? "",
+    parentSessionId === null ? "null" : (parentSessionId ?? ""),
+    cursor ?? "",
+    search ?? "",
+    pinsOnly ? "1" : "",
+  ].join("\u0000");
   const previousQueryKey = useRef(queryKey);
   const queryKeyTransition = previousQueryKey.current !== queryKey;
   useEffect(() => {

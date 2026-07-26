@@ -14,7 +14,12 @@ const budgets = {
   initialGzip: 210 * kib,
   initialFileGzip: 70 * kib,
   directSessionRaw: 1900 * kib,
-  directSessionGzip: 541 * kib,
+  // The pin-aware session page and rolling-version compatibility path are part
+  // of the direct session behavior. Source-level query/key compression brings
+  // the deterministic current graph to 554002 bytes; keep only a small
+  // measured margin instead of hiding the feature behind a broad budget
+  // increase.
+  directSessionGzip: 554016,
   lazyChunkRaw: 800 * kib,
   lazyChunkGzip: 240 * kib,
   cssGzip: 30 * kib,
