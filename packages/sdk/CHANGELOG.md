@@ -1,5 +1,17 @@
 # @opengeni/sdk
 
+## 0.24.0
+
+### Minor Changes
+
+- 0ed0f01: Add per-member session pin preferences with isolated server persistence, bounded/reused stable
+  pagination snapshots, snapshot-free pin polling, typed SDK and React reconciliation, and accessible
+  list and header controls.
+
+### Patch Changes
+
+- 744a93d: Add default-off, bounded adaptive Codex fleet decision telemetry with strict deterministic replay, cache-aware and work-conserving policy simulation, secret-safe event/UI observability, and independent future policy gates.
+
 ## 0.23.0
 
 ### Minor Changes
