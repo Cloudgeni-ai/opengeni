@@ -22372,7 +22372,11 @@ export async function getSessionGoalWithContinuation(
             eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
             eq(schema.sessionSystemUpdates.state, "pending"),
             sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goal.id}`,
-            sql`(${schema.sessionSystemUpdates.payload} ->> 'goalVersion')::integer = ${goal.version}`,
+            sql`(
+              jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'goalVersion') = 'number'
+              and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' ~ '^[1-9][0-9]*$'
+              and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' = ${goal.version.toString()}
+            )`,
           ),
         )
         .limit(1);
@@ -23573,6 +23577,71 @@ export async function materializeGoalContinuation(
           return { action: "none", events: [] } as const;
         }
 
+        // A migrated goal continuation can retain a malformed version even
+        // though its discriminator is intact. Quarantine it before any mapper
+        // can parse the payload, then let this same transaction materialize a
+        // valid successor. The rewritten payload remains contract-parseable
+        // and carries visible evidence for audit/reconciliation.
+        const malformedGoalVersionEvidence = sql`
+          jsonb_build_object(
+            'reason', 'malformed_goal_version',
+            'rawGoalVersion', ${schema.sessionSystemUpdates.payload} ->> 'goalVersion',
+            'expectedGoalVersion', ${goalRead.version}
+          )
+        `;
+        await tx
+          .update(schema.sessionSystemUpdates)
+          .set({
+            state: "failed",
+            classification: "failure",
+            deliveredTurnId: null,
+            deliveredAt: null,
+            summary: "Malformed goal continuation quarantined: malformed_goal_version",
+            payload: sql`
+              (
+                case
+                  when jsonb_typeof(${schema.sessionSystemUpdates.payload}) = 'object'
+                    then ${schema.sessionSystemUpdates.payload}
+                  else '{}'::jsonb
+                end
+                || jsonb_build_object(
+                  'type', 'goal_continuation',
+                  'goalId', ${goalRead.id}::text,
+                  'goalVersion', ${goalRead.version},
+                  'prompt', coalesce(
+                    nullif(btrim(${schema.sessionSystemUpdates.payload} ->> 'prompt'), ''),
+                    'Quarantined malformed goal continuation'
+                  ),
+                  'quarantine', ${malformedGoalVersionEvidence}
+                )
+              )
+            `,
+            lineage: sql`
+              (
+                case
+                  when jsonb_typeof(${schema.sessionSystemUpdates.lineage}) = 'object'
+                    then ${schema.sessionSystemUpdates.lineage}
+                  else '{}'::jsonb
+                end
+                || jsonb_build_object('quarantine', ${malformedGoalVersionEvidence})
+              )
+            `,
+          })
+          .where(
+            and(
+              eq(schema.sessionSystemUpdates.workspaceId, input.workspaceId),
+              eq(schema.sessionSystemUpdates.sessionId, input.sessionId),
+              eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
+              eq(schema.sessionSystemUpdates.state, "pending"),
+              sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goalRead.id}`,
+              sql`not (
+                jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'goalVersion') = 'number'
+                and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' ~ '^[1-9][0-9]*$'
+                and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' = ${goalRead.version.toString()}
+              )`,
+            ),
+          );
+
         const [pendingTurn] = await tx
           .select({
             id: schema.sessionTurns.id,
@@ -23630,7 +23699,11 @@ export async function materializeGoalContinuation(
               eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
               eq(schema.sessionSystemUpdates.state, "pending"),
               sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goalRead.id}`,
-              sql`(${schema.sessionSystemUpdates.payload} ->> 'goalVersion')::integer = ${goalRead.version}`,
+              sql`(
+                jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'goalVersion') = 'number'
+                and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' ~ '^[1-9][0-9]*$'
+                and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' = ${goalRead.version.toString()}
+              )`,
             ),
           )
           .orderBy(desc(schema.sessionSystemUpdates.createdAt))

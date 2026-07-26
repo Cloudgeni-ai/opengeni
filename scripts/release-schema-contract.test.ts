@@ -87,7 +87,7 @@ describe("release schema contract", () => {
     );
     expect(contract.fileCount).toBe(100 + currentMainMigrations.length + 1);
     expect(contract.sha256).toBe(
-      "e09923184e59b6b5b22022949680d549c1c75fe0a3e9098cbb74e84d5ae90ab0",
+      "bd4c8f8bb509ee2bad6eb5669f83d52f928aa0e097b183b118a4541ae2c98da3",
     );
     expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
     expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
@@ -134,7 +134,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0120_durable_goal_wake.sql")).toMatchObject({
-      sha256: "f3d63dd60c8d933d8729a597d947be940a0483a148665ecca47c8f05909b2577",
+      sha256: "5c24fb49679513e2a7cc387e738b2bbdc9b5b3f465c023ea97921882f035d983",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0121_goal_update_idempotency.sql")).toMatchObject({

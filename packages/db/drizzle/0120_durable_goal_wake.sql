@@ -1,6 +1,22 @@
 -- deployment-mode: rolling
 -- OPE-59: a goal-owned, monotonic continuation obligation. PostgreSQL is the
 -- authority; Temporal receives only repairable workflow nudges.
+--
+-- Migrations run as the table owner, but FORCE ROW LEVEL SECURITY still makes
+-- that owner subject to workspace policies. This cross-workspace repair has no
+-- tenant GUC and must therefore relax only the owner-visible posture for the
+-- duration of this file. The migration runner executes the file in one
+-- implicit transaction, so a failure rolls back both the data repair and the
+-- posture changes; the final FORCE statements restore the shipped posture on
+-- success. The application role remains non-bypass and policy-bound.
+ALTER TABLE "session_goals" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_system_updates" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_workflow_wake_outbox" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "sessions" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "workspace_inference_controls" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_turns" NO FORCE ROW LEVEL SECURITY;
+ALTER TABLE "codex_capacity_waiters" NO FORCE ROW LEVEL SECURITY;
+
 ALTER TABLE "session_goals"
   ADD COLUMN IF NOT EXISTS "continuation_wake_revision" bigint NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS "continuation_observed_revision" bigint NOT NULL DEFAULT 0;
@@ -62,6 +78,8 @@ WITH ranked AS (
     ON goal.workspace_id = update.workspace_id
    AND goal.session_id = update.session_id
    AND update.payload ->> 'goalId' = goal.id::text
+   AND jsonb_typeof(update.payload -> 'goalVersion') = 'number'
+   AND update.payload ->> 'goalVersion' ~ '^[1-9][0-9]*$'
    AND update.payload ->> 'goalVersion' = goal.version::text
   WHERE goal.status = 'active'
     AND update.kind = 'goal_continuation'
@@ -109,6 +127,8 @@ WITH RECURSIVE materialized AS (
         AND update.kind = 'goal_continuation'
         AND update.state = 'pending'
         AND update.payload ->> 'goalId' = goal.id::text
+        AND jsonb_typeof(update.payload -> 'goalVersion') = 'number'
+        AND update.payload ->> 'goalVersion' ~ '^[1-9][0-9]*$'
         AND update.payload ->> 'goalVersion' = goal.version::text
     )
 ), ancestry AS (
@@ -330,3 +350,11 @@ ON CONFLICT ("session_id") DO UPDATE SET
   "next_attempt_at" = LEAST("session_workflow_wake_outbox"."next_attempt_at", EXCLUDED."next_attempt_at"),
   "last_error" = NULL,
   "updated_at" = now();
+
+ALTER TABLE "session_goals" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_system_updates" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_workflow_wake_outbox" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "sessions" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "workspace_inference_controls" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "session_turns" FORCE ROW LEVEL SECURITY;
+ALTER TABLE "codex_capacity_waiters" FORCE ROW LEVEL SECURITY;

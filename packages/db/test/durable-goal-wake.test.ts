@@ -12,6 +12,7 @@ import {
   ensureCodexRotationSettings,
   getSessionGoalWithContinuation,
   initializeSessionStartAtomically,
+  listOutstandingSessionSystemUpdates,
   listSessionSystemUpdatesForTurn,
   materializeGoalContinuation,
   mutateSessionControlInTransaction,
@@ -249,6 +250,104 @@ describe("durable active-goal wake", () => {
       (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
         ?.continuation,
     ).toMatchObject({ state: "scheduled", reason: "continuation_pending" });
+  });
+
+  test("quarantines malformed legacy versions and materializes valid work exactly once", async () => {
+    const ctx = await runningGoalFixture();
+    await settleIdle(ctx);
+    const [goal] = await shared.admin<{ id: string }[]>`
+      select id
+      from session_goals
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
+    if (!goal) throw new Error("goal fixture was not created");
+    const dedupeKey = `malformed-goal-continuation:${crypto.randomUUID()}`;
+    await shared.admin`
+      insert into session_system_updates (
+        account_id, workspace_id, session_id, kind, source_id,
+        dedupe_key, summary, payload
+      ) values (
+        ${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.session.id},
+        'goal_continuation', ${goal.id}, ${dedupeKey}, 'legacy malformed continuation',
+        ${shared.admin.json({
+          type: "goal_continuation",
+          goalId: goal.id,
+          goalVersion: "not-an-integer",
+          prompt: "continue from the legacy obligation",
+          policy: {
+            model: "scripted-model",
+            reasoningEffort: "low",
+            tools: [],
+            sandboxBackend: "none",
+          },
+        })}
+      )`;
+
+    // The read path ignores the malformed row rather than casting it or
+    // reporting a false continuation_pending state.
+    expect(
+      (await getSessionGoalWithContinuation(client.db, ctx.grant.workspaceId!, ctx.session.id))
+        ?.continuation,
+    ).toMatchObject({ state: "scheduled", reason: "wake_pending" });
+
+    expect((await materialize(ctx)).action).toBe("continue");
+    expect((await materialize(ctx)).action).toBe("continue");
+
+    const quarantined = await shared.admin<
+      Array<{
+        state: string;
+        classification: string;
+        summary: string;
+        payload: Record<string, unknown>;
+        lineage: Record<string, unknown>;
+      }>
+    >`
+      select state, classification, summary, payload, lineage
+      from session_system_updates
+      where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
+        and dedupe_key = ${dedupeKey}`;
+    expect(quarantined).toHaveLength(1);
+    expect(quarantined[0]).toMatchObject({
+      state: "failed",
+      classification: "failure",
+      summary: "Malformed goal continuation quarantined: malformed_goal_version",
+      payload: {
+        type: "goal_continuation",
+        goalId: goal.id,
+        goalVersion: 1,
+        prompt: "continue from the legacy obligation",
+        quarantine: {
+          reason: "malformed_goal_version",
+          rawGoalVersion: "not-an-integer",
+          expectedGoalVersion: 1,
+        },
+      },
+      lineage: {
+        quarantine: {
+          reason: "malformed_goal_version",
+          rawGoalVersion: "not-an-integer",
+          expectedGoalVersion: 1,
+        },
+      },
+    });
+
+    const outstanding = await listOutstandingSessionSystemUpdates(
+      client.db,
+      ctx.grant.workspaceId!,
+      ctx.session.id,
+    );
+    expect(outstanding).toHaveLength(1);
+    expect(outstanding[0]).toMatchObject({
+      state: "pending",
+      payload: { type: "goal_continuation", goalId: goal.id, goalVersion: 1 },
+    });
+    expect(await counts(ctx)).toEqual({
+      autoContinuations: 1,
+      wakeRevision: 1,
+      observedRevision: 1,
+      updates: 2,
+      usage: 1,
+      events: 1,
+    });
   });
 
   test("a recovered attempt reconciles an ambiguously committed goal update without overwriting newer truth", async () => {

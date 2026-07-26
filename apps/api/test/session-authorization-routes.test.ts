@@ -174,6 +174,51 @@ async function fixture() {
 }
 
 describe("embedding host session authorization routes", () => {
+  test("GET goal ignores a malformed legacy continuation instead of returning 500", async () => {
+    if (!available || !shared) return;
+    const value = await fixture();
+    await shared.admin`
+      update sessions
+      set status = 'idle'
+      where id = ${value.child.id} and workspace_id = ${value.grant.workspaceId}`;
+    const [goal] = await shared.admin<{ id: string }[]>`
+      insert into session_goals (account_id, workspace_id, session_id, text)
+      values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'API malformed continuation goal'
+      )
+      returning id`;
+    if (!goal) throw new Error("goal fixture was not created");
+    await shared.admin`
+      insert into session_system_updates (
+        account_id, workspace_id, session_id, kind, source_id,
+        dedupe_key, summary, payload
+      ) values (
+        ${value.grant.accountId}, ${value.grant.workspaceId}, ${value.child.id},
+        'goal_continuation', ${goal.id}, ${`api-malformed-${crypto.randomUUID()}`},
+        'malformed API continuation',
+        ${shared.admin.json({
+          type: "goal_continuation",
+          goalId: goal.id,
+          goalVersion: "not-an-integer",
+          prompt: "continue safely",
+        })}
+      )`;
+
+    const response = await appWith().request(
+      `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/goal`,
+      { headers: { authorization: value.authorization } },
+    );
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      continuation?: { state?: string; reason?: string };
+    };
+    expect(body.continuation).toMatchObject({
+      state: "invariant_broken",
+      reason: "missing_obligation",
+    });
+  });
+
   test("updates MCP approval policy with session-control authority and one durable event", async () => {
     if (!available) return;
     const value = await fixture();

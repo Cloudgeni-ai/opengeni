@@ -4,6 +4,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
+import { runMigrations } from "../src/migrate";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
@@ -351,7 +352,100 @@ describe("migration 0120 (durable goal wake)", () => {
         update workspace_inference_controls set revision = 3
         where workspace_id = ${pausedWorkspace.id}`;
 
-      await applyFile(admin, "0120_durable_goal_wake.sql");
+      // The migration is deliberately exercised through the supported runner
+      // as a normal table owner, not as the superuser that seeded the fixture.
+      // This is the production topology in which FORCE RLS would otherwise
+      // filter every cross-workspace backfill query.
+      const forceRlsTables = [
+        "codex_capacity_waiters",
+        "session_goals",
+        "session_system_updates",
+        "session_turns",
+        "session_workflow_wake_outbox",
+        "sessions",
+        "workspace_inference_controls",
+      ] as const;
+      const expectedForceRls: Array<{
+        relname: string;
+        forceRowSecurity: boolean;
+      }> = forceRlsTables.map((relname) => ({
+        relname,
+        forceRowSecurity: true,
+      }));
+      const forceRlsBefore = await admin<Array<{ relname: string; forceRowSecurity: boolean }>>`
+        select relname, relforcerowsecurity as "forceRowSecurity"
+        from pg_class
+        where oid in (
+          'codex_capacity_waiters'::regclass,
+          'session_goals'::regclass,
+          'session_system_updates'::regclass,
+          'session_turns'::regclass,
+          'session_workflow_wake_outbox'::regclass,
+          'sessions'::regclass,
+          'workspace_inference_controls'::regclass
+        )
+        order by relname`;
+      expect([...forceRlsBefore]).toEqual(expectedForceRls);
+
+      const migrationRole = `ope59_migration_owner_${crypto.randomUUID().replaceAll("-", "")}`;
+      const migrationPassword = crypto.randomUUID();
+      const adminRole = decodeURIComponent(new URL(blank.databaseUrl).username);
+      const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
+      const ownedTables = [...forceRlsTables, "schema_migrations"];
+      let ownershipTransferred = false;
+      try {
+        await admin.unsafe(
+          `create role ${quoteIdentifier(migrationRole)} login password '${migrationPassword}' nosuperuser nobypassrls`,
+        );
+        await admin.unsafe(`grant usage on schema public to ${quoteIdentifier(migrationRole)}`);
+        await admin<never[]>`
+          insert into schema_migrations (name) values ('0121_goal_update_idempotency.sql')
+          on conflict do nothing`;
+        ownershipTransferred = true;
+        for (const table of ownedTables) {
+          await admin.unsafe(
+            `alter table ${quoteIdentifier(table)} owner to ${quoteIdentifier(migrationRole)}`,
+          );
+        }
+
+        const role = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+          select rolsuper, rolbypassrls
+          from pg_roles where rolname = ${migrationRole}`;
+        const expectedRole: Array<{
+          rolsuper: boolean;
+          rolbypassrls: boolean;
+        }> = [{ rolsuper: false, rolbypassrls: false }];
+        expect([...role]).toEqual(expectedRole);
+
+        const migrationUrl = new URL(blank.databaseUrl);
+        migrationUrl.username = migrationRole;
+        migrationUrl.password = migrationPassword;
+        await runMigrations(migrationUrl.toString());
+      } finally {
+        if (ownershipTransferred) {
+          for (const table of ownedTables) {
+            await admin.unsafe(
+              `alter table ${quoteIdentifier(table)} owner to ${quoteIdentifier(adminRole)}`,
+            );
+          }
+        }
+        await admin.unsafe(`drop role if exists ${quoteIdentifier(migrationRole)}`);
+      }
+
+      const forceRlsAfter = await admin<Array<{ relname: string; forceRowSecurity: boolean }>>`
+        select relname, relforcerowsecurity as "forceRowSecurity"
+        from pg_class
+        where oid in (
+          'codex_capacity_waiters'::regclass,
+          'session_goals'::regclass,
+          'session_system_updates'::regclass,
+          'session_turns'::regclass,
+          'session_workflow_wake_outbox'::regclass,
+          'sessions'::regclass,
+          'workspace_inference_controls'::regclass
+        )
+        order by relname`;
+      expect([...forceRlsAfter]).toEqual(expectedForceRls);
 
       const goals = await admin<
         Array<{
