@@ -3,6 +3,7 @@ import { testSettings } from "@opengeni/testing";
 import {
   buildAgentCapabilities,
   buildOpenGeniAgent,
+  HUMAN_INPUT_TOOL_NAME,
   type TurnToolCancellationFence,
 } from "../src/index";
 
@@ -108,7 +109,7 @@ describe("native web search hosted tool", () => {
     expect((webSearch[0]!.providerData as { type: string }).type).toBe("web_search");
   });
 
-  test("operators can disable it: webSearchEnabled=false attaches no web_search tool and no tools field", () => {
+  test("operators can disable it without removing the structured human-input tool", () => {
     const noneAgent = buildOpenGeniAgent(
       testSettings({ sandboxBackend: "none", webSearchEnabled: false }),
       [],
@@ -119,9 +120,9 @@ describe("native web search hosted tool", () => {
     );
     expect(webSearchHostedTools(noneAgent)).toHaveLength(0);
     expect(webSearchHostedTools(sandboxAgent)).toHaveLength(0);
-    // With the flag off the explicit tools field is omitted entirely, preserving
-    // the SDK's "no explicit tools" tool-choice semantics.
-    expect((noneAgent as { tools?: unknown[] }).tools ?? []).toHaveLength(0);
+    expect(
+      ((noneAgent as { tools?: Array<{ name?: unknown }> }).tools ?? []).map((tool) => tool.name),
+    ).toEqual([HUMAN_INPUT_TOOL_NAME]);
   });
 });
 

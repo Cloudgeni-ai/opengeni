@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import type { ReasoningEffort, ResourceRef, ToolRef } from "@opengeni/contracts";
 import { and, asc, eq, inArray } from "drizzle-orm";
+import { readTurnExecutionPolicyV1, TurnExecutionPolicyV1 } from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import {
   applySessionTurnSettlement,
@@ -10,12 +12,15 @@ import {
   deleteSessionQueueItemInTransaction,
   editQueuedTurnInTransaction,
   evaluateSessionControl,
+  getSessionTurn,
   getSessionQueueSnapshot,
+  listSessionTurns,
   markSessionAttemptQuiesced,
   moveQueuedTurnInTransaction,
   mutateSessionControlInTransaction,
   peekSessionWork,
   QueueCommandConflictError,
+  saveComposerDraftInTransaction,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   settleSessionAttemptInterruptions,
@@ -258,6 +263,230 @@ describe("canonical queue commands", () => {
     expect(withdrawn).toEqual({ status: "withdrawn_for_edit", reason: "withdrawn_for_edit" });
   });
 
+  test("Edit then Send copies private source instructions without exposing them or accepting an override", async () => {
+    const value = await fixture();
+    const privateInstructions = "host-only record context: source-42";
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ turnInstructions: privateInstructions })
+        .where(eq(schema.sessionTurns.id, value.turns[1]!.id));
+    });
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: value.turns[1]!.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: value.turns[1]!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+    const savedEdit = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          saveComposerDraftInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            expectedRevision: edited.draft.revision,
+            text: "edited prompt with replacement content",
+            resources: [],
+            tools: [],
+            toolsProvided: false,
+            model: "edited-model",
+            reasoningEffort: "medium",
+          }),
+        ),
+    );
+    const command = {
+      accountId: value.grant.accountId,
+      workspaceId: value.grant.workspaceId!,
+      sessionId: value.session.id,
+      subjectId: value.grant.subjectId,
+      actor: value.actor,
+      operationKey: crypto.randomUUID(),
+      delivery: "send" as const,
+      expectedDraftRevision: savedEdit.revision,
+      text: savedEdit.text,
+      resources: savedEdit.resources as ResourceRef[],
+      tools: savedEdit.tools as ToolRef[],
+      model: savedEdit.model,
+      reasoningEffort: savedEdit.reasoningEffort as ReasoningEffort,
+      reasoningEffortFallback: "medium" as const,
+      source: "user" as const,
+      turnInstructions: "client must not replace source instructions",
+    };
+    const submitted = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+    );
+    const [stored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select({
+          turnInstructions: schema.sessionTurns.turnInstructions,
+          prompt: schema.sessionTurns.prompt,
+        })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, submitted.turnId)),
+    );
+    expect(stored).toEqual({
+      turnInstructions: privateInstructions,
+      prompt: savedEdit.text,
+    });
+
+    const publicTurn = await getSessionTurn(client.db, value.grant.workspaceId!, submitted.turnId);
+    expect(publicTurn).not.toHaveProperty("turnInstructions");
+    const publicTurns = await listSessionTurns(
+      client.db,
+      value.grant.workspaceId!,
+      value.session.id,
+    );
+    expect(publicTurns.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
+      "turnInstructions",
+    );
+    const queue = await getSessionQueueSnapshot(
+      client.db,
+      value.grant.workspaceId!,
+      value.session.id,
+    );
+    expect(queue?.items.find((turn) => turn.id === submitted.turnId)).not.toHaveProperty(
+      "turnInstructions",
+    );
+    const events = await storedEvents(value.grant.workspaceId!, submitted.eventIds);
+    expect(
+      events.every((event) => !JSON.stringify(event.payload).includes(privateInstructions)),
+    ).toBe(true);
+    expect(
+      events.every(
+        (event) =>
+          typeof event.payload !== "object" ||
+          event.payload === null ||
+          !Object.hasOwn(event.payload, "turnInstructions"),
+      ),
+    ).toBe(true);
+
+    const replay = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+    );
+    expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+  });
+
+  test("an edited source must still be the exact withdrawn revision, while direct Send keeps explicit instructions", async () => {
+    const value = await fixture();
+    const direct = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: "direct prompt",
+            turnInstructions: "direct explicit context",
+            resources: [],
+            tools: [],
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+    );
+    const [directStored] = await withWorkspaceRls(client.db, value.grant.workspaceId!, (db) =>
+      db
+        .select({ turnInstructions: schema.sessionTurns.turnInstructions })
+        .from(schema.sessionTurns)
+        .where(eq(schema.sessionTurns.id, direct.turnId)),
+    );
+    expect(directStored?.turnInstructions).toBe("direct explicit context");
+
+    const edited = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db.transaction((tx) =>
+          editQueuedTurnInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            turnId: value.turns[1]!.id,
+            subjectId: value.grant.subjectId,
+            expectedTurnVersion: value.turns[1]!.version,
+            expectedDraftRevision: 0,
+            replaceDraft: false,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+          }),
+        ),
+    );
+    await withWorkspaceRls(client.db, value.grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionTurns)
+        .set({ status: "queued" })
+        .where(eq(schema.sessionTurns.id, value.turns[1]!.id));
+    });
+    await expect(
+      withWorkspaceSubjectRls(client.db, value.grant.workspaceId!, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId: value.grant.workspaceId!,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            expectedDraftRevision: edited.draft.revision,
+            text: edited.draft.text,
+            resources: edited.draft.resources as ResourceRef[],
+            tools: edited.draft.tools as ToolRef[],
+            model: edited.draft.model,
+            reasoningEffort: edited.draft.reasoningEffort as ReasoningEffort,
+            reasoningEffortFallback: "medium",
+            source: "user",
+            turnInstructions: "must be ignored",
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "EDIT_SOURCE_CHANGED" });
+    const [draft] = await withWorkspaceSubjectRls(
+      client.db,
+      value.grant.workspaceId!,
+      value.grant.subjectId,
+      (db) =>
+        db
+          .select({ revision: schema.composerDrafts.revision })
+          .from(schema.composerDrafts)
+          .where(eq(schema.composerDrafts.sessionId, value.session.id)),
+    );
+    expect(draft?.revision).toBe(edited.draft.revision);
+  });
+
   test("Edit never overwrites a dirty draft without exact replacement consent", async () => {
     const value = await fixture();
     await withWorkspaceSubjectRls(
@@ -337,6 +566,7 @@ describe("canonical queue commands", () => {
         temporalWorkflowRunId: `run-${attemptId}`,
         temporalActivityId: `activity-${attemptId}`,
         verifiedControlRevision: 0,
+        mcpApprovalPolicies: {},
       });
       await db
         .update(schema.sessions)
@@ -523,12 +753,21 @@ describe("canonical queue commands", () => {
         return row?.wakeRevision ?? 0;
       },
     );
-    const quiescenceEvents = await markSessionAttemptQuiesced(client.db, {
-      workspaceId: value.grant.workspaceId!,
-      sessionId: value.session.id,
-      attemptId,
-      temporalWorkflowId: `session-${value.session.id}`,
-    });
+    const [quiescenceEvents, concurrentReplay] = await Promise.all([
+      markSessionAttemptQuiesced(client.db, {
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        attemptId,
+        temporalWorkflowId: `session-${value.session.id}`,
+      }),
+      markSessionAttemptQuiesced(client.db, {
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        attemptId,
+        temporalWorkflowId: `session-${value.session.id}`,
+      }),
+    ]);
+    expect(concurrentReplay).toEqual(quiescenceEvents);
     const wakeAfterQuiescence = await withWorkspaceRls(
       client.db,
       value.grant.workspaceId!,
@@ -678,6 +917,242 @@ describe("canonical queue commands", () => {
       (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
     );
     expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+  });
+
+  test("Send preserves omitted versus explicit turn tool provenance without mutating a fixed policy", async () => {
+    const value = await fixture(1);
+    const workspaceId = value.grant.workspaceId!;
+    const selected = [{ kind: "mcp" as const, id: "cap-docs" }];
+    await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .update(schema.sessions)
+        .set({
+          tools: selected,
+          toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+        })
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+
+    const submit = async (tools: typeof selected, toolsProvided: boolean) =>
+      await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+        db.transaction((tx) =>
+          submitHumanPromptInTransaction(tx as typeof db, {
+            accountId: value.grant.accountId,
+            workspaceId,
+            sessionId: value.session.id,
+            subjectId: value.grant.subjectId,
+            actor: value.actor,
+            operationKey: crypto.randomUUID(),
+            delivery: "send",
+            text: toolsProvided ? "explicit tools" : "inherited tools",
+            resources: [],
+            tools,
+            toolsProvided,
+            model: "scripted-model",
+            reasoningEffort: "low",
+            reasoningEffortFallback: "medium",
+            source: "user",
+          }),
+        ),
+      );
+
+    const omitted = await submit([], false);
+    const explicitEmpty = await submit([], true);
+    const explicitSubset = await submit(selected, true);
+
+    const turns = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({
+          id: schema.sessionTurns.id,
+          tools: schema.sessionTurns.tools,
+          toolsProvided: schema.sessionTurns.toolsProvided,
+        })
+        .from(schema.sessionTurns)
+        .where(
+          inArray(schema.sessionTurns.id, [
+            omitted.turnId,
+            explicitEmpty.turnId,
+            explicitSubset.turnId,
+          ]),
+        ),
+    );
+    expect(turns).toEqual(
+      expect.arrayContaining([
+        { id: omitted.turnId, tools: [], toolsProvided: false },
+        { id: explicitEmpty.turnId, tools: [], toolsProvided: true },
+        { id: explicitSubset.turnId, tools: selected, toolsProvided: true },
+      ]),
+    );
+
+    const events = await storedEvents(workspaceId, [
+      omitted.acceptedEventId,
+      explicitEmpty.acceptedEventId,
+      explicitSubset.acceptedEventId,
+    ]);
+    const omittedPayload = events.find((event) => event.id === omitted.acceptedEventId)!
+      .payload as Record<string, unknown>;
+    const emptyPayload = events.find((event) => event.id === explicitEmpty.acceptedEventId)!
+      .payload as Record<string, unknown>;
+    expect(Object.hasOwn(omittedPayload, "tools")).toBe(false);
+    expect(emptyPayload.tools).toEqual([]);
+
+    const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({ tools: schema.sessions.tools, toolPolicy: schema.sessions.toolPolicy })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(storedSession).toEqual({
+      tools: selected,
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+    });
+  });
+
+  test("legacy sessions retain the historical follow-up merge behavior", async () => {
+    const value = await fixture(1);
+    const workspaceId = value.grant.workspaceId!;
+    const selected = [{ kind: "mcp" as const, id: "legacy-added" }];
+    await withWorkspaceSubjectRls(client.db, workspaceId, value.grant.subjectId, (db) =>
+      db.transaction((tx) =>
+        submitHumanPromptInTransaction(tx as typeof db, {
+          accountId: value.grant.accountId,
+          workspaceId,
+          sessionId: value.session.id,
+          subjectId: value.grant.subjectId,
+          actor: value.actor,
+          operationKey: crypto.randomUUID(),
+          delivery: "send",
+          text: "legacy merge",
+          resources: [],
+          tools: selected,
+          toolsProvided: true,
+          model: "scripted-model",
+          reasoningEffort: "low",
+          reasoningEffortFallback: "medium",
+          source: "user",
+        }),
+      ),
+    );
+
+    const [storedSession] = await withWorkspaceRls(client.db, workspaceId, (db) =>
+      db
+        .select({ tools: schema.sessions.tools, toolPolicy: schema.sessions.toolPolicy })
+        .from(schema.sessions)
+        .where(eq(schema.sessions.id, value.session.id)),
+    );
+    expect(storedSession).toEqual({ tools: selected, toolPolicy: null });
+  });
+
+  test("Send and Steer persist canonical execution identity and replay its original evidence", async () => {
+    for (const delivery of ["send", "steer"] as const) {
+      const value = await fixture();
+      const operationKey = crypto.randomUUID();
+      const turnExecutionPolicy = TurnExecutionPolicyV1.parse({
+        schemaVersion: 1,
+        productModelId: "xai/grok-4.5",
+        requestedModelId: "grok-4.5",
+        modelSource: "explicit",
+        reasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        upstreamModelId: "grok-4.5",
+        wireApi: "responses",
+        credentialSource: { kind: "workspace_connection", mechanism: "api_key" },
+        billing: { upstreamPayer: "workspace", metering: "external" },
+        definitionVersion: `sha256:${"b".repeat(64)}`,
+      });
+      const command = {
+        accountId: value.grant.accountId,
+        workspaceId: value.grant.workspaceId!,
+        sessionId: value.session.id,
+        subjectId: value.grant.subjectId,
+        actor: value.actor,
+        operationKey,
+        delivery,
+        text: `${delivery} with explicit alias`,
+        resources: [],
+        tools: [],
+        // Core canonicalizes the requested alias before this DB transaction;
+        // the frozen policy intentionally retains the raw accepted alias.
+        model: "xai/grok-4.5",
+        reasoningEffort: "high" as const,
+        reasoningEffortFallback: "medium" as const,
+        turnExecutionPolicy,
+        source: "user" as const,
+      };
+      const submitted = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) => db.transaction((tx) => submitHumanPromptInTransaction(tx as typeof db, command)),
+      );
+      expect(submitted.replay).toBe(false);
+
+      const [storedTurn, audit] = await withWorkspaceRls(
+        client.db,
+        value.grant.workspaceId!,
+        async (db) => {
+          const [turn] = await db
+            .select()
+            .from(schema.sessionTurns)
+            .where(eq(schema.sessionTurns.id, submitted.turnId));
+          const [auditRow] = await db
+            .select()
+            .from(schema.auditEvents)
+            .where(eq(schema.auditEvents.targetId, submitted.turnId));
+          return [turn!, auditRow!] as const;
+        },
+      );
+      expect(storedTurn).toMatchObject({
+        model: "xai/grok-4.5",
+        reasoningEffort: "high",
+      });
+      expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
+        kind: "valid",
+        policy: turnExecutionPolicy,
+      });
+      const expectedEvidence = expect.objectContaining({
+        turnId: submitted.turnId,
+        requestedModelId: "grok-4.5",
+        effectiveModelId: "xai/grok-4.5",
+        modelSource: "explicit",
+        effectiveReasoningEffort: "high",
+        reasoningSource: "explicit",
+        providerId: "xai",
+        credentialSourceKind: "workspace_connection",
+        credentialSourceMechanism: "api_key",
+        billingOwner: "workspace",
+        billingMetering: "external",
+        definitionVersion: turnExecutionPolicy.definitionVersion,
+      });
+      expect(audit.metadata).toEqual(expectedEvidence);
+      expect(submitted.receipt.result.executionPolicy).toEqual(expectedEvidence);
+
+      const retryPolicy = TurnExecutionPolicyV1.parse({
+        ...turnExecutionPolicy,
+        definitionVersion: `sha256:${"c".repeat(64)}`,
+      });
+      const replay = await withWorkspaceSubjectRls(
+        client.db,
+        value.grant.workspaceId!,
+        value.grant.subjectId,
+        (db) =>
+          db.transaction((tx) =>
+            submitHumanPromptInTransaction(tx as typeof db, {
+              ...command,
+              turnExecutionPolicy: retryPolicy,
+            }),
+          ),
+      );
+      expect(replay).toMatchObject({ replay: true, turnId: submitted.turnId });
+      expect(replay.receipt.result.executionPolicy).toEqual(
+        submitted.receipt.result.executionPolicy,
+      );
+      expect(readTurnExecutionPolicyV1(storedTurn.metadata)).toEqual({
+        kind: "valid",
+        policy: turnExecutionPolicy,
+      });
+    }
   });
 
   test("an observing Send loses to an unseen newer Pause without consuming the draft", async () => {

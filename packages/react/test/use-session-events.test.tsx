@@ -869,6 +869,59 @@ describe("useSessionEvents", () => {
 });
 
 describe("boundBrowserSessionEventWindow", () => {
+  test("preserves a normal bounded retained receipt while enforcing the browser window", () => {
+    const artifactId = "44444444-4444-4444-8444-444444444444";
+    const receipt = {
+      available: true as const,
+      artifactId,
+      kind: "tool_result" as const,
+      contentType: "application/json",
+      originalBytes: 4 * 1024 * 1024,
+      sha256: "a".repeat(64),
+      retainedAt: "2026-07-21T00:00:00.000Z",
+      retention: { policy: "workspace_file" as const, expiresAt: null },
+      retrieval: {
+        method: "GET" as const,
+        path: `/v1/workspaces/${WORKSPACE_ID}/artifacts/${artifactId}/content`,
+        acceptRanges: "bytes" as const,
+        maxRangeBytes: 1024 * 1024,
+      },
+    };
+    const bounded = event(6, "agent.toolCall.output", {
+      id: "call-retained",
+      output: "bounded human preview",
+      truncation: {
+        truncated: true,
+        surface: "durable_audit",
+        reason: "payload_bytes_exceeded",
+        originalBytes: 4 * 1024 * 1024,
+        deliveredBytes: 1_024,
+        omittedBytes: 4 * 1024 * 1024 - 1_024,
+        estimatedOriginalTokens: 1024 * 1024,
+        estimatedDeliveredTokens: 256,
+        fullEvidence: receipt,
+        details: [],
+      },
+    });
+    const window = boundBrowserSessionEventWindow(
+      [event(1), event(2), event(3), event(4), event(5), bounded],
+      { maxCount: 3, maxBytes: 16 * 1024 },
+    );
+
+    expect(window.truncated).toBeTrue();
+    expect(window.events).toHaveLength(3);
+    expect(window.events.at(-1)).toBe(bounded);
+    const latestPayload = window.events.at(-1)!.payload as Record<string, unknown>;
+    expect(
+      (
+        latestPayload.truncation as {
+          fullEvidence: unknown;
+        }
+      ).fullEvidence,
+    ).toEqual(receipt);
+    expect(window.bytes).toBeLessThanOrEqual(16 * 1024);
+  });
+
   test("defensively replaces a multi-megabyte legacy event before rendering", () => {
     const legacy = event(1, "agent.toolCall.output", {
       id: "call-1",

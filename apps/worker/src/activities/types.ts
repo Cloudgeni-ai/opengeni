@@ -186,6 +186,17 @@ export type PeekSessionWorkInput = {
   sessionId: string;
 };
 
+export type ExpireSessionHumanInputInput = {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+  requestId: string;
+};
+
+export type ExpireSessionHumanInputResult = {
+  action: "expired" | "stale" | "not_found";
+};
+
 export type MarkSessionIdleInput = {
   workspaceId: string;
   sessionId: string;

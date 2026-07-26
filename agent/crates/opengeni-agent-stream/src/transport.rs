@@ -8,7 +8,7 @@
 //!   *binary* message (the framing in [`crate::codec`]).
 //! * **QUIC / WebTransport** — the PREFERRED path (lower latency, native
 //!   multiplexing). Structured behind this same trait + the `quic` cargo feature;
-//! the agent negotiates QUIC first and falls back to `wss`. The
+//!   the agent negotiates QUIC first and falls back to `wss`. The
 //!   QUIC impl lands with the relay tier; the trait shape is fixed now so the
 //!   channel/pump code is transport-agnostic.
 //!
@@ -186,11 +186,10 @@ pub mod quic {
     impl QuicTransport {
         /// Dials the relay over QUIC. Returns an error today so [`super::dial`]
         /// falls back to `wss` until M8b wires the QUIC endpoint.
-        #[allow(clippy::unused_async)] // stub: async for parity with WssTransport::dial; real impl awaits
-        pub async fn dial(_url: &str) -> StreamResult<Self> {
-            Err(StreamError::Transport(
+        pub fn dial(_url: &str) -> impl std::future::Future<Output = StreamResult<Self>> {
+            std::future::ready(Err(StreamError::Transport(
                 "QUIC relay transport is not yet implemented (M8b)".to_string(),
-            ))
+            )))
         }
     }
 

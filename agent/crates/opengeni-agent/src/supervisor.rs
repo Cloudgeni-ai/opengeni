@@ -1585,10 +1585,7 @@ mod tests {
                 }
                 match tokio::time::timeout(remaining, sub.next()).await {
                     Ok(Some(msg)) => {
-                        if AgentEvent::decode(msg.payload.as_ref())
-                            .ok()
-                            .is_some_and(|e| pred(&e))
-                        {
+                        if AgentEvent::decode(msg.payload.as_ref()).is_ok_and(|e| pred(&e)) {
                             return true;
                         }
                     }

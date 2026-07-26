@@ -63,6 +63,7 @@ import {
   isProviderSandboxNotFoundError,
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
+  type ModalOrphanSweepTermination,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
@@ -447,6 +448,31 @@ async function forceDrainOverLimitWorkspaces(
   return forceDrained;
 }
 
+export function modalOrphanTerminationStillEligible(
+  latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
+  candidate: ModalOrphanSweepTermination,
+): boolean {
+  if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
+    return false;
+  }
+  const leaseId = candidate.tags.opengeni_lease_id;
+  const workspaceId = candidate.tags.opengeni_workspace_id;
+  const sandboxGroupId = candidate.tags.opengeni_sandbox_group_id;
+  if (!leaseId || !workspaceId || !sandboxGroupId) {
+    return true;
+  }
+  const activeAttribution = latest.find(
+    (lease) =>
+      lease.leaseId === leaseId &&
+      lease.workspaceId === workspaceId &&
+      lease.sandboxGroupId === sandboxGroupId,
+  );
+  return Boolean(
+    !activeAttribution ||
+    (activeAttribution.instanceId !== null && activeAttribution.instanceId !== candidate.sandboxId),
+  );
+}
+
 async function sweepModalOrphansForConfiguredBackend(
   settings: ActivityServices["settings"],
   db: ActivityServices["db"],
@@ -468,7 +494,12 @@ async function sweepModalOrphansForConfiguredBackend(
     return 0;
   }
 
-  const result = await sweepModalOrphanSandboxes(settings, liveLeases);
+  const result = await sweepModalOrphanSandboxes(settings, liveLeases, {
+    revalidateTermination: async (candidate) => {
+      const latest = await listLiveModalSandboxLeaseAttributions(db);
+      return modalOrphanTerminationStillEligible(latest, candidate);
+    },
+  });
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
       sandboxId: terminated.sandboxId,

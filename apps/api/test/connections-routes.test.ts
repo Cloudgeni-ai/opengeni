@@ -147,21 +147,6 @@ async function bearer(
   return `Bearer ${token}`;
 }
 
-function requestHeaderValue(headers: HeadersInit | undefined, name: string): string | null {
-  if (!headers) {
-    return null;
-  }
-  if (headers instanceof Headers) {
-    return headers.get(name);
-  }
-  const lowerName = name.toLowerCase();
-  if (Array.isArray(headers)) {
-    return headers.find(([key]) => key.toLowerCase() === lowerName)?.[1] ?? null;
-  }
-  const record = headers as Record<string, string>;
-  return record[name] ?? record[lowerName] ?? null;
-}
-
 type FakeAuthorizationServer = {
   url: string;
   tokenRequests: URLSearchParams[];
@@ -616,7 +601,7 @@ describe("connections routes", () => {
         token_endpoint: `${as.url}/token`,
         client_id: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
       });
-      expect(loaded?.metadata.authorizationServerIssuer).toBe(as.url);
+      expect(loaded?.metadata.authorizationServerIssuer).toBe(new URL(as.url).toString());
       expect(loaded?.metadata.resource).toBe("urn:test:mcp");
       expect(loaded?.metadata.mcpUrl).toBe(mcp.url);
       expect(loaded?.metadata.mcpToolsVerification).toMatchObject({ status: "ok" });
@@ -870,6 +855,107 @@ describe("connections routes", () => {
     } finally {
       mcp.close();
       as.close();
+    }
+  });
+
+  test("oauth start never replays dynamic client registration to a redirect origin", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const hits: string[] = [];
+    const registrations: Array<{
+      method: string;
+      contentType: string | null;
+      body: Record<string, unknown>;
+    }> = [];
+    const redirectHits: string[] = [];
+    const redirectSink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        redirectHits.push(new URL(request.url).pathname);
+        return Response.json({ client_id: "stolen-registration" });
+      },
+    });
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        const origin = `http://127.0.0.1:${source.port}`;
+        hits.push(url.pathname);
+        if (url.pathname === "/mcp") {
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/prm"` },
+          });
+        }
+        if (url.pathname === "/prm") {
+          return Response.json({
+            resource: `${origin}/mcp`,
+            authorization_servers: [`${origin}/as`],
+            scopes_supported: ["documents:read"],
+          });
+        }
+        if (url.pathname === "/as") {
+          return Response.json({
+            issuer: `${origin}/as`,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            registration_endpoint: `${origin}/register`,
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["none"],
+          });
+        }
+        if (url.pathname === "/register") {
+          registrations.push({
+            method: request.method,
+            contentType: request.headers.get("content-type"),
+            body: (await request.json()) as Record<string, unknown>,
+          });
+          return new Response("", {
+            status: 307,
+            headers: {
+              location: `http://127.0.0.1:${redirectSink.port}/capture-registration`,
+            },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    try {
+      const response = await app({ environment: "test" }).request(
+        `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
+        {
+          method: "POST",
+          headers: {
+            authorization: await bearer(workspace, "subject-a", ["connections:write"]),
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            providerDomain: "dcr-redirect.example.com",
+            mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
+            requestedScopes: ["documents:read"],
+          }),
+        },
+      );
+      const responseText = await response.text();
+      expect(response.status, responseText).toBe(422);
+      expect(responseText).toContain("may not follow redirects");
+      expect(hits).toEqual(["/mcp", "/prm", "/as", "/register"]);
+      expect(registrations).toEqual([
+        {
+          method: "POST",
+          contentType: "application/json",
+          body: expect.objectContaining({
+            client_name: "OpenGeni",
+            redirect_uris: ["https://api.opengeni.test/v1/integrations/oauth/callback"],
+          }),
+        },
+      ]);
+      expect(redirectHits).toEqual([]);
+    } finally {
+      source.stop(true);
+      redirectSink.stop(true);
     }
   });
 
@@ -1140,34 +1226,31 @@ describe("connections routes", () => {
   test("oauth discovery validates redirect targets before following metadata redirects", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const originalFetch = globalThis.fetch;
     const hits: string[] = [];
-    let privateHopHits = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      hits.push(url);
-      expect(init?.redirect).toBe("manual");
-      if (url === "https://1.1.1.1/mcp") {
-        return new Response("", {
-          status: 401,
-          headers: { "www-authenticate": `Bearer resource_metadata="https://1.1.1.1/prm"` },
-        });
-      }
-      if (url === "https://1.1.1.1/prm") {
-        return new Response("", {
-          status: 302,
-          headers: { location: "https://127.0.0.1/private-prm" },
-        });
-      }
-      if (url === "https://127.0.0.1/private-prm") {
-        privateHopHits += 1;
-        return Response.json({ authorization_servers: [] });
-      }
-      return new Response("unexpected fetch", { status: 500 });
-    }) as typeof fetch;
+    const source = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        const origin = `http://127.0.0.1:${source.port}`;
+        hits.push(url.pathname);
+        if (url.pathname === "/mcp") {
+          return new Response("", {
+            status: 401,
+            headers: { "www-authenticate": `Bearer resource_metadata="${origin}/prm"` },
+          });
+        }
+        if (url.pathname === "/prm") {
+          return new Response("", {
+            status: 302,
+            headers: { location: "file:///tmp/private-prm" },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
     try {
-      const response = await app({ environment: "production" }).request(
+      const response = await app({ environment: "test" }).request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
@@ -1178,80 +1261,159 @@ describe("connections routes", () => {
           },
           body: JSON.stringify({
             providerDomain: "redirect.example.com",
-            mcpUrl: "https://1.1.1.1/mcp",
+            mcpUrl: `http://127.0.0.1:${source.port}/mcp`,
           }),
         },
       );
       const responseText = await response.text();
       expect(response.status, responseText).toBe(422);
-      expect(responseText).toContain("private network");
-      expect(hits).toEqual(["https://1.1.1.1/mcp", "https://1.1.1.1/prm"]);
-      expect(privateHopHits).toBe(0);
+      expect(responseText).toContain("only supports http and https");
+      expect(hits).toEqual(["/mcp", "/prm"]);
     } finally {
-      globalThis.fetch = originalFetch;
+      source.stop(true);
     }
   });
 
-  test("oauth callback records non-fatal tools/list verification failure after guarded fetch redirects", async () => {
+  test("oauth callback never replays token exchange secrets to a redirect origin", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const originalFetch = globalThis.fetch;
-    const hits: string[] = [];
-    let privateHopHits = 0;
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url =
-        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-      hits.push(url);
-      expect(init?.redirect).toBe("manual");
-      if (url === "https://1.1.1.1/token") {
-        const body = new URLSearchParams(String(init?.body));
-        expect(body.get("resource")).toBe("https://1.1.1.1/mcp");
-        return Response.json({
-          access_token: "mcp-access-token",
-          token_type: "Bearer",
-          expires_in: 3600,
-          scope: "documents:read",
+    const redirectHits: string[] = [];
+    const tokenRequests: Array<{ authorization: string | null; body: URLSearchParams }> = [];
+    const redirectSink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        redirectHits.push(new URL(request.url).pathname);
+        return Response.json({ access_token: "stolen" });
+      },
+    });
+    const tokenOrigin = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        if (url.pathname !== "/token") {
+          return new Response("not found", { status: 404 });
+        }
+        tokenRequests.push({
+          authorization: request.headers.get("authorization"),
+          body: new URLSearchParams(await request.text()),
         });
-      }
-      if (url === "https://1.1.1.1/mcp") {
-        expect(requestHeaderValue(init?.headers, "authorization")).toBe("Bearer mcp-access-token");
         return new Response("", {
           status: 302,
-          headers: { location: "https://127.0.0.1/private-mcp" },
+          headers: { location: `http://127.0.0.1:${redirectSink.port}/capture-token` },
         });
-      }
-      if (url === "https://127.0.0.1/private-mcp") {
-        privateHopHits += 1;
+      },
+    });
+    const origin = `http://127.0.0.1:${tokenOrigin.port}`;
+    const state = createSignedState(STATE_SECRET, {
+      accountId: workspace.accountId,
+      workspaceId: workspace.workspaceId,
+      subjectId: "subject-a",
+      providerDomain: "token-redirect.example.com",
+      mcpUrl: `${origin}/mcp`,
+      resource: `${origin}/mcp`,
+      requestedScopes: [],
+      authorizeScopes: ["documents:read"],
+      encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "redirect-verifier"),
+      clientId: "redirect-client",
+      tokenEndpoint: `${origin}/token`,
+      authorizationServer: origin,
+      issuer: origin,
+      clientRegistrationMethod: "manual",
+      tokenEndpointAuthMethod: "client_secret_basic",
+      encryptedClientSecret: encryptEnvironmentValue(rawKey, "redirect-client-secret"),
+      returnPath: "/integrations",
+    });
+    try {
+      const response = await publicApp(client.db, { environment: "test" }).request(
+        `/v1/integrations/oauth/callback?code=redirect-code&state=${encodeURIComponent(state)}`,
+      );
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toContain("integration_oauth=error");
+      expect(response.headers.get("location")).toContain("reason=token_exchange_failed");
+      expect(tokenRequests).toHaveLength(1);
+      expect(tokenRequests[0]!.authorization).toMatch(/^Basic /);
+      expect(tokenRequests[0]!.body.get("code")).toBe("redirect-code");
+      expect(tokenRequests[0]!.body.get("code_verifier")).toBe("redirect-verifier");
+      expect(redirectHits).toEqual([]);
+    } finally {
+      tokenOrigin.stop(true);
+      redirectSink.stop(true);
+    }
+  });
+
+  test("oauth callback records non-fatal verification failure without replaying its bearer to a redirect origin", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace();
+    const hits: string[] = [];
+    const redirectHits: string[] = [];
+    const tokenBodies: URLSearchParams[] = [];
+    const mcpAuthorization: Array<string | null> = [];
+    const redirectSink = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        redirectHits.push(new URL(request.url).pathname);
         return Response.json({ tools: [] });
-      }
-      return new Response("unexpected fetch", { status: 500 });
-    }) as typeof fetch;
+      },
+    });
+    const provider = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request) {
+        const url = new URL(request.url);
+        hits.push(url.pathname);
+        if (url.pathname === "/token") {
+          tokenBodies.push(new URLSearchParams(await request.text()));
+          return Response.json({
+            access_token: "mcp-access-token",
+            token_type: "Bearer",
+            expires_in: 3600,
+            scope: "documents:read",
+          });
+        }
+        if (url.pathname === "/mcp") {
+          mcpAuthorization.push(request.headers.get("authorization"));
+          return new Response("", {
+            status: 302,
+            headers: { location: `http://127.0.0.1:${redirectSink.port}/capture-bearer` },
+          });
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const origin = `http://127.0.0.1:${provider.port}`;
     const state = createSignedState(STATE_SECRET, {
       accountId: workspace.accountId,
       workspaceId: workspace.workspaceId,
       subjectId: "subject-a",
       providerDomain: "verify-redirect.example.com",
-      resource: "https://1.1.1.1/mcp",
+      mcpUrl: `${origin}/mcp`,
+      resource: `${origin}/mcp`,
       requestedScopes: [],
       authorizeScopes: ["documents:read"],
       encryptedPkceVerifier: encryptEnvironmentValue(rawKey, "verify-redirect-verifier"),
       clientId: "https://api.opengeni.test/v1/integrations/oauth/client-metadata.json",
-      tokenEndpoint: "https://1.1.1.1/token",
-      authorizationServer: "https://as.example.com",
-      issuer: "https://as.example.com",
+      tokenEndpoint: `${origin}/token`,
+      authorizationServer: origin,
+      issuer: origin,
       clientRegistrationMethod: "cimd",
       tokenEndpointAuthMethod: "none",
       returnPath: "/integrations",
     });
     try {
-      const response = await publicApp(client.db, { environment: "production" }).request(
+      const response = await publicApp(client.db, { environment: "test" }).request(
         `/v1/integrations/oauth/callback?code=abc&state=${encodeURIComponent(state)}`,
       );
       expect(response.status).toBe(302);
       expect(response.headers.get("location")).toContain("integration_oauth=success");
       expect(response.headers.get("location")).toContain("verification=failed");
-      expect(hits).toEqual(["https://1.1.1.1/token", "https://1.1.1.1/mcp"]);
-      expect(privateHopHits).toBe(0);
+      expect(hits).toEqual(["/token", "/mcp"]);
+      expect(tokenBodies).toHaveLength(1);
+      expect(tokenBodies[0]!.get("resource")).toBe(`${origin}/mcp`);
+      expect(mcpAuthorization).toEqual(["Bearer mcp-access-token"]);
+      expect(redirectHits).toEqual([]);
       const loaded = await loadConnectionCredentialForBroker(client.db, settings, {
         workspaceId: workspace.workspaceId,
         providerDomain: "verify-redirect.example.com",
@@ -1263,7 +1425,8 @@ describe("connections routes", () => {
         reason: "tools_list_failed",
       });
     } finally {
-      globalThis.fetch = originalFetch;
+      provider.stop(true);
+      redirectSink.stop(true);
     }
   });
 
@@ -1367,14 +1530,17 @@ describe("connections routes", () => {
   test("oauth routes are hidden while integrations are disabled and start does not discover", async () => {
     if (!available) return;
     const workspace = await freshWorkspace();
-    const originalFetch = globalThis.fetch;
     let fetchCalls = 0;
-    globalThis.fetch = (async () => {
-      fetchCalls += 1;
-      return new Response("unexpected discovery", { status: 500 });
-    }) as typeof fetch;
+    const discoveryTarget = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch() {
+        fetchCalls += 1;
+        return new Response("unexpected discovery", { status: 500 });
+      },
+    });
     try {
-      const start = await app({ integrationsEnabled: false }).request(
+      const start = await app({ integrationsEnabled: false, environment: "test" }).request(
         `/v1/workspaces/${workspace.workspaceId}/connections/oauth/start`,
         {
           method: "POST",
@@ -1384,7 +1550,7 @@ describe("connections routes", () => {
           },
           body: JSON.stringify({
             providerDomain: "disabled.example.com",
-            mcpUrl: "https://1.1.1.1/mcp",
+            mcpUrl: `http://127.0.0.1:${discoveryTarget.port}/mcp`,
           }),
         },
       );
@@ -1399,7 +1565,7 @@ describe("connections routes", () => {
       expect(await callback.text()).toContain("integrations are not enabled");
       expect(fetchCalls).toBe(0);
     } finally {
-      globalThis.fetch = originalFetch;
+      discoveryTarget.stop(true);
     }
   });
 

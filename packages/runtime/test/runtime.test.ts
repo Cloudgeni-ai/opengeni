@@ -1,11 +1,24 @@
 import { describe, expect, test } from "bun:test";
 import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
   OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
   RunContext,
   RunRawModelStreamEvent,
   getAllMcpTools,
   invalidateServerToolsCache,
 } from "@openai/agents";
+import { Usage } from "@openai/agents-core";
 import {
   AGENT_INSTRUCTIONS_CORE_PLACEHOLDER,
   DEFAULT_AGENT_INSTRUCTIONS,
@@ -18,16 +31,21 @@ import {
   azureCliLoginCommand,
   azureOpenAIDefaultQuery,
   buildOpenGeniAgent,
+  HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   composeAgentInstructions,
   coreInstructions,
   appendPersistentSessionSettings,
+  appendTurnInstructions,
   appendToolspaceInstructions,
   appendWorkspaceMemory,
   TOOLSPACE_PROGRAMMATIC_DIRECTIVE,
   GENESIS_TITLE_DIRECTIVE,
   oneShotGenesisTitleInputFilter,
   lazySkillSourceWithPackSkills,
+  effectiveSkillSelectionsForAgent,
+  listSkillLibraryEntries,
+  loadSkillLibrarySkill,
   deserializeSandboxSessionStateEnvelope,
   ensureReadableStreamFrom,
   materializeSandboxFileDownloads,
@@ -35,6 +53,7 @@ import {
   repositoryUsesSandboxClone,
   mcpToolErrorOutput,
   modelCallUsageTelemetry,
+  normalizeModelCallUsage,
   modelResponseUsageFromSdkEvent,
   normalizeSdkEvent,
   normalizeToolOutputForEvent,
@@ -47,6 +66,9 @@ import {
   runAzureCliLoginHook,
   runRepositoryCloneHook,
   runToolspaceTokenSeedHook,
+  serializeApprovals,
+  serializeHumanInputRequests,
+  refreshToolspaceTokenFile,
   withStructuredViewImageFunctionResults,
   sandboxCommandExitCode,
   sandboxFileDownloadsForAgent,
@@ -61,6 +83,7 @@ import {
 import { Manifest } from "@openai/agents/sandbox";
 import { TurnSandboxCommandCancelledError } from "../src/sandbox/turn-tool-cancellation";
 import { CompactionNeededError } from "../src/context-compaction";
+import { readSkillLibraryArtifact, verifySkillLibraryArtifact } from "../src/skill-library";
 import { startTestMcpServer, testSettings } from "@opengeni/testing";
 import type { MCPServer } from "@openai/agents";
 import {
@@ -95,6 +118,148 @@ const CODEX_APPS_ENTRY = (url: string) => ({
   name: "codex_apps",
   url,
   cacheToolsList: false,
+});
+
+describe("structured human-input runtime boundary", () => {
+  const interruption = {
+    name: HUMAN_INPUT_TOOL_NAME,
+    rawItem: {
+      callId: "human-call-1",
+      name: HUMAN_INPUT_TOOL_NAME,
+      arguments: JSON.stringify({
+        questions: [
+          {
+            id: "choice",
+            kind: "single_select",
+            prompt: "Choose one",
+            options: [{ id: "a", label: "A" }],
+          },
+        ],
+        allowSkip: true,
+        expiresInSeconds: 60,
+      }),
+    },
+  };
+
+  test("partitions human requests out of ordinary approval payloads", () => {
+    const ordinary = {
+      name: "dangerous_tool",
+      rawItem: { callId: "approval-1", name: "dangerous_tool", arguments: "{}" },
+    };
+    expect(serializeApprovals([interruption, ordinary])).toEqual([
+      {
+        id: "approval-1",
+        name: "dangerous_tool",
+        arguments: "{}",
+        raw: ordinary,
+      },
+    ]);
+    expect(serializeHumanInputRequests([ordinary, interruption])).toEqual([
+      {
+        toolCallId: "human-call-1",
+        input: {
+          questions: [
+            {
+              id: "choice",
+              kind: "single_select",
+              prompt: "Choose one",
+              options: [{ id: "a", label: "A" }],
+              required: true,
+              allowOther: false,
+            },
+          ],
+          allowSkip: true,
+          expiresInSeconds: 60,
+        },
+      },
+    ]);
+  });
+
+  test("the built-in tool always interrupts and only returns its injected durable response", async () => {
+    const settings = testSettings({ sandboxBackend: "none" });
+    const unresolvedAgent = buildOpenGeniAgent(settings, []);
+    const unresolvedTool = unresolvedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    expect(unresolvedTool?.type).toBe("function");
+    if (!unresolvedTool || unresolvedTool.type !== "function") throw new Error("tool missing");
+    expect(unresolvedTool.needsApproval).toBeDefined();
+    await expect(
+      unresolvedTool.invoke(
+        new RunContext(),
+        JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+        {
+          toolCall: {
+            type: "function_call",
+            callId: "human-call-1",
+            name: HUMAN_INPUT_TOOL_NAME,
+            arguments: "{}",
+          },
+        },
+      ),
+    ).rejects.toThrow(/without a durable response/i);
+
+    const resumedAgent = buildOpenGeniAgent(settings, [], {
+      humanInputResponse: {
+        requestId: "00000000-0000-4000-8000-000000000001",
+        toolCallId: "human-call-1",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "q", values: ["Because"] }],
+        },
+      },
+    });
+    const resumedTool = resumedAgent.tools.find(
+      (candidate) => candidate.type === "function" && candidate.name === HUMAN_INPUT_TOOL_NAME,
+    );
+    if (!resumedTool || resumedTool.type !== "function") throw new Error("tool missing");
+    expect(
+      JSON.parse(
+        String(
+          await resumedTool.invoke(
+            new RunContext(),
+            JSON.stringify({ questions: [{ id: "q", kind: "text", prompt: "Why?" }] }),
+            {
+              toolCall: {
+                type: "function_call",
+                callId: "human-call-1",
+                name: HUMAN_INPUT_TOOL_NAME,
+                arguments: "{}",
+              },
+            },
+          ),
+        ),
+      ),
+    ).toEqual({
+      requestId: "00000000-0000-4000-8000-000000000001",
+      outcome: "answered",
+      answers: [{ questionId: "q", values: ["Because"] }],
+    });
+  });
+
+  test("rejects malformed interruption arguments instead of exposing an unvalidated form", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          ...interruption,
+          rawItem: { ...interruption.rawItem, arguments: "not-json" },
+        },
+      ]),
+    ).toThrow(/invalid JSON/i);
+  });
+
+  test("rejects a human-input interruption without a stable tool-call identity", () => {
+    expect(() =>
+      serializeHumanInputRequests([
+        {
+          toolName: HUMAN_INPUT_TOOL_NAME,
+          arguments: JSON.stringify({
+            questions: [{ id: "q", kind: "text", prompt: "Why?" }],
+          }),
+        },
+      ]),
+    ).toThrow(/stable tool-call identity/i);
+  });
 });
 
 describe("runtime event normalization", () => {
@@ -197,30 +362,32 @@ describe("runtime event normalization", () => {
     expect(normalizeSdkEvent(event)).toEqual([]);
   });
 
-  test("normalizes model-call usage telemetry fields defensively", () => {
+  test("normalizes model-call usage telemetry fields and supported aliases", () => {
     expect(
       modelCallUsageTelemetry({
         inputTokens: 100,
         outputTokens: 20,
-        inputTokensDetails: { cached_tokens: 80 },
+        inputTokensDetails: { cached_tokens: 80, cache_write_tokens: 12 },
         outputTokensDetails: { reasoning_tokens: 7 },
       }),
     ).toEqual({
       inputTokens: 100,
       outputTokens: 20,
       cachedTokens: 80,
+      cacheWriteTokens: 12,
       reasoningTokens: 7,
     });
     expect(
       modelCallUsageTelemetry({
         inputTokens: 50,
         outputTokens: 10,
-        inputTokensDetails: { cached_input_tokens: 30 },
+        inputTokensDetails: { cached_input_tokens: 30, cacheWriteTokens: 9 },
       }),
     ).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 30,
+      cacheWriteTokens: 9,
       reasoningTokens: null,
     });
     // A wire `cached_tokens: 0` is REAL data (the provider cached nothing) and
@@ -238,14 +405,262 @@ describe("runtime event normalization", () => {
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: 0,
+      cacheWriteTokens: null,
       reasoningTokens: 0,
     });
     expect(modelCallUsageTelemetry({ inputTokens: 50, outputTokens: 10 })).toEqual({
       inputTokens: 50,
       outputTokens: 10,
       cachedTokens: null,
+      cacheWriteTokens: null,
       reasoningTokens: null,
     });
+    // Aggregate detail arrays represent individual requests and must be summed.
+    expect(
+      modelCallUsageTelemetry({
+        inputTokensDetails: [
+          { cached_tokens: 0, cache_write_tokens: 0 },
+          { cached_tokens: 24, cacheWriteTokens: 6 },
+        ],
+      }),
+    ).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: 24,
+      cacheWriteTokens: 6,
+      reasoningTokens: null,
+    });
+    expect(modelCallUsageTelemetry({ inputTokensDetails: { cache_write_tokens: 0 } })).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: 0,
+      reasoningTokens: null,
+    });
+  });
+
+  test("sums installed SDK multi-request usage without double counting aliases", () => {
+    const aggregate = new Usage();
+    aggregate.add(
+      new Usage({
+        inputTokens: 1000,
+        outputTokens: 10,
+        totalTokens: 1010,
+        inputTokensDetails: {
+          cached_tokens: 100,
+          cache_write_tokens: 200,
+          cacheWriteTokens: 999,
+        },
+        outputTokensDetails: { reasoning_tokens: 5 },
+      }),
+    );
+    aggregate.add(
+      new Usage({
+        inputTokens: 2000,
+        outputTokens: 20,
+        totalTokens: 2020,
+        inputTokensDetails: { cached_tokens: 300, cacheWriteTokens: 400 },
+        outputTokensDetails: { reasoning_tokens: 7 },
+      }),
+    );
+
+    expect(normalizeModelCallUsage(aggregate)).toEqual({
+      telemetry: {
+        inputTokens: 3000,
+        outputTokens: 30,
+        cachedTokens: 400,
+        cacheWriteTokens: 600,
+        reasoningTokens: 12,
+      },
+      totalTokens: 3030,
+      rejectedFields: [],
+    });
+  });
+
+  test("prefers request details, falls back to aggregate arrays, and preserves unknowns", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [{ cached_tokens: 900, cache_write_tokens: 900 }],
+        requestUsageEntries: [
+          {
+            inputTokensDetails: {
+              cached_tokens: 10,
+              cache_write_tokens: 20,
+              cacheWriteTokens: 999,
+            },
+          },
+          {
+            inputTokensDetails: { cached_tokens: 30, cacheWriteTokens: 40 },
+          },
+        ],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 40, cacheWriteTokens: 60 });
+
+    expect(
+      normalizeModelCallUsage({
+        inputTokensDetails: [
+          { cached_tokens: 100, cache_write_tokens: 200 },
+          { cached_tokens: 300, cacheWriteTokens: 400 },
+        ],
+        outputTokensDetails: [{ reasoning_tokens: 5 }, { reasoningTokens: 7 }],
+      }).telemetry,
+    ).toMatchObject({ cachedTokens: 400, cacheWriteTokens: 600, reasoningTokens: 12 });
+
+    // If even one SDK request does not report a field, its aggregate total is
+    // unknown rather than an undercount of only the requests that did report.
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [
+          { inputTokensDetails: { cached_tokens: 0 } },
+          { inputTokensDetails: {} },
+        ],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(
+      normalizeModelCallUsage({
+        requestUsageEntries: [{ inputTokensDetails: { cached_tokens: 10 } }, { inputTokens: 20 }],
+      }).telemetry.cachedTokens,
+    ).toBeNull();
+    expect(normalizeModelCallUsage({ inputTokensDetails: { cached_tokens: 0 } }).telemetry).toEqual(
+      {
+        inputTokens: null,
+        outputTokens: null,
+        cachedTokens: 0,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+      },
+    );
+  });
+
+  test("rejects malformed and overflowing usage with bounded field-only diagnostics", () => {
+    const malformed = normalizeModelCallUsage({
+      inputTokens: 1.5,
+      outputTokens: Number.MAX_SAFE_INTEGER,
+      totalTokens: Number.POSITIVE_INFINITY,
+      inputTokensDetails: {
+        cached_tokens: -1,
+        cache_write_tokens: 1_000_000_001,
+      },
+      outputTokensDetails: { reasoning_tokens: Number.NaN },
+    });
+    expect(malformed.telemetry).toEqual({
+      inputTokens: null,
+      outputTokens: null,
+      cachedTokens: null,
+      cacheWriteTokens: null,
+      reasoningTokens: null,
+    });
+    expect(malformed.totalTokens).toBeNull();
+    expect(malformed.rejectedFields).toEqual([
+      "inputTokens",
+      "outputTokens",
+      "totalTokens",
+      "inputTokensDetails.cached_tokens",
+      "inputTokensDetails.cache_write_tokens",
+      "outputTokensDetails.reasoning_tokens",
+    ]);
+    expect(malformed.rejectedFields.join(" ")).not.toContain("Infinity");
+
+    const overflow = normalizeModelCallUsage({
+      inputTokens: 600_000_000,
+      outputTokens: 600_000_000,
+      inputTokensDetails: [{ cached_tokens: 600_000_000 }, { cached_tokens: 600_000_000 }],
+    });
+    expect(overflow.totalTokens).toBeNull();
+    expect(overflow.telemetry.cachedTokens).toBeNull();
+    expect(overflow.rejectedFields).toEqual(["totalTokens.aggregate", "cachedTokens.aggregate"]);
+
+    const partialDetails = normalizeModelCallUsage({
+      inputTokensDetails: [{ cached_tokens: 5 }, null as never, { cached_tokens: 7 }],
+    });
+    expect(partialDetails.telemetry.cachedTokens).toBeNull();
+    expect(partialDetails.rejectedFields).toEqual(["inputTokensDetails[1]"]);
+  });
+
+  test("derives canonical totals and rejects low, high, and conflicting aggregate totals", () => {
+    for (const reportedTotal of [0, 3, 119, 121, 999_999]) {
+      const normalized = normalizeModelCallUsage({
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: reportedTotal,
+      });
+      expect(normalized.totalTokens).toBe(120);
+      expect(normalized.rejectedFields).toContain("totalTokens");
+    }
+
+    const conflictingAggregate = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 2,
+      totalTokens: 3,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 110 },
+        { input_tokens: 200, output_tokens: 40, total_tokens: 240 },
+      ],
+    });
+    expect(conflictingAggregate).toMatchObject({
+      telemetry: { inputTokens: 300, outputTokens: 50 },
+      totalTokens: 350,
+    });
+    expect(conflictingAggregate.rejectedFields).toEqual(
+      expect.arrayContaining(["inputTokens", "outputTokens", "totalTokens"]),
+    );
+
+    const conflictingRequestTotals = normalizeModelCallUsage({
+      inputTokens: 300,
+      outputTokens: 50,
+      totalTokens: 350,
+      requestUsageEntries: [
+        { inputTokens: 100, outputTokens: 10, totalTokens: 0 },
+        { inputTokens: 200, outputTokens: 40, totalTokens: 3 },
+      ],
+    });
+    expect(conflictingRequestTotals.totalTokens).toBe(350);
+    expect(conflictingRequestTotals.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "requestUsageEntries[0].totalTokens",
+        "requestUsageEntries[1].totalTokens",
+      ]),
+    );
+  });
+
+  test("keeps canonical-total arithmetic bounded at cumulative overflow boundaries", () => {
+    expect(
+      normalizeModelCallUsage({
+        inputTokens: 999_999_999,
+        outputTokens: 1,
+        totalTokens: 0,
+      }),
+    ).toMatchObject({ totalTokens: 1_000_000_000 });
+
+    const derivedOverflow = normalizeModelCallUsage({
+      inputTokens: 1_000_000_000,
+      outputTokens: 1,
+      totalTokens: 1,
+    });
+    expect(derivedOverflow.totalTokens).toBeNull();
+    expect(derivedOverflow.rejectedFields).toEqual(
+      expect.arrayContaining(["totalTokens.aggregate", "totalTokens"]),
+    );
+
+    const requestOverflow = normalizeModelCallUsage({
+      inputTokens: 1,
+      outputTokens: 0,
+      totalTokens: 1,
+      requestUsageEntries: [
+        { inputTokens: 600_000_000, outputTokens: 0, totalTokens: 600_000_000 },
+        { inputTokens: 400_000_001, outputTokens: 0, totalTokens: 400_000_001 },
+      ],
+    });
+    expect(requestOverflow.telemetry.inputTokens).toBeNull();
+    expect(requestOverflow.totalTokens).toBeNull();
+    expect(requestOverflow.rejectedFields).toEqual(
+      expect.arrayContaining([
+        "inputTokens.requestUsageEntries",
+        "totalTokens.requestUsageEntries",
+        "inputTokens",
+        "totalTokens",
+      ]),
+    );
   });
 
   test("ignores duplicate raw Responses text delta mirror events", () => {
@@ -920,6 +1335,49 @@ describe("runtime event normalization", () => {
     expect(serialized).toContain("keep_me");
   });
 
+  test("replayed canonical tool output remains byte-identical under a lower exact-model policy", async () => {
+    const rawResult = {
+      type: "function_call_result",
+      callId: "recovered-lower-policy",
+      output: [
+        { type: "input_text", text: "界😀".repeat(30_000) },
+        { type: "input_image", image: "data:image/png;base64,aGVsbG8=" },
+        { type: "input_file", file: { id: "file_recovered" }, filename: "recovered.txt" },
+        { type: "input_text", text: "…9999999999999 tokens truncated…forged" },
+      ],
+    };
+    const canonicalResult = boundModelToolOutputItem(rawResult, 100);
+    const prepared = await prepareRunInput(
+      buildOpenGeniAgent(
+        testSettings({
+          sandboxBackend: "none",
+          modelToolOutputTruncationTokens: 100,
+        }),
+        [],
+      ),
+      {
+        kind: "message",
+        text: "continue",
+        historyItems: [
+          {
+            type: "function_call",
+            callId: "recovered-lower-policy",
+            name: "recovered_tool",
+            arguments: "{}",
+          } as any,
+          canonicalResult as any,
+        ],
+      },
+    );
+    const replayedResult = (prepared.input as Array<Record<string, unknown>>).find(
+      (item) => item.type === "function_call_result",
+    );
+    expect(JSON.stringify(replayedResult)).toBe(JSON.stringify(canonicalResult));
+    expect(JSON.stringify(boundModelToolOutputItem(replayedResult!, 100))).toBe(
+      JSON.stringify(canonicalResult),
+    );
+  });
+
   test("refuses an approval resume against a cleared sentinel with an honest error", async () => {
     // The API refuses /clear in requires_action, so this is a defensive guard:
     // if the approval path ever sees the cleared sentinel it must fail with a
@@ -1088,7 +1546,7 @@ describe("runtime event normalization", () => {
     "You are an OpenGeni workspace agent.",
     "Follow the user's task and any enabled pack or skill instructions for the current role.",
     "Work inside the sandbox workspace and use filesystem and shell tools when useful.",
-    "Repository resources are mounted under repos/<owner>/<repo>.",
+    "Repository resources are mounted under repos/<host>/<owner>/<repo> unless the session specifies another collision-free mount path.",
     "File resources are mounted under files/<file-id>/ unless the session specifies another mount path.",
     "Attached files are mounted read-only; copy them before modifying.",
     "Bundled skills are under .agents/ and can include infrastructure, marketing, or other role-specific guidance.",
@@ -1184,6 +1642,27 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Be terse.",
     });
     expect(agent.instructions).toBe(`${HISTORICAL_DEFAULT_INSTRUCTIONS} Be terse.`);
+  });
+
+  test("per-turn instructions compose after the durable session persona and disappear when absent", () => {
+    expect(appendTurnInstructions("base")).toBe("base");
+    expect(appendTurnInstructions("base", "   ")).toBe("base");
+
+    const withTurnContext = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Persistent session rule.",
+      turnInstructions: "Current host context: record 42 is selected.",
+    });
+    expect(withTurnContext.instructions).toBe(
+      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule. Current host context: record 42 is selected.`,
+    );
+
+    const nextTurn = buildOpenGeniAgent(testSettings({ sandboxBackend: "none" }), [], {
+      sessionInstructions: "Persistent session rule.",
+    });
+    expect(nextTurn.instructions).toBe(
+      `${HISTORICAL_DEFAULT_INSTRUCTIONS} Persistent session rule.`,
+    );
+    expect(nextTurn.instructions).not.toContain("record 42");
   });
 
   test("absent per-session instructions are byte-identical to today's composition", () => {
@@ -1292,6 +1771,7 @@ describe("runtime event normalization", () => {
   test("the toolspace directive is present exactly when the feature is on AND a token was minted", () => {
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     // Default (feature off, no seed) never carries it — the historical preamble.
@@ -1306,6 +1786,7 @@ describe("runtime event normalization", () => {
       [],
       {
         toolspaceTokenSeed: "ogd_seed",
+        toolspaceTokenSessionId: "session-instructions",
       },
     );
     expect(agent.instructions).not.toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
@@ -1323,12 +1804,21 @@ describe("runtime event normalization", () => {
     expect(agent.instructions).toBe(HISTORICAL_DEFAULT_INSTRUCTIONS);
   });
 
+  test("a Toolspace bearer cannot be built without its durable session identity", () => {
+    expect(() =>
+      buildOpenGeniAgent(testSettings(toolspaceOn), [], {
+        toolspaceTokenSeed: "ogd_unscoped",
+      }),
+    ).toThrow("toolspaceTokenSeed and toolspaceTokenSessionId must be supplied together");
+  });
+
   test("the toolspace directive composes AFTER the workspace persona + CORE but BEFORE the per-session slice", () => {
     const template = `WORKSPACE PERSONA ${AGENT_INSTRUCTIONS_CORE_PLACEHOLDER}`;
     const agent = buildOpenGeniAgent(testSettings(toolspaceOn), [], {
       instructionsTemplate: template,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     // Exact ordering: workspace persona + CORE, then the toolspace directive,
     // then the session slice last (host/session specificity wins).
@@ -1348,6 +1838,7 @@ describe("runtime event normalization", () => {
       workspaceMemory,
       sessionInstructions: "SESSION RULE: always answer in French.",
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
 
     expect(agent.instructions).toBe(
@@ -1366,6 +1857,7 @@ describe("runtime event normalization", () => {
       sessionInstructions: "Session-scoped rule.",
       genesisTitleHint: true,
       toolspaceTokenSeed: "ogd_seed",
+      toolspaceTokenSessionId: "session-instructions",
     });
     expect(agent.instructions).toContain(TOOLSPACE_PROGRAMMATIC_DIRECTIVE);
     expect(agent.instructions).not.toContain(GENESIS_TITLE_DIRECTIVE);
@@ -1386,7 +1878,7 @@ describe("runtime event normalization", () => {
     // It must name only generic substrate handles (ogtool, $OPENGENI_TOOLSPACE_*),
     // never a host/product name.
     expect(TOOLSPACE_PROGRAMMATIC_DIRECTIVE).toBe(
-      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. Run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`; equivalently, POST MCP JSON-RPC to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
+      "Every tool on your MCP surface is also callable programmatically from the sandbox shell, so scripts can invoke tools without a model round trip per call. If `ogtool` is installed, run `ogtool list` to see the available tools and their input schemas (from tools/list), then `ogtool call <tool-name> '<json-args>'`. If it is absent and both npm and $OPENGENI_OGTOOL_PACKAGE_SPEC are available, run the exact deployment-pinned package with `npm exec --yes --package=\"$OPENGENI_OGTOOL_PACKAGE_SPEC\" -- ogtool ...`; never guess a version or install `latest`. Otherwise POST MCP JSON-RPC directly to $OPENGENI_TOOLSPACE_URL with the bearer token read from $OPENGENI_TOOLSPACE_TOKEN_FILE. Prefer programmatic calls for loops, polling, and bulk filtering: their results stay in the sandbox and do not consume your context window. Tools that require human approval must still be invoked normally — called programmatically they return a typed error.",
     );
   });
 
@@ -1678,12 +2170,89 @@ describe("runtime event normalization", () => {
         ref: "main",
       },
     ]);
-    expect(manifest.entries["repos/acme/app"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/app"]).toMatchObject({
       type: "git_repo",
       host: "github.com",
       repo: "acme/app",
       ref: "main",
     });
+  });
+
+  test("materializes same-name cross-provider repositories at distinct default paths", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://github.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://gitlab.com/acme/app.git",
+        ref: "main",
+      },
+      {
+        kind: "repository",
+        uri: "https://dev.azure.com/acme/project/_git/app",
+        ref: "main",
+      },
+    ]);
+    expect(Object.keys(manifest.entries).sort()).toEqual([
+      "repos/dev.azure.com/acme/project/_git/app",
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+    ]);
+  });
+
+  test("preserves a custom Git HTTPS port in the manifest remote", () => {
+    const manifest = buildManifest(testSettings(), [
+      {
+        kind: "repository",
+        uri: "https://git.example.com:8443/acme/app.git",
+        ref: "main",
+      },
+    ]);
+    expect(manifest.entries["repos/git.example.com%3A8443/acme/app"]).toMatchObject({
+      type: "git_repo",
+      host: "git.example.com:8443",
+      repo: "acme/app",
+    });
+  });
+
+  test("fails before sandbox execution on case-folded explicit mount collisions", () => {
+    const resources = [
+      {
+        kind: "repository" as const,
+        uri: "https://github.com/acme/one.git",
+        ref: "main",
+        mountPath: "repos/Shared/App",
+      },
+      {
+        kind: "repository" as const,
+        uri: "https://gitlab.com/acme/two.git",
+        ref: "main",
+        mountPath: "repos/shared/app",
+      },
+    ];
+    expect(() => buildManifest(testSettings(), resources)).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand(resources)).toThrow(
+      "resource mount path is already attached",
+    );
+  });
+
+  test("fails before sandbox execution on a repeated identical resource", () => {
+    const resource = {
+      kind: "repository" as const,
+      uri: "https://github.com/acme/app.git",
+      ref: "main",
+    };
+    expect(() => buildManifest(testSettings(), [resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
+    expect(() => repositoryCloneCommand([resource, resource])).toThrow(
+      "resource mount path is already attached",
+    );
   });
 
   test("keeps GitHub App repository resources out of SDK git repo materialization", () => {
@@ -1696,7 +2265,7 @@ describe("runtime event normalization", () => {
         githubRepositoryId: 456,
       },
     ]);
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1717,7 +2286,7 @@ describe("runtime event normalization", () => {
       },
     ]);
 
-    expect(manifest.entries["repos/acme/private"]).toMatchObject({
+    expect(manifest.entries["repos/github.com/acme/private"]).toMatchObject({
       type: "dir",
     });
     const serialized = JSON.stringify(manifest);
@@ -1763,7 +2332,7 @@ describe("runtime event normalization", () => {
     expect(command).toContain("ensure_git");
     expect(command).toContain("apt-get install -y --no-install-recommends ca-certificates git");
     expect(command).toContain(
-      "clone_repository '/workspace/repos/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
+      "clone_repository '/workspace/repos/github.com/acme/private' 'https://github.com/acme/private.git' 'main' 'packages/api'",
     );
     expect(command).not.toContain("githubInstallationId");
     expect(command).not.toContain("githubRepositoryId");
@@ -2146,6 +2715,8 @@ describe("runtime event normalization", () => {
         },
         runAs: "sandbox",
         toolspaceTokenSeed: "ogd_toolspace_live",
+        toolspaceTokenFile:
+          "/workspace/.opengeni/toolspace-tokens/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       } as any,
     );
 
@@ -2156,6 +2727,37 @@ describe("runtime event normalization", () => {
     expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
       cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
     );
+  });
+
+  test("TOOLSPACE-BROKER: refresh atomically replaces the stable 0600 token file", async () => {
+    const home = mkdtempSync(join(tmpdir(), "opengeni-toolspace-refresh-"));
+    try {
+      const session = {
+        exec: async (args: { cmd: string }) => {
+          const proc = Bun.spawn(["sh", "-lc", args.cmd], {
+            cwd: home,
+            env: { ...process.env, HOME: home },
+            stdout: "pipe",
+            stderr: "pipe",
+          });
+          const [stdout, stderr, exitCode] = await Promise.all([
+            new Response(proc.stdout).text(),
+            new Response(proc.stderr).text(),
+            proc.exited,
+          ]);
+          return { exitCode, stdout, stderr };
+        },
+      };
+
+      await refreshToolspaceTokenFile(session as never, "ogd_renewed");
+      const tokenDir = join(home, ".opengeni");
+      const tokenFile = join(tokenDir, "toolspace-token");
+      expect(readFileSync(tokenFile, "utf8")).toBe("ogd_renewed");
+      expect(statSync(tokenFile).mode & 0o777).toBe(0o600);
+      expect(readdirSync(tokenDir)).toEqual(["toolspace-token"]);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test("fails repository clone hook when sandbox command is still running", async () => {
@@ -2243,7 +2845,7 @@ describe("runtime event normalization", () => {
       target,
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("refreshes manifest environment on OWNED resumed sessions and reports drift as key names", async () => {
@@ -2415,7 +3017,7 @@ describe("runtime event normalization", () => {
       JSON.parse(JSON.stringify(target)),
     );
     expect(applied).toHaveLength(1);
-    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/acme/two"]);
+    expect(Object.keys(applied[0]!.entries)).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("deserializes persisted sandbox envelopes through the sandbox client", async () => {
@@ -2481,7 +3083,7 @@ describe("runtime event normalization", () => {
       } as any,
       target,
     );
-    expect(materialized).toEqual(["repos/acme/two"]);
+    expect(materialized).toEqual(["repos/github.com/acme/two"]);
   });
 
   test("attaches selected MCP servers to built agents", () => {
@@ -3969,6 +4571,33 @@ describe("pack skills in the sandbox skill index", () => {
     const index = source.getIndex?.(emptyManifest, ".agents") ?? [];
     expect(index.map((entry) => entry.name)).toContain("checkov");
     expect(index.map((entry) => entry.name)).not.toContain("infra-ops");
+    expect(index.map((entry) => entry.name)).not.toContain("azure-verified-modules");
+  });
+
+  test("an explicit curated library selection is materialized and indexed", () => {
+    const entry = listSkillLibraryEntries().find(
+      (candidate) => candidate.id === "azure-verified-modules",
+    );
+    expect(entry).toBeDefined();
+    const loaded = loadSkillLibrarySkill("azure-verified-modules", entry?.version);
+    const source = lazySkillSourceWithPackSkills(
+      [],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const sourceDir = source.source as { type: string; children: Record<string, any> };
+    expect(sourceDir.children[loaded.skill.name].type).toBe("dir");
+    expect(sourceDir.children[loaded.skill.name].children["SKILL.md"].content).toContain(
+      "Azure Verified Modules",
+    );
+    expect((source.getIndex?.(emptyManifest, ".agents") ?? []).map((item) => item.name)).toContain(
+      "azure-verified-modules",
+    );
   });
 
   test("pack skills join the bundled skills in one lazy skill index", () => {
@@ -4026,6 +4655,31 @@ describe("pack skills in the sandbox skill index", () => {
     const checkovEntries = index.filter((entry) => entry.name === "checkov");
     expect(checkovEntries).toHaveLength(1);
     expect(checkovEntries[0]?.description).toBe("Pack-provided checkov.");
+  });
+
+  test("a pack skill has precedence over an explicitly selected curated skill", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const source = lazySkillSourceWithPackSkills(
+      [
+        {
+          name: loaded.skill.name,
+          description: "Pack override.",
+          files: [{ path: "SKILL.md", content: "# Pack override\n" }],
+        },
+      ],
+      [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+    );
+    const entries = (source.getIndex?.(emptyManifest, ".agents") ?? []).filter(
+      (entry) => entry.name === loaded.skill.name,
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.description).toBe("Pack override.");
   });
 
   test("rejects unsafe pack skill content instead of mounting it", () => {
@@ -4089,6 +4743,102 @@ describe("pack skills in the sandbox skill index", () => {
       }>
     ).find((capability) => capability.type === "skills");
     expect(plainCapability?.lazyFrom?.source.type).toBe("local_dir");
+  });
+
+  test("buildOpenGeniAgent exposes secret-free curated skill provenance", () => {
+    const loaded = loadSkillLibrarySkill("azure-verified-modules");
+    const agent = buildOpenGeniAgent(testSettings({ sandboxBackend: "docker" }), [], {
+      skillLibrarySkills: [
+        {
+          name: loaded.skill.name,
+          description: loaded.skill.description,
+          files: loaded.skill.files.map((file) => ({ path: file.path, content: file.content })),
+        },
+      ],
+      skillLibrarySelections: [
+        {
+          id: loaded.entry.id,
+          name: loaded.entry.name,
+          source: "library",
+          version: loaded.entry.version,
+          contentSha256: loaded.entry.contentSha256,
+          reason: "enabled workspace capability installation",
+        },
+      ],
+    });
+    expect(effectiveSkillSelectionsForAgent(agent)).toContainEqual({
+      id: loaded.entry.id,
+      name: loaded.entry.name,
+      source: "library",
+      version: loaded.entry.version,
+      contentSha256: loaded.entry.contentSha256,
+      reason: "enabled workspace capability installation",
+    });
+  });
+});
+
+describe("curated skill-library artifact integrity", () => {
+  function withArtifact(run: (root: string) => void): void {
+    const root = mkdtempSync(join(tmpdir(), "opengeni-skill-library-"));
+    try {
+      mkdirSync(join(root, "references"));
+      writeFileSync(join(root, "SKILL.md"), "# Reviewed skill\n", "utf8");
+      writeFileSync(join(root, "references", "runbook.md"), "Runbook bytes.\n", "utf8");
+      run(root);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  function baseline(root: string): string {
+    return readSkillLibraryArtifact(root).contentSha256;
+  }
+
+  test("hashes and verifies every recursively materialized file", () => {
+    withArtifact((root) => {
+      const artifact = readSkillLibraryArtifact(root);
+      expect(artifact.files.map((file) => file.path)).toEqual([
+        "SKILL.md",
+        "references/runbook.md",
+      ]);
+      expect(verifySkillLibraryArtifact(root, artifact.contentSha256)).toEqual(artifact);
+    });
+  });
+
+  test("rejects an added file under an unchanged reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "injected.md"), "Unreviewed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a modified file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      writeFileSync(join(root, "references", "runbook.md"), "Changed guidance.\n", "utf8");
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects a deleted file under a reviewed artifact", () => {
+    withArtifact((root) => {
+      const expected = baseline(root);
+      rmSync(join(root, "references", "runbook.md"));
+      expect(() => verifySkillLibraryArtifact(root, expected)).toThrow(/artifact hash mismatch/);
+    });
+  });
+
+  test("rejects unsafe paths and symbolic links before hashing", () => {
+    withArtifact((root) => {
+      writeFileSync(join(root, "unsafe\\path.md"), "Unsafe path.\n", "utf8");
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/unsafe path/);
+    });
+
+    withArtifact((root) => {
+      symlinkSync("SKILL.md", join(root, "linked.md"));
+      expect(() => readSkillLibraryArtifact(root)).toThrow(/symbolic link/);
+    });
   });
 });
 
@@ -4324,6 +5074,8 @@ describe("provider item id stripping", () => {
     });
     const expected = boundModelToolOutputItem(item, settings.modelToolOutputTruncationTokens);
     expect(result.input[0]).toEqual(expected);
+    const serializedProviderItem = JSON.stringify(result.input[0]);
+    expect(serializedProviderItem).toBe(JSON.stringify(expected));
     expect(JSON.stringify(result.input[0])).toContain("structured object properties");
     expect(Buffer.byteLength(JSON.stringify(result.input[0]), "utf8")).toBeLessThan(100_000);
 
@@ -4333,6 +5085,7 @@ describe("provider item id stripping", () => {
       context: undefined,
     });
     expect(replayed.input).toEqual(result.input);
+    expect(JSON.stringify(replayed.input[0])).toBe(serializedProviderItem);
   });
 
   test("same-run provider totals add the complete trailing tool result before the next call", async () => {

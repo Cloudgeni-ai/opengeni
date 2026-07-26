@@ -118,10 +118,11 @@ async function seedTurn(ws: Workspace, position = 1): Promise<string> {
       insert into session_turn_attempts (
         id, account_id, workspace_id, session_id, turn_id, execution_generation,
         state, temporal_workflow_id, temporal_workflow_run_id, temporal_activity_id,
-        verified_control_revision
+        verified_control_revision, mcp_approval_policies
       ) values (
         ${attemptId}, ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${turnId}, 0,
-        'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0
+        'running', 'wf', ${`run:${attemptId}`}, ${`activity:${attemptId}`}, 0,
+        '{}'::jsonb
       )`;
     await transaction`update sessions set active_turn_id = ${turnId} where id = ${sessionId}`;
   });
@@ -155,7 +156,6 @@ function selector(context: CodexCredentialLeaseSelectionContext): {
     activeCredentialId: context.activeCredentialId,
     priorCredentialId: context.activeCredentialId,
     accounts: context.accounts,
-    nearExhaustionPct: 90,
     now: new Date(),
   });
   return {
@@ -268,7 +268,7 @@ describe("credential allocator atomic Codex credential allocation", () => {
     await connectCredential(wsB!, "shared-quota");
     const reset = new Date(Date.now() + 5 * 60 * 60_000);
     await recordCodexAccountUsage(dbA, wsA!.workspaceId, credentialA, {
-      primaryUsedPercent: 99,
+      primaryUsedPercent: 100,
       primaryResetAt: reset,
       secondaryUsedPercent: 10,
       secondaryResetAt: new Date(Date.now() + 7 * 24 * 60 * 60_000),
@@ -666,7 +666,6 @@ describe("credential allocator atomic Codex credential allocation", () => {
           sessionPinnedCredentialId: null,
           sessionLastCredentialId: toggledCredential,
           continuationCredentialId: toggledCredential,
-          nearExhaustionPct: 90,
           now: new Date(),
         }),
     );

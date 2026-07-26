@@ -14,6 +14,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     text: "",
     resources: [],
     tools: [],
+    toolsProvided: false,
     model: "model-x",
     reasoningEffort: "medium",
     sourceTurnId: null,
@@ -24,7 +25,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
     getClientConfig: async () =>
       ({
         deploymentRevision: "test",
-        apiContractRevision: "2026-07-session-control-v1",
+        apiContractRevision: "2026-07-turn-instructions-v1",
         defaultModel: "model-x",
         allowedModels: ["model-x"],
         models: [],
@@ -80,6 +81,8 @@ export function fakeTurn(overrides: Partial<SessionTurn> = {}): SessionTurn {
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:test" },
+    initiatorContext: {},
     startedAt: null,
     finishedAt: null,
     createdAt: "2026-06-12T00:00:00.000Z",

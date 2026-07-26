@@ -9,13 +9,35 @@ over this doc; the canonical sources are `apps/worker/src/workflows/session.ts`,
 ## Turns
 
 A **turn** is one logical unit of agent work inside a session: a waiting
-human/API prompt, an approval decision, or one coalesced internal-update batch
+human/API prompt, an approval or structured-input response, or one coalesced internal-update batch
 is processed until the agent reaches a natural stopping point. The visible
 queue contains only waiting human/API prompts; goals, schedules, child results,
 capacity recovery, and lifecycle notices are typed internal updates, not queue
 rows. One execution attempt runs as one non-retryable Temporal `runAgentTurn`
 activity. Inside the activity the OpenAI Agents SDK loop makes as many model
 calls and tool calls as the work needs.
+
+Every accepted turn also carries one immutable `TurnInitiator`. Human/API
+Send and Steer capture the authenticated subject that accepted the command;
+schedules, goal continuation, compaction, and coalesced internal batches use
+explicit service principals. An Agent Steer remains the causal initiator when
+ordinary machine notices coalesce into its inference; those notices cannot
+erase the steering subject merely because they arrived in the same batch. The
+session creator is stored separately and is
+copied only when idempotently repairing that same create command's first turn.
+Queue move/edit/resubmit preserves the original initiator, while Steer creates a
+new turn with the steering actor. Agent-created work inherits the frozen
+initiator through the worker-signed calling-turn reference and appends bounded
+provenance. Approval, structured-human-input response, recovery, and retry
+reuse the existing row and therefore cannot change authority. Legacy rows use
+`{ kind: "service", subjectId: "unattributed-legacy" }`, which host credential
+ports must reject rather than infer from another identity.
+
+An embedding host may separate authorization from causal service provenance by
+signing a service-only initiator into its delegated grant. The ordinary grant
+subject and permissions still authorize the command; the asserted service is
+only the immutable initiator of the newly created work. It cannot assert a
+human subject or override a worker-signed exact agent attempt.
 
 Synthesized goal continuations inherit the model and reasoning effort from the
 newest turn with a durable `turn.started` event. The session default is used
@@ -25,6 +47,23 @@ during admission, whose `started_at` claim timestamp alone is not proof that
 their policy ran. Spawned-child terminal results enter the parent's bounded
 typed internal-update batch without injecting a synthetic `user.message` or a
 human queue row.
+
+Immediately after claim, the exact owning attempt installs or reads the
+logical turn's accepted execution policy before credit admission, credential
+allocation, compaction, or provider work. That secret-safe policy freezes the
+public product model id, provider id, upstream deployment id, credential-source
+class, billing attribution, wire API, and definition version. The public id is
+not necessarily the provider request id: `codex/gpt-5.6-sol`, for example,
+routes upstream as `gpt-5.6-sol`. Billing and Codex allocator eligibility are
+derived from the explicit accepted attribution, never from a model prefix or a
+mutable active-credential snapshot; malformed present metadata fails closed.
+
+Approval, capacity wait, worker recovery, and Pause/Resume create newer
+attempts for the **same logical turn**, so they must replay the original policy
+rather than resolve or overwrite it. A new user/API turn or a newly materialized
+goal, system, child-result, or scheduled turn is a new logical turn and resolves
+a fresh policy. Thus a per-turn model/provider switch persists through recovery
+without accidentally becoming a permanent session default.
 
 **Runs have no length limits, by design.** What the SDK calls "turns" are model
 calls; `OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN` exists but defaults to
@@ -112,11 +151,12 @@ intent. See [`context-compaction.md`](context-compaction.md).
 Before model/tool work, a claimed turn inserts a first-class
 `session_turn_attempts` row containing its exact Temporal activity id, current
 trigger, monotonic dispatch generation, verified control revision, and write
-lease. A real Temporal activity retry retains the activity id; a re-dispatch
-creates a new attempt. Every event, model-history write, run-state write,
-compaction transition, tool receipt, and terminal settlement must match that
-attempt. A typed schedule-to-start timeout is the only no-attempt recovery case
-because its activity never ran.
+lease. The same claim snapshots every per-session MCP approval policy under the
+session lock. A real Temporal activity retry retains the activity id; a
+re-dispatch creates a new attempt and captures the then-current policy. Every
+event, model-history write, run-state write, compaction transition, tool receipt,
+and terminal settlement must match that attempt. A typed schedule-to-start
+timeout is the only no-attempt recovery case because its activity never ran.
 
 One model response's parallel tool calls are tracked as an in-memory settlement
 batch while its stream is active; batch identity is not durable schema. A
@@ -145,7 +185,8 @@ Generic appends and operation-keyed Agent Message/Steer commands retry PostgreSQ
 Provider inference, tools, live event publication, and workflow wakes remain after
 that boundary and are never replayed. An exhausted or non-retryable database
 failure surfaces as sanitized typed truth with SQLSTATE, stage, one correlation
-ID, and allowlisted catalog identifiers—never raw SQL text or bound parameters.
+ID, an equally sanitized typed cause, and allowlisted catalog identifiers—never
+raw SQL text, a raw driver cause, or bound parameters.
 
 After a reviewed release reaches staging, run the dry-by-default event-ordering invariant canary
 with `bun run canary:session-event-ordering`. Execution requires
@@ -163,6 +204,14 @@ closed owner is an event-free stale no-op. This prevents a superseded activity
 that keeps running from publishing contradictory history or terminal truth.
 Each Pause/Steer cause is a durable `session_attempt_interruptions` row; the
 workflow's `sessionControl` signal is only a wake hint to settle those rows.
+For Agent Steer, accepting that signal is not an admission acknowledgement: if
+effective control is active while the newest `agent_steer_instruction` remains
+pending, the delivery path leaves its coalesced workflow-wake revision
+unacknowledged. The bounded outbox dispatcher can therefore redeliver across a
+workflow close or `continueAsNew`; the attempt-fenced Postgres claim consumes
+the newest instruction once, so duplicate signals cannot duplicate inference.
+A real Pause is the truthful blocker and may acknowledge the old revision;
+Resume commits a fresh revision for the preserved pending instruction.
 
 Control settlement and physical cancellation are deliberately separate
 boundaries. A receipt-gated v2 workflow first atomically settles the exact
@@ -180,13 +229,18 @@ heartbeat timeout and the activity's ten-second heartbeat timer.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
-quiesce, and immediately writes `session_turn_attempts.quiesced_at` before
-credential, cache, recording, provider, lease, or workspace housekeeping. The
+quiesce, stops and drains attempt-owned Toolspace and run-material renewal
+writes, and immediately writes `session_turn_attempts.quiesced_at` before
+attempt-qualified credential deletion, cache, recording, provider, lease, or
+workspace housekeeping. The
 receipt, its `session.queue.changed` event, the session queue/sequence update,
 and the exact `session_workflow_wake_outbox` revision commit in one retryable,
 idempotent transaction. Provider completion and batch flushes that ignore
 cancellation are detached with rejection handlers; all later housekeeping is
-attempt-fenced and detachable.
+attempt-fenced and detachable. While either logical interruption or the exact
+physical receipt remains pending, `effectiveControl.settlement` stays typed as
+`stopping` and reports `attemptCount`, `interruptionPendingCount`, and
+`quiescencePendingCount`; Resume does not clear or bypass that receipt gate.
 
 The direct receipt remains the preferred path. If its three Postgres attempts
 exhaust, `runAgentTurn` does not suppress the failure or infer a receipt from
@@ -241,7 +295,8 @@ envelope, closes the exact attempt as recoverable, and leaves the same logical
 turn in `recovering`. It never creates a human queue row or synthetic user
 message. Any in-flight side-effecting tool call is durably closed with an
 explicit `interrupted / outcome unknown` result before the next attempt can
-run; a late result is retained only as rejected evidence. The workflow then
+run; this includes Toolspace calls, whose pending receipt is written before the
+remote request. A late result is retained only as rejected evidence. The workflow then
 creates a fresh attempt for that same turn on a healthy worker and reconstructs
 model input from durable model history and tool-call lineage. At most the
 single in-flight model step is lost, the same bound as a crash. This is an
@@ -307,11 +362,12 @@ wrong one is the classic mistake.
    streams (reconciled after every model response and at every turn-end path)
    so a crash loses at most the single in-flight model call. Ordinary inference
    has no second conversation-memory read path.
-2. **`agent_run_states` — approval resume only.** The serialized SDK `RunState`
+2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
-   job is resuming a turn that paused mid-flight for a human approval
-   (`requires_action`); a half-finished tool approval cannot be represented as
-   plain history items. The blob is written only for that case.
+   job is resuming a turn that paused mid-flight for a human approval or
+   structured-input tool call (`requires_action`); neither a half-finished tool
+   approval nor an unanswered tool call can be represented as plain history
+   items. The blob is written only for those cases.
    Do not use it as conversation memory.
 3. **`session_events` — the redacted human/audit timeline.** Append-only,
    per-session sequence numbers, drives replay/SSE/UI. It is **secret-redacted
@@ -324,6 +380,17 @@ wrong one is the classic mistake.
    full-output evidence store. A manager can inspect an independently bounded
    cross-session monitoring projection as ordinary tool output; that does not
    turn audit events into conversation truth.
+
+Structured human input adds a durable control checkpoint, not a fourth memory
+store. When the built-in `request_human_input` tool interrupts a run, the same
+transaction stores its request rows, the opaque `agent_run_states` checkpoint,
+the `requires_action` projection, and requested events. The request row is
+owned by the exact turn execution generation; its creation attempt is only
+provenance. Answer, allowed skip, expiry, or cancellation is first-writer-wins
+and becomes structured output for that same SDK tool call. It never becomes a
+synthetic queue row or `user.message`. A replay-safe workflow timer settles
+expiry, Pause preserves the pending interruption, and permanent replacement
+settles it as cancelled. Canonical: [`human-input.md`](human-input.md).
 
 Cross-session monitoring is tail-first and selected in PostgreSQL. With no
 cursor, REST/SDK/MCP monitoring omits raw message, reasoning, command-output,

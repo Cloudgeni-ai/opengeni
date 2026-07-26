@@ -21,9 +21,9 @@ import "./queue-harness.css";
 
 declare global {
   interface Window {
-    __OPE9_PROMPT__: string;
-    __ope9AppendQueuePrompt?: () => void;
-    __ope9SetQueueLoading?: (loading: boolean) => void;
+    __queuePrompt: string;
+    __queueAppendQueuePrompt?: () => void;
+    __queueSetQueueLoading?: (loading: boolean) => void;
   }
 }
 
@@ -77,6 +77,8 @@ function makeTurn(index: number): SessionTurn {
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:harness" },
+    initiatorContext: {},
     startedAt: null,
     finishedAt: null,
     createdAt: "2026-07-19T00:00:00.000Z",
@@ -171,13 +173,13 @@ function QueueHarness() {
   const [clearMutationErrorCount, setClearMutationErrorCount] = useState(0);
 
   useEffect(() => {
-    window.__OPE9_PROMPT__ = turns[0]?.prompt ?? "";
-    window.__ope9AppendQueuePrompt = () =>
+    window.__queuePrompt = turns[0]?.prompt ?? "";
+    window.__queueAppendQueuePrompt = () =>
       setTurns((current) => [...current, makeTurn(current.length)]);
-    window.__ope9SetQueueLoading = setLoading;
+    window.__queueSetQueueLoading = setLoading;
     return () => {
-      delete window.__ope9AppendQueuePrompt;
-      delete window.__ope9SetQueueLoading;
+      delete window.__queueAppendQueuePrompt;
+      delete window.__queueSetQueueLoading;
     };
   }, [turns]);
 

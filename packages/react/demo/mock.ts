@@ -51,6 +51,7 @@ import type {
   SessionListResponse,
   SessionEvent,
   SessionGoal,
+  SessionHumanInputRequest,
   SessionLineageResponse,
   SessionQueueMutationResponse,
   SessionQueueSnapshot,
@@ -59,8 +60,11 @@ import type {
   SessionTurn,
   SteerMessageResult,
   StreamSessionEventsOptions,
+  SubmitHumanInputResponseRequest,
   UploadFileInput,
   UpdateSessionGoalRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionRequest,
   UpdateSessionPinRequest,
   UpdateWorkspaceEnvironmentRequest,
@@ -209,6 +213,26 @@ export class MockOpenGeniClient implements SessionClientLike {
       "Ops channel — manager session",
     );
     return { ...session, title: request.title, titleSource: "user" };
+  }
+
+  async updateSessionMcpApprovalPolicy(
+    _workspaceId: string,
+    _sessionId: string,
+    serverId: string,
+    request: UpdateSessionMcpApprovalPolicyRequest,
+  ): Promise<UpdateSessionMcpApprovalPolicyResponse> {
+    return {
+      server: {
+        id: serverId,
+        name: serverId,
+        url: "https://tools.example.test/mcp",
+        headerNames: [],
+        credentialVersion: 1,
+        requireApproval: request.requireApproval,
+        connectionRef: null,
+      },
+      effectiveFrom: "next_attempt",
+    };
   }
 
   async updateSessionPin(
@@ -381,6 +405,7 @@ export class MockOpenGeniClient implements SessionClientLike {
       text: turn.prompt,
       resources: turn.resources,
       tools: turn.tools,
+      toolsProvided: turn.toolsProvided === true,
       model: turn.model,
       reasoningEffort: turn.reasoningEffort,
       sourceTurnId: turn.id,
@@ -413,6 +438,7 @@ export class MockOpenGeniClient implements SessionClientLike {
         text: "",
         resources: [],
         tools: [],
+        toolsProvided: false,
         model: "gpt-5.2",
         reasoningEffort: "medium",
         sourceTurnId: null,
@@ -611,6 +637,27 @@ export class MockOpenGeniClient implements SessionClientLike {
     decision: { approvalId: string; decision: "approve" | "reject"; message?: string },
   ): Promise<SessionEvent> {
     return this.bus(sessionId).append("user.approvalDecision", decision);
+  }
+
+  async listHumanInputRequests(): Promise<SessionHumanInputRequest[]> {
+    return [];
+  }
+
+  async getHumanInputRequest(
+    _workspaceId: string,
+    _sessionId: string,
+    requestId: string,
+  ): Promise<SessionHumanInputRequest> {
+    throw new Error(`No demo human-input request ${requestId}`);
+  }
+
+  async submitHumanInputResponse(
+    _workspaceId: string,
+    sessionId: string,
+    requestId: string,
+    response: SubmitHumanInputResponseRequest,
+  ): Promise<SessionEvent> {
+    return this.bus(sessionId).append("user.humanInputResponse", { requestId, response });
   }
 
   // --- Environments, packs, workspaces, billing (static-ish fixtures) ----------
@@ -1518,6 +1565,8 @@ export class MockOpenGeniClient implements SessionClientLike {
       resources: [],
       tools: [],
       metadata: { title },
+      createdBy: { kind: "subject", subjectId: "user:demo" },
+      createdByContext: {},
       model: "gpt-5.2",
       sandboxBackend: "modal",
       sandboxOs: "linux",
@@ -1794,7 +1843,7 @@ const ACCOUNT_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
  */
 const CLIENT_CONFIG: ClientConfig = {
   deploymentRevision: "demo",
-  apiContractRevision: "2026-07-session-control-v1",
+  apiContractRevision: "2026-07-turn-instructions-v1",
   defaultModel: "gpt-5.6-sol",
   allowedModels: ["gpt-5.6-sol", "accounts/fireworks/models/glm-5p2"],
   models: [
@@ -1846,6 +1895,8 @@ function fabricateTurn(sessionId: string, position: number, prompt: string): Ses
     executionGeneration: 0,
     activeAttemptId: null,
     lineage: {},
+    initiator: { kind: "subject", subjectId: "user:demo" },
+    initiatorContext: {},
     startedAt: null,
     finishedAt: null,
     createdAt: now,

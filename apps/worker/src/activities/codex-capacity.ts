@@ -9,6 +9,7 @@ import {
 } from "@opengeni/db";
 import type { Settings } from "@opengeni/config";
 import {
+  CODEX_USAGE_EXHAUSTED_PCT,
   authoritativeCodexCapacityResetAt,
   isCodexCredentialEligible,
   selectCodexCredentialLeaseForTurn,
@@ -94,7 +95,6 @@ export function codexCapacityDecision(
     sessionPinSource: context.sessionPinSource,
     sessionLastCredentialId: context.sessionLastCredentialId,
     continuationCredentialId: null,
-    nearExhaustionPct: settings.codexRotationNearExhaustionPct,
     now,
   });
   if (selected.credentialId) {
@@ -103,17 +103,12 @@ export function codexCapacityDecision(
       credentialId: selected.credentialId,
       diagnostic: {
         connectedCount: context.accounts.length,
-        eligibleCount: context.accounts.filter((account) =>
-          isCodexCredentialEligible(account, settings.codexRotationNearExhaustionPct, now),
-        ).length,
+        eligibleCount: context.accounts.filter((account) => isCodexCredentialEligible(account, now))
+          .length,
       },
     };
   }
-  const authoritativeReset = authoritativeCodexCapacityResetAt(
-    context.accounts,
-    settings.codexRotationNearExhaustionPct,
-    now,
-  );
+  const authoritativeReset = authoritativeCodexCapacityResetAt(context.accounts, now);
   return {
     kind: "unavailable",
     earliestResetAt: authoritativeReset,
@@ -135,8 +130,8 @@ async function refreshCapacityMetadata(
     (account) =>
       account.allocatorEnabled &&
       account.status === "active" &&
-      ((account.primaryUsedPercent ?? 0) >= services.settings.codexRotationNearExhaustionPct ||
-        (account.secondaryUsedPercent ?? 0) >= services.settings.codexRotationNearExhaustionPct ||
+      ((account.primaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
+        (account.secondaryUsedPercent ?? 0) >= CODEX_USAGE_EXHAUSTED_PCT ||
         account.usageCheckedAt === null),
   );
   await refreshCodexUsageAndRepairCapacityWaiters(

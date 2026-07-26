@@ -91,6 +91,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
   const createComposer: ComposerState = {
     value: message,
     setValue: setMessage,
+    hasDraftContent: () => message.length > 0 || attachments.readyResources.length > 0,
     sending: context.busy,
     // Mirrors useComposer's gate: a ready attachment with no typed draft is a
     // sendable file-only message (the API requires non-empty text, so send()
@@ -169,6 +170,7 @@ export function SessionsIndexRoute({ workspaceId }: { workspaceId: string }) {
 
         <div className="mt-8">
           <ConsoleComposer
+            workspaceId={workspaceId}
             composer={createComposer}
             attachments={attachments}
             autoFocus
@@ -329,6 +331,8 @@ function WorkspaceRepositoryPicker({
     <RepositoryContextPicker
       configured={context.githubStatus?.configured === true}
       installUrl={context.githubStatus?.installUrl ?? null}
+      linkUrl={context.githubStatus?.linkUrl ?? null}
+      installations={context.githubStatus?.installations ?? []}
       repositories={context.githubRepos}
       groups={context.repositoryGroups}
       selectedRepoIds={context.selectedRepoIds}
@@ -359,6 +363,9 @@ function WorkspaceRepositoryPicker({
       onGitHubAppOpenChange={context.setGithubAppOpen}
       onOrgChange={context.setGithubOrg}
       onStartGitHubApp={() => void context.startGitHubAppManifestFlow(workspaceId)}
+      onDisconnectInstallation={(installationId) =>
+        context.disconnectGitHubInstallation(workspaceId, installationId)
+      }
     />
   );
 }

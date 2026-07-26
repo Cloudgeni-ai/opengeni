@@ -414,6 +414,8 @@ describe("deployment contract", () => {
         OPENGENI_DATABASE_URL: "postgres://opengeni:secret@postgres/opengeni",
         OPENGENI_IMAGE_TAG: "test-sha",
         OPENGENI_OPENAI_API_KEY: "openai",
+        OPENGENI_TEMPORAL_API_KEY: "temporal-api-key",
+        OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64: "cm9v\ndC1jYQ==",
       },
     );
 
@@ -430,6 +432,11 @@ describe("deployment contract", () => {
     expect(artifacts.runtimeEnv).toContain("OPENGENI_OBJECT_STORAGE_BACKEND=gcs");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_PRODUCT_ACCESS_MODE=configured");
     expect(artifacts.runtimeEnv).toContain("OPENGENI_DEPLOYMENT_REVISION=test-sha");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_TLS_ENABLED=false");
+    expect(artifacts.runtimeEnv).toContain("OPENGENI_TEMPORAL_API_KEY=temporal-api-key");
+    expect(artifacts.runtimeEnv).toContain(
+      "OPENGENI_TEMPORAL_TLS_ROOT_CA_CERTIFICATE_BASE64=cm9vdC1jYQ==",
+    );
     expect(artifacts.runtimeEnv).toContain(
       "OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID=opengeni-example",
     );

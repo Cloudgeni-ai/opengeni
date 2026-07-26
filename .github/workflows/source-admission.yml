@@ -1,0 +1,56 @@
+name: Source Admission
+
+# This required PR check executes only base-owned workflow/helper bytes. It never
+# checks out, executes, or grants credentials to candidate content. The helper
+# reads provider metadata and Git objects, rejects a head that is not strictly
+# based on current main, reconciles the provider file projection with a direct
+# tree-object manifest, and fences both refs with terminal readbacks.
+on:
+  pull_request_target:
+    branches:
+      - main
+    types: [opened, ready_for_review, reopened, synchronize]
+
+concurrency:
+  group: source-admission-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  verify:
+    name: Current-base source admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      OPENGENI_SOURCE_ADMISSION_ACTION: verify_current_base_head
+      ADMISSION_HELPER_SHA256: d40edb61d547e9ca4c7a9a3524912b447cb5fcb20946b490e8ab2b22de5fcc7e
+    steps:
+      - name: Execute the exact base-owned admission verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_SERVER_URL" == "https://github.com" ]]
+          [[ "$GITHUB_API_URL" == "https://api.github.com" ]]
+          [[ "$GITHUB_REPOSITORY" == "Cloudgeni-ai/opengeni" ]]
+          [[ "$GITHUB_EVENT_NAME" == "pull_request_target" ]]
+          [[ "$GITHUB_REF" == "refs/heads/main" ]]
+          [[ "$GITHUB_BASE_REF" == "main" ]]
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]]
+
+          # The workflow file is the base-owned trust anchor. Fetch the helper
+          # from that same immutable commit and verify its exact reviewed bytes.
+          helper="$RUNNER_TEMP/source-admission.mjs"
+          curl --fail --silent --show-error --proto '=https' --tlsv1.2 \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github.raw+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/Cloudgeni-ai/opengeni/contents/scripts/check-source-admission.mjs?ref=$GITHUB_WORKFLOW_SHA" \
+            --output "$helper"
+          actual_sha256="$(sha256sum "$helper" | awk '{print $1}')"
+          [[ "$actual_sha256" == "$ADMISSION_HELPER_SHA256" ]]
+          node "$helper"

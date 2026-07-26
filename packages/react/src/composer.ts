@@ -53,3 +53,8 @@ export type {
   ComposerSurfaceProps,
   UseChatComposerControllerOptions,
 } from "./components/composer";
+export { ComposerTranscriptionControl } from "./components/composer-transcription-control";
+export type {
+  ComposerTranscriptionControlProps,
+  ComposerTranscriptionMessages,
+} from "./components/composer-transcription-control";

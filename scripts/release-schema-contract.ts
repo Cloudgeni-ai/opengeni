@@ -35,7 +35,7 @@ export async function buildSchemaContract(
     migrations.push({
       path,
       sha256: createHash("sha256").update(content).digest("hex"),
-      deploymentMode: deploymentMode(content.toString("utf8")),
+      deploymentMode: deploymentMode(path, content.toString("utf8")),
     });
   }
   return {
@@ -47,10 +47,16 @@ export async function buildSchemaContract(
   };
 }
 
-function deploymentMode(content: string): MigrationDeploymentMode {
+function deploymentMode(path: string, content: string): MigrationDeploymentMode {
   const firstLine = content.replaceAll("\r\n", "\n").split("\n", 1)[0]?.trim();
   if (firstLine === "-- deployment-mode: rolling") return "rolling";
   if (firstLine === "-- deployment-mode: maintenance") return "maintenance";
+  const ordinal = /^(\d{4})_/.exec(path)?.[1];
+  if (ordinal && Number(ordinal) >= 63) {
+    throw new Error(
+      `${path}: classified migrations require -- deployment-mode: rolling or -- deployment-mode: maintenance on the first line`,
+    );
+  }
   return "historical";
 }
 

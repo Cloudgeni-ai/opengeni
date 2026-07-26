@@ -1,7 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
 import type { Session } from "@/types";
-import { applySessionPinProjection, reconcileFailedSessionPin } from "./session-pins";
+import {
+  applySessionPinProjection,
+  applySessionRailProjection,
+  reconcileFailedSessionPin,
+} from "./session-pins";
 
 const session = {
   id: "00000000-0000-4000-8000-000000000026",
@@ -124,5 +128,34 @@ describe("session pin reconciliation", () => {
       pinVersion: 2,
     };
     expect(reconcileFailedSessionPin(newer, optimistic, session)).toBe(newer);
+  });
+
+  test("keeps route lifecycle while copying list pin and hierarchy projections", () => {
+    const projected = {
+      ...session,
+      status: "idle",
+      initialMessage: "Stale list content",
+      pinned: true,
+      pinnedAt: "2026-07-10T00:05:00.000Z",
+      pinVersion: 5,
+      treeStats: {
+        directChildren: 2,
+        totalDescendants: 4,
+        runningDescendants: 1,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+      },
+    } as Session;
+
+    expect(applySessionRailProjection(session, projected)).toMatchObject({
+      status: "running",
+      initialMessage: "Keep this lifecycle projection",
+      pinned: true,
+      pinnedAt: "2026-07-10T00:05:00.000Z",
+      pinVersion: 5,
+      treeStats: projected.treeStats,
+    });
   });
 });

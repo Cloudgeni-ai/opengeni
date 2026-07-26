@@ -33,11 +33,13 @@ import {
   type RepositoryGroup,
 } from "@/lib/session-tools";
 import { cn } from "@/lib/utils";
-import type { GitHubRepository, ResourceRef } from "@/types";
+import type { GitHubInstallationBinding, GitHubRepository, ResourceRef } from "@/types";
 
 export function RepositoryContextPicker(props: {
   configured: boolean;
   installUrl: string | null;
+  linkUrl: string | null;
+  installations: GitHubInstallationBinding[];
   repositories: GitHubRepository[];
   groups: RepositoryGroup[];
   selectedRepoIds: Set<number>;
@@ -60,6 +62,7 @@ export function RepositoryContextPicker(props: {
   onGitHubAppOpenChange: (open: boolean) => void;
   onOrgChange: (value: string) => void;
   onStartGitHubApp: () => void;
+  onDisconnectInstallation: (installationId: number) => Promise<void>;
 }) {
   const selectedInstalledCount = props.selectedRepoIds.size;
   const manualCount = props.manualRepos.filter((repo) => repo.url.trim().length > 0).length;
@@ -68,6 +71,9 @@ export function RepositoryContextPicker(props: {
   // Two-step inline confirm for removing a manual repo, so a stray click in a
   // dense picker doesn't drop a repo the user typed out.
   const [confirmRemoveId, setConfirmRemoveId] = useState<number | null>(null);
+  const [confirmDisconnectInstallationId, setConfirmDisconnectInstallationId] = useState<
+    number | null
+  >(null);
 
   // The GitHub App manifest form — org login plus the install/create actions.
   // Rendered inline (open) in the first-run empty state so setup is never hidden
@@ -80,51 +86,104 @@ export function RepositoryContextPicker(props: {
           ? "The app provides repository listing, scoped clone tokens, pushes, and pull requests."
           : "Create a prefilled app, add the generated values to your .env, then restart the API and worker."}
       </p>
-      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-        <div className="min-w-0">
-          <Label htmlFor="github-org-menu" className="text-2xs text-fg-subtle">
-            Organization
-          </Label>
-          <Input
-            id="github-org-menu"
-            value={props.org}
-            onChange={(event) => props.onOrgChange(event.target.value)}
-            placeholder="Optional org login"
-            disabled={props.githubAppBusy}
-            className="mt-1 h-8 text-xs"
-          />
-        </div>
-        <div className="flex items-end gap-1.5">
-          {props.installUrl ? (
-            <Button asChild type="button" variant="outline" size="sm" className="h-8 text-xs">
-              <a href={props.installUrl}>
+      <div className="space-y-2">
+        {!props.configured ? (
+          <div className="min-w-0">
+            <Label htmlFor="github-org-menu" className="text-2xs text-fg-subtle">
+              Organization
+            </Label>
+            <Input
+              id="github-org-menu"
+              value={props.org}
+              onChange={(event) => props.onOrgChange(event.target.value)}
+              placeholder="Optional org login"
+              disabled={props.githubAppBusy}
+              className="mt-1 h-8 text-xs"
+            />
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {!props.configured ? (
+            <Button
+              type="button"
+              size="sm"
+              onClick={props.onStartGitHubApp}
+              disabled={props.githubAppBusy}
+              className="h-8 text-xs"
+            >
+              {props.githubAppBusy ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
                 <GitPullRequestIcon className="size-3.5" />
-                Install
-              </a>
+              )}
+              Create app
             </Button>
           ) : null}
-          <Button
-            type="button"
-            size="sm"
-            onClick={props.onStartGitHubApp}
-            disabled={props.githubAppBusy}
-            className="h-8 text-xs"
-          >
-            {props.githubAppBusy ? (
-              <Loader2Icon className="size-3.5 animate-spin" />
-            ) : (
-              <GitPullRequestIcon className="size-3.5" />
-            )}
-            {props.configured ? "Create another" : "Create app"}
-          </Button>
         </div>
       </div>
+      {props.installations.length > 0 ? (
+        <div className="overflow-hidden rounded-lg border border-border bg-bg/25">
+          {props.installations.map((installation) => {
+            const confirming = confirmDisconnectInstallationId === installation.installationId;
+            return (
+              <div
+                key={installation.installationId}
+                className="flex items-center justify-between gap-3 border-b border-border px-3 py-2 last:border-b-0"
+              >
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-medium text-fg">
+                    {installation.accountLogin ?? `Installation ${installation.installationId}`}
+                  </div>
+                  <div className="text-2xs text-fg-subtle">
+                    {installation.repositoryScope === "all"
+                      ? "All installation repositories (legacy)"
+                      : `${installation.repositoryCount} workspace repositories`}
+                  </div>
+                </div>
+                {confirming ? (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="xs"
+                      onClick={() =>
+                        void props
+                          .onDisconnectInstallation(installation.installationId)
+                          .finally(() => setConfirmDisconnectInstallationId(null))
+                      }
+                    >
+                      Unlink
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="xs"
+                      onClick={() => setConfirmDisconnectInstallationId(null)}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-xs"
+                    aria-label={`Unlink ${installation.accountLogin ?? installation.installationId}`}
+                    onClick={() => setConfirmDisconnectInstallationId(installation.installationId)}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
     </div>
   );
 
-  // The recovery path must stay reachable in EVERY configured state — including
-  // configured-but-zero-repos (the stale-app case), where installUrl may be
-  // absent and the settings form is the only way to reconnect or re-create.
+  // Existing installation bindings can still be inspected and unlinked while
+  // new binding remains fail-closed.
   const settingsDisclosure = (
     <Collapsible open={props.githubAppOpen} onOpenChange={props.onGitHubAppOpenChange}>
       <div className="border-t border-border/60 pt-1">
@@ -215,7 +274,7 @@ export function RepositoryContextPicker(props: {
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="Connect the GitHub app so the sandbox can clone your repositories, push branches, and open pull requests."
+                    description="App registration does not connect repositories. New installation binding is disabled; existing bindings can still be managed or unlinked."
                   />
                   <div className="px-1 pt-1">{setupForm}</div>
                 </div>
@@ -229,23 +288,7 @@ export function RepositoryContextPicker(props: {
                   <EmptyState
                     icon={<GitBranchIcon className="size-5" />}
                     title="No repositories connected"
-                    description="The connected GitHub app isn't sharing any repositories with this workspace — if some are missing, the app may have been removed on GitHub. Reinstall it."
-                    action={
-                      props.installUrl ? (
-                        <Button
-                          asChild
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          className="h-8 text-xs"
-                        >
-                          <a href={props.installUrl}>
-                            <GitPullRequestIcon className="size-3.5" />
-                            Reinstall on GitHub
-                          </a>
-                        </Button>
-                      ) : undefined
-                    }
+                    description="The connected GitHub app isn't sharing any repositories with this workspace. Existing bindings can be unlinked, but new installation binding is temporarily disabled."
                   />
                   {settingsDisclosure}
                 </div>
@@ -265,14 +308,6 @@ export function RepositoryContextPicker(props: {
                         </span>
                       ) : null}
                     </div>
-                    {props.installUrl ? (
-                      <a
-                        href={props.installUrl}
-                        className="shrink-0 text-2xs text-fg-subtle underline-offset-2 transition-colors hover:text-fg hover:underline"
-                      >
-                        Reconnect
-                      </a>
-                    ) : null}
                   </div>
 
                   <section className="overflow-hidden rounded-lg border border-border bg-bg/25">
@@ -592,7 +627,8 @@ export function ScheduledTaskRepositoryPicker(props: {
 
       {!props.configured ? (
         <div className="p-3 text-xs leading-5 text-fg-muted">
-          Configure the GitHub App to select repositories for scheduled runs.
+          App registration does not connect repositories. New installation binding is disabled;
+          existing bindings can still be managed or unlinked.
         </div>
       ) : props.repoBusy ? (
         <div className="flex items-center gap-2 p-3 text-xs text-fg-muted">

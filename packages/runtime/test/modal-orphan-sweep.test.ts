@@ -187,4 +187,70 @@ describe("sweepModalOrphanSandboxes live-instance guard", () => {
     expect(result.terminated).toEqual([]);
     expect(result.skipped).toBe(1);
   });
+
+  test("an exact verifier instance survives repeated sweeps beyond the two-minute grace", async () => {
+    for (const ageMs of [125_000, 155_000, 185_000]) {
+      const { client, terminated } = fakeModalClient([
+        { id: "sb-live", createdAt: 1_000, tags: [] },
+      ]);
+      const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+        client: client as any,
+        now: new Date(1_000_000 + ageMs),
+      });
+      expect(terminated).toEqual([]);
+      expect(result.terminated).toEqual([]);
+      expect(result.skipped).toBe(1);
+    }
+  });
+
+  test("copied active attribution tags do not protect the wrong instance", async () => {
+    const { client, terminated } = fakeModalClient([
+      {
+        id: "sb-copy",
+        createdAt: 1_000,
+        tags: attributionTags({ leaseId: "lease-1", workspaceId: "ws-1", sandboxGroupId: "grp-1" }),
+      },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [LIVE_LEASE], {
+      client: client as any,
+      now: new Date(1_000_000 + 185_000),
+    });
+    expect(terminated).toEqual(["sb-copy"]);
+    expect(result.terminated.map((entry) => entry.reason)).toEqual(["stale_attribution"]);
+  });
+
+  test("revalidates immediately before termination and spares a newly registered instance", async () => {
+    const { client, terminated } = fakeModalClient([
+      { id: "sb-late-live", createdAt: 1_000, tags: [] },
+    ]);
+    const candidates: string[] = [];
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+      revalidateTermination: async (candidate) => {
+        candidates.push(candidate.sandboxId);
+        return false;
+      },
+    });
+    expect(candidates).toEqual(["sb-late-live"]);
+    expect(terminated).toEqual([]);
+    expect(result.terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+  });
+
+  test("fails closed when pre-termination ownership revalidation fails", async () => {
+    const { client, terminated } = fakeModalClient([
+      { id: "sb-inconclusive", createdAt: 1_000, tags: [] },
+    ]);
+    const result = await sweepModalOrphanSandboxes(testSettings(MODAL_SETTINGS), [], {
+      client: client as any,
+      now: new Date(1_000_000 + 60 * 60_000),
+      revalidateTermination: async () => {
+        throw new Error("database unavailable");
+      },
+    });
+    expect(terminated).toEqual([]);
+    expect(result.terminated).toEqual([]);
+    expect(result.skipped).toBe(1);
+  });
 });

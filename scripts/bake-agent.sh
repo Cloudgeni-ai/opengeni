@@ -3,8 +3,9 @@
 # API image serves from /agent/* (the "agent ships inside the control-plane"
 # decision; agent-distribution).
 #
-# Run this as a CI STEP in the deployed-env API image build (release.yml here, and
-# the ops-repo per-SHA preview/staging/prod image builds) BEFORE `docker build`.
+# Run this as a CI STEP in the deployed-env API image build
+# (release-candidate.yml here, and operator-controlled per-SHA builds) BEFORE
+# `docker build`.
 # It builds the two static Linux musl binaries that match THIS exact control-plane
 # SHA, signs + checksums each, and writes them into agent/install/baked/ so they
 # ride into the image via the Dockerfile's existing `COPY . .`.
