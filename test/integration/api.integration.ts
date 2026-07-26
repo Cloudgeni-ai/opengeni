@@ -30,6 +30,7 @@ import {
   getSessionGoal,
   getWorkspaceEnvironmentValuesForRun,
   listGitHubInstallationAccessForWorkspace,
+  initializeSessionStartAtomically,
   listSessionEvents,
   listScheduledTasks,
   listOutstandingSessionSystemUpdates,
@@ -797,6 +798,25 @@ describe("API component integration", () => {
       model: "scripted-model",
       sandboxBackend: "none",
     });
+    await initializeSessionStartAtomically(dbClient.db, {
+      accountId: baseGrant.accountId,
+      workspaceId: baseGrant.workspaceId,
+      sessionId: session.id,
+      clientEventId: `initial:${session.id}`,
+      reasoningEffortFallback: "low",
+      createdEventPayload: {},
+    });
+    const attemptId = crypto.randomUUID();
+    const claimed = await claimSessionWorkForAttempt(dbClient.db, baseGrant.workspaceId, {
+      sessionId: session.id,
+      workflowId: `session-${session.id}`,
+      workflowRunId: crypto.randomUUID(),
+      attemptId,
+      dispatchId: `dispatch-${crypto.randomUUID()}`,
+      trigger: { kind: "next" },
+    });
+    expect(claimed.action).toBe("claimed");
+    if (claimed.action !== "claimed") throw new Error("goal MCP turn was not claimed");
     const mcpDeps = {
       settings,
       db: dbClient.db,
@@ -819,7 +839,13 @@ describe("API component integration", () => {
 
     const grant = {
       ...baseGrant,
-      metadata: { delegated: true, sessionId: session.id },
+      metadata: {
+        delegated: true,
+        sessionId: session.id,
+        turnId: claimed.turn.id,
+        attemptId,
+        executionGeneration: claimed.turn.executionGeneration,
+      },
     };
     const mcp = buildOpenGeniMcpServer(mcpDeps, grant);
 
@@ -834,11 +860,19 @@ describe("API component integration", () => {
     expect(setGoal.status).toBe("active");
     expect(setGoal.version).toBe(1);
 
-    const updated = await callMcpTool<{ version: number; text: string }>(mcp, "goal_update", {
+    const updated = await callMcpTool<{
+      version: number;
+      text: string;
+      operationId: string;
+      replay: boolean;
+    }>(mcp, "goal_update", {
       text: "keep CI green on main",
       progressNote: "fixed two flaky tests",
+      idempotencyKey: crypto.randomUUID(),
     });
     expect(updated.version).toBe(2);
+    expect(updated.operationId).toBeTruthy();
+    expect(updated.replay).toBe(false);
 
     const pausedGoal = await callMcpTool<{
       status: string;
@@ -861,18 +895,17 @@ describe("API component integration", () => {
     await expect(callMcpTool(mcp, "goal_pause", { rationale: "too late" })).rejects.toThrow(
       "completed",
     );
-    await expect(callMcpTool(mcp, "goal_update", { text: "also too late" })).rejects.toThrow(
-      "completed",
-    );
+    await expect(
+      callMcpTool(mcp, "goal_update", {
+        text: "also too late",
+        idempotencyKey: crypto.randomUUID(),
+      }),
+    ).rejects.toThrow("completed");
 
     const events = await listSessionEvents(dbClient.db, baseGrant.workspaceId, session.id);
-    expect(events.map((event) => event.type)).toEqual([
-      "goal.set",
-      "goal.updated",
-      "goal.paused",
-      "goal.set",
-      "goal.completed",
-    ]);
+    expect(
+      events.filter((event) => event.type.startsWith("goal.")).map((event) => event.type),
+    ).toEqual(["goal.set", "goal.updated", "goal.paused", "goal.set", "goal.completed"]);
     expect((await getSessionGoal(dbClient.db, baseGrant.workspaceId, session.id))?.status).toBe(
       "completed",
     );
