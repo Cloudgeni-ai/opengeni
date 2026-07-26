@@ -45,7 +45,9 @@ import {
   readWorkspaceArchiveCapturePreflight,
   recordWarmingSandboxCreated,
   readLease,
+  retainWorkspaceMutationProcess,
   SandboxWorkspaceMutationFencedError,
+  settleRetainedProcess,
   touchLeaseHolder,
   verifyWorkspaceMutationSettlement,
   withWorkspaceRls,
@@ -83,6 +85,7 @@ let shared: SharedTestDatabase | null = null;
 let admin: postgres.Sql;
 let client: DbClient;
 let db: Database;
+const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
 const REAPER_SETTINGS = testSettings({
   sandboxBackend: "local",
@@ -298,6 +301,11 @@ async function holderCount(
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("worker-sandbox-lease");
   if (!shared) {
+    if (requireRealDatabase) {
+      throw new Error(
+        "[worker-sandbox-lease] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+      );
+    }
     available = false;
     // eslint-disable-next-line no-console
     console.warn("[worker-sandbox-lease] docker unavailable, skipping");
@@ -1007,6 +1015,240 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         liveness: "warm",
       }),
     ).toMatchObject({ workspaceGeneration: 2 });
+  }, 60_000);
+
+  test("(1b-settlement-race) provider success settles once before a stale-route rejection", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 11,
+      expiresInMs: 600_000,
+      instanceId: "box-settlement-race",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-settlement-race" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 11,
+      expectedInstanceId: "box-settlement-race",
+      operation: "providerResolvedBeforeRouteMove",
+      routeKind: "active",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    await admin`
+      update sessions set active_epoch = 1
+      where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}`;
+
+    const settle = () =>
+      verifyWorkspaceMutationSettlement(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 11,
+        expectedInstanceId: "box-settlement-race",
+        admission,
+        operation: "providerResolvedBeforeRouteMove",
+        outcome: "resolved",
+        routeKind: "active",
+        routeTargetId: null,
+        routeEpoch: 0,
+      });
+    const stale = await settle().catch((error) => error);
+    expect(stale).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+
+    const [first] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(first?.providerOutcome).toBe("resolved");
+    expect(first?.settledAt).toBeInstanceOf(Date);
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 11,
+        expectedInstanceId: "box-settlement-race",
+        liveness: "warm",
+      }),
+    ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
+
+    // Model a caller crash after receiving the stale-authority error. Replaying
+    // the exact physical result reports the same fence without rewriting or
+    // reopening its durable settlement.
+    const replay = await settle().catch((error) => error);
+    expect(replay).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect((replay as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+    const [afterReplay] = await admin<{ providerOutcome: string | null; settledAt: Date | null }[]>`
+      select provider_outcome as "providerOutcome", settled_at as "settledAt"
+      from sandbox_workspace_mutation_admissions where id = ${admission.id}`;
+    expect(afterReplay?.providerOutcome).toBe("resolved");
+    expect(afterReplay?.settledAt?.getTime()).toBe(first?.settledAt?.getTime());
+  }, 60_000);
+
+  test("(1b-retained-race) yielded success is tracked once before stale-route rejection and remains settleable", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: 12,
+      expiresInMs: 600_000,
+      instanceId: "box-retained-race",
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-retained-race" } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: 12,
+      expectedInstanceId: "box-retained-race",
+      operation: "yieldBeforeRouteMove",
+      routeKind: "active",
+      routeTargetId: null,
+      routeEpoch: 0,
+    });
+    await admin`
+      update sessions set active_epoch = 1
+      where workspace_id = ${ids.workspaceId} and id = ${attempt.sessionId}`;
+
+    const processId = crypto.randomUUID();
+    const promote = () =>
+      retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId: 41,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation: "yieldBeforeRouteMove",
+        owner: {
+          kind: "turn",
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: 12,
+          expectedInstanceId: "box-retained-race",
+          routeKind: "active",
+          routeTargetId: null,
+          routeEpoch: 0,
+        },
+      });
+    const stale = await promote().catch((error) => error);
+    expect(stale).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+
+    const retained = await admin<
+      {
+        providerOutcome: string | null;
+        settledAt: Date | null;
+        processCount: number;
+        holderCount: number;
+        state: string;
+        startedAt: Date;
+      }[]
+    >`
+      select admission.provider_outcome as "providerOutcome",
+        admission.settled_at as "settledAt", process.state,
+        process.started_at as "startedAt",
+        (select count(*)::integer from sandbox_retained_processes child
+          where child.parent_admission_id = admission.id) as "processCount",
+        (select count(*)::integer from sandbox_lease_holders holder
+          where holder.lease_id = admission.lease_id and holder.kind = 'process'
+            and holder.holder_id = ${`process:${processId}`}) as "holderCount"
+      from sandbox_workspace_mutation_admissions admission
+      join sandbox_retained_processes process on process.parent_admission_id = admission.id
+      where admission.id = ${admission.id}`;
+    expect(retained[0]).toMatchObject({
+      providerOutcome: "retained",
+      settledAt: null,
+      processCount: 1,
+      holderCount: 1,
+      state: "active",
+    });
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: "box-retained-race",
+        liveness: "warm",
+      }),
+    ).toBeNull();
+
+    const replay = await promote().catch((error) => error);
+    expect(replay).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
+    expect((replay as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+    const [afterReplay] = await admin<{ count: number; startedAt: Date }[]>`
+      select count(*)::integer as count, min(started_at) as "startedAt"
+      from sandbox_retained_processes where parent_admission_id = ${admission.id}`;
+    expect(afterReplay?.count).toBe(1);
+    expect(afterReplay?.startedAt.getTime()).toBe(retained[0]?.startedAt.getTime());
+
+    await settleRetainedProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider exited after stale-route promotion",
+      idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+    });
+    const [terminal] = await admin<
+      { providerOutcome: string | null; settledAt: Date | null; state: string }[]
+    >`
+      select admission.provider_outcome as "providerOutcome",
+        admission.settled_at as "settledAt", process.state
+      from sandbox_workspace_mutation_admissions admission
+      join sandbox_retained_processes process on process.parent_admission_id = admission.id
+      where admission.id = ${admission.id}`;
+    expect(terminal[0]).toMatchObject({
+      providerOutcome: "resolved",
+      state: "exited",
+    });
+    expect(terminal?.settledAt).toBeInstanceOf(Date);
+    expect(
+      await readWorkspaceArchiveCapturePreflight(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: 12,
+        expectedInstanceId: "box-retained-race",
+        liveness: "warm",
+      }),
+    ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
   }, 60_000);
 
   test("(1b-retention) the last verified fallback survives warm + drain rotations until a newer revision is verified", async () => {

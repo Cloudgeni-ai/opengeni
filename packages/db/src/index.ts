@@ -21085,6 +21085,42 @@ function admissionSnapshotMatchesAuthorityInput(
   );
 }
 
+function admissionMatchesAuthorityInput(
+  admission: AdmissionIdentityRow,
+  authority: WorkspaceMutationAuthority,
+): boolean {
+  if (
+    !admissionSnapshotMatchesAuthorityInput(mapWorkspaceMutationAdmission(admission), authority)
+  ) {
+    return false;
+  }
+  if (authority.kind === "turn") {
+    return (
+      admission.turn_id === authority.turnId &&
+      admission.attempt_id === authority.attemptId &&
+      Number(admission.execution_generation) === authority.executionGeneration
+    );
+  }
+  return admission.turn_id === null && admission.attempt_id === null;
+}
+
+function workspaceMutationAuthorityFailure(
+  error: unknown,
+): SandboxWorkspaceMutationSettlementResult | null {
+  if (!(error instanceof SandboxWorkspaceMutationFencedError)) return null;
+  if (
+    error.code !== "admission_fenced" &&
+    error.code !== "attempt_fenced" &&
+    error.code !== "holder_fenced" &&
+    error.code !== "lease_fenced" &&
+    error.code !== "route_fenced" &&
+    error.code !== "process_fenced"
+  ) {
+    return null;
+  }
+  return { failure: error.code, detail: error.message };
+}
+
 async function verifyResolvedAdmissionAuthority(
   tx: Database,
   authority: LockedWorkspaceMutationAuthority,
@@ -21166,12 +21202,6 @@ async function verifyWorkspaceMutationSettlementForAuthority(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        // Resolved output requires live authority. A provider rejection has no
-        // output to accept, but still settles the exact matching admission.
-        const authority =
-          input.outcome === "resolved"
-            ? await lockWorkspaceMutationAuthorityTx(tx, authorityInput)
-            : null;
         const actorKind = authorityInput.kind;
         const actorId =
           authorityInput.kind === "turn"
@@ -21209,7 +21239,20 @@ async function verifyWorkspaceMutationSettlementForAuthority(
           `);
         }
         if (input.outcome === "rejected") return { failure: null };
-        return await verifyResolvedAdmissionAuthority(tx, authority!, admission);
+        // The provider has already returned. Lock and settle its immutable
+        // admission before consulting mutable turn/route/process authority, so
+        // a stale-authority rejection cannot roll the physical settlement back
+        // and strand archive capture. Only authority-fence errors are converted
+        // to a post-commit rejection; database failures still abort normally.
+        let authority: LockedWorkspaceMutationAuthority;
+        try {
+          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+        } catch (error) {
+          const failure = workspaceMutationAuthorityFailure(error);
+          if (failure) return failure;
+          throw error;
+        }
+        return await verifyResolvedAdmissionAuthority(tx, authority, admission);
       }),
   );
   if (settlement.failure !== null) {
@@ -21390,24 +21433,26 @@ export async function retainWorkspaceMutationProcess(
           routeTargetId: input.owner.routeTargetId,
           routeEpoch: input.owner.routeEpoch,
         };
-  return await withRlsContext(
+  const result = await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
-        const authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+        const actorKind = authorityInput.kind;
+        const actorId =
+          authorityInput.kind === "turn" ? authorityInput.attemptId : authorityInput.requestId;
         const admission = await selectExactAdmissionForUpdate(tx, {
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           admissionId: input.admissionId,
-          actorKind: authority.actorKind,
-          actorId: authority.actorId,
+          actorKind,
+          actorId,
           sessionId: input.sessionId,
           admittedWorkspaceGeneration: input.admittedWorkspaceGeneration,
           operation,
         });
-        if (!admission || !admissionMatchesAuthority(admission, authority)) {
+        if (!admission || !admissionMatchesAuthorityInput(admission, authorityInput)) {
           throw new SandboxWorkspaceMutationFencedError(
             "admission_fenced",
             "Retained process did not match its exact parent admission",
@@ -21429,75 +21474,95 @@ export async function retainWorkspaceMutationProcess(
               "Parent admission is already bound to a different retained process",
             );
           }
-          return mapRetainedProcess(existing);
         }
-        if (admission.provider_outcome !== null || admission.settled_at !== null) {
-          throw new SandboxWorkspaceMutationFencedError(
-            "admission_fenced",
-            "Settled workspace mutation cannot be promoted to a retained process",
-          );
+        let process = existing;
+        if (!process) {
+          if (admission.provider_outcome !== null || admission.settled_at !== null) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "admission_fenced",
+              "Settled workspace mutation cannot be promoted to a retained process",
+            );
+          }
+          const processHolderId = `process:${input.processId}`;
+          await tx.execute(sql`
+            insert into sandbox_lease_holders
+              (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
+               last_heartbeat_at)
+            values (${input.accountId}, ${input.workspaceId}, ${admission.lease_id},
+              'process', ${processHolderId}, ${input.sessionId}, now())
+            on conflict (lease_id, kind, holder_id) do nothing
+          `);
+          const [created] = await tx
+            .insert(schema.sandboxRetainedProcesses)
+            .values({
+              id: input.processId,
+              accountId: input.accountId,
+              workspaceId: input.workspaceId,
+              sessionId: input.sessionId,
+              leaseId: admission.lease_id,
+              sandboxGroupId: admission.sandbox_group_id,
+              parentAdmissionId: admission.id,
+              holderId: processHolderId,
+              ownerActorKind: admission.actor_kind as "turn" | "direct",
+              ownerActorId: admission.actor_id,
+              ownerTurnId: admission.turn_id,
+              ownerAttemptId: admission.attempt_id,
+              ownerExecutionGeneration:
+                admission.execution_generation === null
+                  ? null
+                  : Number(admission.execution_generation),
+              leaseEpoch: Number(admission.lease_epoch),
+              providerBackend: admission.provider_backend,
+              providerInstanceId: admission.provider_instance_id,
+              routeKind: admission.route_kind,
+              routeTargetId: admission.route_target_id,
+              routeEpoch: Number(admission.route_epoch),
+              providerSessionId: input.providerSessionId,
+              state: "active",
+            })
+            .returning();
+          await tx.execute(sql`
+            update sandbox_workspace_mutation_admissions set provider_outcome = 'retained'
+            where id = ${admission.id} and provider_outcome is null and settled_at is null
+          `);
+          await tx.execute(sql`
+            update sandbox_leases as lease set
+              refcount = counts.total,
+              turn_holders = counts.turns,
+              viewer_holders = counts.viewers,
+              updated_at = now()
+            from (
+              select count(*)::int as total,
+                count(*) filter (where kind = 'turn')::int as turns,
+                count(*) filter (where kind = 'viewer')::int as viewers
+              from sandbox_lease_holders
+              where lease_id = ${admission.lease_id}
+            ) as counts
+            where lease.id = ${admission.lease_id}
+          `);
+          process = created;
+        }
+
+        // A yielded provider process is already a physical outcome. Persist its
+        // exact route and non-TTL holder before consulting mutable authority, so
+        // a route/turn race cannot leave an untracked process or open parent
+        // admission. Report staleness only after this transaction commits.
+        let authority: LockedWorkspaceMutationAuthority;
+        try {
+          authority = await lockWorkspaceMutationAuthorityTx(tx, authorityInput);
+        } catch (error) {
+          const failure = workspaceMutationAuthorityFailure(error);
+          if (failure) return { process: mapRetainedProcess(process!), failure };
+          throw error;
         }
         const identity = await verifyResolvedAdmissionAuthority(tx, authority, admission);
-        if (identity.failure !== null) {
-          throw new SandboxWorkspaceMutationFencedError(identity.failure, identity.detail);
-        }
-        const processHolderId = `process:${input.processId}`;
-        await tx.execute(sql`
-          insert into sandbox_lease_holders
-            (account_id, workspace_id, lease_id, kind, holder_id, subject_id,
-             last_heartbeat_at)
-          values (${input.accountId}, ${input.workspaceId}, ${admission.lease_id},
-            'process', ${processHolderId}, ${input.sessionId}, now())
-          on conflict (lease_id, kind, holder_id) do nothing
-        `);
-        const [created] = await tx
-          .insert(schema.sandboxRetainedProcesses)
-          .values({
-            id: input.processId,
-            accountId: input.accountId,
-            workspaceId: input.workspaceId,
-            sessionId: input.sessionId,
-            leaseId: admission.lease_id,
-            sandboxGroupId: admission.sandbox_group_id,
-            parentAdmissionId: admission.id,
-            holderId: processHolderId,
-            ownerActorKind: authority.actorKind as "turn" | "direct",
-            ownerActorId: authority.actorId,
-            ownerTurnId: authority.turnId,
-            ownerAttemptId: authority.attemptId,
-            ownerExecutionGeneration: authority.executionGeneration,
-            leaseEpoch: Number(admission.lease_epoch),
-            providerBackend: admission.provider_backend,
-            providerInstanceId: admission.provider_instance_id,
-            routeKind: admission.route_kind,
-            routeTargetId: admission.route_target_id,
-            routeEpoch: Number(admission.route_epoch),
-            providerSessionId: input.providerSessionId,
-            state: "active",
-          })
-          .returning();
-        await tx.execute(sql`
-          update sandbox_workspace_mutation_admissions set provider_outcome = 'retained'
-          where id = ${admission.id} and provider_outcome is null and settled_at is null
-        `);
-        await tx.execute(sql`
-          update sandbox_leases as lease set
-            refcount = counts.total,
-            turn_holders = counts.turns,
-            viewer_holders = counts.viewers,
-            updated_at = now()
-          from (
-            select count(*)::int as total,
-              count(*) filter (where kind = 'turn')::int as turns,
-              count(*) filter (where kind = 'viewer')::int as viewers
-            from sandbox_lease_holders
-            where lease_id = ${admission.lease_id}
-          ) as counts
-          where lease.id = ${admission.lease_id}
-        `);
-        return mapRetainedProcess(created!);
+        return { process: mapRetainedProcess(process!), failure: identity };
       }),
   );
+  if (result.failure.failure !== null) {
+    throw new SandboxWorkspaceMutationFencedError(result.failure.failure, result.failure.detail);
+  }
+  return result.process;
 }
 
 /** Read one retained process by durable UUID. Callers must use the copied route
