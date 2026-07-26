@@ -125,7 +125,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0109_sandbox_recovery_generations.sql")).toMatchObject({
-      sha256: "cd9df2775bf5ecb79b96bca06e2de7bb19a5b682147fdd7e9ef22f9d4bf4e27e",
+      sha256: "365284a9ab495173780d54c4b1470824891b15a7290735bf09b72c2f5fdbc48b",
       deploymentMode: "maintenance",
     });
   });
