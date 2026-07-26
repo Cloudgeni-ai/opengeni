@@ -415,6 +415,57 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("retries a non-conflict revision-zero preservation failure without losing the newer value", async () => {
+    const fileId = "00000000-0000-4000-8000-000000000099";
+    const requests: SaveNewSessionDraftRequest[] = [];
+    const hook = await renderDraftHook(
+      client({
+        saveNewSessionDraft: async (_workspaceId, request) => {
+          requests.push(request);
+          if (requests.length === 2) throw new Error("temporary preservation failure");
+          return remote(request.expectedRevision + 1, request);
+        },
+      }),
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "submitted" })));
+    const flushed = await actRun(() => hook.result.current.draft.flush());
+    if (!flushed) throw new Error("Expected the submitted draft to flush");
+
+    const newer = editable({
+      text: "newer local edit",
+      resources: [{ kind: "file", fileId }],
+    });
+    await actRun(() => hook.result.current.setValue(newer));
+    const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
+
+    expect(acknowledged).toBeNull();
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toMatchObject({
+      expectedRevision: 0,
+      text: newer.text,
+      resources: newer.resources,
+    });
+    expect(hook.result.current.value).toEqual(newer);
+    expect(hook.result.current.draft.revision).toBe(0);
+    expect(hook.result.current.draft.conflict).toBeNull();
+    expect(hook.result.current.draft.error?.message).toContain("temporary preservation failure");
+
+    const preserved = await actRun(() => hook.result.current.draft.flush());
+    expect(requests).toHaveLength(3);
+    expect(requests[2]).toMatchObject({
+      expectedRevision: 0,
+      text: newer.text,
+      resources: newer.resources,
+    });
+    expect(preserved && hook.result.current.draft.isCurrentSignature(preserved.signature)).toBe(
+      true,
+    );
+    expect(hook.result.current.value).toEqual(newer);
+    expect(hook.result.current.draft.error).toBeNull();
+    await hook.unmount();
+  });
+
   test("invalidates an in-flight old-revision autosave before preserving the newer value", async () => {
     const staleAutosave = deferred<NewSessionDraft>();
     const requests: SaveNewSessionDraftRequest[] = [];

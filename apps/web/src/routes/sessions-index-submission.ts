@@ -1,14 +1,17 @@
 export type CreatedSessionRouteAuthority = Readonly<{
   sessionId: string;
+  /** Null once draft settlement is durable; navigation may still need retrying. */
+  settleDraft: (() => Promise<boolean>) | null;
 }>;
 
-type CreatedSessionRouteAttempt = CreatedSessionRouteAuthority & {
+type CreatedSessionRouteAttempt = Readonly<{
+  sessionId: string;
   /**
    * Reconcile the draft consumed by this create. A conflict is recoverable and
    * must not discard the durable authority of the already-created session.
    */
   settleDraft: () => Promise<boolean>;
-};
+}>;
 
 export type RunNewSessionRouteSubmissionOptions = {
   authority: CreatedSessionRouteAuthority | null;
@@ -21,9 +24,9 @@ export type RunNewSessionRouteSubmissionOptions = {
  * Owns the post-create boundary for the sessions-index route.
  *
  * Session creation is the authoritative commit. Once it succeeds, retain its
- * exact ID until navigation succeeds. Draft preservation may legitimately stop
- * on an OCC conflict, but a later retry must only navigate to that same session
- * rather than issuing another create with a fresh idempotency key.
+ * exact ID until navigation succeeds. Draft settlement remains attached to that
+ * authority until it is durable; a later retry must settle, then navigate to the
+ * same session rather than issuing another create with a fresh idempotency key.
  */
 export async function runNewSessionRouteSubmission(
   options: RunNewSessionRouteSubmissionOptions,
@@ -32,9 +35,14 @@ export async function runNewSessionRouteSubmission(
   if (!authority) {
     const created = await options.create();
     if (!created) return false;
-    authority = { sessionId: created.sessionId };
+    authority = created;
     options.onAuthorityChange(authority);
-    if (!(await created.settleDraft())) return false;
+  }
+
+  if (authority.settleDraft) {
+    if (!(await authority.settleDraft())) return false;
+    authority = { sessionId: authority.sessionId, settleDraft: null };
+    options.onAuthorityChange(authority);
   }
 
   await options.navigate(authority.sessionId);

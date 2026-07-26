@@ -233,8 +233,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                 // A sibling-tab OCC conflict remains visible, while the route
                 // retains exact authority for the already-created session.
                 const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-                if (!acknowledged) return false;
-                if (acknowledged.kind === "consumed") {
+                if (acknowledged?.kind === "consumed") {
                   setMessage("");
                   setDraft(emptySessionDraft());
                   attachments.removeReadyFiles(
@@ -242,7 +241,13 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
                       resource.kind === "file" ? [resource.fileId] : [],
                     ),
                   );
-                } else if (!newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)) {
+                } else if (
+                  !acknowledged ||
+                  !newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)
+                ) {
+                  // A non-conflict revision-zero insert can fail transiently.
+                  // Retry it (or prove a concurrently saved current signature)
+                  // before allowing this route to unmount through navigation.
                   const preserved = await newSessionDraft.flush();
                   if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
                     return false;
