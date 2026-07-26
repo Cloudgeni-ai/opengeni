@@ -1,0 +1,28 @@
+{{- if and .Values.networkPolicy.enabled .Values.worker.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-worker
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: worker
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+    matchExpressions:
+      - key: opengeni.ai/worker-role
+        operator: Exists
+  policyTypes:
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- else }}
+    - Ingress
+    {{- end }}
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    {{- toYaml .Values.networkPolicy.egress.rules | nindent 4 }}
+  {{- else }}
+  ingress: []
+  {{- end }}
+{{- end }}

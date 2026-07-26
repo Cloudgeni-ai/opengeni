@@ -1,0 +1,242 @@
+global:
+  imageRegistry: "ACR_LOGIN_SERVER"
+
+api:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:API_IMAGE_DIGEST"
+
+worker:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:WORKER_IMAGE_DIGEST"
+  # Control workflows and short recovery activities are isolated from agent
+  # inference so a saturated turn fleet cannot starve Pause, Steer, or wakeup.
+  control:
+    replicaCount: 2
+  turns:
+    replicaCount: 4
+    # Turn pods hold the in-flight model history and sandbox clients. The
+    # worker process enforces an explicit activity cap; these requests and
+    # limits provide headroom for the temporary 16-turn density while density rollout
+    # measures the final concurrency/resource optimum.
+    resources:
+      requests:
+        cpu: 500m
+        memory: 3Gi
+      limits:
+        cpu: "2"
+        memory: 6Gi
+    autoscaling:
+      enabled: true
+      minReplicas: 4
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+      customMetrics: []
+      behavior:
+        scaleUp:
+          stabilizationWindowSeconds: 60
+          policies:
+            - type: Pods
+              value: 2
+              periodSeconds: 60
+        scaleDown:
+          stabilizationWindowSeconds: 600
+          policies:
+            - type: Pods
+              value: 1
+              periodSeconds: 300
+
+web:
+  # One steady production web pod is sufficient at the current request rate.
+  # Surge by one during a rollout so that the single serving pod is never
+  # removed before its replacement is ready.
+  replicaCount: 1
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:WEB_IMAGE_DIGEST"
+
+migrations:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:API_IMAGE_DIGEST"
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+
+networkPolicy:
+  enabled: true
+
+postgres:
+  enabled: false
+  # Keep false when Terraform provisions Azure Database for PostgreSQL and
+  # provide OPENGENI_DATABASE_URL through secret.existingSecret.
+
+temporal:
+  # Production should use Temporal Cloud, an existing endpoint, or the official
+  # Temporal chart managed by the stack wrapper outside OpenGeni's chart.
+  # Set true only for smoke.
+  enabled: false
+
+nats:
+  # Production should use an existing NATS endpoint or the official NATS chart
+  # managed by the stack wrapper outside OpenGeni's chart.
+  # Set true only for local/preview/cloud smoke fixtures.
+  enabled: false
+  url: "nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222"
+  # When the bring-your-own-compute feature is enabled and NATS runs OUTSIDE this
+  # chart (enabled:false above), the auth-callout config (deploy/nats/auth-callout.conf)
+  # is folded into the platform NATS StatefulSet by the stack wrapper / ops-repo —
+  # NOT toggled here. Set authCallout.enabled=true only when this chart manages the
+  # NATS fixture (preview/smoke). The control-plane env + the relay/ingress wiring
+  # below stand regardless of which NATS the agents dial.
+  authCallout:
+    enabled: false
+
+# Bring-your-own-compute (selfhosted) — the relay tier + the control-plane wiring.
+# Enabling needs the runtime-secret keys (see deploy/helm/opengeni/values.yaml
+# secret: comment) and the ingress relay.<domain> / nats.<domain> hosts below.
+# Flip selfhosted.enabled + relay.enabled together at deploy time (e.g. via a
+# deploy-workflow --set overlay) once the relay image + secrets are provisioned.
+selfhosted:
+  enabled: true
+  natsUrl: "wss://nats.opengeni.example.com"
+  relayUrl: "wss://relay.opengeni.example.com"
+
+relay:
+  enabled: true
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:RELAY_IMAGE_DIGEST"
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+
+minio:
+  enabled: false
+
+config:
+  OPENGENI_SERVICE_NAME: opengeni
+  OPENGENI_ENVIRONMENT: azure-managed
+  OPENGENI_API_HOST: 0.0.0.0
+  OPENGENI_API_PORT: "8000"
+  OPENGENI_TEMPORAL_NAMESPACE: default
+  OPENGENI_TEMPORAL_HOST: opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233
+  OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
+  OPENGENI_AUTH_REQUIRED: "true"
+  OPENGENI_AUTH_ALLOW_HEALTH: "true"
+  OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
+  # Cross-origin allow-list for the API. The code wraps this as ^(?:<value>)$,
+  # so it is an unanchored exact-alternation regex (no leading ^ / trailing $).
+  # Covers localhost dev plus the managed staging and production app origins
+  # (a single universal value is fine across staging and prod).
+  OPENGENI_CORS_ALLOW_ORIGIN_REGEX: 'https?://(localhost|127\.0\.0\.1)(:\d+)?|https://staging\.app\.opengeni\.ai|https://geni-staging\.app\.opengeni\.ai|https://app\.opengeni\.ai'
+  OPENGENI_PRODUCT_ACCESS_MODE: configured
+  OPENGENI_BILLING_MODE: disabled
+  OPENGENI_ENTITLEMENTS_MODE: none
+  OPENGENI_USAGE_LIMITS_MODE: none
+  OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
+  OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
+  OPENGENI_OBJECT_STORAGE_BACKEND: azure-blob
+  OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
+  # Production readiness checks should use a real sandbox backend. Modal is
+  # supported with Azure Blob by materializing attached file resources into the
+  # sandbox before the agent starts.
+  OPENGENI_SANDBOX_BACKEND: modal
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  hosts:
+    - host: opengeni.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
+          pathType: Exact
+          service: api
+        # get.<domain> install-script + device-enrollment routes served by the
+        # API (same origin / single trust root). These ride the
+        # SAME app host here; point the get.<domain> DNS record at this ingress —
+        # OR add a dedicated `get.opengeni.example.com` host block routing the
+        # same /install.sh|/install.ps1|/uninstall.sh|/opengeni-agent-minisign.pub|
+        # /device|/v/ paths to the api service.
+        - path: /install.sh
+          pathType: Exact
+          service: api
+        - path: /install.ps1
+          pathType: Exact
+          service: api
+        - path: /uninstall.sh
+          pathType: Exact
+          service: api
+        - path: /opengeni-agent-minisign.pub
+          pathType: Exact
+          service: api
+    # The bring-your-own-compute stream relay — wss long-lived sockets. The
+    # global proxy-read/send-timeout:3600 + proxy-buffering:off annotations above
+    # already make these websocket-friendly (nginx upgrades Connection/Upgrade
+    # automatically). Point relay.<domain> DNS at this ingress; TLS is the
+    # existing cert-manager pattern (add the host to ingress.tls below).
+    - host: relay.opengeni.example.com
+      paths:
+        - path: /stream
+          pathType: Prefix
+          service: relay
+          portName: wss
+        - path: /healthz
+          pathType: Exact
+          service: relay
+          portName: wss
+    # The control-plane NATS websocket the agents dial over wss (symmetric with
+    # the relay). Only present when the chart manages NATS (nats.enabled +
+    # nats.authCallout.enabled); when NATS runs outside the chart, route this host
+    # to the external NATS websocket service instead.
+    - host: nats.opengeni.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: nats
+          portName: websocket
+  # tls:
+  #   - secretName: opengeni-tls
+  #     hosts:
+  #       - opengeni.example.com
+  #       - relay.opengeni.example.com
+  #       - nats.opengeni.example.com
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  otel:
+    enabled: true
+    # Leave endpoint empty when using the chart-managed collector; the chart
+    # points workloads at the release-local collector service automatically.
+    endpoint: ""
+  collector:
+    enabled: true

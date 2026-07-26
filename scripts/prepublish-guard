@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "${OPENGENI_RELEASE:-}" == "1" ]]; then
+  exit 0
+fi
+
+cat >&2 <<'EOF'
+OpenGeni npm packages must be published through scripts/release-publish.sh.
+
+Direct npm publish is blocked because the blessed release path builds the
+publishable closure, rewrites workspace dependencies and entry points, and
+sets OPENGENI_RELEASE=1 before changesets publishes.
+EOF
+exit 1

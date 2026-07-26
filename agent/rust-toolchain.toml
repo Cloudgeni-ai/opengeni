@@ -1,0 +1,5 @@
+# Pin to stable so local cargo fmt/clippy/test match the CI agent toolchain
+# (dtolnay/rust-toolchain@stable). Avoids nightly-vs-stable lint drift.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

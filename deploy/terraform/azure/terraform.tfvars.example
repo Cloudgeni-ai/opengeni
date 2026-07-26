@@ -1,0 +1,40 @@
+name_prefix         = "opengeni-dev"
+location            = "westeurope"
+resource_group_name = "rg-opengeni-dev"
+deployment_phase    = "complete"
+
+tags = {
+  environment = "dev"
+}
+
+postgres = {
+  mode                 = "external"
+  existing_host        = "existing-postgres.postgres.database.azure.com"
+  allow_azure_services = false
+  # Optional for managed PostgreSQL when the subscription cannot create Flexible
+  # Server in the primary resource location, or when retrying after a failed
+  # provider create reserved a server name.
+  # location = "northeurope"
+  # name     = "opengeni-dev-pg"
+  # zone     = "1"
+}
+
+temporal = {
+  mode = "officialChart"
+  # Use mode = "external" plus existing_host for Temporal Cloud or customer Temporal.
+  # existing_host = "temporal.example.com:7233"
+  namespace  = "default"
+  task_queue = "opengeni-runs-ts"
+}
+
+object_storage = {
+  mode   = "managed"
+  api    = "azure-blob"
+  bucket = "opengeni-files"
+  # Required for direct browser uploads to signed Blob URLs. Prefer exact
+  # HTTPS app origins; "*" is acceptable only for short-lived private evaluation stacks.
+  # List every app origin that uploads directly to Blob, e.g. a primary app plus
+  # an additional product front-end sharing the same storage account:
+  #   cors_allowed_origins = ["https://staging.app.opengeni.ai", "https://geni-staging.app.opengeni.ai"]
+  cors_allowed_origins = ["https://opengeni.example.com"]
+}

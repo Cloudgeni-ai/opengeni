@@ -1,0 +1,80 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000001001",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 1,
+    "type": "user.message",
+    "payload": {
+      "text": "Keep building on the connected machine."
+    },
+    "occurredAt": "2026-01-02T11:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000001002",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 2,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000001001"
+    },
+    "occurredAt": "2026-01-02T11:00:02.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000001003",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 3,
+    "type": "machine.link.lost",
+    "payload": {
+      "reason": "GOING_OFFLINE_REASON_UPDATE"
+    },
+    "occurredAt": "2026-01-02T11:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000001004",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 4,
+    "type": "machine.runner.restarted",
+    "payload": {},
+    "occurredAt": "2026-01-02T11:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000001005",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 5,
+    "type": "machine.link.restored",
+    "payload": {},
+    "occurredAt": "2026-01-02T11:00:05.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000001006",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 6,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "The machine restarted for a self-update and reconnected; the build continued."
+    },
+    "occurredAt": "2026-01-02T11:00:06.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000001007",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 7,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T11:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000010"
+  }
+]

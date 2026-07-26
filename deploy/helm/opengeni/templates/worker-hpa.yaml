@@ -1,0 +1,44 @@
+{{- range $role := list "control" "turns" }}
+{{- $config := index $.Values.worker $role }}
+{{- if and $.Values.worker.enabled $config.autoscaling.enabled }}
+{{- if ne $role "control" }}
+---
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "opengeni.fullname" $ }}-worker-{{ $role }}
+  labels:
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: worker-{{ $role }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "opengeni.fullname" $ }}-worker-{{ $role }}
+  minReplicas: {{ $config.autoscaling.minReplicas }}
+  maxReplicas: {{ $config.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $config.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if $config.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $config.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+    {{- with $config.autoscaling.customMetrics }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with $config.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- end }}

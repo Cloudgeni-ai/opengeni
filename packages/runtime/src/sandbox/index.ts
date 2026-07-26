@@ -1,0 +1,1248 @@
+// @opengeni/runtime/sandbox — the agent-loop-free sandbox leaf.
+//
+// This module is the load-bearing pre-req for the API-direct control plane
+// (docs/connected-machines.md). It exposes the sandbox client factory plus
+// the resume / recovery-envelope helpers that the API needs to touch a box by
+// id (resume-by-id, file/exec/port ops) WITHOUT importing the @openai/agents
+// agent-loop graph.
+//
+// IMPORT DISCIPLINE (enforced by packages/runtime/test/sandbox-leaf-no-agent-loop.test.ts):
+//   - ALLOWED: the per-provider sandbox SDK build imports
+//       `@openai/agents/sandbox`, `@openai/agents/sandbox/local`,
+//       `@openai/agents-extensions/sandbox/modal`
+//     and the workspace `@opengeni/config` / `@opengeni/contracts` packages.
+//   - FORBIDDEN: the agent-loop entrypoints — the bare `@openai/agents`,
+//       `@openai/agents-extensions`, or `@openai/agents-core` roots, and the
+//       loop symbols (`Agent`, `run`, `Runner`, `RunState`).
+// The barrel `packages/runtime/src/index.ts` re-exports everything here via
+// `export * from "./sandbox"`, so existing consumers (apps/worker) are
+// unchanged.
+
+import type { Settings } from "@opengeni/config";
+import { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+import {
+  DESKTOP_STREAM_PORT,
+  TERMINAL_STREAM_PORT,
+  type SandboxBackend,
+} from "@opengeni/contracts";
+import type {
+  SandboxClient,
+  SandboxSessionLike,
+  SandboxSessionState,
+} from "@openai/agents/sandbox";
+import { PROVIDER_REGISTRY } from "./providers";
+import { SandboxConfigError, SandboxResumeStateUnavailableError } from "./errors";
+import { isSelfhostedProviderNotFoundError } from "./selfhosted/session";
+import type { RuntimeMetricsHooks } from "../metrics";
+
+// Re-export the config-owned environment/port helpers from the leaf so the
+// API-direct control plane can pull its full sandbox-construction surface from
+// a single agent-loop-free entrypoint. They physically live in @opengeni/config
+// (moving them into runtime would create a config→runtime cycle — ledger CR8).
+export { collectSandboxEnvironment, parseExposedPorts } from "@opengeni/config";
+
+// The provider registry surface — the descriptor table self-test, the per-
+// provider registrations, selection + capability negotiation, and the typed
+// construction errors. All agent-loop-free, so the API-direct control plane
+// imports them from this one leaf.
+export {
+  CAPABILITY_DESCRIPTORS,
+  DESKTOP_STREAM_PORT,
+  assertDescriptorRegistryInvariants,
+  type CapabilityDescriptor,
+} from "./capabilities";
+export {
+  SandboxConfigError,
+  SandboxProviderUnavailableError,
+  SandboxResumeStateUnavailableError,
+} from "./errors";
+export {
+  PROVIDER_REGISTRY,
+  assertProviderRegistryInvariants,
+  type ProviderRegistration,
+  type ProviderConstructionContext,
+} from "./providers";
+export {
+  ensureModalRegistryImage,
+  modalSandboxAttributionEnvironment,
+  modalSandboxAttributionTags,
+  sweepModalOrphanSandboxes,
+  tagModalSandbox,
+  terminateModalSandboxById,
+  type LiveModalSandboxLeaseAttribution,
+  type ModalModuleLoader,
+  type ModalOrphanSweepResult,
+  type ModalOrphanSweepTermination,
+  type ModalSandboxAttribution,
+  type RevalidateModalOrphanTermination,
+} from "./providers/modal";
+export {
+  selectBackend,
+  backendSupportsOs,
+  desktopCapableBackend,
+  negotiateCapabilities,
+  type NegotiationContext,
+} from "./select";
+
+// Scoped data-plane stream-token mint/verify (P3.1). Agent-loop-free; the API
+// pulls these from this leaf to authorize the desktop pixel plane.
+export {
+  STREAM_TOKEN_DEFAULT_TTL_SECONDS,
+  mintStreamToken,
+  verifyStreamToken,
+  StreamTokenPayload,
+  type MintStreamTokenInput,
+  type StreamTokenPayloadType,
+} from "./stream-token";
+
+// The Channel-B desktop display-stack launcher (P4.1). Exec-launched,
+// flock-idempotent; the worker (per-turn) and the API (per viewer op) both drive
+// it from this leaf to bring up Xvfb -> XFCE -> x11vnc -viewonly -> websockify:6080.
+export {
+  STREAM_PORT,
+  DISPLAY_STACK_TIMEOUT_MS,
+  DEFAULT_DESKTOP_GEOMETRY,
+  DisplayStackError,
+  DisplayStackUnsupportedError,
+  buildDisplayStackScript,
+  ensureDisplayStack,
+  tearDownDisplayStack,
+  type DesktopGeometry,
+  type DisplayStackCallerKind,
+  type DisplayStackClassification,
+  type DisplayStackTelemetryContext,
+  type DisplayStackTelemetryEvent,
+  type DisplayStackTelemetryStatus,
+  type EnsureDisplayStackOptions,
+  type EnsureDisplayStackResult,
+} from "./display-stack";
+
+// The Channel-B REAL PTY terminal-server launcher (P5.t). Exec-launched,
+// flock-idempotent twin of ensureDisplayStack; brings up ttyd PTY-over-websocket
+// (bash -l per ws client) on 7681 over the SAME tunnel the desktop noVNC uses.
+export {
+  TERMINAL_STREAM_PORT,
+  TERMINAL_SERVER_TIMEOUT_MS,
+  TerminalServerError,
+  TerminalServerUnsupportedError,
+  buildTerminalServerScript,
+  ensureTerminalServer,
+  tearDownTerminalServer,
+  type EnsureTerminalServerOptions,
+  type EnsureTerminalServerResult,
+} from "./terminal-server";
+
+// Host-owned rotating run credentials. Material lives outside the persisted
+// workspace/manifest and is activated atomically per session generation.
+export {
+  RunCredentialValidationError,
+  normalizeRunCredentialsResolution,
+  runCredentialRoot,
+  runCredentialPointerFile,
+  materializeRunCredentials,
+  clearRunCredentials,
+  clearRunCredentialsForAttempt,
+  withRunCredentialEnvironment,
+  withRunCredentialsSession,
+  withRunCredentialsClient,
+  type RunCredentialExpectedScope,
+  type NormalizedRunCredentialMaterial,
+  type RunCredentialCommandSession,
+  type RunCredentialCommandRunner,
+  type RunCredentialSessionReady,
+  type MaterializeRunCredentialsOptions,
+} from "./run-credentials";
+
+// Session-specific Toolspace token routing. The manifest retains one stable
+// legacy pointer for warm-box env parity; every session command selects its own
+// hashed token file off-manifest.
+export {
+  ToolspaceTokenPathError,
+  toolspaceTokenFileForSession,
+  toolspaceTokenFileFromEnvironment,
+  withToolspaceTokenEnvironment,
+  withToolspaceTokenSession,
+  withToolspaceTokenClient,
+} from "./toolspace-token";
+
+// The Channel-B pixel DATA PLANE (P4.2). Resolves the provider's scoped tunnel
+// for port 6080 (client → provider-tunnel direct), assembles the WS URL, and
+// mints the scoped stream token. Called API-direct on the resumed handle.
+export {
+  exposeStreamPort,
+  buildStreamUrl,
+  StreamPortUnavailableError,
+  type ExposedPortEndpoint,
+  type ExposeStreamPortInput,
+  type ExposeStreamPortResult,
+} from "./stream-port";
+
+// P4.3 recording loop — plain functions over a live session handle (no agent
+// loop); finalize uploads box -> object storage without buffering in the worker.
+export {
+  startRecording,
+  stopRecording,
+  inspectRecordingArtifact,
+  uploadRecordingArtifact,
+  deleteRecordingArtifacts,
+  recordingStorageKey,
+  contentTypeForCodec,
+  extForCodec,
+  RecordingUnavailableError,
+  RecordingError,
+  type RecordingCodec,
+  type RecordingContentType,
+  type StartRecordingInput,
+  type RecordingProcess,
+  type RecordingArtifactMetadata,
+} from "./recording";
+
+// P4.4 Channel-A structured services — the provider-agnostic SandboxChannelAService
+// (FileSystem + Git + Terminal) over a live, resumed-by-id session handle. The
+// API constructs one per request around the box it just resumed; no ownership.
+// Agent-loop-free, so the API-direct control plane imports it from this leaf.
+export {
+  SandboxChannelAService,
+  ChannelAValidationError,
+  ChannelAUnavailableError,
+  ChannelAConflictError,
+  ChannelANotFoundError,
+  ChannelAUnsupportedError,
+  stripExecBanner,
+  parseExecBannerSessionId,
+  parseExecBannerExitCode,
+  isExecSessionLostBanner,
+  assertSafeRelPath,
+  parsePorcelainV2,
+  parseNumstatZ,
+  parseUnifiedPatch,
+  REPOSITORY_DISCOVERY_LIMIT,
+  type ChannelASession,
+  type ChannelAExecArgs,
+  type ChannelAExecResult,
+  type ChannelAEmitter,
+  type SandboxChannelAServiceOptions,
+  type RepositoryDiscoveryDegradedReason,
+  type RepositoryDiscoveryResult,
+  type NumstatEntry,
+} from "./channel-a";
+
+// The selfhosted (bring-your-own-compute) control surface (M3). The NATS-backed
+// `SelfhostedSession` presents the SAME structural exec/fs/git surface as Modal
+// over a `ControlRpc` seam (request/reply on `agent.<ws>.<id>.rpc`, encoded via
+// `@opengeni/agent-proto`). agent-offline is NEVER a NotFound — the lease never
+// cold-creates a rival for a user's real machine. The real NATS transport +
+// Accounts land in M4 behind the SAME `ControlRpc`.
+export {
+  type ControlRpc,
+  NatsControlRpc,
+  SelfhostedControlError,
+  agentErrorToControlError,
+  subjectFor,
+  offlineControlResponse,
+  timeoutControlResponse,
+  offlineAgentError,
+  timeoutAgentError,
+  drainingExhaustedError,
+  payloadTooLargeMessage,
+  drainingMessage,
+  execDeadlineHint,
+  NEVER_SENT_DETAIL_KEY,
+  type NatsRequestConnection,
+  type SelfhostedUnavailableReason,
+} from "./selfhosted/control-rpc";
+// The transport-agnostic per-op observation seam (out-of-band telemetry — metrics
+// + machine.* events; the op-engine's op-stream client emits through this too).
+export type { SelfhostedOpObserver, SelfhostedOpObservation } from "./selfhosted/op-observer";
+// The four-field in-band fault renderer (the failure-visibility doctrine).
+export {
+  selfhostedFaultClass,
+  SELFHOSTED_INFRASTRUCTURE_FAULT_CLASSES,
+  renderSelfhostedFault,
+  FAULT_FIELD_WHAT_HAPPENED,
+  FAULT_FIELD_WHICH_LAYER,
+  FAULT_FIELD_WHAT_PRESERVED,
+  FAULT_FIELD_WHAT_TO_TRY,
+} from "./selfhosted/fault-rendering";
+// The selfhosted control-op retry policy (the pure decision + the injected clock).
+export {
+  decideSelfhostedRetry,
+  selfhostedRetryBackoffMs,
+  defaultSelfhostedRetryClock,
+  SELFHOSTED_IDEMPOTENT_READONLY_OPS,
+  SELFHOSTED_DRAINING_MAX_RETRIES,
+  SELFHOSTED_EXEC_DRAINING_MAX_RETRIES,
+  SELFHOSTED_TIMEOUT_MAX_RETRIES,
+  SELFHOSTED_NEVER_SENT_MAX_RETRIES,
+  SELFHOSTED_RETRY_BACKOFF_BASE_MS,
+  SELFHOSTED_RETRY_BACKOFF_FACTOR,
+  SELFHOSTED_RETRY_BACKOFF_CAP_MS,
+  type SelfhostedRetryClock,
+  type SelfhostedRetryDecision,
+} from "./selfhosted/retry-policy";
+export {
+  SelfhostedSession,
+  SelfhostedSandboxClient,
+  buildSelfhostedBackendSession,
+  isSelfhostedProviderNotFoundError,
+  setSelfhostedApplyDiff,
+  SELFHOSTED_DEFAULT_TIMEOUT_MS,
+  SELFHOSTED_RELAY_STREAM_PATH,
+  type SelfhostedSessionState,
+  type SelfhostedSessionDeps,
+  type SelfhostedSessionBuild,
+  type SelfhostedRelayConfig,
+  type SelfhostedExecArgs,
+  type SelfhostedExecResult,
+  type SelfhostedApplyDiff,
+  type SelfhostedEditor,
+  type SelfhostedImageOutput,
+  type SelfhostedOpStreamDeps,
+} from "./selfhosted/session";
+// The op-stream exec transport (op-stream protocol v1.1 — streaming exec to a
+// Connected Machine runner). The worker injects `NatsOpStreamTransport` (over
+// the same bus connection as the control rpc) plus an `OpStreamJournal`
+// adapted onto Temporal; sessions without the injection keep the legacy exec.
+export {
+  NatsOpStreamTransport,
+  OpStreamUnavailableError,
+  opAckSubject,
+  opFrameSubject,
+  type NatsOpStreamConnection,
+  type OpStreamSubscription,
+  type OpStreamTransport,
+} from "./selfhosted/op-transport";
+export {
+  OP_STREAM_ACK_INTERVAL_MS,
+  OP_STREAM_DEFAULT_WINDOW_BYTES,
+  OP_STREAM_RECONNECT_HOLD_MS,
+  OP_STREAM_SILENCE_TIMEOUT_MS,
+  type OpStreamExecOutcome,
+  type OpStreamJournal,
+} from "./selfhosted/op-stream";
+// The durable op-id correlation seam (B1): the runtime barrel BINDS it around
+// the SDK shell tool; the sandbox leaf READS it when minting op ids.
+export { nextDurableOpId, runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
+export {
+  negotiateSelfhostedCapabilities,
+  selfhostedLiveness,
+  SELFHOSTED_RECONNECT_WINDOW_MS,
+  type SelfhostedNegotiationInput,
+  type SelfhostedLivenessState,
+  type SelfhostedEnrollment,
+} from "./selfhosted/capabilities";
+export {
+  MockAgentResponder,
+  type MockAgentResponderOptions,
+  type MockExecHandler,
+} from "./selfhosted/testing";
+
+// The hot-swap routing proxy (M7): ONE stable session-shaped object the SDK binds
+// to, which re-reads the per-session active pointer per op and dispatches to the
+// currently-active backend (Modal or selfhosted) — flippable mid-turn, single
+// active at a time, fence-retrying on a swap race.
+export {
+  RoutingSandboxSession,
+  RoutingUnsupportedError,
+  type ActivePointer,
+  type RoutableBackendSession,
+  type ResolvedActiveBackend,
+  type RoutingSandboxSessionDeps,
+  type RoutingTransitionEvent,
+} from "./routing/routing-session";
+export {
+  makeActiveBackendResolver,
+  ActiveBackendUnresolvableError,
+  swapTargetEstablishability,
+  type ActiveBackendResolverDeps,
+  type RoutableSandbox,
+  type BackendUnresolvableCode,
+  type SwapTargetEstablishability,
+} from "./routing/backend-resolver";
+
+/**
+ * Construct the raw provider SandboxClient for the configured backend. Registry-
+ * driven (the old flat if/else is gone): the backend's ProviderRegistration owns
+ * validateCredentials + build, with per-provider units/field-names. Returns
+ * undefined for "none".
+ *
+ * The desktop stream port (6080) is merged into exposedPorts for every desktop-
+ * capable (backend, os) when desktop is enabled AND the provider cannot expose
+ * ports on demand (modal/runloop/e2b pre-declare; blaxel resolves on demand).
+ * Existing modal/docker/local construction is behavior-preserved.
+ */
+export function createSandboxClient(
+  settings: Settings,
+  environment = collectSandboxEnvironment(settings),
+): unknown {
+  return createSandboxClientForBackend(
+    settings.sandboxBackend as SandboxBackend,
+    settings,
+    environment,
+  );
+}
+
+/**
+ * Construct the raw provider SandboxClient for an EXPLICIT backend, independent
+ * of settings.sandboxBackend. This is the resume-by-id builder the per-turn
+ * resume path (and the API-direct control plane) call: a lease's box was created
+ * on a specific backend (the envelope's backendId / the lease's
+ * resume_backend_id), and the client that reattaches to it must be built for
+ * THAT backend, not the process's currently-configured default. When the backend
+ * equals settings.sandboxBackend this is identical to createSandboxClient
+ * (behavior-preserved). Returns undefined for "none".
+ */
+export function createSandboxClientForBackend(
+  backend: SandboxBackend,
+  settings: Settings,
+  environment = collectSandboxEnvironment(settings),
+): unknown {
+  const registration = PROVIDER_REGISTRY[backend];
+  if (!registration) {
+    throw new SandboxConfigError(backend, `Unknown sandbox backend "${backend}"`);
+  }
+  if (registration.backend === "none") {
+    return undefined;
+  }
+  registration.validateCredentials(settings); // fail-fast, typed
+
+  const exposedPorts = parseExposedPorts(settings.dockerExposedPorts);
+  // 6080 port-merge: a desktop-capable backend that pre-declares ports (not
+  // on-demand) must carry the desktop port at construction so resolveExposedPort
+  // (6080) succeeds later. runloop is included (it is desktop-capable but NOT
+  // on-demand → must pre-declare). blaxel is on-demand → skipped here.
+  const desktop = registration.descriptor.capabilities.DesktopStream;
+  if (
+    desktop.available &&
+    settings.sandboxDesktopEnabled &&
+    !registration.descriptor.portExposure.supportsOnDemandPorts &&
+    !exposedPorts.includes(DESKTOP_STREAM_PORT)
+  ) {
+    exposedPorts.push(DESKTOP_STREAM_PORT);
+  }
+  // 7681 port-merge: the REAL PTY terminal (ttyd) rides the SAME tunnel as the
+  // desktop, so a desktop-capable pre-declared-port backend must ALSO carry 7681
+  // at construction for resolveExposedPort(7681) to succeed later on a fresh box.
+  // Same condition as the 6080 merge (a desktop-capable image bakes ttyd too).
+  if (
+    desktop.available &&
+    settings.sandboxDesktopEnabled &&
+    !registration.descriptor.portExposure.supportsOnDemandPorts &&
+    !exposedPorts.includes(TERMINAL_STREAM_PORT)
+  ) {
+    exposedPorts.push(TERMINAL_STREAM_PORT);
+  }
+
+  const raw = registration.build({ settings, environment, exposedPorts });
+  // Docker network decoration stays backend-specific (only docker).
+  return registration.backend === "docker"
+    ? withDockerNetwork(raw as SandboxClient, settings.dockerNetwork)
+    : raw;
+}
+
+function withDockerNetwork(client: SandboxClient, network: string | undefined): SandboxClient {
+  const trimmed = network?.trim();
+  if (!trimmed) {
+    return client;
+  }
+  const wrapSession = async <T extends SandboxSessionLike>(session: T): Promise<T> => {
+    const containerId = (session as { state?: { containerId?: unknown } }).state?.containerId;
+    if (typeof containerId === "string" && containerId.length > 0) {
+      await connectDockerNetwork(trimmed, containerId);
+    }
+    return session;
+  };
+  return {
+    backendId: client.backendId,
+    ...(client.supportsDefaultOptions !== undefined
+      ? { supportsDefaultOptions: client.supportsDefaultOptions }
+      : {}),
+    ...(client.create
+      ? {
+          create: async (...args: any[]) =>
+            await wrapSession(await (client.create as any)(...args)),
+        }
+      : {}),
+    ...(client.resume
+      ? {
+          resume: async (state: SandboxSessionState) =>
+            await wrapSession(await client.resume!(state)),
+        }
+      : {}),
+    ...(client.delete
+      ? { delete: async (state: SandboxSessionState) => await client.delete!(state) }
+      : {}),
+    ...(client.serializeSessionState
+      ? {
+          serializeSessionState: async (state: SandboxSessionState, options) =>
+            await client.serializeSessionState!(state, options),
+        }
+      : {}),
+    ...(client.canPersistOwnedSessionState
+      ? {
+          canPersistOwnedSessionState: async (state: SandboxSessionState) =>
+            await client.canPersistOwnedSessionState!(state),
+        }
+      : {}),
+    ...(client.canReusePreservedOwnedSession
+      ? {
+          canReusePreservedOwnedSession: async (state: SandboxSessionState) =>
+            await client.canReusePreservedOwnedSession!(state),
+        }
+      : {}),
+    ...(client.deserializeSessionState
+      ? {
+          deserializeSessionState: async (state: Record<string, unknown>) =>
+            await client.deserializeSessionState!(state),
+        }
+      : {}),
+  };
+}
+
+async function connectDockerNetwork(network: string, containerId: string): Promise<void> {
+  const result = Bun.spawnSync(["docker", "network", "connect", network, containerId], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  if (result.exitCode === 0) {
+    return;
+  }
+  const stderr = new TextDecoder().decode(result.stderr);
+  if (stderr.includes("already exists")) {
+    return;
+  }
+  throw new Error(
+    `Failed to connect Docker sandbox container to network ${network}: ${stderr.trim()}`,
+  );
+}
+
+/**
+ * Extract the sandbox recovery entry from a run state as a plain JSON record,
+ * for storage decoupled from the RunState blob (issue #35). Encapsulates the
+ * underscore-internal `_sandbox` read in exactly one place.
+ */
+export function sandboxStateEntryFromRunState(state: unknown): Record<string, unknown> | null {
+  const sandboxState = (state as any)?._sandbox;
+  if (!sandboxState) {
+    return null;
+  }
+  const entry =
+    sandboxState.sessionsByAgent?.[sandboxState.currentAgentKey] ??
+    (sandboxState.currentAgentKey && sandboxState.sessionState
+      ? {
+          backendId: sandboxState.backendId,
+          currentAgentKey: sandboxState.currentAgentKey,
+          currentAgentName: sandboxState.currentAgentName,
+          sessionState: sandboxState.sessionState,
+        }
+      : null);
+  if (!entry || !entry.sessionState) {
+    return null;
+  }
+  return entry as Record<string, unknown>;
+}
+
+/**
+ * Items-mode counterpart of restoredSandboxSessionState: rebuild the live
+ * sandbox session state from a stored entry (as produced by
+ * sandboxStateEntryFromRunState) instead of from a RunState blob.
+ */
+export async function restoredSandboxSessionStateFromEntry(
+  entry: Record<string, unknown>,
+  client: unknown,
+): Promise<SandboxSessionState | undefined> {
+  if (!client || !entry || typeof entry !== "object" || !("sessionState" in entry)) {
+    return undefined;
+  }
+  if (entry.backendId && (client as SandboxClient).backendId !== entry.backendId) {
+    throw new Error("Stored sandbox envelope backend does not match the configured sandbox client");
+  }
+  return await deserializeSandboxSessionStateEnvelope(client as SandboxClient, entry.sessionState);
+}
+
+/**
+ * Read the persisted /workspace snapshot archive off a lease envelope's
+ * `sessionState` (sandbox-file-persistence). The reaper (persistDrainSnapshot)
+ * folds the base64 archive — a Modal native snapshot-ref or a tar archive, the
+ * exact bytes `session.persistWorkspace()` returned — at
+ * `sessionState.workspaceArchive`. Cold-restore decodes it and replays it via
+ * `session.hydrateWorkspace(archive)` on the freshly-created box so /workspace is
+ * restored. Returns undefined when the envelope carries no archive (a box that
+ * was never drain-persisted, or a non-persistence config that stored none).
+ *
+ * It is deliberately read SEPARATELY from deserializeSandboxSessionStateEnvelope:
+ * the archive does NOT ride serializeSessionState (it originates at reaper time),
+ * and the SDK's deserializeSessionState must NOT receive it (it is an opaque
+ * runtime-level field, not provider state).
+ */
+export function readWorkspaceArchiveFromEnvelopeSessionState(
+  sessionState: unknown,
+): Uint8Array | undefined {
+  if (!sessionState || typeof sessionState !== "object") {
+    return undefined;
+  }
+  const b64 = (sessionState as { workspaceArchive?: unknown }).workspaceArchive;
+  if (typeof b64 !== "string" || b64.length === 0) {
+    return undefined;
+  }
+  try {
+    return Uint8Array.from(Buffer.from(b64, "base64"));
+  } catch {
+    return undefined;
+  }
+}
+
+function readWorkspaceArchivePairFromEnvelopeSessionState(sessionState: unknown): {
+  current?: Uint8Array;
+  previous?: Uint8Array;
+} {
+  if (!sessionState || typeof sessionState !== "object") {
+    return {};
+  }
+  const state = sessionState as { workspaceArchivePrev?: unknown };
+  const current = readWorkspaceArchiveFromEnvelopeSessionState(sessionState);
+  const previous = readWorkspaceArchiveFromEnvelopeSessionState({
+    workspaceArchive: state.workspaceArchivePrev,
+  });
+  return {
+    ...(current ? { current } : {}),
+    ...(previous ? { previous } : {}),
+  };
+}
+
+// The native snapshot-ref prefixes the @openai/agents-extensions modal client
+// encodes (snapshots.mjs `NATIVE_SNAPSHOT_PREFIXES`). The ref is
+// `<PREFIX>\n{"snapshot_id":"...",...}`. We re-implement the decode here because
+// `@openai/agents-extensions/sandbox/shared` is NOT an exported subpath (the
+// package `exports` map only exposes `./sandbox/<provider>`), so decodeNativeSnapshotRef
+// is unreachable — same reasoning as isProviderSandboxNotFoundError below.
+const MODAL_SNAPSHOT_REF_PREFIXES = [
+  "MODAL_SANDBOX_FS_SNAPSHOT_V1\n",
+  "MODAL_SANDBOX_DIR_SNAPSHOT_V1\n",
+];
+
+/** Decode the Modal snapshot id out of a persisted base64 archive ref, or
+ *  undefined when the archive is a tar payload (no provider snapshot to GC) or
+ *  is unparseable. Used only for keep-latest-per-lease snapshot GC. */
+export function decodeModalSnapshotId(archive: Uint8Array): string | undefined {
+  let text: string;
+  try {
+    text = new TextDecoder().decode(archive);
+  } catch {
+    return undefined;
+  }
+  for (const prefix of MODAL_SNAPSHOT_REF_PREFIXES) {
+    if (!text.startsWith(prefix)) {
+      continue;
+    }
+    try {
+      const payload = JSON.parse(text.slice(prefix.length)) as { snapshot_id?: unknown };
+      return typeof payload.snapshot_id === "string" && payload.snapshot_id.length > 0
+        ? payload.snapshot_id
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Best-effort GC of a SUPERSEDED Modal filesystem/directory snapshot
+ * (sandbox-file-persistence). restoreSnapshotFilesystem terminates the previous
+ * SANDBOX but never deletes the prior SNAPSHOT image, so snapshots accumulate
+ * unbounded across warm/cold cycles. The reaper keeps only the latest per lease:
+ * when it writes a NEW archive it passes the PRIOR archive here to delete its
+ * image via the live session's Modal client (`session.modal.images.delete(id)` —
+ * the same API the SDK uses for directory images). Never throws (GC is a
+ * best-effort backstop; a leaked snapshot is a cost issue, not a correctness one).
+ * A tar archive (no snapshot id) is a no-op. Returns the deleted snapshot id (or
+ * undefined when nothing was deleted) for observability.
+ */
+export async function deletePriorPersistedSnapshot(
+  session: unknown,
+  priorArchiveBase64: string | null | undefined,
+): Promise<string | undefined> {
+  if (!priorArchiveBase64) {
+    return undefined;
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = Uint8Array.from(Buffer.from(priorArchiveBase64, "base64"));
+  } catch {
+    return undefined;
+  }
+  const snapshotId = decodeModalSnapshotId(bytes);
+  if (!snapshotId) {
+    return undefined;
+  }
+  const modal = (session as { modal?: { images?: { delete?: (id: string) => Promise<unknown> } } })
+    .modal;
+  const del = modal?.images?.delete;
+  if (typeof del !== "function") {
+    return undefined;
+  }
+  try {
+    await del.call(modal!.images, snapshotId);
+    return snapshotId;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function deserializeSandboxSessionStateEnvelope(
+  client: SandboxClient,
+  envelope: unknown,
+): Promise<SandboxSessionState | undefined> {
+  if (!envelope || typeof envelope !== "object") {
+    return undefined;
+  }
+  if (!client.deserializeSessionState) {
+    throw new Error(
+      "Sandbox client must implement deserializeSessionState() to resume RunState sandbox state",
+    );
+  }
+  const state = envelope as {
+    providerState?: Record<string, unknown>;
+    manifest?: unknown;
+    snapshot?: unknown;
+    snapshotFingerprint?: unknown;
+    snapshotFingerprintVersion?: unknown;
+    workspaceReady?: unknown;
+    exposedPorts?: unknown;
+  };
+  return await client.deserializeSessionState({
+    ...(state.providerState ?? {}),
+    manifest: state.manifest,
+    ...(state.snapshot !== undefined ? { snapshot: state.snapshot } : {}),
+    ...(state.snapshotFingerprint !== undefined
+      ? { snapshotFingerprint: state.snapshotFingerprint }
+      : {}),
+    ...(state.snapshotFingerprintVersion !== undefined
+      ? { snapshotFingerprintVersion: state.snapshotFingerprintVersion }
+      : {}),
+    workspaceReady: state.workspaceReady,
+    ...(state.exposedPorts ? { exposedPorts: structuredClone(state.exposedPorts) } : {}),
+  });
+}
+
+// ============================================================================
+// The ONE resume / recovery primitive (P1.2).
+//
+// establishSandboxSessionFromEnvelope is the single re-establish-from-envelope
+// path the stateless model leans on. Creation authority is explicit:
+//
+//   - `create-or-restore` is reserved for the caller that won the durable
+//     cold->warming lease transition. It may create a cold box, or replace a
+//     resumable box that the provider proves is gone.
+//   - `resume-only` is for attached turns and API-direct operations. It may
+//     resume the leased box by id, but a provider NotFound propagates to the
+//     caller so the lease can be atomically marked cold. It NEVER creates.
+//
+// This ownership boundary is the double-spawn guard. A provider NotFound alone
+// is not creation authority: many attached callers can observe the same dead id
+// concurrently, while only one caller may own cold->warming.
+// ============================================================================
+
+/** A live, externally-owned sandbox session re-established from the group lease
+ *  envelope. The caller injects `{client, session, sessionState}` NON-OWNED into
+ *  the run (or drives session.exec/readFile/resolveExposedPort directly) and
+ *  drops the handle when done — the lease, not this handle, owns the box. */
+export type EstablishedSandboxSession = {
+  client: unknown;
+  session: unknown;
+  sessionState: unknown;
+  instanceId: string;
+  backendId: string;
+  /** How this establish reached a live box: warm reattach by id ("resumed"),
+   *  fresh create ("created"), or fresh create + archive hydration
+   *  ("restored"). Callers use it to emit the durable sandbox.box.* lifecycle
+   *  events — box transitions were previously unrecorded, which made both
+   *  2026-07-06 incidents near-unattributable. Optional so external/legacy
+   *  constructors of this shape stay valid. */
+  origin?: "resumed" | "created" | "restored";
+  /** Set when a create-authorized reattach found the envelope's box GONE
+   *  (provider NotFound) and fell through to cold-restore. */
+  lostInstanceId?: string;
+};
+
+export type SandboxCreatedCallback = (established: EstablishedSandboxSession) => Promise<void>;
+
+// The structural slice we need from a provider SandboxClient to resume by id and
+// cold-restore. Narrowed (not the full agent-loop SandboxClient) so the leaf
+// stays agent-loop-free.
+type ResumeCapableClient = {
+  backendId: string;
+  deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
+  resume?: (state: unknown, options?: unknown) => Promise<unknown>;
+  create?: (manifest?: unknown, options?: unknown) => Promise<unknown>;
+};
+
+/**
+ * Per-provider NotFound discriminator. The @openai/agents-extensions
+ * `isProviderSandboxNotFoundError` / `assertResumeRecreateAllowed` helpers live
+ * under `@openai/agents-extensions/sandbox/shared`, which is NOT an exported
+ * subpath (the package `exports` map only exposes `./sandbox/<provider>`), so we
+ * re-implement the discrimination here by inspecting the thrown error shape.
+ *
+ * "Box no longer running" (the box was reaped / idled out / 24h-ceiling) is the
+ * ONLY error that licenses a cold-restore via create(). Every other resume
+ * failure (transient provider error, auth, network) must propagate so the caller
+ * backs off — never spawns a rival box. We err on the side of NOT recreating:
+ * an unrecognized error is treated as "not NotFound" (propagate), because a
+ * false-positive recreate is the dangerous direction (double-spawn).
+ */
+export function isProviderSandboxNotFoundError(backendId: string, error: unknown): boolean {
+  // selfhosted: agent-offline is NEVER a provider NotFound (the user's machine is
+  // not recreatable — a false NotFound would cold-create a RIVAL box). The
+  // selfhosted discriminator ALWAYS returns false; short-circuit so no goneMarker
+  // string match below can ever flip a selfhosted agent-offline error to true.
+  if (backendId === "selfhosted") {
+    return isSelfhostedProviderNotFoundError(error);
+  }
+  if (!error) {
+    return false;
+  }
+  const status =
+    (error as { status?: unknown; statusCode?: unknown }).status ??
+    (error as { statusCode?: unknown }).statusCode;
+  if (status === 404) {
+    return true;
+  }
+  const name =
+    typeof (error as { name?: unknown }).name === "string" ? (error as { name: string }).name : "";
+  const code =
+    typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "";
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : String((error as { message?: unknown })?.message ?? "");
+  const haystack = `${name} ${code} ${message}`.toLowerCase();
+  // Provider-agnostic "gone" markers (Modal: "sandbox … not found" / terminated;
+  // e2b/daytona/runloop: "not found" / "no longer running" / "terminated" /
+  // "does not exist"). Kept broad-but-conservative: it matches box-gone phrasing
+  // and never matches generic 5xx/transport errors.
+  const goneMarkers = [
+    "not found",
+    "no longer running",
+    "no longer exists",
+    "does not exist",
+    "doesn't exist",
+    "has been terminated",
+    "was terminated",
+    "is terminated",
+    "sandbox terminated",
+    "notfound",
+    "sandbox_not_found",
+    "box no longer running",
+  ];
+  // A "running"/"already exists" resume-conflict is explicitly NOT NotFound — the
+  // box is alive; recreating would double-spawn.
+  if (
+    haystack.includes("already running") ||
+    haystack.includes("still running") ||
+    haystack.includes("already exists")
+  ) {
+    return false;
+  }
+  return goneMarkers.some((marker) => haystack.includes(marker));
+}
+
+function readInstanceId(session: unknown): string {
+  const state = (session as { state?: Record<string, unknown> }).state ?? {};
+  const candidate =
+    state.sandboxId ??
+    state.instanceId ??
+    state.id ??
+    state.hostId ??
+    state.containerId ??
+    state.workspaceRootPath;
+  return typeof candidate === "string" && candidate.length > 0 ? candidate : "";
+}
+
+async function terminateCreatedSandbox(
+  client: ResumeCapableClient,
+  session: unknown,
+  sessionState: unknown,
+): Promise<void> {
+  const clientWithDelete = client as { delete?: (state: unknown) => Promise<unknown> };
+  if (typeof clientWithDelete.delete === "function" && sessionState !== undefined) {
+    try {
+      await clientWithDelete.delete(sessionState);
+    } catch {
+      /* best-effort */
+    }
+    return;
+  }
+  const sess = session as {
+    close?: () => Promise<unknown>;
+    terminate?: () => Promise<unknown>;
+    kill?: () => Promise<unknown>;
+  };
+  try {
+    await (sess.terminate ?? sess.kill ?? sess.close)?.();
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Establish from one recovery envelope under an explicit creation policy. The
+ * envelope is the lease's box-identity descriptor (the same per-turn `_sandbox`
+ * envelope upserted by the turn activity).
+ *
+ *  - `opts.backendOverride ?? envelope.backendId ?? settings.sandboxBackend`
+ *    selects the backend; the client is built for THAT backend (resume-by-id is
+ *    fenced to the original provider).
+ *  - warm reattach: deserialize the envelope sessionState → client.resume(state)
+ *    (no lock; R4-safe). `resume-only` propagates provider NotFound.
+ *  - `create-or-restore`: the elected owner may replace a missing warm instance,
+ *    or create directly from a cold/null envelope.
+ */
+export async function establishSandboxSessionFromEnvelope(
+  settings: Settings,
+  envelope: Record<string, unknown> | null,
+  opts: {
+    sessionId: string;
+    recovery: "create-or-restore" | "resume-only";
+    backendOverride?: SandboxBackend;
+    environment?: Record<string, string>;
+    onSandboxCreated?: SandboxCreatedCallback;
+    metrics?: RuntimeMetricsHooks;
+  },
+): Promise<EstablishedSandboxSession> {
+  const envelopeBackend =
+    typeof envelope?.backendId === "string" ? (envelope.backendId as SandboxBackend) : undefined;
+  const backend =
+    opts.backendOverride ?? envelopeBackend ?? (settings.sandboxBackend as SandboxBackend);
+  const environment = opts.environment ?? collectSandboxEnvironment(settings);
+  const client = createSandboxClientForBackend(backend, settings, environment) as
+    | ResumeCapableClient
+    | undefined;
+  if (!client) {
+    throw new SandboxConfigError(
+      backend,
+      `Cannot establish a sandbox session for backend "${backend}" (no client; sandboxBackend=none?)`,
+    );
+  }
+  if (opts.recovery === "create-or-restore" && !client.create) {
+    throw new SandboxConfigError(backend, `Sandbox backend "${backend}" does not support create()`);
+  }
+
+  // The manifest the box is CREATED with. Its `environment` must equal the
+  // environment the agent declares for this run (buildManifest's `environment`),
+  // because the SDK injects this box NON-OWNED and then applies the agent's
+  // manifest as a provided-session delta — `applyManifestToProvidedSession`
+  // throws on ANY environment delta (validateNoEnvironmentDelta). The client's
+  // constructor `env` materializes the RUNTIME env but does NOT populate
+  // `manifest.environment` (a bare create() yields `new Manifest()` with an empty
+  // environment), so the manifest env must be set here explicitly. `root` is left
+  // to default to "/workspace" to match buildManifest's declared root (the
+  // root-delta guard). The caller threads `opts.environment` = the SAME object
+  // passed to runtime.buildAgent, so current==target and the delta is empty.
+  const createManifest = { environment };
+
+  // The serialized provider state the box was last persisted as. The envelope
+  // shape is the per-turn `_sandbox` entry; its `sessionState` is the provider
+  // payload deserializeSandboxSessionStateEnvelope re-hydrates.
+  const envelopeSessionState =
+    envelope && typeof envelope === "object"
+      ? (envelope as { sessionState?: unknown }).sessionState
+      : undefined;
+
+  // The persisted /workspace snapshot the reaper folded onto the lease envelope
+  // (sandbox-file-persistence). Present on a re-warm whose box was drain-persisted:
+  //   - WARM reattach NotFound path (box gone, full envelope still has sandboxId);
+  //   - COLD lease re-warm (confirmDrainCold preserved a MINIMAL archive-only
+  //     envelope `{ sessionState: { workspaceArchive } }` — NO sandboxId, so the
+  //     warm-reattach branch must NOT try resume()-by-id; it cold-creates+hydrates).
+  const workspaceArchives = readWorkspaceArchivePairFromEnvelopeSessionState(envelopeSessionState);
+  const workspaceArchive = workspaceArchives.current;
+
+  // create() a FRESH box, THEN replay the persisted /workspace snapshot via
+  // session.hydrateWorkspace(archive) when one rode the envelope. hydrateWorkspace
+  // decodes the snapshot-ref and swaps the box for one booted from the snapshot
+  // image (restoreSnapshotFilesystem); no archive -> a clean empty box. This is the
+  // SOLE archive-replay seam, shared by the NotFound warm-reattach path AND the
+  // cold-restore branch (b) below.
+  const coldRestore = async (
+    resumeFallbackState?: unknown,
+    skipWorkspaceHydrate = false,
+  ): Promise<EstablishedSandboxSession> => {
+    const createStarted = Date.now();
+    let restored: Awaited<ReturnType<NonNullable<typeof client.create>>>;
+    try {
+      restored = await client.create!({ manifest: createManifest });
+      recordSandboxCreateMetric(opts.metrics, client.backendId, "completed", createStarted);
+    } catch (error) {
+      recordSandboxCreateMetric(opts.metrics, client.backendId, "failed", createStarted);
+      throw error;
+    }
+    let restoredState = (restored as { state?: unknown }).state;
+    let established: EstablishedSandboxSession = {
+      client,
+      session: restored,
+      sessionState: restoredState ?? resumeFallbackState,
+      instanceId: readInstanceId(restored),
+      backendId: client.backendId,
+    };
+    if (opts.onSandboxCreated) {
+      try {
+        await opts.onSandboxCreated(established);
+      } catch (createCallbackError) {
+        await terminateCreatedSandbox(client, restored, restoredState);
+        throw createCallbackError;
+      }
+    }
+    // Whether an archive was ACTUALLY applied to /workspace — drives `origin`
+    // (and the worker's sandbox.box.created `hydrated` field). A clean-box
+    // fallback, a backend without hydrateWorkspace, or an all-archives-failed
+    // path leaves this false so we never report `hydrated: "archive"` for an
+    // empty workspace.
+    let hydrationApplied = false;
+    if (!skipWorkspaceHydrate && (workspaceArchive || workspaceArchives.previous)) {
+      const hydrate = (restored as { hydrateWorkspace?: (data: Uint8Array) => Promise<void> })
+        .hydrateWorkspace;
+      if (typeof hydrate === "function") {
+        let hydrated = false;
+        for (const candidate of [
+          { archive: workspaceArchive, label: "current" },
+          { archive: workspaceArchives.previous, label: "previous" },
+        ]) {
+          if (!candidate.archive) {
+            continue;
+          }
+          try {
+            // hydrateWorkspace may internally REPLACE the underlying box
+            // (restoreSnapshotFilesystem creates a replacement sandbox and terminates
+            // the placeholder), so the instanceId must be re-read AFTER.
+            await hydrate.call(restored, candidate.archive);
+            console.info(
+              `[sandbox] cold-restore hydrated workspace from ${candidate.label} archive`,
+            );
+            hydrated = true;
+            break;
+          } catch (hydrateError) {
+            console.warn(
+              `[sandbox] cold-restore failed to hydrate workspace from ${candidate.label} archive${
+                candidate.label === "current" && workspaceArchives.previous
+                  ? "; trying previous archive"
+                  : ""
+              }`,
+              hydrateError,
+            );
+          }
+        }
+        if (!hydrated) {
+          // If both retained archives are unusable, drop the placeholder and
+          // fall through to the same clean-box behavior as an envelope with no
+          // archive. Restore failure is fail-open; it must not strand a turn.
+          await terminateCreatedSandbox(client, restored, restoredState);
+          return await coldRestore(resumeFallbackState, true);
+        }
+        hydrationApplied = true;
+        const hydratedState = (restored as { state?: unknown }).state;
+        const hydratedInstanceId = readInstanceId(restored);
+        if (hydratedInstanceId && hydratedInstanceId !== established.instanceId) {
+          established = {
+            client,
+            session: restored,
+            sessionState: hydratedState ?? resumeFallbackState,
+            instanceId: hydratedInstanceId,
+            backendId: client.backendId,
+          };
+          if (opts.onSandboxCreated) {
+            try {
+              await opts.onSandboxCreated(established);
+            } catch (createCallbackError) {
+              await terminateCreatedSandbox(client, restored, hydratedState);
+              throw createCallbackError;
+            }
+          }
+        }
+      }
+    }
+    restoredState = (restored as { state?: unknown }).state;
+    return {
+      client,
+      session: restored,
+      sessionState: restoredState ?? resumeFallbackState,
+      instanceId: readInstanceId(restored),
+      backendId: client.backendId,
+      origin: hydrationApplied ? ("restored" as const) : ("created" as const),
+    };
+  };
+
+  // Does the envelope carry a RESUMABLE box id (warm reattach), or only a
+  // restorable archive (cold lease)? A Modal envelope with no providerState.sandboxId
+  // (the minimal archive-only envelope confirmDrainCold preserves) is NOT resumable —
+  // client.resume() would throw "requires a persisted sandboxId", which is NOT a
+  // NotFound, so it would propagate instead of cold-restoring. Gate the resume
+  // branch on a present sandbox identity so an archive-only envelope falls straight
+  // through to the cold-restore+hydrate path (b).
+  const envelopeProviderState =
+    envelopeSessionState && typeof envelopeSessionState === "object"
+      ? (envelopeSessionState as { providerState?: Record<string, unknown> }).providerState
+      : undefined;
+  const hasResumableInstance = Boolean(
+    envelopeProviderState &&
+    typeof envelopeProviderState === "object" &&
+    (envelopeProviderState.sandboxId ||
+      envelopeProviderState.instanceId ||
+      envelopeProviderState.id ||
+      envelopeProviderState.containerId ||
+      envelopeProviderState.workspaceRootPath),
+  );
+
+  // (a) WARM REATTACH BY ID — only when the envelope carries a resumable box id.
+  if (
+    hasResumableInstance &&
+    envelopeSessionState &&
+    client.resume &&
+    client.deserializeSessionState
+  ) {
+    let resumedState: unknown;
+    try {
+      resumedState = await deserializeSandboxSessionStateEnvelope(
+        client as unknown as SandboxClient,
+        envelopeSessionState,
+      );
+    } catch (error) {
+      throw new SandboxConfigError(
+        backend,
+        `Failed to deserialize sandbox resume envelope for backend "${backend}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (resumedState !== undefined) {
+      try {
+        const session = await client.resume(resumedState);
+        return {
+          client,
+          session,
+          sessionState: resumedState,
+          instanceId: readInstanceId(session),
+          backendId: client.backendId,
+          origin: "resumed",
+        };
+      } catch (error) {
+        // Attached callers never own replacement. Propagate the provider
+        // NotFound so their lease-aware caller can atomically mark this exact
+        // warm epoch/instance cold and re-enter normal admission. Only the
+        // cold->warming winner may replace the missing box.
+        if (
+          !isProviderSandboxNotFoundError(client.backendId, error) ||
+          opts.recovery === "resume-only"
+        ) {
+          throw error;
+        }
+        // COLD-RESTORE: the box is genuinely gone. Modal does NOT restore via
+        // create({ snapshot }) — passing `snapshot` to ModalSandboxClient.create()
+        // THROWS (assertCoreSnapshotUnsupported). Modal's real persistence is an
+        // OPAQUE ARCHIVE captured by session.persistWorkspace() at drain/turn-
+        // snapshot time and folded onto the lease envelope
+        // (sandbox-file-persistence). The shared coldRestore() seam creates a
+        // fresh box and replays that archive. `lostInstanceId` carries the gone
+        // box's id so the caller can emit the durable sandbox.box.lost event.
+        const lostInstanceId = [
+          envelopeProviderState?.sandboxId,
+          envelopeProviderState?.instanceId,
+          envelopeProviderState?.id,
+          envelopeProviderState?.containerId,
+          envelopeProviderState?.workspaceRootPath,
+        ].find((value): value is string => typeof value === "string" && value.length > 0);
+        const restoredSession = await coldRestore(resumedState);
+        return lostInstanceId ? { ...restoredSession, lostInstanceId } : restoredSession;
+      }
+    }
+  }
+
+  // (b) COLD SESSION / COLD LEASE — no resumable box id. create() a fresh box, and
+  // if the envelope carries a persisted /workspace snapshot (the archive-only
+  // envelope confirmDrainCold preserves across draining->cold), replay it so
+  // /workspace survives the box churn (sandbox-file-persistence). No archive -> a
+  // clean empty box (a never-warmed session).
+  if (opts.recovery === "resume-only") {
+    throw new SandboxResumeStateUnavailableError(backend);
+  }
+  return await coldRestore();
+}
+
+function recordSandboxCreateMetric(
+  metrics: RuntimeMetricsHooks | undefined,
+  backend: string,
+  outcome: "completed" | "failed",
+  startedMs: number,
+): void {
+  try {
+    metrics?.onSandboxCreate?.({
+      backend,
+      outcome,
+      durationSeconds: Math.max(0, (Date.now() - startedMs) / 1000),
+    });
+  } catch {
+    // Metrics emission must not affect sandbox lifecycle.
+  }
+}
+
+// A client that can SERIALIZE a live session state back to the persistable
+// envelope form (the inverse of deserializeSessionState). Narrowed so the leaf
+// stays agent-loop-free.
+type SerializeCapableClient = {
+  backendId: string;
+  serializeSessionState?: (state: unknown, options?: unknown) => Promise<Record<string, unknown>>;
+};
+
+/**
+ * Fold a freshly-established (or resumed) sandbox session into the persistable
+ * `resume_state` envelope the lease stores — the SAME `{ backendId, sessionState }`
+ * shape `establishSandboxSessionFromEnvelope` consumes to RESUME BY ID. The
+ * API-direct control plane (viewer attach / Channel-A) MUST persist this onto the
+ * lease at warm-commit time, or a later op (which reads the lease's resume_state)
+ * has nothing to resume from and COLD-CREATES A RIVAL BOX — the box-churn the
+ * prove-it surfaced (fs.write then fs.read 404'd on a different box; N Channel-A
+ * ops leaked N boxes). Returns null when the client cannot serialize (the caller
+ * stores null and the box rides the provider idle-timeout — no rival spawn, just
+ * no warm-reattach).
+ */
+export async function serializeEstablishedSandboxEnvelope(
+  established: EstablishedSandboxSession,
+): Promise<Record<string, unknown> | null> {
+  const client = established.client as SerializeCapableClient | undefined;
+  if (!client || typeof client.serializeSessionState !== "function") {
+    return null;
+  }
+  if (established.sessionState === undefined || established.sessionState === null) {
+    return null;
+  }
+  try {
+    // serializeSessionState returns the PERSISTABLE FLAT provider state — for
+    // Modal `{ sandboxId, appName, imageTag, manifest(serialized),
+    // configuredExposedPorts, ... }` (sandboxId preserved via `...state`).
+    const serialized = await client.serializeSessionState(established.sessionState);
+
+    // deserializeSandboxSessionStateEnvelope expects the lease-envelope shape
+    // `{ providerState, manifest, snapshot?, exposedPorts?, workspaceReady }` and
+    // rehydrates `{ ...providerState, manifest, snapshot?, exposedPorts?,
+    // workspaceReady }`. So the FLAT serialized state must be nested under
+    // `providerState` (and manifest/ports lifted), or sandboxId is dropped on the
+    // round-trip and resume() throws "requires a persisted sandboxId". We pull
+    // manifest/exposedPorts up but leave them in providerState too (harmless; the
+    // deserialize spreads providerState first, then overlays manifest/ports).
+    const flat = serialized as Record<string, unknown>;
+    const manifest = flat.manifest;
+    const exposedPorts = flat.configuredExposedPorts ?? flat.exposedPorts;
+    const sessionState: Record<string, unknown> = {
+      providerState: flat,
+      ...(manifest !== undefined ? { manifest } : {}),
+      ...(exposedPorts !== undefined ? { exposedPorts } : {}),
+      workspaceReady: true,
+    };
+    return { backendId: established.backendId, sessionState };
+  } catch {
+    // A serialize failure must NOT fail the attach/op; we just lose warm-reattach
+    // for this box (it stays resumable-by-instance only via the next cold path).
+    return null;
+  }
+}

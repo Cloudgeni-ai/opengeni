@@ -1,0 +1,15 @@
+[package]
+name = "opengeni-agent-engine"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Transport-agnostic op engine for the OpenGeni Connected-Machine runner: op lifecycle, retention/replay, credit flow control, admission."
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

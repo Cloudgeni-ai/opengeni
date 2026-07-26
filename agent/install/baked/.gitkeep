@@ -1,0 +1,16 @@
+# Placeholder so this directory exists in the committed tree + the docker build
+# context. The API serves baked release binaries from here (apps/api/src/routes/
+# install.ts).
+#
+# In a deployed-env image build the agent-bake CI step
+# (scripts/bake-agent.sh, wired into the per-SHA API image build) writes the SIGNED
+# Linux musl binaries + their `.sha256`/`.minisig` siblings here BEFORE `docker
+# build`, so they ride into the image via the existing `COPY . .`. The minisign
+# signing key (OPENGENI_AGENT_MINISIGN_KEY) is used ONLY in that pre-build CI step
+# and never enters the Docker build.
+#
+# When this dir holds ONLY this placeholder (a plain `docker build`, CI image
+# smoke, or a source checkout), every /agent/<ver>/<asset> request falls through
+# to the GitHub-Releases 302 redirect — the build still works, just without the
+# baked fast-path. The baked binaries themselves are intentionally NOT committed
+# (they are large, per-SHA build outputs).

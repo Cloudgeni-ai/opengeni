@@ -1,0 +1,4 @@
+interface:
+  display_name: "OpenGeni"
+  short_description: "Operate and understand OpenGeni"
+  default_prompt: "Use $opengeni to inspect this OpenGeni repo and explain the relevant architecture before making changes."

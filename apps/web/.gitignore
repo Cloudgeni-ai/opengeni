@@ -1,0 +1,8 @@
+node_modules
+dist
+.vite
+.output
+.vinxi
+src/routeTree.gen.ts
+.env
+.env.local

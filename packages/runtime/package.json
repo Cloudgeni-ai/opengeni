@@ -1,0 +1,67 @@
+{
+  "name": "@opengeni/runtime",
+  "version": "0.13.0",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/runtime"
+  },
+  "files": [
+    "THIRD_PARTY_NOTICES",
+    "dist",
+    "src"
+  ],
+  "type": "module",
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./sandbox": {
+      "types": "./src/sandbox/index.ts",
+      "default": "./src/sandbox/index.ts"
+    },
+    "./skill-library": {
+      "types": "./src/skill-library.ts",
+      "default": "./src/skill-library.ts"
+    },
+    "./mcp-network": {
+      "types": "./src/mcp-network.ts",
+      "default": "./src/mcp-network.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsgo --noEmit",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@noble/hashes": "^1.8.0",
+    "@openai/agents": "0.13.3",
+    "@openai/agents-extensions": "0.13.3",
+    "@opengeni/agent-proto": "workspace:*",
+    "@opengeni/codex": "workspace:*",
+    "@opengeni/config": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/network": "workspace:*",
+    "debug": "4.4.3",
+    "modal": "0.7.6",
+    "openai": "6.47.0",
+    "ws": "8.21.1"
+  },
+  "devDependencies": {
+    "@openai/agents-core": "0.13.3",
+    "tsup": "^8.5.0",
+    "typescript": "^6.0.3",
+    "zod": "4.4.3"
+  }
+}

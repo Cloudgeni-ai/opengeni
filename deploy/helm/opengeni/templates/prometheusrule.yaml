@@ -1,0 +1,197 @@
+{{- if and ((.Values.observability).prometheusRule).enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1") }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "opengeni.fullname" . }}
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    {{- with ((.Values.observability).prometheusRule).labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with ((.Values.observability).prometheusRule).annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  groups:
+    - name: opengeni.rules
+      rules:
+        {{- if ((.Values.observability).prometheusRule).rules }}
+        {{- toYaml ((.Values.observability).prometheusRule).rules | nindent 8 }}
+        {{- else }}
+        - alert: OpenGeniTurnStuck
+          expr: opengeni_turn_oldest_inflight_age_seconds > 900
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: OpenGeni has an agent turn stuck for more than 15 minutes
+        - alert: OpenGeniSandboxCreateFailureRatio
+          expr: sum(rate(opengeni_sandbox_creates_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_sandbox_creates_total[10m])), 1) > 0.2
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni sandbox create failures exceed 20%
+        - alert: OpenGeniSandboxOrphansTerminatedGrowing
+          expr: increase(opengeni_sandbox_orphans_terminated_total[30m]) > 0
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni reaper terminated provider-side orphan sandboxes
+        - alert: OpenGeniCodexCredentialPoolEmpty
+          expr: increase(opengeni_codex_pool_low_total{depth="zero"}[5m]) > 0
+          for: 1m
+          labels:
+            severity: critical
+          annotations:
+            summary: A Codex workspace observed no eligible subscription credentials
+        - alert: OpenGeniCodexCredentialPoolSingle
+          expr: increase(opengeni_codex_pool_low_total{depth="one"}[15m]) > 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: A Codex workspace is operating with only one eligible subscription credential
+        - alert: OpenGeniServiceDown
+          expr: up{job=~".*opengeni.*"} == 0
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: An OpenGeni service target is down
+        # ── Streaming health ─────────────────────────────────────────────────
+        # SLIs from the token-streaming pipeline, split so an alert names the
+        # layer: the model (TTFT), the durable write path (append), or delivery
+        # (publish). Thresholds are starters — tune per deployment.
+        - alert: OpenGeniStreamingFirstTokenSlow
+          expr: histogram_quantile(0.99, sum by (le, provider) (rate(opengeni_stream_ttft_seconds_bucket[10m]))) > 8
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni p99 time-to-first-token exceeds 8s
+            description: The model is slow to START streaming (p99 TTFT by provider above 8s for 15m). Suspect the model provider before the write/delivery path.
+        - alert: OpenGeniEventAppendLatencyHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_append_seconds_bucket[10m]))) > 1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni session-event append p99 exceeds 1s (durable write path)
+            description: appendSessionEvents p99 is above 1s for 10m — Postgres is the streaming bottleneck, not the model or NATS.
+        - alert: OpenGeniEventPublishLatencyHigh
+          expr: histogram_quantile(0.99, sum by (le) (rate(opengeni_session_event_publish_seconds_bucket[10m]))) > 0.5
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni live-publish p99 exceeds 500ms (delivery path)
+            description: The best-effort NATS live fan-out p99 is above 500ms for 10m — live delivery is degraded (events stay durable and reconcile on stream replay).
+        # ── Context / compaction ─────────────────────────────────────────────
+        - alert: OpenGeniCompactionNotFiring
+          # Contexts running hot (p90 observed input tokens high) while NO
+          # compaction has fired in 30m — sessions are drifting toward overflow.
+          # The 150k token threshold assumes a ~200k-window model; tune to yours.
+          # `or vector(0)` is load-bearing: on a fresh cluster the compaction
+          # counter has NEVER been created, so a bare `sum(increase(...)) == 0`
+          # is an EMPTY vector, not 0 — the conjunction would silently never fire
+          # exactly when compaction has never fired. The fallback forces a real 0.
+          expr: |
+            histogram_quantile(0.9, sum by (le) (rate(opengeni_model_input_tokens_bucket[30m]))) > 150000
+            and on()
+            (sum(increase(opengeni_context_compactions_total[30m])) or vector(0)) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni contexts are running hot but compaction has not fired in 30m
+        - alert: OpenGeniCodexPromptCacheHitRatioLow
+          # The codex-subscription prompt cache is doing little work: median per-call
+          # cache-hit ratio below 40% over 30m while codex calls are actually flowing.
+          # A sustained drop is the signature of prompt-cache thrash (e.g. an account
+          # rotation cold-starting the provider's per-account cache).
+          # `or vector(0)` on the traffic gate is load-bearing (the #367 lesson): with
+          # no codex calls yet the ratio series has never been created, so a bare
+          # `_count` rate is an EMPTY vector — the fallback forces a real 0 so the
+          # conjunction is well-formed and the alert simply stays quiet on no traffic.
+          expr: |
+            histogram_quantile(0.5, sum by (le) (rate(opengeni_model_cache_hit_ratio_bucket{provider="codex-subscription"}[30m]))) < 0.4
+            and on()
+            (sum(rate(opengeni_model_cache_hit_ratio_count{provider="codex-subscription"}[30m])) or vector(0)) > 0
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni codex prompt-cache hit ratio p50 below 40% over 30m
+            description: The codex-subscription prompt cache is serving under 40% of prompt tokens from cache (median call) for 30m. Suspect prompt-cache thrash — an account rotation cold-starts the provider's per-account cache. Cross-check the per-call usage logs' accountChangedFromPrevCall against cachedTokens.
+        - alert: OpenGeniCodexPromptCacheTelemetryMissing
+          # A missing cached-token field is unknown, not a truthful 0% hit. Keep
+          # that semantics while separately alerting whenever Codex calls are
+          # flowing with unavailable cache-read telemetry.
+          expr: |
+            (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription",status="missing"}[30m])) or vector(0)) > 0
+            or
+            (
+              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m])) > 0
+              and on()
+              (sum(rate(opengeni_model_cache_read_telemetry_total{provider="codex-subscription"}[30m])) or vector(0))
+              <
+              sum(rate(opengeni_model_calls_total{provider="codex-subscription",outcome="completed"}[30m]))
+            )
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni Codex prompt-cache telemetry is missing on active calls
+            description: Codex-subscription model calls have omitted cached-token telemetry for 15m. Cache-hit ratio remains unknown rather than being fabricated as zero; inspect provider usage payload compatibility and worker rejected-field diagnostics.
+        # ── Connected Machines (op-outcome plane) ────────────────────────────
+        - alert: OpenGeniMachineOpInfraFailuresHigh
+          expr: sum(rate(opengeni_machine_op_total{outcome="failed"}[10m])) / clamp_min(sum(rate(opengeni_machine_op_total[10m])), 1) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: OpenGeni Connected Machine op infra-failure ratio exceeds 10%
+        - alert: OpenGeniMachineOpHealedFaultsSpiking
+          # Healed faults are the LEADING indicator of the next unhealed one — a
+          # blip/backpressure the transport absorbed. A rising rate precedes real
+          # op failures, so this fires EARLY (info severity) as a heads-up.
+          expr: sum(rate(opengeni_machine_op_healed_total[10m])) > 0.2
+          for: 15m
+          labels:
+            severity: info
+          annotations:
+            summary: OpenGeni Connected Machine healed-fault rate is elevated (leading indicator)
+        # ── Worker fleet ─────────────────────────────────────────────────────
+        # These two read cluster-infra series (cAdvisor + kube-state-metrics); if
+        # those exporters are absent the alerts simply never fire (no data). Pod/
+        # HPA matchers assume the default "opengeni" release name — override
+        # observability.prometheusRule.rules for a custom name.
+        - alert: OpenGeniWorkerMemoryNearLimit
+          expr: |
+            max by (namespace, pod, container) (
+              container_memory_working_set_bytes{container=~"worker|api|relay", pod=~".*opengeni.*"}
+            )
+            /
+            max by (namespace, pod, container) (
+              kube_pod_container_resource_limits{resource="memory", container=~"worker|api|relay", pod=~".*opengeni.*"}
+            ) > 0.9
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni container is above 90% of its memory limit (pre-OOM)
+            description: The worker holds the full in-turn history in memory; sustained >90% of the limit precedes an OOM kill mid-turn.
+        - alert: OpenGeniHpaAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*opengeni.*"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~".*opengeni.*"}
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: An OpenGeni HPA has been pinned at maxReplicas (capacity saturation)
+            description: The autoscaler cannot add more pods; sustained saturation means turns queue. Raise maxReplicas or investigate the load source.
+        {{- end }}
+{{- end }}

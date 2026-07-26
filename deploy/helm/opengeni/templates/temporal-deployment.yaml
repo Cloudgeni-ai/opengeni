@@ -1,0 +1,70 @@
+{{- if .Values.temporal.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "opengeni.fullname" . }}-temporal
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: temporal
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: temporal
+  template:
+    metadata:
+      labels:
+        {{- include "opengeni.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: temporal
+    spec:
+      securityContext:
+        {{- toYaml .Values.temporal.podSecurityContext | nindent 8 }}
+      containers:
+        - name: temporal
+          image: {{ printf "%s:%s" .Values.temporal.image.repository .Values.temporal.image.tag | quote }}
+          imagePullPolicy: {{ .Values.temporal.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.temporal.securityContext | nindent 12 }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.temporal.service.port }}
+          env:
+            - name: HTTP_PROXY
+              value: ""
+            - name: HTTPS_PROXY
+              value: ""
+            - name: ALL_PROXY
+              value: ""
+            - name: NO_PROXY
+              value: "localhost,127.0.0.1,postgres,temporal,frontend,history,matching,worker"
+            - name: DB
+              value: postgres12
+            - name: DB_PORT
+              value: {{ .Values.temporal.postgres.port | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.temporal.postgres.username | quote }}
+            - name: POSTGRES_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "opengeni.temporalPostgresSecretName" . }}
+                  key: {{ .Values.temporal.postgres.passwordKey }}
+            - name: POSTGRES_SEEDS
+              value: {{ include "opengeni.temporalPostgresHost" . | quote }}
+            - name: BIND_ON_IP
+              value: 0.0.0.0
+            - name: DYNAMIC_CONFIG_FILE_PATH
+              value: config/dynamicconfig/docker.yaml
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 60
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.temporal.resources | nindent 12 }}
+{{- end }}

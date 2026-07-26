@@ -1,0 +1,1944 @@
+//! The cross-platform native [`Platform`] implementation.
+//!
+//! exec/fs/git are portable, so a single struct serves every OS: exec via
+//! [`tokio::process`], the filesystem via [`tokio::fs`], git by shelling the
+//! system `git`. The per-OS specifics (OS/arch identity, the default shell)
+//! delegate to the cfg-gated `linux`/`macos`/`windows` modules.
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Instant;
+
+use async_trait::async_trait;
+#[cfg(windows)]
+use command_group::{AsyncCommandGroup, AsyncGroupChild};
+use opengeni_agent_proto::v1;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+
+use crate::cgroup::OpCgroups;
+use crate::desktop::{resolve_desktop, DesktopBackend};
+use crate::error::{PlatformError, PlatformResult};
+use crate::{HostIdentity, Platform, StreamRegistry};
+
+/// The host-native platform: exec/fs/git against the machine the agent runs on,
+/// plus the desktop backend (capture + computer-use input) and the optional relay
+/// stream registrar that powers the M8 pty/desktop streams.
+#[derive(Clone)]
+pub struct NativePlatform {
+    /// The working root reported to the control plane (the sandbox cwd). Defaults
+    /// to the process's current directory at construction time.
+    workspace_root: PathBuf,
+    /// The host desktop backend (X11 on Linux, structured native on macOS/Windows,
+    /// [`NoDesktop`](crate::NoDesktop) when headless). Resolved once at construction.
+    desktop: Arc<dyn DesktopBackend>,
+    /// The relay stream registrar that pumps pty/desktop channels, wired by the
+    /// agent supervisor once it has a relay connection. `None` until then (and in
+    /// unit contexts), in which case the stream ops report a clean `Unsupported`.
+    stream_registry: Option<Arc<dyn StreamRegistry>>,
+    /// The per-op OOM cgroup manager, wired by the supervisor at startup on a
+    /// delegated Linux cgroup v2 host (issue #345). `None` until then (and on every
+    /// non-Linux / non-delegated host), in which case exec runs with no per-op
+    /// memory isolation — its children still get a raised `oom_score_adj`.
+    cgroups: Option<Arc<OpCgroups>>,
+}
+
+impl std::fmt::Debug for NativePlatform {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativePlatform")
+            .field("workspace_root", &self.workspace_root)
+            .field("has_display", &self.desktop.probe().is_some())
+            .field("has_stream_registry", &self.stream_registry.is_some())
+            .field("has_oom_isolation", &self.cgroups.is_some())
+            .finish()
+    }
+}
+
+impl Default for NativePlatform {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NativePlatform {
+    /// Builds a platform rooted at the process's current working directory, with the
+    /// host desktop backend resolved and no relay registrar yet (the supervisor
+    /// wires one via [`with_stream_registry`](Self::with_stream_registry)).
+    #[must_use]
+    pub fn new() -> Self {
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        Self {
+            workspace_root,
+            desktop: Arc::from(resolve_desktop()),
+            stream_registry: None,
+            cgroups: None,
+        }
+    }
+
+    /// Builds a platform rooted at an explicit directory (used in tests and when
+    /// the user overrides the workspace root).
+    #[must_use]
+    pub fn with_root(workspace_root: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_root: workspace_root.into(),
+            desktop: Arc::from(resolve_desktop()),
+            stream_registry: None,
+            cgroups: None,
+        }
+    }
+
+    /// Returns a copy of this platform with the relay stream registrar wired in,
+    /// enabling the M8 pty/desktop stream ops. Called by the agent supervisor once
+    /// it holds a relay connection.
+    #[must_use]
+    pub fn with_stream_registry(mut self, registry: Arc<dyn StreamRegistry>) -> Self {
+        self.stream_registry = Some(registry);
+        self
+    }
+
+    /// Returns a copy of this platform with a per-op OOM cgroup manager wired in, so
+    /// each `exec` child is placed in its own memory sub-cgroup (issue #345). Called
+    /// by the agent supervisor at startup after [`crate::establish_oom_isolation`]
+    /// succeeds on a delegated Linux cgroup v2 host; left unset everywhere else.
+    #[must_use]
+    pub fn with_oom_isolation(mut self, cgroups: Arc<OpCgroups>) -> Self {
+        self.cgroups = Some(cgroups);
+        self
+    }
+
+    /// Overrides the desktop backend (used by `--virtual-desktop`, which spawns
+    /// Xvfb and re-resolves the X11 backend against it, and by tests).
+    #[must_use]
+    pub fn with_desktop(mut self, desktop: Arc<dyn DesktopBackend>) -> Self {
+        self.desktop = desktop;
+        self
+    }
+
+    /// Resolves a request-supplied `cwd` against the workspace root: an empty
+    /// `cwd` falls back to the root; a relative `cwd` is joined onto it; an
+    /// absolute `cwd` is used as-is.
+    fn resolve_cwd(&self, cwd: &str) -> PathBuf {
+        if cwd.is_empty() {
+            self.workspace_root.clone()
+        } else {
+            let p = Path::new(cwd);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                self.workspace_root.join(p)
+            }
+        }
+    }
+}
+
+/// A zero-CPU Unix process-group leader that remains stopped until the group is
+/// killed. If another group member sends `SIGCONT`, the loop immediately stops it
+/// again. Keeping this private child unreaped fences the numeric PGID against reuse.
+#[cfg(unix)]
+const UNIX_EXEC_ANCHOR: &str = "while :; do kill -STOP $$; done";
+
+struct ExecOutput {
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// One native exec and every ordinary descendant it spawns, contained as a POSIX
+/// process group on Unix.
+///
+/// The requested command is a direct child with its native argv/spawn/status
+/// semantics unchanged. A separate stopped anchor owns the group ID until cleanup
+/// is issued. Tokio's direct-child waits are cancel-safe; Drop only signals while
+/// the still-unreaped anchor fences the numeric PGID against reuse.
+#[cfg(unix)]
+struct ExecProcessGroup {
+    anchor: tokio::process::Child,
+    child: tokio::process::Child,
+    pgid: i32,
+    running: bool,
+    /// Whether [`wait`](Self::wait)'s post-exit group kill already ran. The
+    /// wait future may be dropped mid-sequence and re-created (the op-engine
+    /// pump polls it inside a select that drops arm futures every iteration);
+    /// re-running the group kill on re-entry is not just redundant — on macOS
+    /// `killpg` returns EPERM once the group holds only zombies (the anchor
+    /// killed but not yet reaped), which surfaced as a spurious typed wait
+    /// failure. Explicit [`terminate`](Self::terminate) calls do NOT set this:
+    /// the post-exit kill must still run once after a cancel, closing the
+    /// fork-race window (a descendant forked between a cancel's kill scan and
+    /// the direct child's exit).
+    wait_killed_group: bool,
+    /// The per-op memory leaf this exec's processes were placed in (issue #345),
+    /// or `None` when isolation is unavailable. Torn down once the process tree is
+    /// reaped. Always `None` off Linux (no manager is ever wired there).
+    op_cgroup: Option<crate::cgroup::OpCgroupHandle>,
+}
+
+#[cfg(unix)]
+impl ExecProcessGroup {
+    fn spawn(
+        mut command: tokio::process::Command,
+        cgroups: Option<&OpCgroups>,
+    ) -> std::io::Result<Self> {
+        let mut anchor_command = tokio::process::Command::new("/bin/sh");
+        anchor_command
+            .arg("-c")
+            .arg(UNIX_EXEC_ANCHOR)
+            .process_group(0)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut anchor = anchor_command.spawn()?;
+        let pgid = i32::try_from(anchor.id().expect("new anchor must have a pid"))
+            .map_err(|_| std::io::Error::other("exec anchor PID exceeds i32"))?;
+
+        command.process_group(pgid);
+        let child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = terminate_unix_process_group(pgid);
+                let _ = anchor.start_kill();
+                return Err(error);
+            }
+        };
+
+        // Bias the kernel's global OOM killer toward this child (and its inheriting
+        // descendants) so a runaway command is sacrificed before the supervisor.
+        // Always applied on Linux — independent of, and composing with, the per-op
+        // cgroup below (which bounds systemd-oomd's scope).
+        #[cfg(target_os = "linux")]
+        if let Some(child_pid) = child.id() {
+            crate::cgroup::raise_exec_oom_score_adj(child_pid);
+        }
+
+        // Place the requested child AND the group anchor into a per-op memory leaf
+        // so they share one OOM fate, isolated from the control supervisor. The tiny
+        // window between spawn and this move is the accepted post-spawn billing
+        // window — pre_exec placement is async-signal-unsafe and deliberately not
+        // used. A no-op when `cgroups` is `None` (isolation unavailable / off Linux).
+        let op_cgroup = cgroups.and_then(|cg| {
+            let pids: Vec<u32> = [anchor.id(), child.id()].into_iter().flatten().collect();
+            cg.place_op(&pids)
+        });
+
+        Ok(Self {
+            anchor,
+            child,
+            pgid,
+            running: true,
+            wait_killed_group: false,
+            op_cgroup,
+        })
+    }
+
+    /// Removes the child's stdio handles for the streaming [`ContainedExec`]; after
+    /// this the group only tracks lifecycle (wait/terminate), the caller owns I/O.
+    fn take_pipes(&mut self) -> ContainedPipes {
+        (
+            self.child.stdin.take(),
+            self.child.stdout.take(),
+            self.child.stderr.take(),
+        )
+    }
+
+    fn terminate(&mut self) -> std::io::Result<()> {
+        terminate_unix_process_group(self.pgid)
+    }
+
+    /// Waits for the DIRECT command to exit, then tears the group down in the #344
+    /// order: kill the process group (so descendants that inherited the pipes are
+    /// gone before the caller drains to EOF), THEN reap the stopped anchor fence.
+    /// `running` flips false only after the reap, so a cancellation at any earlier
+    /// point still fences the PGID via [`Drop`].
+    ///
+    /// RESUMABLE: every await point is cancel-safe and the group kill runs
+    /// exactly once (`wait_killed_group`), so a caller may drop this future at
+    /// any point and call `wait` again — the op-engine pump does exactly that
+    /// every select iteration.
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self.child.wait().await?;
+        if !self.wait_killed_group {
+            self.terminate()?;
+            self.wait_killed_group = true;
+        }
+        // Reap the fence only after the group kill. Tokio wait is cancel-safe; if
+        // this future is dropped after reaping, anchor.id() is None and Drop will
+        // not signal the now-recyclable numeric PGID.
+        let _ = self.anchor.wait().await?;
+        self.running = false;
+        // The process tree is reaped, so the op leaf can be removed now (bounded
+        // EBUSY retry). Taking the handle here means Drop below won't touch it.
+        if let Some(handle) = self.op_cgroup.take() {
+            handle.teardown().await;
+        }
+        Ok(status)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for ExecProcessGroup {
+    fn drop(&mut self) {
+        if self.running && self.anchor.id().is_some() {
+            if let Err(error) = self.terminate() {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        group_id = self.pgid,
+                        %error,
+                        "failed to terminate cancelled exec process group"
+                    );
+                }
+            }
+        }
+        // A cancelled/timed-out exec drops here with its op leaf still present: the
+        // group was just SIGKILL'd but its processes reap asynchronously, so this
+        // best-effort rmdir usually leaves an (eventually empty) leaf that the next
+        // unit stop reclaims. On the normal path the handle was already taken and
+        // torn down in wait(), so this is a no-op there.
+        if let Some(handle) = self.op_cgroup.take() {
+            handle.teardown_best_effort();
+        }
+    }
+}
+
+#[cfg(unix)]
+fn terminate_unix_process_group(pgid: i32) -> std::io::Result<()> {
+    use nix::errno::Errno;
+    use nix::sys::signal::{killpg, Signal};
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(pgid), Signal::SIGKILL) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        // POSIX delivers the signal to every member the caller has permission
+        // for and reports EPERM only about the rest — members we could never
+        // kill under ANY handling. macOS raises it when the group holds a
+        // transiently unsignalable member (e.g. a zombie mid-reparent from a
+        // child git itself forked — seen live on macOS CI the moment git
+        // gained containment), where Linux reports success. The kill has done
+        // all it can either way; failing the op over it turned a SUCCESSFUL
+        // git commit into a typed error.
+        Err(Errno::EPERM) => {
+            tracing::debug!(
+                group_id = pgid,
+                "group kill reported EPERM (unsignalable member); owned members were signaled"
+            );
+            Ok(())
+        }
+        Err(error) => Err(std::io::Error::from(error)),
+    }
+}
+
+/// One native exec and every ordinary descendant it spawns, contained as a
+/// Windows Job Object. The Job Object is a stable kernel handle, so cancellation
+/// can terminate the complete job even after its direct leader exits.
+#[cfg(windows)]
+struct ExecProcessGroup {
+    child: AsyncGroupChild,
+    running: bool,
+}
+
+#[cfg(windows)]
+impl ExecProcessGroup {
+    fn spawn(mut command: tokio::process::Command) -> std::io::Result<Self> {
+        // `command_group` wraps the spawn in a Job Object; kill-on-drop terminates
+        // the whole job (the direct child + every descendant) on cancel.
+        let child = command.group().kill_on_drop(true).spawn()?;
+        Ok(Self {
+            child,
+            running: true,
+        })
+    }
+
+    /// Removes the child's stdio handles for the streaming [`ContainedExec`].
+    fn take_pipes(&mut self) -> ContainedPipes {
+        let child = self.child.inner();
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    }
+
+    /// Terminates the whole Job Object (idempotent — a repeat kill, or a kill after
+    /// the job already exited, is InvalidInput/NotFound and treated as success).
+    fn terminate(&mut self) -> std::io::Result<()> {
+        match self.child.start_kill() {
+            Ok(()) => Ok(()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+                ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self.child.wait().await?;
+        self.running = false;
+        Ok(status)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ExecProcessGroup {
+    fn drop(&mut self) {
+        if !self.running {
+            return;
+        }
+        let group_id = self.child.id();
+        if let Err(error) = self.child.start_kill() {
+            if !matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidInput | std::io::ErrorKind::NotFound
+            ) {
+                tracing::warn!(?group_id, %error, "failed to terminate cancelled exec process group");
+            }
+        }
+    }
+}
+
+async fn read_optional_pipe<R>(pipe: Option<R>) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut bytes).await?;
+    }
+    Ok(bytes)
+}
+
+/// The three stdio handles a [`ContainedExec`] exposes — stdin (write), stdout and
+/// stderr (read), each present until the caller takes it.
+type ContainedPipes = (
+    Option<tokio::process::ChildStdin>,
+    Option<tokio::process::ChildStdout>,
+    Option<tokio::process::ChildStderr>,
+);
+
+/// A spawned command and every ordinary descendant it spawns, contained as a POSIX
+/// process group (Unix) or a Job Object (Windows), with its stdio exposed for
+/// streaming.
+///
+/// This is the shared containment primitive: the one-shot [`NativePlatform::exec`]
+/// drains the pipes to EOF and assembles a single reply over it, while the op-stream
+/// job runner reads them incrementally into sequenced frames. The #344 cancellation
+/// semantics are preserved verbatim — [`terminate`](Self::terminate) SIGKILLs the
+/// whole group (idempotent), and [`Drop`] terminates any still-running group so a
+/// dropped handle never leaks descendants.
+pub struct ContainedExec {
+    /// The child's stdin (write end). Take it to feed input; drop it to signal EOF.
+    pub stdin: Option<tokio::process::ChildStdin>,
+    /// The child's stdout (read end). Take it to stream or assemble output.
+    pub stdout: Option<tokio::process::ChildStdout>,
+    /// The child's stderr (read end).
+    pub stderr: Option<tokio::process::ChildStderr>,
+    /// The lifecycle handle (anchored process group on Unix / Job Object on Windows).
+    /// Its `Drop` terminates the group.
+    group: ExecProcessGroup,
+}
+
+impl ContainedExec {
+    /// Waits for the direct command to exit, then tears the contained group down
+    /// (Unix: SIGKILL the process group, then reap the stopped anchor fence;
+    /// Windows: the Job Object is reaped on drop). Returns the command's exit status.
+    ///
+    /// Drain the taken `stdout`/`stderr` concurrently with this call — on Unix the
+    /// group is not killed until the direct command exits, so a descendant holding a
+    /// pipe open keeps it from reaching EOF until then.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a wait/cleanup IO error.
+    pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.group.wait().await
+    }
+
+    /// SIGKILLs the whole contained group NOW (for cancellation or a deadline).
+    /// Idempotent: a repeat call, or a call after the group already exited, is a
+    /// no-op.
+    ///
+    /// # Errors
+    ///
+    /// Propagates a signal/kill IO error other than "already gone".
+    pub fn terminate(&mut self) -> std::io::Result<()> {
+        self.group.terminate()
+    }
+}
+
+/// Spawns `command` inside a fresh containment group with piped stdio, returning a
+/// [`ContainedExec`] whose stdin/stdout/stderr handles are taken for streaming.
+///
+/// `kill_on_drop` and the three piped stdio slots are configured here, so callers
+/// pass a command with only program/args/cwd/env set. The containment is the #344
+/// design: on Unix a stopped anchor owns the process-group id; on Windows a Job
+/// Object owns the tree.
+///
+/// `cgroups` is the per-op OOM-isolation root: when present (Linux with isolation
+/// available), the group's processes are placed into a fresh memory leaf so their
+/// page cache and anon memory share one OOM fate, billed away from the supervisor.
+/// Pass `None` where isolation is unavailable or not wanted (tests, non-Linux).
+///
+/// # Errors
+///
+/// Propagates the spawn IO error (e.g. the program is missing or not executable).
+pub fn spawn_contained(
+    mut command: tokio::process::Command,
+    cgroups: Option<&OpCgroups>,
+) -> std::io::Result<ContainedExec> {
+    command
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    let mut group = ExecProcessGroup::spawn(command, cgroups)?;
+    #[cfg(windows)]
+    let mut group = {
+        // Job Objects give the whole-tree kill; per-op cgroup leaves are Linux-only.
+        let _ = cgroups;
+        ExecProcessGroup::spawn(command)?
+    };
+    let (stdin, stdout, stderr) = group.take_pipes();
+    Ok(ContainedExec {
+        stdin,
+        stdout,
+        stderr,
+        group,
+    })
+}
+
+#[async_trait]
+impl Platform for NativePlatform {
+    fn host_identity(&self) -> HostIdentity {
+        crate::host_identity()
+    }
+
+    fn workspace_root(&self) -> String {
+        self.workspace_root.to_string_lossy().into_owned()
+    }
+
+    fn desktop(&self) -> Arc<dyn DesktopBackend> {
+        self.desktop.clone()
+    }
+
+    fn default_shell(&self) -> Vec<String> {
+        crate::default_shell()
+    }
+
+    fn stream_registry(&self) -> Option<Arc<dyn StreamRegistry>> {
+        self.stream_registry.clone()
+    }
+
+    /// Builds the command (shell vs argv, cwd/env resolution) and spawns it
+    /// inside the shared containment primitive — the streaming job path. The
+    /// per-op cgroup leaf (#351) rides inside the group: placed at spawn, torn
+    /// down after the anchor reap in `wait()`, best-effort in `Drop`.
+    fn spawn_exec(&self, req: &v1::ExecRequest) -> PlatformResult<ContainedExec> {
+        if req.command.is_empty() {
+            return Err(PlatformError::Os {
+                message: "exec: empty command".to_string(),
+                detail: BTreeMap::new(),
+            });
+        }
+
+        let mut cmd = if req.shell {
+            crate::shell_command(&req.command)
+        } else {
+            let mut command = tokio::process::Command::new(&req.command[0]);
+            command.args(&req.command[1..]);
+            command
+        };
+
+        cmd.current_dir(self.resolve_cwd(&req.cwd));
+        for (k, v) in &req.env {
+            cmd.env(k, v);
+        }
+
+        spawn_contained(cmd, self.cgroups.as_deref())
+            .map_err(|e| PlatformError::from_io(&format!("spawn {}", req.command[0]), &e))
+    }
+
+    async fn exec(&self, req: &v1::ExecRequest) -> PlatformResult<v1::ExecResponse> {
+        let started = Instant::now();
+        // Spawn inside the shared containment primitive. `spawn_contained` (via
+        // `spawn_exec`) configures piped stdio + kill_on_drop; the group's Drop
+        // SIGKILLs the POSIX process group (Unix) / Job Object (Windows) on any
+        // early return, incl. the timeout.
+        let mut contained = self.spawn_exec(req)?;
+
+        // Feed stdin (if any) then drop the handle so the child sees EOF.
+        if req.stdin.is_empty() {
+            // Close stdin immediately so a child reading stdin does not hang.
+            drop(contained.stdin.take());
+        } else if let Some(mut stdin) = contained.stdin.take() {
+            let _ = stdin.write_all(&req.stdin).await;
+            let _ = stdin.shutdown().await;
+        }
+
+        // Assemble the full reply: drain both pipes to EOF WHILE waiting for the
+        // command, so large output cannot deadlock the child. `ContainedExec::wait`
+        // kills the group on the direct command's exit, letting descendant-held pipes
+        // reach EOF — the #344 ordering, unchanged.
+        let stdout = contained.stdout.take();
+        let stderr = contained.stderr.take();
+        let assemble = async {
+            let (status, stdout, stderr) = tokio::try_join!(
+                contained.wait(),
+                read_optional_pipe(stdout),
+                read_optional_pipe(stderr),
+            )?;
+            Ok::<ExecOutput, std::io::Error>(ExecOutput {
+                exit_code: status.code().unwrap_or(-1),
+                stdout,
+                stderr,
+            })
+        };
+
+        let output = if req.timeout_ms > 0 {
+            let dur = std::time::Duration::from_millis(u64::from(req.timeout_ms));
+            match tokio::time::timeout(dur, assemble).await {
+                Ok(out) => out.map_err(|e| PlatformError::from_io("exec wait", &e))?,
+                Err(_) => {
+                    // Dropping `contained` below synchronously initiates process-group
+                    // cleanup before this typed timeout becomes unobservable work.
+                    return Ok(v1::ExecResponse {
+                        exit_code: -1,
+                        stdout: prost::bytes::Bytes::new(),
+                        stderr: prost::bytes::Bytes::from_static(b"timed out"),
+                        timed_out: true,
+                        duration_ms: elapsed_millis(started),
+                    });
+                }
+            }
+        } else {
+            assemble
+                .await
+                .map_err(|e| PlatformError::from_io("exec wait", &e))?
+        };
+
+        Ok(v1::ExecResponse {
+            exit_code: output.exit_code,
+            stdout: prost::bytes::Bytes::from(output.stdout),
+            stderr: prost::bytes::Bytes::from(output.stderr),
+            timed_out: false,
+            duration_ms: elapsed_millis(started),
+        })
+    }
+
+    async fn fs_read(&self, req: &v1::FsReadRequest) -> PlatformResult<v1::FsReadResponse> {
+        let path = self.resolve_cwd(&req.path);
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("read {}", path.display()), &e))?;
+        let total_size = bytes.len() as u64;
+
+        // Apply the optional ranged read over the in-memory buffer.
+        let content = if req.offset == 0 && req.length == 0 {
+            bytes
+        } else {
+            // Clamp the 64-bit wire offsets into the in-memory buffer; on a
+            // 32-bit target an out-of-range offset simply saturates to the len.
+            let start = usize::try_from(req.offset)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let end = if req.length == 0 {
+                bytes.len()
+            } else {
+                let len = usize::try_from(req.length).unwrap_or(usize::MAX);
+                start.saturating_add(len).min(bytes.len())
+            };
+            bytes[start..end].to_vec()
+        };
+
+        Ok(v1::FsReadResponse {
+            content: prost::bytes::Bytes::from(content),
+            total_size,
+        })
+    }
+
+    async fn fs_write(&self, req: &v1::FsWriteRequest) -> PlatformResult<v1::FsWriteResponse> {
+        let path = self.resolve_cwd(&req.path);
+        if req.create_parents {
+            if let Some(parent) = path.parent() {
+                tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                    PlatformError::from_io(&format!("mkdir -p {}", parent.display()), &e)
+                })?;
+            }
+        }
+
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.write(true).create(true);
+        if req.append {
+            opts.append(true);
+        } else {
+            opts.truncate(true);
+        }
+        apply_mode(&mut opts, req.mode);
+
+        let mut file = opts
+            .open(&path)
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("open {}", path.display()), &e))?;
+        file.write_all(&req.content)
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("write {}", path.display()), &e))?;
+        file.flush()
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("flush {}", path.display()), &e))?;
+
+        Ok(v1::FsWriteResponse {
+            bytes_written: req.content.len() as u64,
+        })
+    }
+
+    async fn fs_list(&self, req: &v1::FsListRequest) -> PlatformResult<v1::FsListResponse> {
+        let root = self.resolve_cwd(&req.path);
+        let mut entries = Vec::new();
+        list_dir(&root, &root, req.recursive, &mut entries).await?;
+        Ok(v1::FsListResponse { entries })
+    }
+
+    async fn fs_mkdir(&self, req: &v1::FsMkdirRequest) -> PlatformResult<v1::FsMkdirResponse> {
+        let path = self.resolve_cwd(&req.path);
+        let result = if req.parents {
+            tokio::fs::create_dir_all(&path).await
+        } else {
+            tokio::fs::create_dir(&path).await
+        };
+        result.map_err(|e| PlatformError::from_io(&format!("mkdir {}", path.display()), &e))?;
+        set_mode(&path, req.mode).await?;
+        Ok(v1::FsMkdirResponse {})
+    }
+
+    async fn fs_move(&self, req: &v1::FsMoveRequest) -> PlatformResult<v1::FsMoveResponse> {
+        let from = self.resolve_cwd(&req.from);
+        let to = self.resolve_cwd(&req.to);
+        if !req.overwrite && tokio::fs::try_exists(&to).await.unwrap_or(false) {
+            return Err(PlatformError::Os {
+                message: format!("move: destination exists: {}", to.display()),
+                detail: BTreeMap::new(),
+            });
+        }
+        tokio::fs::rename(&from, &to).await.map_err(|e| {
+            PlatformError::from_io(&format!("move {} -> {}", from.display(), to.display()), &e)
+        })?;
+        Ok(v1::FsMoveResponse {})
+    }
+
+    async fn fs_stat(&self, req: &v1::FsStatRequest) -> PlatformResult<v1::FsStatResponse> {
+        let path = self.resolve_cwd(&req.path);
+        match tokio::fs::symlink_metadata(&path).await {
+            Ok(meta) => {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                Ok(v1::FsStatResponse {
+                    exists: true,
+                    entry: Some(metadata_to_entry(&name, &req.path, &meta)),
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(v1::FsStatResponse {
+                exists: false,
+                entry: None,
+            }),
+            Err(e) => Err(PlatformError::from_io(
+                &format!("stat {}", path.display()),
+                &e,
+            )),
+        }
+    }
+
+    async fn fs_remove(&self, req: &v1::FsRemoveRequest) -> PlatformResult<v1::FsRemoveResponse> {
+        let path = self.resolve_cwd(&req.path);
+        let meta = tokio::fs::symlink_metadata(&path)
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("stat {}", path.display()), &e))?;
+        let result = if meta.is_dir() {
+            if req.recursive {
+                tokio::fs::remove_dir_all(&path).await
+            } else {
+                tokio::fs::remove_dir(&path).await
+            }
+        } else {
+            tokio::fs::remove_file(&path).await
+        };
+        result.map_err(|e| PlatformError::from_io(&format!("remove {}", path.display()), &e))?;
+        Ok(v1::FsRemoveResponse {})
+    }
+
+    /// Builds the git argv (op-aware) and spawns it inside the shared
+    /// containment primitive — the engine-job path. Descendants are contained
+    /// (process group / Job Object) and, on a delegated Linux host, placed in
+    /// a per-op OOM cgroup leaf like any exec child.
+    fn spawn_git(&self, req: &v1::GitRequest) -> PlatformResult<ContainedExec> {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(git_args(req.op(), &req.args))
+            .current_dir(self.resolve_cwd(&req.cwd));
+        spawn_contained(cmd, self.cgroups.as_deref())
+            .map_err(|e| PlatformError::from_io("spawn git", &e))
+    }
+
+    async fn git(&self, req: &v1::GitRequest) -> PlatformResult<v1::GitResponse> {
+        // Spawn via the shared containment primitive (spawn_git): behaviorally
+        // the pre-engine plain spawn plus containment — a closed piped stdin
+        // reads EOF exactly like the old Stdio::null.
+        let mut contained = self.spawn_git(req)?;
+        drop(contained.stdin.take());
+        let stdout = contained.stdout.take();
+        let stderr = contained.stderr.take();
+        let (status, stdout, stderr) = tokio::try_join!(
+            contained.wait(),
+            read_optional_pipe(stdout),
+            read_optional_pipe(stderr),
+        )
+        .map_err(|e| PlatformError::from_io("git wait", &e))?;
+        Ok(assemble_git_response(
+            req.op(),
+            status.code().unwrap_or(-1),
+            stdout,
+            stderr,
+        ))
+    }
+}
+
+/// Assembles the wire `GitResponse` from a finished git invocation: the
+/// porcelain-v2 structured parse for a clean `GIT_OP_STATUS`, raw
+/// stdout/stderr otherwise. Shared by the one-shot [`Platform::git`] and the
+/// engine-job git adapter so the reply shape can never drift.
+#[must_use]
+pub fn assemble_git_response(
+    op: v1::GitOp,
+    exit_code: i32,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+) -> v1::GitResponse {
+    let status = if op == v1::GitOp::Status && exit_code == 0 {
+        Some(parse_porcelain_status(&stdout))
+    } else {
+        None
+    };
+    v1::GitResponse {
+        exit_code,
+        stdout: prost::bytes::Bytes::from(stdout),
+        stderr: prost::bytes::Bytes::from(stderr),
+        status,
+    }
+}
+
+/// Builds the git argv for an op. For [`v1::GitOp::Status`] we always use the
+/// machine-readable porcelain-v2 + branch headers so [`parse_porcelain_status`]
+/// can produce structured output; other ops pass through their `args` verbatim.
+fn git_args(op: v1::GitOp, args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    match op {
+        v1::GitOp::Status => {
+            out.push("status".to_string());
+            out.push("--porcelain=v2".to_string());
+            out.push("--branch".to_string());
+        }
+        v1::GitOp::Diff => out.push("diff".to_string()),
+        v1::GitOp::Log => out.push("log".to_string()),
+        v1::GitOp::Add => out.push("add".to_string()),
+        v1::GitOp::Commit => out.push("commit".to_string()),
+        v1::GitOp::Branch => out.push("branch".to_string()),
+        v1::GitOp::Checkout => out.push("checkout".to_string()),
+        v1::GitOp::Pull => out.push("pull".to_string()),
+        v1::GitOp::Push => out.push("push".to_string()),
+        // RAW and the unspecified default pass through whatever args were given.
+        v1::GitOp::Raw | v1::GitOp::Unspecified => {}
+    }
+    out.extend(args.iter().cloned());
+    out
+}
+
+/// Parses `git status --porcelain=v2 --branch` into the structured
+/// [`v1::GitStatus`]. Tolerant of fields it does not recognize.
+fn parse_porcelain_status(stdout: &[u8]) -> v1::GitStatus {
+    let text = String::from_utf8_lossy(stdout);
+    let mut status = v1::GitStatus {
+        clean: true,
+        ..Default::default()
+    };
+
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("# branch.head ") {
+            status.branch = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("# branch.upstream ") {
+            status.upstream = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
+            // Format: "+<ahead> -<behind>".
+            let mut parts = rest.split_whitespace();
+            if let Some(a) = parts.next() {
+                status.ahead = a.trim_start_matches('+').parse().unwrap_or(0);
+            }
+            if let Some(b) = parts.next() {
+                status.behind = b.trim_start_matches('-').parse().unwrap_or(0);
+            }
+        } else if let Some(file) = parse_status_entry(line) {
+            status.clean = false;
+            status.files.push(file);
+        }
+    }
+    status
+}
+
+/// Parses one porcelain-v2 entry line (ordinary `1`, renamed `2`, or untracked
+/// `?`) into a [`v1::GitFileStatus`]. Returns `None` for header/unknown lines.
+fn parse_status_entry(line: &str) -> Option<v1::GitFileStatus> {
+    let mut parts = line.split_whitespace();
+    match parts.next()? {
+        "1" | "2" => {
+            // `1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>` — XY is the second field.
+            let xy = parts.next()?;
+            let path = line.split_whitespace().last()?.to_string();
+            let staged = xy.starts_with(|c| c != '.');
+            Some(v1::GitFileStatus {
+                path,
+                code: xy.to_string(),
+                staged,
+            })
+        }
+        "?" => {
+            let path = parts.next()?.to_string();
+            Some(v1::GitFileStatus {
+                path,
+                code: "??".to_string(),
+                staged: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Recursively (or shallowly) lists a directory into `entries`, with each
+/// entry's `path` relative to `root`.
+fn list_dir<'a>(
+    root: &'a Path,
+    dir: &'a Path,
+    recursive: bool,
+    entries: &'a mut Vec<v1::FsEntry>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = PlatformResult<()>> + Send + 'a>> {
+    Box::pin(async move {
+        let mut rd = tokio::fs::read_dir(dir)
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("readdir {}", dir.display()), &e))?;
+        while let Some(de) = rd
+            .next_entry()
+            .await
+            .map_err(|e| PlatformError::from_io(&format!("readdir {}", dir.display()), &e))?
+        {
+            let full = de.path();
+            let meta = de
+                .metadata()
+                .await
+                .map_err(|e| PlatformError::from_io(&format!("stat {}", full.display()), &e))?;
+            let rel = full
+                .strip_prefix(root)
+                .unwrap_or(&full)
+                .to_string_lossy()
+                .into_owned();
+            let name = de.file_name().to_string_lossy().into_owned();
+            entries.push(metadata_to_entry(&name, &rel, &meta));
+            if recursive && meta.is_dir() {
+                list_dir(root, &full, recursive, entries).await?;
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Converts filesystem metadata into a wire [`v1::FsEntry`].
+fn metadata_to_entry(name: &str, rel_path: &str, meta: &std::fs::Metadata) -> v1::FsEntry {
+    let kind = if meta.file_type().is_symlink() {
+        v1::FsEntryKind::Symlink
+    } else if meta.is_dir() {
+        v1::FsEntryKind::Directory
+    } else {
+        v1::FsEntryKind::File
+    };
+    let modified_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+
+    v1::FsEntry {
+        name: name.to_string(),
+        path: rel_path.to_string(),
+        kind: kind as i32,
+        size: meta.len(),
+        modified_ms,
+        mode: file_mode(meta),
+    }
+}
+
+// --- Per-OS mode helpers (POSIX permission bits where they exist) ------------
+
+#[cfg(unix)]
+fn file_mode(meta: &std::fs::Metadata) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    meta.permissions().mode()
+}
+
+#[cfg(not(unix))]
+fn file_mode(_meta: &std::fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn apply_mode(opts: &mut tokio::fs::OpenOptions, mode: u32) {
+    // `tokio::fs::OpenOptions` exposes `mode` as an inherent method on unix, so no
+    // `OpenOptionsExt` import is needed (unlike `std::fs::OpenOptions`).
+    if mode != 0 {
+        opts.mode(mode);
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_mode(_opts: &mut tokio::fs::OpenOptions, _mode: u32) {
+    // POSIX modes are a no-op on non-unix targets.
+}
+
+#[cfg(unix)]
+async fn set_mode(path: &Path, mode: u32) -> PlatformResult<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if mode == 0 {
+        return Ok(());
+    }
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .await
+        .map_err(|e| PlatformError::from_io(&format!("chmod {}", path.display()), &e))
+}
+
+#[cfg(not(unix))]
+async fn set_mode(_path: &Path, _mode: u32) -> PlatformResult<()> {
+    Ok(())
+}
+
+/// Milliseconds elapsed since `start`, saturated into a `u64` (so an absurdly
+/// long-running op can never overflow the wire field). Centralizes the one cast
+/// the exec path needs for `duration_ms`.
+fn elapsed_millis(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opengeni_agent_proto::v1::{
+        ExecRequest, FsListRequest, FsMkdirRequest, FsMoveRequest, FsReadRequest, FsRemoveRequest,
+        FsStatRequest, FsWriteRequest, GitOp, GitRequest,
+    };
+
+    /// A platform rooted at a fresh temp dir, plus the dir guard (kept alive so it
+    /// is not reaped while the test runs).
+    fn rooted() -> (NativePlatform, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let platform = NativePlatform::with_root(dir.path());
+        (platform, dir)
+    }
+
+    /// TEST-ONLY NixOS-sandbox fork/exec transient-ENOENT mitigation.
+    ///
+    /// Under the default parallel `cargo test`, this NixOS sandbox intermittently
+    /// fails a `fork`/`exec` of a *known-present* binary (git, `/bin/sh`) with
+    /// `ENOENT` ("No such file or directory", os error 2) purely from concurrent
+    /// subprocess churn — re-running the same test with `--test-threads=1` always
+    /// passes. It is NOT a code bug (production agents on normal Linux never hit
+    /// it), but a non-deterministic gate is unacceptable, so the test harness
+    /// retries the spawn a few times when — and ONLY when — the failure is that
+    /// transient spawn ENOENT for a binary the caller KNOWS is installed.
+    ///
+    /// This is strictly a `#[cfg(test)]` helper: production exec/git paths are
+    /// untouched, so a user command that genuinely does not exist still returns
+    /// `NotFound` immediately with no masking. Callers must only wrap spawns of
+    /// binaries they have already confirmed are present (the `git`/exec tests gate
+    /// on [`which_git`] / the platform shell); tests that deliberately assert
+    /// `NotFound` for a missing target must NOT route through here.
+    async fn retry_transient_spawn<T, F, Fut>(mut op: F) -> PlatformResult<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = PlatformResult<T>>,
+    {
+        const MAX_ATTEMPTS: u32 = 6;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match op().await {
+                Ok(value) => return Ok(value),
+                Err(err) if attempt < MAX_ATTEMPTS && is_transient_spawn_enoent(&err) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)))
+                        .await;
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("the loop returns on the final attempt")
+    }
+
+    /// True only for the NixOS-sandbox transient spawn `ENOENT` described on
+    /// [`retry_transient_spawn`]: an error whose message is from a *spawn* context
+    /// (`spawn git`, `spawn <cmd>`) and carries the os-error-2 signature. A genuine
+    /// missing-file/missing-ref `NotFound` (e.g. an `fs_read` of a path that does
+    /// not exist) has no `spawn` context and is therefore never matched, so those
+    /// assertions keep failing/asserting immediately.
+    fn is_transient_spawn_enoent(err: &PlatformError) -> bool {
+        let message = match err {
+            PlatformError::NotFound(m) => m.as_str(),
+            PlatformError::Os { message, .. } => message.as_str(),
+            _ => return false,
+        };
+        message.contains("spawn")
+            && (message.contains("os error 2") || message.contains("No such file or directory"))
+    }
+
+    /// argv for a portable "print a fixed string" used by the exec tests.
+    ///
+    /// Uses the shell's `echo` BUILTIN (`shell = true`) rather than spawning
+    /// `printf`/`echo` as a coreutil: on NixOS there is no `/bin/printf` (coreutils
+    /// live in the nix profile) and, under heavy parallel test load, a coreutil
+    /// fork/exec intermittently ENOENTs in this sandbox. A shell builtin needs no
+    /// second fork, the platform shell is a stable absolute path (`/bin/sh`,
+    /// `cmd.exe`), and the test still asserts real stdout capture (the callers use
+    /// `contains`, tolerating `echo`'s trailing newline).
+    fn echo_request(text: &str) -> ExecRequest {
+        ExecRequest {
+            command: vec![format!("echo {text}")],
+            shell: true,
+            ..Default::default()
+        }
+    }
+
+    const EXEC_DESCENDANT_PID_FILE_ENV: &str = "OPENGENI_TEST_EXEC_DESCENDANT_PID_FILE";
+
+    #[cfg(any(unix, windows))]
+    fn descendant_command(parent_fixture: &str) -> Vec<String> {
+        vec![
+            std::env::current_exe()
+                .expect("current test executable")
+                .to_string_lossy()
+                .into_owned(),
+            "--ignored".to_string(),
+            "--exact".to_string(),
+            parent_fixture.to_string(),
+            "--nocapture".to_string(),
+        ]
+    }
+
+    #[cfg(any(unix, windows))]
+    fn descendant_exec_env(pid_file: &Path) -> std::collections::HashMap<String, String> {
+        std::collections::HashMap::from([(
+            EXEC_DESCENDANT_PID_FILE_ENV.to_string(),
+            pid_file.to_string_lossy().into_owned(),
+        )])
+    }
+
+    fn spawn_descendant_fixture() -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().expect("current test executable"))
+            .args([
+                "--ignored",
+                "--exact",
+                "native::tests::exec_descendant_fixture",
+                "--nocapture",
+            ])
+            .spawn()
+            .expect("spawn descendant fixture")
+    }
+
+    #[test]
+    #[ignore = "waiting process-tree parent fixture; invoked explicitly by exec tests"]
+    fn exec_descendant_parent_fixture() {
+        let status = spawn_descendant_fixture()
+            .wait()
+            .expect("wait for descendant fixture");
+        panic!("descendant fixture exited unexpectedly: {status}");
+    }
+
+    #[test]
+    #[ignore = "early-exit process-tree parent fixture; invoked explicitly by exec tests"]
+    fn exec_exiting_parent_fixture() {
+        let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
+            .expect("descendant fixture pid-file env");
+        let child = spawn_descendant_fixture();
+        for _ in 0..200 {
+            if Path::new(&pid_file).exists() {
+                drop(child);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(child);
+        panic!("descendant fixture did not publish its pid");
+    }
+
+    #[test]
+    #[ignore = "bounded child fixture; invoked explicitly by the parent fixture"]
+    fn exec_descendant_fixture() {
+        let pid_file = std::env::var_os(EXEC_DESCENDANT_PID_FILE_ENV)
+            .expect("descendant fixture pid-file env");
+        std::fs::write(pid_file, std::process::id().to_string())
+            .expect("write descendant fixture pid");
+        // Bound the fixture itself so a failing containment regression cannot leave
+        // permanent test work behind. Production cleanup should terminate it well
+        // before this fallback expires.
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+
+    #[cfg(any(unix, windows))]
+    async fn recorded_pid(pid_file: &Path) -> u32 {
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Ok(raw_pid) = tokio::fs::read_to_string(pid_file).await {
+                    break raw_pid.trim().parse::<u32>().expect("descendant pid");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("descendant should publish its pid")
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        use nix::errno::Errno;
+        use nix::sys::signal::kill;
+        use nix::unistd::Pid;
+
+        let pid = i32::try_from(pid).expect("fixture PID exceeds i32");
+        match kill(Pid::from_raw(pid), None) {
+            Ok(()) => true,
+            Err(Errno::ESRCH) => false,
+            Err(error) => panic!("failed to probe descendant PID {pid}: {error}"),
+        }
+    }
+
+    #[cfg(windows)]
+    async fn process_exists(pid: u32) -> bool {
+        let probe = format!(
+            "$p = Get-Process -Id {pid} -ErrorAction SilentlyContinue; \
+             if ($null -eq $p) {{ [Console]::Out.Write('absent') }} \
+             else {{ [Console]::Out.Write('present') }}"
+        );
+        let output = tokio::process::Command::new("powershell.exe")
+            .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"])
+            .arg(probe)
+            .stderr(Stdio::null())
+            .output()
+            .await
+            .expect("run descendant process probe");
+        assert!(
+            output.status.success(),
+            "descendant process probe failed: {:?}",
+            output.status.code()
+        );
+        match output.stdout.as_slice() {
+            b"present" => true,
+            b"absent" => false,
+            other => panic!("descendant process probe returned an unexpected sentinel: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_process_exits(pid: u32, context: &str) {
+        for _ in 0..100 {
+            if !process_exists(pid) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Do not signal the bare PID here: it may have been reused. The bounded
+        // fixture exits by itself, so a failed assertion remains identity-safe.
+        panic!("{context} descendant {pid} survived process-group cleanup");
+    }
+
+    #[cfg(windows)]
+    async fn assert_process_exits(pid: u32, context: &str) {
+        for _ in 0..100 {
+            if !process_exists(pid).await {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Do not signal the bare PID here: it may have been reused. The bounded
+        // fixture exits by itself, so a failed assertion remains identity-safe.
+        panic!("{context} descendant {pid} survived process-group cleanup");
+    }
+
+    /// The op-engine pump recreates the `wait` future every select iteration,
+    /// so `ContainedExec::wait` must be RESUMABLE: dropped at any await point
+    /// and called again, it must still return the status — and must not
+    /// re-run the post-exit group kill (on macOS a second `killpg` on the
+    /// then-zombie-only group returns EPERM, which surfaced as a spurious
+    /// typed wait failure in CI).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn contained_wait_is_resumable_across_drops() {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg("exit 7");
+        let mut contained = spawn_contained(cmd, None).expect("spawn");
+        drop(contained.stdin.take());
+        // Repeatedly drop the wait future mid-flight (1ms slices) until it
+        // completes — the pump's exact usage pattern under select.
+        let status = loop {
+            let sliced =
+                tokio::time::timeout(std::time::Duration::from_millis(1), contained.wait()).await;
+            if let Ok(result) = sliced {
+                break result.expect("wait must resume cleanly, never EPERM");
+            }
+        };
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[tokio::test]
+    async fn exec_captures_stdout_and_exit_code() {
+        let (platform, _dir) = rooted();
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT.
+        let req = echo_request("hello");
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(resp.exit_code, 0);
+        let out = String::from_utf8_lossy(&resp.stdout);
+        assert!(out.contains("hello"), "stdout was {out:?}");
+        assert!(!resp.timed_out);
+    }
+
+    #[tokio::test]
+    async fn exec_nonzero_exit_is_reported_not_errored() {
+        let (platform, _dir) = rooted();
+        let req = ExecRequest {
+            command: vec!["exit 7".to_string()],
+            shell: true,
+            ..Default::default()
+        };
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT.
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert_eq!(resp.exit_code, 7);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_non_shell_uses_request_path_not_shell_builtin() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (platform, dir) = rooted();
+        let executable = dir.path().join("echo");
+        std::fs::write(&executable, "#!/bin/sh\nprintf 'external-program'\n")
+            .expect("write external echo fixture");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755))
+            .expect("make external echo fixture executable");
+        let resp = platform
+            .exec(&ExecRequest {
+                command: vec!["echo".to_string(), "builtin-output".to_string()],
+                shell: false,
+                env: std::collections::HashMap::from([(
+                    "PATH".to_string(),
+                    dir.path().to_string_lossy().into_owned(),
+                )]),
+                ..Default::default()
+            })
+            .await
+            .expect("exec external PATH fixture");
+        assert_eq!(&resp.stdout[..], b"external-program");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_missing_direct_command_is_not_found() {
+        let (platform, _dir) = rooted();
+        let err = platform
+            .exec(&ExecRequest {
+                command: vec!["opengeni-command-that-does-not-exist".to_string()],
+                shell: false,
+                ..Default::default()
+            })
+            .await
+            .expect_err("missing direct executable must error");
+        assert!(matches!(err, PlatformError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn exec_empty_command_is_os_error() {
+        let (platform, _dir) = rooted();
+        let err = platform
+            .exec(&ExecRequest::default())
+            .await
+            .expect_err("empty command must error");
+        assert!(matches!(err, PlatformError::Os { .. }));
+    }
+
+    #[tokio::test]
+    async fn exec_stdin_is_fed_to_child() {
+        let (platform, _dir) = rooted();
+        // `cat` echoes stdin; portable on unix. Skip the assertion shape on Windows
+        // where `cat` may be absent — there we just assert the call succeeds via
+        // `more` is unreliable, so this test is unix-only.
+        if cfg!(windows) {
+            return;
+        }
+        // Read stdin with the shell's `read` BUILTIN + re-emit with the `echo`
+        // builtin — no `cat` coreutil fork (which flakes under parallel load on
+        // NixOS, where coreutils live in the nix profile). This still proves stdin
+        // reaches the child; the callers tolerate `echo`'s trailing newline.
+        let req = ExecRequest {
+            command: vec!["IFS= read -r x; echo \"$x\"".to_string()],
+            shell: true,
+            stdin: prost::bytes::Bytes::from_static(b"piped-in\n"),
+            ..Default::default()
+        };
+        // `/bin/sh` is known-present; retry the transient NixOS spawn ENOENT.
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        let out = String::from_utf8_lossy(&resp.stdout);
+        assert!(
+            out.contains("piped-in"),
+            "stdin should reach the child: {out:?}"
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn exec_timeout_kills_and_flags() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("timed-out-descendant.pid");
+        // The direct exec helper launches a second ignored copy of this test
+        // binary. Recording that grandchild PID catches the regression where
+        // kill-on-drop terminated only the parent and reparented its child.
+        let req = ExecRequest {
+            command: descendant_command("native::tests::exec_descendant_parent_fixture"),
+            shell: false,
+            env: descendant_exec_env(&pid_file),
+            timeout_ms: 1_000,
+            ..Default::default()
+        };
+        // Retry the transient NixOS spawn ENOENT. It happens before the timeout
+        // path, so the retry cannot mask the deliberate timeout asserted below;
+        // other platforms return on the first attempt.
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert!(
+            resp.timed_out,
+            "the loop should be killed by the timeout: exit={} stdout={:?} stderr={:?}",
+            resp.exit_code, resp.stdout, resp.stderr
+        );
+        assert_eq!(resp.exit_code, -1);
+        let descendant_pid = recorded_pid(&pid_file).await;
+        assert_process_exits(descendant_pid, "timed-out exec").await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn exec_leader_exit_kills_remaining_descendants() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("leader-exit-descendant.pid");
+        let req = ExecRequest {
+            command: descendant_command("native::tests::exec_exiting_parent_fixture"),
+            shell: false,
+            env: descendant_exec_env(&pid_file),
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+
+        let resp = retry_transient_spawn(|| platform.exec(&req))
+            .await
+            .expect("exec");
+        assert!(!resp.timed_out, "early leader exit must complete normally");
+        assert_eq!(resp.exit_code, 0);
+        let descendant_pid = recorded_pid(&pid_file).await;
+        assert_process_exits(descendant_pid, "early-exit exec").await;
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn cancelling_exec_future_kills_descendant_tree() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("cancelled-descendant.pid");
+        let req = ExecRequest {
+            command: descendant_command("native::tests::exec_descendant_parent_fixture"),
+            shell: false,
+            env: descendant_exec_env(&pid_file),
+            timeout_ms: 0,
+            ..Default::default()
+        };
+        let platform = Arc::new(platform);
+        let task_platform = platform.clone();
+        let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
+
+        let descendant_pid = recorded_pid(&pid_file).await;
+
+        // `JoinSet::shutdown` aborts the dispatch task when a NATS connection
+        // generation ends. Aborting this task exercises the same drop path: the
+        // unbounded child must not outlive the caller that could observe it.
+        exec_task.abort();
+        let _ = exec_task.await;
+
+        assert_process_exits(descendant_pid, "cancelled exec").await;
+    }
+
+    /// Every exec child is stamped `oom_score_adj=500` so the kernel OOM killer
+    /// sacrifices a runaway command before the supervisor (issue #345). This needs
+    /// no cgroup delegation (raising is always unprivileged-legal), so it runs on
+    /// any Linux host. The direct child (the fixture) reports its own PID — the one
+    /// the exec path stamps — and holds it alive long enough to read the value.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn exec_child_gets_raised_oom_score_adj() {
+        let (platform, dir) = rooted();
+        let pid_file = dir.path().join("oom-score-child.pid");
+        let req = ExecRequest {
+            command: descendant_command("native::tests::exec_descendant_fixture"),
+            shell: false,
+            env: descendant_exec_env(&pid_file),
+            timeout_ms: 5_000,
+            ..Default::default()
+        };
+        let platform = Arc::new(platform);
+        let task_platform = platform.clone();
+        let exec_task = tokio::spawn(async move { task_platform.exec(&req).await });
+
+        let child_pid = recorded_pid(&pid_file).await;
+        // The stamp is written post-spawn, so poll briefly for the raised value
+        // rather than assume it landed before the fixture published its PID.
+        let oom_path = format!("/proc/{child_pid}/oom_score_adj");
+        let mut observed = String::new();
+        for _ in 0..200 {
+            if let Ok(text) = tokio::fs::read_to_string(&oom_path).await {
+                observed = text.trim().to_string();
+                if observed == "500" {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        exec_task.abort();
+        let _ = exec_task.await;
+        assert_eq!(
+            observed, "500",
+            "exec child {child_pid} must have oom_score_adj=500, saw {observed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fs_write_then_read_roundtrips() {
+        let (platform, _dir) = rooted();
+        let body = b"the quick brown fox";
+        let written = platform
+            .fs_write(&FsWriteRequest {
+                path: "sub/dir/file.txt".to_string(),
+                content: prost::bytes::Bytes::from_static(body),
+                create_parents: true,
+                ..Default::default()
+            })
+            .await
+            .expect("write");
+        assert_eq!(written.bytes_written, body.len() as u64);
+
+        let read = platform
+            .fs_read(&FsReadRequest {
+                path: "sub/dir/file.txt".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("read");
+        assert_eq!(&read.content[..], body);
+        assert_eq!(read.total_size, body.len() as u64);
+    }
+
+    #[tokio::test]
+    async fn fs_read_ranged_slices_the_buffer() {
+        let (platform, _dir) = rooted();
+        platform
+            .fs_write(&FsWriteRequest {
+                path: "f".to_string(),
+                content: prost::bytes::Bytes::from_static(b"0123456789"),
+                ..Default::default()
+            })
+            .await
+            .expect("write");
+        let read = platform
+            .fs_read(&FsReadRequest {
+                path: "f".to_string(),
+                offset: 3,
+                length: 4,
+            })
+            .await
+            .expect("read");
+        assert_eq!(&read.content[..], b"3456");
+        assert_eq!(read.total_size, 10);
+    }
+
+    #[tokio::test]
+    async fn fs_read_missing_is_not_found() {
+        let (platform, _dir) = rooted();
+        let err = platform
+            .fs_read(&FsReadRequest {
+                path: "nope".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect_err("missing read must error");
+        assert!(matches!(err, PlatformError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn fs_write_append_extends() {
+        let (platform, _dir) = rooted();
+        let w = |body: &'static [u8], append: bool| FsWriteRequest {
+            path: "log".to_string(),
+            content: prost::bytes::Bytes::from_static(body),
+            append,
+            ..Default::default()
+        };
+        platform.fs_write(&w(b"a", false)).await.expect("write");
+        platform.fs_write(&w(b"b", true)).await.expect("append");
+        let read = platform
+            .fs_read(&FsReadRequest {
+                path: "log".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("read");
+        assert_eq!(&read.content[..], b"ab");
+    }
+
+    #[tokio::test]
+    async fn fs_mkdir_list_stat_remove_lifecycle() {
+        let (platform, _dir) = rooted();
+        platform
+            .fs_mkdir(&FsMkdirRequest {
+                path: "a/b/c".to_string(),
+                parents: true,
+                ..Default::default()
+            })
+            .await
+            .expect("mkdir");
+
+        // Stat the directory exists.
+        let stat = platform
+            .fs_stat(&FsStatRequest {
+                path: "a/b/c".to_string(),
+            })
+            .await
+            .expect("stat");
+        assert!(stat.exists);
+        assert_eq!(stat.entry.unwrap().kind, v1::FsEntryKind::Directory as i32);
+
+        // Drop a file in and list non-recursively from the root.
+        platform
+            .fs_write(&FsWriteRequest {
+                path: "a/top.txt".to_string(),
+                content: prost::bytes::Bytes::from_static(b"x"),
+                ..Default::default()
+            })
+            .await
+            .expect("write");
+        let listing = platform
+            .fs_list(&FsListRequest {
+                path: "a".to_string(),
+                recursive: false,
+            })
+            .await
+            .expect("list");
+        let names: Vec<_> = listing.entries.iter().map(|e| e.name.clone()).collect();
+        assert!(names.contains(&"b".to_string()));
+        assert!(names.contains(&"top.txt".to_string()));
+
+        // Recursive list reaches the nested dir.
+        let deep = platform
+            .fs_list(&FsListRequest {
+                path: "a".to_string(),
+                recursive: true,
+            })
+            .await
+            .expect("list recursive");
+        assert!(deep.entries.iter().any(|e| e.path.contains('c')));
+
+        // Remove recursively.
+        platform
+            .fs_remove(&FsRemoveRequest {
+                path: "a".to_string(),
+                recursive: true,
+            })
+            .await
+            .expect("remove");
+        let gone = platform
+            .fs_stat(&FsStatRequest {
+                path: "a".to_string(),
+            })
+            .await
+            .expect("stat after remove");
+        assert!(!gone.exists);
+    }
+
+    #[tokio::test]
+    async fn fs_move_renames_and_guards_overwrite() {
+        let (platform, _dir) = rooted();
+        let write = |p: &str, b: &'static [u8]| FsWriteRequest {
+            path: p.to_string(),
+            content: prost::bytes::Bytes::from_static(b),
+            ..Default::default()
+        };
+        platform.fs_write(&write("from", b"src")).await.expect("w");
+        platform.fs_write(&write("to", b"dst")).await.expect("w");
+
+        // Without overwrite, the move is refused.
+        let err = platform
+            .fs_move(&FsMoveRequest {
+                from: "from".to_string(),
+                to: "to".to_string(),
+                overwrite: false,
+            })
+            .await
+            .expect_err("must refuse overwrite");
+        assert!(matches!(err, PlatformError::Os { .. }));
+
+        // With overwrite it succeeds and the destination now holds the source.
+        platform
+            .fs_move(&FsMoveRequest {
+                from: "from".to_string(),
+                to: "to".to_string(),
+                overwrite: true,
+            })
+            .await
+            .expect("overwrite move");
+        let read = platform
+            .fs_read(&FsReadRequest {
+                path: "to".to_string(),
+                ..Default::default()
+            })
+            .await
+            .expect("read");
+        assert_eq!(&read.content[..], b"src");
+    }
+
+    #[tokio::test]
+    async fn fs_stat_absent_path_succeeds_with_exists_false() {
+        let (platform, _dir) = rooted();
+        let stat = platform
+            .fs_stat(&FsStatRequest {
+                path: "ghost".to_string(),
+            })
+            .await
+            .expect("stat must succeed for an absent path");
+        assert!(!stat.exists);
+        assert!(stat.entry.is_none());
+    }
+
+    /// Initializes a git repo in the platform root, returning the platform.
+    async fn git_init(platform: &NativePlatform) {
+        // Configure identity locally so commits work in CI with no global config.
+        for args in [
+            vec!["init", "-q"],
+            vec!["config", "user.email", "agent@opengeni.test"],
+            vec!["config", "user.name", "OpenGeni Agent"],
+        ] {
+            // git is gated as known-present by the callers' `which_git()` check, so
+            // a spawn `NotFound` here is the transient NixOS fork/exec ENOENT — retry
+            // it rather than fail the gate non-deterministically.
+            let req = GitRequest {
+                op: GitOp::Raw as i32,
+                args: args.iter().map(ToString::to_string).collect(),
+                ..Default::default()
+            };
+            let resp = retry_transient_spawn(|| platform.git(&req))
+                .await
+                .expect("git setup");
+            assert_eq!(resp.exit_code, 0, "git {args:?} failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn git_status_reports_structured_state() {
+        let (platform, _dir) = rooted();
+        if which_git().is_none() {
+            return; // git absent on this host; the dispatch path is still covered.
+        }
+        git_init(&platform).await;
+
+        // git is known-present here (guarded by `which_git` above), so each spawn
+        // is retried against the transient NixOS fork/exec ENOENT.
+        let status_req = GitRequest {
+            op: GitOp::Status as i32,
+            ..Default::default()
+        };
+        // Clean repo: status is clean.
+        let clean = retry_transient_spawn(|| platform.git(&status_req))
+            .await
+            .expect("status");
+        assert_eq!(clean.exit_code, 0);
+        let st = clean.status.expect("structured status");
+        assert!(st.clean, "fresh repo should be clean: {st:?}");
+
+        // Add an untracked file → status reports it, not clean.
+        platform
+            .fs_write(&FsWriteRequest {
+                path: "tracked.txt".to_string(),
+                content: prost::bytes::Bytes::from_static(b"data"),
+                ..Default::default()
+            })
+            .await
+            .expect("write");
+        let dirty = retry_transient_spawn(|| platform.git(&status_req))
+            .await
+            .expect("status");
+        let st = dirty.status.expect("structured status");
+        assert!(!st.clean);
+        assert!(st.files.iter().any(|f| f.code == "??"));
+    }
+
+    #[tokio::test]
+    async fn git_add_commit_then_status_clean() {
+        let (platform, _dir) = rooted();
+        if which_git().is_none() {
+            return;
+        }
+        git_init(&platform).await;
+        platform
+            .fs_write(&FsWriteRequest {
+                path: "a.txt".to_string(),
+                content: prost::bytes::Bytes::from_static(b"hi"),
+                ..Default::default()
+            })
+            .await
+            .expect("write");
+        // git is known-present here (guarded by `which_git` above), so each spawn
+        // is retried against the transient NixOS fork/exec ENOENT.
+        let add_req = GitRequest {
+            op: GitOp::Add as i32,
+            args: vec!["a.txt".to_string()],
+            ..Default::default()
+        };
+        let add = retry_transient_spawn(|| platform.git(&add_req))
+            .await
+            .expect("add");
+        assert_eq!(add.exit_code, 0);
+        let commit_req = GitRequest {
+            op: GitOp::Commit as i32,
+            args: vec!["-m".to_string(), "init".to_string()],
+            ..Default::default()
+        };
+        let commit = retry_transient_spawn(|| platform.git(&commit_req))
+            .await
+            .expect("commit");
+        assert_eq!(
+            commit.exit_code,
+            0,
+            "commit stderr: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        let status_req = GitRequest {
+            op: GitOp::Status as i32,
+            ..Default::default()
+        };
+        let status = retry_transient_spawn(|| platform.git(&status_req))
+            .await
+            .expect("status");
+        assert!(status.status.expect("status").clean);
+    }
+
+    /// Returns `Some(())` if a `git` binary is resolvable on the host.
+    fn which_git() -> Option<()> {
+        std::process::Command::new("git")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .ok()
+            .filter(std::process::ExitStatus::success)
+            .map(|_| ())
+    }
+
+    #[tokio::test]
+    async fn pty_open_without_relay_is_unsupported() {
+        // Spawning a PTY succeeds, but with no relay registrar wired the op reports
+        // a clean Unsupported (the registrar is wired by the agent supervisor).
+        let (platform, _dir) = rooted();
+        let err = platform
+            .pty_open(&v1::PtyOpenRequest::default())
+            .await
+            .expect_err("no relay registrar");
+        assert!(matches!(err, PlatformError::Unsupported(_)));
+        assert_eq!(err.code(), v1::ErrorCode::Unsupported);
+    }
+
+    #[tokio::test]
+    async fn desktop_ensure_is_unsupported_without_display_or_relay() {
+        // Force a headless desktop so the test is deterministic regardless of the
+        // host's $DISPLAY: no display => display_unavailable (Unsupported).
+        let platform = NativePlatform::with_root("/")
+            .with_desktop(std::sync::Arc::new(crate::desktop::NoDesktop));
+        let err = platform
+            .desktop_ensure(&v1::DesktopEnsureRequest::default())
+            .await
+            .expect_err("no display");
+        assert!(matches!(err, PlatformError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn desktop_input_on_headless_is_unsupported() {
+        let platform = NativePlatform::with_root("/")
+            .with_desktop(std::sync::Arc::new(crate::desktop::NoDesktop));
+        let err = platform
+            .desktop_input(&v1::DesktopInput::default())
+            .await
+            .expect_err("no display");
+        assert!(matches!(err, PlatformError::Unsupported(_)));
+    }
+
+    /// A desktop backend that records every injected input, so a test can assert the
+    /// computer-use mapping (a `desktop_input` proto → the platform inject call).
+    #[derive(Default)]
+    struct RecordingDesktop {
+        injected: std::sync::Mutex<Vec<v1::DesktopInput>>,
+    }
+
+    #[async_trait]
+    impl crate::desktop::DesktopBackend for RecordingDesktop {
+        fn probe(&self) -> Option<v1::Display> {
+            Some(v1::Display {
+                id: ":0".to_string(),
+                width: 100,
+                height: 100,
+                r#virtual: false,
+            })
+        }
+        async fn capture(&self) -> PlatformResult<crate::desktop::CapturedFrame> {
+            Ok(crate::desktop::CapturedFrame {
+                png: Vec::new(),
+                width: 100,
+                height: 100,
+            })
+        }
+        async fn inject(&self, input: &v1::DesktopInput) -> PlatformResult<()> {
+            self.injected.lock().unwrap().push(input.clone());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_input_proto_maps_to_the_platform_inject_call() {
+        // The computer-use mapping: a DesktopInput proto routed through
+        // Platform::desktop_input reaches the backend's inject verbatim.
+        let recorder = std::sync::Arc::new(RecordingDesktop::default());
+        let platform = NativePlatform::with_root("/").with_desktop(recorder.clone());
+
+        let input = v1::DesktopInput {
+            channel_id: "desk-1".to_string(),
+            event: Some(v1::desktop_input::Event::Pointer(v1::PointerEvent {
+                x: 42,
+                y: 99,
+                action: v1::PointerAction::Click as i32,
+                button: v1::PointerButton::Right as i32,
+            })),
+        };
+        platform.desktop_input(&input).await.expect("inject");
+
+        let seen = recorder.injected.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], input, "the proto must reach inject byte-identical");
+    }
+}

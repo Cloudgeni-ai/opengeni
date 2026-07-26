@@ -1,0 +1,292 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000201",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 1,
+    "type": "session.created",
+    "payload": {
+      "id": "22222222-3333-4444-9555-666666666667",
+      "workspaceId": "11111111-2222-4333-9444-555555555555",
+      "status": "queued",
+      "model": "gpt-4.1"
+    },
+    "occurredAt": "2026-01-02T11:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000202",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 2,
+    "type": "user.message",
+    "payload": {
+      "text": "Patch the login helper and prove the page still renders."
+    },
+    "occurredAt": "2026-01-02T11:00:02.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000203",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 3,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000002",
+      "triggerEventId": "00000000-0000-4000-8000-000000000202",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T11:00:03.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000204",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 4,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000202"
+    },
+    "occurredAt": "2026-01-02T11:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000205",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 5,
+    "type": "agent.reasoning.delta",
+    "payload": {
+      "item": {
+        "rawItem": {
+          "content": [
+            {
+              "type": "summary_text",
+              "text": "I need to inspect the helper, "
+            },
+            {
+              "type": "summary_text",
+              "text": "patch the import, then use the browser screenshot."
+            }
+          ]
+        }
+      }
+    },
+    "occurredAt": "2026-01-02T11:00:05.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000206",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 6,
+    "type": "agent.message.delta",
+    "payload": {
+      "text": "First I will inspect the helper."
+    },
+    "occurredAt": "2026-01-02T11:00:06.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000207",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 7,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "First I will inspect the helper."
+    },
+    "occurredAt": "2026-01-02T11:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000208",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 8,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-heavy-read",
+      "name": "exec_command",
+      "arguments": {
+        "cmd": "sed -n '1,80p' src/auth/login-helper.ts",
+        "workdir": "/workspace"
+      },
+      "raw": {
+        "type": "function_call",
+        "callId": "call-heavy-read",
+        "name": "exec_command",
+        "arguments": "{\"cmd\":\"sed -n '1,80p' src/auth/login-helper.ts\",\"workdir\":\"/workspace\"}"
+      }
+    },
+    "occurredAt": "2026-01-02T11:00:08.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000209",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 9,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-heavy-read",
+      "output": "Chunk ID: heavy-read\nWall time: 0.0100 seconds\nProcess exited with code 0\nOutput:\nimport { oldSession } from './legacy';\nexport function login() { return oldSession(); }\n"
+    },
+    "occurredAt": "2026-01-02T11:00:09.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000210",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 10,
+    "type": "agent.message.delta",
+    "payload": {
+      "text": "The helper still imports the legacy session."
+    },
+    "occurredAt": "2026-01-02T11:00:10.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000211",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 11,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "The helper still imports the legacy session."
+    },
+    "occurredAt": "2026-01-02T11:00:11.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000212",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 12,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-heavy-patch",
+      "name": "apply_patch_call",
+      "arguments": null,
+      "raw": {
+        "type": "apply_patch_call",
+        "operation": {
+          "type": "update_file",
+          "path": "src/auth/login-helper.ts",
+          "diff": "@@ -1,2 +1,2 @@\n-import { oldSession } from './legacy';\n+import { sessionApi } from './session-api';\n-export function login() { return oldSession(); }\n+export function login() { return sessionApi.resolve(); }\n"
+        }
+      }
+    },
+    "occurredAt": "2026-01-02T11:00:12.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000213",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 13,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-heavy-patch",
+      "output": "Patch applied."
+    },
+    "occurredAt": "2026-01-02T11:00:13.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000214",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 14,
+    "type": "agent.reasoning.delta",
+    "payload": {
+      "item": {
+        "rawItem": {
+          "content": [
+            {
+              "type": "summary_text",
+              "text": "Now I need visual proof after the patch."
+            }
+          ]
+        }
+      }
+    },
+    "occurredAt": "2026-01-02T11:00:14.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000215",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 15,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-heavy-shot",
+      "name": "computer_call",
+      "arguments": null,
+      "raw": {
+        "type": "computer_call",
+        "action": {
+          "type": "screenshot"
+        },
+        "actions": [
+          {
+            "type": "screenshot"
+          }
+        ]
+      }
+    },
+    "occurredAt": "2026-01-02T11:00:15.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000216",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 16,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-heavy-shot",
+      "output": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    },
+    "occurredAt": "2026-01-02T11:00:16.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000217",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 17,
+    "type": "agent.message.delta",
+    "payload": {
+      "text": "The login page renders after the patch."
+    },
+    "occurredAt": "2026-01-02T11:00:17.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000218",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 18,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "The login page renders after the patch."
+    },
+    "occurredAt": "2026-01-02T11:00:18.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000219",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666667",
+    "sequence": 19,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T11:00:19.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000002"
+  }
+]

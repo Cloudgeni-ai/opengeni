@@ -1,0 +1,35 @@
+name_prefix      = "opengeni-example"
+region           = "us-east-1"
+deployment_phase = "bootstrap"
+ecr_force_delete = true
+
+tags = {
+  environment = "example"
+  lifecycle   = "temporary"
+}
+
+postgres = {
+  mode                = "external"
+  deletion_protection = false
+  skip_final_snapshot = true
+  # existing_host = "postgres.example.com"
+}
+
+temporal = {
+  mode = "officialChart"
+  # Use mode = "external" plus existing_host for Temporal Cloud or customer Temporal.
+  # existing_host = "temporal.example.com:7233"
+  namespace  = "default"
+  task_queue = "opengeni-runs-ts"
+}
+
+object_storage = {
+  mode          = "managed"
+  force_destroy = true
+  # Required for direct browser uploads to signed S3 URLs. Prefer exact
+  # HTTPS app origins; "*" is acceptable only for short-lived private evaluation stacks.
+  cors_allowed_origins = ["https://opengeni.example.com"]
+
+  # In external mode, set bucket to an existing S3 bucket name.
+  # bucket = "existing-opengeni-files"
+}

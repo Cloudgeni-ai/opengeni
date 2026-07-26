@@ -1,0 +1,175 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000101",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 1,
+    "type": "session.created",
+    "payload": {
+      "id": "22222222-3333-4444-9555-666666666666",
+      "workspaceId": "11111111-2222-4333-9444-555555555555",
+      "status": "queued",
+      "model": "scripted-model",
+      "sandboxBackend": "docker"
+    },
+    "occurredAt": "2026-01-02T10:00:01.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000102",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 2,
+    "type": "user.message",
+    "payload": {
+      "text": "Run the tests and report the result.",
+      "resources": [
+        {
+          "kind": "repository",
+          "uri": "https://github.com/cloudgeni-ai/opengeni.git",
+          "ref": "main"
+        }
+      ],
+      "tools": [
+        {
+          "kind": "mcp",
+          "id": "opengeni"
+        }
+      ]
+    },
+    "occurredAt": "2026-01-02T10:00:02.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000103",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 3,
+    "type": "session.status.changed",
+    "payload": {
+      "status": "queued"
+    },
+    "occurredAt": "2026-01-02T10:00:03.000Z",
+    "turnId": null
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000104",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 4,
+    "type": "turn.queued",
+    "payload": {
+      "turnId": "aaaaaaaa-0000-4000-8000-000000000001",
+      "triggerEventId": "00000000-0000-4000-8000-000000000102",
+      "source": "user"
+    },
+    "occurredAt": "2026-01-02T10:00:04.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000105",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 5,
+    "type": "turn.started",
+    "payload": {
+      "triggerEventId": "00000000-0000-4000-8000-000000000102"
+    },
+    "occurredAt": "2026-01-02T10:00:05.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000106",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 6,
+    "type": "agent.message.delta",
+    "payload": {
+      "text": "I will run "
+    },
+    "occurredAt": "2026-01-02T10:00:06.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000107",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 7,
+    "type": "agent.message.delta",
+    "payload": {
+      "text": "the package tests now."
+    },
+    "occurredAt": "2026-01-02T10:00:07.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000108",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 8,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "I will run the package tests now."
+    },
+    "occurredAt": "2026-01-02T10:00:08.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000109",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 9,
+    "type": "agent.toolCall.created",
+    "payload": {
+      "id": "call-exec-plain",
+      "name": "exec_command",
+      "arguments": {
+        "cmd": "bun test packages/react/test",
+        "workdir": "/workspace"
+      },
+      "raw": {
+        "type": "function_call",
+        "callId": "call-exec-plain",
+        "name": "exec_command",
+        "arguments": "{\"cmd\":\"bun test packages/react/test\",\"workdir\":\"/workspace\"}"
+      }
+    },
+    "occurredAt": "2026-01-02T10:00:09.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000110",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 10,
+    "type": "agent.toolCall.output",
+    "payload": {
+      "id": "call-exec-plain",
+      "output": "Chunk ID: plain\nWall time: 1.2040 seconds\nProcess exited with code 0\nOutput:\n42 pass\n"
+    },
+    "occurredAt": "2026-01-02T10:00:10.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000111",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 11,
+    "type": "agent.message.completed",
+    "payload": {
+      "text": "Tests passed: 42 pass."
+    },
+    "occurredAt": "2026-01-02T10:00:11.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000112",
+    "workspaceId": "11111111-2222-4333-9444-555555555555",
+    "sessionId": "22222222-3333-4444-9555-666666666666",
+    "sequence": 12,
+    "type": "turn.completed",
+    "payload": {},
+    "occurredAt": "2026-01-02T10:00:12.000Z",
+    "turnId": "aaaaaaaa-0000-4000-8000-000000000001"
+  }
+]

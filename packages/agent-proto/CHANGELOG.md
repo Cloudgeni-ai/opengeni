@@ -1,0 +1,29 @@
+# @opengeni/agent-proto
+
+## 0.3.0
+
+### Minor Changes
+
+- 3584f26: Op-stream wire additions (all additive; PROTOCOL v1.1): `OpExit.failure_code`
+  - `failure_detail` (typed runner-decided deaths — OP_OVERFLOW / OP_SPOOL_IO /
+    OP_PIPE_IO — never exit-code sentinels), `OpAttach.window_bytes` (0 = reuse
+    the OpStart grant), and heartbeat capacity telemetry
+    (`Heartbeat.capacity`/`.admission`: HostCapacitySample + AdmissionTelemetry
+    incl. live_ops, op_frames_dropped_total, evicted_unacked_total — the upward
+    report the server paces against). The runner now serves the op-stream
+    protocol and advertises `Capabilities.op_stream = true`; the server-side
+    feature flag still gates use (no flag day).
+
+## 0.2.1
+
+### Patch Changes
+
+- 5962dd0: Republish the closure so published manifests reference `@opengeni/contracts@^0.4.0`. The previous `^0.3.0` ranges exclude 0.4.0 under 0.x caret semantics, causing consumers to nest a stale contracts copy that lacks the current export surface.
+
+## 0.2.0
+
+### Minor Changes
+
+- 2170732: Publish the full Stage C `@opengeni/*` runtime closure to npm so external hosts can consume OpenGeni from published packages instead of vendored workspace tarballs.
+
+  The release pipeline now builds every publishable package, rewrites every published `workspace:*` dependency to a concrete semver range, rewrites source entry points to dist entry points for every publishable package, and leaves only leaf-only non-runtime packages ignored.

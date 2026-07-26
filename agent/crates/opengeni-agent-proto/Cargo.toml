@@ -1,0 +1,31 @@
+[package]
+name = "opengeni-agent-proto"
+description = "Generated wire-protocol types for the OpenGeni self-hosted agent (Rust side of the single-source-of-truth codegen)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Exposes `opengeni_agent_proto::corpus`, the canonical cross-stack test corpus
+# used by the round-trip test. Not compiled into a production agent build.
+test-corpus = []
+
+[dependencies]
+prost = { workspace = true }
+
+[build-dependencies]
+prost-build = { workspace = true }
+protox = { workspace = true }
+
+# The fixture generator for the cross-stack round-trip test; needs the corpus,
+# so it only builds when the `test-corpus` feature is enabled (plain `cargo test`
+# skips it — the round-trip unit test inside the crate runs under `cargo test`).
+[[example]]
+name = "gen_fixtures"
+required-features = ["test-corpus"]

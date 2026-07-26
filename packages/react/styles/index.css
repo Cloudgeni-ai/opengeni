@@ -1,0 +1,307 @@
+/* ----------------------------------------------------------------------------
+   @opengeni/react — Tailwind v4 theme bridge + component keyframes
+
+   Consumers import this once inside their Tailwind entry CSS:
+
+     @import "tailwindcss";
+     @import "@opengeni/react/styles.css";
+     @source "../node_modules/@opengeni/react/src";
+
+   The @source directive makes Tailwind compile the utility classes used by
+   the components in this package. Everything themable lives in tokens.css
+   (plain CSS variables) — override those to rebrand; this file only maps them
+   into Tailwind utility names (`bg-og-surface-1`, `text-og-fg-muted`,
+   `rounded-og-md`, `shadow-og-glow`, `font-og-mono`, ...).
+   -------------------------------------------------------------------------- */
+
+@import "./tokens.css";
+
+@theme inline {
+  --font-og-sans: var(--og-font-sans);
+  --font-og-mono: var(--og-font-mono);
+
+  /* Type ramp — a real 4-step scale (no half-pixel hand-tuning). Every
+     timeline string maps to one of these via `text-og-{xs,sm,base,md}`;
+     mono reuses the same steps. */
+  --text-og-xs: 11px;
+  --text-og-xs--line-height: 1.45;
+  --text-og-sm: 12px;
+  --text-og-sm--line-height: 1.5;
+  --text-og-base: 13px;
+  --text-og-base--line-height: 1.55;
+  --text-og-md: 15px;
+  --text-og-md--line-height: 1.6;
+
+  --color-og-bg: var(--og-color-bg);
+  --color-og-surface-1: var(--og-color-surface-1);
+  --color-og-surface-2: var(--og-color-surface-2);
+  --color-og-surface-3: var(--og-color-surface-3);
+  --color-og-border: var(--og-color-border);
+  --color-og-border-strong: var(--og-color-border-strong);
+  --color-og-fg: var(--og-color-fg);
+  --color-og-fg-muted: var(--og-color-fg-muted);
+  --color-og-fg-subtle: var(--og-color-fg-subtle);
+
+  --color-og-accent: var(--og-color-accent);
+  --color-og-accent-strong: var(--og-color-accent-strong);
+  --color-og-accent-fg: var(--og-color-accent-fg);
+  --color-og-accent-soft: var(--og-color-accent-soft);
+
+  --color-og-status-queued: var(--og-color-status-queued);
+  --color-og-status-running: var(--og-color-status-running);
+  --color-og-status-idle: var(--og-color-status-idle);
+  --color-og-status-waiting: var(--og-color-status-waiting);
+  --color-og-status-failed: var(--og-color-status-failed);
+  --color-og-status-cancelled: var(--og-color-status-cancelled);
+  --color-og-danger: var(--og-color-danger);
+
+  --radius-og-xs: var(--og-radius-xs);
+  --radius-og-sm: var(--og-radius-sm);
+  --radius-og-md: var(--og-radius-md);
+  --radius-og-lg: var(--og-radius-lg);
+  --radius-og-xl: var(--og-radius-xl);
+
+  --shadow-og-sm: var(--og-shadow-sm);
+  --shadow-og-md: var(--og-shadow-md);
+  --shadow-og-lg: var(--og-shadow-lg);
+  --shadow-og-glow: var(--og-shadow-glow);
+
+  --ease-og-out: var(--og-ease-out);
+  --ease-og-in-out: var(--og-ease-in-out);
+  --ease-og-spring: var(--og-ease-spring);
+
+  --animate-og-enter: og-enter var(--og-duration-base) var(--og-ease-out) both;
+  --animate-og-pulse: og-pulse 2s var(--og-ease-in-out) infinite;
+  --animate-og-blink: og-blink 1s steps(2, start) infinite;
+  --animate-og-shimmer: og-shimmer 2.2s linear infinite;
+  --animate-og-spin: og-spin 0.9s linear infinite;
+  --animate-og-expand: og-expand var(--og-duration-fast) var(--og-ease-in-out);
+  --animate-og-collapse: og-collapse var(--og-duration-fast) var(--og-ease-in-out);
+}
+
+/* Radix Collapsible disclosure: height auto-animates via the content var. Used
+   by the timeline tool rows so an expand glides open instead of snapping.
+
+   Height carries the motion; opacity is a SUBTLE fade that resolves slightly
+   ahead of the height so the body never pops in at full size, but also never
+   flickers half-transparent mid-glide. The ease is a symmetric ease-in-out
+   (no overshoot), so open and close feel like the same short, calm motion with
+   no double-bounce. */
+@keyframes og-expand {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  60% {
+    opacity: 1;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes og-collapse {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  40% {
+    opacity: 0;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+/* Entry: messages and timeline rows slide in just enough to feel placed. */
+@keyframes og-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Live/running indicators breathe; they do not flash. */
+@keyframes og-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+/* Streaming caret. */
+@keyframes og-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+/* Text shimmer for in-flight labels ("Thinking", "Running tool…"). */
+@keyframes og-shimmer {
+  from {
+    background-position: 200% center;
+  }
+  to {
+    background-position: -200% center;
+  }
+}
+
+@keyframes og-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Metric-history line draw-in. The chart path carries `pathLength={1}`, so the
+   dash math is resolution-independent: one full-length dash whose offset animates
+   from 1 (hidden) to 0 (drawn). Degrades to a solid line if animations are off. */
+@keyframes og-mh-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.og-mh-draw {
+  stroke-dasharray: 1;
+  animation: og-mh-draw 900ms var(--og-ease-out) forwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .og-mh-draw {
+    animation: none;
+    stroke-dasharray: none;
+  }
+}
+
+/* Shimmer helper: gradient text the keyframe scrolls through. */
+.og-shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--og-color-fg-subtle) 0%,
+    var(--og-color-fg) 50%,
+    var(--og-color-fg-subtle) 100%
+  );
+  background-size: 200% auto;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: og-shimmer 2.2s linear infinite;
+}
+
+/* Scoped base for component subtrees (applied by the components themselves). */
+.og-root {
+  font-family: var(--og-font-sans);
+  font-feature-settings: var(--og-font-features);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  color: var(--og-color-fg);
+}
+
+.og-root :where(*) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--og-color-border-strong) transparent;
+}
+
+/* The machine popover stays mounted so its trigger's `aria-controls` always
+   resolves. Keep Radix's positioning wrapper measurable while closed, but
+   remove the entire fixed layer from painting, hit testing, and the a11y tree.
+   Hiding only the content leaves the wrapper able to intercept pointer input. */
+[data-radix-popper-content-wrapper]:has(
+  > [data-machine-state-popover][data-state="closed"]
+) {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .og-root *,
+  .og-root *::before,
+  .og-root *::after,
+  .og-shimmer-text {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@media (forced-colors: active) {
+  /* Forced-colors can replace a painted background with Canvas while custom
+     properties retain their authored dark/light values. That combination is
+     dangerous: descendants may resolve a pale dark-theme foreground against a
+     light system canvas. Collapse the whole component palette onto guaranteed
+     system colors. Meaning in status/diff UI is also carried by text, icons,
+     and +/- markers, so it never depends on these colors alone. */
+  .og-root {
+    --og-color-bg: Canvas;
+    --og-color-surface-1: Canvas;
+    --og-color-surface-2: Canvas;
+    --og-color-surface-3: Canvas;
+    --og-color-border: CanvasText;
+    --og-color-border-strong: CanvasText;
+    --og-color-fg: CanvasText;
+    --og-color-fg-muted: CanvasText;
+    --og-color-fg-subtle: CanvasText;
+    --og-color-accent: CanvasText;
+    --og-color-accent-strong: CanvasText;
+    --og-color-accent-deep: CanvasText;
+    --og-color-accent-fg: CanvasText;
+    --og-color-accent-soft: Canvas;
+    --og-color-status-queued: CanvasText;
+    --og-color-status-running: CanvasText;
+    --og-color-status-idle: CanvasText;
+    --og-color-status-waiting: CanvasText;
+    --og-color-status-failed: CanvasText;
+    --og-color-status-cancelled: CanvasText;
+    --og-color-danger: CanvasText;
+    --og-color-diff-add-bg: Canvas;
+    --og-color-diff-del-bg: Canvas;
+    --og-shadow-sm: none;
+    --og-shadow-md: none;
+    --og-shadow-lg: none;
+    --og-shadow-glow: none;
+  }
+
+  /* Selected fills are flattened by the OS palette. Preserve a visible,
+     non-color-only tab selection affordance in every high-contrast theme. */
+  .og-root [role="tab"][aria-selected="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+}
+
+/* ----------------------------------------------------------------------------
+   xterm.js hardening (SandboxTerminal)
+
+   xterm 6's DOM renderer measures glyph widths by stamping a scratch element
+   (`.xterm-width-cache-measure-container`) full of repeated characters
+   (`]]]]bbbb yyyy…`). The shipped xterm.css hides the older
+   `.xterm-char-measure-element` but NOT this newer container, so on first paint
+   it leaks a row of garbage glyphs across the top of the terminal. Clip every
+   xterm measurement scratch element off-screen so the transcript is the only
+   thing visible.
+   -------------------------------------------------------------------------- */
+.xterm .xterm-width-cache-measure-container,
+.xterm-width-cache-measure-container,
+.xterm .xterm-char-measure-element {
+  position: absolute !important;
+  top: 0;
+  left: 0;
+  visibility: hidden !important;
+  pointer-events: none !important;
+  z-index: -1 !important;
+}

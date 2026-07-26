@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Encoding=UTF-8
+Type=X-XFCE-Helper
+X-XFCE-Category=WebBrowser
+Icon=web-browser
+Name=OpenGeni Browser
+X-XFCE-Binaries=opengeni-browser;/usr/local/bin/opengeni-browser;
+X-XFCE-Commands=/usr/local/bin/opengeni-browser
+X-XFCE-CommandsWithParameter=/usr/local/bin/opengeni-browser "%s"

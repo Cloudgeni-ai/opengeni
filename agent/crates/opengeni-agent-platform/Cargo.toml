@@ -1,0 +1,58 @@
+[package]
+name = "opengeni-agent-platform"
+description = "Per-OS platform abstraction (exec/fs/git/terminal/desktop/metrics + service manager) for the OpenGeni agent."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Real macOS desktop backend (ScreenCaptureKit capture + CGEvent input) via the
+# leaf FFI crate. OFF by default: the default macOS build keeps the honest stub
+# (probe → None, capture/inject → Unsupported), byte-identical to before. CI
+# compiles the real path via `--all-features`; releases enable it only once a
+# signed, TCC-granted Mac has live-verified it.
+macos-desktop = ["dep:opengeni-agent-macos-ffi"]
+
+[dependencies]
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "time", "rt", "macros", "rt-multi-thread"] }
+tracing = { workspace = true }
+prost = { workspace = true }
+
+# Interactive terminal: a real PTY (openpty / ConPTY) via the safe portable-pty
+# crate — no unsafe, cross-platform (the M8 terminal seam).
+portable-pty = { workspace = true }
+
+# Desktop frame encoding (capture → PNG chunk for the relay framebuffer pump).
+image = { workspace = true }
+
+# Linux X11 desktop: capture (GetImage) + computer-use input (XTEST) + geometry
+# (RANDR), all via the SAFE pure-Rust x11rb binding so unsafe_code stays forbidden.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+command-group = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { workspace = true }
+
+# macOS desktop backend: the leaf FFI crate that owns all Apple `unsafe` behind a
+# safe API. Optional + macOS-gated so non-macOS builds (and the default macOS
+# build, feature off) never pull the objc2 dependency tree.
+[target.'cfg(target_os = "macos")'.dependencies]
+opengeni-agent-macos-ffi = { path = "../opengeni-agent-macos-ffi", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
+tempfile = { workspace = true }
+# The wire types the cgroup-placement integration test builds an ExecRequest with.
+opengeni-agent-proto = { path = "../opengeni-agent-proto" }

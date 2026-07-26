@@ -1,0 +1,29 @@
+{
+  "name": "@opengeni/testing",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@openai/agents": "0.13.3",
+    "@opengeni/config": "workspace:*",
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/db": "workspace:*",
+    "@opengeni/events": "workspace:*",
+    "@opengeni/runtime": "workspace:*",
+    "@opengeni/worker-bundle": "workspace:*",
+    "@temporalio/client": "^1.17.0",
+    "nats": "^2.29.3",
+    "playwright": "^1.57.0",
+    "postgres": "^3.4.7",
+    "zod": "^4.2.1"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}

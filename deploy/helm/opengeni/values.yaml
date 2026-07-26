@@ -1,0 +1,824 @@
+global:
+  # Default to the public GHCR images so a vanilla `helm install` pulls the
+  # released OpenGeni images with no extra config. Per-cloud example values
+  # override this with their own registry. The image tags below are left empty
+  # and resolve to the chart appVersion (see the opengeni.image helper).
+  imageRegistry: "ghcr.io/cloudgeni-ai"
+  imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+  automountServiceAccountToken: false
+
+networkPolicy:
+  enabled: false
+  egress:
+    enabled: false
+    rules: []
+  ingressController:
+    namespaceSelector: {}
+    podSelector: {}
+  # Optional: allow a metrics scraper (Prometheus) to reach the relay's
+  # GET /metrics on its wss port. Leave unset to omit the rule (the relay has no
+  # other ingress source than the ingress controller). When the kube-prometheus
+  # ServiceMonitor scrapes from a separate namespace, set both selectors here.
+  monitoring: {}
+    # namespaceSelector:
+    #   matchLabels:
+    #     kubernetes.io/metadata.name: monitoring
+    # podSelector: {}
+
+config:
+  OPENGENI_SERVICE_NAME: opengeni
+  OPENGENI_ENVIRONMENT: production
+  OPENGENI_DEPLOYMENT_REVISION: dev
+  OPENGENI_API_HOST: 0.0.0.0
+  OPENGENI_API_PORT: "8000"
+  OPENGENI_WORKER_HTTP_PORT: "8001"
+  OPENGENI_TEMPORAL_NAMESPACE: default
+  OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_ATTEMPTS: "30"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_INITIAL_DELAY_MS: "1000"
+  OPENGENI_STARTUP_DEPENDENCY_RETRY_MAX_DELAY_MS: "5000"
+  OPENGENI_AUTH_REQUIRED: "false"
+  OPENGENI_AUTH_ALLOW_HEALTH: "true"
+  OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_SESSION_TURN_TOOL_REPLACEMENT_ENABLED: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: ""
+  OPENGENI_PRODUCT_ACCESS_MODE: local
+  OPENGENI_BILLING_MODE: disabled
+  OPENGENI_ENTITLEMENTS_MODE: none
+  OPENGENI_USAGE_LIMITS_MODE: none
+  OPENGENI_STATIC_ENTITLEMENTS_JSON: "{}"
+  OPENGENI_STATIC_USAGE_LIMITS_JSON: "{}"
+  OPENGENI_OBJECT_STORAGE_BACKEND: s3-compatible
+  OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
+  OPENGENI_OBJECT_STORAGE_REGION: us-east-1
+  OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Minio
+  OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  OPENGENI_SANDBOX_BACKEND: modal
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+  # Provide OPENGENI_ACCESS_KEY for deployment shared-key access.
+  # Provide OPENGENI_DELEGATION_SECRET for configured/managed product access.
+  # Provide Better Auth, Resend, Stripe, GitHub App, model-provider, database,
+  # NATS, Temporal, sandbox, and object-storage secrets through this secret or
+  # an ExternalSecret. Never commit real secrets in values.
+  # For Temporal Cloud, configure OPENGENI_TEMPORAL_HOST and
+  # OPENGENI_TEMPORAL_NAMESPACE, then place OPENGENI_TEMPORAL_API_KEY in this
+  # secret; the API key automatically enables TLS.
+  #
+  # Bring-your-own-compute (selfhosted) SECRET keys — set these in the runtime
+  # secret (NOT this file) when selfhosted.enabled=true. They thread into the
+  # api/worker via `envFrom: secretRef`, into the relay via explicit secretKeyRef,
+  # and into the chart-managed NATS via env-var expansion:
+  #   OPENGENI_ENROLLMENT_SIGNING_SECRET        HMAC the control plane signs the
+  #                                             `oge_` enrollment bearer with and
+  #                                             the callout responder verifies it
+  #                                             with (falls back to
+  #                                             OPENGENI_DELEGATION_SECRET).
+  #   OPENGENI_STREAM_TOKEN_SECRET              HMAC the relay verifies the viewer
+  #                                             `ogs_` stream token with (already
+  #                                             used by sandbox workspace).
+  #   OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET    HMAC the relay verifies the agent
+  #                                             `ogr_` producer token with (may be
+  #                                             omitted to reuse the stream secret).
+  #   OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED   the callout account SEED the
+  #                                             control plane signs user JWTs with.
+  #   OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY     the PUBLIC half of the seed —
+  #                                             the nats-server callout `issuer`.
+  #   OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD       the control-plane NATS login.
+  #   OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD       the callout responder login.
+  stringData: {}
+
+externalSecret:
+  enabled: false
+  apiVersion: external-secrets.io/v1
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ""
+    kind: ClusterSecretStore
+  target:
+    creationPolicy: Owner
+    deletionPolicy: Retain
+  data: []
+  dataFrom: []
+
+api:
+  enabled: true
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  image:
+    repository: opengeni-api
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  containerPort: 8000
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 30
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+    startup:
+      enabled: false
+      path: /healthz
+      periodSeconds: 5
+      failureThreshold: 30
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 8000
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+worker:
+  enabled: true
+  image:
+    repository: opengeni-worker
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  command: []
+  containerPort: 8001
+  control:
+    replicaCount: 2
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: null
+      customMetrics: []
+      behavior: {}
+  turns:
+    replicaCount: 4
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+    resources:
+      requests:
+        cpu: 500m
+        memory: 1Gi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+    podDisruptionBudget:
+      enabled: true
+      minAvailable: 1
+    autoscaling:
+      enabled: false
+      minReplicas: 4
+      maxReplicas: 20
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: null
+      customMetrics: []
+      behavior: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  # Worker pods checkpoint in-flight agent turns on SIGTERM (graceful
+  # preemption: final conversation-truth reconcile, sandbox envelope,
+  # turn requeue). The Temporal worker cancels in-flight activities
+  # immediately on shutdown and then waits for them to finish, so this pod
+  # grace period is the only bound on the checkpoint window — give it real
+  # room. A SIGKILL after this period surfaces as a heartbeat-timeout
+  # activity failure, which the session workflow survives by re-dispatching
+  # the turn (bounded), but the graceful path loses less.
+  terminationGracePeriodSeconds: 120
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /readyz
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+  service:
+    type: ClusterIP
+    port: 8001
+
+web:
+  enabled: true
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+  image:
+    repository: opengeni-web
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  containerPort: 3000
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  terminationGracePeriodSeconds: 30
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /
+      initialDelaySeconds: 5
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /
+      initialDelaySeconds: 20
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+    startup:
+      enabled: false
+      path: /
+      periodSeconds: 5
+      failureThreshold: 30
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 3000
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+# Bring-your-own-compute stream relay. A stateless wss byte
+# pump: the agent (producer) and the viewer (consumer) both dial IN over wss
+# through the ingress, and the relay splices their pty/desktop streams. It holds
+# NO cluster state and makes NO cluster egress. Disabled by default — the whole
+# selfhosted feature is flag-gated off (see config.OPENGENI_SANDBOX_SELFHOSTED_ENABLED)
+# so existing deploys are unaffected. Enable together with the ingress relay host,
+# nats.authCallout, and the runtime-secret keys below.
+relay:
+  enabled: false
+  replicaCount: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  image:
+    repository: opengeni-relay
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  # The wss listener port. The container, service targetPort, and the relay's
+  # OPENGENI_RELAY_BIND all derive from this single value.
+  containerPort: 8443
+  # The runtime-secret keys the relay's two HMAC token secrets are read from.
+  # The producer (ogr_) secret falls back to the viewer (ogs_) stream-token secret
+  # inside the relay when the relay key is absent, so a single OPENGENI_STREAM_TOKEN_SECRET
+  # can back both planes.
+  streamTokenSecretKey: OPENGENI_STREAM_TOKEN_SECRET
+  relayTokenSecretKey: OPENGENI_SELFHOSTED_RELAY_TOKEN_SECRET
+  # Non-secret relay tuning knobs (defaults match the relay binary's own defaults).
+  tuning:
+    ringFrames: 1024
+    spliceBuffer: 256
+    rateBurstBytes: 16777216
+    rateBytesPerSec: 8388608
+    pairTimeoutSecs: 120
+  extraEnv: []
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+  podSecurityContext:
+    runAsNonRoot: true
+    # The distroless:nonroot base runs as uid/gid 65532.
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop:
+        - ALL
+  podAnnotations: {}
+  priorityClassName: ""
+  # In-flight streams drain on SIGTERM (the relay's own handler stops the listener
+  # then drains). Give the pod real room so resumable streams keep splicing through
+  # a rolling deploy / node drain. The preStop sleep holds the pod past the
+  # endpoints-controller propagation so the ingress stops sending NEW dials first.
+  terminationGracePeriodSeconds: 120
+  preStopDrainSeconds: 15
+  topologySpreadConstraints:
+    enabled: true
+    maxSkew: 1
+    topologyKey: kubernetes.io/hostname
+    whenUnsatisfiable: ScheduleAnyway
+  # Optional dedicated node pool for the relay edge (values-gated, default off for
+  # staging — the relay co-schedules on the platform nodes). Set both to pin the
+  # relay to an isolated, internet-facing edge pool.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  probes:
+    readiness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 3
+      periodSeconds: 10
+      timeoutSeconds: 2
+      failureThreshold: 3
+    liveness:
+      enabled: true
+      path: /healthz
+      initialDelaySeconds: 10
+      periodSeconds: 20
+      timeoutSeconds: 2
+      failureThreshold: 3
+  podDisruptionBudget:
+    enabled: true
+    minAvailable: 1
+  service:
+    type: ClusterIP
+    port: 8443
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    # The relay is bandwidth/connection bound more than CPU bound; memory is a
+    # second cheap signal that needs no metrics adapter. For connection-count or
+    # bytes-spliced scaling, wire customMetrics (needs a Prometheus adapter).
+    targetMemoryUtilizationPercentage: 80
+    customMetrics: []
+    behavior: {}
+
+migrations:
+  enabled: true
+  image:
+    repository: opengeni-api
+    # Empty tag resolves to the chart appVersion via the opengeni.image helper.
+    tag: ""
+    digest: ""
+    pullPolicy: IfNotPresent
+  secret:
+    # Optional separate secret for migration/admin-only settings such as
+    # OPENGENI_MIGRATIONS_DATABASE_URL. If empty, the runtime secret is reused.
+    existingSecret: ""
+  command: ["bun", "run", "db:migrate"]
+  backoffLimit: 6
+  annotations:
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+    helm.sh/hook-weight: "-5"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
+# Use managed Postgres, an existing database, or an upstream Postgres operator for production.
+postgres:
+  enabled: false
+  image:
+    repository: pgvector/pgvector
+    tag: pg17
+    pullPolicy: IfNotPresent
+  auth:
+    database: opengeni
+    username: opengeni
+    password: opengeni
+    existingSecret: ""
+    passwordKey: POSTGRES_PASSWORD
+  service:
+    port: 5432
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  podSecurityContext:
+    fsGroup: 999
+  securityContext: {}
+
+# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
+# Use Temporal Cloud, an existing Temporal endpoint, or the official Temporal chart for production.
+temporal:
+  enabled: false
+  image:
+    repository: temporalio/auto-setup
+    tag: "1.28"
+    pullPolicy: IfNotPresent
+  service:
+    port: 7233
+  postgres:
+    host: ""
+    port: 5432
+    username: opengeni
+    existingSecret: ""
+    passwordKey: POSTGRES_PASSWORD
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+  podSecurityContext:
+    runAsNonRoot: false
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+
+# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
+# Use Azure Blob, AWS S3, GCS, or another production object-store integration for production.
+minio:
+  enabled: false
+  image:
+    repository: minio/minio
+    tag: RELEASE.2025-09-07T16-13-09Z
+    pullPolicy: IfNotPresent
+  mcImage:
+    repository: minio/mc
+    tag: RELEASE.2025-08-13T08-35-41Z
+    pullPolicy: IfNotPresent
+  auth:
+    rootUser: minioadmin
+    rootPassword: minioadmin
+    existingSecret: ""
+    accessKeyKey: MINIO_ROOT_USER
+    secretKeyKey: MINIO_ROOT_PASSWORD
+  bucket: opengeni-files
+  publicEndpoint: ""
+  sandboxEndpoint: ""
+  corsAllowOrigin: ""
+  service:
+    apiPort: 9000
+    consolePort: 9001
+  persistence:
+    enabled: true
+    size: 20Gi
+    storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: opengeni.local
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+          # Optional. Defaults to the http service port. Set to api for MinIO/S3-compatible preview bucket paths.
+          portName: http
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
+          pathType: Exact
+          service: api
+        # The self-hosted agent install surface (get.<domain>). The API serves the
+        # committed install scripts AND the per-SHA baked opengeni-agent binaries
+        # from /agent/*; these MUST route to api, not fall through to the web SPA.
+        # The install bodies + agent binaries carry no secrets and are auth-exempt.
+        - path: /install.sh
+          pathType: Exact
+          service: api
+        - path: /install.ps1
+          pathType: Exact
+          service: api
+        - path: /uninstall.sh
+          pathType: Exact
+          service: api
+        - path: /opengeni-agent-minisign.pub
+          pathType: Exact
+          service: api
+        - path: /agent
+          pathType: Prefix
+          service: api
+  tls: []
+  # A SECOND, un-gated Ingress for the same host(s) that exposes ONLY the
+  # unauthenticated-by-design public paths. Used by edge-gated deployments
+  # (e.g. the preview environment, whose primary Ingress sits behind nginx
+  # basic-auth) so that a fresh, un-credentialed machine can still
+  # `curl -fsSL https://<host>/install.sh | sh` and complete device-flow
+  # enrollment, while the web app and the rest of the API stay gated.
+  #
+  # ingress-nginx merges Ingresses by host and applies auth per location, so the
+  # more-specific paths listed here win and are served WITHOUT the primary
+  # Ingress's auth annotations. Keep this set MINIMAL — anything added here is
+  # publicly reachable. Disabled by default (only edge-gated deployments need it).
+  publicIngress:
+    enabled: false
+    # No auth annotations here by design. cert-manager / proxy tuning may be set
+    # by the deployment if this Ingress owns its own TLS entry (otherwise it
+    # shares the primary Ingress's already-issued host cert).
+    annotations: {}
+    hosts:
+      - host: opengeni.local
+        paths:
+          # Installer scripts + the pinned minisign public key (served verbatim,
+          # no secrets) — the `curl | sh` entry point and its trust root.
+          - path: /install.sh
+            pathType: Exact
+            service: api
+          - path: /install.ps1
+            pathType: Exact
+            service: api
+          - path: /uninstall.sh
+            pathType: Exact
+            service: api
+          - path: /opengeni-agent-minisign.pub
+            pathType: Exact
+            service: api
+          # Release-asset redirects the installer follows (302 → GitHub Releases).
+          - path: /agent/latest
+            pathType: Prefix
+            service: api
+          - path: /agent/v
+            pathType: Prefix
+            service: api
+          # Device-flow enrollment BOOTSTRAP endpoints a not-yet-credentialed
+          # machine calls (POST). The user-authenticated approve/list/revoke
+          # routes live under different paths and stay on the gated Ingress.
+          - path: /v1/enrollments/device/start
+            pathType: Exact
+            service: api
+          - path: /v1/enrollments/device/poll
+            pathType: Exact
+            service: api
+    tls: []
+
+# Disposable dependency fixture for local Kubernetes, CI, previews, and smoke tests.
+# Use an existing NATS endpoint or the official NATS chart for production.
+nats:
+  enabled: false
+  url: ""
+  image:
+    repository: nats
+    tag: "2-alpine"
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+  clientPort: 4222
+  monitorPort: 8222
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  # The bring-your-own-compute tenancy boundary (M-AUTH; NATS
+  # Accounts + §17). When enabled, the chart-managed nats fixture runs the
+  # auth-callout config (deploy/nats/auth-callout.conf is the version-controlled
+  # source of truth) with a websocket listener the agents dial over wss through
+  # the ingress. The control plane (api/worker) + the callout responder
+  # authenticate directly with the control/auth users; every enrolled agent is
+  # delegated to the callout responder, which mints a per-workspace-scoped user
+  # JWT. The secret VALUES (callout issuer public key, control/auth passwords)
+  # come from the runtime secret via env-var expansion — never the configmap.
+  #
+  # Production typically runs NATS outside this chart (nats.enabled=false) and
+  # folds the SAME auth-callout.conf into the platform NATS StatefulSet. This
+  # block is the in-chart fixture for preview/smoke + the documented config shape.
+  authCallout:
+    enabled: false
+    # The websocket listener port (TLS terminates at the ingress; no_tls here).
+    websocketPort: 8443
+    websocketSameOrigin: false
+    # The shared application account + the two direct-auth users. Match the
+    # control-plane env (OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_NAME / _USER /
+    # _CONTROL_USER) and the responder's expectations.
+    account: APP
+    controlUser: control
+    calloutUser: auth
+    # The runtime-secret keys the callout issuer public key + the two passwords
+    # are read from. The issuer is the PUBLIC half of the callout account seed
+    # (OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED); the chart wires the public
+    # key (not the seed) into nats-server. The control plane separately holds the
+    # seed (to sign user JWTs) via the runtime secret read by the api/worker.
+    calloutPublicKeySecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY
+    controlPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD
+    calloutPasswordSecretKey: OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD
+
+# Bring-your-own-compute (selfhosted SandboxBackend) NON-SECRET wiring threaded
+# into the api/worker configmap. The SECRET values live in the runtime secret
+# (see the DEPLOY NOTES / secret keys below). Disabled by default so existing
+# deploys are completely unaffected. To enable the feature end-to-end set
+# selfhosted.enabled=true, relay.enabled=true, nats.authCallout.enabled=true (or
+# point at an external NATS with the callout config), add the ingress relay+nats
+# hosts, and provision the runtime-secret keys.
+selfhosted:
+  enabled: false
+  # The public wss URLs the agent dials (must match the ingress hosts below).
+  natsUrl: ""   # e.g. wss://nats.opengeni.ai
+  relayUrl: ""  # e.g. wss://relay.opengeni.ai
+  # The NATS callout account + user NAMES the control plane uses (must match the
+  # nats.authCallout block). Non-secret; the seeds/passwords are in the secret.
+  natsCalloutAccountName: APP
+  natsControlUser: control
+  natsCalloutUser: auth
+
+# Optional self-hosted HashiCorp Terraform MCP server. Agents reach it by adding
+# an OPENGENI_MCP_SERVERS entry that points at
+# http://<fullname>-terraform-mcp:8080/mcp, then selecting it for a session with
+# an explicit {kind:mcp,id} ToolRef. This is Terraform Registry docs only; no
+# Terraform Enterprise token is wired.
+terraformMcp:
+  enabled: false
+  image:
+    repository: hashicorp/terraform-mcp-server
+    tag: "1.0.0"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+    path: /metrics
+  serviceMonitor:
+    # Optional Prometheus Operator ServiceMonitors for api/worker/relay. The
+    # template is also guarded on monitoring.coreos.com/v1 being installed.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+  prometheusRule:
+    # Optional Prometheus Operator starter alerts. The template is also guarded
+    # on monitoring.coreos.com/v1 being installed.
+    enabled: false
+    labels: {}
+    annotations: {}
+    rules: []
+  otel:
+    enabled: false
+    endpoint: ""
+  collector:
+    enabled: false
+    image:
+      repository: otel/opentelemetry-collector-contrib
+      tag: "0.139.0"
+      pullPolicy: IfNotPresent
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    config: ""

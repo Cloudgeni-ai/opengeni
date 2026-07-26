@@ -1,0 +1,68 @@
+# Example values for the upstream Temporal Helm chart used by the OpenGeni
+# stack wrapper. This file is intentionally not part of the OpenGeni
+# application chart and contains no real secrets.
+#
+# Source chart: https://go.temporal.io/helm-charts
+#
+# Before installing:
+# 1. Replace the two connectAddr values with the managed/customer Postgres host.
+# 2. Create the `temporal` and `temporal_visibility` databases.
+# 3. Create the Kubernetes Secret referenced below:
+#    kubectl -n opengeni-platform create secret generic opengeni-temporal-postgres \
+#      --from-literal=password="$TEMPORAL_POSTGRES_PASSWORD"
+#
+# For managed PostgreSQL services that require TLS, prefer generating a private
+# values file with `bun run deployment:temporal-values` and set:
+#   TEMPORAL_POSTGRES_TLS_ENABLED=true
+#   TEMPORAL_POSTGRES_TLS_CA_FILE=/etc/opengeni/postgres-ca/ca.pem
+#   TEMPORAL_POSTGRES_TLS_CA_CONFIG_MAP_NAME=<private-ca-configmap>
+
+server:
+  replicaCount: 1
+  config:
+    persistence:
+      defaultStore: default
+      visibilityStore: visibility
+      numHistoryShards: 128
+      datastores:
+        default:
+          sql:
+            createDatabase: true
+            manageSchema: true
+            pluginName: postgres12
+            driverName: postgres12
+            databaseName: temporal
+            connectAddr: temporal-postgres.example.internal:5432
+            connectProtocol: tcp
+            user: opengeni
+            existingSecret: opengeni-temporal-postgres
+            secretKey: password
+            maxConns: 20
+            maxIdleConns: 20
+            maxConnLifetime: 1h
+        visibility:
+          sql:
+            createDatabase: true
+            manageSchema: true
+            pluginName: postgres12
+            driverName: postgres12
+            databaseName: temporal_visibility
+            connectAddr: temporal-postgres.example.internal:5432
+            connectProtocol: tcp
+            user: opengeni
+            existingSecret: opengeni-temporal-postgres
+            secretKey: password
+            maxConns: 20
+            maxIdleConns: 20
+            maxConnLifetime: 1h
+  metrics:
+    annotations:
+      enabled: true
+
+web:
+  enabled: false
+
+schema:
+  useHelmHooks: true
+  backoffLimit: 100
+  ttlSecondsAfterFinished: 86400

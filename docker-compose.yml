@@ -1,0 +1,99 @@
+name: opengeni
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: opengeni
+      POSTGRES_USER: opengeni
+      POSTGRES_PASSWORD: opengeni
+    ports:
+      - "${OPENGENI_POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opengeni -d opengeni"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  nats:
+    image: nats:2-alpine
+    command: ["-m", "8222"]
+    ports:
+      - "${OPENGENI_NATS_HOST_PORT:-4222}:4222"
+      - "${OPENGENI_NATS_MONITOR_HOST_PORT:-8222}:8222"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8222/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:1.28
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1,postgres,temporal,frontend,history,matching,worker"
+      no_proxy: "localhost,127.0.0.1,postgres,temporal,frontend,history,matching,worker"
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: opengeni
+      POSTGRES_PWD: opengeni
+      POSTGRES_SEEDS: postgres
+      BIND_ON_IP: 0.0.0.0
+      DYNAMIC_CONFIG_FILE_PATH: config/dynamicconfig/docker.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "${OPENGENI_TEMPORAL_HOST_PORT:-7233}:7233"
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "${OPENGENI_MINIO_HOST_PORT:-9000}:9000"
+      - "${OPENGENI_MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      ALL_PROXY: ""
+      http_proxy: ""
+      https_proxy: ""
+      all_proxy: ""
+      NO_PROXY: "localhost,127.0.0.1,minio"
+      no_proxy: "localhost,127.0.0.1,minio"
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "for i in $$(seq 1 30); do
+         mc alias set local http://minio:9000 minioadmin minioadmin &&
+         mc mb --ignore-existing local/opengeni-files &&
+         exit 0;
+         sleep 2;
+       done;
+       exit 1"
+
+volumes:
+  postgres-data:
+  minio-data:

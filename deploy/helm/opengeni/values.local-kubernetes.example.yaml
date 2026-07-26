@@ -1,0 +1,99 @@
+# Local Kubernetes conformance profile. This file is intentionally self-contained
+# and uses disposable in-cluster fixtures; do not use it as a production values file.
+
+global:
+  # Locally-built images (tag local-k8s) are loaded straight into the cluster,
+  # so opt out of the chart's public GHCR default and use bare image names.
+  imageRegistry: ""
+
+api:
+  replicaCount: 1
+  image:
+    repository: opengeni-api
+    tag: local-k8s
+    pullPolicy: IfNotPresent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+
+worker:
+  image:
+    repository: opengeni-worker
+    tag: local-k8s
+    pullPolicy: IfNotPresent
+  command: ["bun", "packages/testing/src/e2e-worker.ts"]
+  control:
+    replicaCount: 1
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+  turns:
+    replicaCount: 1
+    strategy:
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 0
+        maxUnavailable: 1
+
+web:
+  replicaCount: 1
+  image:
+    repository: opengeni-web
+    tag: local-k8s
+    pullPolicy: IfNotPresent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
+
+migrations:
+  image:
+    repository: opengeni-api
+    tag: local-k8s
+    pullPolicy: IfNotPresent
+  backoffLimit: 12
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime-local-k8s
+
+config:
+  OPENGENI_ENVIRONMENT: local-kubernetes
+  OPENGENI_AUTH_REQUIRED: "true"
+  OPENGENI_AUTH_ALLOW_HEALTH: "true"
+  OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_SANDBOX_BACKEND: none
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+postgres:
+  enabled: true
+  persistence:
+    size: 2Gi
+
+temporal:
+  enabled: true
+
+nats:
+  enabled: true
+
+minio:
+  enabled: true
+  persistence:
+    size: 2Gi
+
+ingress:
+  enabled: false
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  otel:
+    enabled: false
+  collector:
+    enabled: false

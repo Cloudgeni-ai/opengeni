@@ -1,0 +1,48 @@
+{{- if and .Values.networkPolicy.enabled .Values.nats.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "opengeni.fullname" . }}-nats
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "opengeni.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: nats
+  policyTypes:
+    - Ingress
+  ingress:
+    # The control plane (api = callout responder + control RPC, worker = event
+    # bus + control RPC) reaches NATS in-cluster on the client + monitor ports.
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: api
+        - podSelector:
+            matchLabels:
+              {{- include "opengeni.selectorLabels" . | nindent 14 }}
+            matchExpressions:
+              - key: opengeni.ai/worker-role
+                operator: Exists
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nats.clientPort }}
+        - protocol: TCP
+          port: {{ .Values.nats.monitorPort }}
+    {{- if .Values.nats.authCallout.enabled }}
+    # The enrolled agents dial the websocket listener over wss through the ingress
+    # controller (symmetric with the relay) — the per-workspace tenancy boundary
+    # is the callout-minted user JWT subject scope, not network reachability.
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.namespaceSelector | nindent 12 }}
+          podSelector:
+            {{- toYaml .Values.networkPolicy.ingressController.podSelector | nindent 12 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.nats.authCallout.websocketPort }}
+    {{- end }}
+{{- end }}

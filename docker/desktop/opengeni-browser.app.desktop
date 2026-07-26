@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=OpenGeni Browser
+GenericName=Web Browser
+Comment=Container-safe Chrome for the OpenGeni sandbox desktop
+Exec=/usr/local/bin/opengeni-browser %U
+Terminal=false
+Icon=web-browser
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;x-scheme-handler/http;x-scheme-handler/https;x-scheme-handler/about;x-scheme-handler/unknown;
+StartupNotify=true

@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter/wght.css";
+@import "@fontsource-variable/jetbrains-mono/wght.css";
+@import "../styles/index.css";
+
+@source "../src";
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--og-color-bg);
+  color: var(--og-color-fg);
+  font-family: var(--og-font-sans);
+}

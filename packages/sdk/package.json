@@ -1,0 +1,45 @@
+{
+  "name": "@opengeni/sdk",
+  "version": "0.23.0",
+  "description": "Framework-agnostic TypeScript SDK for the OpenGeni API: typed client, session lifecycle, SSE event streaming with reconnect + replay-by-sequence, and proxy re-streaming helpers.",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Cloudgeni-ai/opengeni.git",
+    "directory": "packages/sdk"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./src/index.ts",
+  "module": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "build": "tsup",
+    "prepublishOnly": "bash ../../scripts/prepublish-guard"
+  },
+  "devDependencies": {
+    "@opengeni/contracts": "workspace:*",
+    "@opengeni/deployment": "workspace:*",
+    "tsup": "^8.5.0",
+    "typescript": "^6.0.3",
+    "zod": "^4.2.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,17 @@
+title = "OpenGeni gitleaks allowlist"
+
+[[allowlists]]
+description = "Deployment object-storage API enum value, not a credential"
+regexes = [
+  '''api(:| ==| ===) "s3-compatible"''',
+  '''object_storage\.api == "s3-compatible"'''
+]
+
+[[allowlists]]
+description = "Dummy private key text used only as deployment renderer fixture input"
+paths = [
+  '''packages/deployment/test/deployment\.test\.ts'''
+]
+regexes = [
+  '''-----BEGIN PRIVATE KEY-----\\ntest\\n-----END PRIVATE KEY-----'''
+]

@@ -1,0 +1,60 @@
+project_id       = "opengeni-project"
+name_prefix      = "opengeni-example"
+region           = "us-central1"
+zone             = "us-central1-a"
+deployment_phase = "bootstrap"
+
+gke = {
+  deletion_protection = false
+  node_count          = 1
+  min_node_count      = 1
+  max_node_count      = 2
+  # Optional: constrain a regional cluster's node pool to specific zones for
+  # short-lived evaluation stacks. Omit for multi-zone production resilience.
+  # node_locations = ["us-central1-a"]
+}
+
+labels = {
+  environment = "example"
+  lifecycle   = "temporary"
+}
+
+artifact_registry_writer_members = [
+  "serviceAccount:ci-image-writer@opengeni-project.iam.gserviceaccount.com",
+]
+
+gke_admin_members = [
+  "serviceAccount:platform-operator@opengeni-project.iam.gserviceaccount.com",
+]
+
+kubernetes_workload_identity = {
+  namespace       = "opengeni-gcp"
+  service_account = "opengeni-gcp"
+}
+
+postgres = {
+  mode = "external"
+  private_ip_enabled  = true
+  edition             = "ENTERPRISE"
+  availability_type   = "REGIONAL"
+  # existing_host = "postgres.example.com"
+}
+
+temporal = {
+  mode = "officialChart"
+  # Use mode = "external" plus existing_host for Temporal Cloud or customer Temporal.
+  # existing_host = "temporal.example.com:7233"
+  namespace  = "default"
+  task_queue = "opengeni-runs-ts"
+}
+
+object_storage = {
+  mode          = "managed"
+  force_destroy = true
+  # Required for direct browser uploads to signed GCS URLs. Prefer exact
+  # HTTPS app origins; "*" is acceptable only for short-lived private evaluation stacks.
+  cors_allowed_origins = ["https://opengeni.example.com"]
+
+  # In external mode, set bucket to an existing GCS bucket name.
+  # bucket = "existing-opengeni-files"
+}

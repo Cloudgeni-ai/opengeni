@@ -1,0 +1,41 @@
+# Values for the upstream NATS Helm chart used by the OpenGeni stack wrapper.
+# This file is intentionally not part of the OpenGeni application chart.
+#
+# Source chart: https://nats-io.github.io/k8s/helm/charts
+
+config:
+  cluster:
+    enabled: false
+  jetstream:
+    enabled: false
+  merge:
+    http: 8222
+
+service:
+  enabled: true
+  ports:
+    nats:
+      enabled: true
+    monitor:
+      enabled: true
+    leafnodes:
+      enabled: false
+    websocket:
+      enabled: false
+    mqtt:
+      enabled: false
+
+container:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+podDisruptionBudget:
+  enabled: false
+
+natsBox:
+  enabled: false

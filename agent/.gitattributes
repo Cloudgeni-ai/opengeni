@@ -1,0 +1,14 @@
+# Committed test fixtures are byte-exact and verified across languages and OSes:
+#
+#   * opengeni-agent-update/tests/fixtures — signed release artifacts whose bytes
+#     are checked by the update flow's sha256 checksum gate AND its minisign
+#     signature gate (flow.rs). A single changed byte fails both gates.
+#   * opengeni-relay/tests/fixtures, agent-proto cross-stack fixtures — TS↔Rust
+#     token / encoding parity vectors compared byte-for-byte.
+#
+# Git's automatic CRLF translation (the GitHub-hosted Windows runner ships
+# core.autocrlf=true) rewrites the line endings of these LF text files on
+# checkout, changing their bytes and breaking the byte-exact checks — which is
+# exactly what failed the windows-latest Agent CI leg. Treat every committed
+# fixture as binary so the working tree is identical on every OS.
+**/tests/fixtures/** -text

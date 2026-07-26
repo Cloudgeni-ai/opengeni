@@ -1,0 +1,113 @@
+global:
+  imageRegistry: "GCP_REGION-docker.pkg.dev/GCP_PROJECT/opengeni"
+
+api:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:API_IMAGE_DIGEST"
+
+worker:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:WORKER_IMAGE_DIGEST"
+
+web:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:WEB_IMAGE_DIGEST"
+
+migrations:
+  image:
+    tag: "RELEASE_TAG"
+    digest: "sha256:API_IMAGE_DIGEST"
+
+serviceAccount:
+  automountServiceAccountToken: true
+  annotations:
+    iam.gke.io/gcp-service-account: "opengeni-runtime@GCP_PROJECT.iam.gserviceaccount.com"
+
+secret:
+  create: false
+  existingSecret: opengeni-runtime
+
+externalSecret:
+  enabled: true
+  secretStoreRef:
+    name: gcp-secrets
+    kind: ClusterSecretStore
+  dataFrom:
+    - extract:
+        key: opengeni-runtime
+
+networkPolicy:
+  enabled: true
+
+postgres:
+  enabled: false
+
+temporal:
+  # Production should use Temporal Cloud, an existing endpoint, or the official
+  # Temporal chart managed by the stack wrapper outside OpenGeni's chart.
+  # Set true only for smoke.
+  enabled: false
+
+nats:
+  # Production should use an existing NATS endpoint or the official NATS chart
+  # managed by the stack wrapper outside OpenGeni's chart.
+  # Set true only for local/preview/cloud smoke fixtures.
+  enabled: false
+  url: "nats://opengeni-nats.opengeni-platform.svc.cluster.local:4222"
+
+minio:
+  enabled: false
+
+config:
+  OPENGENI_SERVICE_NAME: opengeni
+  OPENGENI_ENVIRONMENT: gcp-managed
+  OPENGENI_API_HOST: 0.0.0.0
+  OPENGENI_API_PORT: "8000"
+  OPENGENI_TEMPORAL_HOST: opengeni-temporal-frontend.opengeni-platform.svc.cluster.local:7233
+  OPENGENI_TEMPORAL_NAMESPACE: default
+  OPENGENI_TEMPORAL_TASK_QUEUE: opengeni-runs-ts
+  OPENGENI_AUTH_REQUIRED: "true"
+  OPENGENI_AUTH_ALLOW_HEALTH: "true"
+  OPENGENI_AUTH_ALLOW_METRICS: "false"
+  OPENGENI_WEB_ALLOWED_HOSTS: opengeni.example.com
+  OPENGENI_OBJECT_STORAGE_BACKEND: gcs
+  OPENGENI_OBJECT_STORAGE_BUCKET: opengeni-files
+  OPENGENI_OBJECT_STORAGE_GCS_PROJECT_ID: GCP_PROJECT
+  OPENGENI_SANDBOX_BACKEND: none
+  OPENGENI_SANDBOX_PREPARATION_PROFILES: none
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+  hosts:
+    - host: opengeni.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: web
+        - path: /v1
+          pathType: Prefix
+          service: api
+        - path: /healthz
+          pathType: Exact
+          service: api
+        - path: /metrics
+          pathType: Exact
+          service: api
+
+observability:
+  structuredLogs: true
+  metrics:
+    enabled: true
+  otel:
+    enabled: true
+    endpoint: ""
+  collector:
+    enabled: true

@@ -1,0 +1,42 @@
+{{- if and .Values.relay.enabled .Values.relay.autoscaling.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "opengeni.fullname" . }}-relay
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: relay
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "opengeni.fullname" . }}-relay
+  minReplicas: {{ .Values.relay.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.relay.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.relay.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if .Values.relay.autoscaling.targetMemoryUtilizationPercentage }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.relay.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+    {{- with .Values.relay.autoscaling.customMetrics }}
+    # Optional custom/external metrics — the relay scales best on live-channel
+    # count or spliced-bandwidth (opengeni_relay_live_channels /
+    # opengeni_relay_bytes_*_total) once a Prometheus adapter exposes them. Wired
+    # values-gated so the default cpu+memory HPA needs no metrics adapter.
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.relay.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
