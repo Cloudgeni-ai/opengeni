@@ -674,6 +674,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | Build / test / release tooling                                              | `package.json`, `.changeset/config.json`, `.github/workflows/`                                                                                                                                                                                              | [`../AGENTS.md`](../AGENTS.md) Verification                                        |
 | The web console                                                             | `apps/web/src/App.tsx`, `apps/web/src/context.tsx`                                                                                                                                                                                                          | [`command-palette.md`](command-palette.md)                                         |
 
+
 ---
 
 ## 14. Map of all docs
@@ -704,6 +705,7 @@ A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile 
 | [`../README.md`](../README.md)                                   | Product framing, the rendered architecture diagram, public route/env surface, quick start.                                                                                                            |
 | [`../SECURITY.md`](../SECURITY.md)                               | Security policy, the workspace access boundary, RLS posture, credential-injection caution.                                                                                                            |
 
+
 ---
 
 ## 15. Keeping this current
@@ -720,3 +722,4 @@ You **must** update this file (and the relevant topic doc) in the same PR when y
 What this doc **must never become**: a second source of truth for route lists, env defaults, table names, enum members, or permission names. Those live in code (`contracts`/`config`/`core`/`db`/`api`); this doc names _where_ they live and _why they matter_ — it deliberately follows them. If you find a list here drifting from code, delete or correct it rather than letting it lie.
 
 When in doubt, prefer **omission over invention**: an empty cell that points at the canonical source is better than a confident-but-wrong line that sends the next agent to the wrong file.
+
