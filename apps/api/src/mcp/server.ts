@@ -109,6 +109,8 @@ import {
   controlAgentSessionWorkstream,
   controlHumanSessionWorkstream,
   createSessionForRequest,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
@@ -1583,6 +1585,9 @@ function registerWorkspaceOrchestrationTools(
           // Workspace-scoped CREATE idempotency key: a retried session_create with
           // the same key returns the already-spawned worker instead of a duplicate.
           idempotencyKey: z4.string().min(1).max(200).optional(),
+          // Per-session/agent descendant policy. Reductions need only create;
+          // increases are authorized server-side with workspace:admin.
+          maxNestedAgentDepth: z4.number().int().nonnegative().optional(),
           // First-party MCP token permissions for the spawned session; every
           // permission must be held by this grant (validated in the domain).
           // A goal requires goals:manage in the resulting set; it is never
@@ -1627,11 +1632,21 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async (args) => {
-        if (callerSessionId !== null) {
-          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+        try {
+          if (callerSessionId !== null) {
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+          }
+          const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
+          return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
+        } catch (error) {
+          if (error instanceof SessionSpawnDeniedError) {
+            return {
+              ...json(sessionSpawnDenialEnvelope(error)),
+              isError: true,
+            };
+          }
+          throw error;
         }
-        const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
-        return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
       },
     );
   }
