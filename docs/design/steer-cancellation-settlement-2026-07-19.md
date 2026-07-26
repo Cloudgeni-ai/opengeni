@@ -35,6 +35,36 @@ the fenced queued replacement remains unadmitted. The exact-head run completed i
 controls pass by asserting broken pre-fix states; they do not claim cancellation
 settlement is implemented.
 
+### Current-main reconciliation
+
+The historical observations above are preserved as incident evidence. This PR
+is now reconciled onto current `main` at
+`99709248dba838b7df60becf5b79af113d4ef085`; the current v2 workflow and
+projections intentionally change several expected assertions in the fixture:
+
+- `session-attempt-quiescence-v2` requests `TRY_CANCEL` and may close its
+  bounded cancellation wait without physical quiescence. The exact
+  `reportCancellation` probe therefore proves Temporal terminalization and
+  stale-activity heartbeat rejection, but never supplies `quiesced_at` or
+  replacement admission.
+- While the Agent Steer remains actionable, wake delivery returns
+  `{ action: "pending_admission", blocker: "pending_agent_steer" }`. The
+  wake remains undelivered (`deliveredRevision < wakeRevision`) rather than
+  becoming an exhausted `4 / 4` wake.
+- The current queue projection reports `stoppingPreviousAttempt=true` while
+  the latest attempt has `quiesced_at=NULL`, even though Agent Steer creates no
+  visible user/API queue item.
+- The heartbeat-timeout control now asserts bounded workflow completion, the
+  still-running local activity body, stale by-ID heartbeat rejection, and
+  `control-pending` replacement-claim rejection. It does not expect a
+  `FAILED` workflow, wake exhaustion, replacement dispatch, or model call.
+
+Thus, phrases later in this record such as “workflow `FAILED`”, “wake
+exhausted”, or “the replacement runs” describe the historical pre-reconciliation
+controls or the future post-fix contract only when explicitly labeled; they are
+not claims about the current-main fixture. The adapted fixture remains an
+evidence-only lane and does not modify runtime code.
+
 Implementation is intentionally blocked from the overlapping runtime and
 database files until the OPE-63 and OPE-73 final reviewed heads land and root
 serializes the OPE-59 integration. Their owners supplied the typed boundaries

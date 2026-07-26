@@ -284,12 +284,16 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         expect(steered.interruptionCount).toBe(1);
         expect(steered.wakeRevision).toBeGreaterThan(0);
         await handle.signal("sessionControl");
-        await markSessionWorkflowWakeDelivered(dbClient.db, {
+        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId: target.id,
           temporalWorkflowId: workflowId,
           wakeRevision: steered.wakeRevision,
+        });
+        expect(wakeDelivery).toEqual({
+          action: "pending_admission",
+          blocker: "pending_agent_steer",
         });
 
         // The workflow logically settles Steer before waiting forever for the
@@ -358,10 +362,9 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
           1,
         );
         expect(updates.every((update) => update.state === "pending")).toBe(true);
-        // Agent Steer has no visible user/API replacement row yet, so the
-        // public queue currently reports no stop even though Temporal and the
-        // attempt receipt below prove that the predecessor is not quiesced.
-        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: false });
+        // Agent Steer has no visible user/API replacement row yet, but the
+        // latest interruption still truthfully reports the unquiesced fence.
+        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
         expect(rows.attempt).toMatchObject({
           state: "closed",
           outcome: "superseded",
@@ -372,7 +375,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
           kind: "steer",
           state: "settled",
         });
-        expect(rows.wake?.wakeRevision).toBe(rows.wake?.deliveredRevision);
+        expect(rows.wake?.deliveredRevision).toBeLessThan(rows.wake?.wakeRevision ?? 0);
 
         let workflowSettled = false;
         const workflowResult = handle.result().finally(() => {
@@ -381,9 +384,9 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         await Bun.sleep(300);
         expect(workflowSettled).toBe(false);
 
-        // Terminalize only this exact Temporal activity. This must release the
-        // workflow's WAIT_CANCELLATION_COMPLETED promise without terminating
-        // the workflow itself.
+        // Terminalize only this exact Temporal activity. This proves that
+        // Temporal transport state can change independently of the local
+        // activity body and must not be treated as a quiescence receipt.
         const fullActivityId = {
           workflowId,
           runId: handle.firstExecutionRunId,
@@ -410,21 +413,21 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         const beatsAtTemporalTerminalization = heartbeats;
         await waitFor(() => heartbeats >= beatsAtTemporalTerminalization + 3);
 
-        // The workflow must progress naturally after exact terminalization;
-        // terminating it here would hide the production deadlock boundary.
+        // The receipt-gated workflow may close after its bounded cancellation
+        // wait, but exact Temporal terminalization must not admit replacement
+        // work while the local activity body is still running.
         const workflowProgress = await Promise.race([
           workflowResult.then(() => "settled" as const),
           Bun.sleep(15_000).then(() => "timed_out" as const),
         ]);
         expect(workflowProgress).toBe("settled");
         expect(workflowSettled).toBe(true);
-        expect(replacementDispatches).toBe(1);
-        expect(model.calls).toBe(1);
+        expect(replacementDispatches).toBe(0);
+        expect(model.calls).toBe(0);
 
-        // This records a second current defect rather than endorsing it: the
-        // workflow fallback equates Temporal's cancellation result with a
-        // physical stop and writes quiesced_at even though the zombie proof
-        // above shows the activity body is still executing.
+        // Temporal terminalization is not physical quiescence. The predecessor
+        // remains fenced and the Steer bundle remains pending until the exact
+        // activity-owned receipt exists.
         const [finalSession, finalTurns, finalOutstandingUpdates, finalQueue, finalRows] =
           await Promise.all([
             getSession(dbClient.db, workspaceId, target.id),
@@ -451,48 +454,39 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
               return { attempts, allUpdates, interruption, wake };
             }),
           ]);
-        const replacementTurn = finalTurns.find((turn) => turn.id !== targetClaim!.turn.id);
         const terminalizedAttempt = finalRows.attempts.find(
           (attempt) => attempt.id === targetClaim!.turn.activeAttemptId,
         );
-        const replacementAttempt = finalRows.attempts.find(
-          (attempt) => attempt.turnId === replacementTurn?.id,
-        );
 
         expect(finalSession).toMatchObject({
-          status: "idle",
+          status: "queued",
           activeTurnId: null,
           queueHeadPosition: 0,
           queueTailPosition: 1,
         });
-        expect(finalTurns).toHaveLength(2);
-        expect(replacementTurn).toMatchObject({ source: "system", status: "completed" });
-        expect(finalOutstandingUpdates).toHaveLength(0);
+        expect(finalTurns).toHaveLength(1);
+        expect(finalTurns[0]).toMatchObject({
+          id: targetClaim!.turn.id,
+          status: "superseded",
+          activeAttemptId: null,
+        });
+        expect(finalOutstandingUpdates).toHaveLength(7);
         expect(finalRows.allUpdates).toHaveLength(7);
-        expect(
-          finalRows.allUpdates.every(
-            (update) =>
-              update.state === "delivered" &&
-              update.deliveredTurnId === replacementTurn?.id &&
-              update.deliveredAt !== null,
-          ),
-        ).toBe(true);
+        expect(finalRows.allUpdates.every((update) => update.state === "pending")).toBe(true);
         expect(
           finalRows.allUpdates.filter((update) => update.kind === "agent_steer_instruction"),
         ).toHaveLength(1);
-        expect(finalRows.attempts).toHaveLength(2);
+        expect(finalRows.attempts).toHaveLength(1);
         expect(terminalizedAttempt).toMatchObject({
           state: "closed",
           outcome: "superseded",
         });
-        expect(terminalizedAttempt?.quiescedAt).not.toBeNull();
-        expect(replacementAttempt).toMatchObject({
-          state: "closed",
-          outcome: "completed",
-        });
+        expect(terminalizedAttempt?.quiescedAt).toBeNull();
         expect(finalRows.interruption).toMatchObject({ kind: "steer", state: "settled" });
-        expect(finalRows.wake?.wakeRevision).toBe(finalRows.wake?.deliveredRevision);
-        expect(finalQueue).toMatchObject({ items: [], stoppingPreviousAttempt: false });
+        expect(finalRows.wake?.deliveredRevision).toBeLessThan(
+          finalRows.wake?.wakeRevision ?? 0,
+        );
+        expect(finalQueue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
       } finally {
         releaseZombie = true;
         try {
@@ -508,7 +502,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
   );
 
   test(
-    "a heartbeat timeout fails the workflow and exhausts the delivered wake without admitting the queued replacement",
+    "a heartbeat timeout leaves the receipt fence closed without admitting the queued replacement",
     async () => {
       const suffix = crypto.randomUUID();
       const access = await bootstrapWorkspace(dbClient.db, {
@@ -696,12 +690,16 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         expect(steered.interruptionCount).toBe(1);
         expect(steered.wakeRevision).toBeGreaterThan(0);
         await handle.signal("sessionControl");
-        await markSessionWorkflowWakeDelivered(dbClient.db, {
+        const wakeDelivery = await markSessionWorkflowWakeDelivered(dbClient.db, {
           accountId: grant.accountId,
           workspaceId,
           sessionId: target.id,
           temporalWorkflowId: workflowId,
           wakeRevision: steered.wakeRevision,
+        });
+        expect(wakeDelivery).toEqual({
+          action: "pending_admission",
+          blocker: "pending_agent_steer",
         });
 
         await waitFor(async () => {
@@ -715,16 +713,17 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         expect(pendingActivityId).toBeTruthy();
 
         // Stop acknowledging the server heartbeat contract without allowing
-        // the local function to settle. Temporal will fail the workflow only
-        // after its real production heartbeat timeout elapses.
+        // the local function to settle. The receipt-gated workflow closes its
+        // run after the bounded cancellation wait; it must not infer a
+        // physical stop or admit replacement work from that closure.
         stopHeartbeats = true;
         const beatsAtStop = heartbeats;
-        await expect(handle.result()).rejects.toBeDefined();
+        await handle.result();
         expect(heartbeats).toBe(beatsAtStop);
-        const failedDescription = await handle.describe();
-        expect(failedDescription.status.name).toBe("FAILED");
+        const completedDescription = await handle.describe();
+        expect(completedDescription.status.name).toBe("COMPLETED");
         expect(
-          failedDescription.raw.pendingActivities?.some(
+          completedDescription.raw.pendingActivities?.some(
             (activity) => activity.activityId === pendingActivityId,
           ) ?? false,
         ).toBe(false);
@@ -736,15 +735,15 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         };
         await expect(
           asyncCompletion.heartbeat(fullActivityId, {
-            fixtureProbe: "after-heartbeat-timeout",
+            fixtureProbe: "after-workflow-close",
           }),
         ).rejects.toBeInstanceOf(ActivityNotFoundError);
 
         // Workflow/activity terminalization still does not prove that the
         // in-process body stopped. The disposable loop remains live until the
         // fixture's exact cleanup gate is released.
-        const ticksAtWorkflowFailure = hungTicks;
-        await waitFor(() => hungTicks >= ticksAtWorkflowFailure + 3);
+        const ticksAtWorkflowClose = hungTicks;
+        await waitFor(() => hungTicks >= ticksAtWorkflowClose + 3);
 
         const rejectedReplacementAttemptId = crypto.randomUUID();
         const rejectedClaim = await claimSessionWorkForAttempt(dbClient.db, workspaceId, {
@@ -796,7 +795,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
           kind: "agent_steer_instruction",
           state: "pending",
         });
-        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: false });
+        expect(queue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
         expect(rows.attempts).toHaveLength(1);
         expect(rows.attempts[0]).toMatchObject({
           id: targetClaim!.turn.activeAttemptId,
@@ -806,12 +805,8 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
           temporalActivityId: pendingActivityId,
         });
         expect(rows.interruption).toMatchObject({ kind: "steer", state: "settled" });
-        expect(rows.wake).toMatchObject({
-          wakeRevision: steered.wakeRevision,
-          deliveredRevision: steered.wakeRevision,
-          attempts: 0,
-          lastError: null,
-        });
+        expect(rows.wake?.wakeRevision).toBeGreaterThan(rows.wake?.deliveredRevision ?? -1);
+        expect(rows.wake).toMatchObject({ attempts: 0, lastError: null });
         expect(replacementDispatches).toBe(0);
         expect(model.calls).toBe(0);
       } finally {
@@ -819,7 +814,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         try {
           await handle.terminate("OPE-75 failed-workflow fixture final cleanup");
         } catch {
-          // The workflow is expected to have failed at the heartbeat timeout.
+          // The workflow already closed after its bounded cancellation wait.
         }
         worker.shutdown();
         await workerRun;
