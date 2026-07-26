@@ -297,12 +297,11 @@ describe("nested-agent depth database admission", () => {
       returning id`;
     expect(duplicateRows).toHaveLength(0);
     expect(await count("sessions", workspace.workspaceId)).toBe(4);
-    expect(
-      await admin<{ count: number }[]>`
-        select count(*)::int as count
-        from session_create_idempotency_guard
-        where workspace_id = ${workspace.workspaceId} and idempotency_key = ${key}`,
-    ).toEqual([{ count: 1 }]);
+    const [ledgerRow] = await admin<{ count: number }[]>`
+      select count(*)::int as count
+      from session_create_idempotency_guard
+      where workspace_id = ${workspace.workspaceId} and idempotency_key = ${key}`;
+    expect(ledgerRow).toEqual({ count: 1 });
   }, 60_000);
 
   test("installs the guard before insert and cascades its ledger on workspace deletion", async () => {
