@@ -1,8 +1,4 @@
 -- deployment-mode: maintenance
--- PUBLICATION BLOCKED: this maintenance migration intentionally has no
--- executable ordinal. Reserve and assign the next coordinated ledger ordinal
--- only after reconciling concurrent migration candidates.
---
 -- This changes the waiter/worker contract in one no-overlap cutover: old
 -- workers terminally settled capacity waits, while new workers preserve the
 -- same logical turn. Do not run old and new workers concurrently.
