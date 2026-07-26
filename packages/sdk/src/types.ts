@@ -2830,6 +2830,19 @@ export type KnowledgeSourceKind =
   | "other";
 export type DocumentSearchMode = "hybrid" | "vector" | "keyword";
 
+export type DocumentVisibility = "workspace" | "private";
+
+export type DocumentCurationStatus = "none" | "pending" | "suggested" | "auto_filed" | "failed";
+
+export type DocumentCuration = {
+  suggestedBaseId: string | null;
+  suggestedBaseName: string | null;
+  confidence: number;
+  reason: string | null;
+  originalTitle: string | null;
+  model: string | null;
+};
+
 export type DocumentBase = {
   id: string;
   workspaceId: string;
@@ -2858,6 +2871,13 @@ export type Document = {
   sourceUpdatedAt: string | null;
   sourceVersion: string | null;
   aclTags: string[];
+  visibility: DocumentVisibility;
+  createdBy: string | null;
+  agentAccess: boolean;
+  summary: string | null;
+  topics: string[];
+  curationStatus: DocumentCurationStatus;
+  curation: DocumentCuration | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -2904,6 +2924,21 @@ export type AddDocumentRequest = {
   sourceUpdatedAt?: string | undefined;
   sourceVersion?: string | undefined;
   aclTags?: string[] | undefined;
+  visibility?: DocumentVisibility | undefined;
+  agentAccess?: boolean | undefined;
+};
+
+export type CreateKnowledgeDropRequest = {
+  text?: string | undefined;
+  fileId?: string | undefined;
+  filename?: string | undefined;
+  title?: string | undefined;
+  visibility?: DocumentVisibility | undefined;
+  agentAccess?: boolean | undefined;
+};
+
+export type MoveDocumentRequest = {
+  targetBaseId?: string | undefined;
 };
 
 export type DocumentSearchRequest = {

@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
   DeterministicEmbeddingProvider,
+  HeuristicCurationProvider,
   RecursiveTextChunker,
   chunkText,
   deterministicEmbedding,
   documentOpenAIEmbeddingConfig,
+  heuristicCuration,
+  parseCurationOutcome,
   parseDocumentBytes,
 } from "../src";
 
@@ -169,5 +172,92 @@ describe("documents", () => {
       baseURL: "https://example.openai.azure.com/openai/deployments/gpt-5.6-sol",
       defaultQuery: { "api-version": "2025-04-01-preview" },
     });
+  });
+});
+
+describe("document curation", () => {
+  const bases = [
+    { id: "11111111-1111-4111-8111-111111111111", name: "Engineering", description: "Eng docs" },
+    { id: "22222222-2222-4222-8222-222222222222", name: "Sales", description: null },
+  ];
+
+  test("heuristic curation names from the first meaningful line and summarizes", () => {
+    const outcome = heuristicCuration(
+      {
+        text: "# Q3 Incident Review\n\nOn July 3rd the API returned 500s for 12 minutes because...",
+        filename: "notes.txt",
+        title: "notes.txt",
+        bases,
+      },
+      "text/plain",
+    );
+    expect(outcome.title).toBe("Q3 Incident Review");
+    expect(outcome.summary).toContain("Q3 Incident Review");
+    expect(outcome.targetBaseId).toBeNull();
+    expect(outcome.confidence).toBe(0);
+  });
+
+  test("heuristic curation falls back to the current title for unusable text", () => {
+    const outcome = heuristicCuration(
+      { text: "-\n*\n>", filename: "x.bin", title: "x.bin", bases: [] },
+      "application/octet-stream",
+    );
+    expect(outcome.title).toBe("x.bin");
+  });
+
+  test("heuristic curation guesses source kind from filename/content type", async () => {
+    const provider = new HeuristicCurationProvider();
+    const transcript = await provider.curate({
+      text: "00:01 Alice: welcome everyone",
+      filename: "standup-transcript.vtt",
+      title: "standup-transcript.vtt",
+      bases: [],
+    });
+    expect(transcript.sourceKind).toBe("meeting_transcript");
+    expect(provider.model).toBe("heuristic");
+  });
+
+  test("parseCurationOutcome clamps confidence and drops unknown base ids", () => {
+    const outcome = parseCurationOutcome(
+      JSON.stringify({
+        title: "API Incident Postmortem",
+        summary: "A postmortem of the July outage.",
+        sourceKind: "document",
+        topics: ["incident", "API ", "incident"],
+        targetBaseId: "99999999-9999-4999-8999-999999999999",
+        confidence: 3.5,
+        reason: "looks like an eng doc",
+      }),
+      bases,
+    );
+    // Unknown base → no target and confidence zeroed, so no auto-file can happen.
+    expect(outcome.targetBaseId).toBeNull();
+    expect(outcome.confidence).toBe(0);
+    expect(outcome.topics).toEqual(["incident", "api"]);
+  });
+
+  test("parseCurationOutcome accepts a known base and normalizes fields", () => {
+    const outcome = parseCurationOutcome(
+      JSON.stringify({
+        title: "  Pricing Proposal  ",
+        summary: "Draft pricing for enterprise tier.",
+        sourceKind: "not-a-kind",
+        topics: "nope",
+        targetBaseId: bases[1]?.id,
+        confidence: 0.9,
+        reason: null,
+      }),
+      bases,
+    );
+    expect(outcome.title).toBe("Pricing Proposal");
+    expect(outcome.targetBaseId).toBe(bases[1]?.id ?? "");
+    expect(outcome.confidence).toBe(0.9);
+    expect(outcome.sourceKind).toBe("other");
+    expect(outcome.topics).toEqual([]);
+  });
+
+  test("parseCurationOutcome rejects non-object payloads", () => {
+    expect(() => parseCurationOutcome("[]", bases)).toThrow();
+    expect(() => parseCurationOutcome("null", bases)).toThrow("non-object");
   });
 });

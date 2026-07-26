@@ -2491,6 +2491,37 @@ export type KnowledgeSourceKind = z.infer<typeof KnowledgeSourceKind>;
 export const DocumentSearchMode = z.enum(["hybrid", "vector", "keyword"]);
 export type DocumentSearchMode = z.infer<typeof DocumentSearchMode>;
 
+// 'workspace' documents are readable by anyone with workspace access;
+// 'private' documents are readable only by the grant subject that created them.
+export const DocumentVisibility = z.enum(["workspace", "private"]);
+export type DocumentVisibility = z.infer<typeof DocumentVisibility>;
+
+// Knowledge-drop auto-curation lifecycle. 'none' = ordinary caller-described add
+// (never auto-curated). 'pending' = dropped, curation runs during indexing.
+// 'suggested' = curated but the base move was NOT applied (low confidence or
+// conflict) — the suggestion lives in Document.curation. 'auto_filed' = curated
+// and moved into the suggested base. 'failed' = curation errored (fail-soft;
+// the document still indexes and stays searchable).
+export const DocumentCurationStatus = z.enum([
+  "none",
+  "pending",
+  "suggested",
+  "auto_filed",
+  "failed",
+]);
+export type DocumentCurationStatus = z.infer<typeof DocumentCurationStatus>;
+
+// Curator audit blob persisted on the document.
+export const DocumentCuration = z.object({
+  suggestedBaseId: z.string().uuid().nullable(),
+  suggestedBaseName: z.string().nullable(),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().nullable(),
+  originalTitle: z.string().nullable(),
+  model: z.string().nullable(),
+});
+export type DocumentCuration = z.infer<typeof DocumentCuration>;
+
 export const DocumentBase = z.object({
   id: z.string().uuid(),
   workspaceId: z.string().uuid(),
@@ -2520,6 +2551,13 @@ export const Document = z.object({
   sourceUpdatedAt: z.string().nullable(),
   sourceVersion: z.string().nullable(),
   aclTags: z.array(z.string()),
+  visibility: DocumentVisibility,
+  createdBy: z.string().nullable(),
+  agentAccess: z.boolean(),
+  summary: z.string().nullable(),
+  topics: z.array(z.string()),
+  curationStatus: DocumentCurationStatus,
+  curation: DocumentCuration.nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -2569,8 +2607,34 @@ export const AddDocumentRequest = z.object({
   sourceUpdatedAt: z.string().datetime({ offset: true }).optional(),
   sourceVersion: z.string().min(1).optional(),
   aclTags: z.array(z.string().min(1)).optional(),
+  visibility: DocumentVisibility.optional(),
+  agentAccess: z.boolean().optional(),
 });
 export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
+
+// A knowledge drop: raw text or an already-uploaded file, with no required
+// metadata. The server files it into the workspace Inbox base and auto-curation
+// names, summarizes, categorizes, and (confidence permitting) moves it.
+export const CreateKnowledgeDropRequest = z
+  .object({
+    text: z.string().min(1).max(2_000_000).optional(),
+    fileId: z.string().uuid().optional(),
+    filename: z.string().min(1).optional(),
+    title: z.string().min(1).optional(),
+    visibility: DocumentVisibility.optional(),
+    agentAccess: z.boolean().optional(),
+  })
+  .refine((value) => (value.text === undefined) !== (value.fileId === undefined), {
+    message: "provide exactly one of text or fileId",
+  });
+export type CreateKnowledgeDropRequest = z.infer<typeof CreateKnowledgeDropRequest>;
+
+// Move a document (and its indexed chunks) to another base. With no explicit
+// targetBaseId, applies the document's stored curation suggestion.
+export const MoveDocumentRequest = z.object({
+  targetBaseId: z.string().uuid().optional(),
+});
+export type MoveDocumentRequest = z.infer<typeof MoveDocumentRequest>;
 
 export const DocumentSearchRequest = z.object({
   query: z.string().min(1),

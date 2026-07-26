@@ -1187,6 +1187,17 @@ export const documents = pgTable(
     sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
     sourceVersion: text("source_version"),
     aclTags: jsonb("acl_tags").$type<string[]>().notNull().default([]),
+    // Per-document access controls. visibility 'private' restricts human reads to
+    // created_by (a grant subject id, not a uuid); agent_access=false hides the
+    // document from agent retrieval surfaces (docs MCP) while humans keep REST.
+    visibility: text("visibility").notNull().default("workspace"),
+    createdBy: text("created_by"),
+    agentAccess: boolean("agent_access").notNull().default(true),
+    // Auto-curation output (knowledge drops).
+    summary: text("summary"),
+    topics: jsonb("topics").$type<string[]>().notNull().default([]),
+    curationStatus: text("curation_status").notNull().default("none"),
+    curation: jsonb("curation").$type<Record<string, unknown>>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1208,6 +1219,10 @@ export const documents = pgTable(
     sourceExternalId: index("documents_workspace_source_external_id_idx").on(
       table.workspaceId,
       table.sourceExternalId,
+    ),
+    curationStatus: index("documents_workspace_curation_status_idx").on(
+      table.workspaceId,
+      table.curationStatus,
     ),
   }),
 );

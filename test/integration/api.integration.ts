@@ -5608,6 +5608,140 @@ describe("API component integration", () => {
     expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
+  test("drops raw text into the Inbox, auto-curates it, and enforces visibility + agent access", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+
+    // Private, agent-blocked text drop: no base, no metadata — the server
+    // creates the Inbox, and heuristic curation names + summarizes it.
+    const dropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Vendor Contract Renewal\n\nThe Acme contract renews on 2026-09-01. Cancellation window is 30 days.",
+        visibility: "private",
+        agentAccess: false,
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(dropResponse.status).toBe(201);
+    const drop = (await dropResponse.json()) as {
+      id: string;
+      baseId: string;
+      status: string;
+      title: string;
+      summary: string | null;
+      curationStatus: string;
+      visibility: string;
+      agentAccess: boolean;
+      createdBy: string | null;
+      chunkCount: number;
+    };
+    expect(drop.status).toBe("ready");
+    expect(drop.title).toBe("Vendor Contract Renewal");
+    expect(drop.summary).toContain("Acme");
+    // Heuristic curator never auto-files (confidence 0) → suggestion state.
+    expect(drop.curationStatus).toBe("suggested");
+    expect(drop.visibility).toBe("private");
+    expect(drop.agentAccess).toBe(false);
+    expect(drop.createdBy).toBe("dev");
+    expect(drop.chunkCount).toBeGreaterThan(0);
+
+    const basesResponse = await app.request(workspacePath(workspaceId, "/document-bases"));
+    const bases = (await basesResponse.json()) as Array<{ id: string; name: string }>;
+    const inbox = bases.find((base) => base.name === "Inbox");
+    expect(inbox).toBeDefined();
+    expect(drop.baseId).toBe(inbox!.id);
+
+    // The creating subject still sees their private drop in list + search.
+    const inboxDocs = (await (
+      await app.request(workspacePath(workspaceId, `/document-bases/${inbox!.id}/documents`))
+    ).json()) as Array<{ id: string }>;
+    expect(inboxDocs.map((document) => document.id)).toContain(drop.id);
+    const ownerSearch = (await (
+      await app.request(workspacePath(workspaceId, "/knowledge/search"), {
+        method: "POST",
+        body: JSON.stringify({ query: "contract renews", mode: "keyword" }),
+        headers: { "content-type": "application/json" },
+      })
+    ).json()) as { results: Array<{ documentId: string }> };
+    expect(ownerSearch.results.map((result) => result.documentId)).toContain(drop.id);
+
+    // The agent retrieval surface never sees it: private AND agent-blocked.
+    const agentBlocked = await searchDocuments(dbClient.db, {
+      workspaceId,
+      query: "contract renews",
+      mode: "keyword",
+      access: { agentOnly: true },
+    });
+    expect(agentBlocked.map((result) => result.documentId)).not.toContain(drop.id);
+
+    // A default drop (workspace-visible, agents allowed) IS agent-searchable.
+    const publicDropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "Onboarding Checklist\n\nBadge, laptop, accounts, and a buddy for week one.",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(publicDropResponse.status).toBe(201);
+    const publicDrop = (await publicDropResponse.json()) as {
+      id: string;
+      visibility: string;
+      agentAccess: boolean;
+    };
+    expect(publicDrop.visibility).toBe("workspace");
+    expect(publicDrop.agentAccess).toBe(true);
+    const agentVisible = await searchDocuments(dbClient.db, {
+      workspaceId,
+      query: "onboarding checklist",
+      mode: "keyword",
+      access: { agentOnly: true },
+    });
+    expect(agentVisible.map((result) => result.documentId)).toContain(publicDrop.id);
+
+    // Filing out of the Inbox: explicit move lands the document (and its
+    // chunks) in the target base and marks it filed.
+    const contractsBase = (await (
+      await app.request(workspacePath(workspaceId, "/document-bases"), {
+        method: "POST",
+        body: JSON.stringify({ name: "Contracts" }),
+        headers: { "content-type": "application/json" },
+      })
+    ).json()) as { id: string };
+    const moveResponse = await app.request(
+      workspacePath(workspaceId, `/documents/${drop.id}/move`),
+      {
+        method: "POST",
+        body: JSON.stringify({ targetBaseId: contractsBase.id }),
+        headers: { "content-type": "application/json" },
+      },
+    );
+    expect(moveResponse.status).toBe(200);
+    const moved = (await moveResponse.json()) as { baseId: string; curationStatus: string };
+    expect(moved.baseId).toBe(contractsBase.id);
+    expect(moved.curationStatus).toBe("auto_filed");
+    const movedSearch = (await (
+      await app.request(workspacePath(workspaceId, `/document-bases/${contractsBase.id}/search`), {
+        method: "POST",
+        body: JSON.stringify({ query: "contract renews", mode: "keyword" }),
+        headers: { "content-type": "application/json" },
+      })
+    ).json()) as { results: Array<{ documentId: string; baseId: string }> };
+    expect(movedSearch.results.map((result) => result.documentId)).toContain(drop.id);
+
+    // A move without a stored target and without an explicit one is a 422.
+    const noTargetMove = await app.request(
+      workspacePath(workspaceId, `/documents/${publicDrop.id}/move`),
+      { method: "POST", body: JSON.stringify({}), headers: { "content-type": "application/json" } },
+    );
+    expect(noTargetMove.status).toBe(422);
+  });
+
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
     let indexCalls = 0;
     const app = createApp({

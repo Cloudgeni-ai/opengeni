@@ -4,8 +4,11 @@ import type {
   CreateDocumentBaseRequest,
   Document,
   DocumentBase,
+  DocumentCuration,
+  DocumentCurationStatus,
   DocumentSearchMode,
   DocumentSearchResult,
+  DocumentVisibility,
   FileAsset,
   KnowledgeSourceKind,
 } from "@opengeni/contracts";
@@ -13,7 +16,7 @@ import { requireFile, withRlsContext, withWorkspaceRls, type Database } from "@o
 import * as schema from "@opengeni/db/schema";
 import type { ObjectStorage } from "@opengeni/storage";
 import { LiteParse } from "@llamaindex/liteparse";
-import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql, type SQL } from "drizzle-orm";
 import OpenAI from "openai";
 
 export const DEFAULT_DOCUMENT_PARSER = "liteparse";
@@ -21,6 +24,17 @@ export const DEFAULT_DOCUMENT_EMBEDDING_MODEL = "text-embedding-3-large";
 export const DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS = 3072;
 export const DEFAULT_DOCUMENT_CHUNK_SIZE = 1200;
 export const DEFAULT_DOCUMENT_CHUNK_OVERLAP = 160;
+export const DEFAULT_DOCUMENT_CURATION_MODEL = "gpt-4o-mini";
+// Curator input is a preview, not the whole document — enough to name and
+// classify without paying for a full-document prompt on every drop.
+export const DOCUMENT_CURATION_MAX_INPUT_CHARS = 24_000;
+// A base move is applied automatically only at or above this curator
+// confidence; below it the suggestion is surfaced for human review instead.
+export const DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE = 0.75;
+// The per-workspace landing base for knowledge drops, created on first drop.
+export const INBOX_BASE_NAME = "Inbox";
+export const INBOX_BASE_DESCRIPTION =
+  "Landing base for dropped files and notes awaiting auto-curation review.";
 
 export type ParsedDocument = {
   text: string;
@@ -48,10 +62,55 @@ export type DocumentEmbedder = {
   embedQuery: (text: string) => Promise<number[]>;
 };
 
+export type DocumentCurationCandidateBase = {
+  id: string;
+  name: string;
+  description: string | null;
+};
+
+export type DocumentCurationInput = {
+  /** Parsed document text, clipped to DOCUMENT_CURATION_MAX_INPUT_CHARS. */
+  text: string;
+  filename: string;
+  /** Current (usually filename-derived) title. */
+  title: string;
+  /** Candidate bases the document could be filed into (never the inbox itself). */
+  bases: DocumentCurationCandidateBase[];
+};
+
+export type DocumentCurationOutcome = {
+  title: string | null;
+  summary: string | null;
+  sourceKind: KnowledgeSourceKind | null;
+  topics: string[];
+  targetBaseId: string | null;
+  confidence: number;
+  reason: string | null;
+};
+
+export type DocumentCurator = {
+  model: string;
+  curate: (input: DocumentCurationInput) => Promise<DocumentCurationOutcome>;
+};
+
 export type DocumentServices = {
   parser: DocumentParser;
   chunker: DocumentChunker;
   embedder: DocumentEmbedder;
+  /** Optional: names/summarizes/categorizes dropped documents during indexing. */
+  curator?: DocumentCurator | undefined;
+};
+
+/**
+ * Read-scoping for document queries. Fail-closed: when a caller supplies no
+ * filter, private documents are invisible (only their creator may see them,
+ * and only by passing their subject id).
+ */
+export type DocumentAccessFilter = {
+  /** Grant subject id of the human viewer; null/undefined hides private docs. */
+  viewerSubjectId?: string | null | undefined;
+  /** Agent retrieval surface: only workspace-visible, agent-enabled documents. */
+  agentOnly?: boolean | undefined;
 };
 
 export type DocumentSearchInput = {
@@ -62,6 +121,7 @@ export type DocumentSearchInput = {
   mode?: DocumentSearchMode | undefined;
   sourceKinds?: KnowledgeSourceKind[] | undefined;
   aclTags?: string[] | undefined;
+  access?: DocumentAccessFilter | undefined;
 };
 
 export type DocumentIndexHooks = {
@@ -221,6 +281,169 @@ export class DeterministicEmbeddingProvider implements DocumentEmbedder {
   }
 }
 
+/**
+ * Deterministic no-network curation: first meaningful line becomes the title,
+ * the opening text becomes the summary, and the kind is guessed from the
+ * filename/content type. Never proposes a base move (confidence 0). Used as
+ * the `heuristic` provider and as the in-pipeline fallback when the LLM
+ * curator fails — a drop must always end up named and summarized.
+ */
+export function heuristicCuration(
+  input: DocumentCurationInput,
+  contentType = "application/octet-stream",
+): DocumentCurationOutcome {
+  const firstLine = input.text
+    .split("\n")
+    .map((line) => line.replace(/^[#>\s*-]+/, "").trim())
+    .find((line) => line.length >= 3);
+  const title = (firstLine ?? input.title).slice(0, 120).trim() || input.title;
+  const summaryWindow = input.text.replace(/\s+/g, " ").trim().slice(0, 360);
+  const summary =
+    summaryWindow.length === 360 ? `${summaryWindow.slice(0, 357)}...` : summaryWindow;
+  return {
+    title,
+    summary: summary || null,
+    sourceKind: heuristicSourceKind(input.filename, contentType),
+    topics: [],
+    targetBaseId: null,
+    confidence: 0,
+    reason: null,
+  };
+}
+
+function heuristicSourceKind(rawFilename: string, rawContentType: string): KnowledgeSourceKind {
+  const filename = rawFilename.toLowerCase();
+  const contentType = rawContentType.toLowerCase();
+  if (filename.endsWith(".eml") || contentType === "message/rfc822") return "email";
+  if (filename.endsWith(".vtt") || filename.endsWith(".srt") || filename.includes("transcript")) {
+    return "meeting_transcript";
+  }
+  if (contentType === "text/html") return "web";
+  if (contentType === "application/pdf" || filename.endsWith(".docx") || filename.endsWith(".md")) {
+    return "document";
+  }
+  return "manual_upload";
+}
+
+export class HeuristicCurationProvider implements DocumentCurator {
+  readonly model = "heuristic";
+
+  async curate(input: DocumentCurationInput): Promise<DocumentCurationOutcome> {
+    return heuristicCuration(input);
+  }
+}
+
+const CURATION_SYSTEM_PROMPT = [
+  "You organize a team knowledge base. Given the beginning of a dropped document",
+  "and the list of existing collections (bases), return STRICT JSON with keys:",
+  '"title" (concise, specific, <= 120 chars, no filename extensions),',
+  '"summary" (2-3 sentences, plain prose, what the document is and why it matters),',
+  '"sourceKind" (one of: manual_upload, meeting_transcript, repository, email, chat, document, web, other),',
+  '"topics" (3-6 short lowercase tags),',
+  '"targetBaseId" (the id of the best-fitting existing base, or null if none fits),',
+  '"confidence" (0..1 — how sure you are the document belongs in targetBaseId),',
+  '"reason" (one sentence explaining the filing choice).',
+  "Only pick a targetBaseId from the provided list. If the document fits no base",
+  "well, return targetBaseId null and confidence 0. Respond with JSON only.",
+].join(" ");
+
+export class OpenAICurationProvider implements DocumentCurator {
+  private client: OpenAI | null = null;
+  private readonly apiKey: string | undefined;
+  private readonly baseURL: string | undefined;
+  private readonly defaultHeaders: Record<string, string> | undefined;
+  private readonly defaultQuery: Record<string, string> | undefined;
+  readonly model: string;
+
+  constructor(args: {
+    apiKey?: string | undefined;
+    baseURL?: string | undefined;
+    defaultHeaders?: Record<string, string> | undefined;
+    defaultQuery?: Record<string, string> | undefined;
+    model?: string | undefined;
+  }) {
+    this.apiKey = args.apiKey ?? process.env.OPENAI_API_KEY;
+    this.baseURL = args.baseURL;
+    this.defaultHeaders = args.defaultHeaders;
+    this.defaultQuery = args.defaultQuery;
+    this.model = args.model ?? DEFAULT_DOCUMENT_CURATION_MODEL;
+  }
+
+  async curate(input: DocumentCurationInput): Promise<DocumentCurationOutcome> {
+    const response = await this.openai().chat.completions.create({
+      model: this.model,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: CURATION_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify({
+            filename: input.filename,
+            currentTitle: input.title,
+            bases: input.bases,
+            text: input.text,
+          }),
+        },
+      ],
+    });
+    const raw = response.choices[0]?.message?.content;
+    if (!raw) {
+      throw new Error("curation model returned no content");
+    }
+    return parseCurationOutcome(raw, input.bases);
+  }
+
+  private openai(): OpenAI {
+    if (!this.apiKey) {
+      throw new Error("OpenAI document curation requires an API key");
+    }
+    this.client ??= new OpenAI({
+      apiKey: this.apiKey,
+      ...(this.baseURL ? { baseURL: this.baseURL } : {}),
+      ...(this.defaultQuery ? { defaultQuery: this.defaultQuery } : {}),
+      ...(this.defaultHeaders ? { defaultHeaders: this.defaultHeaders } : {}),
+    });
+    return this.client;
+  }
+}
+
+/** Parse + clamp model output; a targetBaseId outside the candidate list is dropped. */
+export function parseCurationOutcome(
+  raw: string,
+  bases: DocumentCurationCandidateBase[],
+): DocumentCurationOutcome {
+  const parsed: unknown = JSON.parse(raw);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("curation model returned non-object JSON");
+  }
+  const record = parsed as Record<string, unknown>;
+  const knownBase = bases.find((base) => base.id === record.targetBaseId);
+  const confidence =
+    typeof record.confidence === "number" && Number.isFinite(record.confidence)
+      ? Math.min(1, Math.max(0, record.confidence))
+      : 0;
+  return {
+    title:
+      cleanString(typeof record.title === "string" ? record.title.slice(0, 200) : null) ?? null,
+    summary:
+      cleanString(typeof record.summary === "string" ? record.summary.slice(0, 2000) : null) ??
+      null,
+    sourceKind:
+      typeof record.sourceKind === "string"
+        ? normalizeKnowledgeSourceKind(record.sourceKind)
+        : null,
+    topics: cleanStringArray(
+      Array.isArray(record.topics)
+        ? record.topics.filter((topic): topic is string => typeof topic === "string").slice(0, 8)
+        : [],
+    ).map((topic) => topic.toLowerCase().slice(0, 60)),
+    targetBaseId: knownBase?.id ?? null,
+    confidence: knownBase ? confidence : 0,
+    reason:
+      cleanString(typeof record.reason === "string" ? record.reason.slice(0, 500) : null) ?? null,
+  };
+}
+
 export function createDocumentServices(
   settings?: Settings,
   overrides: Partial<DocumentServices> = {},
@@ -244,7 +467,22 @@ export function createDocumentServices(
             model: settings?.documentEmbeddingModel ?? DEFAULT_DOCUMENT_EMBEDDING_MODEL,
             dimensions,
           })),
+    curator: overrides.curator ?? createDocumentCurator(settings),
   };
+}
+
+function createDocumentCurator(settings?: Settings): DocumentCurator | undefined {
+  const provider = settings?.documentCurationProvider ?? "openai";
+  if (provider === "none") return undefined;
+  if (provider === "heuristic") return new HeuristicCurationProvider();
+  const embeddingConfig = documentOpenAIEmbeddingConfig(settings);
+  return new OpenAICurationProvider({
+    apiKey: settings?.documentCurationApiKey ?? embeddingConfig.apiKey,
+    baseURL: settings?.documentCurationBaseUrl ?? embeddingConfig.baseURL,
+    defaultHeaders: embeddingConfig.defaultHeaders,
+    defaultQuery: embeddingConfig.defaultQuery,
+    model: settings?.documentCurationModel ?? DEFAULT_DOCUMENT_CURATION_MODEL,
+  });
 }
 
 export function documentOpenAIEmbeddingConfig(settings?: Settings): {
@@ -354,9 +592,37 @@ export async function getDocumentBase(
   });
 }
 
+/**
+ * Find-or-create the workspace's Inbox base — the landing spot for knowledge
+ * drops before auto-curation files them. Matched by name (case-insensitive) so
+ * a user-created "Inbox" is adopted rather than duplicated.
+ */
+export async function ensureInboxBase(
+  db: Database,
+  input: { accountId: string; workspaceId: string },
+): Promise<DocumentBase> {
+  const bases = await listDocumentBases(db, input.workspaceId);
+  const existing = bases.find(
+    (base) => base.name.trim().toLowerCase() === INBOX_BASE_NAME.toLowerCase(),
+  );
+  if (existing) return existing;
+  return await createDocumentBase(db, {
+    accountId: input.accountId,
+    workspaceId: input.workspaceId,
+    name: INBOX_BASE_NAME,
+    description: INBOX_BASE_DESCRIPTION,
+  });
+}
+
 export async function addDocumentToBase(
   db: Database,
-  input: AddDocumentRequest & { accountId: string; workspaceId: string; baseId: string },
+  input: AddDocumentRequest & {
+    accountId: string;
+    workspaceId: string;
+    baseId: string;
+    createdBy?: string | null | undefined;
+    curationStatus?: DocumentCurationStatus | undefined;
+  },
 ): Promise<Document> {
   return await withRlsContext(
     db,
@@ -394,6 +660,8 @@ export async function addDocumentToBase(
             sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt) ?? existing.sourceUpdatedAt,
             sourceVersion: cleanString(input.sourceVersion) ?? existing.sourceVersion,
             ...(input.aclTags !== undefined ? { aclTags: cleanStringArray(input.aclTags) } : {}),
+            ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
+            ...(input.agentAccess !== undefined ? { agentAccess: input.agentAccess } : {}),
             updatedAt: now,
           })
           .where(
@@ -424,11 +692,102 @@ export async function addDocumentToBase(
           sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt),
           sourceVersion: cleanString(input.sourceVersion) ?? null,
           aclTags: cleanStringArray(input.aclTags),
+          visibility: input.visibility ?? "workspace",
+          agentAccess: input.agentAccess ?? true,
+          createdBy: input.createdBy ?? null,
+          curationStatus: input.curationStatus ?? "none",
           updatedAt: now,
         })
         .returning();
       if (!row) throw new Error("Failed to create document");
       return mapDocument(row);
+    },
+  );
+}
+
+/**
+ * Move a document and its indexed chunks to another base. With no explicit
+ * target, applies the stored curation suggestion. A 'suggested' or 'pending'
+ * document that gets moved counts as filed.
+ */
+export async function moveDocumentToBase(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    documentId: string;
+    targetBaseId?: string | null | undefined;
+  },
+): Promise<Document> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .select()
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.id, input.documentId),
+          ),
+        )
+        .limit(1);
+      if (!row) throw new Error(`Document not found: ${input.documentId}`);
+      const suggestion = (row.curation as { suggestedBaseId?: string | null } | null)
+        ?.suggestedBaseId;
+      const targetBaseId = input.targetBaseId ?? suggestion;
+      if (!targetBaseId) {
+        throw new Error("document has no suggested base; pass targetBaseId");
+      }
+      if (targetBaseId === row.baseId) return mapDocument(row);
+      const base = await getDocumentBase(scopedDb, input.workspaceId, targetBaseId);
+      if (!base) throw new Error(`Document base not found: ${targetBaseId}`);
+      const [conflict] = await scopedDb
+        .select({ id: schema.documents.id })
+        .from(schema.documents)
+        .where(
+          and(
+            eq(schema.documents.workspaceId, input.workspaceId),
+            eq(schema.documents.baseId, targetBaseId),
+            eq(schema.documents.fileId, row.fileId),
+          ),
+        )
+        .limit(1);
+      if (conflict) {
+        throw new Error("a document for this file already exists in the target base");
+      }
+      const now = new Date();
+      const moved = await scopedDb.transaction(async (tx) => {
+        const [updated] = await tx
+          .update(schema.documents)
+          .set({
+            baseId: targetBaseId,
+            ...(row.curationStatus === "suggested" || row.curationStatus === "pending"
+              ? { curationStatus: "auto_filed" }
+              : {}),
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(schema.documents.workspaceId, input.workspaceId),
+              eq(schema.documents.id, input.documentId),
+            ),
+          )
+          .returning();
+        await tx
+          .update(schema.documentChunks)
+          .set({ baseId: targetBaseId })
+          .where(
+            and(
+              eq(schema.documentChunks.workspaceId, input.workspaceId),
+              eq(schema.documentChunks.documentId, input.documentId),
+            ),
+          );
+        return updated;
+      });
+      if (!moved) throw new Error(`Document not found: ${input.documentId}`);
+      return mapDocument(moved);
     },
   );
 }
@@ -473,13 +832,18 @@ export async function listDocuments(
   db: Database,
   workspaceId: string,
   baseId: string,
+  access?: DocumentAccessFilter,
 ): Promise<Document[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select()
       .from(schema.documents)
       .where(
-        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.baseId, baseId)),
+        and(
+          eq(schema.documents.workspaceId, workspaceId),
+          eq(schema.documents.baseId, baseId),
+          ...documentAccessConditions(access),
+        ),
       )
       .orderBy(asc(schema.documents.createdAt));
     return rows.map(mapDocument);
@@ -533,7 +897,7 @@ export async function indexDocumentNow(
   services: DocumentServices = createDocumentServices(),
   hooks: DocumentIndexHooks = {},
 ): Promise<Document> {
-  const [document] = await withWorkspaceRls(
+  const [loadedDocument] = await withWorkspaceRls(
     db,
     workspaceId,
     async (scopedDb) =>
@@ -545,7 +909,8 @@ export async function indexDocumentNow(
         )
         .limit(1),
   );
-  if (!document) throw new Error(`Document not found: ${documentId}`);
+  if (!loadedDocument) throw new Error(`Document not found: ${documentId}`);
+  let document: DocumentRow = loadedDocument;
   const file = await requireReadyFile(db, workspaceId, document.fileId);
   await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     await scopedDb
@@ -563,6 +928,13 @@ export async function indexDocumentNow(
   try {
     const bytes = await objectStorage.getFileBytes(file);
     const parsed = await services.parser.parse(bytes, file);
+    // Knowledge drops (curationStatus 'pending') get named/summarized/filed
+    // between parse and chunking, so chunk metadata and the base placement
+    // reflect the curated truth. Fail-soft: a curation error never blocks
+    // indexing — the heuristic fallback still names and summarizes the drop.
+    if (document.curationStatus === "pending") {
+      document = await curateDroppedDocument(db, services, document, parsed, file);
+    }
     const chunks = services.chunker.chunk(parsed, file);
     await hooks.beforeEmbed?.({
       accountId: document.accountId,
@@ -661,6 +1033,115 @@ export async function indexDocumentNow(
   const updated = await getDocument(db, workspaceId, documentId);
   if (!updated) throw new Error(`Document disappeared after indexing: ${documentId}`);
   return updated;
+}
+
+type DocumentRow = typeof schema.documents.$inferSelect;
+
+async function curateDroppedDocument(
+  db: Database,
+  services: DocumentServices,
+  document: DocumentRow,
+  parsed: ParsedDocument,
+  file: FileAsset,
+): Promise<DocumentRow> {
+  const bases = await listDocumentBases(db, document.workspaceId);
+  const candidates: DocumentCurationCandidateBase[] = bases
+    .filter((base) => base.id !== document.baseId)
+    .map((base) => ({ id: base.id, name: base.name, description: base.description }));
+  const input: DocumentCurationInput = {
+    text: parsed.text.slice(0, DOCUMENT_CURATION_MAX_INPUT_CHARS),
+    filename: file.filename,
+    title: document.title,
+    bases: candidates,
+  };
+  let outcome: DocumentCurationOutcome;
+  let model: string;
+  let failure: string | null = null;
+  if (services.curator) {
+    try {
+      outcome = await services.curator.curate(input);
+      model = services.curator.model;
+    } catch (error) {
+      failure = error instanceof Error ? error.message : String(error);
+      console.warn("document curation failed; applying heuristic fallback", {
+        workspaceId: document.workspaceId,
+        documentId: document.id,
+        error: failure,
+      });
+      outcome = heuristicCuration(input, file.contentType);
+      model = "heuristic";
+    }
+  } else {
+    outcome = heuristicCuration(input, file.contentType);
+    model = "heuristic";
+  }
+  const suggestedBase = candidates.find((base) => base.id === outcome.targetBaseId) ?? null;
+  let moveToBaseId: string | null = null;
+  if (
+    suggestedBase &&
+    failure === null &&
+    outcome.confidence >= DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE
+  ) {
+    // The (workspace, base, file) unique index means a same-file twin already
+    // in the target base blocks the move; keep it as a suggestion instead.
+    const conflict = await withWorkspaceRls(
+      db,
+      document.workspaceId,
+      async (scopedDb) =>
+        await scopedDb
+          .select({ id: schema.documents.id })
+          .from(schema.documents)
+          .where(
+            and(
+              eq(schema.documents.workspaceId, document.workspaceId),
+              eq(schema.documents.baseId, suggestedBase.id),
+              eq(schema.documents.fileId, document.fileId),
+            ),
+          )
+          .limit(1),
+    );
+    if (conflict.length === 0) {
+      moveToBaseId = suggestedBase.id;
+    }
+  }
+  const curation: DocumentCuration = {
+    suggestedBaseId: suggestedBase?.id ?? null,
+    suggestedBaseName: suggestedBase?.name ?? null,
+    confidence: outcome.confidence,
+    reason: failure ? `curation failed (${failure}); heuristic fallback applied` : outcome.reason,
+    originalTitle: document.title,
+    model,
+  };
+  const curationStatus: DocumentCurationStatus = failure
+    ? "failed"
+    : moveToBaseId
+      ? "auto_filed"
+      : "suggested";
+  const [updated] = await withWorkspaceRls(
+    db,
+    document.workspaceId,
+    async (scopedDb) =>
+      await scopedDb
+        .update(schema.documents)
+        .set({
+          title: outcome.title ?? document.title,
+          summary: outcome.summary,
+          topics: outcome.topics,
+          ...(outcome.sourceKind ? { sourceKind: outcome.sourceKind } : {}),
+          ...(moveToBaseId ? { baseId: moveToBaseId } : {}),
+          curationStatus,
+          curation,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(schema.documents.workspaceId, document.workspaceId),
+            eq(schema.documents.id, document.id),
+          ),
+        )
+        .returning(),
+  );
+  return updated ?? document;
 }
 
 export async function searchDocuments(
@@ -794,6 +1275,7 @@ export async function getDocumentChunk(
   db: Database,
   workspaceId: string,
   chunkId: string,
+  access?: DocumentAccessFilter,
 ): Promise<DocumentSearchResult | null> {
   const [row] = await withWorkspaceRls(
     db,
@@ -826,6 +1308,7 @@ export async function getDocumentChunk(
             eq(schema.documentChunks.workspaceId, workspaceId),
             eq(schema.documentChunks.id, chunkId),
             eq(schema.documents.status, "ready"),
+            ...documentAccessConditions(access),
           ),
         )
         .limit(1),
@@ -849,10 +1332,41 @@ type CombinedSearchRow = SearchRowBase & {
   keywordScore: number | null;
 };
 
+/**
+ * Visibility/agent scoping shared by every document read path. Fail-closed:
+ * with no filter supplied, private documents are invisible.
+ */
+function documentAccessConditions(access: DocumentAccessFilter | undefined): SQL[] {
+  if (access?.agentOnly) {
+    return [eq(schema.documents.agentAccess, true), eq(schema.documents.visibility, "workspace")];
+  }
+  const viewer = access?.viewerSubjectId;
+  if (viewer) {
+    const condition = or(
+      eq(schema.documents.visibility, "workspace"),
+      eq(schema.documents.createdBy, viewer),
+    );
+    return condition ? [condition] : [];
+  }
+  return [eq(schema.documents.visibility, "workspace")];
+}
+
+/** Whether a single already-fetched document is readable by this human viewer. */
+export function canViewDocument(
+  document: Pick<Document, "visibility" | "createdBy">,
+  viewerSubjectId: string | null | undefined,
+): boolean {
+  return (
+    document.visibility !== "private" ||
+    (!!viewerSubjectId && document.createdBy === viewerSubjectId)
+  );
+}
+
 function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: string): SQL[] {
   const conditions: SQL[] = [
     eq(schema.documents.status, "ready"),
     eq(schema.documentChunks.workspaceId, input.workspaceId),
+    ...documentAccessConditions(input.access),
   ];
   if (embeddingModel) {
     conditions.push(eq(schema.documentChunks.embeddingModel, embeddingModel));
@@ -1195,7 +1709,30 @@ function mapDocument(row: typeof schema.documents.$inferSelect): Document {
     sourceUpdatedAt: row.sourceUpdatedAt?.toISOString() ?? null,
     sourceVersion: row.sourceVersion,
     aclTags: cleanStringArray(row.aclTags),
+    visibility: normalizeDocumentVisibility(row.visibility),
+    createdBy: row.createdBy,
+    agentAccess: row.agentAccess,
+    summary: row.summary,
+    topics: cleanStringArray(row.topics),
+    curationStatus: normalizeDocumentCurationStatus(row.curationStatus),
+    curation: (row.curation as DocumentCuration | null) ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   };
+}
+
+function normalizeDocumentVisibility(value: string): DocumentVisibility {
+  return value === "private" ? "private" : "workspace";
+}
+
+function normalizeDocumentCurationStatus(value: string): DocumentCurationStatus {
+  switch (value) {
+    case "pending":
+    case "suggested":
+    case "auto_filed":
+    case "failed":
+      return value;
+    default:
+      return "none";
+  }
 }

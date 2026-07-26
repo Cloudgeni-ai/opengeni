@@ -33,6 +33,8 @@ import type {
   CapabilityCatalogResponse,
   CapabilityInstallation,
   AddDocumentRequest,
+  CreateKnowledgeDropRequest,
+  MoveDocumentRequest,
   ClientConfig,
   WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
@@ -2168,6 +2170,38 @@ export class OpenGeniClient {
     return await this.requestJson<Document[]>(
       "GET",
       `/v1/workspaces/${workspaceId}/document-bases/${baseId}/documents`,
+    );
+  }
+
+  /**
+   * Drop raw text or an already-uploaded file into the workspace knowledge
+   * Inbox. Auto-curation names, summarizes, categorizes, and (confidence
+   * permitting) files the document into the best-matching base.
+   */
+  async createKnowledgeDrop(
+    workspaceId: string,
+    request: CreateKnowledgeDropRequest,
+  ): Promise<Document> {
+    return await this.requestJson<Document>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/knowledge/drops`,
+      request,
+    );
+  }
+
+  /**
+   * Move a document (and its indexed chunks) to another base. With no
+   * targetBaseId, applies the document's stored curation suggestion.
+   */
+  async moveDocument(
+    workspaceId: string,
+    documentId: string,
+    request: MoveDocumentRequest = {},
+  ): Promise<Document> {
+    return await this.requestJson<Document>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/documents/${documentId}/move`,
+      request,
     );
   }
 
