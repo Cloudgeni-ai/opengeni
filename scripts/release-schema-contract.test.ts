@@ -125,11 +125,12 @@ describe("release schema contract", () => {
     expect(contract.fileCount).toBe(
       108 +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
+        (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
         (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
         2,
     );
     expect(contract.sha256).toBe(
-      "bafe3d985ebdda3617f9d2d6136222fa5a0178864325df18297ba90c97fb2e4f",
+      "f427b98a02f6ed3feaf59be9ea1b89b709ad6fc42d9b3648f0e240ffea42ff67",
     );
     expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
 
@@ -153,12 +154,13 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-6]|0119|012[01])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-6]|011[89]|012[01])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       ...nestedDepthMigrations,
+      "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
       "0120_durable_goal_wake.sql",
       "0121_goal_update_idempotency.sql",
@@ -190,6 +192,10 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
+    expect(migrations.get("0118_new_session_drafts.sql")).toMatchObject({
+      sha256: "69ae71b80392eea964c47cadff876cff58db699d6c2470482d35aaf0931de70c",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
       sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
       deploymentMode: "rolling",
