@@ -190,6 +190,10 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       }
       setSubmitting(true);
       try {
+        // This render's resources are the immutable create snapshot. Files can
+        // still be added through paste/drop/picker while the request is in
+        // flight; those newer ids belong to the next draft.
+        const submittedResources = persistedValue.resources;
         const flushed = await newSessionDraft.flush();
         if (!flushed) return false;
         const submission = submissionFromSessionDraft(draft);
@@ -197,7 +201,7 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
           workspaceId,
           {
             text,
-            resources: persistedValue.resources,
+            resources: submittedResources,
             tools: persistedValue.tools,
             model: persistedValue.model,
             reasoningEffort: persistedValue.reasoningEffort,
@@ -220,7 +224,11 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
         if (acknowledged.kind === "consumed") {
           setMessage("");
           setDraft(emptySessionDraft());
-          attachments.clear();
+          attachments.removeReadyFiles(
+            submittedResources.flatMap((resource) =>
+              resource.kind === "file" ? [resource.fileId] : [],
+            ),
+          );
         } else if (!newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)) {
           const preserved = await newSessionDraft.flush();
           if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) return false;

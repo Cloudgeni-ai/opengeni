@@ -624,7 +624,14 @@ function SessionChatPane(props: {
     sendBlocked: () => attachments.hasUnresolved,
     effectiveControl: props.queue.effectiveControl ?? props.session.effectiveControl,
     onDraftApplied: applyComposerSettings,
-    onSent: () => attachments.clear(),
+    // Clear only files included in the accepted wire input. A file added while
+    // sendMessage is in flight belongs to the next message and must survive.
+    onSent: (_text, input) =>
+      attachments.removeReadyFiles(
+        (input.resources ?? []).flatMap((resource) =>
+          resource.kind === "file" ? [resource.fileId] : [],
+        ),
+      ),
   });
 
   // Slash-command palette context: the operator controls (/goal, /clear,

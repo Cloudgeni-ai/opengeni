@@ -69,6 +69,7 @@ function makeAttachments(
     restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
+    removeReadyFiles: () => {},
     clear: () => {},
     ...overrides,
   };

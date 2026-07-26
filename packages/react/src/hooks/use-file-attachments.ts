@@ -54,7 +54,13 @@ export type UseFileAttachmentsResult = {
   retry: (id: string) => void;
   /** Remove one attachment; revokes its object-URL. */
   remove: (id: string) => void;
-  /** Remove all; revokes every object-URL. Call from `useComposer`'s `onSent`. */
+  /**
+   * Remove only finalized files whose durable ids were accepted by a send.
+   * Attachments added while that request was in flight remain queued for the
+   * next message.
+   */
+  removeReadyFiles: (fileIds: Iterable<string>) => void;
+  /** Remove all attachments and revoke every object-URL. */
   clear: () => void;
 };
 
@@ -248,6 +254,24 @@ export function useFileAttachments(
     });
   }, []);
 
+  const removeReadyFiles = useCallback((fileIds: Iterable<string>) => {
+    const accepted = new Set(fileIds);
+    if (accepted.size === 0) return;
+    setAttachments((current) =>
+      current.filter((attachment) => {
+        const removeAccepted =
+          attachment.status === "ready" &&
+          attachment.file !== undefined &&
+          accepted.has(attachment.file.id);
+        if (removeAccepted) {
+          sources.current.delete(attachment.id);
+          if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+        }
+        return !removeAccepted;
+      }),
+    );
+  }, []);
+
   const clear = useCallback(() => {
     sources.current.clear();
     setAttachments((current) => {
@@ -274,6 +298,7 @@ export function useFileAttachments(
     restoreReadyFiles,
     retry,
     remove,
+    removeReadyFiles,
     clear,
   };
 }

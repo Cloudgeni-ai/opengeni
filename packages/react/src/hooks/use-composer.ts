@@ -15,8 +15,8 @@ export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId"
 
 export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
-    /** Called with the accepted text after a successful send. */
-    onSent?: ((text: string) => void) | undefined;
+    /** Called with the exact accepted wire input after a successful send. */
+    onSent?: ((text: string, input: SendMessageInput) => void) | undefined;
     /**
      * Extra message fields (resources, tools, model, reasoningEffort) merged
      * into every send. A function is evaluated at send time so it can read the
@@ -466,7 +466,7 @@ export function useComposer(
             setValue("");
           }
         }
-        onSent?.(sendText);
+        onSent?.(sendText, input);
         return true;
       } catch (cause) {
         if (

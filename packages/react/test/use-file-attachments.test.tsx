@@ -140,6 +140,40 @@ describe("useFileAttachments", () => {
     await hook.unmount();
   });
 
+  test("removeReadyFiles clears only the accepted snapshot and preserves later attachments", async () => {
+    let upload = 0;
+    const client = fakeClient({
+      uploadFile: async () => {
+        upload += 1;
+        return fakeAsset({ id: upload === 1 ? "accepted-file" : "later-file" });
+      },
+    });
+    const hook = await renderHook(
+      () => useFileAttachments({ client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+
+    await flushing(() => hook.result.current.addFiles([imageFile("accepted.png")]));
+    await flush();
+    const acceptedIds = hook.result.current.readyResources.map((resource) => resource.fileId);
+    const acceptedPreview = hook.result.current.attachments[0]!.previewUrl!;
+
+    // This attachment was not part of the already-dispatched request and must
+    // remain available for the next message after that request succeeds.
+    await flushing(() => hook.result.current.addFiles([imageFile("later.png")]));
+    await flush();
+    const laterPreview = hook.result.current.attachments[1]!.previewUrl!;
+    await flushing(() => hook.result.current.removeReadyFiles(acceptedIds));
+
+    expect(hook.result.current.readyResources).toEqual([{ kind: "file", fileId: "later-file" }]);
+    expect(hook.result.current.attachments.map((attachment) => attachment.name)).toEqual([
+      "asset.png",
+    ]);
+    expect(revoked).toContain(acceptedPreview);
+    expect(revoked).not.toContain(laterPreview);
+    await hook.unmount();
+  });
+
   test("addFromPaste applies the default image/* filter — only the image is enqueued", async () => {
     const client = fakeClient({ uploadFile: async () => fakeAsset() });
     const hook = await renderHook(

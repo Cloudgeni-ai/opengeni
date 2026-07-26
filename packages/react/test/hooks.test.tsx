@@ -7,6 +7,7 @@
 import { describe, expect, test } from "bun:test";
 import type {
   ComposerDraft,
+  SendMessageInput,
   SessionControlResponse,
   SessionEvent,
   SessionQueueMutationResponse,
@@ -1310,6 +1311,52 @@ describe("useComposer file-only send", () => {
     // Resources ride along, and the wire text is non-empty (contract: min(1)).
     expect(sent[0]!.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
     expect(sent[0]!.text.trim().length).toBeGreaterThan(0);
+    await hook.unmount();
+  });
+
+  test("onSent receives the immutable input snapshot accepted before an in-flight edit", async () => {
+    let currentFileId = "accepted-file";
+    let releaseSend!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let accepted: SendMessageInput | undefined;
+    const client = fakeClient({
+      sendMessage: async () => {
+        markStarted();
+        await pending;
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: currentFileId }] }),
+          onSent: (_text, input) => {
+            accepted = input;
+          },
+        }),
+      undefined,
+    );
+
+    let result!: Promise<boolean>;
+    await flushing(() => {
+      result = hook.result.current.send();
+    });
+    await started;
+    currentFileId = "later-file";
+    await flushing(async () => {
+      releaseSend();
+      expect(await result).toBe(true);
+    });
+
+    expect(accepted?.resources).toEqual([{ kind: "file", fileId: "accepted-file" }]);
     await hook.unmount();
   });
 

@@ -75,6 +75,7 @@ function attachments(overrides: Partial<UseFileAttachmentsResult> = {}): UseFile
     restoreReadyFiles: () => {},
     retry: () => {},
     remove: () => {},
+    removeReadyFiles: () => {},
     clear: () => {},
     ...overrides,
   };
