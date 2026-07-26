@@ -1,5 +1,22 @@
 # @opengeni/react
 
+## 0.25.0
+
+### Patch Changes
+
+- c549ed8: Persist and transactionally materialize revisioned active-goal continuation
+  obligations, recover their Temporal delivery without human input or model
+  polling, preserve authoritative human/Steer ordering, and expose truthful
+  scheduled, running, blocked, and invariant-broken continuation state to clients.
+  Make agent goal updates revisioned, attempt-recoverable commands so ambiguous
+  commit responses reconcile without duplicate mutation or stale overwrites.
+- 860de22: Persist actor-private pre-session drafts on the server, consume only the exact accepted revision after durable session initialization, return structured create errors, deduplicate create resources, derive checksums for SDK uploads, restore finalized attachments without browser-local byte authority, and preserve attachments added while an earlier send is in flight.
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/sdk@0.25.0
+
 ## 0.24.0
 
 ### Minor Changes

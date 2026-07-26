@@ -1,5 +1,64 @@
 # @opengeni/worker-bundle
 
+## 0.11.0
+
+### Minor Changes
+
+- 46bac05: Enforce a configurable inclusive nested-agent depth at the transactional
+  session-creation boundary with a server default of three. Persist immutable
+  lineage and policy snapshots, and return idempotent typed denial evidence without
+  creating run, workflow, sandbox, usage, or billing artifacts.
+
+### Patch Changes
+
+- c549ed8: Persist and transactionally materialize revisioned active-goal continuation
+  obligations, recover their Temporal delivery without human input or model
+  polling, preserve authoritative human/Steer ordering, and expose truthful
+  scheduled, running, blocked, and invariant-broken continuation state to clients.
+  Make agent goal updates revisioned, attempt-recoverable commands so ambiguous
+  commit responses reconcile without duplicate mutation or stale overwrites.
+- 7736781: Project supported ready file attachments with verified size and canonical SHA-256 metadata into typed image and file content for Responses model turns while preserving the sandbox-path fallback and durable history invariants.
+- 5b57a2d: Make provisioned-sandbox recovery truthful and atomic. Provider existence,
+  lease liveness, route attachment, archive availability, restore progress,
+  verified workspace readiness, and epochs are exposed separately; attach/swap
+  must certify readiness. Definitive provider loss is exact-instance fenced,
+  concurrent observers receive typed recovery/superseded outcomes, and ambiguous
+  operations are never replayed. Rematerialization selects one verified archive
+  revision under the lease lock, verifies archive bytes and restored tree contents,
+  and fails closed as degraded or unrecoverable instead of publishing a partial,
+  mixed, previous, or clean fallback workspace.
+
+  Unify every persistable workspace mutation under durable turn, API-direct, or
+  retained-process authority. Direct requests use exact request UUID holders;
+  yielded processes retain their parent admission and exact pinned provider/route
+  identity until durable exit/loss settlement. Direct/process authority blocks
+  archive capture, process stdin receives a distinct mutation admission, and PTY
+  control cannot be rerouted by active-pointer movement.
+
+  Make terminal execution physically synchronous: `terminalExec` always returns a
+  numeric `exitCode` with `running: false`, and timeout/error paths return only
+  after exact process-group absence and retained settlement. Interactive PTYs open
+  only after durable promotion, close only on exact terminal proof, and report
+  provider loss truthfully.
+
+  Activate the generation/process schema through maintenance migration 0117. All
+  old API/control/turn writers must stop before the one-way cutover and may not
+  restart afterward; archive completeness requires the exact closed generation.
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+  - @opengeni/db@0.12.0
+  - @opengeni/config@0.7.0
+  - @opengeni/core@0.11.0
+  - @opengeni/runtime@0.13.2
+  - @opengeni/documents@0.2.30
+  - @opengeni/events@0.3.21
+  - @opengeni/github@0.3.12
+  - @opengeni/storage@0.2.24
+
 ## 0.10.9
 
 ### Patch Changes
