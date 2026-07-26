@@ -487,6 +487,13 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
+  /** Immutable server-authored nested-agent lineage and policy snapshot. */
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  maxNestedAgentDepthOverride: number | null;
+  effectiveMaxNestedAgentDepth: number;
+  nestedAgentDepthPolicySource: "session" | "workspace" | "deployment" | "default";
+  nestedAgentDepthPolicySessionId: string | null;
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
@@ -1483,6 +1490,7 @@ export type ScheduledTaskAgentConfig = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type ScheduledTask = {
@@ -1544,6 +1552,7 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
+  maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -2063,12 +2072,14 @@ export type Workspace = {
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
@@ -2429,6 +2440,7 @@ export type ScheduledTaskAgentConfigInput = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type CreateScheduledTaskRequest = {

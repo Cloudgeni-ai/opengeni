@@ -1,5 +1,28 @@
 # @opengeni/api-router
 
+## 0.10.0
+
+### Minor Changes
+
+- 0ed0f01: Add per-member session pin preferences with isolated server persistence, bounded/reused stable
+  pagination snapshots, snapshot-free pin polling, typed SDK and React reconciliation, and accessible
+  list and header controls.
+
+### Patch Changes
+
+- Updated dependencies [744a93d]
+- Updated dependencies [0ed0f01]
+- Updated dependencies [b32938f]
+  - @opengeni/config@0.6.10
+  - @opengeni/contracts@0.18.1
+  - @opengeni/db@0.11.0
+  - @opengeni/core@0.10.1
+  - @opengeni/documents@0.2.29
+  - @opengeni/github@0.3.11
+  - @opengeni/runtime@0.13.1
+  - @opengeni/storage@0.2.23
+  - @opengeni/events@0.3.20
+
 ## 0.9.0
 
 ### Minor Changes

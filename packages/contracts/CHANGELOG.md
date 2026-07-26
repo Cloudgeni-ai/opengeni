@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.18.1
+
+### Patch Changes
+
+- 744a93d: Add default-off, bounded adaptive Codex fleet decision telemetry with strict deterministic replay, cache-aware and work-conserving policy simulation, secret-safe event/UI observability, and independent future policy gates.
+
 ## 0.18.0
 
 ### Minor Changes

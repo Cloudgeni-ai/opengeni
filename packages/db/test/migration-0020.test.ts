@@ -109,6 +109,9 @@ describe("migration 0020 (session_recordings)", () => {
           { id: string }[]
         >`INSERT INTO "workspaces" ("account_id", "name") VALUES (${accountId}, 'ws') RETURNING "id"`
       )[0]!.id;
+      await sql`
+        INSERT INTO "workspace_inference_controls" ("workspace_id", "account_id")
+        VALUES (${workspaceId}, ${accountId})`;
       // sandbox_group_id is app-generated (== id for a singleton group), NOT NULL
       // since 0018 — supply both from one uuid.
       const sessionId = (
