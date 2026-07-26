@@ -229,8 +229,9 @@ heartbeat timeout and the activity's ten-second heartbeat timer.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
-quiesce, stops and drains attempt-owned Toolspace and run-material renewal
-writes, and immediately writes `session_turn_attempts.quiesced_at` before
+quiesce, stops and drains attempt-owned Git, Toolspace, and generic
+run-credential renewal/materialization writes, and immediately writes
+`session_turn_attempts.quiesced_at` before
 attempt-qualified credential deletion, cache, recording, provider, lease, or
 workspace housekeeping. The
 receipt, its `session.queue.changed` event, the session queue/sequence update,
@@ -315,17 +316,51 @@ only after a verified workspace capture is durably folded onto the fenced lease.
 Definitive `NOT_FOUND` before capture preserves any existing archive or records
 typed unrecoverable truth when no durable revision exists.
 
-Every operation that may mutate a persistable `/workspace` first enters a
-lease-scoped admission ledger. In one transaction, admission validates the exact
-attempt, session group, canonical turn-attempt holder, warm lease epoch, and
-provider identity, increments `workspace_generation`, and inserts the operation
-row. The exact provider promise is physically settled as `resolved` or
-`rejected`; a resolved result then passes the current attempt/holder/lease/provider
-acceptance fences before its output is accepted. Capture preflight and archive
-fold block on any unsettled admission at or below the captured generation. Only
-authoritative `session_turn_attempts.quiesced_at` for that exact attempt makes an
-abandoned admission non-blocking. No admitted operation is replayed after a
-provider rejection, provider loss, or failed acceptance fence.
+Every operation that may mutate a persistable `/workspace` first enters one
+lease-scoped turn/direct/process admission ledger. In one transaction, admission
+binds the session group, warm lease epoch, provider identity, and pinned route to
+the canonical turn attempt, an API request UUID held as `direct:<request UUID>`,
+or an exact retained-process UUID held as `process:<process UUID>`, then
+increments `workspace_generation` and inserts the operation row. The exact
+provider promise is physically settled as `resolved` or `rejected`; a resolved
+result then passes the matching authority/lease/provider/route acceptance fences
+before its output is accepted. Only a turn admission can use authoritative
+`session_turn_attempts.quiesced_at` for its exact attempt; direct and process
+authority remain capture blockers until settled.
+
+A yielded process promotes its parent admission to retained state and creates
+the non-TTL process holder in the same transaction before any caller receives a
+live locator. The exact parent admission, process UUID, provider locator, lease
+epoch, provider instance, and route remain pinned across active-pointer movement.
+Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
+cancellation, helper exec, and drain polling are process control: they may prove
+exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
+settles the parent and process holder and closes any matching PTY; duplicate
+identical proof is idempotent, while missing/conflicting proof keeps the fence
+closed. Connected Machines and other non-persistable routes do not dirty the
+provisioned cloud-home generation.
+
+Capture preflight and archive fold block on every unsettled admission and live
+direct/process holder in the closed write set. Publication is complete only when
+that set is proven closed and `archive_generation === workspace_generation`.
+Late, concurrent, or replayed requests either remain blockers or are admitted
+into a successor generation; no admitted operation is replayed after provider
+rejection, provider loss, or a failed acceptance fence.
+
+Terminal execution follows the same physical boundary. `terminalExec` does not
+return a yielded process: success always carries a numeric `exitCode` and
+`running: false`. Timeout or a non-timeout failure after yield first drains the
+exact process group and settles retained authority; timeout cannot return while
+the process or its durable admission remains live. PTY open returns only after
+durable promotion and persistence of its exact process identity, and PTY close
+leaves metadata open until exact exit/loss proof exists.
+
+Migration `0109_sandbox_recovery_generations.sql` activates this protocol as a
+one-way maintenance cutover. Stop all old API, control-worker, and turn-worker
+writers first. A live `opengeni_app` session rejects activation with SQLSTATE
+`55000` and the transaction rolls back cleanly. Application/image rollback to an
+old writer is permitted only before activation; after activation no old writer
+may restart, because there is no mixed-version or down-migration path.
 
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
