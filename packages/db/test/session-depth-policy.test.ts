@@ -266,6 +266,45 @@ describe("nested-agent depth database admission", () => {
     expect(await count("sessions", workspace.workspaceId)).toBe(0);
   }, 60_000);
 
+  test("replays a keyed winner before evaluating a now-invalid depth", async () => {
+    if (!available) return;
+    const workspace = await freshWorkspace("db depth replay before policy");
+    const key = `replay-before-policy-${crypto.randomUUID()}`;
+    const winner = await createSession(
+      db,
+      sessionInput(workspace, "winner", { createIdempotencyKey: key }),
+    );
+    let deepestParent = winner;
+    for (let depth = 1; depth <= 3; depth += 1) {
+      deepestParent = await createSession(
+        db,
+        sessionInput(workspace, `depth-${depth}`, { parentSessionId: deepestParent.id }),
+      );
+    }
+
+    // The same key already has a committed success, but this duplicate shape
+    // would exceed the default depth if the policy trigger ran first. The
+    // ledger-first path must suppress it and let the caller replay the winner
+    // rather than raise 23514.
+    const duplicateRows = await admin<{ id: string }[]>`
+      insert into sessions (
+        account_id, workspace_id, initial_message, model, sandbox_backend,
+        sandbox_group_id, parent_session_id, create_idempotency_key
+      ) values (
+        ${workspace.accountId}, ${workspace.workspaceId}, 'duplicate',
+        'depth-policy-test', 'none', gen_random_uuid(), ${deepestParent.id}, ${key}
+      )
+      returning id`;
+    expect(duplicateRows).toHaveLength(0);
+    expect(await count("sessions", workspace.workspaceId)).toBe(4);
+    expect(
+      await admin<{ count: number }[]>`
+        select count(*)::int as count
+        from session_create_idempotency_guard
+        where workspace_id = ${workspace.workspaceId} and idempotency_key = ${key}`,
+    ).toEqual([{ count: 1 }]);
+  }, 60_000);
+
   test("installs the guard before insert and cascades its ledger on workspace deletion", async () => {
     if (!available) return;
     const workspace = await freshWorkspace("db depth guard cleanup");

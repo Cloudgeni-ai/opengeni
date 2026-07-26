@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildSchemaContract } from "./release-schema-contract";
@@ -71,6 +71,15 @@ describe("release schema contract", () => {
     expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
       deploymentMode: "maintenance",
     });
+    // Current main carries this independently published migration, while the
+    // nested-depth branch was cut before it landed. Account for it explicitly
+    // instead of renumbering the nested-depth chain or freezing main.
+    const currentMainToolPolicyMigration = "0065_session_tool_policy.sql";
+    if (migrations.has(currentMainToolPolicyMigration)) {
+      expect(migrations.get(currentMainToolPolicyMigration)).toMatchObject({
+        deploymentMode: "rolling",
+      });
+    }
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",
@@ -114,8 +123,30 @@ describe("release schema contract", () => {
         "0116_nested_agent_depth_index.sql",
       ].filter((file) => migrations.has(file)),
     );
-    expect(contract.fileCount).toBe(108);
+    expect(contract.fileCount).toBe(
+      108 + (migrations.has(currentMainToolPolicyMigration) ? 1 : 0),
+    );
     expect(contract.latestMigration).toBe("0116_nested_agent_depth_index.sql");
+
+    const boundarySql = await readFile(
+      join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
+      "utf8",
+    );
+    const sourceTableLock = boundarySql.indexOf(
+      'LOCK TABLE "workspaces", "sessions", "session_spawn_denials" IN SHARE MODE;',
+    );
+    const guardInstall = boundarySql.indexOf(
+      "CREATE TRIGGER session_idempotency_guard BEFORE INSERT",
+    );
+    const firstLedgerReconciliation = boundarySql.indexOf(
+      'INSERT INTO "session_create_idempotency_guard"',
+    );
+    expect(sourceTableLock).toBeGreaterThanOrEqual(0);
+    expect(guardInstall).toBeGreaterThan(sourceTableLock);
+    expect(firstLedgerReconciliation).toBeGreaterThan(sourceTableLock);
+    expect(boundarySql.indexOf("DO $reconcile$", sourceTableLock)).toBeGreaterThan(
+      sourceTableLock,
+    );
     expect(
       contract.migrations
         .map((migration) => migration.path)

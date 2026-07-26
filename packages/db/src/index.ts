@@ -13183,13 +13183,17 @@ async function createSessionInTransaction(
   input: SessionCreateInput,
   id: string,
 ): Promise<SessionCreateResult> {
+  const createIdempotencyKey = input.createIdempotencyKey ?? null;
   const { workspace, deploymentPolicy } = await lockWorkspaceForSessionCreate(
     tx,
     input.workspaceId,
     input.accountId,
   );
-  const createIdempotencyKey = input.createIdempotencyKey ?? null;
   if (createIdempotencyKey !== null) {
+    // Keyed admission retains the control -> advisory order used by old
+    // binaries during the rolling migration. The database depth trigger takes
+    // the same advisory lock after its control-row prefix, so an old writer
+    // holding control cannot deadlock a new writer holding the advisory lock.
     await lockSessionCreateIdempotencyKey(tx, input.workspaceId, createIdempotencyKey);
     // A committed success always wins over a denial on a later retry.
     const existing = await existingSessionForCreateKey(tx, input.workspaceId, createIdempotencyKey);

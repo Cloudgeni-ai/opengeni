@@ -98,9 +98,10 @@ BEGIN
   -- This is the exact lock used by the application admission path. The
   -- trigger must take it before reserving the cross-outcome ledger row so an
   -- old writer and a current writer cannot choose different winners for the
-  -- same workspace/key. Keep this trigger after session_depth_policy_defaults
-  -- (by trigger name) because application admission locks the workspace
-  -- control row before taking this advisory lock.
+  -- same workspace/key. The depth trigger already took this same advisory
+  -- lock and checked for an existing winner; taking it again is
+  -- transaction-reentrant and keeps this guard safe for direct old writers as
+  -- well as the current application.
   PERFORM pg_advisory_xact_lock(
     hashtext('session-create:' || NEW.workspace_id::text || ':' || new_idempotency_key)
   );
@@ -166,15 +167,44 @@ DECLARE
   expected_effective integer;
   expected_source text;
   expected_policy_session uuid;
+  new_idempotency_key text;
+  ledger_winner_exists boolean;
 BEGIN
-  -- Keep direct/older writers on the same control-row -> workspace-row
-  -- ordering as current application admission. This prevents a session from
-  -- observing a workspace policy half-way through a narrowing update.
+  -- Keep direct/older writers on the same control -> advisory -> workspace
+  -- ordering as pre-boundary application admission. The control prefix is
+  -- required for rolling compatibility: an old binary can already hold this
+  -- row before its insert reaches this trigger. The keyed advisory lock below
+  -- still fences the cross-outcome ledger before policy evaluation.
   EXECUTE format('SELECT account_id FROM %I.workspace_inference_controls '
       'WHERE workspace_id = $1 FOR SHARE', TG_TABLE_SCHEMA)
     INTO control_account_id USING NEW.workspace_id;
   IF control_account_id IS NULL THEN
     RAISE EXCEPTION 'workspace has no mandatory inference-control row' USING ERRCODE = '23503';
+  END IF;
+
+  -- Take the same transaction advisory lock as current and old application
+  -- admission, then check the durable outcome before policy/control suffix
+  -- reads. A retry must replay its winner even if the retry's parent would now
+  -- exceed the effective depth policy. Waiting on the advisory lock also makes
+  -- an uncommitted winner visible before this check, instead of allowing a
+  -- mixed-version loser to evaluate policy first.
+  IF TG_TABLE_NAME = 'sessions' THEN
+    new_idempotency_key := NEW.create_idempotency_key;
+    IF new_idempotency_key IS NOT NULL THEN
+      PERFORM pg_advisory_xact_lock(
+        hashtext('session-create:' || NEW.workspace_id::text || ':' || new_idempotency_key)
+      );
+      EXECUTE format('SELECT EXISTS (
+          SELECT 1
+          FROM %I.session_create_idempotency_guard
+          WHERE workspace_id = $1 AND idempotency_key = $2
+        )', TG_TABLE_SCHEMA)
+        INTO ledger_winner_exists
+        USING NEW.workspace_id, new_idempotency_key;
+      IF ledger_winner_exists THEN
+        RETURN NULL;
+      END IF;
+    END IF;
   END IF;
 
   EXECUTE format('SELECT CASE WHEN jsonb_typeof(settings -> ''maxNestedAgentDepth'') = ''number''
@@ -205,6 +235,77 @@ BEGIN
         FROM %I.sessions WHERE workspace_id = $1 AND id = $2 FOR SHARE', TG_TABLE_SCHEMA)
       INTO parent_root, parent_depth, parent_effective, parent_source, parent_policy_session
       USING NEW.workspace_id, NEW.parent_session_id;
+    IF parent_root IS NULL OR parent_depth IS NULL THEN
+      -- During 0111, a legacy parent can still have nullable lineage columns.
+      -- Walk that existing tree and derive the missing snapshot from the
+      -- nearest materialized ancestor, or from the legacy root and workspace
+      -- policy when the whole chain predates this boundary. This keeps old
+      -- trees writable while the bounded backfill catches up; it does not
+      -- bypass the effective-depth check below.
+      EXECUTE format($sql$
+        WITH RECURSIVE lineage AS (
+          SELECT
+            node.id,
+            node.parent_session_id,
+            node.root_session_id,
+            node.nested_agent_depth,
+            node.effective_max_nested_agent_depth,
+            node.nested_agent_depth_policy_source,
+            node.nested_agent_depth_policy_session_id,
+            0::bigint AS distance,
+            ARRAY[node.id]::uuid[] AS path
+          FROM %I.sessions AS node
+          WHERE node.workspace_id = $1 AND node.id = $2
+          UNION ALL
+          SELECT
+            ancestor.id,
+            ancestor.parent_session_id,
+            ancestor.root_session_id,
+            ancestor.nested_agent_depth,
+            ancestor.effective_max_nested_agent_depth,
+            ancestor.nested_agent_depth_policy_source,
+            ancestor.nested_agent_depth_policy_session_id,
+            lineage.distance + 1,
+            lineage.path || ancestor.id
+          FROM %I.sessions AS ancestor
+          JOIN lineage
+            ON ancestor.workspace_id = $1
+           AND ancestor.id = lineage.parent_session_id
+          WHERE NOT ancestor.id = ANY(lineage.path)
+        ),
+        complete AS (
+          SELECT *
+          FROM lineage
+          WHERE root_session_id IS NOT NULL
+            AND nested_agent_depth IS NOT NULL
+            AND effective_max_nested_agent_depth IS NOT NULL
+            AND nested_agent_depth_policy_source IS NOT NULL
+        )
+        SELECT
+          COALESCE(
+            (SELECT root_session_id FROM lineage
+             WHERE root_session_id IS NOT NULL
+             ORDER BY distance LIMIT 1),
+            (SELECT id FROM lineage
+             WHERE parent_session_id IS NULL
+             ORDER BY distance DESC LIMIT 1)
+          ),
+          COALESCE(
+            (SELECT nested_agent_depth::bigint + distance FROM lineage
+             WHERE nested_agent_depth IS NOT NULL
+             ORDER BY distance LIMIT 1),
+            (SELECT max(distance) FROM lineage)
+          ),
+          (SELECT effective_max_nested_agent_depth FROM complete
+           ORDER BY distance LIMIT 1),
+          (SELECT nested_agent_depth_policy_source FROM complete
+           ORDER BY distance LIMIT 1),
+          (SELECT nested_agent_depth_policy_session_id FROM complete
+           ORDER BY distance LIMIT 1)
+      $sql$, TG_TABLE_SCHEMA, TG_TABLE_SCHEMA)
+        INTO parent_root, parent_depth, parent_effective, parent_source, parent_policy_session
+        USING NEW.workspace_id, NEW.parent_session_id;
+    END IF;
     IF parent_root IS NULL OR parent_depth IS NULL THEN
       RAISE EXCEPTION 'parent session not found for nested insert' USING ERRCODE = '23503';
     END IF;
@@ -289,6 +390,14 @@ BEGIN
 END
 $function$;
 
+-- Fence the source tables before installing any source-row guard. A SHARE
+-- lock waits for every pre-boundary writer already in flight, and prevents
+-- new INSERT/UPDATE/DELETE writers from committing while the trigger boundary
+-- and initial ledger reconciliation are installed. Without this fence an old
+-- writer can commit after the trigger install decision but before its source
+-- row is backfilled into the ledger.
+LOCK TABLE "workspaces", "sessions", "session_spawn_denials" IN SHARE MODE;
+
 DO $triggers$
 DECLARE target_schema text := current_schema();
 BEGIN
@@ -305,9 +414,9 @@ BEGIN
   EXECUTE format('CREATE TRIGGER lock_nested_agent_workspace_policy_update BEFORE UPDATE OF settings ON %I.workspaces FOR EACH ROW EXECUTE FUNCTION opengeni_private.lock_nested_agent_workspace_policy_update()', target_schema);
 END $triggers$;
 
--- Preserve successes created before this boundary. The source triggers are
--- already installed, so any old-writer insert that commits while this rolling
--- boundary is in flight must reserve the ledger before its source row commits.
+-- Preserve source rows created before this boundary. The shared source-table
+-- lock remains held, so this reconciliation is fenced against both old and
+-- new writers and cannot miss a source row between the scan and ledger insert.
 INSERT INTO "session_create_idempotency_guard" (
   "workspace_id", "idempotency_key", "outcome", "session_id"
 )
@@ -316,10 +425,9 @@ FROM "sessions"
 WHERE "create_idempotency_key" IS NOT NULL
 ON CONFLICT ("workspace_id", "idempotency_key") DO NOTHING;
 
--- Keep the last reconciliation fenced against source-row writers. The table
--- locks are held to transaction commit, and the final checks make a migration
--- failure explicit rather than publishing a source row with no ledger entry.
-LOCK TABLE "workspaces", "sessions", "session_spawn_denials" IN SHARE MODE;
+-- Keep a final reconciliation for both outcomes while the source-table locks
+-- are still held. The checks make a migration failure explicit rather than
+-- publishing a source row with no ledger entry.
 INSERT INTO "session_create_idempotency_guard" (
   "workspace_id", "idempotency_key", "outcome", "session_id"
 )
