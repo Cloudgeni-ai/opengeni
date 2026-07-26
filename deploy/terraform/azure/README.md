@@ -55,45 +55,97 @@ object_storage = {
 
 External mode means Terraform does not create that dependency. The Helm values or secret manager integration must still provide the runtime values expected by OpenGeni, such as `OPENGENI_OBJECT_STORAGE_AZURE_CONNECTION_STRING` for Azure Blob.
 
-## Managed AKS Capacity
+## AKS Capacity and staged rollout
 
-Keep non-secret production node capacity separate from the rest of the
-environment configuration:
+The `aks` object is the one authoritative model for the system pool. It owns
+node count, VM size, autoscaling, bounds, pod density, OS disk settings, and
+rotation name. Fixed pools keep an explicit `node_count`; autoscaled pools keep
+`node_count` as a validation anchor but omit it from the AzureRM resource
+configuration. AzureRM 4.72.0 then retains the provider-reported live count
+instead of attempting an unsupported `node_count` update on an existing
+autoscaled pool.
+
+A fixed pool is still configured directly:
 
 ```hcl
-managed_aks_capacity = {
+aks = {
   node_count = 5
 }
 ```
 
-When set, this policy is authoritative for the managed AKS system-pool node
-count. Existing automation that supplies only `node_count` retains the fixed
-pool behavior and all existing `aks` settings.
-
-For a right-sized non-production pool, the same override can pin the complete
-capacity and safe-rotation contract without copying credential-bearing tfvars:
+For the observed staging pool, phase 1 must change only autoscaling bounds. The
+SKU, pod density, managed-disk type, and rotation name below are the existing
+live settings and are repeated to make accidental rotation visible in the
+plan. Do not add the later replacement SKU or temporary pool in this phase.
 
 ```hcl
-managed_aks_capacity = {
-  node_count                  = 1
-  vm_size                    = "Standard_E4as_v6"
+aks = {
+  node_count           = 3
+  vm_size              = "Standard_D4ds_v4"
+  auto_scaling_enabled = true
+  min_count            = 3
+  max_count            = 3
+  max_pods             = 30
+  os_disk_size_gb      = 128
+  os_disk_type         = "Managed"
+  temporary_name_for_rotation = null
+}
+
+aks_rollout = {
+  phase = "bounds"
+  expected_existing = {
+    vm_size      = "Standard_D4ds_v4"
+    max_pods     = 30
+    os_disk_size_gb = 128
+    os_disk_type = "Managed"
+    temporary_name_for_rotation = null
+  }
+}
+```
+
+`aks_rollout.phase = "bounds"` requires the expected existing rotation-sensitive
+fields to match the direct `aks` values. The official staging apply owner must
+first confirm authoritative state ownership, resolve the pool's health, clean
+up or reschedule the observed workload so three nodes can fit, and take a
+rollback point. After the bounds-only apply, wait for the autoscaler and refresh
+state until the live/provider count is 3. Recheck provisioning state, regional
+quota, Azure CNI/IP capacity, PDB and drain behavior, and the four bound RWO
+disks before considering any replacement.
+
+Only a separately reviewed follow-up may use the rotation phase. Its saved plan
+would carry the refreshed count and quota evidence explicitly:
+
+```hcl
+aks = {
+  node_count                  = 3
+  vm_size                     = "Standard_E4as_v6"
   auto_scaling_enabled        = true
-  min_count                   = 1
+  min_count                   = 3
   max_count                   = 3
   max_pods                    = 60
   os_disk_size_gb             = 128
   os_disk_type                = "Managed"
   temporary_name_for_rotation = "systemtemp"
 }
+
+aks_rollout = {
+  phase = "rotation"
+  rotation_preflight = {
+    observed_node_count    = 3
+    regional_vcpu_used     = 66
+    regional_vcpu_limit    = 80
+    rotation_vcpu_per_node = 4
+  }
+}
 ```
 
-`temporary_name_for_rotation` lets the AzureRM provider create a temporary
-pool before replacing a default pool for a SKU, pod-density, or disk change.
-It does not make a one-node pool highly available: a pool with `min_count = 1`
-accepts brief staging downtime during maintenance. Verify workload requests,
-PDBs, persistent-volume behavior, subnet IP capacity, regional SKU/quota, and a
-reviewed rollback before applying such a policy. When the override is omitted,
-the equivalent optional fields on `aks` provide the same controls.
+The module rejects rotation unless the refreshed provider count is within the
+requested bounds and the temporary-pool peak fits the supplied regional quota
+headroom. For the example, the modeled peak is 78/80 vCPU. The follow-up still
+requires an operator-reviewed read-only plan, RWO drain/reattach and rollback
+evidence, and a fresh quota/SKU/preflight check. These settings are operational
+guardrails, not a cost-savings claim; actual savings require authoritative
+billing evidence.
 
 ## Managed PostgreSQL Capacity
 

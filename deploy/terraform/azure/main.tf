@@ -30,15 +30,27 @@ locals {
   availability_test_url                 = try(var.observability.availability_test_url, null)
   observability_action_group_short_name = try(var.observability.action_group_short_name, "opengenialrt")
   observability_alert_email_receivers   = try(var.observability.alert_email_receivers, {})
-  aks_auto_scaling_enabled              = coalesce(try(var.managed_aks_capacity.auto_scaling_enabled, null), var.aks.auto_scaling_enabled)
-  aks_max_count                         = local.aks_auto_scaling_enabled ? coalesce(try(var.managed_aks_capacity.max_count, null), var.aks.max_count) : null
-  aks_max_pods                          = try(var.managed_aks_capacity.max_pods, null) != null ? var.managed_aks_capacity.max_pods : var.aks.max_pods
-  aks_min_count                         = local.aks_auto_scaling_enabled ? coalesce(try(var.managed_aks_capacity.min_count, null), var.aks.min_count) : null
-  aks_node_count                        = var.managed_aks_capacity != null ? var.managed_aks_capacity.node_count : var.aks.node_count
-  aks_os_disk_size_gb                   = try(var.managed_aks_capacity.os_disk_size_gb, null) != null ? var.managed_aks_capacity.os_disk_size_gb : var.aks.os_disk_size_gb
-  aks_os_disk_type                      = try(var.managed_aks_capacity.os_disk_type, null) != null ? var.managed_aks_capacity.os_disk_type : var.aks.os_disk_type
-  aks_temporary_name_for_rotation       = try(var.managed_aks_capacity.temporary_name_for_rotation, null) != null ? var.managed_aks_capacity.temporary_name_for_rotation : var.aks.temporary_name_for_rotation
-  aks_vm_size                           = coalesce(try(var.managed_aks_capacity.vm_size, null), var.aks.vm_size)
+  aks_auto_scaling_enabled              = var.aks.auto_scaling_enabled
+  aks_max_count                         = local.aks_auto_scaling_enabled ? var.aks.max_count : null
+  aks_max_pods                          = var.aks.max_pods
+  aks_min_count                         = local.aks_auto_scaling_enabled ? var.aks.min_count : null
+  aks_node_count_for_pool               = local.aks_auto_scaling_enabled ? null : var.aks.node_count
+  aks_os_disk_size_gb                   = var.aks.os_disk_size_gb
+  aks_os_disk_type                      = var.aks.os_disk_type
+  aks_temporary_name_for_rotation       = var.aks.temporary_name_for_rotation
+  aks_vm_size                           = var.aks.vm_size
+  aks_rotation_preflight                = try(var.aks_rollout.rotation_preflight, null)
+  aks_rotation_count_within_bounds = try(
+    local.aks_rotation_preflight.observed_node_count >= local.aks_min_count &&
+    local.aks_rotation_preflight.observed_node_count <= local.aks_max_count,
+    false
+  )
+  aks_rotation_quota_within_limit = try(
+    local.aks_rotation_preflight.regional_vcpu_used +
+    local.aks_rotation_preflight.observed_node_count * local.aks_rotation_preflight.rotation_vcpu_per_node <=
+    local.aks_rotation_preflight.regional_vcpu_limit,
+    false
+  )
   dns_zone_contributor_principals = {
     for item in flatten([
       for assignment_name, assignment in var.dns_zone_contributor_assignments : [
@@ -91,12 +103,15 @@ resource "azurerm_kubernetes_cluster" "this" {
   tags                      = local.tags
 
   default_node_pool {
-    name                        = "system"
-    auto_scaling_enabled        = local.aks_auto_scaling_enabled
-    max_count                   = local.aks_max_count
-    max_pods                    = local.aks_max_pods
-    min_count                   = local.aks_min_count
-    node_count                  = local.aks_node_count
+    name                 = "system"
+    auto_scaling_enabled = local.aks_auto_scaling_enabled
+    max_count            = local.aks_max_count
+    max_pods             = local.aks_max_pods
+    min_count            = local.aks_min_count
+    # AzureRM 4.72.0 rejects node_count updates on an existing autoscaled pool.
+    # Keep the requested count for validation, but let Azure/autoscaling state
+    # own the live count whenever autoscaling is enabled.
+    node_count                  = local.aks_node_count_for_pool
     os_disk_size_gb             = local.aks_os_disk_size_gb
     os_disk_type                = local.aks_os_disk_type
     temporary_name_for_rotation = local.aks_temporary_name_for_rotation
@@ -140,10 +155,30 @@ resource "azurerm_kubernetes_cluster" "this" {
       condition = !local.aks_auto_scaling_enabled || (
         local.aks_min_count != null &&
         local.aks_max_count != null &&
-        local.aks_min_count <= local.aks_node_count &&
-        local.aks_node_count <= local.aks_max_count
+        local.aks_min_count <= var.aks.node_count &&
+        var.aks.node_count <= local.aks_max_count
       )
       error_message = "AKS autoscaling requires min_count <= node_count <= max_count."
+    }
+
+    precondition {
+      condition = var.aks_rollout.phase != "bounds" || (
+        var.aks_rollout.expected_existing != null &&
+        try(var.aks_rollout.expected_existing.vm_size, null) == var.aks.vm_size &&
+        try(var.aks_rollout.expected_existing.max_pods, null) == var.aks.max_pods &&
+        try(var.aks_rollout.expected_existing.os_disk_size_gb, null) == var.aks.os_disk_size_gb &&
+        try(var.aks_rollout.expected_existing.os_disk_type, null) == var.aks.os_disk_type &&
+        try(var.aks_rollout.expected_existing.temporary_name_for_rotation, null) == var.aks.temporary_name_for_rotation
+      )
+      error_message = "AKS bounds rollout may change only autoscaling bounds; refresh and review the existing SKU, pod density, disk, and rotation settings before changing them."
+    }
+
+    precondition {
+      condition = var.aks_rollout.phase != "rotation" || (
+        local.aks_rotation_count_within_bounds &&
+        local.aks_rotation_quota_within_limit
+      )
+      error_message = "AKS rotation requires a refreshed provider count within the requested bounds and enough regional vCPU quota for the temporary pool."
     }
   }
 }
