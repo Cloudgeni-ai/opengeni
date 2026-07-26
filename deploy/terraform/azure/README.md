@@ -76,9 +76,14 @@ aks = {
 For the observed staging pool, phase 1 must change only autoscaling bounds. The
 SKU, pod density, managed-disk type, and rotation name below are the existing
 live settings and are repeated to make accidental rotation visible in the
-plan. Do not add the later replacement SKU or temporary pool in this phase.
+plan. The staging composition must set `aks_existing_pool = true`; omitting
+`aks_rollout` then fails closed instead of silently selecting the new-cluster
+`direct` phase. Do not add the later replacement SKU or temporary pool in this
+phase.
 
 ```hcl
+aks_existing_pool = true
+
 aks = {
   node_count           = 3
   vm_size              = "Standard_D4ds_v4"
@@ -104,7 +109,8 @@ aks_rollout = {
 ```
 
 `aks_rollout.phase = "bounds"` requires the expected existing rotation-sensitive
-fields to match the direct `aks` values. The official staging apply owner must
+fields to match the direct `aks` values and requires autoscaling to remain
+enabled. The official staging apply owner must
 first confirm authoritative state ownership, resolve the pool's health, clean
 up or reschedule the observed workload so three nodes can fit, and take a
 rollback point. After the bounds-only apply, wait for the autoscaler and refresh

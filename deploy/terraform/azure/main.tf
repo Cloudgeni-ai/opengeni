@@ -162,6 +162,19 @@ resource "azurerm_kubernetes_cluster" "this" {
     }
 
     precondition {
+      condition     = !var.aks_existing_pool || contains(["bounds", "rotation"], var.aks_rollout.phase)
+      error_message = "Existing AKS pools must explicitly select the bounds or rotation rollout phase; direct is reserved for new-cluster compatibility."
+    }
+
+    precondition {
+      condition = var.aks_rollout.phase != "bounds" || (
+        local.aks_auto_scaling_enabled &&
+        local.aks_node_count_for_pool == null
+      )
+      error_message = "The AKS bounds rollout requires autoscaling and must omit an explicit fixed-pool node_count."
+    }
+
+    precondition {
       condition = var.aks_rollout.phase != "bounds" || (
         var.aks_rollout.expected_existing != null &&
         try(var.aks_rollout.expected_existing.vm_size, null) == var.aks.vm_size &&

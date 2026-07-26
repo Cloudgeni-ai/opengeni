@@ -191,6 +191,7 @@ run "bounds_rollout_preserves_existing_rotation_fields" {
   command = plan
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_D4ds_v4"
@@ -234,6 +235,7 @@ run "imported_autoscaled_count_is_retained_when_bounds_change" {
   state_key = "aks-count-transition"
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 4
       vm_size                     = "Standard_D4ds_v4"
@@ -259,7 +261,7 @@ run "imported_autoscaled_count_is_retained_when_bounds_change" {
   }
 
   assert {
-    condition = azurerm_kubernetes_cluster.this.default_node_pool[0].node_count == 4
+    condition     = azurerm_kubernetes_cluster.this.default_node_pool[0].node_count == 4
     error_message = "The imported autoscaled pool must start with the provider-reported count of four."
   }
 }
@@ -269,6 +271,7 @@ run "bounds_change_does_not_emit_node_count_update" {
   state_key = "aks-count-transition"
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_D4ds_v4"
@@ -309,6 +312,7 @@ run "rotation_is_allowed_after_count_refresh_and_quota_check" {
   command = plan
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_E4as_v6"
@@ -348,6 +352,7 @@ run "rotation_is_rejected_before_count_converges" {
   command = plan
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_E4as_v6"
@@ -364,7 +369,7 @@ run "rotation_is_rejected_before_count_converges" {
       phase = "rotation"
       rotation_preflight = {
         observed_node_count    = 4
-        regional_vcpu_used     = 66
+        regional_vcpu_used     = 64
         regional_vcpu_limit    = 80
         rotation_vcpu_per_node = 4
       }
@@ -380,6 +385,7 @@ run "rotation_is_rejected_when_quota_headroom_is_insufficient" {
   command = plan
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_E4as_v6"
@@ -404,7 +410,95 @@ run "rotation_is_rejected_when_quota_headroom_is_insufficient" {
   }
 
   expect_failures = [
+    var.aks_rollout,
+  ]
+}
+
+run "existing_pool_rejects_omitted_rollout_for_rotation_sensitive_changes" {
+  command   = plan
+  state_key = "aks-count-transition"
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 3
+      vm_size                     = "Standard_E4as_v6"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 3
+      max_pods                    = 60
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = "systemtemp"
+    }
+  }
+
+  expect_failures = [
     azurerm_kubernetes_cluster.this,
+  ]
+}
+
+run "bounds_rollout_rejects_fixed_pool_configuration" {
+  command = plan
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 3
+      vm_size                     = "Standard_D4ds_v4"
+      max_pods                    = 30
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = null
+    }
+
+    aks_rollout = {
+      phase = "bounds"
+      expected_existing = {
+        vm_size                     = "Standard_D4ds_v4"
+        max_pods                    = 30
+        os_disk_size_gb             = 128
+        os_disk_type                = "Managed"
+        temporary_name_for_rotation = null
+      }
+    }
+  }
+
+  expect_failures = [
+    azurerm_kubernetes_cluster.this,
+  ]
+}
+
+run "rotation_rejects_negative_vcpu_preflight" {
+  command = plan
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 3
+      vm_size                     = "Standard_E4as_v6"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 3
+      max_pods                    = 60
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = "systemtemp"
+    }
+
+    aks_rollout = {
+      phase = "rotation"
+      rotation_preflight = {
+        observed_node_count    = 3
+        regional_vcpu_used     = 66
+        regional_vcpu_limit    = 80
+        rotation_vcpu_per_node = -4
+      }
+    }
+  }
+
+  expect_failures = [
+    var.aks_rollout,
   ]
 }
 
@@ -429,6 +523,7 @@ run "bounds_rollout_rejects_rotation_sensitive_changes" {
   command = plan
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_E4as_v6"
@@ -466,6 +561,7 @@ run "post_convergence_refreshes_count_three_state" {
   }
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_D4ds_v4"
@@ -504,6 +600,7 @@ run "rotation_uses_refreshed_count_three_state" {
   }
 
   variables {
+    aks_existing_pool = true
     aks = {
       node_count                  = 3
       vm_size                     = "Standard_E4as_v6"

@@ -44,6 +44,12 @@ variable "deployment_phase" {
   }
 }
 
+variable "aks_existing_pool" {
+  description = "Whether this composition manages an already-existing AKS system pool. Existing pools must explicitly select a staged aks_rollout phase; new clusters retain the direct default."
+  type        = bool
+  default     = false
+}
+
 variable "aks" {
   description = "AKS cluster settings."
   type = object({
@@ -155,6 +161,25 @@ variable "aks_rollout" {
   validation {
     condition     = var.aks_rollout.phase != "rotation" || var.aks_rollout.rotation_preflight != null
     error_message = "aks_rollout.rotation_preflight is required before a rotation rollout."
+  }
+
+  validation {
+    condition = var.aks_rollout.phase != "rotation" || try(
+      var.aks_rollout.rotation_preflight.observed_node_count > 0 &&
+      floor(var.aks_rollout.rotation_preflight.observed_node_count) == var.aks_rollout.rotation_preflight.observed_node_count &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_used > 0 &&
+      floor(var.aks_rollout.rotation_preflight.regional_vcpu_used) == var.aks_rollout.rotation_preflight.regional_vcpu_used &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_limit > 0 &&
+      floor(var.aks_rollout.rotation_preflight.regional_vcpu_limit) == var.aks_rollout.rotation_preflight.regional_vcpu_limit &&
+      var.aks_rollout.rotation_preflight.rotation_vcpu_per_node > 0 &&
+      floor(var.aks_rollout.rotation_preflight.rotation_vcpu_per_node) == var.aks_rollout.rotation_preflight.rotation_vcpu_per_node &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_used <= var.aks_rollout.rotation_preflight.regional_vcpu_limit &&
+      var.aks_rollout.rotation_preflight.regional_vcpu_used +
+      var.aks_rollout.rotation_preflight.observed_node_count * var.aks_rollout.rotation_preflight.rotation_vcpu_per_node <=
+      var.aks_rollout.rotation_preflight.regional_vcpu_limit,
+      false
+    )
+    error_message = "aks rotation preflight values must be positive whole numbers, use a limit at least as large as current usage, and fit the temporary-pool vCPU peak."
   }
 }
 
