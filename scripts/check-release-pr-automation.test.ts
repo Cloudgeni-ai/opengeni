@@ -12,6 +12,7 @@ import {
 const root = join(import.meta.dir, "..");
 const releaseWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath);
 const ciWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath);
+const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mjs");
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
@@ -452,7 +453,11 @@ function checksFixture() {
         check_runs: checks.filter((check) => check.name === url.searchParams.get("check_name")),
       });
     if (method === "POST" && url.pathname === `${prefix}/check-runs`) {
-      const check = { ...body, id: nextId++, app: { slug: "github-actions" } };
+      const check = {
+        ...body,
+        id: nextId++,
+        app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+      };
       checks.push(check);
       return response(check, 201);
     }
@@ -519,7 +524,10 @@ function approvalFixture(
     requestedReview?: boolean;
     headChecks?: Array<Record<string, unknown>>;
     sourceChecks?: Array<Record<string, unknown>>;
+    historicalHeadChecks?: Array<Record<string, unknown>>;
+    historicalSourceChecks?: Array<Record<string, unknown>>;
     discontinuousCompare?: boolean;
+    mergeEvent?: Record<string, unknown> | null;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
@@ -566,12 +574,28 @@ function approvalFixture(
     body: reviewBody,
     user: RELEASE_AUTOMATION_CONTRACT.releaseApprover,
   };
-  const successfulCheck = (name: string) => ({
+  const successfulCheck = (name: string, sha: string) => ({
     name,
+    head_sha: sha,
     status: "completed",
     conclusion: "success",
-    app: { slug: "github-actions" },
+    app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
   });
+  const mergeEvent =
+    options.mergeEvent === null
+      ? []
+      : [
+          options.mergeEvent ?? {
+            id: 7001,
+            node_id: "ME_fixture",
+            url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/issues/events/7001`,
+            event: "merged",
+            actor: merger,
+            commit_id: mergeSha,
+            commit_url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/commits/${mergeSha}`,
+            created_at: "2026-07-23T12:00:00Z",
+          },
+        ];
   let mainReads = 0;
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
@@ -629,6 +653,8 @@ function approvalFixture(
           ? [RELEASE_AUTOMATION_CONTRACT.releaseApprover]
           : [],
       });
+    if (method === "GET" && url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
+      return response(mergeEvent);
     if (method === "GET" && url.pathname === `${prefix}/compare/${baseSha}...${mergeSha}`) {
       const commits =
         mergeMethod === "rebase"
@@ -656,15 +682,24 @@ function approvalFixture(
       return response(review);
     if (method === "GET" && url.pathname === `${prefix}/commits/${pullHeadSha}/check-runs`)
       return response({
-        check_runs: options.headChecks ?? [
-          successfulCheck(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission),
+        check_runs: [
+          ...(options.headChecks ?? [
+            successfulCheck(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, pullHeadSha),
+          ]),
+          ...(url.searchParams.get("filter") === "all" ? (options.historicalHeadChecks ?? []) : []),
         ],
       });
     if (method === "GET" && url.pathname === `${prefix}/commits/${mergeSha}/check-runs`)
       return response({
-        check_runs:
-          options.sourceChecks ??
-          RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map(successfulCheck),
+        check_runs: [
+          ...(options.sourceChecks ??
+            RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
+              successfulCheck(name, mergeSha),
+            )),
+          ...(url.searchParams.get("filter") === "all"
+            ? (options.historicalSourceChecks ?? [])
+            : []),
+        ],
       });
     return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
   }
@@ -700,6 +735,7 @@ describe("release approval provenance", () => {
         sourceAdmission: {
           name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
           appSlug: "github-actions",
+          appId: 15368,
         },
       }),
     );
@@ -770,6 +806,15 @@ describe("release approval provenance", () => {
     ).rejects.toThrow("is not merged");
   });
 
+  test("rejects an associated direct fast-forward with matching provider topology", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeMethod: "single", mergeEvent: null }).fetchImpl,
+      }),
+    ).rejects.toThrow("exactly one provider merge event");
+  });
+
   test("rejects tree, head, topology, effective-review, and terminal-main drift", async () => {
     await expect(
       verifyApprovedMerge({
@@ -805,11 +850,12 @@ describe("release approval provenance", () => {
   });
 
   test("rejects missing, duplicate, failed, or foreign source-admission and source checks", async () => {
-    const success = (name: string, appSlug = "github-actions") => ({
+    const success = (name: string, sha = headSha, appSlug = "github-actions", appId = 15368) => ({
       name,
+      head_sha: sha,
       status: "completed",
       conclusion: "success",
-      app: { slug: appSlug },
+      app: { slug: appSlug, id: appId },
     });
     await expect(
       verifyApprovedMerge({
@@ -832,27 +878,75 @@ describe("release approval provenance", () => {
       verifyApprovedMerge({
         env: approvalEnv(),
         fetchImpl: approvalFixture({
-          headChecks: [success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, "forged-app")],
+          headChecks: [
+            success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, headSha, "forged-app"),
+          ],
         }).fetchImpl,
       }),
-    ).rejects.toThrow("not owned by GitHub Actions");
+    ).rejects.toThrow("not owned by the official GitHub Actions app");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          headChecks: [
+            success(
+              RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+              headSha,
+              "github-actions",
+              999,
+            ),
+          ],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("not owned by the official GitHub Actions app");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          headChecks: [success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, mergeSha)],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("bound to another commit");
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
         fetchImpl: approvalFixture({
           sourceChecks: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
-            ...success(name),
+            ...success(name, mergeSha),
             conclusion: index === 0 ? "failure" : "success",
           })),
         }).fetchImpl,
       }),
     ).rejects.toThrow("did not complete successfully");
   });
+
+  test("uses all check runs so a failed run hidden by a successful rerequest is rejected", async () => {
+    const successful = {
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    };
+    const fixture = approvalFixture({
+      headChecks: [successful],
+      historicalHeadChecks: [{ ...successful, conclusion: "failure" }],
+    });
+    await expect(
+      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: fixture.fetchImpl }),
+    ).rejects.toThrow("exactly one check run");
+    expect(
+      fixture.requests
+        .filter((request) => request.path.endsWith("/check-runs"))
+        .every((request) => request.query.get("filter") === "all"),
+    ).toBe(true);
+  });
 });
 
 describe("workflow contracts", () => {
   const releaseText = readFileSync(releaseWorkflowPath, "utf8");
   const ciText = readFileSync(ciWorkflowPath, "utf8");
+  const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
 
@@ -944,6 +1038,12 @@ describe("workflow contracts", () => {
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: source-admission");
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: automation-ci");
     expect(releaseText).toContain("verify-approved-merge");
+  });
+
+  test("writes approved provenance outputs from the provider result field names", () => {
+    expect(releaseAutomationText).toContain("approved_pr_number: result.pullRequestNumber");
+    expect(releaseAutomationText).toContain("approved_pr_head_sha: result.reviewedHeadSha");
+    expect(releaseAutomationText).toContain("approved_review_id: result.review.id");
   });
 
   test("requires complete live acceptance before any publication", () => {

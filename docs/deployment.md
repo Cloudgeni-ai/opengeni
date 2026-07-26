@@ -209,8 +209,10 @@ Release admission derives the merge outcome exclusively from GitHub records; a
 workflow caller cannot assert a merge method. The exact current `main` SHA is
 fenced before and after admission, must be associated with exactly one merged
 PR, and must retain the PR's provider-recorded base, head, merge SHA, actors,
-commit count, and exact reviewed-head tree. Supported provider-derived outcomes
-are:
+commit count, and exact reviewed-head tree. A matching GitHub `merged` timeline
+event must independently bind the source commit, merge actor, and merge time;
+association and topology alone do not admit a direct fast-forward push.
+Supported provider-derived outcomes are:
 
 - an exact two-parent merge commit with parents `[reviewed base, reviewed head]`;
 - an exact one-commit squash on the reviewed base when the PR had multiple
@@ -231,9 +233,11 @@ The exact reviewed head must have one successful GitHub Actions `Current-base
 source admission` check. The exact source must separately have one successful
 GitHub Actions result for each required candidate check: `Typecheck and unit
 tests`, `Deployment artifacts`, and `Workload image builds`. Missing,
-duplicated, failed, or foreign-app check runs are rejected. This admission
-metadata does not alter the reproducible schema-v2 candidate receipt or any
-chart, manifest, SBOM, provenance, or workload digest.
+duplicated, failed, wrong-head, or foreign-app check runs are rejected. Check
+history is read with `filter=all`, and every accepted record must bind the exact
+commit and the official GitHub Actions app identity (`github-actions`, app ID
+`15368`). This admission metadata does not alter the reproducible schema-v2
+candidate receipt or any chart, manifest, SBOM, provenance, or workload digest.
 
 That workflow requires the exact current `main` SHA, no pending changesets, and
 the exact expected package set (for example, `@opengeni/react@0.15.0`). It

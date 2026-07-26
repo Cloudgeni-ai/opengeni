@@ -23,6 +23,10 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
     id: 55702375,
     type: "User",
   }),
+  githubActionsApp: Object.freeze({
+    slug: "github-actions",
+    id: 15368,
+  }),
   checks: Object.freeze({
     sourceAdmission: "Current-base source admission",
     automationCi: "Automation PR CI",
@@ -300,6 +304,10 @@ function repositoryPath(path) {
   return `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}${path}`;
 }
 
+function repositoryApiUrl(path) {
+  return `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${repositoryPath(path)}`;
+}
+
 async function terminalVersionIdentity(api, context) {
   const [main, pull, versionBranch, headCommit] = await Promise.all([
     api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
@@ -536,7 +544,7 @@ async function findCheckRun(api, context, identity) {
     for (const check of response.check_runs) {
       if (check?.external_id !== identity.externalId) continue;
       invariant(check?.head_sha === context.headSha, "existing check run is bound to another head");
-      invariant(check?.app?.slug === "github-actions", "existing check run has another owner app");
+      assertGitHubActionsApp(check?.app, "existing check run");
       invariant(
         Number.isSafeInteger(check?.id) && check.id > 0,
         "existing check-run ID is invalid",
@@ -668,7 +676,9 @@ async function paginatedCheckRuns(api, sha) {
   const rows = [];
   for (let page = 1; page <= maximumPages; page += 1) {
     const value = await api.get(
-      repositoryPath(`/commits/${sha}/check-runs?per_page=${recordsPerPage}&page=${page}`),
+      repositoryPath(
+        `/commits/${sha}/check-runs?filter=all&per_page=${recordsPerPage}&page=${page}`,
+      ),
     );
     invariant(Array.isArray(value?.check_runs), "check-run listing is invalid");
     rows.push(...value.check_runs);
@@ -677,16 +687,29 @@ async function paginatedCheckRuns(api, sha) {
   throw new Error(`check-run listing exceeded ${maximumPages * recordsPerPage} records`);
 }
 
+function assertGitHubActionsApp(app, label) {
+  invariant(
+    app?.slug === RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug &&
+      app?.id === RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+    `${label} is not owned by the official GitHub Actions app`,
+  );
+}
+
 function assertSuccessfulCheck(checks, name, sha) {
   const selected = checks.filter((check) => check?.name === name);
   invariant(selected.length === 1, `${name} is not represented by exactly one check run on ${sha}`);
   const check = selected[0];
-  invariant(check?.app?.slug === "github-actions", `${name} is not owned by GitHub Actions`);
+  invariant(check?.head_sha === sha, `${name} is bound to another commit`);
+  assertGitHubActionsApp(check?.app, name);
   invariant(
     check.status === "completed" && check.conclusion === "success",
     `${name} did not complete successfully`,
   );
-  return Object.freeze({ name, appSlug: "github-actions" });
+  return Object.freeze({
+    name,
+    appSlug: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.slug,
+    appId: RELEASE_AUTOMATION_CONTRACT.githubActionsApp.id,
+  });
 }
 
 function assertCommit(value, expectedSha, label) {
@@ -743,6 +766,32 @@ function assertMergedPull(value, expected) {
     "pull-request merge actor type is invalid",
   );
   return { baseSha, headSha, mergedAt, author, merger, commitCount: value.commits };
+}
+
+function assertProviderMergeEvent(events, sourceSha, pullIdentity) {
+  const matching = events.filter(
+    (event) => event?.event === "merged" && event?.commit_id === sourceSha,
+  );
+  invariant(
+    matching.length === 1,
+    "release source is not represented by exactly one provider merge event",
+  );
+  const event = record(matching[0], "provider merge event");
+  invariant(
+    event.commit_url === repositoryApiUrl(`/commits/${sourceSha}`),
+    "provider merge event commit URL changed",
+  );
+  invariant(
+    assertTimestamp(event.created_at, "provider merge event timestamp") === pullIdentity.mergedAt,
+    "provider merge event timestamp differs from pull-request merge time",
+  );
+  assertIdentity(event.actor, pullIdentity.merger, "provider merge actor");
+  assertString(event.node_id, "provider merge event node ID");
+  const eventId = assertPositiveInteger(event.id, "provider merge event ID");
+  invariant(
+    event.url === repositoryApiUrl(`/issues/events/${eventId}`),
+    "provider merge event URL changed",
+  );
 }
 
 function exactHeadReviewArtifact(baseSha, headSha) {
@@ -916,6 +965,12 @@ export async function verifyApprovedMerge(options = {}) {
       associatedPull.head?.sha === pullIdentity.headSha,
     "associated pull summary differs from pull-request detail",
   );
+  const timeline = await paginatedArray(
+    api,
+    repositoryPath(`/issues/${pullNumber}/timeline`),
+    "pull-request timeline",
+  );
+  assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
   const [base, head] = await Promise.all([
     api
       .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
@@ -1104,9 +1159,9 @@ async function runCommand(env = process.env) {
     const result = await verifyApprovedMerge({ env });
     writeOutputs(
       {
-        approved_pr_number: result.pullNumber,
-        approved_pr_head_sha: result.headSha,
-        approved_review_id: result.reviewId,
+        approved_pr_number: result.pullRequestNumber,
+        approved_pr_head_sha: result.reviewedHeadSha,
+        approved_review_id: result.review.id,
       },
       env,
     );
