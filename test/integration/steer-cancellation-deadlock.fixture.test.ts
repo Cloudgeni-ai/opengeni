@@ -483,9 +483,7 @@ describe("OPE-75 Agent Steer cancellation deadlock production fixture", () => {
         });
         expect(terminalizedAttempt?.quiescedAt).toBeNull();
         expect(finalRows.interruption).toMatchObject({ kind: "steer", state: "settled" });
-        expect(finalRows.wake?.deliveredRevision).toBeLessThan(
-          finalRows.wake?.wakeRevision ?? 0,
-        );
+        expect(finalRows.wake?.deliveredRevision).toBeLessThan(finalRows.wake?.wakeRevision ?? 0);
         expect(finalQueue).toMatchObject({ items: [], stoppingPreviousAttempt: true });
       } finally {
         releaseZombie = true;
