@@ -44,7 +44,7 @@ jobs:
     permissions:
       actions: read # authenticate the exact push-triggered Release run
       checks: write # publish idempotent checks on the candidate head SHA
-      contents: read # inspect immutable commits and direct Git trees
+      contents: write # retain the exact head before any check can make the Version PR mergeable
       pull-requests: read # authenticate the bot PR and provider projection
     env:
       AUTOMATION_PR_NUMBER: ${{ inputs.automation_pr_number }}

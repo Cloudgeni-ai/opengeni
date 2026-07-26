@@ -205,6 +205,29 @@ bun scripts/release-review.ts \
 Regenerate the body and verdict after every head or base movement. Do not edit a
 submitted review after merge to manufacture evidence retroactively.
 
+GitHub check lookup is ref-sensitive: a checked head can become undiscoverable
+after its source branch is deleted or rewritten even though the check itself
+ran successfully. Release-capable heads are therefore retained before merge at
+the immutable lightweight tag
+`opengeni-release-head-<exact-reviewed-head-sha>`. Trusted Version-PR CI creates
+that tag before it creates the exact-head check runs. For a non-Version PR that
+will be used directly as a release source, dispatch
+`.github/workflows/seal-release-head.yml` from exact current `main` with the PR
+number and exact base/head SHAs before merging. The base-owned workflow reruns
+the complete source-admission verifier, requires the existing successful
+exact-head admission check, then creates or verifies the tag idempotently. A
+tag is retention evidence, not approval: the native pre-merge review and every
+later source/acceptance gate remain mandatory. A missing, moved, indirect, or
+post-hoc substitute ref fails release provenance.
+
+The repository must keep one active tag ruleset named
+`Immutable OpenGeni release heads`, targeting only
+`refs/tags/opengeni-release-head-*`, with update and deletion restrictions and
+no bypass actors. Both sealing and final provenance read the public ruleset
+detail and fail closed unless that exact contract is active before trusting or
+creating a retained ref. These tags intentionally accumulate for the lifetime
+of their release evidence; never include them in routine tag cleanup.
+
 Release admission derives the merge outcome exclusively from GitHub records; a
 workflow caller cannot assert a merge method. The exact current `main` SHA is
 fenced before and after admission, must be associated with exactly one merged
@@ -229,15 +252,17 @@ Both possible operations have the same admitted security identity: one exact PR,
 base, head, reviewed tree, source tree, and provider merge SHA. Any nonlinear or
 discontinuous range fails closed.
 
-The exact reviewed head must have one successful GitHub Actions `Current-base
-source admission` check. The exact source must separately have one successful
-GitHub Actions result for each required candidate check: `Typecheck and unit
-tests`, `Deployment artifacts`, and `Workload image builds`. Missing,
-duplicated, failed, wrong-head, or foreign-app check runs are rejected. Check
-history is read with `filter=all`, and every accepted record must bind the exact
-commit and the official GitHub Actions app identity (`github-actions`, app ID
-`15368`). This admission metadata does not alter the reproducible schema-v2
-candidate receipt or any chart, manifest, SBOM, provenance, or workload digest.
+The exact reviewed head must still resolve directly from its canonical
+`opengeni-release-head-<sha>` tag and have one successful GitHub Actions
+`Current-base source admission` check. The exact source must separately have
+one successful GitHub Actions result for each required candidate check:
+`Typecheck and unit tests`, `Deployment artifacts`, and `Workload image
+builds`. Missing, moved, indirect, duplicated, failed, wrong-head, or
+foreign-app evidence is rejected. Check history is read with `filter=all`, and
+every accepted record must bind the exact commit and the official GitHub
+Actions app identity (`github-actions`, app ID `15368`). This admission
+metadata does not alter the reproducible schema-v2 candidate receipt or any
+chart, manifest, SBOM, provenance, or workload digest.
 
 That workflow requires the exact current `main` SHA, no pending changesets, and
 the exact expected package set (for example, `@opengeni/react@0.15.0`). It

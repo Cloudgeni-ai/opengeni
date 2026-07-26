@@ -346,6 +346,12 @@ protected source tests retain the remaining isolation and residue proofs:
 
 The release sequence is linear and fail-closed:
 
+Before merging whichever PR will become the release source, retain its exact
+admitted head with `seal-release-head.yml`; trusted Version-PR CI performs this
+step automatically. The canonical `opengeni-release-head-<sha>` tag must exist
+before branch cleanup and is only a durable check-lookup anchor, never a
+replacement for review or acceptance.
+
 1. Merge reviewed source to `main`.
 2. Merge the generated Version PR so the release source has exact package
    versions and no pending changesets.
