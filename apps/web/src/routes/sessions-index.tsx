@@ -70,6 +70,10 @@ import {
 import { buildTools } from "@/lib/session-tools";
 import { useNewSessionDraft, type NewSessionDraftEditable } from "@/lib/use-new-session-draft";
 import { cn } from "@/lib/utils";
+import {
+  runNewSessionRouteSubmission,
+  type CreatedSessionRouteAuthority,
+} from "@/routes/sessions-index-submission";
 import type { SandboxBackend, Session } from "@/types";
 
 const BACKEND_OPTIONS = managedBackendOptions();
@@ -93,6 +97,8 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
   const [optionsOpen, setOptionsOpen] = useState(false);
   const [draft, setDraft] = useState<SessionDraft>(() => emptySessionDraft());
   const [submitting, setSubmitting] = useState(false);
+  const [createdSessionAuthority, setCreatedSessionAuthority] =
+    useState<CreatedSessionRouteAuthority | null>(null);
 
   useEffect(() => {
     resetSessionView();
@@ -152,12 +158,13 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     // sendable file-only message (the API requires non-empty text, so send()
     // substitutes FILE_ONLY_MESSAGE_TEXT).
     canSend:
-      (message.trim().length > 0 || attachments.readyResources.length > 0) &&
+      (createdSessionAuthority !== null ||
+        message.trim().length > 0 ||
+        attachments.readyResources.length > 0) &&
       !busy &&
       !newSessionDraft.loading &&
       !newSessionDraft.conflict &&
-      !attachments.hasUnresolved &&
-      computeReady,
+      (createdSessionAuthority !== null || (!attachments.hasUnresolved && computeReady)),
     pause: async () => {},
     pausing: false,
     resume: async () => {},
@@ -178,66 +185,80 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
     send: async () => {
       const text =
         message.trim() || (attachments.readyResources.length > 0 ? FILE_ONLY_MESSAGE_TEXT : "");
+      if (busy || newSessionDraft.loading || newSessionDraft.conflict) {
+        return false;
+      }
       if (
-        !text ||
-        busy ||
-        newSessionDraft.loading ||
-        newSessionDraft.conflict ||
-        attachments.hasUnresolved ||
-        !computeReady
+        createdSessionAuthority === null &&
+        (!text || attachments.hasUnresolved || !computeReady)
       ) {
         return false;
       }
       setSubmitting(true);
       try {
-        // This render's resources are the immutable create snapshot. Files can
-        // still be added through paste/drop/picker while the request is in
-        // flight; those newer ids belong to the next draft.
-        const submittedResources = persistedValue.resources;
-        const flushed = await newSessionDraft.flush();
-        if (!flushed) return false;
-        const submission = submissionFromSessionDraft(draft);
-        const created = await context.startSession(
-          workspaceId,
-          {
-            text,
-            resources: submittedResources,
-            tools: persistedValue.tools,
-            model: persistedValue.model,
-            reasoningEffort: persistedValue.reasoningEffort,
-            ...submission.extras,
+        return await runNewSessionRouteSubmission({
+          authority: createdSessionAuthority,
+          onAuthorityChange: setCreatedSessionAuthority,
+          create: async () => {
+            // This render's resources are the immutable create snapshot. Files
+            // can still be added through paste/drop/picker while the request is
+            // in flight; those newer ids belong to the next draft.
+            const submittedResources = persistedValue.resources;
+            const flushed = await newSessionDraft.flush();
+            if (!flushed) return null;
+            const submission = submissionFromSessionDraft(draft);
+            const created = await context.startSession(
+              workspaceId,
+              {
+                text,
+                resources: submittedResources,
+                tools: persistedValue.tools,
+                model: persistedValue.model,
+                reasoningEffort: persistedValue.reasoningEffort,
+                ...submission.extras,
+              },
+              {
+                targetSandboxId: submission.options.targetSandboxId,
+                workingDir: submission.options.workingDir,
+                omitWorkspaceResources: submission.omitWorkspaceResources,
+                expectedNewSessionDraftRevision: flushed.revision,
+              },
+            );
+            if (!created) return null;
+            return {
+              sessionId: created.id,
+              settleDraft: async () => {
+                // A programmatic edit made while create was in flight was not
+                // submitted and must not be abandoned when this route unmounts.
+                // A sibling-tab OCC conflict remains visible, while the route
+                // retains exact authority for the already-created session.
+                const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
+                if (!acknowledged) return false;
+                if (acknowledged.kind === "consumed") {
+                  setMessage("");
+                  setDraft(emptySessionDraft());
+                  attachments.removeReadyFiles(
+                    submittedResources.flatMap((resource) =>
+                      resource.kind === "file" ? [resource.fileId] : [],
+                    ),
+                  );
+                } else if (!newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)) {
+                  const preserved = await newSessionDraft.flush();
+                  if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) {
+                    return false;
+                  }
+                }
+                return true;
+              },
+            };
           },
-          {
-            targetSandboxId: submission.options.targetSandboxId,
-            workingDir: submission.options.workingDir,
-            omitWorkspaceResources: submission.omitWorkspaceResources,
-            expectedNewSessionDraftRevision: flushed.revision,
+          navigate: async (sessionId) => {
+            await navigate({
+              to: "/workspaces/$workspaceId/sessions/$sessionId",
+              params: { workspaceId, sessionId },
+            });
           },
-        );
-        if (!created) return false;
-        // A programmatic edit made while create was in flight was not submitted
-        // and must not be abandoned when this route unmounts. The accepted row
-        // is gone, so the hook rebases that newer value onto revision zero while
-        // preserving the normal cross-tab OCC fence.
-        const acknowledged = await newSessionDraft.acknowledgeConsumed(flushed);
-        if (!acknowledged) return false;
-        if (acknowledged.kind === "consumed") {
-          setMessage("");
-          setDraft(emptySessionDraft());
-          attachments.removeReadyFiles(
-            submittedResources.flatMap((resource) =>
-              resource.kind === "file" ? [resource.fileId] : [],
-            ),
-          );
-        } else if (!newSessionDraft.isCurrentSignature(acknowledged.flushed.signature)) {
-          const preserved = await newSessionDraft.flush();
-          if (!preserved || !newSessionDraft.isCurrentSignature(preserved.signature)) return false;
-        }
-        await navigate({
-          to: "/workspaces/$workspaceId/sessions/$sessionId",
-          params: { workspaceId, sessionId: created.id },
         });
-        return true;
       } finally {
         setSubmitting(false);
       }
