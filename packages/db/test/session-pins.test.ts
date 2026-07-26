@@ -31,11 +31,14 @@ let client: DbClient;
 let db: Database;
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
 
-async function freshWorkspace(): Promise<{ accountId: string; workspaceId: string }> {
+async function freshWorkspace(
+  workspaceSettings: Parameters<typeof admin.json>[0] = {},
+): Promise<{ accountId: string; workspaceId: string }> {
   const [account] = await admin<{ id: string }[]>`
     insert into managed_accounts (name) values ('session-pins-account') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
-    insert into workspaces (account_id, name) values (${account!.id}, 'session-pins-workspace') returning id`;
+    insert into workspaces (account_id, name, settings)
+    values (${account!.id}, 'session-pins-workspace', ${admin.json(workspaceSettings)}) returning id`;
   await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
@@ -214,7 +217,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
 
   test("bounds deep, wide, and overlapping descendant summaries with explicit lower bounds", async () => {
     if (!available) return;
-    const workspace = await freshWorkspace();
+    const workspace = await freshWorkspace({ maxNestedAgentDepth: 64 });
     const subjectId = "user:bounded-tree-stats";
     await grantMember(workspace, subjectId);
     const deepRoot = await session({ ...workspace, message: "deep root" });

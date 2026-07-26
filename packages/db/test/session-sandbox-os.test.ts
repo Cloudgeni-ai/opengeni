@@ -34,6 +34,12 @@ function baseSession() {
     sandboxBackend: "modal" as const,
     sandboxOs: "linux" as const,
     sandboxGroupId: id,
+    rootSessionId: id,
+    nestedAgentDepth: 0,
+    maxNestedAgentDepthOverride: null,
+    effectiveMaxNestedAgentDepth: 3,
+    nestedAgentDepthPolicySource: "default" as const,
+    nestedAgentDepthPolicySessionId: null,
     // M2 swappable-sandbox pointer (null == use the group sandbox; epoch 0 default).
     activeSandboxId: null,
     activeEpoch: 0,
