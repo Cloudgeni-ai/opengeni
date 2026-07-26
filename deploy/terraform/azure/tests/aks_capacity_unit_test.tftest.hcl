@@ -1,4 +1,28 @@
 mock_provider "azurerm" {
+  mock_resource "azurerm_kubernetes_cluster" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-opengeni-test/providers/Microsoft.ContainerService/managedClusters/opengeni-test-aks"
+      default_node_pool = {
+        node_count           = 3
+        auto_scaling_enabled = true
+        min_count            = 3
+        max_count            = 3
+      }
+    }
+  }
+
+  mock_resource "azurerm_public_ip" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-opengeni-test/providers/Microsoft.Network/publicIPAddresses/opengeni-test-aks-egress-ip"
+    }
+  }
+
+  mock_resource "azurerm_storage_account" {
+    defaults = {
+      id = "/subscriptions/00000000-0000-0000-0000-000000000003/resourceGroups/rg-opengeni-test/providers/Microsoft.Storage/storageAccounts/opengenitestfiles"
+    }
+  }
+
   mock_data "azurerm_client_config" {
     defaults = {
       client_id       = "00000000-0000-0000-0000-000000000001"
@@ -64,7 +88,6 @@ run "staging_capacity_is_fully_pinned" {
 
   assert {
     condition = (
-      azurerm_kubernetes_cluster.this.default_node_pool[0].node_count == 1 &&
       azurerm_kubernetes_cluster.this.default_node_pool[0].vm_size == "Standard_E4as_v6" &&
       azurerm_kubernetes_cluster.this.default_node_pool[0].auto_scaling_enabled == true &&
       azurerm_kubernetes_cluster.this.default_node_pool[0].min_count == 1 &&
@@ -97,7 +120,6 @@ run "direct_aks_capacity_controls_are_honored" {
 
   assert {
     condition = (
-      azurerm_kubernetes_cluster.this.default_node_pool[0].node_count == 2 &&
       azurerm_kubernetes_cluster.this.default_node_pool[0].vm_size == "Standard_E4as_v6" &&
       azurerm_kubernetes_cluster.this.default_node_pool[0].auto_scaling_enabled == true &&
       azurerm_kubernetes_cluster.this.default_node_pool[0].min_count == 1 &&
@@ -126,4 +148,37 @@ run "invalid_staging_autoscaling_bounds_are_rejected" {
   expect_failures = [
     var.managed_aks_capacity,
   ]
+}
+
+run "existing_autoscaled_pool_does_not_receive_node_count_update" {
+  command   = apply
+  state_key = "existing-autoscaled-pool"
+
+  variables {
+    managed_aks_capacity = {
+      node_count           = 3
+      auto_scaling_enabled = true
+      min_count            = 3
+      max_count            = 3
+    }
+  }
+}
+
+run "existing_autoscaled_pool_keeps_provider_count" {
+  command   = plan
+  state_key = "existing-autoscaled-pool"
+
+  variables {
+    managed_aks_capacity = {
+      node_count           = 1
+      auto_scaling_enabled = true
+      min_count            = 1
+      max_count            = 3
+    }
+  }
+
+  assert {
+    condition     = azurerm_kubernetes_cluster.this.default_node_pool[0].node_count == 3
+    error_message = "An existing autoscaled pool must retain its provider-reported node count instead of receiving a node_count update."
+  }
 }

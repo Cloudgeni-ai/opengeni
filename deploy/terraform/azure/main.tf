@@ -35,6 +35,7 @@ locals {
   aks_max_pods                          = try(var.managed_aks_capacity.max_pods, null) != null ? var.managed_aks_capacity.max_pods : var.aks.max_pods
   aks_min_count                         = local.aks_auto_scaling_enabled ? coalesce(try(var.managed_aks_capacity.min_count, null), var.aks.min_count) : null
   aks_node_count                        = var.managed_aks_capacity != null ? var.managed_aks_capacity.node_count : var.aks.node_count
+  aks_node_count_for_pool               = local.aks_auto_scaling_enabled ? null : local.aks_node_count
   aks_os_disk_size_gb                   = try(var.managed_aks_capacity.os_disk_size_gb, null) != null ? var.managed_aks_capacity.os_disk_size_gb : var.aks.os_disk_size_gb
   aks_os_disk_type                      = try(var.managed_aks_capacity.os_disk_type, null) != null ? var.managed_aks_capacity.os_disk_type : var.aks.os_disk_type
   aks_temporary_name_for_rotation       = try(var.managed_aks_capacity.temporary_name_for_rotation, null) != null ? var.managed_aks_capacity.temporary_name_for_rotation : var.aks.temporary_name_for_rotation
@@ -91,12 +92,16 @@ resource "azurerm_kubernetes_cluster" "this" {
   tags                      = local.tags
 
   default_node_pool {
-    name                        = "system"
-    auto_scaling_enabled        = local.aks_auto_scaling_enabled
-    max_count                   = local.aks_max_count
-    max_pods                    = local.aks_max_pods
-    min_count                   = local.aks_min_count
-    node_count                  = local.aks_node_count
+    name                 = "system"
+    auto_scaling_enabled = local.aks_auto_scaling_enabled
+    max_count            = local.aks_max_count
+    max_pods             = local.aks_max_pods
+    min_count            = local.aks_min_count
+    # AzureRM 4.72.0 rejects node_count updates when the existing pool is
+    # already autoscaled. Omit this optional+computed argument for autoscaled
+    # pools so Azure retains the current count; fixed pools still receive the
+    # legacy node-count update behavior.
+    node_count                  = local.aks_node_count_for_pool
     os_disk_size_gb             = local.aks_os_disk_size_gb
     os_disk_type                = local.aks_os_disk_type
     temporary_name_for_rotation = local.aks_temporary_name_for_rotation

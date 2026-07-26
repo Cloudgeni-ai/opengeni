@@ -75,10 +75,10 @@ capacity and safe-rotation contract without copying credential-bearing tfvars:
 
 ```hcl
 managed_aks_capacity = {
-  node_count                  = 1
-  vm_size                    = "Standard_E4as_v6"
+  node_count                  = 3
+  vm_size                     = "Standard_E4as_v6"
   auto_scaling_enabled        = true
-  min_count                   = 1
+  min_count                   = 3
   max_count                   = 3
   max_pods                    = 60
   os_disk_size_gb             = 128
@@ -87,13 +87,18 @@ managed_aks_capacity = {
 }
 ```
 
-`temporary_name_for_rotation` lets the AzureRM provider create a temporary
-pool before replacing a default pool for a SKU, pod-density, or disk change.
-It does not make a one-node pool highly available: a pool with `min_count = 1`
-accepts brief staging downtime during maintenance. Verify workload requests,
-PDBs, persistent-volume behavior, subnet IP capacity, regional SKU/quota, and a
-reviewed rollback before applying such a policy. When the override is omitted,
-the equivalent optional fields on `aks` provide the same controls.
+`node_count` remains required for validation and fixed pools, but AzureRM omits
+it from the resource configuration while autoscaling is enabled. This is
+intentional: AzureRM 4.72.0 rejects changing `default_node_pool.node_count` on
+an existing autoscaled pool, so the autoscaler and its bounds—not a forced
+count update—own the live count. The example uses a three-node floor because a
+one-node projection is not a fit for the observed preview workload. The
+`temporary_name_for_rotation` setting lets AzureRM create a temporary pool
+before replacing a default pool for a SKU, pod-density, or disk change; it does
+not remove the need to verify workload requests, PDBs, persistent-volume
+behavior, subnet IP capacity, regional SKU/quota, and a reviewed rollback
+before applying such a policy. When the override is omitted, the equivalent
+optional fields on `aks` provide the same controls.
 
 ## Managed PostgreSQL Capacity
 
