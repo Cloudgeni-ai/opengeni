@@ -193,6 +193,10 @@ async function assertExpiredDrainFence(
     leaseTtlMs: 45_000,
   });
   expect(nextCommit.committed).toBe(true);
+  // Publishing the successor warming lease is the third and final bump: after
+  // expiry attribution and confirmed provider teardown, it fences any stale
+  // warming callbacks from the now-live replacement.
+  expect(nextCommit.lease?.leaseEpoch).toBe(oldEpoch + 3);
   const lateCleanupAfterSuccessor = await markWarmLeaseInstanceLost(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -203,7 +207,7 @@ async function assertExpiredDrainFence(
   expect(lateCleanupAfterSuccessor.status).toBe("stale");
   const final = await readRow(ids.workspaceId, ids.groupId);
   expect(final?.liveness).toBe("warm");
-  expect(final?.lease_epoch).toBe(oldEpoch + 2);
+  expect(final?.lease_epoch).toBe(oldEpoch + 3);
   expect(final?.instance_id).toBe("successor-provider");
 }
 
