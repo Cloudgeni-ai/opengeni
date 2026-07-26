@@ -52,7 +52,7 @@ import {
   type DisclosureChip,
 } from "./shared";
 import { RawPatch, ToolDiff } from "./tool-diff";
-import { toolDisplayName } from "./projection";
+import { toolDisplayName } from "./tool-display-name";
 
 /* ----------------------------------------------------------------------------
    Per-tool renderers

@@ -1,4 +1,5 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+const { default: fleetDecisionItem } = await import("./fleet-decision-projection");
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   humanizeFailureReason,
@@ -19,6 +20,12 @@ import type {
   ToolCallItem,
   WorkerItem,
 } from "./types";
+/** Readable label for a tool call, without leaking an MCP server prefix. */
+export function toolDisplayName(name: string): string {
+  const boundary = name.indexOf("__");
+  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
+  return toolPart.replace(/[_-]+/g, " ").trim();
+}
 
 /* ----------------------------------------------------------------------------
    Timeline projection
@@ -554,6 +561,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "codex.fleet.decision": {
+        const decision = fleetDecisionItem(event, payload);
+        if (decision) {
+          closeStreamingTail();
+          items.push(decision);
+        }
+        break;
+      }
+
       case "goal.set":
       case "goal.updated":
       case "goal.completed":
@@ -643,6 +659,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "worker":
     case "sandbox":
     case "memory":
+    case "fleet-decision":
       return true;
     default:
       return false;
@@ -822,7 +839,8 @@ function isTurnExecutionEvidence(type: string): boolean {
     type === "credential.auth_needed" ||
     type.startsWith("rig.setup.") ||
     type === "codex.capacity.waiting" ||
-    type === "codex.capacity.resumed"
+    type === "codex.capacity.resumed" ||
+    type === "codex.fleet.decision"
   );
 }
 
@@ -1307,10 +1325,3 @@ function looksLikeId(value: string): boolean {
  * just the tool ("list organizations"). Names without the `__` boundary (plain
  * built-ins like "session_create") are unaffected.
  */
-export function toolDisplayName(name: string): string {
-  // The prefix is a single LEFT boundary (`registryId__toolName`), so split on
-  // the FIRST `__` — the tool name itself may contain `__` and must survive whole.
-  const boundary = name.indexOf("__");
-  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
-  return toolPart.replace(/[_-]+/g, " ").trim();
-}
