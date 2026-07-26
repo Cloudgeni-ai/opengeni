@@ -529,6 +529,7 @@ export async function persistOrSignalSessionAttemptQuiescence(input: {
 export async function drainAttemptOwnedSandboxWriters(input: {
   toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
   cancellationReason?: unknown;
+  gitCredentialRenewals: readonly Pick<GitCredentialRenewalController, "stop">[];
   toolspaceTokenRenewal: Pick<ToolspaceTokenRenewalController, "stop"> | null;
   runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
 }): Promise<void> {
@@ -538,6 +539,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
     );
     await input.toolCancellationFence.waitForQuiescence();
   }
+  await Promise.all(input.gitCredentialRenewals.map(async (renewal) => await renewal.stop()));
   await input.toolspaceTokenRenewal?.stop();
   await input.runCredentialRenewal?.stop();
 }
@@ -6905,7 +6907,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runCredentialRenewalClosed = true;
         const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
         runCredentialRenewal = null;
-        await Promise.all(gitRenewalsToStop.map(async (renewal) => await renewal.stop()));
 
         // Attempt-qualified credential deletion is also a real workspace write.
         // Perform it under the same admission fence before publishing physical
@@ -6930,6 +6931,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         await drainAttemptOwnedSandboxWriters({
           toolCancellationFence: acknowledgeQuiescence ? toolCancellationFence : null,
           cancellationReason: cancellationSignal?.reason,
+          gitCredentialRenewals: gitRenewalsToStop,
           toolspaceTokenRenewal: toolspaceRenewalToStop,
           runCredentialRenewal: runRenewalToStop,
         });
