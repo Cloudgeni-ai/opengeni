@@ -55,20 +55,24 @@ describe("0109-0116 nested-agent depth rolling upgrade (real PostgreSQL)", () =>
       )`;
 
       const files = (await readdir(migrationsDir)).filter((file) => file.endsWith(".sql")).sort();
-      const apply = async (file: string): Promise<void> => {
+      const apply = async (file: string): Promise<number> => {
         const migrationSql = await readFile(join(migrationsDir, file), "utf8");
         if (file === backfillMigration) {
           // Match the canonical migration runner: 0111 is one bounded batch
           // per statement and must repeat until RETURNING is empty.
+          let updatedBatchCount = 0;
           for (;;) {
             const updated = await sql.unsafe(migrationSql);
             if (updated.length === 0) break;
+            updatedBatchCount += 1;
           }
+          return updatedBatchCount;
         } else {
           await sql.unsafe(migrationSql);
         }
         await sql`insert into schema_migrations (name)
           values (${file}) on conflict do nothing`;
+        return 0;
       };
 
       for (const file of files.filter(
@@ -109,6 +113,19 @@ describe("0109-0116 nested-agent depth rolling upgrade (real PostgreSQL)", () =>
           ${childId}, ${account!.id}, ${workspace!.id}, 'legacy child',
           'migration-test', 'none', ${childId}, ${rootId}
         )`;
+
+      // Force 0111 to exercise its repeated bounded-batch contract instead of
+      // silently passing with a fixture that fits in one 1000-row statement.
+      await sql`
+        insert into sessions (
+          account_id, workspace_id, initial_message, model,
+          sandbox_backend, sandbox_group_id
+        )
+        select
+          ${account!.id}, ${workspace!.id},
+          'legacy batch root ' || series,
+          'migration-test', 'none', gen_random_uuid()
+        from generate_series(1, 1001) as series`;
       await apply(expandMigration);
 
       // A legacy writer can already be inside its transaction after expand
@@ -165,7 +182,8 @@ describe("0109-0116 nested-agent depth rolling upgrade (real PostgreSQL)", () =>
       expect(sawUnGrantedLock).toBe(true);
       expect(boundaryElapsed).toBeGreaterThan(900);
 
-      await apply(backfillMigration);
+      const backfillUpdatedBatchCount = await apply(backfillMigration);
+      expect(backfillUpdatedBatchCount).toBeGreaterThan(1);
       for (const file of contractMigrations) await apply(file);
 
       const [lineage] = await sql<
