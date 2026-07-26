@@ -29,6 +29,9 @@ function decodeApiErrorBody(body: string): { code?: string; message?: string } {
   }
 }
 
+/** A short-lived session-list snapshot cursor can no longer be continued. */
+export class OpenGeniSessionListCursorError extends OpenGeniApiError {}
+
 /** The browser bundle and API disagree about their state-changing wire contract. */
 export class OpenGeniApiContractMismatchError extends Error {
   readonly expected: string;
