@@ -197,6 +197,17 @@ import {
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
 
+function sessionListQuery(options: {
+  limit?: number;
+  parentSessionId?: string | null;
+}): Record<string, string> {
+  const { limit, parentSessionId } = options;
+  return {
+    ...(limit === undefined ? {} : { limit: String(limit) }),
+    ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
+  };
+}
+
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export type WorkspaceControlEventPage = {
@@ -332,16 +343,7 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
-      {
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
-        options.parentSessionId !== undefined
-          ? {
-              parentSessionId:
-                options.parentSessionId === null ? "null" : String(options.parentSessionId),
-            }
-          : {}),
-      },
+      sessionListQuery(options),
     );
   }
 
@@ -357,6 +359,7 @@ export class OpenGeniClient {
       pinsOnly?: boolean;
     } = {},
   ): Promise<SessionListResponse> {
+    const search = options.search?.trim();
     let response: SessionListResponse | Session[];
     try {
       response = await this.requestJson<SessionListResponse | Session[]>(
@@ -365,17 +368,10 @@ export class OpenGeniClient {
         undefined,
         {
           view: "page",
-          ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+          ...sessionListQuery(options),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
-          ...(options.search?.trim() ? { search: options.search.trim() } : {}),
+          ...(search ? { search } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
-          ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
-          options.parentSessionId !== undefined
-            ? {
-                parentSessionId:
-                  options.parentSessionId === null ? "null" : String(options.parentSessionId),
-              }
-            : {}),
         },
       );
     } catch (error) {
@@ -395,7 +391,7 @@ export class OpenGeniClient {
       // array as a successful search would be worse than an explicit rolling-
       // upgrade error (and client-side filtering cannot recover matches beyond
       // the old endpoint's bounded first page).
-      if (options.search?.trim()) {
+      if (search) {
         throw new Error("The connected OpenGeni API does not support session search");
       }
       if (options.pinsOnly) {
