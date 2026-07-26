@@ -5583,7 +5583,7 @@ export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDelt
 export const TerminalPtyExitedPayload = z.object({
   ptyId: z.string().uuid(),
   exitCode: z.number().int().nullable(),
-  reason: z.enum(["exit", "killed", "owner_gone", "timeout"]),
+  reason: z.enum(["exit", "killed", "owner_gone", "timeout", "lost"]),
 });
 export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 
@@ -6042,7 +6042,8 @@ export type GitShowResponse = z.infer<typeof GitShowResponse>;
 export const TerminalExecRequest = z.object({
   command: z.string().min(1),
   cwd: z.string().default(""), // workspace-relative
-  // Soft per-call wall-clock bound (the box yields output back when reached).
+  // Hard wall-clock bound. A timeout response is returned only after the exact
+  // provider process is physically absent and any retained admission settles.
   timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
   // in addition to returning the buffered result inline.
@@ -6052,10 +6053,10 @@ export type TerminalExecRequest = z.infer<typeof TerminalExecRequest>;
 export const TerminalExecResponse = z.object({
   stdout: z.string(),
   stderr: z.string(),
-  exitCode: z.number().int().nullable(),
-  // True when the process was still running when the call yielded (a long
-  // command); the remaining output drains onto A1 if emitStream was set.
-  running: z.boolean(),
+  exitCode: z.number().int(),
+  // Retained for wire compatibility; synchronous exec never exposes a live
+  // provider process. Interactive work uses the PTY API.
+  running: z.literal(false),
   wallTimeSeconds: z.number().nonnegative(),
 });
 export type TerminalExecResponse = z.infer<typeof TerminalExecResponse>;
@@ -7542,6 +7543,9 @@ export const SessionCapabilities = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // Echoed on viewer heartbeats (the split-brain fence).
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveComplete: z.boolean().default(false),
   viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
   FileSystem: z.object({
     available: z.boolean(),
@@ -7646,6 +7650,9 @@ export const ViewerHolder = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // The epoch the viewer is fenced on; echoed back on heartbeats.
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   viewerHeartbeatIntervalMs: z.number().int().positive(),
   // The desktop pixel tunnel URL the viewer connects to directly; null until
   // a viewer grant is minted (gated until then).
@@ -8009,6 +8016,9 @@ export const MachineView = z.object({
   state: MachineState,
   active: z.boolean(),
   isSessionGroup: z.boolean(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   os: z.string(),
   arch: z.string(),
   hasDisplay: z.boolean(),
@@ -8068,6 +8078,9 @@ export const SwapActiveSandboxResponse = z.object({
       "unsupported_backend_context",
       "transient_establishment",
       "concurrent_swap",
+      "recovery_in_progress",
+      "recovery_degraded",
+      "recovery_unrecoverable",
     ])
     .optional(),
 });

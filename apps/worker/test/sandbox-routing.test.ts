@@ -26,19 +26,30 @@ import {
   createSandbox,
   createSession,
   createDb,
+  acquireLease,
+  claimSessionWorkForAttempt,
+  commitWarmingToWarm,
   getSandbox,
+  initializeSessionStartAtomically,
+  readLease,
   readActiveSandbox,
   setActiveSandbox,
   type Database,
   type DbClient,
 } from "@opengeni/db";
-import { buildManifest, subjectFor, type EstablishedSandboxSession } from "@opengeni/runtime";
+import {
+  buildManifest,
+  RoutingBackendRecoveryRequiredError,
+  subjectFor,
+  type EstablishedSandboxSession,
+} from "@opengeni/runtime";
 import { swapActiveSandbox, type FleetContext } from "@opengeni/core";
 import {
   wrapLazyTurnBoxWithRouting,
   wrapTurnBoxWithRouting,
   routingEnabled,
 } from "../src/sandbox-routing";
+import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { reconcileActiveSandboxPointer } from "../src/activities/agent-turn";
 
 let available = true;
@@ -113,6 +124,41 @@ function fakeGroupBox(marker: string): EstablishedSandboxSession {
   return { client: {}, session, sessionState: {}, instanceId: "group-box", backendId: "modal" };
 }
 
+async function claimRoutingAttempt(input: {
+  accountId: string;
+  workspaceId: string;
+  sessionId: string;
+}): Promise<{
+  accountId: string;
+  turnId: string;
+  executionGeneration: number;
+  attemptId: string;
+}> {
+  await initializeSessionStartAtomically(db, {
+    ...input,
+    reasoningEffortFallback: "low",
+    createdEventPayload: {},
+  });
+  const attemptId = crypto.randomUUID();
+  const claim = await claimSessionWorkForAttempt(db, input.workspaceId, {
+    sessionId: input.sessionId,
+    workflowId: `session-${input.sessionId}`,
+    workflowRunId: crypto.randomUUID(),
+    attemptId,
+    dispatchId: `routing-${crypto.randomUUID()}`,
+    trigger: { kind: "next" },
+  });
+  if (claim.action !== "claimed") {
+    throw new Error(`Routing fixture did not claim its turn: ${claim.reason}`);
+  }
+  return {
+    accountId: input.accountId,
+    turnId: claim.turn.id,
+    executionGeneration: claim.turn.executionGeneration,
+    attemptId,
+  };
+}
+
 beforeAll(async () => {
   shared = await acquireSharedTestDatabase("worker-sandbox-routing");
   if (!shared) {
@@ -159,6 +205,11 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       model: "gpt-test",
       sandboxBackend: "modal",
     });
+    const workspaceMutationFence = await claimRoutingAttempt({
+      accountId,
+      workspaceId,
+      sessionId: session.id,
+    });
     const enrollment = await createEnrollment(db, {
       accountId,
       workspaceId,
@@ -177,18 +228,61 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       enrollmentId: enrollment.id,
     });
 
+    // Seed the durable warm home so a same-target route epoch change exercises
+    // the worker's lease-backed home resolver instead of the static fallback.
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: sandboxLeaseHolderIdForAttempt(workspaceMutationFence.attemptId),
+      subjectId: session.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "group-box",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "group-box" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+
     const bus = busWithAgent(workspaceId, enrollment.id, "the-laptop") as never;
 
     // Wrap the established group box in the routing proxy (what the turn does).
     const established = wrapTurnBoxWithRouting(
       { db, settings, bus },
-      { workspaceId, sessionId: session.id },
+      {
+        workspaceId,
+        sessionId: session.id,
+        workspaceMutationFence,
+        homeLease: {
+          accountId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: committed.lease!.leaseEpoch,
+          instanceId: "group-box",
+          backend: "modal",
+        },
+      },
       fakeGroupBox("group-box-marker"),
     );
     const proxy = established.session as { exec: (a: unknown) => Promise<{ stdout: string }> };
 
     // Default pointer (null) → the op lands on the GROUP box.
     expect((await proxy.exec({ cmd: "uname" })).stdout).toBe("group-box-marker");
+    expect(await readLease(db, workspaceId, session.sandboxGroupId)).toMatchObject({
+      workspaceGeneration: 1,
+      archiveGeneration: null,
+      archiveComplete: false,
+    });
 
     // SWAP mid-turn: repoint the session to the enrolled machine (epoch-bumped CAS).
     const swap = await setActiveSandbox(db, {
@@ -203,6 +297,11 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     // The NEXT op re-reads the pointer and lands on the MACHINE (the agent echoes
     // its hostname) — the SDK-binds-the-proxy-once contract: same object, new box.
     expect((await proxy.exec({ cmd: "echo $HOSTNAME" })).stdout.trim()).toBe("the-laptop");
+    expect(await readLease(db, workspaceId, session.sandboxGroupId)).toMatchObject({
+      workspaceGeneration: 1,
+      archiveGeneration: null,
+      archiveComplete: false,
+    });
 
     // Swap BACK to the group box (target null) → the op routes there again.
     const back = await setActiveSandbox(db, {
@@ -214,6 +313,312 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     });
     expect(back.swapped).toBe(true);
     expect((await proxy.exec({ cmd: "uname" })).stdout).toBe("group-box-marker");
+    expect(await readLease(db, workspaceId, session.sandboxGroupId)).toMatchObject({
+      workspaceGeneration: 2,
+      archiveGeneration: null,
+      archiveComplete: false,
+    });
+  }, 60_000);
+
+  test("operation-level 404/NOT_FOUND preserves the warm provider identity and epoch", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-subresource-miss') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-subresource-miss') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "subresource-miss-turn",
+      subjectId: session.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "box-still-live",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: "box-still-live" } },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    const warmEpoch = committed.lease!.leaseEpoch;
+    const subresourceMissing = Object.assign(new Error("/workspace/missing.txt not found"), {
+      code: "NOT_FOUND",
+      status: 404,
+    });
+    const groupBox: EstablishedSandboxSession = {
+      client: {},
+      session: {
+        state: { instanceId: "box-still-live" },
+        async writeFile() {
+          throw subresourceMissing;
+        },
+      },
+      sessionState: {},
+      instanceId: "box-still-live",
+      backendId: "modal",
+    };
+    const established = wrapTurnBoxWithRouting(
+      { db, settings, bus: new MemoryEventBus() as never },
+      {
+        workspaceId,
+        sessionId: session.id,
+        homeLease: {
+          accountId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: warmEpoch,
+          instanceId: "box-still-live",
+          backend: "modal",
+        },
+      },
+      groupBox,
+    );
+
+    const error = await (established.session as { writeFile: (args: unknown) => Promise<unknown> })
+      .writeFile({ path: "/workspace/missing.txt", content: "x" })
+      .catch((caught) => caught);
+    expect(error).toBe(subresourceMissing);
+    const lease = await readLease(db, workspaceId, session.sandboxGroupId);
+    expect(lease).toMatchObject({
+      liveness: "warm",
+      instanceId: "box-still-live",
+      leaseEpoch: warmEpoch,
+      recovery: { provider: { status: "exists", instanceId: "box-still-live" } },
+    });
+  }, 60_000);
+
+  test("provider loss retires once and the stable proxy drops the dead backend", async () => {
+    if (!available) return;
+    const [a] = await admin<
+      { id: string }[]
+    >`insert into managed_accounts (name) values ('acct-provider-loss') returning id`;
+    const [w] = await admin<
+      { id: string }[]
+    >`insert into workspaces (account_id, name) values (${a!.id}, 'ws-provider-loss') returning id`;
+    await admin`insert into workspace_inference_controls (workspace_id, account_id) values (${w!.id}, ${a!.id})`;
+    const accountId = a!.id;
+    const workspaceId = w!.id;
+    const session = await createSession(db, {
+      accountId,
+      workspaceId,
+      initialMessage: "hi",
+      resources: [],
+      metadata: {},
+      model: "gpt-test",
+      sandboxBackend: "modal",
+    });
+
+    const archive = Buffer.from("concurrent-route-archive").toString("base64");
+    const archiveBytes = Buffer.from(archive, "base64");
+    const archiveSha256 = new Bun.CryptoHasher("sha256").update(archiveBytes).digest("hex");
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:1900000000000:${archiveSha256}`,
+      archiveSha256,
+      archiveBytes: archiveBytes.length,
+      capturedAt: "2030-03-17T17:46:40.000Z",
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256: "b".repeat(64),
+        entryCount: 2,
+        fileCount: 1,
+        totalFileBytes: 31,
+      },
+    };
+    const acquired = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      kind: "turn",
+      holderId: "provider-loss-turn",
+      subjectId: session.id,
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(acquired.role).toBe("spawner");
+    const committed = await commitWarmingToWarm(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: session.sandboxGroupId,
+      expectedEpoch: acquired.lease.leaseEpoch,
+      instanceId: "box-before-concurrent-loss",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: {
+          providerState: { sandboxId: "box-before-concurrent-loss" },
+          workspaceArchive: archive,
+          workspaceArchiveMeta: descriptor,
+        },
+      },
+      leaseTtlMs: 45_000,
+    });
+    expect(committed.committed).toBe(true);
+    expect(committed.lease?.leaseEpoch).toBe(acquired.lease.leaseEpoch + 1);
+    // This setup bypasses the capture activity. Mark its structurally valid
+    // archive as the completed capture that the provider-loss path expects.
+    await admin`
+      update sandbox_leases
+      set archive_generation = workspace_generation
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${session.sandboxGroupId}`;
+    const warmEpoch = committed.lease!.leaseEpoch;
+
+    const operationCalls = Array.from({ length: 24 }, () => 0);
+    let deadProviderCalls = 0;
+    const missing = Object.assign(new Error("provider sandbox missing"), {
+      code: "SANDBOX_NOT_FOUND",
+      status: 404,
+    });
+    const groupBox: EstablishedSandboxSession = {
+      client: {},
+      session: {
+        state: { instanceId: "box-before-concurrent-loss" },
+        async writeFile(args: unknown) {
+          deadProviderCalls += 1;
+          const index = (args as { index: number }).index;
+          operationCalls[index] += 1;
+          await Promise.resolve();
+          throw missing;
+        },
+      },
+      sessionState: {},
+      instanceId: "box-before-concurrent-loss",
+      backendId: "modal",
+    };
+    const lossEvents: Array<{
+      sandboxGroupId: string;
+      instanceId: string;
+      leaseEpoch: number;
+    }> = [];
+    const established = wrapTurnBoxWithRouting(
+      {
+        db,
+        settings,
+        bus: new MemoryEventBus() as never,
+        onHomeSandboxLost: async (event) => {
+          lossEvents.push(event);
+        },
+      },
+      {
+        workspaceId,
+        sessionId: session.id,
+        homeLease: {
+          accountId,
+          sandboxGroupId: session.sandboxGroupId,
+          leaseEpoch: warmEpoch,
+          instanceId: "box-before-concurrent-loss",
+          backend: "modal",
+        },
+      },
+      groupBox,
+    );
+    const proxy = established.session as { writeFile: (args: unknown) => Promise<unknown> };
+
+    const results = await Promise.allSettled(
+      operationCalls.map((_, index) => proxy.writeFile({ path: `/workspace/${index}`, index })),
+    );
+    expect(results.every((result) => result.status === "rejected")).toBe(true);
+    const errors = results.map((result) =>
+      result.status === "rejected" ? result.reason : new Error("unexpected fulfilled mutation"),
+    );
+    expect(errors.every((error) => error instanceof RoutingBackendRecoveryRequiredError)).toBe(
+      true,
+    );
+    const recoveryErrors = errors as RoutingBackendRecoveryRequiredError[];
+    const recoveries = recoveryErrors.map((error) => error.recovery);
+    expect(recoveries.every((status) => status === "pending" || status === "superseded")).toBe(
+      true,
+    );
+
+    // Concurrent calls may already hold the shared provider handle, or may
+    // re-resolve after the winner invalidates it. Exactly one provider caller
+    // retires warm -> cold as pending; other provider callers lose that CAS as
+    // superseded. Re-resolved callers observe durable pending recovery before
+    // provider dispatch. These are scheduler-dependent subsets, but the durable
+    // election, disposition, and no-replay invariants are exact.
+    const providerFailures = recoveryErrors.filter((error) => error.op === "writeFile");
+    const reResolvedFailures = recoveryErrors.filter(
+      (error) => error.op === "resolve_home_backend",
+    );
+    expect(providerFailures.length + reResolvedFailures.length).toBe(operationCalls.length);
+    expect(providerFailures.length).toBeGreaterThanOrEqual(1);
+    expect(providerFailures.filter((error) => error.recovery === "pending")).toHaveLength(1);
+    expect(providerFailures.filter((error) => error.recovery === "superseded")).toHaveLength(
+      providerFailures.length - 1,
+    );
+    expect(reResolvedFailures.every((error) => error.recovery === "pending")).toBe(true);
+    expect(
+      recoveryErrors.every((error) => error.leaseEpoch === warmEpoch + 1 && error.retryable),
+    ).toBe(true);
+    expect(operationCalls.every((calls) => calls === 0 || calls === 1)).toBe(true);
+    expect(operationCalls.reduce((sum, calls) => sum + calls, 0)).toBe(deadProviderCalls);
+    expect(providerFailures).toHaveLength(deadProviderCalls);
+    const callsAfterConcurrentLoss = deadProviderCalls;
+
+    // The route pointer itself did not move in any of the three incidents. The
+    // stable proxy must still discard its cached provider handle after the loss
+    // transition: the next independent call re-resolves durable cold/recovery
+    // truth and never invokes the dead backend again.
+    const followUpError = await proxy
+      .writeFile({ path: "/workspace/post-loss", index: 24 })
+      .catch((error) => error);
+    expect(followUpError).toBeInstanceOf(RoutingBackendRecoveryRequiredError);
+    expect(followUpError).toMatchObject({
+      leaseEpoch: warmEpoch + 1,
+      recovery: "pending",
+      retryable: true,
+    });
+    expect(deadProviderCalls).toBe(callsAfterConcurrentLoss);
+    expect(lossEvents).toEqual([
+      {
+        sandboxGroupId: session.sandboxGroupId,
+        instanceId: "box-before-concurrent-loss",
+        leaseEpoch: warmEpoch + 1,
+      },
+    ]);
+
+    const lease = await readLease(db, workspaceId, session.sandboxGroupId);
+    expect(lease).toMatchObject({
+      liveness: "cold",
+      instanceId: null,
+      leaseEpoch: warmEpoch + 1,
+      recovery: {
+        provider: {
+          status: "missing",
+          instanceId: "box-before-concurrent-loss",
+          diagnostic: "provider_not_found_during_routed_operation",
+        },
+        archive: { status: "available", current: { revision: descriptor.revision } },
+        restore: { status: "pending", selectedRevision: descriptor.revision },
+        workspace: { status: "not_ready", verifiedRevision: null },
+      },
+    });
+    expect(lease?.resumeState).not.toHaveProperty("sessionState.providerState");
+    expect(lease?.resumeState).toHaveProperty("sessionState.workspaceArchive", archive);
   }, 60_000);
 
   test("routingEnabled is false when the selfhosted flag is off (the proxy is not wrapped)", () => {

@@ -65,6 +65,9 @@ export type SessionCapabilities = {
   os: SandboxOs;
   liveness: "cold" | "warming" | "warm" | "draining";
   leaseEpoch: number;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   FileSystem: {
     available: boolean;
@@ -182,6 +185,9 @@ export type ViewerHolder = {
   sandboxGroupId: string;
   liveness: "cold" | "warming" | "warm" | "draining";
   leaseEpoch: number;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   dataPlaneUrl: string | null;
 };
@@ -1138,7 +1144,7 @@ export type TerminalPtyOutputDeltaPayload = {
 export type TerminalPtyExitedPayload = {
   ptyId: string;
   exitCode: number | null;
-  reason: "exit" | "killed" | "owner_gone" | "timeout";
+  reason: "exit" | "killed" | "owner_gone" | "timeout" | "lost";
 };
 
 // A2 FileSystem request/response.
@@ -1425,8 +1431,8 @@ export type TerminalExecRequest = {
 export type TerminalExecResponse = {
   stdout: string;
   stderr: string;
-  exitCode: number | null;
-  running: boolean;
+  exitCode: number;
+  running: false;
   wallTimeSeconds: number;
 };
 export type PtyOpenRequest = {
@@ -3536,6 +3542,9 @@ export type MachineView = {
   state: MachineState;
   active: boolean;
   isSessionGroup: boolean;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   os: string;
   arch: string;
   hasDisplay: boolean;
@@ -3585,7 +3594,10 @@ export type SwapActiveSandboxResponse = {
     | "offline_enrollment"
     | "unsupported_backend_context"
     | "transient_establishment"
-    | "concurrent_swap";
+    | "concurrent_swap"
+    | "recovery_in_progress"
+    | "recovery_degraded"
+    | "recovery_unrecoverable";
 };
 
 // ── Self-hosted enrollment UX (design 11) ────────────────────────────────────
