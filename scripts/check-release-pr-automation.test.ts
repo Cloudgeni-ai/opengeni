@@ -12,11 +12,13 @@ import {
 const root = join(import.meta.dir, "..");
 const releaseWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.releaseWorkflowPath);
 const ciWorkflowPath = join(root, RELEASE_AUTOMATION_CONTRACT.ciWorkflowPath);
+const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mjs");
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
 const baseTreeSha = "e".repeat(40);
 const headTreeSha = "f".repeat(40);
+const rebasedFirstSha = "a".repeat(40);
 const pullNumber = 88;
 const runId = 123456;
 const runAttempt = 2;
@@ -451,7 +453,11 @@ function checksFixture() {
         check_runs: checks.filter((check) => check.name === url.searchParams.get("check_name")),
       });
     if (method === "POST" && url.pathname === `${prefix}/check-runs`) {
-      const check = { ...body, id: nextId++, app: { slug: "github-actions" } };
+      const check = {
+        ...body,
+        id: nextId++,
+        app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+      };
       checks.push(check);
       return response(check, 201);
     }
@@ -502,62 +508,257 @@ function approvalEnv(overrides: Record<string, string> = {}) {
 
 function approvalFixture(
   options: {
+    mergeMethod?: "merge" | "squash" | "rebase" | "single";
+    associatedPullCount?: number;
     authorId?: number;
+    pullState?: string;
+    merged?: boolean;
+    mergeCommitSha?: string;
+    pullHeadSha?: string;
+    sourceTreeSha?: string;
+    terminalMainSha?: string;
     reviewCommit?: string;
     reviewState?: string;
     reviewTime?: string;
+    reviewBody?: string;
+    requestedReview?: boolean;
+    headChecks?: Array<Record<string, unknown>>;
+    sourceChecks?: Array<Record<string, unknown>>;
+    historicalHeadChecks?: Array<Record<string, unknown>>;
+    historicalSourceChecks?: Array<Record<string, unknown>>;
+    discontinuousCompare?: boolean;
+    mergeEvent?: Record<string, unknown> | null;
   } = {},
 ) {
   const requests: RequestRecord[] = [];
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+  const mergeMethod = options.mergeMethod ?? "merge";
+  const pullHeadSha = options.pullHeadSha ?? headSha;
+  const pullCommitCount = mergeMethod === "single" ? 1 : 2;
+  const sourceParents =
+    mergeMethod === "merge"
+      ? [{ sha: baseSha }, { sha: pullHeadSha }]
+      : mergeMethod === "rebase"
+        ? [{ sha: rebasedFirstSha }]
+        : [{ sha: baseSha }];
+  const author =
+    options.authorId === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id ||
+    (options.reviewState === "COMMENTED" && options.authorId === undefined)
+      ? RELEASE_AUTOMATION_CONTRACT.releaseApprover
+      : { login: "release-bot", id: options.authorId ?? 41898282, type: "Bot" };
+  const merger =
+    options.reviewState === "COMMENTED"
+      ? RELEASE_AUTOMATION_CONTRACT.releaseApprover
+      : { login: "merge-maintainer", id: 1234567, type: "User" };
+  const artifact = {
+    version: 3,
+    kind: "opengeni-exact-head-release-review",
+    repository: RELEASE_AUTOMATION_CONTRACT.repository,
+    reviewedBaseSha: baseSha,
+    reviewedHeadSha: pullHeadSha,
+    reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+    reviewProfile: "exact-head-maintainer-v1",
+    verdict: "PASS",
+  };
+  const reviewBody =
+    options.reviewBody ??
+    `<!-- opengeni-exact-head-release-review:v3 -->\n\n\`\`\`json\n${JSON.stringify(artifact, null, 2)}\n\`\`\``;
+  const review = {
+    id: 9001,
+    state: options.reviewState ?? "APPROVED",
+    commit_id: options.reviewCommit ?? pullHeadSha,
+    submitted_at: options.reviewTime ?? "2026-07-23T11:59:00Z",
+    html_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/pull/${pullNumber}#pullrequestreview-9001`,
+    body: reviewBody,
+    user: RELEASE_AUTOMATION_CONTRACT.releaseApprover,
+  };
+  const successfulCheck = (name: string, sha: string) => ({
+    name,
+    head_sha: sha,
+    status: "completed",
+    conclusion: "success",
+    app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+  });
+  const mergeEvent =
+    options.mergeEvent === null
+      ? []
+      : [
+          options.mergeEvent ?? {
+            id: 7001,
+            node_id: "ME_fixture",
+            url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/issues/events/7001`,
+            event: "merged",
+            actor: merger,
+            commit_id: mergeSha,
+            commit_url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/commits/${mergeSha}`,
+            created_at: "2026-07-23T12:00:00Z",
+          },
+        ];
+  let mainReads = 0;
   async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
     requests.push({ method, path: url.pathname, query: url.searchParams });
+    if (method === "GET" && url.pathname === `${prefix}/git/ref/heads/main`) {
+      mainReads += 1;
+      return response(mainRef(mainReads === 1 ? mergeSha : (options.terminalMainSha ?? mergeSha)));
+    }
     if (method === "GET" && url.pathname === `${prefix}/git/commits/${mergeSha}`)
-      return response({ sha: mergeSha, parents: [{ sha: baseSha }, { sha: headSha }] });
+      return response({
+        sha: mergeSha,
+        tree: { sha: options.sourceTreeSha ?? headTreeSha },
+        parents: sourceParents,
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${baseSha}`)
+      return response({
+        sha: baseSha,
+        tree: { sha: baseTreeSha },
+        parents: [{ sha: "1".repeat(40) }],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/git/commits/${pullHeadSha}`)
+      return response({
+        sha: pullHeadSha,
+        tree: { sha: headTreeSha },
+        parents: [{ sha: baseSha }],
+      });
     if (method === "GET" && url.pathname === `${prefix}/commits/${mergeSha}/pulls`)
-      return response([
-        {
-          number: pullNumber,
-          state: "closed",
-          merge_commit_sha: mergeSha,
-          merged_at: "2026-07-23T12:00:00Z",
-          user: { login: "release-bot", id: options.authorId ?? 41898282, type: "Bot" },
-          base: {
-            ref: "main",
-            sha: baseSha,
-            repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
-          },
-          head: { sha: headSha },
+      return response(
+        Array.from({ length: options.associatedPullCount ?? 1 }, (_, index) => ({
+          number: pullNumber + index,
+          merge_commit_sha: options.mergeCommitSha ?? mergeSha,
+          base: { sha: baseSha },
+          head: { sha: pullHeadSha },
+        })),
+      );
+    if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}`)
+      return response({
+        number: pullNumber,
+        html_url: `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}/pull/${pullNumber}`,
+        state: options.pullState ?? "closed",
+        merged: options.merged ?? true,
+        merge_commit_sha: options.mergeCommitSha ?? mergeSha,
+        merged_at: "2026-07-23T12:00:00Z",
+        user: author,
+        merged_by: merger,
+        base: {
+          ref: "main",
+          sha: baseSha,
+          repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
         },
-      ]);
+        head: { sha: pullHeadSha },
+        commits: pullCommitCount,
+        requested_reviewers: options.requestedReview
+          ? [RELEASE_AUTOMATION_CONTRACT.releaseApprover]
+          : [],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
+      return response(mergeEvent);
+    if (method === "GET" && url.pathname === `${prefix}/compare/${baseSha}...${mergeSha}`) {
+      const commits =
+        mergeMethod === "rebase"
+          ? [
+              { sha: rebasedFirstSha, parents: [{ sha: baseSha }] },
+              {
+                sha: mergeSha,
+                parents: [{ sha: options.discontinuousCompare ? baseSha : rebasedFirstSha }],
+              },
+            ]
+          : [{ sha: mergeSha, parents: [{ sha: baseSha }] }];
+      return response({
+        status: "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: { sha: baseSha },
+        ahead_by: commits.length,
+        behind_by: 0,
+        total_commits: commits.length,
+        commits,
+      });
+    }
     if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews`)
-      return response([
-        {
-          id: 9001,
-          state: options.reviewState ?? "APPROVED",
-          commit_id: options.reviewCommit ?? headSha,
-          submitted_at: options.reviewTime ?? "2026-07-23T11:59:00Z",
-          user: RELEASE_AUTOMATION_CONTRACT.releaseApprover,
-        },
-      ]);
+      return response([review]);
+    if (method === "GET" && url.pathname === `${prefix}/pulls/${pullNumber}/reviews/9001`)
+      return response(review);
+    if (method === "GET" && url.pathname === `${prefix}/commits/${pullHeadSha}/check-runs`)
+      return response({
+        check_runs: [
+          ...(options.headChecks ?? [
+            successfulCheck(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, pullHeadSha),
+          ]),
+          ...(url.searchParams.get("filter") === "all" ? (options.historicalHeadChecks ?? []) : []),
+        ],
+      });
+    if (method === "GET" && url.pathname === `${prefix}/commits/${mergeSha}/check-runs`)
+      return response({
+        check_runs: [
+          ...(options.sourceChecks ??
+            RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
+              successfulCheck(name, mergeSha),
+            )),
+          ...(url.searchParams.get("filter") === "all"
+            ? (options.historicalSourceChecks ?? [])
+            : []),
+        ],
+      });
     return response({ message: `unexpected ${method} ${url.pathname}` }, 404);
   }
   return { fetchImpl, requests };
 }
 
 describe("release approval provenance", () => {
-  test("accepts a distinct trusted user's native exact-head approval before merge", async () => {
-    const fixture = approvalFixture();
+  test.each([
+    ["merge", "merge"],
+    ["squash", "squash"],
+    ["rebase", "rebase"],
+    ["single", "single-commit-squash-or-rebase"],
+  ] as const)("accepts provider-proved %s provenance", async (fixtureMethod, expectedMethod) => {
+    const fixture = approvalFixture({ mergeMethod: fixtureMethod });
+    const result = await verifyApprovedMerge({
+      env: approvalEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      mergeMethod: "forged-caller-value",
+    } as any);
+    expect(result).toEqual(
+      expect.objectContaining({
+        version: 1,
+        repository: RELEASE_AUTOMATION_CONTRACT.repository,
+        sourceSha: mergeSha,
+        sourceTreeSha: headTreeSha,
+        pullRequestNumber: pullNumber,
+        mergeMethod: expectedMethod,
+        reviewedBaseSha: baseSha,
+        reviewedBaseTreeSha: baseTreeSha,
+        reviewedHeadSha: headSha,
+        reviewedHeadTreeSha: headTreeSha,
+        sourceAdmission: {
+          name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+          appSlug: "github-actions",
+          appId: 15368,
+        },
+      }),
+    );
+    expect(result.requiredSourceChecks.map((check: { name: string }) => check.name)).toEqual(
+      RELEASE_AUTOMATION_CONTRACT.checks.requiredSource,
+    );
+    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+  });
+
+  test("accepts the provider-bound structured single-maintainer admin PASS", async () => {
+    const fixture = approvalFixture({ mergeMethod: "single", reviewState: "COMMENTED" });
     await expect(
       verifyApprovedMerge({
         env: approvalEnv(),
         fetchImpl: fixture.fetchImpl,
         logger: { log() {} },
       }),
-    ).resolves.toEqual({ sourceSha: mergeSha, baseSha, headSha, pullNumber, reviewId: 9001 });
-    expect(fixture.requests.every((request) => request.method === "GET")).toBe(true);
+    ).resolves.toEqual(
+      expect.objectContaining({
+        mergeMethod: "single-commit-squash-or-rebase",
+        review: expect.objectContaining({ type: "single-maintainer-admin-pass" }),
+      }),
+    );
   });
 
   test("rejects stale-head and post-merge approvals", async () => {
@@ -575,17 +776,177 @@ describe("release approval provenance", () => {
     const self = approvalFixture({ authorId: RELEASE_AUTOMATION_CONTRACT.releaseApprover.id });
     await expect(
       verifyApprovedMerge({ env: approvalEnv(), fetchImpl: self.fetchImpl }),
-    ).rejects.toThrow("trusted reviewer authored the pull request");
+    ).rejects.toThrow("trusted reviewer authored the independently approved pull request");
     const requested = approvalFixture({ reviewState: "CHANGES_REQUESTED" });
     await expect(
       verifyApprovedMerge({ env: approvalEnv(), fetchImpl: requested.fetchImpl }),
-    ).rejects.toThrow("does not currently approve the exact head");
+    ).rejects.toThrow(
+      "neither independent approval nor a provider-bound single-maintainer admin PASS",
+    );
+  });
+
+  test("rejects direct pushes, ambiguous associations, and reopened or unmerged PRs", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ associatedPullCount: 0 }).fetchImpl,
+      }),
+    ).rejects.toThrow("exactly one pull request");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ associatedPullCount: 2 }).fetchImpl,
+      }),
+    ).rejects.toThrow("exactly one pull request");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ pullState: "open", merged: false }).fetchImpl,
+      }),
+    ).rejects.toThrow("is not merged");
+  });
+
+  test("rejects an associated direct fast-forward with matching provider topology", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeMethod: "single", mergeEvent: null }).fetchImpl,
+      }),
+    ).rejects.toThrow("exactly one provider merge event");
+  });
+
+  test("rejects tree, head, topology, effective-review, and terminal-main drift", async () => {
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ sourceTreeSha: "9".repeat(40) }).fetchImpl,
+      }),
+    ).rejects.toThrow("tree differs");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ pullHeadSha: "8".repeat(40), reviewCommit: headSha })
+          .fetchImpl,
+      }),
+    ).rejects.toThrow("did not review the exact PR head");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ mergeMethod: "rebase", discontinuousCompare: true }).fetchImpl,
+      }),
+    ).rejects.toThrow("discontinuity");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ requestedReview: true }).fetchImpl,
+      }),
+    ).rejects.toThrow("review was re-requested");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ terminalMainSha: "7".repeat(40) }).fetchImpl,
+      }),
+    ).rejects.toThrow("terminal release main differs");
+  });
+
+  test("rejects missing, duplicate, failed, or foreign source-admission and source checks", async () => {
+    const success = (name: string, sha = headSha, appSlug = "github-actions", appId = 15368) => ({
+      name,
+      head_sha: sha,
+      status: "completed",
+      conclusion: "success",
+      app: { slug: appSlug, id: appId },
+    });
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({ headChecks: [] }).fetchImpl,
+      }),
+    ).rejects.toThrow("exactly one check run");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          headChecks: [
+            success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission),
+            success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission),
+          ],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("exactly one check run");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          headChecks: [
+            success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, headSha, "forged-app"),
+          ],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("not owned by the official GitHub Actions app");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          headChecks: [
+            success(
+              RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+              headSha,
+              "github-actions",
+              999,
+            ),
+          ],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("not owned by the official GitHub Actions app");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          headChecks: [success(RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission, mergeSha)],
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("bound to another commit");
+    await expect(
+      verifyApprovedMerge({
+        env: approvalEnv(),
+        fetchImpl: approvalFixture({
+          sourceChecks: RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name, index) => ({
+            ...success(name, mergeSha),
+            conclusion: index === 0 ? "failure" : "success",
+          })),
+        }).fetchImpl,
+      }),
+    ).rejects.toThrow("did not complete successfully");
+  });
+
+  test("uses all check runs so a failed run hidden by a successful rerequest is rejected", async () => {
+    const successful = {
+      name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+      app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+    };
+    const fixture = approvalFixture({
+      headChecks: [successful],
+      historicalHeadChecks: [{ ...successful, conclusion: "failure" }],
+    });
+    await expect(
+      verifyApprovedMerge({ env: approvalEnv(), fetchImpl: fixture.fetchImpl }),
+    ).rejects.toThrow("exactly one check run");
+    expect(
+      fixture.requests
+        .filter((request) => request.path.endsWith("/check-runs"))
+        .every((request) => request.query.get("filter") === "all"),
+    ).toBe(true);
   });
 });
 
 describe("workflow contracts", () => {
   const releaseText = readFileSync(releaseWorkflowPath, "utf8");
   const ciText = readFileSync(ciWorkflowPath, "utf8");
+  const releaseAutomationText = readFileSync(releaseAutomationPath, "utf8");
   const release = Bun.YAML.parse(releaseText) as any;
   const ci = Bun.YAML.parse(ciText) as any;
 
@@ -677,6 +1038,12 @@ describe("workflow contracts", () => {
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: source-admission");
     expect(ciText).toContain("AUTOMATION_CHECK_KIND: automation-ci");
     expect(releaseText).toContain("verify-approved-merge");
+  });
+
+  test("writes approved provenance outputs from the provider result field names", () => {
+    expect(releaseAutomationText).toContain("approved_pr_number: result.pullRequestNumber");
+    expect(releaseAutomationText).toContain("approved_pr_head_sha: result.reviewedHeadSha");
+    expect(releaseAutomationText).toContain("approved_review_id: result.review.id");
   });
 
   test("requires complete live acceptance before any publication", () => {

@@ -244,7 +244,7 @@ jobs:
             --output-prefix acceptance
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Verify exact-head approval provenance
+      - name: Verify provider-proved merge and exact-head approval provenance
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SOURCE_SHA: ${{ steps.preflight.outputs.source_sha }}
