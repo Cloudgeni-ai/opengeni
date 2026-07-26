@@ -1,5 +1,6 @@
 import {
   boundSessionEventPayload,
+  isCredentialHeaderName,
   isSensitiveFieldName,
   redactSensitiveText,
 } from "@opengeni/contracts";
@@ -169,10 +170,21 @@ function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: n
       return payload.map((item) => sanitizeModelPayloadDeep(item, seen, depth + 1)) as unknown as T;
     }
     return Object.fromEntries(
-      Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
-        sanitizeEventString(key),
-        isSensitiveFieldName(key) ? REDACTED : sanitizeModelPayloadDeep(value, seen, depth + 1),
-      ]),
+      Object.entries(payload as Record<string, unknown>).map(([key, value]) => {
+        if (isSensitiveFieldName(key)) {
+          return [sanitizeEventString(key), REDACTED] as const;
+        }
+        if (normalizeFieldName(key) === "headers") {
+          return [
+            sanitizeEventString(key),
+            sanitizeModelHeaders(value, seen, depth + 1),
+          ] as const;
+        }
+        return [
+          sanitizeEventString(key),
+          sanitizeModelPayloadDeep(value, seen, depth + 1),
+        ] as const;
+      }),
     ) as unknown as T;
   } finally {
     seen.delete(payload);
@@ -195,12 +207,52 @@ function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
   if (key === "mcpCredentialUpdates") {
     return sanitizeMcpCredentialUpdateList(value);
   }
-  // Event payloads retain their longstanding stricter handling for arbitrary
-  // header containers. MCP server/update payloads above preserve only names.
-  if (normalizeFieldName(key) === "headers" || isSensitiveFieldName(key)) {
+  if (normalizeFieldName(key) === "headers") {
+    return sanitizeEventHeaders(value);
+  }
+  if (isSensitiveFieldName(key)) {
     return REDACTED;
   }
   return sanitizeEventPayloadDeep(value);
+}
+
+function sanitizeEventHeaders(value: unknown): unknown {
+  if (!isPlainObject(value)) {
+    return sanitizeEventPayloadDeep(value);
+  }
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => [
+      sanitizeEventString(key),
+      isCredentialHeaderName(key) ? REDACTED : sanitizeEventPayloadDeep(child),
+    ]),
+  );
+}
+
+function sanitizeModelHeaders(
+  value: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+): unknown {
+  if (!isPlainObject(value)) {
+    return sanitizeModelPayloadDeep(value, seen, depth);
+  }
+  if (depth >= MODEL_PAYLOAD_SANITIZE_MAX_DEPTH) {
+    return MODEL_PAYLOAD_DEPTH_MARKER;
+  }
+  if (seen.has(value)) return MODEL_PAYLOAD_CYCLE_MARKER;
+  seen.add(value);
+  try {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        sanitizeEventString(key),
+        isCredentialHeaderName(key)
+          ? REDACTED
+          : sanitizeModelPayloadDeep(child, seen, depth + 1),
+      ]),
+    );
+  } finally {
+    seen.delete(value);
+  }
 }
 
 function sanitizeSessionMcpServerList(value: unknown): unknown {

@@ -1,6 +1,7 @@
 export {
   createSecretRedactor,
   identityRedactor,
+  isCredentialHeaderName,
   redactSensitiveData,
   redactSensitiveText,
   redactSerializedJson,

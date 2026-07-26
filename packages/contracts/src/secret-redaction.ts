@@ -22,7 +22,6 @@ const SENSITIVE_FIELD_NAMES = new Set([
   "accesstoken",
   "refreshtoken",
   "idtoken",
-  "token",
   "apikey",
   "secret",
   "clientsecret",
@@ -36,18 +35,28 @@ const SENSITIVE_FIELD_NAMES = new Set([
   "headersencrypted",
   "encryptedpkceverifier",
   "codeverifier",
-  "signature",
   "signingkey",
 ]);
 
+const CREDENTIAL_HEADER_PATTERNS = [
+  /^(?:proxy-)?authorization$/i,
+  /^(?:set-)?cookie$/i,
+  /^(?:x[-_])?api[-_]?key$/i,
+  /^(?:x[-_])?(?:access|refresh|id)[-_]?token$/i,
+  /^(?:x[-_])?(?:auth|session)[-_]?(?:token|key|secret)$/i,
+  /^(?:x[-_])?(?:client|app|consumer)[-_]?secret$/i,
+  /^x-opengeni-access-key$/i,
+] as const;
+
 const SECRET_KEY_SOURCE =
-  "(?:proxy[-_ ]?authorization|authorization|set[-_ ]?cookie|cookie|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|token|api[-_ ]?key|client[-_ ]?secret|secret|password|passwd|private[-_ ]?key|credential(?:s|[-_ ]?encrypted)?|encrypted[-_ ]?credential|encrypted[-_ ]?pkce[-_ ]?verifier|code[-_ ]?verifier|signature|signing[-_ ]?key)";
+  "(?:proxy[-_ ]?authorization|authorization|set[-_ ]?cookie|cookie|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|api[-_ ]?key|client[-_ ]?secret|secret|password|passwd|private[-_ ]?key|credential(?:s|[-_ ]?encrypted)?|encrypted[-_ ]?credential|encrypted[-_ ]?pkce[-_ ]?verifier|code[-_ ]?verifier|signing[-_ ]?key)";
 const UNQUOTED_SECRET_KEY_SOURCE =
-  "(?:access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|token|api[-_ ]?key|client[-_ ]?secret|secret|password|passwd|private[-_ ]?key|credential(?:s|[-_ ]?encrypted)?|encrypted[-_ ]?credential|encrypted[-_ ]?pkce[-_ ]?verifier|code[-_ ]?verifier|signature|signing[-_ ]?key)";
+  "(?:access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|api[-_ ]?key|client[-_ ]?secret|secret|password|passwd|private[-_ ]?key|credential(?:s|[-_ ]?encrypted)?|encrypted[-_ ]?credential|encrypted[-_ ]?pkce[-_ ]?verifier|code[-_ ]?verifier|signing[-_ ]?key)";
 
 const AUTHORIZATION_HEADER_PATTERN =
   /(\b(?:proxy-)?authorization[^\S\r\n]*:[^\S\r\n]*)([^\r\n'"`]+)/gi;
 const COOKIE_HEADER_PATTERN = /(\b(?:set-cookie|cookie)\s*:\s*)([^\r\n'"`]+)/gi;
+const API_KEY_HEADER_PATTERN = /(\b(?:x[-_])?api[-_]?key[^\S\r\n]*:[^\S\r\n]*)([^\r\n'"`]+)/gi;
 const CURL_USER_PATTERN = /((?:^|\s)(?:-u|--user)(?:=|\s+))(?:("[^"]*")|('[^']*')|([^\s]+))/gm;
 const URL_USERINFO_PATTERN = /(https?:\/\/)[^\s/@]+@/gi;
 const SIGNED_QUERY_PATTERN = new RegExp(
@@ -88,6 +97,15 @@ export function isSensitiveFieldName(name: string): boolean {
 }
 
 /**
+ * Return true only for header names whose values are credential material.
+ * Ordinary protocol metadata (`content-type`, `accept`, `user-agent`, and
+ * pagination/signature headers outside this allowlist) must remain intact.
+ */
+export function isCredentialHeaderName(name: string): boolean {
+  return CREDENTIAL_HEADER_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+/**
  * Redact known secret provenance and common credential-bearing text shapes.
  * This is deliberately a conservative safety boundary, not a promise of
  * general-purpose DLP. It never includes a matched value in a marker or error.
@@ -123,6 +141,7 @@ export function redactSensitiveText(
     },
   );
   redacted = redacted.replace(COOKIE_HEADER_PATTERN, `$1${REDACTED}`);
+  redacted = redacted.replace(API_KEY_HEADER_PATTERN, `$1${REDACTED}`);
   redacted = redacted.replace(CURL_USER_PATTERN, (_match, prefix: string) => {
     return `${prefix}${REDACTED}`;
   });
@@ -223,13 +242,42 @@ function redactSensitiveDataDeep<T>(
       return value;
     }
     return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => {
+        if (isSensitiveFieldName(key)) {
+          return [key, REDACTED] as const;
+        }
+        if (normalizeFieldName(key) === "headers") {
+          return [key, redactHeaderMap(child, knownSecrets, seen, depth + 1)] as const;
+        }
+        return [key, redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1)] as const;
+      }),
+    ) as T;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function redactHeaderMap(
+  value: unknown,
+  knownSecrets: readonly SecretForRedaction[],
+  seen: WeakSet<object>,
+  depth: number,
+): unknown {
+  if (!isPlainObject(value)) {
+    return redactSensitiveDataDeep(value, knownSecrets, seen, depth);
+  }
+  if (depth >= MAX_REDACTION_DEPTH) return DEPTH_MARKER;
+  if (seen.has(value)) return CYCLE_MARKER;
+  seen.add(value);
+  try {
+    return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
-        isSensitiveFieldName(key)
+        isCredentialHeaderName(key)
           ? REDACTED
           : redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1),
       ]),
-    ) as T;
+    );
   } finally {
     seen.delete(value);
   }

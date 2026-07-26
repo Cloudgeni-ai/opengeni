@@ -227,7 +227,12 @@ import {
   settingsWithRigImage,
 } from "./packs";
 import { deliverFailedChildTurnToParent } from "./parent-wake";
-import { createSecretRedactor, redactSensitiveText, type SecretForRedaction } from "./redaction";
+import {
+  createSecretRedactor,
+  isCredentialHeaderName,
+  redactSensitiveText,
+  type SecretForRedaction,
+} from "./redaction";
 import { applyCodexHistoryStrip, turnInput, type TurnCodexAccount } from "./run-input";
 import {
   createRuntimeBatcher,
@@ -661,12 +666,13 @@ function safeErrorForTelemetry(error: unknown, redactText: (value: string) => st
   return safe;
 }
 
-function headerSecretRedactions(
+export function headerSecretRedactions(
   prefix: string,
   headers: Readonly<Record<string, string>> | undefined,
 ): SecretForRedaction[] {
   const discovered: SecretForRedaction[] = [];
   for (const [headerName, value] of Object.entries(headers ?? {})) {
+    if (!isCredentialHeaderName(headerName)) continue;
     const safeHeaderName = headerName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
     discovered.push({ name: `${prefix}_${safeHeaderName || "HEADER"}`, value });
     if (/^(?:proxy-)?authorization$/i.test(headerName)) {

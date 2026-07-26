@@ -49,12 +49,61 @@ describe("secret redaction boundary", () => {
     });
   });
 
+  test("preserves public token, signature, and ordinary protocol headers", () => {
+    const value = {
+      token: "page-2",
+      signature: "sha256=public-digest",
+      mediaType: "application/json",
+      headers: {
+        authorization: "Bearer synthetic-auth-value-123456",
+        cookie: "session=synthetic-cookie-value-123456",
+        "x-api-key": "synthetic-api-key-value-123456",
+        "content-type": "application/json",
+        accept: "application/json",
+        "user-agent": "mcp-client/1.0",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    };
+
+    expect(redactSensitiveData(value)).toEqual({
+      ...value,
+      headers: {
+        authorization: "[redacted]",
+        cookie: "[redacted]",
+        "x-api-key": "[redacted]",
+        "content-type": "application/json",
+        accept: "application/json",
+        "user-agent": "mcp-client/1.0",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
+  });
+
+  test("redacts registered secrets even under generic token and signature fields", () => {
+    const knownSecrets = [
+      { name: "PAGE_TOKEN_SECRET", value: "synthetic-page-token-123456" },
+      { name: "PUBLIC_SIGNATURE_SECRET", value: "synthetic-signature-123456" },
+    ];
+    const value = {
+      token: "synthetic-page-token-123456",
+      signature: "synthetic-signature-123456",
+    };
+
+    expect(redactSensitiveData(value, knownSecrets)).toEqual({
+      token: "[redacted:PAGE_TOKEN_SECRET]",
+      signature: "[redacted:PUBLIC_SIGNATURE_SECRET]",
+    });
+  });
+
   test("redacts authorization, cookies, curl credentials, and URL userinfo in traces", () => {
     const trace = [
       "> Authorization: Bearer synthetic-bearer-value-123456",
       "> Authorization: Digest synthetic-digest-value-123456",
       "> Proxy-Authorization: synthetic-opaque-auth-value-123456",
       "> Cookie: session=synthetic-cookie-value-123456; theme=dark",
+      "> X-API-Key: synthetic-api-key-value-123456",
       "+ curl -u synthetic-user:synthetic-password https://api.example/v1",
       "clone https://synthetic-user:synthetic-password@git.example/org/repo.git",
       "clone https://synthetic-username@git.example/org/repo.git",
@@ -65,6 +114,7 @@ describe("secret redaction boundary", () => {
     expect(cleaned).toContain("> Authorization: Digest [redacted]");
     expect(cleaned).toContain("> Proxy-Authorization: [redacted]");
     expect(cleaned).toContain("> Cookie: [redacted]");
+    expect(cleaned).toContain("> X-API-Key: [redacted]");
     expect(cleaned).toContain("curl -u [redacted] https://api.example/v1");
     expect(cleaned).toContain("https://[redacted]@git.example/org/repo.git");
     expect(cleaned).not.toContain("synthetic-password");
@@ -114,12 +164,22 @@ describe("secret redaction boundary", () => {
     for (const token of tokens) expect(cleaned).not.toContain(token);
   });
 
-  test("redacts valid and malformed serialized checkpoints", () => {
-    expect(redactSerializedJson('{"token":"synthetic-state-token-123456","step":3}')).toBe(
-      '{"token":"[redacted]","step":3}',
+  test("preserves public tokens/signatures in valid and malformed serialized checkpoints", () => {
+    const publicPayload =
+      '{"token":"page-2","signature":"sha256=public-digest","mediaType":"application/json"}';
+    expect(redactSerializedJson(publicPayload)).toBe(publicPayload);
+    expect(redactSerializedJson("token=page-2 signature=sha256=public-digest trailing")).toBe(
+      "token=page-2 signature=sha256=public-digest trailing",
     );
-    expect(redactSerializedJson("token=synthetic-state-token-123456 trailing")).toBe(
-      "token=[redacted] trailing",
+  });
+
+  test("redacts registered secrets in valid and malformed serialized checkpoints", () => {
+    const knownSecrets = [{ name: "STATE_TOKEN", value: "synthetic-state-token-123456" }];
+    expect(
+      redactSerializedJson('{"token":"synthetic-state-token-123456","step":3}', knownSecrets),
+    ).toBe('{"token":"[redacted:STATE_TOKEN]","step":3}');
+    expect(redactSerializedJson("token=synthetic-state-token-123456 trailing", knownSecrets)).toBe(
+      "token=[redacted:STATE_TOKEN] trailing",
     );
   });
 });

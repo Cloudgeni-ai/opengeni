@@ -43,6 +43,7 @@ import {
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   filterUnmaterializedSandboxFileDownloads,
+  headerSecretRedactions,
   historyRowsToAppend,
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
@@ -272,6 +273,26 @@ describe("turn secret-redaction boundaries", () => {
     expect(diagnostic).not.toHaveProperty("stack");
     expect(diagnostic).not.toHaveProperty("cause");
     expect(JSON.stringify(diagnostic)).not.toContain(syntheticSecret);
+  });
+
+  test("registers only credential-bearing MCP headers", () => {
+    expect(
+      headerSecretRedactions("MCP", {
+        authorization: "Bearer synthetic-mcp-auth-value-123456",
+        cookie: "session=synthetic-mcp-cookie-value-123456",
+        "x-api-key": "synthetic-mcp-api-key-value-123456",
+        "content-type": "application/json",
+        accept: "application/json",
+        "user-agent": "mcp-client/1.0",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      }),
+    ).toEqual([
+      { name: "MCP_AUTHORIZATION", value: "Bearer synthetic-mcp-auth-value-123456" },
+      { name: "MCP_AUTHORIZATION_CREDENTIAL", value: "synthetic-mcp-auth-value-123456" },
+      { name: "MCP_COOKIE", value: "session=synthetic-mcp-cookie-value-123456" },
+      { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
+    ]);
   });
 });
 

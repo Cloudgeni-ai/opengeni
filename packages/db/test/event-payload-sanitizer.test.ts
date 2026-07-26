@@ -190,7 +190,13 @@ describe("sanitizeEventPayload (deep walk)", () => {
       access_token: "raw-access-token",
       refreshToken: "raw-refresh-token",
       encryptedPkceVerifier: "v1:secret-verifier",
-      headers: { authorization: "Bearer raw-token" },
+      headers: {
+        authorization: "Bearer raw-token",
+        "content-type": "application/json",
+        accept: "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
       nested: { credentialEncrypted: "v1:secret-bundle" },
     }) as Record<string, unknown>;
 
@@ -205,14 +211,20 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(cleaned.access_token).toBe("[redacted]");
     expect(cleaned.refreshToken).toBe("[redacted]");
     expect(cleaned.encryptedPkceVerifier).toBe("[redacted]");
-    expect(cleaned.headers).toBe("[redacted]");
+    expect(cleaned.headers).toEqual({
+      authorization: "[redacted]",
+      "content-type": "application/json",
+      accept: "application/json",
+      "x-page-token": "page-2",
+      "x-signature": "sha256=public-digest",
+    });
     expect((cleaned.nested as Record<string, unknown>).credentialEncrypted).toBe("[redacted]");
   });
 
   test("bounds cyclic and multi-megabyte payloads before deep sanitation", () => {
     const payload: Record<string, unknown> = {
       id: "cycle-output",
-      token: "must-not-survive",
+      refreshToken: "must-not-survive",
       output: "界😀".repeat(500_000),
     };
     payload.self = payload;
@@ -338,13 +350,28 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     expect(sanitizeModelPayload(item)).toEqual({
       ...item,
       arguments: {
-        token: "[redacted]",
+        token: "actualvalue",
         headers: { authorization: "[redacted]" },
       },
     });
     expect(sanitizeEventPayload(item)).toMatchObject({
-      arguments: { token: "[redacted]", headers: "[redacted]" },
+      arguments: { token: "actualvalue", headers: { authorization: "[redacted]" } },
     });
+  });
+
+  test("preserves public pagination and signature fields in model and event payloads", () => {
+    const item = {
+      type: "function_call",
+      arguments: {
+        token: "page-2",
+        signature: "sha256=public-digest",
+        mediaType: "application/json",
+        serialized: '{"token":"page-2","signature":"sha256=public-digest"}',
+      },
+    };
+
+    expect(sanitizeModelPayload(item)).toEqual(item);
+    expect(sanitizeEventPayload(item)).toEqual(item);
   });
 
   test("makes cyclic and over-depth model payloads explicit and JSON-safe", () => {
