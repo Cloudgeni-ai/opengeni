@@ -1045,6 +1045,11 @@ describe("clean session control plane", () => {
       JSON.stringify(canonicalMixed),
     );
 
+    const pendingTextResultItem = {
+      type: "function_call_result",
+      callId: "pending-call",
+      output: { type: "text", text: huge },
+    };
     expect(
       await registerPendingSessionToolCall(client.db, {
         accountId: grant.accountId,
@@ -1055,6 +1060,7 @@ describe("clean session control plane", () => {
         attemptId,
         callId: "pending-call",
         callType: "function_call",
+        modelToolOutputTruncationTokens: 100,
         callItem: {
           type: "function_call",
           callId: "pending-call",
@@ -1071,12 +1077,15 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "pending-call",
-      resultItem: {
-        type: "function_call_result",
-        callId: "pending-call",
-        output: { type: "text", text: huge },
-      },
+      modelToolOutputTruncationTokens: 100,
+      resultItem: pendingTextResultItem,
     });
+    const pendingMixedResultItem = {
+      type: "function_call_result",
+      callId: "pending-mixed-call",
+      status: "completed",
+      output: mixedOutput,
+    };
     expect(
       await registerPendingSessionToolCall(client.db, {
         accountId: grant.accountId,
@@ -1087,6 +1096,7 @@ describe("clean session control plane", () => {
         attemptId,
         callId: "pending-mixed-call",
         callType: "function_call",
+        modelToolOutputTruncationTokens: 100,
         callItem: {
           type: "function_call",
           callId: "pending-mixed-call",
@@ -1104,27 +1114,33 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "pending-mixed-call",
-      resultItem: {
-        type: "function_call_result",
-        callId: "pending-mixed-call",
-        status: "completed",
-        output: mixedOutput,
-      },
+      modelToolOutputTruncationTokens: 100,
+      resultItem: pendingMixedResultItem,
     });
     const [pending] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
-        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .select({
+          resultItem: schema.sessionPendingToolCalls.resultItem,
+          modelToolOutputTruncationTokens:
+            schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+        })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, "pending-call")),
     );
     expect(((pending!.resultItem as any).output as { text: string }).text).toBe(huge);
+    expect(pending!.modelToolOutputTruncationTokens).toBe(100);
     const [pendingMixed] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
       db
-        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .select({
+          resultItem: schema.sessionPendingToolCalls.resultItem,
+          modelToolOutputTruncationTokens:
+            schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+        })
         .from(schema.sessionPendingToolCalls)
         .where(eq(schema.sessionPendingToolCalls.callId, "pending-mixed-call")),
     );
     expect((pendingMixed!.resultItem as { output: unknown[] }).output).toHaveLength(360);
+    expect(pendingMixed!.modelToolOutputTruncationTokens).toBe(100);
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -1146,8 +1162,11 @@ describe("clean session control plane", () => {
           item.type === "function_call_result" &&
           (item as { callId?: unknown }).callId === "pending-call",
       ) as { output: { text: string } };
-    expect(recoveredResult.output.text).toContain("tokens truncated");
-    expect(recoveredResult.output.text.length).toBeLessThan(50_000);
+    const expectedRecoveredResult = boundModelToolOutputItem(pendingTextResultItem, 100);
+    expect(recoveredResult).toEqual(expectedRecoveredResult);
+    expect(JSON.stringify(boundModelToolOutputItem(recoveredResult, 100))).toBe(
+      JSON.stringify(recoveredResult),
+    );
     const recoveredMixedResult = recoveredHistory
       .map((row) => row.item)
       .find(
@@ -1155,8 +1174,8 @@ describe("clean session control plane", () => {
           item.type === "function_call_result" &&
           (item as { callId?: unknown }).callId === "pending-mixed-call",
       ) as { output: Array<Record<string, unknown>> };
-    expect(recoveredMixedResult.output).toEqual(canonicalMixedOutput);
-    expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult))).toBe(
+    expect(recoveredMixedResult).toEqual(boundModelToolOutputItem(pendingMixedResultItem, 100));
+    expect(JSON.stringify(boundModelToolOutputItem(recoveredMixedResult, 100))).toBe(
       JSON.stringify(recoveredMixedResult),
     );
     const recoveryOutput = recovery.events.find(
@@ -1211,6 +1230,174 @@ describe("clean session control plane", () => {
           .where(eq(schema.sessionPendingToolCalls.sessionId, session.id)),
       ),
     ).toEqual([]);
+  });
+
+  test("pending recovery policy fills rolling nulls and rejects conflicting retries", async () => {
+    const { grant, session } = await fixture();
+    await send(grant, session.id, "recover calls across a rolling worker update");
+    const attemptId = crypto.randomUUID();
+    const turn = await claimTestSessionWork(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+      `session-${session.id}`,
+      { attemptId },
+    );
+    const rawText = "界😀".repeat(30_000);
+    const baseInput = {
+      accountId: grant.accountId,
+      workspaceId: grant.workspaceId!,
+      sessionId: session.id,
+      turnId: turn!.id,
+      executionGeneration: turn!.executionGeneration,
+      attemptId,
+    };
+    const policyCall = {
+      type: "function_call",
+      name: "rolling_policy_tool",
+      callId: "rolling-policy-call",
+      arguments: "{}",
+    };
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        callType: "function_call",
+        callItem: policyCall,
+      }),
+    ).toEqual({ accepted: true, registered: true });
+    expect(
+      await registerPendingSessionToolCall(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        callType: "function_call",
+        callItem: policyCall,
+        modelToolOutputTruncationTokens: 100,
+      }),
+    ).toEqual({ accepted: true, registered: false });
+    const policyResult = {
+      type: "function_call_result",
+      callId: "rolling-policy-call",
+      output: { type: "text", text: rawText },
+    };
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: policyResult,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+
+    const resultFirstCall = {
+      type: "function_call",
+      name: "result_first_policy_tool",
+      callId: "result-first-policy-call",
+      arguments: "{}",
+    };
+    const resultFirstResult = {
+      type: "function_call_result",
+      callId: "result-first-policy-call",
+      output: { type: "text", text: rawText },
+    };
+    await registerPendingSessionToolCall(client.db, {
+      ...baseInput,
+      callId: "result-first-policy-call",
+      callType: "function_call",
+      callItem: resultFirstCall,
+    });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "result-first-policy-call",
+        resultItem: resultFirstResult,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "result-first-policy-call",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: resultFirstResult,
+      }),
+    ).toEqual({ accepted: true, recorded: false });
+
+    const fallbackCall = {
+      type: "function_call",
+      name: "fallback_policy_tool",
+      callId: "fallback-policy-call",
+      arguments: "{}",
+    };
+    const fallbackResult = {
+      type: "function_call_result",
+      callId: "fallback-policy-call",
+      output: { type: "text", text: rawText },
+    };
+    await registerPendingSessionToolCall(client.db, {
+      ...baseInput,
+      callId: "fallback-policy-call",
+      callType: "function_call",
+      callItem: fallbackCall,
+    });
+    await recordPendingSessionToolCallResult(client.db, {
+      ...baseInput,
+      callId: "fallback-policy-call",
+      resultItem: fallbackResult,
+    });
+
+    await expect(
+      registerPendingSessionToolCall(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        callType: "function_call",
+        callItem: policyCall,
+        modelToolOutputTruncationTokens: 200,
+      }),
+    ).rejects.toThrow("changed model tool-output policy from 100 to 200");
+    await expect(
+      recordPendingSessionToolCallResult(client.db, {
+        ...baseInput,
+        callId: "rolling-policy-call",
+        modelToolOutputTruncationTokens: 200,
+        resultItem: policyResult,
+      }),
+    ).rejects.toThrow("changed model tool-output policy from 100 to 200");
+    expect(
+      await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+        db
+          .select({
+            callId: schema.sessionPendingToolCalls.callId,
+            policy: schema.sessionPendingToolCalls.modelToolOutputTruncationTokens,
+          })
+          .from(schema.sessionPendingToolCalls)
+          .where(eq(schema.sessionPendingToolCalls.turnId, turn!.id))
+          .orderBy(schema.sessionPendingToolCalls.callId),
+      ),
+    ).toEqual([
+      { callId: "fallback-policy-call", policy: null },
+      { callId: "result-first-policy-call", policy: 100 },
+      { callId: "rolling-policy-call", policy: 100 },
+    ]);
+
+    await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
+      sessionId: session.id,
+      turnId: turn!.id,
+      triggerEventId: turn!.triggerEventId,
+      attemptId,
+      reason: "worker_shutdown",
+    });
+    const recovered = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).map((row) => row.item);
+    expect(recovered.find((item) => item.callId === "rolling-policy-call" && item.output)).toEqual(
+      boundModelToolOutputItem(policyResult, 100),
+    );
+    expect(
+      recovered.find((item) => item.callId === "result-first-policy-call" && item.output),
+    ).toEqual(boundModelToolOutputItem(resultFirstResult, 100));
+    expect(recovered.find((item) => item.callId === "fallback-policy-call" && item.output)).toEqual(
+      boundModelToolOutputItem(fallbackResult),
+    );
   });
 
   test("bulk control projection accepts an empty session page", async () => {
@@ -1438,7 +1625,7 @@ describe("clean session control plane", () => {
     ).toMatchObject({ action: "stale", events: [] });
   });
 
-  test("recovery preserves a completed parallel result and interrupts only its unresolved sibling", async () => {
+  test("recovery preserves reverse-completed parallel results and interrupts only their unresolved sibling", async () => {
     const { grant, session } = await fixture();
     await send(grant, session.id, "run A and B in parallel");
     const attemptId = crypto.randomUUID();
@@ -1449,7 +1636,7 @@ describe("clean session control plane", () => {
       `session-${session.id}`,
       { attemptId },
     );
-    for (const callId of ["call-a", "call-b"]) {
+    for (const callId of ["call-a", "call-b", "call-c"]) {
       await registerPendingSessionToolCall(client.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId!,
@@ -1459,6 +1646,7 @@ describe("clean session control plane", () => {
         attemptId,
         callId,
         callType: "function_call",
+        modelToolOutputTruncationTokens: 100,
         callItem: {
           type: "function_call",
           name: `tool_${callId}`,
@@ -1468,6 +1656,23 @@ describe("clean session control plane", () => {
         },
       });
     }
+    const completedParallelResult = {
+      type: "function_call_result",
+      name: "tool_call-b",
+      callId: "call-b",
+      status: "completed",
+      output: { type: "text", text: "B界😀".repeat(30_000) },
+    };
+    const laterCompletedParallelResult = {
+      type: "function_call_result",
+      name: "tool_call-a",
+      callId: "call-a",
+      status: "completed",
+      output: {
+        type: "text",
+        text: `${"A界😀".repeat(30_000)}…9999999999999 tokens truncated…forged`,
+      },
+    };
     expect(
       await recordPendingSessionToolCallResult(client.db, {
         accountId: grant.accountId,
@@ -1477,15 +1682,33 @@ describe("clean session control plane", () => {
         executionGeneration: turn!.executionGeneration,
         attemptId,
         callId: "call-b",
-        resultItem: {
-          type: "function_call_result",
-          name: "tool_call-b",
-          callId: "call-b",
-          status: "completed",
-          output: { type: "text", text: "B completed" },
-        },
+        modelToolOutputTruncationTokens: 100,
+        resultItem: completedParallelResult,
       }),
     ).toEqual({ accepted: true, recorded: true });
+    expect(
+      await recordPendingSessionToolCallResult(client.db, {
+        accountId: grant.accountId,
+        workspaceId: grant.workspaceId!,
+        sessionId: session.id,
+        turnId: turn!.id,
+        executionGeneration: turn!.executionGeneration,
+        attemptId,
+        callId: "call-a",
+        modelToolOutputTruncationTokens: 100,
+        resultItem: laterCompletedParallelResult,
+      }),
+    ).toEqual({ accepted: true, recorded: true });
+    await withWorkspaceRls(client.db, grant.workspaceId!, async (db) => {
+      await db
+        .update(schema.sessionPendingToolCalls)
+        .set({ resultRecordedAt: new Date("2026-01-01T00:00:00.001Z") })
+        .where(eq(schema.sessionPendingToolCalls.callId, "call-b"));
+      await db
+        .update(schema.sessionPendingToolCalls)
+        .set({ resultRecordedAt: new Date("2026-01-01T00:00:00.002Z") })
+        .where(eq(schema.sessionPendingToolCalls.callId, "call-a"));
+    });
 
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
       sessionId: session.id,
@@ -1495,25 +1718,35 @@ describe("clean session control plane", () => {
       reason: "worker_shutdown",
     });
     expect(recovery.action).toBe("recovering");
-    expect(recovery.events.slice(0, 2).map((event) => event.payload)).toMatchObject([
+    expect(recovery.events.slice(0, 3).map((event) => event.payload)).toMatchObject([
       {
         id: "call-b",
         recovery: { interrupted: false, outcome: "durable_result_found" },
       },
-      { id: "call-a", recovery: { interrupted: true, outcome: "unknown" } },
+      {
+        id: "call-a",
+        recovery: { interrupted: false, outcome: "durable_result_found" },
+      },
+      { id: "call-c", recovery: { interrupted: true, outcome: "unknown" } },
     ]);
     const history = await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id);
     expect(history.slice(1).map((row) => [row.item.type, row.item.callId])).toEqual([
       ["function_call", "call-a"],
       ["function_call", "call-b"],
+      ["function_call", "call-c"],
       ["function_call_result", "call-b"],
       ["function_call_result", "call-a"],
+      ["function_call_result", "call-c"],
     ]);
-    expect(history[3]?.item).toMatchObject({
-      status: "completed",
-      output: { text: "B completed" },
-    });
-    expect(history[4]?.item).toMatchObject({ status: "incomplete" });
+    expect(history[4]?.item).toEqual(boundModelToolOutputItem(completedParallelResult, 100));
+    expect(JSON.stringify(boundModelToolOutputItem(history[4]!.item, 100))).toBe(
+      JSON.stringify(history[4]!.item),
+    );
+    expect(history[5]?.item).toEqual(boundModelToolOutputItem(laterCompletedParallelResult, 100));
+    expect(JSON.stringify(boundModelToolOutputItem(history[5]!.item, 100))).toBe(
+      JSON.stringify(history[5]!.item),
+    );
+    expect(history[6]?.item).toMatchObject({ status: "incomplete" });
   });
 
   test("a completed response batch clears even when an older call remains unresolved", async () => {
@@ -1625,7 +1858,7 @@ describe("clean session control plane", () => {
     const resultItem = {
       type: "function_call_result",
       callId: "compacted-call",
-      output: { type: "text", text: "durable result" },
+      output: { type: "text", text: "compacted界😀".repeat(30_000) },
     };
     await registerPendingSessionToolCall(client.db, {
       accountId: grant.accountId,
@@ -1636,6 +1869,7 @@ describe("clean session control plane", () => {
       attemptId,
       callId: "compacted-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem,
     });
     await recordPendingSessionToolCallResult(client.db, {
@@ -1646,6 +1880,7 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "compacted-call",
+      modelToolOutputTruncationTokens: 100,
       resultItem,
     });
     expect(
@@ -1656,12 +1891,35 @@ describe("clean session control plane", () => {
         turnId: turn!.id,
         expectedExecutionGeneration: turn!.executionGeneration,
         expectedAttemptId: attemptId,
+        modelToolOutputTruncationTokens: 100,
         items: [
           { position: 100, item: callItem },
           { position: 101, item: resultItem },
         ],
       }),
     ).toBe(true);
+    const beforeCompaction = await getActiveSessionHistoryItems(
+      client.db,
+      grant.workspaceId!,
+      session.id,
+    );
+    expect(beforeCompaction.find((row) => row.item.callId === "compacted-call")?.item).toEqual(
+      callItem,
+    );
+    expect(
+      beforeCompaction.find(
+        (row) => row.item.callId === "compacted-call" && row.item.type === "function_call_result",
+      )?.item,
+    ).toEqual(boundModelToolOutputItem(resultItem, 100));
+    const [rawReceipt] = await withWorkspaceRls(client.db, grant.workspaceId!, (db) =>
+      db
+        .select({ resultItem: schema.sessionPendingToolCalls.resultItem })
+        .from(schema.sessionPendingToolCalls)
+        .where(eq(schema.sessionPendingToolCalls.callId, "compacted-call")),
+    );
+    expect(((rawReceipt!.resultItem as any).output as { text: string }).text).toBe(
+      (resultItem.output as { text: string }).text,
+    );
     const compacted = await applyContextCompaction(client.db, {
       accountId: grant.accountId,
       workspaceId: grant.workspaceId!,
@@ -1722,7 +1980,7 @@ describe("clean session control plane", () => {
     const resultItem = {
       type: "function_call_result",
       callId: "active-completed-call",
-      output: { type: "text", text: "completed before crash" },
+      output: { type: "text", text: "completed界😀".repeat(30_000) },
     };
     const alreadyProjectedCallItem = {
       type: "function_call",
@@ -1744,6 +2002,7 @@ describe("clean session control plane", () => {
       attemptId,
       callId: "active-completed-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem,
     });
     await recordPendingSessionToolCallResult(client.db, {
@@ -1754,6 +2013,7 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "active-completed-call",
+      modelToolOutputTruncationTokens: 100,
       resultItem,
     });
     await registerPendingSessionToolCall(client.db, {
@@ -1765,6 +2025,7 @@ describe("clean session control plane", () => {
       attemptId,
       callId: "active-already-projected-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem: alreadyProjectedCallItem,
     });
     await recordPendingSessionToolCallResult(client.db, {
@@ -1775,6 +2036,7 @@ describe("clean session control plane", () => {
       executionGeneration: turn!.executionGeneration,
       attemptId,
       callId: "active-already-projected-call",
+      modelToolOutputTruncationTokens: 100,
       resultItem: alreadyProjectedResultItem,
     });
     await appendSessionHistoryItems(client.db, {
@@ -1784,6 +2046,7 @@ describe("clean session control plane", () => {
       turnId: turn!.id,
       expectedExecutionGeneration: turn!.executionGeneration,
       expectedAttemptId: attemptId,
+      modelToolOutputTruncationTokens: 100,
       items: [
         { position: 100, item: callItem },
         { position: 101, item: resultItem },
@@ -1824,6 +2087,14 @@ describe("clean session control plane", () => {
         )
         .map((item) => item.type),
     ).toEqual(["function_call", "function_call_result", "function_call", "function_call_result"]);
+    const activeCompletedResult = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    )
+      .map((row) => row.item)
+      .find(
+        (item) => item.type === "function_call_result" && item.callId === "active-completed-call",
+      );
+    expect(activeCompletedResult).toEqual(boundModelToolOutputItem(resultItem, 100));
   });
 
   test("a pending approval tool receipt follows the logical turn into its next attempt", async () => {
@@ -1846,6 +2117,7 @@ describe("clean session control plane", () => {
       attemptId: firstAttemptId,
       callId: "approval-call",
       callType: "function_call",
+      modelToolOutputTruncationTokens: 100,
       callItem: {
         type: "function_call",
         name: "protected_tool",
@@ -1888,6 +2160,13 @@ describe("clean session control plane", () => {
       },
     );
     expect(resumedTurn?.id).toBe(turn!.id);
+    const approvalResult = {
+      type: "function_call_result",
+      name: "protected_tool",
+      callId: "approval-call",
+      status: "completed",
+      output: { type: "text", text: "approved界😀".repeat(30_000) },
+    };
     expect(
       await recordPendingSessionToolCallResult(client.db, {
         accountId: grant.accountId,
@@ -1897,13 +2176,8 @@ describe("clean session control plane", () => {
         executionGeneration: resumedTurn!.executionGeneration,
         attemptId: resumedAttemptId,
         callId: "approval-call",
-        resultItem: {
-          type: "function_call_result",
-          name: "protected_tool",
-          callId: "approval-call",
-          status: "completed",
-          output: { type: "text", text: "approved result" },
-        },
+        modelToolOutputTruncationTokens: 100,
+        resultItem: approvalResult,
       }),
     ).toEqual({ accepted: true, recorded: true });
     const recovery = await requestSessionTurnRecovery(client.db, grant.workspaceId!, {
@@ -1920,11 +2194,14 @@ describe("clean session control plane", () => {
         recovery: { interrupted: false, outcome: "durable_result_found" },
       },
     });
-    expect(
-      (await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id))
-        .slice(-2)
-        .map((row) => row.item.type),
-    ).toEqual(["function_call", "function_call_result"]);
+    const resumedHistory = (
+      await getActiveSessionHistoryItems(client.db, grant.workspaceId!, session.id)
+    ).slice(-2);
+    expect(resumedHistory.map((row) => row.item.type)).toEqual([
+      "function_call",
+      "function_call_result",
+    ]);
+    expect(resumedHistory[1]!.item).toEqual(boundModelToolOutputItem(approvalResult, 100));
   });
 
   test("Pause preserves a pending approval, while Steer permanently closes it", async () => {

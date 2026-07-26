@@ -122,8 +122,15 @@ describe("release schema contract", () => {
         "0116_nested_agent_depth_index.sql",
       ].filter((file) => migrations.has(file)),
     );
-    expect(contract.fileCount).toBe(108 + (migrations.has(currentMainToolPolicyMigration) ? 1 : 0));
-    expect(contract.latestMigration).toBe("0116_nested_agent_depth_index.sql");
+    expect(contract.fileCount).toBe(
+      108 +
+        (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
+        (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0),
+    );
+    expect(contract.sha256).toBe(
+      "5bc171c3065c447732dd7d2db4e53d65de554a876e05cdaeda9e8fb67a3efddd",
+    );
+    expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
 
     const boundarySql = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
@@ -145,12 +152,13 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-6])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-6]|0119)_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       ...nestedDepthMigrations,
+      "0119_pending_tool_output_policy.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -179,6 +187,10 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
+    expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
+      sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
+      deploymentMode: "rolling",
+    });
   });
 });
 
