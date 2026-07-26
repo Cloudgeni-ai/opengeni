@@ -108,9 +108,11 @@ aks_rollout = {
 }
 ```
 
-`aks_rollout.phase = "bounds"` requires the expected existing rotation-sensitive
-fields to match the direct `aks` values and requires autoscaling to remain
-enabled. The official staging apply owner must
+`aks_rollout.phase = "bounds"` reads the existing `system` pool through the
+AzureRM node-pool data source and requires both the expected snapshot and direct
+`aks` rotation-sensitive fields to match that refreshed live state. Autoscaling
+must remain enabled and rotation settings must remain null. The official staging
+apply owner must
 first confirm authoritative state ownership, resolve the pool's health, clean
 up or reschedule the observed workload so three nodes can fit, and take a
 rollback point. After the bounds-only apply, wait for the autoscaler and refresh
@@ -145,9 +147,11 @@ aks_rollout = {
 }
 ```
 
-The module rejects rotation unless the refreshed provider count is within the
-requested bounds and the temporary-pool peak fits the supplied regional quota
-headroom. For the example, the modeled peak is 78/80 vCPU. The follow-up still
+The module rejects rotation unless the caller's observed count exactly matches
+the refreshed live/provider node-pool count, that live count is within the
+requested bounds, and the temporary-pool peak—calculated from the live count—fits
+the supplied regional quota headroom. For the example, the modeled peak is
+78/80 vCPU. The follow-up still
 requires an operator-reviewed read-only plan, RWO drain/reattach and rollback
 evidence, and a fresh quota/SKU/preflight check. These settings are operational
 guardrails, not a cost-savings claim; actual savings require authoritative

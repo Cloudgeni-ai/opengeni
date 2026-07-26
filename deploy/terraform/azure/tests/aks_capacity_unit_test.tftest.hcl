@@ -26,6 +26,20 @@ mock_provider "azurerm" {
     }
   }
 
+  mock_data "azurerm_kubernetes_cluster_node_pool" {
+    defaults = {
+      auto_scaling_enabled = true
+      max_count            = 8
+      max_pods             = 30
+      min_count            = 4
+      name                 = "system"
+      node_count           = 4
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      vm_size              = "Standard_D4ds_v4"
+    }
+  }
+
   mock_resource "azurerm_resource_group" {
     defaults = {
       id = "/subscriptions/test/resourceGroups/rg-opengeni-test"
@@ -94,6 +108,20 @@ mock_provider "azurerm" {
         temporary_name_for_rotation = null
         vm_size                     = "Standard_D4ds_v4"
       }
+    }
+  }
+
+  mock_data "azurerm_kubernetes_cluster_node_pool" {
+    defaults = {
+      auto_scaling_enabled = true
+      max_count            = 3
+      max_pods             = 30
+      min_count            = 3
+      name                 = "system"
+      node_count           = 3
+      os_disk_size_gb      = 128
+      os_disk_type         = "Managed"
+      vm_size              = "Standard_D4ds_v4"
     }
   }
 
@@ -310,6 +338,9 @@ run "bounds_change_does_not_emit_node_count_update" {
 
 run "rotation_is_allowed_after_count_refresh_and_quota_check" {
   command = plan
+  providers = {
+    azurerm = azurerm.converged
+  }
 
   variables {
     aks_existing_pool = true
@@ -338,6 +369,9 @@ run "rotation_is_allowed_after_count_refresh_and_quota_check" {
 
   assert {
     condition = (
+      local.aks_existing_node_count == 3 &&
+      local.aks_rotation_count_matches_live &&
+      local.aks_rotation_quota_within_limit &&
       var.aks_rollout.rotation_preflight.observed_node_count == 3 &&
       var.aks_rollout.rotation_preflight.regional_vcpu_used +
       var.aks_rollout.rotation_preflight.observed_node_count * var.aks_rollout.rotation_preflight.rotation_vcpu_per_node <=
@@ -370,6 +404,40 @@ run "rotation_is_rejected_before_count_converges" {
       rotation_preflight = {
         observed_node_count    = 4
         regional_vcpu_used     = 64
+        regional_vcpu_limit    = 80
+        rotation_vcpu_per_node = 4
+      }
+    }
+  }
+
+  expect_failures = [
+    azurerm_kubernetes_cluster.this,
+  ]
+}
+
+run "rotation_rejects_false_count_three_attestation_against_live_count_four" {
+  command   = plan
+  state_key = "aks-count-transition"
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 3
+      vm_size                     = "Standard_E4as_v6"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 3
+      max_pods                    = 60
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = "systemtemp"
+    }
+
+    aks_rollout = {
+      phase = "rotation"
+      rotation_preflight = {
+        observed_node_count    = 3
+        regional_vcpu_used     = 66
         regional_vcpu_limit    = 80
         rotation_vcpu_per_node = 4
       }
@@ -553,6 +621,41 @@ run "bounds_rollout_rejects_rotation_sensitive_changes" {
   ]
 }
 
+run "bounds_rejects_self_attested_existing_snapshot" {
+  command   = plan
+  state_key = "aks-count-transition"
+
+  variables {
+    aks_existing_pool = true
+    aks = {
+      node_count                  = 3
+      vm_size                     = "Standard_E4as_v6"
+      auto_scaling_enabled        = true
+      min_count                   = 3
+      max_count                   = 3
+      max_pods                    = 60
+      os_disk_size_gb             = 128
+      os_disk_type                = "Managed"
+      temporary_name_for_rotation = "systemtemp"
+    }
+
+    aks_rollout = {
+      phase = "bounds"
+      expected_existing = {
+        vm_size                     = "Standard_E4as_v6"
+        max_pods                    = 60
+        os_disk_size_gb             = 128
+        os_disk_type                = "Managed"
+        temporary_name_for_rotation = "systemtemp"
+      }
+    }
+  }
+
+  expect_failures = [
+    azurerm_kubernetes_cluster.this,
+  ]
+}
+
 run "post_convergence_refreshes_count_three_state" {
   command   = apply
   state_key = "aks-count-converged"
@@ -627,5 +730,13 @@ run "rotation_uses_refreshed_count_three_state" {
   assert {
     condition     = azurerm_kubernetes_cluster.this.default_node_pool[0].node_count == 3
     error_message = "Phase 2 must refresh provider state to count three before rotation."
+  }
+
+  assert {
+    condition = (
+      local.aks_existing_node_count == 3 &&
+      local.aks_rotation_count_matches_live
+    )
+    error_message = "Phase 2 must bind the rotation evidence to the refreshed live node-pool count."
   }
 }

@@ -40,14 +40,21 @@ locals {
   aks_temporary_name_for_rotation       = var.aks.temporary_name_for_rotation
   aks_vm_size                           = var.aks.vm_size
   aks_rotation_preflight                = try(var.aks_rollout.rotation_preflight, null)
+  aks_existing_node_pool                = try(data.azurerm_kubernetes_cluster_node_pool.existing[0], null)
+  aks_existing_node_count               = try(local.aks_existing_node_pool.node_count, null)
+  aks_rotation_count_matches_live = try(
+    local.aks_rotation_preflight.observed_node_count == local.aks_existing_node_count,
+    false
+  )
   aks_rotation_count_within_bounds = try(
-    local.aks_rotation_preflight.observed_node_count >= local.aks_min_count &&
-    local.aks_rotation_preflight.observed_node_count <= local.aks_max_count,
+    local.aks_rotation_count_matches_live &&
+    local.aks_existing_node_count >= local.aks_min_count &&
+    local.aks_existing_node_count <= local.aks_max_count,
     false
   )
   aks_rotation_quota_within_limit = try(
     local.aks_rotation_preflight.regional_vcpu_used +
-    local.aks_rotation_preflight.observed_node_count * local.aks_rotation_preflight.rotation_vcpu_per_node <=
+    local.aks_existing_node_count * local.aks_rotation_preflight.rotation_vcpu_per_node <=
     local.aks_rotation_preflight.regional_vcpu_limit,
     false
   )
@@ -66,6 +73,14 @@ locals {
 }
 
 data "azurerm_client_config" "current" {}
+
+data "azurerm_kubernetes_cluster_node_pool" "existing" {
+  count = var.aks_existing_pool ? 1 : 0
+
+  name                    = "system"
+  kubernetes_cluster_name = local.aks_name
+  resource_group_name     = local.resource_group_name
+}
 
 resource "azurerm_resource_group" "this" {
   count    = var.create_resource_group ? 1 : 0
@@ -177,13 +192,19 @@ resource "azurerm_kubernetes_cluster" "this" {
     precondition {
       condition = var.aks_rollout.phase != "bounds" || (
         var.aks_rollout.expected_existing != null &&
-        try(var.aks_rollout.expected_existing.vm_size, null) == var.aks.vm_size &&
-        try(var.aks_rollout.expected_existing.max_pods, null) == var.aks.max_pods &&
-        try(var.aks_rollout.expected_existing.os_disk_size_gb, null) == var.aks.os_disk_size_gb &&
-        try(var.aks_rollout.expected_existing.os_disk_type, null) == var.aks.os_disk_type &&
-        try(var.aks_rollout.expected_existing.temporary_name_for_rotation, null) == var.aks.temporary_name_for_rotation
+        try(local.aks_existing_node_pool.auto_scaling_enabled, false) &&
+        try(var.aks_rollout.expected_existing.vm_size, null) == local.aks_existing_node_pool.vm_size &&
+        try(var.aks_rollout.expected_existing.max_pods, null) == local.aks_existing_node_pool.max_pods &&
+        try(var.aks_rollout.expected_existing.os_disk_size_gb, null) == local.aks_existing_node_pool.os_disk_size_gb &&
+        try(var.aks_rollout.expected_existing.os_disk_type, null) == local.aks_existing_node_pool.os_disk_type &&
+        var.aks.vm_size == local.aks_existing_node_pool.vm_size &&
+        var.aks.max_pods == local.aks_existing_node_pool.max_pods &&
+        var.aks.os_disk_size_gb == local.aks_existing_node_pool.os_disk_size_gb &&
+        var.aks.os_disk_type == local.aks_existing_node_pool.os_disk_type &&
+        try(var.aks_rollout.expected_existing.temporary_name_for_rotation, null) == null &&
+        var.aks.temporary_name_for_rotation == null
       )
-      error_message = "AKS bounds rollout may change only autoscaling bounds; refresh and review the existing SKU, pod density, disk, and rotation settings before changing them."
+      error_message = "AKS bounds rollout must match the refreshed live system pool for SKU, pod density, disk, and autoscaling; rotation settings must remain null."
     }
 
     precondition {
