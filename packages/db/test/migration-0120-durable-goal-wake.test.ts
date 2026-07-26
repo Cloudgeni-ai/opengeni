@@ -444,7 +444,7 @@ describe("migration 0120 (durable goal wake)", () => {
         const noForceAnchor = 'ALTER TABLE "codex_capacity_waiters" NO FORCE ROW LEVEL SECURITY;';
         expect(migrationSql).toContain(noForceAnchor);
         const noForceProbe = `
-DO $$
+DO $durable_goal_probe$
 DECLARE
   forced_count integer;
 BEGIN
@@ -463,11 +463,11 @@ BEGIN
   IF forced_count <> 0 THEN
     RAISE EXCEPTION 'durable-goal NO FORCE probe saw % forced tables', forced_count;
   END IF;
-END $$;
+END $durable_goal_probe$;
 `;
         const rollbackSql =
           migrationSql.replace(noForceAnchor, `${noForceAnchor}${noForceProbe}`) +
-          `\nDO $$ BEGIN RAISE EXCEPTION 'durable-goal intentional rollback'; END $$;`;
+          `\nDO $durable_goal_rollback$ BEGIN RAISE EXCEPTION 'durable-goal intentional rollback'; END $durable_goal_rollback$;`;
         const migrationProbe = postgres(migrationUrl.toString(), { max: 1 });
         let rollbackRejected = false;
         try {
