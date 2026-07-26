@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildSchemaContract } from "./release-schema-contract";
@@ -68,10 +68,22 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const contract = await buildSchemaContract();
     const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
+      deploymentMode: "maintenance",
+    });
+    // Current main carries this independently published migration, while the
+    // nested-depth branch was cut before it landed. Account for it explicitly
+    // instead of renumbering the nested-depth chain or freezing main.
+    const currentMainToolPolicyMigration = "0065_session_tool_policy.sql";
+    expect(migrations.has(currentMainToolPolicyMigration)).toBe(true);
+    expect(migrations.get(currentMainToolPolicyMigration)).toMatchObject({
+      deploymentMode: "rolling",
+    });
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",
       "0107_host_export_lineage_contract.sql",
+      "0108_fence_invalidated_warming_epochs.sql",
     ].filter((file) => migrations.has(file));
 
     expect(currentMainMigrations).toEqual(
@@ -83,23 +95,70 @@ describe("release schema contract", () => {
             ...(currentMainMigrations.includes("0107_host_export_lineage_contract.sql")
               ? ["0107_host_export_lineage_contract.sql"]
               : []),
+            ...(currentMainMigrations.includes("0108_fence_invalidated_warming_epochs.sql")
+              ? ["0108_fence_invalidated_warming_epochs.sql"]
+              : []),
           ],
     );
-    expect(contract.fileCount).toBe(103);
-    expect(contract.sha256).toBe(
-      "e1925c076a24ef3315803390757487c2f4f3aede791ad808a02b1560b0ebc61c",
+    const nestedDepthMigrations = [
+      "0109_nested_agent_depth_expand.sql",
+      "0110_nested_agent_depth_boundary.sql",
+      "0111_nested_agent_depth_backfill.sql",
+      "0112_nested_agent_depth_contract.sql",
+      "0113_nested_agent_depth_validate.sql",
+      "0114_nested_agent_depth_contract.sql",
+      "0115_nested_agent_depth_validate.sql",
+      "0116_nested_agent_depth_index.sql",
+    ].filter((file) => migrations.has(file));
+    expect(nestedDepthMigrations).toEqual(
+      [
+        "0109_nested_agent_depth_expand.sql",
+        "0110_nested_agent_depth_boundary.sql",
+        "0111_nested_agent_depth_backfill.sql",
+        "0112_nested_agent_depth_contract.sql",
+        "0113_nested_agent_depth_validate.sql",
+        "0114_nested_agent_depth_contract.sql",
+        "0115_nested_agent_depth_validate.sql",
+        "0116_nested_agent_depth_index.sql",
+      ].filter((file) => migrations.has(file)),
     );
-    expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
+    expect(contract.fileCount).toBe(
+      108 +
+        (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
+        (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
+        (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0),
+    );
+    expect(contract.sha256).toBe(
+      "0dc2b0f34ed8c8d0982d1ff0c65ea0e6bc80c4b72e1a93fdf0d56e2de65201bf",
+    );
     expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
+
+    const boundarySql = await readFile(
+      join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
+      "utf8",
+    );
+    const sourceTableLock = boundarySql.indexOf(
+      'LOCK TABLE "workspaces", "sessions", "session_spawn_denials" IN SHARE MODE;',
+    );
+    const guardInstall = boundarySql.indexOf(
+      "CREATE TRIGGER session_idempotency_guard BEFORE INSERT",
+    );
+    const firstLedgerReconciliation = boundarySql.indexOf(
+      'INSERT INTO "session_create_idempotency_guard"',
+    );
+    expect(sourceTableLock).toBeGreaterThanOrEqual(0);
+    expect(guardInstall).toBeGreaterThan(sourceTableLock);
+    expect(firstLedgerReconciliation).toBeGreaterThan(sourceTableLock);
+    expect(boundarySql.indexOf("DO $reconcile$", sourceTableLock)).toBeGreaterThan(sourceTableLock);
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-8]|011[89])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-6]|011[89])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
-      "0108_fence_invalidated_warming_epochs.sql",
+      ...nestedDepthMigrations,
       "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
     ]);
@@ -124,10 +183,12 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
-    expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
-      sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
-      deploymentMode: "rolling",
-    });
+    if (migrations.has("0108_fence_invalidated_warming_epochs.sql")) {
+      expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
+        sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+        deploymentMode: "rolling",
+      });
+    }
     expect(migrations.get("0118_new_session_drafts.sql")).toMatchObject({
       sha256: "69ae71b80392eea964c47cadff876cff58db699d6c2470482d35aaf0931de70c",
       deploymentMode: "rolling",

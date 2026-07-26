@@ -73,6 +73,9 @@ async function freshWorkspace(name: string): Promise<Workspace> {
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
     values (${account!.id}, ${`codex-quota-${name}`}) returning id`;
+  await admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${workspace!.id}, ${account!.id})`;
   return { accountId: account!.id, workspaceId: workspace!.id };
 }
 

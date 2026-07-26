@@ -147,6 +147,8 @@ import {
   readSessionLineage,
   saveHumanComposerDraft,
   saveActorNewSessionDraft,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
   updateSessionMcpApprovalPolicy,
   updateSessionTitle,
@@ -2438,6 +2440,12 @@ function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean 
 
 /** Stable, value-free JSON errors for only the create-session boundary. */
 export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionSpawnDeniedError) {
+    return c.json(
+      sessionSpawnDenialEnvelope(error),
+      error.denial.code === "nested_agent_depth_override_forbidden" ? 403 : 409,
+    );
+  }
   if (error instanceof ZodError) {
     return c.json(
       {

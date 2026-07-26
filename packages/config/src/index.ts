@@ -3,6 +3,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   Entitlements,
   EntitlementsMode,
+  MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
   SandboxBackend,
@@ -249,6 +250,9 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  // Undefined is meaningful: the migration boundary persists the product
+  // default of 3 when no deployment override is supplied.
+  maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -1335,6 +1339,7 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
