@@ -114,6 +114,7 @@ describe("OpenGeniClient", () => {
       initialMessage: "hello",
       turnInstructions: "Host context for the initial turn.",
       sandboxBackend: "none",
+      expectedNewSessionDraftRevision: 4,
     });
     expect(created).toEqual(session as never);
     expect(requests).toHaveLength(1);
@@ -127,6 +128,48 @@ describe("OpenGeniClient", () => {
       initialMessage: "hello",
       turnInstructions: "Host context for the initial turn.",
       sandboxBackend: "none",
+      expectedNewSessionDraftRevision: 4,
+    });
+  });
+
+  test("gets and saves the actor-private new-session draft", async () => {
+    const draft = {
+      revision: 3,
+      text: "recover me",
+      resources: [],
+      tools: [],
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      options: { sandboxBackend: "none" },
+      updatedAt: "2026-07-20T01:02:03.000Z",
+    };
+    const { client, requests } = makeClient(() => jsonResponse(draft));
+
+    expect(await client.getNewSessionDraft(WORKSPACE_ID)).toEqual(draft as never);
+    expect(
+      await client.saveNewSessionDraft(WORKSPACE_ID, {
+        expectedRevision: 2,
+        text: draft.text,
+        resources: [],
+        tools: [],
+        model: draft.model,
+        reasoningEffort: "medium",
+        options: { sandboxBackend: "none" },
+      }),
+    ).toEqual(draft as never);
+
+    expect(requests.map((request) => [request.method, request.url])).toEqual([
+      ["GET", `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+      ["PUT", `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/new-session-draft`],
+    ]);
+    expect(JSON.parse(requests[1]!.body!)).toEqual({
+      expectedRevision: 2,
+      text: "recover me",
+      resources: [],
+      tools: [],
+      model: "gpt-5.4",
+      reasoningEffort: "medium",
+      options: { sandboxBackend: "none" },
     });
   });
 
@@ -495,6 +538,31 @@ describe("OpenGeniClient", () => {
     expect(error).toBeInstanceOf(OpenGeniApiError);
     expect((error as OpenGeniApiError).status).toBe(404);
     expect((error as OpenGeniApiError).body).toBe("workspace not found");
+    expect((error as OpenGeniApiError).code).toBeUndefined();
+    expect((error as OpenGeniApiError).message).toBe("OpenGeni API 404: workspace not found");
+  });
+
+  test("decodes structured API error code/message while retaining the raw body", async () => {
+    const body = JSON.stringify({
+      code: "INVALID_SESSION_CREATE_REQUEST",
+      message: "Invalid session create request: initialMessage failed schema validation",
+    });
+    const { client } = makeClient(
+      () => new Response(body, { status: 422, headers: { "content-type": "application/json" } }),
+    );
+    const error = await client.createSession(WORKSPACE_ID, { initialMessage: "private text" }).then(
+      () => null,
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 422,
+      code: "INVALID_SESSION_CREATE_REQUEST",
+      body,
+      message:
+        "OpenGeni API 422: Invalid session create request: initialMessage failed schema validation",
+    });
   });
 
   test("JSON and void requests fail closed when the API response contract differs", async () => {
