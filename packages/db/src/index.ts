@@ -23586,7 +23586,7 @@ export async function materializeGoalContinuation(
           jsonb_build_object(
             'reason', 'malformed_goal_version',
             'rawGoalVersion', ${schema.sessionSystemUpdates.payload} ->> 'goalVersion',
-            'expectedGoalVersion', ${goalRead.version}
+            'expectedGoalVersion', ${goalRead.version}::bigint
           )
         `;
         await tx
@@ -23607,7 +23607,7 @@ export async function materializeGoalContinuation(
                 || jsonb_build_object(
                   'type', 'goal_continuation',
                   'goalId', ${goalRead.id}::text,
-                  'goalVersion', ${goalRead.version},
+                  'goalVersion', ${goalRead.version}::bigint,
                   'prompt', coalesce(
                     nullif(btrim(${schema.sessionSystemUpdates.payload} ->> 'prompt'), ''),
                     'Quarantined malformed goal continuation'
@@ -23634,11 +23634,11 @@ export async function materializeGoalContinuation(
               eq(schema.sessionSystemUpdates.kind, "goal_continuation"),
               eq(schema.sessionSystemUpdates.state, "pending"),
               sql`${schema.sessionSystemUpdates.payload} ->> 'goalId' = ${goalRead.id}`,
-              sql`not (
+              sql`(
                 jsonb_typeof(${schema.sessionSystemUpdates.payload} -> 'goalVersion') = 'number'
                 and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' ~ '^[1-9][0-9]*$'
                 and ${schema.sessionSystemUpdates.payload} ->> 'goalVersion' = ${goalRead.version.toString()}
-              )`,
+              ) is not true`,
             ),
           );
 

@@ -372,40 +372,51 @@ describe("migration 0120 (durable goal wake)", () => {
         relname,
         forceRowSecurity: true,
       }));
-      const forceRlsBefore = await admin<Array<{ relname: string; forceRowSecurity: boolean }>>`
-        select relname, relforcerowsecurity as "forceRowSecurity"
-        from pg_class
-        where oid in (
-          'codex_capacity_waiters'::regclass,
-          'session_goals'::regclass,
-          'session_system_updates'::regclass,
-          'session_turns'::regclass,
-          'session_workflow_wake_outbox'::regclass,
-          'sessions'::regclass,
-          'workspace_inference_controls'::regclass
-        )
-        order by relname`;
+      const readForceRls = () =>
+        admin<Array<{ relname: string; forceRowSecurity: boolean }>>`
+          select relname, relforcerowsecurity as "forceRowSecurity"
+          from pg_class
+          where oid in (
+            'codex_capacity_waiters'::regclass,
+            'session_goals'::regclass,
+            'session_system_updates'::regclass,
+            'session_turns'::regclass,
+            'session_workflow_wake_outbox'::regclass,
+            'sessions'::regclass,
+            'workspace_inference_controls'::regclass
+          )
+          order by relname`;
+      const forceRlsBefore = await readForceRls();
       expect([...forceRlsBefore]).toEqual(expectedForceRls);
+      const rollbackDataBefore = await admin<
+        Array<{ id: string; state: string; summary: string; payload: string }>
+      >`
+        select id, state, summary, payload::text as payload
+        from session_system_updates
+        where workspace_id = ${workspace.id}
+        order by id`;
 
-      const migrationRole = `ope59_migration_owner_${crypto.randomUUID().replaceAll("-", "")}`;
+      const migrationRole = `durable_goal_migration_owner_${crypto.randomUUID().replaceAll("-", "")}`;
       const migrationPassword = crypto.randomUUID();
       const adminRole = decodeURIComponent(new URL(blank.databaseUrl).username);
       const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
       const ownedTables = [...forceRlsTables, "schema_migrations"];
-      let ownershipTransferred = false;
+      let roleCreated = false;
+      const transferredTables: string[] = [];
       try {
         await admin.unsafe(
           `create role ${quoteIdentifier(migrationRole)} login password '${migrationPassword}' nosuperuser nobypassrls`,
         );
+        roleCreated = true;
         await admin.unsafe(`grant usage on schema public to ${quoteIdentifier(migrationRole)}`);
         await admin<never[]>`
           insert into schema_migrations (name) values ('0121_goal_update_idempotency.sql')
           on conflict do nothing`;
-        ownershipTransferred = true;
         for (const table of ownedTables) {
           await admin.unsafe(
             `alter table ${quoteIdentifier(table)} owner to ${quoteIdentifier(migrationRole)}`,
           );
+          transferredTables.push(table);
         }
 
         const role = await admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
@@ -420,31 +431,91 @@ describe("migration 0120 (durable goal wake)", () => {
         const migrationUrl = new URL(blank.databaseUrl);
         migrationUrl.username = migrationRole;
         migrationUrl.password = migrationPassword;
+
+        // Run the real migration SQL in the same implicit transaction as the
+        // production runner, but inject a probe immediately after the NO FORCE
+        // phase and fail after the final FORCE statements. The probe proves the
+        // migration actually runs with all seven tables unforced; the induced
+        // error proves PostgreSQL rolls back both the data body and posture.
+        const migrationSql = await readFile(
+          join(migrationsDir, "0120_durable_goal_wake.sql"),
+          "utf8",
+        );
+        const noForceAnchor = 'ALTER TABLE "codex_capacity_waiters" NO FORCE ROW LEVEL SECURITY;';
+        expect(migrationSql).toContain(noForceAnchor);
+        const noForceProbe = `
+DO $$
+DECLARE
+  forced_count integer;
+BEGIN
+  SELECT count(*) INTO forced_count
+  FROM pg_class
+  WHERE oid IN (
+    'codex_capacity_waiters'::regclass,
+    'session_goals'::regclass,
+    'session_system_updates'::regclass,
+    'session_turns'::regclass,
+    'session_workflow_wake_outbox'::regclass,
+    'sessions'::regclass,
+    'workspace_inference_controls'::regclass
+  )
+  AND relforcerowsecurity;
+  IF forced_count <> 0 THEN
+    RAISE EXCEPTION 'durable-goal NO FORCE probe saw % forced tables', forced_count;
+  END IF;
+END $$;
+`;
+        const rollbackSql =
+          migrationSql.replace(noForceAnchor, `${noForceAnchor}${noForceProbe}`) +
+          `\nDO $$ BEGIN RAISE EXCEPTION 'durable-goal intentional rollback'; END $$;`;
+        const migrationProbe = postgres(migrationUrl.toString(), { max: 1 });
+        let rollbackRejected = false;
+        try {
+          await migrationProbe.unsafe(rollbackSql);
+        } catch (error) {
+          rollbackRejected = true;
+          expect(String(error)).toContain("durable-goal intentional rollback");
+        } finally {
+          await migrationProbe.end();
+        }
+        expect(rollbackRejected).toBe(true);
+        expect([...(await readForceRls())]).toEqual(expectedForceRls);
+        const rollbackDataAfter = await admin<
+          Array<{ id: string; state: string; summary: string; payload: string }>
+        >`
+          select id, state, summary, payload::text as payload
+          from session_system_updates
+          where workspace_id = ${workspace.id}
+          order by id`;
+        expect([...rollbackDataAfter]).toEqual(rollbackDataBefore);
+        const [rolledBackColumns] = await admin<{ count: number }[]>`
+          select count(*)::int as count
+          from information_schema.columns
+          where table_schema = 'public'
+            and table_name = 'session_goals'
+            and column_name in ('continuation_wake_revision', 'continuation_observed_revision')`;
+        expect(Number(rolledBackColumns!.count)).toBe(0);
+
         await runMigrations(migrationUrl.toString());
       } finally {
-        if (ownershipTransferred) {
-          for (const table of ownedTables) {
+        if (roleCreated) {
+          for (const table of [...transferredTables].reverse()) {
             await admin.unsafe(
               `alter table ${quoteIdentifier(table)} owner to ${quoteIdentifier(adminRole)}`,
             );
           }
+          await admin.unsafe(
+            `revoke usage on schema public from ${quoteIdentifier(migrationRole)}`,
+          );
+          await admin.unsafe(
+            `reassign owned by ${quoteIdentifier(migrationRole)} to ${quoteIdentifier(adminRole)}`,
+          );
+          await admin.unsafe(`drop owned by ${quoteIdentifier(migrationRole)}`);
+          await admin.unsafe(`drop role if exists ${quoteIdentifier(migrationRole)}`);
         }
-        await admin.unsafe(`drop role if exists ${quoteIdentifier(migrationRole)}`);
       }
 
-      const forceRlsAfter = await admin<Array<{ relname: string; forceRowSecurity: boolean }>>`
-        select relname, relforcerowsecurity as "forceRowSecurity"
-        from pg_class
-        where oid in (
-          'codex_capacity_waiters'::regclass,
-          'session_goals'::regclass,
-          'session_system_updates'::regclass,
-          'session_turns'::regclass,
-          'session_workflow_wake_outbox'::regclass,
-          'sessions'::regclass,
-          'workspace_inference_controls'::regclass
-        )
-        order by relname`;
+      const forceRlsAfter = await readForceRls();
       expect([...forceRlsAfter]).toEqual(expectedForceRls);
 
       const goals = await admin<

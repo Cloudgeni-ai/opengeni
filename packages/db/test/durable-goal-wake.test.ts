@@ -260,27 +260,37 @@ describe("durable active-goal wake", () => {
       from session_goals
       where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}`;
     if (!goal) throw new Error("goal fixture was not created");
-    const dedupeKey = `malformed-goal-continuation:${crypto.randomUUID()}`;
-    await shared.admin`
-      insert into session_system_updates (
-        account_id, workspace_id, session_id, kind, source_id,
-        dedupe_key, summary, payload
-      ) values (
-        ${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.session.id},
-        'goal_continuation', ${goal.id}, ${dedupeKey}, 'legacy malformed continuation',
-        ${shared.admin.json({
-          type: "goal_continuation",
-          goalId: goal.id,
-          goalVersion: "not-an-integer",
-          prompt: "continue from the legacy obligation",
-          policy: {
-            model: "scripted-model",
-            reasoningEffort: "low",
-            tools: [],
-            sandboxBackend: "none",
-          },
-        })}
-      )`;
+    const malformedPrefix = `malformed-goal-continuation:${crypto.randomUUID()}:`;
+    const malformedCases = [
+      { label: "absent", goalVersion: undefined },
+      { label: "json-null", goalVersion: null },
+      { label: "non-number", goalVersion: "not-an-integer" },
+      { label: "non-positive", goalVersion: 0 },
+      { label: "mismatched", goalVersion: 2 },
+    ] as const;
+    for (const malformed of malformedCases) {
+      await shared.admin`
+        insert into session_system_updates (
+          account_id, workspace_id, session_id, kind, source_id,
+          dedupe_key, summary, payload
+        ) values (
+          ${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.session.id},
+          'goal_continuation', ${goal.id},
+          ${`${malformedPrefix}${malformed.label}`}, 'legacy malformed continuation',
+          ${shared.admin.json({
+            type: "goal_continuation",
+            goalId: goal.id,
+            ...(malformed.goalVersion === undefined ? {} : { goalVersion: malformed.goalVersion }),
+            prompt: "continue from the legacy obligation",
+            policy: {
+              model: "scripted-model",
+              reasoningEffort: "low",
+              tools: [],
+              sandboxBackend: "none",
+            },
+          })}
+        )`;
+    }
 
     // The read path ignores the malformed row rather than casting it or
     // reporting a false continuation_pending state.
@@ -294,41 +304,57 @@ describe("durable active-goal wake", () => {
 
     const quarantined = await shared.admin<
       Array<{
+        dedupe_key: string;
         state: string;
         classification: string;
         summary: string;
         payload: Record<string, unknown>;
         lineage: Record<string, unknown>;
+        raw_goal_version: string | null;
       }>
     >`
-      select state, classification, summary, payload, lineage
+      select dedupe_key, state, classification, summary, payload, lineage,
+        payload -> 'quarantine' ->> 'rawGoalVersion' as raw_goal_version
       from session_system_updates
       where workspace_id = ${ctx.grant.workspaceId!} and session_id = ${ctx.session.id}
-        and dedupe_key = ${dedupeKey}`;
-    expect(quarantined).toHaveLength(1);
-    expect(quarantined[0]).toMatchObject({
-      state: "failed",
-      classification: "failure",
-      summary: "Malformed goal continuation quarantined: malformed_goal_version",
-      payload: {
-        type: "goal_continuation",
-        goalId: goal.id,
-        goalVersion: 1,
-        prompt: "continue from the legacy obligation",
-        quarantine: {
-          reason: "malformed_goal_version",
-          rawGoalVersion: "not-an-integer",
-          expectedGoalVersion: 1,
+        and dedupe_key like ${`${malformedPrefix}%`}
+      order by dedupe_key`;
+    expect(quarantined).toHaveLength(malformedCases.length);
+    expect(
+      quarantined.map(({ dedupe_key, raw_goal_version }) => [
+        dedupe_key.slice(malformedPrefix.length),
+        raw_goal_version,
+      ]),
+    ).toEqual([
+      ["absent", null],
+      ["json-null", null],
+      ["mismatched", "2"],
+      ["non-number", "not-an-integer"],
+      ["non-positive", "0"],
+    ]);
+    for (const row of quarantined) {
+      expect(row).toMatchObject({
+        state: "failed",
+        classification: "failure",
+        summary: "Malformed goal continuation quarantined: malformed_goal_version",
+        payload: {
+          type: "goal_continuation",
+          goalId: goal.id,
+          goalVersion: 1,
+          prompt: "continue from the legacy obligation",
+          quarantine: {
+            reason: "malformed_goal_version",
+            expectedGoalVersion: 1,
+          },
         },
-      },
-      lineage: {
-        quarantine: {
-          reason: "malformed_goal_version",
-          rawGoalVersion: "not-an-integer",
-          expectedGoalVersion: 1,
+        lineage: {
+          quarantine: {
+            reason: "malformed_goal_version",
+            expectedGoalVersion: 1,
+          },
         },
-      },
-    });
+      });
+    }
 
     const outstanding = await listOutstandingSessionSystemUpdates(
       client.db,
@@ -344,7 +370,7 @@ describe("durable active-goal wake", () => {
       autoContinuations: 1,
       wakeRevision: 1,
       observedRevision: 1,
-      updates: 2,
+      updates: malformedCases.length + 1,
       usage: 1,
       events: 1,
     });
