@@ -180,7 +180,7 @@ When working on production deployment, Azure/AWS/GCP deployment, Helm, Terraform
 
 Every new SQL migration must declare its reviewed production path on the first lines: `-- deployment-mode: rolling` for online-compatible expand-and-contract work, or `-- deployment-mode: maintenance` for an incompatible one-way cutover. The protected production gate hashes the ordered SQL history and rejects rewrites or unclassified additions.
 
-Migration `0109_sandbox_recovery_generations.sql` is a one-way maintenance cutover. Stop every old API, control-worker, and turn-worker writer before activation; activation rejects a live `opengeni_app` session and rolls its transaction back cleanly. Application/image rollback to an old writer is allowed only before migration activation. After activation, no old writer may restart; move forward with the protocol-v2 application because there is no mixed-version or down-migration path.
+Migration `0117_sandbox_recovery_generations.sql` is a one-way maintenance cutover. Stop every old API, control-worker, and turn-worker writer before activation; activation rejects a live `opengeni_app` session and rolls its transaction back cleanly. Application/image rollback to an old writer is allowed only before migration activation. After activation, no old writer may restart; move forward with the protocol-v2 application because there is no mixed-version or down-migration path.
 
 Keep provider resource inventories, cleanup notes, cloud account identifiers, private endpoints, generated credentials, kubeconfigs, Terraform state, plans, local tfvars, service-account keys, and access keys in private operator-controlled storage outside the repository.
 

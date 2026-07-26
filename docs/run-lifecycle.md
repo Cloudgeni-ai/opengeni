@@ -355,7 +355,7 @@ the process or its durable admission remains live. PTY open returns only after
 durable promotion and persistence of its exact process identity, and PTY close
 leaves metadata open until exact exit/loss proof exists.
 
-Migration `0109_sandbox_recovery_generations.sql` activates this protocol as a
+Migration `0117_sandbox_recovery_generations.sql` activates this protocol as a
 one-way maintenance cutover. Stop all old API, control-worker, and turn-worker
 writers first. A live `opengeni_app` session rejects activation with SQLSTATE
 `55000` and the transaction rolls back cleanly. Application/image rollback to an

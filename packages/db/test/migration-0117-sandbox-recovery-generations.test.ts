@@ -9,20 +9,20 @@ import { provisionRoles } from "../src/provision-roles";
 
 const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle");
 const migration0108 = "0108_fence_invalidated_warming_epochs.sql";
-const migration0109 = "0109_sandbox_recovery_generations.sql";
+const migration0117 = "0117_sandbox_recovery_generations.sql";
 const appPassword = "apppw";
 const requireRealDatabase = process.env.OPENGENI_REQUIRE_REAL_DB === "1";
-const explicitAdminDatabaseUrl = process.env.OPENGENI_MIGRATION_0109_TEST_DATABASE_ADMIN_URL;
+const explicitAdminDatabaseUrl = process.env.OPENGENI_MIGRATION_0117_TEST_DATABASE_ADMIN_URL;
 
 let availabilityProbe: BlankTestDatabase | null = null;
 let available = true;
 
 beforeAll(async () => {
-  availabilityProbe = await acquireMigration0109TestDatabase("migration-0109-availability");
+  availabilityProbe = await acquireMigration0117TestDatabase("migration-0117-availability");
   if (!availabilityProbe) {
     if (requireRealDatabase) {
       throw new Error(
-        "[migration-0109] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
+        "[migration-0117] OPENGENI_REQUIRE_REAL_DB=1 but the real PostgreSQL harness is unavailable",
       );
     }
     available = false;
@@ -33,9 +33,9 @@ afterAll(async () => {
   await availabilityProbe?.release();
 }, 180_000);
 
-describe("0109 durable sandbox recovery generations (real PostgreSQL)", () => {
+describe("0117 durable sandbox recovery generations (real PostgreSQL)", () => {
   test("cuts over atomically and enforces exact retained-process, PTY, reaper, generation, and RLS identity", async () => {
-    await withBlankDatabase("migration-0109-public", async (admin, databaseUrl) => {
+    await withBlankDatabase("migration-0117-public", async (admin, databaseUrl) => {
       await ensureAppRole(admin);
       await applyThrough(admin, migration0108);
       const scope = await seedScope(admin, "public");
@@ -63,7 +63,7 @@ describe("0109 durable sandbox recovery generations (real PostgreSQL)", () => {
         await app`select 1`;
         let liveGuardError: unknown;
         try {
-          await applyFile(admin, migration0109);
+          await applyFile(admin, migration0117);
         } catch (error) {
           liveGuardError = error;
         }
@@ -87,7 +87,7 @@ describe("0109 durable sandbox recovery generations (real PostgreSQL)", () => {
         await app.end();
       }
 
-      await applyFile(admin, migration0109);
+      await applyFile(admin, migration0117);
 
       const [legacyPty] = await admin<Array<{ status: string; closedAt: Date | null }>>`
           select status, closed_at as "closedAt"
@@ -360,7 +360,7 @@ describe("0109 durable sandbox recovery generations (real PostgreSQL)", () => {
   }, 300_000);
 
   test("applies and grants the protocol in a dedicated data schema", async () => {
-    await withBlankDatabase("migration-0109-dedicated", async (admin, databaseUrl) => {
+    await withBlankDatabase("migration-0117-dedicated", async (admin, databaseUrl) => {
       await ensureAppRole(admin);
       const schema = `sandbox_recovery_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
       await migrate(databaseUrl, schema);
@@ -425,8 +425,8 @@ async function withBlankDatabase(
   callback: (admin: postgres.Sql, databaseUrl: string) => Promise<void>,
 ): Promise<void> {
   if (!available) return;
-  const blank = await acquireMigration0109TestDatabase(label);
-  if (!blank) throw new Error(`[migration-0109] lost real PostgreSQL harness for ${label}`);
+  const blank = await acquireMigration0117TestDatabase(label);
+  if (!blank) throw new Error(`[migration-0117] lost real PostgreSQL harness for ${label}`);
   const admin = postgres(blank.databaseUrl, { max: 1, prepare: false });
   try {
     await callback(admin, blank.databaseUrl);
@@ -436,10 +436,10 @@ async function withBlankDatabase(
   }
 }
 
-async function acquireMigration0109TestDatabase(label: string): Promise<BlankTestDatabase | null> {
+async function acquireMigration0117TestDatabase(label: string): Promise<BlankTestDatabase | null> {
   if (!explicitAdminDatabaseUrl) return acquireBlankTestDatabase(label);
 
-  const databaseName = `opengeni_0109_${label.replaceAll(/[^a-zA-Z0-9]/g, "_")}_${crypto
+  const databaseName = `opengeni_0117_${label.replaceAll(/[^a-zA-Z0-9]/g, "_")}_${crypto
     .randomUUID()
     .replaceAll("-", "")}`.slice(0, 63);
   const control = postgres(explicitAdminDatabaseUrl, { max: 1, prepare: false });
@@ -509,11 +509,11 @@ async function seedScope(admin: postgres.Sql, label: string, schema?: string): P
     await admin.unsafe(`set search_path = ${quoteIdentifier(schema)}, opengeni_private, public`);
   }
   const [account] = await admin<Array<{ id: string }>>`
-    insert into managed_accounts (name) values (${`migration-0109-${label}-account`})
+    insert into managed_accounts (name) values (${`migration-0117-${label}-account`})
     returning id`;
   const [workspace] = await admin<Array<{ id: string }>>`
     insert into workspaces (account_id, name)
-    values (${account!.id}, ${`migration-0109-${label}-workspace`}) returning id`;
+    values (${account!.id}, ${`migration-0117-${label}-workspace`}) returning id`;
   const sessionId = crypto.randomUUID();
   await admin`
     insert into sessions (

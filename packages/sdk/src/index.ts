@@ -10,6 +10,7 @@ export type {
 export {
   OpenGeniApiContractMismatchError,
   OpenGeniApiError,
+  OpenGeniSessionListCursorError,
   OpenGeniStreamError,
   isRetryableStreamError,
 } from "./errors";
@@ -142,6 +143,11 @@ export type {
   CodexConnectionStatus,
   CodexConnectStart,
   CodexConnectPoll,
+  CodexFleetConfidence,
+  CodexFleetCacheState,
+  CodexFleetDecisionEventPayload,
+  CodexFleetDecisionScore,
+  CodexFleetShadowComparison,
   CodexOverviewResponse,
   CodexResetCredit,
   CodexResetRedemptionRecovery,

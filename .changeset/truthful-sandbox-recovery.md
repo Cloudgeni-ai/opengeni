@@ -31,6 +31,6 @@ after exact process-group absence and retained settlement. Interactive PTYs open
 only after durable promotion, close only on exact terminal proof, and report
 provider loss truthfully.
 
-Activate the generation/process schema through maintenance migration 0109. All
+Activate the generation/process schema through maintenance migration 0117. All
 old API/control/turn writers must stop before the one-way cutover and may not
 restart afterward; archive completeness requires the exact closed generation.
