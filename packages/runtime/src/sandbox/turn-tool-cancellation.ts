@@ -5,7 +5,7 @@ import {
   isExecSessionLostBanner,
   parseExecBannerExitCode,
   parseExecBannerSessionId,
-} from "./channel-a";
+} from "./exec-banner";
 
 const TURN_EXEC_YIELD_MS = 250;
 const TURN_WRITE_YIELD_MS = 250;
@@ -71,6 +71,13 @@ export type TurnSandboxCommandArgs = {
   runAs?: string;
 };
 
+export type TurnSandboxCommandResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+  wallTimeSeconds: number;
+};
+
 export type TurnSandboxCommandSession = CommandCancellationSession & {
   exec?(args: TurnSandboxCommandArgs): Promise<unknown>;
   execCommand?(args: TurnSandboxCommandArgs): Promise<string>;
@@ -103,6 +110,10 @@ export type TurnToolCancellationFence = {
     session: TurnSandboxCommandSession,
     args: TurnSandboxCommandArgs,
   ): Promise<unknown>;
+  runSandboxCommandStructured(
+    session: TurnSandboxCommandSession,
+    args: TurnSandboxCommandArgs,
+  ): Promise<TurnSandboxCommandResult>;
 };
 
 export type TurnToolCancellationController = TurnToolCancellationFence & {
@@ -189,6 +200,64 @@ function nativeCommandBanner(result: unknown): string {
     return `Process exited with code ${exitCode}\n\nOutput:\n${output}`;
   }
   throw new Error("Sandbox command did not report a session id or exit code");
+}
+
+type NativeCommandResult = {
+  stdout: string;
+  stderr: string;
+  exitCode: number | null;
+  sessionId: number | null;
+  wallTimeSeconds: number;
+};
+
+function nativeCommandResult(result: unknown): NativeCommandResult {
+  if (typeof result === "string") {
+    return {
+      stdout: execOutput(result),
+      stderr: "",
+      exitCode: parseExecBannerExitCode(result),
+      sessionId: parseExecBannerSessionId(result),
+      wallTimeSeconds: 0,
+    };
+  }
+  if (!result || typeof result !== "object") {
+    throw new Error("Sandbox command returned an invalid result");
+  }
+  const value = result as {
+    output?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+    exitCode?: unknown;
+    exit_code?: unknown;
+    sessionId?: unknown;
+    session_id?: unknown;
+    wallTimeSeconds?: unknown;
+  };
+  return {
+    stdout:
+      typeof value.stdout === "string"
+        ? value.stdout
+        : typeof value.output === "string"
+          ? value.output
+          : "",
+    stderr: typeof value.stderr === "string" ? value.stderr : "",
+    exitCode:
+      typeof value.exitCode === "number"
+        ? value.exitCode
+        : typeof value.exit_code === "number"
+          ? value.exit_code
+          : null,
+    sessionId:
+      typeof value.sessionId === "number"
+        ? value.sessionId
+        : typeof value.session_id === "number"
+          ? value.session_id
+          : null,
+    wallTimeSeconds:
+      typeof value.wallTimeSeconds === "number" && value.wallTimeSeconds >= 0
+        ? value.wallTimeSeconds
+        : 0,
+  };
 }
 
 function completedCommandBanner(exitCode: number, output: string): string {
@@ -378,13 +447,29 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     session: TurnSandboxCommandSession,
     args: TurnSandboxCommandArgs,
   ): Promise<unknown> {
+    return this.runSandboxCommandInternal(session, args, false);
+  }
+
+  async runSandboxCommandStructured(
+    session: TurnSandboxCommandSession,
+    args: TurnSandboxCommandArgs,
+  ): Promise<TurnSandboxCommandResult> {
+    return (await this.runSandboxCommandInternal(session, args, true)) as TurnSandboxCommandResult;
+  }
+
+  private runSandboxCommandInternal(
+    session: TurnSandboxCommandSession,
+    args: TurnSandboxCommandArgs,
+    structured: boolean,
+  ): Promise<unknown> {
     return this.track(async () => {
+      const startedAt = performance.now();
       if (!session.exec && !session.execCommand) {
         throw new Error("Sandbox session does not support command execution");
       }
       const lifecycleRunContext = {} as Parameters<FunctionToolInvoke>[0];
 
-      const invokeExec: FunctionToolInvoke = async (_runContext, input) => {
+      const invokeExecNative = async (input: string): Promise<unknown> => {
         const parsed = parsedObject(input);
         if (!parsed || typeof parsed.cmd !== "string") {
           throw new Error("Sandbox lifecycle command input was invalid");
@@ -415,8 +500,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
             : session.exec
               ? await session.exec(commandArgs)
               : await session.execCommand!(commandArgs);
-        return nativeCommandBanner(result);
+        return result;
       };
+      const invokeExec: FunctionToolInvoke = async (_runContext, input) =>
+        nativeCommandBanner(await invokeExecNative(input));
       const invokeWrite: FunctionToolInvoke | null =
         session.writeStdin || session.writeStdinForProcessControl
           ? async (_runContext, input) => {
@@ -472,19 +559,49 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         ...(args.maxOutputTokens !== undefined ? { max_output_tokens: args.maxOutputTokens } : {}),
       });
 
-      let initial: Awaited<ReturnType<FunctionToolInvoke>>;
+      let initialNative: Awaited<ReturnType<FunctionToolInvoke>>;
       try {
-        initial = await runWithToolCallCorrelation(
+        initialNative = await runWithToolCallCorrelation(
           correlationId,
-          async () => await invokeExec(lifecycleRunContext, commandInput, undefined),
+          async () => await invokeExecNative(commandInput),
         );
       } finally {
         remoteExec?.settle();
       }
-      if (typeof initial !== "string" || useRemoteOpCancellation) return initial;
+      const initial = nativeCommandBanner(initialNative);
+      const initialResult = nativeCommandResult(initialNative);
+      if (useRemoteOpCancellation) {
+        if (!structured) return initial;
+        if (initialResult.exitCode === null) {
+          throw new Error("Sandbox command did not report a terminal exit code");
+        }
+        return {
+          stdout: initialResult.stdout,
+          stderr: initialResult.stderr,
+          exitCode: initialResult.exitCode,
+          wallTimeSeconds: Math.max(
+            initialResult.wallTimeSeconds,
+            (performance.now() - startedAt) / 1_000,
+          ),
+        } satisfies TurnSandboxCommandResult;
+      }
 
       const sessionId = parseExecBannerSessionId(initial);
-      if (sessionId === null) return initial;
+      if (sessionId === null) {
+        if (!structured) return initial;
+        if (initialResult.exitCode === null) {
+          throw new Error("Sandbox command did not report a terminal exit code");
+        }
+        return {
+          stdout: initialResult.stdout,
+          stderr: initialResult.stderr,
+          exitCode: initialResult.exitCode,
+          wallTimeSeconds: Math.max(
+            initialResult.wallTimeSeconds,
+            (performance.now() - startedAt) / 1_000,
+          ),
+        } satisfies TurnSandboxCommandResult;
+      }
       if (!invokeWrite) {
         throw new Error("Sandbox lifecycle command yielded without stdin support");
       }
@@ -505,6 +622,8 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       const maxOutputTokens = args.maxOutputTokens ?? 20_000;
       const initialOutput = execOutput(initial);
       let output = initialOutput ? appendBoundedOutput("", initialOutput, maxOutputTokens) : "";
+      let stdout = appendBoundedOutput("", initialResult.stdout, maxOutputTokens);
+      const stderr = appendBoundedOutput("", initialResult.stderr, maxOutputTokens);
       while (true) {
         if (this.cancelled) throw cancellationError(this.reason);
         const next = await invokeWrite(
@@ -521,11 +640,20 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           throw new Error("Sandbox lifecycle stdin returned an invalid result");
         }
         const nextOutput = execOutput(next);
-        if (nextOutput) output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+        if (nextOutput) {
+          output = appendBoundedOutput(output, nextOutput, maxOutputTokens);
+          stdout = appendBoundedOutput(stdout, nextOutput, maxOutputTokens);
+        }
         const exitCode = parseExecBannerExitCode(next);
         if (exitCode !== null) {
           this.shellSessions.delete(sessionId);
-          return completedCommandBanner(exitCode, output);
+          if (!structured) return completedCommandBanner(exitCode, output);
+          return {
+            stdout,
+            stderr,
+            exitCode,
+            wallTimeSeconds: (performance.now() - startedAt) / 1_000,
+          } satisfies TurnSandboxCommandResult;
         }
         // A conforming provider blocks for the requested yield. This fallback
         // prevents a non-conforming implementation from turning a long setup
@@ -844,7 +972,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           (state.writeInvoke || state.processSession?.writeStdinForProcessControl) &&
           (await this.rawWrite(state, "\u0003", SHELL_POLL_MS))
         ) {
-          this.shellSessions.delete(state.sessionId);
+          await this.forgetShellSessionAfterExactSettlement(state);
           return;
         }
         await delay(SHELL_POLL_MS);
@@ -860,7 +988,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
         const completed = await this.rawWrite(state, "", SHELL_POLL_MS);
         if (completed) {
-          this.shellSessions.delete(state.sessionId);
+          await this.forgetShellSessionAfterExactSettlement(state);
           return;
         }
       }
@@ -868,37 +996,53 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     }
 
     if (!(await this.identityAlive(state))) {
-      this.shellSessions.delete(state.sessionId);
+      await this.forgetShellSessionAfterExactSettlement(state);
       return;
     }
 
-    if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
+    // A retained provider session must remain pinned until its process group is
+    // absent. Polling it first could settle/delete the durable route while an
+    // ignored-signal descendant still lives, making the exact helper backend
+    // unavailable. Generic legacy sessions retain their Ctrl-C fast path.
+    if (!state.processSession && state.writeInvoke) {
       await this.rawWrite(state, "\u0003", SHELL_POLL_MS);
       if (!(await this.identityAlive(state))) {
-        this.shellSessions.delete(state.sessionId);
+        await this.forgetShellSessionAfterExactSettlement(state);
         return;
       }
     }
 
     await this.signalIdentity(state, "TERM");
     for (let attempt = 0; attempt < SHELL_GRACEFUL_POLLS; attempt++) {
-      if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
+      if (!state.processSession && state.writeInvoke) {
         await this.rawWrite(state, "", SHELL_POLL_MS);
       }
       if (!(await this.identityAlive(state))) {
-        this.shellSessions.delete(state.sessionId);
+        await this.forgetShellSessionAfterExactSettlement(state);
         return;
       }
     }
 
     await this.signalIdentity(state, "KILL");
     while (await this.identityAlive(state)) {
-      if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
+      if (!state.processSession && state.writeInvoke) {
         await this.rawWrite(state, "", SHELL_POLL_MS);
       }
       // A transient helper failure must not turn the first KILL into a single
       // best-effort shot. Re-issue it until the process group is provably gone.
       await this.signalIdentity(state, "KILL");
+      await delay(SHELL_POLL_MS);
+    }
+    await this.forgetShellSessionAfterExactSettlement(state);
+  }
+
+  private async forgetShellSessionAfterExactSettlement(state: ActiveShellSession): Promise<void> {
+    // OS process-group absence is necessary but not sufficient for a routed
+    // retained process. One final exact provider-session poll must publish an
+    // exit/loss proof and durably settle the process holder before tracking is
+    // removed. Settlement failure keeps hasRetainedProcess true and retries.
+    while (state.processSession?.hasRetainedProcess?.(state.sessionId) === true) {
+      if (await this.rawWrite(state, "", SHELL_POLL_MS)) break;
       await delay(SHELL_POLL_MS);
     }
     this.shellSessions.delete(state.sessionId);

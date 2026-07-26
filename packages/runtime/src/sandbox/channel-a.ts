@@ -58,9 +58,21 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
-import { parseExecBannerExitCode, parseExecBannerSessionId } from "./exec-banner";
+import {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./turn-tool-cancellation";
 
-export { parseExecBannerExitCode, parseExecBannerSessionId } from "./exec-banner";
+export {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
 
 // ── The minimal session surface Channel A consumes (a structural subset of the
 // SDK's SandboxSession, all optional — capability-probed before use). ─────────
@@ -113,6 +125,9 @@ export type ChannelASession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }): Promise<string>;
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  hasRetainedProcess?(providerSessionId: number): boolean;
+  execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
 };
@@ -1145,17 +1160,49 @@ export class SandboxChannelAService {
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════
 
-  /** Run a bounded command, return buffered stdout/stderr + exit code inline. The
-   *  long-running tail (when the process hasn't exited within timeoutMs) keeps
-   *  running in-box; if emitStream is set the buffered output is also published as
-   *  the agent firehose so other viewers see it. */
+  /** Run a bounded command to physical completion and return buffered output.
+   *  A deadline cancels the exact provider operation, proves its process group
+   *  absent, and settles any retained-process admission before returning 124. */
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
-    const r = await this.run({
-      cmd: req.command,
-      workdir: this.terminalWorkdir(req.cwd),
-      yieldTimeMs: req.timeoutMs,
-    });
-    const running = r.exitCode === null && typeof r.sessionId === "number";
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const timeoutReason = new Error(`Terminal command exceeded ${req.timeoutMs}ms`);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort(timeoutReason);
+    }, req.timeoutMs);
+    const terminalWorkdir = this.terminalWorkdir(req.cwd);
+    let r: Awaited<ReturnType<typeof controller.runSandboxCommandStructured>>;
+    try {
+      r = await controller.runSandboxCommandStructured(this.session, {
+        cmd: req.command,
+        ...(terminalWorkdir ? { workdir: terminalWorkdir } : {}),
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+        yieldTimeMs: req.timeoutMs,
+      });
+      if (timedOut) {
+        await controller.waitForQuiescence();
+        r = {
+          stdout: "",
+          stderr: timeoutReason.message,
+          exitCode: 124,
+          wallTimeSeconds: req.timeoutMs / 1_000,
+        };
+      }
+    } catch (error) {
+      controller.cancel(error);
+      await controller.waitForQuiescence();
+      if (!timedOut && !(error instanceof TurnSandboxCommandCancelledError)) throw error;
+      r = {
+        stdout: "",
+        stderr: timeoutReason.message,
+        exitCode: 124,
+        wallTimeSeconds: req.timeoutMs / 1_000,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
     if (req.emitStream && (r.stdout || r.stderr)) {
       const events: { type: SessionEventType; payload: unknown }[] = [];
       const commandId = crypto.randomUUID();
@@ -1175,7 +1222,7 @@ export class SandboxChannelAService {
       stdout: r.stdout,
       stderr: r.stderr,
       exitCode: r.exitCode,
-      running,
+      running: false,
       wallTimeSeconds: r.wallTimeSeconds,
     };
   }
@@ -1450,24 +1497,6 @@ function isDefinitePathNotFoundError(error: unknown): boolean {
     candidate.errno === "ENOENT" ||
     candidate.errno === -2
   );
-}
-
-// Detect the Modal "the exec-session you're writing to no longer exists" banner.
-// writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
-// hard cancellation-fence fact, so classify only the complete known banner (or
-// its bare provider fact) carrying the exact tracked numeric id. ID-less,
-// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
-export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
-  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
-  // JavaScript's `$` also matches immediately before one final line terminator.
-  // Requiring the regex match to consume the entire string keeps even that
-  // otherwise-special case fail-closed.
-  if (!match || match[0] !== out) return false;
-  // String equality is intentional: parseInt would normalize malformed facts
-  // such as `01` and can round an out-of-range integer into another identity.
-  return match[1] === String(execSessionId);
 }
 
 function sniffBinary(bytes: Buffer): boolean {

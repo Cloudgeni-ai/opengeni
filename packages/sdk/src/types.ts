@@ -1339,8 +1339,8 @@ export type TerminalExecRequest = {
 export type TerminalExecResponse = {
   stdout: string;
   stderr: string;
-  exitCode: number | null;
-  running: boolean;
+  exitCode: number;
+  running: false;
   wallTimeSeconds: number;
 };
 export type PtyOpenRequest = {

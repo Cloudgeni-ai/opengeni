@@ -5905,7 +5905,8 @@ export type GitShowResponse = z.infer<typeof GitShowResponse>;
 export const TerminalExecRequest = z.object({
   command: z.string().min(1),
   cwd: z.string().default(""), // workspace-relative
-  // Soft per-call wall-clock bound (the box yields output back when reached).
+  // Hard wall-clock bound. A timeout response is returned only after the exact
+  // provider process is physically absent and any retained admission settles.
   timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
   // in addition to returning the buffered result inline.
@@ -5915,10 +5916,10 @@ export type TerminalExecRequest = z.infer<typeof TerminalExecRequest>;
 export const TerminalExecResponse = z.object({
   stdout: z.string(),
   stderr: z.string(),
-  exitCode: z.number().int().nullable(),
-  // True when the process was still running when the call yielded (a long
-  // command); the remaining output drains onto A1 if emitStream was set.
-  running: z.boolean(),
+  exitCode: z.number().int(),
+  // Retained for wire compatibility; synchronous exec never exposes a live
+  // provider process. Interactive work uses the PTY API.
+  running: z.literal(false),
   wallTimeSeconds: z.number().nonnegative(),
 });
 export type TerminalExecResponse = z.infer<typeof TerminalExecResponse>;

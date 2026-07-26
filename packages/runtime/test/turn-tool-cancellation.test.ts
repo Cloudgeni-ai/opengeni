@@ -188,6 +188,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     let mutations = 0;
     const controlWrites: Array<Record<string, unknown>> = [];
     const helperCommands: string[] = [];
+    const settlementOrder: string[] = [];
     const exec = functionTool("exec_command", async () => {
       rawExecs += 1;
       return running(32);
@@ -200,6 +201,7 @@ describe("turn sandbox-tool physical cancellation fence", () => {
       },
       writeStdinForProcessControl: async (args: Record<string, unknown>) => {
         controlWrites.push(args);
+        settlementOrder.push("provider-control");
         return processAlive ? running(32) : exited(137);
       },
       execCommandForProcessControl: async (
@@ -215,10 +217,14 @@ describe("turn sandbox-tool physical cancellation fence", () => {
           return exited(0, "5200 5200\n");
         }
         if (args.cmd.includes("command kill -KILL")) {
+          settlementOrder.push("group-kill");
           processAlive = false;
           return exited(0);
         }
-        if (args.cmd.includes("command kill -0")) return exited(processAlive ? 75 : 0);
+        if (args.cmd.includes("command kill -0")) {
+          settlementOrder.push(processAlive ? "group-live" : "group-absent");
+          return exited(processAlive ? 75 : 0);
+        }
         return exited(0);
       },
     };
@@ -232,11 +238,14 @@ describe("turn sandbox-tool physical cancellation fence", () => {
 
     expect(rawExecs).toBe(1);
     expect(mutations).toBe(0);
-    expect(controlWrites[0]).toMatchObject({ sessionId: 32, chars: "\u0003" });
+    expect(controlWrites.at(-1)).toMatchObject({ sessionId: 32, chars: "" });
     expect(helperCommands.some((command) => command.includes("command cat"))).toBe(true);
     expect(helperCommands.some((command) => command.includes("command kill -TERM"))).toBe(true);
     expect(helperCommands.some((command) => command.includes("command kill -KILL"))).toBe(true);
     expect(processAlive).toBe(false);
+    expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
+      settlementOrder.indexOf("group-absent"),
+    );
   });
 
   test("retained-process terminal settlement failure keeps the cancellation fence closed", async () => {
