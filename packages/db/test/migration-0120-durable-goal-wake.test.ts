@@ -400,7 +400,11 @@ describe("migration 0120 (durable goal wake)", () => {
       const migrationPassword = crypto.randomUUID();
       const adminRole = decodeURIComponent(new URL(blank.databaseUrl).username);
       const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
-      const ownedTables = [...forceRlsTables, "schema_migrations"];
+      const ownedTables = [
+        ...forceRlsTables,
+        "nested_agent_depth_configuration",
+        "schema_migrations",
+      ];
       let roleCreated = false;
       const transferredTables: string[] = [];
       try {
