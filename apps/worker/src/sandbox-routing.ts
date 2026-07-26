@@ -16,7 +16,11 @@
 
 import type { Settings } from "@opengeni/config";
 import {
+  advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
+  retainWorkspaceMutationProcess,
+  settleRetainedProcess,
+  verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
   getSandbox,
   markWarmLeaseInstanceLost,
@@ -43,6 +47,8 @@ import {
   type RoutableBackendSession,
   type RoutableSandbox,
   type ResolvedActiveBackend,
+  type RoutingRetainedProcess,
+  type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
   type SelfhostedRelayConfig,
   type OpStreamJournal,
@@ -415,11 +421,13 @@ function afterPersistableHomeMutation(
       backend: ResolvedActiveBackend;
       admission: unknown;
       outcome: "resolved" | "rejected";
+      result?: unknown;
+      retainedProcess?: RoutingRetainedProcess;
     }) => Promise<void>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!home || !fence) return undefined;
-  return async ({ op, backend, admission, outcome }) => {
+  return async ({ op, backend, admission, outcome, retainedProcess }) => {
     if (
       backend.sandboxId !== null ||
       backend.leaseEpoch === undefined ||
@@ -433,6 +441,32 @@ function afterPersistableHomeMutation(
       return;
     }
     const exactAdmission = admission as SandboxWorkspaceMutationAdmission;
+    if (outcome === "resolved" && retainedProcess) {
+      await retainWorkspaceMutationProcess(services.db, {
+        accountId: fence.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: retainedProcess.id,
+        providerSessionId: retainedProcess.providerSessionId,
+        admissionId: exactAdmission.id,
+        admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
+        operation: op,
+        owner: {
+          kind: "turn",
+          turnId: fence.turnId,
+          executionGeneration: fence.executionGeneration,
+          attemptId: fence.attemptId,
+          holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+          sandboxGroupId: home.sandboxGroupId,
+          expectedEpoch: backend.leaseEpoch,
+          expectedInstanceId: backend.providerInstanceId,
+          routeKind: exactAdmission.routeKind,
+          routeTargetId: exactAdmission.routeTargetId,
+          routeEpoch: exactAdmission.routeEpoch,
+        },
+      });
+      return;
+    }
     await verifyWorkspaceMutationSettlement(services.db, {
       accountId: fence.accountId,
       workspaceId: ids.workspaceId,
@@ -447,6 +481,91 @@ function afterPersistableHomeMutation(
       admission: exactAdmission,
       operation: op,
       outcome,
+    });
+  };
+}
+
+function beforeRetainedProcessMutation(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: {
+      op: string;
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+    }) => Promise<SandboxWorkspaceMutationAdmission>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ op, process }) =>
+    await advanceWorkspaceGenerationForRetainedProcess(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      operation: op,
+    });
+}
+
+function afterRetainedProcessMutation(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: {
+      op: string;
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+      admission: unknown;
+      outcome: "resolved" | "rejected";
+      result?: unknown;
+    }) => Promise<void>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ op, process, admission, outcome }) => {
+    if (
+      !admission ||
+      typeof admission !== "object" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).id !== "string" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).workspaceGeneration !==
+        "number"
+    ) {
+      throw new Error("Retained-process mutation settlement lacked its exact admission");
+    }
+    await verifyRetainedProcessMutationSettlement(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      admission: admission as SandboxWorkspaceMutationAdmission,
+      operation: op,
+      outcome,
+    });
+  };
+}
+
+function settleRetainedProcessForTurn(
+  services: RoutingWiringServices,
+  ids: RoutingWiringIds,
+):
+  | ((input: {
+      backend: ResolvedActiveBackend;
+      process: RoutingRetainedProcess;
+      proof: RoutingRetainedProcessTerminalProof;
+    }) => Promise<void>)
+  | undefined {
+  const fence = ids.workspaceMutationFence;
+  if (!fence) return undefined;
+  return async ({ process, proof }) => {
+    await settleRetainedProcess(services.db, {
+      accountId: fence.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      outcome: proof.outcome,
+      exitCode: proof.exitCode,
+      reason: proof.reason,
+      idleGraceMs: services.settings.sandboxIdleGraceMs,
     });
   };
 }
@@ -484,6 +603,9 @@ export function wrapTurnBoxWithRouting(
   const { db, settings, bus, onOp } = services;
   const beforeMutation = beforePersistableHomeMutation(services, ids, ids.homeLease);
   const afterMutation = afterPersistableHomeMutation(services, ids, ids.homeLease);
+  const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
+  const afterProcessMutation = afterRetainedProcessMutation(services, ids);
+  const settleProcess = settleRetainedProcessForTurn(services, ids);
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -580,6 +702,9 @@ export function wrapTurnBoxWithRouting(
     resolveActiveBackend: resolver,
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
+    ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
+    ...(afterProcessMutation ? { afterProcessMutation } : {}),
+    ...(settleProcess ? { settleProcess } : {}),
     ...(ids.homeLease
       ? {
           onDefaultBackendError: async ({
@@ -649,6 +774,9 @@ export function wrapLazyTurnBoxWithRouting(
   const { db, settings, bus, onOp } = services;
   const beforeMutation = beforePersistableHomeMutation(services, ids, args.homeLeaseIdentity);
   const afterMutation = afterPersistableHomeMutation(services, ids, args.homeLeaseIdentity);
+  const beforeProcessMutation = beforeRetainedProcessMutation(services, ids);
+  const afterProcessMutation = afterRetainedProcessMutation(services, ids);
+  const settleProcess = settleRetainedProcessForTurn(services, ids);
   const syntheticSession: RoutableBackendSession = {
     state: { manifest: args.agentDefaultManifest },
   };
@@ -714,6 +842,9 @@ export function wrapLazyTurnBoxWithRouting(
     },
     ...(beforeMutation ? { beforeMutation } : {}),
     ...(afterMutation ? { afterMutation } : {}),
+    ...(beforeProcessMutation ? { beforeProcessMutation } : {}),
+    ...(afterProcessMutation ? { afterProcessMutation } : {}),
+    ...(settleProcess ? { settleProcess } : {}),
     ...(args.homeLeaseIdentity
       ? {
           onDefaultBackendError: async ({

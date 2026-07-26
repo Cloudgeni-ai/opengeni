@@ -227,6 +227,226 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(settlements).toBe(0);
   });
 
+  test("yielded process mutation, polling, and helpers stay on the exact backend after pointer movement", async () => {
+    const ptr = mutablePointer();
+    let pointerReads = 0;
+    const oldExecs: string[] = [];
+    const oldWrites: Array<Record<string, unknown>> = [];
+    const newCalls: string[] = [];
+    const processEvents: string[] = [];
+    let retainedId: string | null = null;
+    const oldBackend: RoutableBackendSession = {
+      async execCommand(args) {
+        const cmd = String((args as { cmd?: unknown }).cmd ?? "");
+        oldExecs.push(cmd);
+        return cmd === "start"
+          ? "Process running with session ID 73\n\nOutput:\nstarted"
+          : "Process exited with code 0\n\nOutput:\nhelper";
+      },
+      async writeStdin(args) {
+        oldWrites.push(args as Record<string, unknown>);
+        return "Process running with session ID 73\n\nOutput:\nstill-running";
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async execCommand() {
+        newCalls.push("exec");
+        return "Process exited with code 0\n\nOutput:\nwrong-backend";
+      },
+      async writeStdin() {
+        newCalls.push("stdin");
+        return "Process exited with code 0\n\nOutput:\nwrong-backend";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => {
+        pointerReads += 1;
+        return await ptr.read();
+      },
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "selfhosted" },
+      beforeMutation: async () => "parent-admission",
+      afterMutation: async ({ retainedProcess }) => {
+        expect(retainedProcess?.providerSessionId).toBe(73);
+        retainedId ??= retainedProcess!.id;
+        expect(retainedProcess!.id).toBe(retainedId);
+        processEvents.push("parent-promoted");
+      },
+      beforeProcessMutation: async ({ process }) => {
+        expect(process.id).toBe(retainedId);
+        processEvents.push("stdin-admitted");
+        return "stdin-admission";
+      },
+      afterProcessMutation: async ({ admission, outcome }) => {
+        expect(admission).toBe("stdin-admission");
+        expect(outcome).toBe("resolved");
+        processEvents.push("stdin-settled");
+      },
+    });
+
+    expect(await proxy.execCommand({ cmd: "start" })).toContain("session ID 73");
+    expect(proxy.hasRetainedProcess(73)).toBe(true);
+    ptr.swap("sbx-new");
+
+    expect(await proxy.writeStdinForProcessMutation({ sessionId: 73, chars: "input" })).toContain(
+      "still-running",
+    );
+    expect(await proxy.writeStdinForProcessControl({ sessionId: 73, chars: "" })).toContain(
+      "still-running",
+    );
+    expect(await proxy.execCommandForProcessControl(73, { cmd: "helper" })).toContain("helper");
+
+    expect(pointerReads).toBe(1);
+    expect(oldExecs).toEqual(["start", "helper"]);
+    expect(oldWrites).toHaveLength(2);
+    expect(newCalls).toEqual([]);
+    expect(processEvents).toEqual(["parent-promoted", "stdin-admitted", "stdin-settled"]);
+  });
+
+  test("a process-scoped stdin terminal result settles its mutation and parent exactly once", async () => {
+    const events: string[] = [];
+    let writes = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 74\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "Process exited with code 23\n\nOutput:\ndone";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => {
+        events.push("parent-promoted");
+      },
+      beforeProcessMutation: async () => {
+        events.push("stdin-admitted");
+        return "stdin";
+      },
+      afterProcessMutation: async ({ outcome }) => {
+        events.push(`stdin-${outcome}`);
+      },
+      settleProcess: async ({ proof }) => {
+        expect(proof).toEqual({
+          outcome: "exited",
+          exitCode: 23,
+          reason: "provider_exit_banner",
+        });
+        events.push("parent-settled");
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    expect(await proxy.writeStdinForProcessMutation({ sessionId: 74, chars: "finish" })).toContain(
+      "code 23",
+    );
+    expect(writes).toBe(1);
+    expect(proxy.hasRetainedProcess(74)).toBe(false);
+    expect(events).toEqual([
+      "parent-promoted",
+      "stdin-admitted",
+      "stdin-resolved",
+      "parent-settled",
+    ]);
+  });
+
+  test("failed durable terminal settlement makes a model retry reuse stored proof without another provider call", async () => {
+    let writes = 0;
+    let settlementAttempts = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 75\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        writes += 1;
+        return "write_stdin failed: session not found: 75";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async () => undefined,
+      settleProcess: async ({ proof }) => {
+        expect(proof).toEqual({
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_session_lost_banner",
+        });
+        settlementAttempts += 1;
+        if (settlementAttempts === 1) throw new Error("database unavailable");
+      },
+    });
+
+    await proxy.execCommand({ cmd: "start" });
+    await expect(
+      proxy.writeStdinForProcessMutation({ sessionId: 75, chars: "finish" }),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect(proxy.hasRetainedProcess(75)).toBe(true);
+
+    expect(await proxy.writeStdinForProcessMutation({ sessionId: 75, chars: "finish" })).toBe(
+      "write_stdin failed: session not found: 75",
+    );
+    expect(writes).toBe(1);
+    expect(settlementAttempts).toBe(2);
+    expect(proxy.hasRetainedProcess(75)).toBe(false);
+  });
+
+  test("ambiguous process promotion retries the same UUID and exact route before control proceeds", async () => {
+    const ptr = mutablePointer();
+    let promotions = 0;
+    let oldWrites = 0;
+    let newWrites = 0;
+    const retainedIds: string[] = [];
+    const oldBackend: RoutableBackendSession = {
+      async execCommand() {
+        return "Process running with session ID 76\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        oldWrites += 1;
+        return "Process running with session ID 76\n\nOutput:\nrunning";
+      },
+    };
+    const newBackend: RoutableBackendSession = {
+      async writeStdin() {
+        newWrites += 1;
+        return "Process running with session ID 76\n\nOutput:\nwrong";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: ptr.read,
+      resolveActiveBackend: async (pointer) =>
+        pointer.activeSandboxId === null
+          ? { session: oldBackend, sandboxId: null, kind: "modal" }
+          : { session: newBackend, sandboxId: pointer.activeSandboxId, kind: "selfhosted" },
+      beforeMutation: async () => "parent",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions += 1;
+        retainedIds.push(retainedProcess!.id);
+        if (promotions === 1) throw new Error("promotion outcome unknown");
+      },
+    });
+
+    await expect(proxy.execCommand({ cmd: "start" })).rejects.toBeInstanceOf(
+      RoutingMutationOutcomeUnknownError,
+    );
+    expect(proxy.hasRetainedProcess(76)).toBe(true);
+    ptr.swap("sbx-new");
+
+    expect(await proxy.writeStdinForProcessControl({ sessionId: 76, chars: "" })).toContain(
+      "running",
+    );
+    expect(promotions).toBe(2);
+    expect(new Set(retainedIds).size).toBe(1);
+    expect(oldWrites).toBe(1);
+    expect(newWrites).toBe(0);
+  });
+
   test("the eager editor path cannot bypass route resolution or mutation admission", async () => {
     const events: string[] = [];
     const eagerEditor = {

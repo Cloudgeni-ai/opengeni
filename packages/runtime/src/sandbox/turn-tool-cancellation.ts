@@ -32,6 +32,7 @@ type ActiveShellSession = {
   runContext: Parameters<FunctionToolInvoke>[0];
   execInvoke: FunctionToolInvoke;
   writeInvoke: FunctionToolInvoke | null;
+  processSession: CommandCancellationSession | null;
   identity: ShellProcessIdentity | null;
   identityValidated: boolean;
   cancellation: Promise<void> | null;
@@ -40,6 +41,23 @@ type ActiveShellSession = {
 type CommandCancellationSession = {
   cancelExecCommand?(opId: string): Promise<boolean>;
   supportsPty?(): boolean;
+  hasRetainedProcess?(providerSessionId: number): boolean;
+  writeStdinForProcessMutation?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  writeStdinForProcessControl?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  execCommandForProcessControl?(
+    providerSessionId: number,
+    args: TurnSandboxCommandArgs,
+  ): Promise<string>;
 };
 
 export type TurnSandboxCommandArgs = {
@@ -231,13 +249,31 @@ export function cancellableShellCommand(command: string, markerPath: string): st
 }
 
 function shellHelperInput(command: string): string {
+  const args = shellHelperArgs(command);
   return JSON.stringify({
+    cmd: args.cmd,
+    login: args.login,
+    tty: args.tty,
+    yield_time_ms: args.yieldTimeMs,
+    max_output_tokens: args.maxOutputTokens,
+  });
+}
+
+function shellHelperArgs(command: string): TurnSandboxCommandArgs {
+  return {
     cmd: command,
     login: false,
     tty: false,
-    yield_time_ms: SHELL_HELPER_YIELD_MS,
-    max_output_tokens: 128,
-  });
+    yieldTimeMs: SHELL_HELPER_YIELD_MS,
+    maxOutputTokens: 128,
+  };
+}
+
+function retainedProcessSession(
+  session: CommandCancellationSession | undefined,
+  providerSessionId: number,
+): CommandCancellationSession | null {
+  return session?.hasRetainedProcess?.(providerSessionId) === true ? session : null;
 }
 
 function safeProcessIdentity(raw: string): ShellProcessIdentity | null {
@@ -381,24 +417,37 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
               : await session.execCommand!(commandArgs);
         return nativeCommandBanner(result);
       };
-      const invokeWrite: FunctionToolInvoke | null = session.writeStdin
-        ? async (_runContext, input) => {
-            const parsed = parsedObject(input);
-            if (!parsed || typeof parsed.session_id !== "number") {
-              throw new Error("Sandbox lifecycle stdin input was invalid");
+      const invokeWrite: FunctionToolInvoke | null =
+        session.writeStdin || session.writeStdinForProcessControl
+          ? async (_runContext, input) => {
+              const parsed = parsedObject(input);
+              if (!parsed || typeof parsed.session_id !== "number") {
+                throw new Error("Sandbox lifecycle stdin input was invalid");
+              }
+              const directArgs = {
+                sessionId: parsed.session_id,
+                ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
+                ...(typeof parsed.yield_time_ms === "number"
+                  ? { yieldTimeMs: parsed.yield_time_ms }
+                  : {}),
+                ...(typeof parsed.max_output_tokens === "number"
+                  ? { maxOutputTokens: parsed.max_output_tokens }
+                  : {}),
+              };
+              if (
+                session.hasRetainedProcess?.(parsed.session_id) === true &&
+                session.writeStdinForProcessControl
+              ) {
+                return await session.writeStdinForProcessControl(directArgs);
+              }
+              if (!session.writeStdin) {
+                throw new Error(
+                  "Sandbox lifecycle command yielded an unretained session without stdin support",
+                );
+              }
+              return await session.writeStdin!(directArgs);
             }
-            return await session.writeStdin!({
-              sessionId: parsed.session_id,
-              ...(typeof parsed.chars === "string" ? { chars: parsed.chars } : {}),
-              ...(typeof parsed.yield_time_ms === "number"
-                ? { yieldTimeMs: parsed.yield_time_ms }
-                : {}),
-              ...(typeof parsed.max_output_tokens === "number"
-                ? { maxOutputTokens: parsed.max_output_tokens }
-                : {}),
-            });
-          }
-        : null;
+          : null;
       const correlationId = `turn_lifecycle_${crypto.randomUUID()}`;
       const useRemoteOpCancellation =
         Boolean(session.cancelExecCommand) && session.supportsPty?.() === false;
@@ -447,6 +496,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
         runContext: lifecycleRunContext,
         execInvoke: invokeExec,
         writeInvoke: invokeWrite,
+        processSession: retainedProcessSession(session, sessionId),
         identity: null,
         identityValidated: false,
         cancellation: null,
@@ -560,6 +610,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 runContext,
                 execInvoke: tool.invoke,
                 writeInvoke: this.rawWriteInvoke,
+                processSession: retainedProcessSession(cancellationSession, sessionId),
                 identity: null,
                 identityValidated: false,
                 cancellation: null,
@@ -588,7 +639,19 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                   yield_time_ms: cappedYield(parsed.yield_time_ms, TURN_WRITE_YIELD_MS),
                 })
               : input;
-            const output = await tool.invoke(runContext, cappedInput, details);
+            const directProcessSession =
+              sessionId === null ? null : retainedProcessSession(cancellationSession, sessionId);
+            const output =
+              sessionId !== null && directProcessSession?.writeStdinForProcessMutation
+                ? await directProcessSession.writeStdinForProcessMutation({
+                    sessionId,
+                    ...(typeof parsed?.chars === "string" ? { chars: parsed.chars } : {}),
+                    yieldTimeMs: cappedYield(parsed?.yield_time_ms, TURN_WRITE_YIELD_MS),
+                    ...(typeof parsed?.max_output_tokens === "number"
+                      ? { maxOutputTokens: parsed.max_output_tokens }
+                      : {}),
+                  })
+                : await tool.invoke(runContext, cappedInput, details);
             if (sessionId !== null && typeof output === "string") {
               if (isExecSessionLostBanner(output, sessionId)) {
                 // Modal reports a vanished exec session as a non-throwing
@@ -605,6 +668,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                     runContext,
                     execInvoke: this.rawExecInvoke ?? tool.invoke,
                     writeInvoke: tool.invoke,
+                    processSession: directProcessSession,
                     identity: null,
                     identityValidated: false,
                     cancellation: null,
@@ -776,7 +840,10 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     // authority available for that legacy shape.
     if (!state.markerPath) {
       while (true) {
-        if (state.writeInvoke && (await this.rawWrite(state, "\u0003", SHELL_POLL_MS))) {
+        if (
+          (state.writeInvoke || state.processSession?.writeStdinForProcessControl) &&
+          (await this.rawWrite(state, "\u0003", SHELL_POLL_MS))
+        ) {
           this.shellSessions.delete(state.sessionId);
           return;
         }
@@ -790,7 +857,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     while (!state.identity) {
       state.identity = await this.readIdentity(state);
       if (state.identity) break;
-      if (state.writeInvoke) {
+      if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
         const completed = await this.rawWrite(state, "", SHELL_POLL_MS);
         if (completed) {
           this.shellSessions.delete(state.sessionId);
@@ -805,7 +872,7 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
       return;
     }
 
-    if (state.writeInvoke) {
+    if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
       await this.rawWrite(state, "\u0003", SHELL_POLL_MS);
       if (!(await this.identityAlive(state))) {
         this.shellSessions.delete(state.sessionId);
@@ -815,7 +882,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     await this.signalIdentity(state, "TERM");
     for (let attempt = 0; attempt < SHELL_GRACEFUL_POLLS; attempt++) {
-      if (state.writeInvoke) await this.rawWrite(state, "", SHELL_POLL_MS);
+      if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
+        await this.rawWrite(state, "", SHELL_POLL_MS);
+      }
       if (!(await this.identityAlive(state))) {
         this.shellSessions.delete(state.sessionId);
         return;
@@ -824,7 +893,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
 
     await this.signalIdentity(state, "KILL");
     while (await this.identityAlive(state)) {
-      if (state.writeInvoke) await this.rawWrite(state, "", SHELL_POLL_MS);
+      if (state.writeInvoke || state.processSession?.writeStdinForProcessControl) {
+        await this.rawWrite(state, "", SHELL_POLL_MS);
+      }
       // A transient helper failure must not turn the first KILL into a single
       // best-effort shot. Re-issue it until the process group is provably gone.
       await this.signalIdentity(state, "KILL");
@@ -838,18 +909,25 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     chars: string,
     yieldTimeMs: number,
   ): Promise<boolean> {
-    if (!state.writeInvoke) return false;
+    if (!state.writeInvoke && !state.processSession?.writeStdinForProcessControl) return false;
     try {
-      const output = await state.writeInvoke(
-        state.runContext,
-        JSON.stringify({
-          session_id: state.sessionId,
-          chars,
-          yield_time_ms: yieldTimeMs,
-          max_output_tokens: 128,
-        }),
-        undefined,
-      );
+      const output = state.processSession?.writeStdinForProcessControl
+        ? await state.processSession.writeStdinForProcessControl({
+            sessionId: state.sessionId,
+            chars,
+            yieldTimeMs,
+            maxOutputTokens: 128,
+          })
+        : await state.writeInvoke!(
+            state.runContext,
+            JSON.stringify({
+              session_id: state.sessionId,
+              chars,
+              yield_time_ms: yieldTimeMs,
+              max_output_tokens: 128,
+            }),
+            undefined,
+          );
       if (typeof output !== "string") return false;
       // Marker files can already be gone when a process exited outside the
       // model-facing write path. Modal's exact matching lost-session banner is
@@ -868,11 +946,13 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
   private async readIdentity(state: ActiveShellSession): Promise<ShellProcessIdentity | null> {
     if (!state.markerPath) return null;
     try {
-      const output = await state.execInvoke(
-        state.runContext,
-        shellHelperInput(`command cat ${singleQuote(state.markerPath)} 2>/dev/null`),
-        undefined,
-      );
+      const command = `command cat ${singleQuote(state.markerPath)} 2>/dev/null`;
+      const output = state.processSession?.execCommandForProcessControl
+        ? await state.processSession.execCommandForProcessControl(
+            state.sessionId,
+            shellHelperArgs(command),
+          )
+        : await state.execInvoke(state.runContext, shellHelperInput(command), undefined);
       return typeof output === "string" ? safeProcessIdentity(output) : null;
     } catch {
       return null;
@@ -892,7 +972,12 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           76,
         );
     try {
-      const output = await state.execInvoke(state.runContext, shellHelperInput(script), undefined);
+      const output = state.processSession?.execCommandForProcessControl
+        ? await state.processSession.execCommandForProcessControl(
+            state.sessionId,
+            shellHelperArgs(script),
+          )
+        : await state.execInvoke(state.runContext, shellHelperInput(script), undefined);
       if (typeof output !== "string") return true;
       const exitCode = parseExecBannerExitCode(output);
       if (exitCode === 75) {
@@ -914,7 +999,14 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
           76,
         );
     try {
-      await state.execInvoke(state.runContext, shellHelperInput(script), undefined);
+      if (state.processSession?.execCommandForProcessControl) {
+        await state.processSession.execCommandForProcessControl(
+          state.sessionId,
+          shellHelperArgs(script),
+        );
+      } else {
+        await state.execInvoke(state.runContext, shellHelperInput(script), undefined);
+      }
     } catch {
       // Confirmation is performed by identityAlive(). A failed signal helper
       // never opens the fence; it is retried/escalated until the process is gone.

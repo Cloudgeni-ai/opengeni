@@ -372,12 +372,15 @@ export {
 export {
   RoutingBackendRecoveryRequiredError,
   RoutingMutationOutcomeUnknownError,
+  RoutingRetainedProcessNotFoundError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   type ActivePointer,
   type DefaultBackendLossResult,
   type RoutableBackendSession,
   type ResolvedActiveBackend,
+  type RoutingRetainedProcess,
+  type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxSessionDeps,
   type RoutingTransitionEvent,
 } from "./routing/routing-session";

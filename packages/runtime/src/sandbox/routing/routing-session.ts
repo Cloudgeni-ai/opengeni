@@ -30,6 +30,8 @@
 import type { ExposedPortEndpoint } from "../stream-port";
 import { SelfhostedControlError } from "../selfhosted/control-rpc";
 import { renderSelfhostedFault } from "../selfhosted/fault-rendering";
+import { isExecSessionLostBanner } from "../channel-a";
+import { parseExecBannerExitCode, parseExecBannerSessionId } from "../exec-banner";
 
 /** The per-session active-sandbox pointer the proxy re-reads on every op. Mirror
  *  of `@opengeni/db`'s `ActiveSandboxPointer` (structural, so the leaf does not
@@ -105,6 +107,18 @@ export interface ResolvedActiveBackend {
   activeEpoch?: number;
 }
 
+/** Durable identity assigned to a provider exec that yielded instead of
+ * exiting. The UUID is OpenGeni authority; the numeric provider session id is
+ * only a locator within the exact copied backend route. */
+export type RoutingRetainedProcess = {
+  id: string;
+  providerSessionId: number;
+};
+
+export type RoutingRetainedProcessTerminalProof =
+  | { outcome: "exited"; exitCode: number; reason: "provider_exit_banner" }
+  | { outcome: "lost"; exitCode: null; reason: "provider_session_lost_banner" };
+
 export interface RoutingSandboxSessionDeps {
   /**
    * The DEFAULT backend resolved at construction time (the same shape `resolve()`
@@ -150,6 +164,34 @@ export interface RoutingSandboxSessionDeps {
     backend: ResolvedActiveBackend;
     admission: unknown;
     outcome: "resolved" | "rejected";
+    /** Provider result for a resolved call. Never present for rejection. */
+    result?: unknown;
+    /** Stable candidate generated before durable promotion is attempted. It is
+     * supplied only when the provider returned a positive yielded-session id. */
+    retainedProcess?: RoutingRetainedProcess;
+  }) => Promise<void>;
+  /** Admit one model/user-visible stdin mutation under the already-durable
+   * retained process authority. Control polling and helper execs never call it. */
+  beforeProcessMutation?: (input: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }) => Promise<unknown>;
+  /** Physically settle one process-scoped stdin admission. */
+  afterProcessMutation?: (input: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+    admission: unknown;
+    outcome: "resolved" | "rejected";
+    result?: unknown;
+  }) => Promise<void>;
+  /** Close the durable parent admission/process holder only after exact exit or
+   * matching provider-loss proof. Tracking is removed only after this resolves. */
+  settleProcess?: (input: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+    proof: RoutingRetainedProcessTerminalProof;
   }) => Promise<void>;
   /** Called only when an operation against the default/home backend throws a
    * non-fence error. Wiring may classify definitive provider disappearance and
@@ -218,6 +260,39 @@ export class RoutingMutationOutcomeUnknownError extends Error {
   }
 }
 
+/** An explicit process-aware operation named a numeric provider locator that
+ * is not retained by this routing session. Callers must never fall back to the
+ * current active pointer for such an operation. */
+export class RoutingRetainedProcessNotFoundError extends Error {
+  readonly name = "RoutingRetainedProcessNotFoundError";
+  readonly retryable = false;
+
+  constructor(public readonly providerSessionId: number) {
+    super(`retained sandbox process ${providerSessionId} is not tracked on its original route`);
+  }
+}
+
+type PendingParentPromotion = Parameters<
+  NonNullable<RoutingSandboxSessionDeps["afterMutation"]>
+>[0];
+
+type PendingProcessMutationSettlement = Parameters<
+  NonNullable<RoutingSandboxSessionDeps["afterProcessMutation"]>
+>[0];
+
+type RetainedProcessRecord = {
+  process: RoutingRetainedProcess;
+  backend: ResolvedActiveBackend;
+  durable: boolean;
+  pendingParentPromotion: PendingParentPromotion | null;
+  pendingMutationSettlement: PendingProcessMutationSettlement | null;
+  pendingTerminal: {
+    proof: RoutingRetainedProcessTerminalProof;
+    result: string;
+  } | null;
+  settlement: Promise<void> | null;
+};
+
 /** Recognize a stale-epoch FENCE error from a backend op so the proxy retries
  *  against the re-resolved active sandbox (the existing fenced-retry role). A
  *  selfhosted `SelfhostedControlError` carries `.fenced`; a generic fence is
@@ -235,6 +310,78 @@ function isFenceError(error: unknown): boolean {
     error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
   const haystack = `${name} ${message}`.toLowerCase();
   return haystack.includes("fenced") || (haystack.includes("epoch") && haystack.includes("super"));
+}
+
+function positiveProviderSessionId(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function providerSessionIdFromResult(result: unknown): number | null {
+  if (typeof result === "string") {
+    return positiveProviderSessionId(parseExecBannerSessionId(result));
+  }
+  if (!result || typeof result !== "object") return null;
+  const record = result as { sessionId?: unknown; session_id?: unknown };
+  return (
+    positiveProviderSessionId(record.sessionId) ?? positiveProviderSessionId(record.session_id)
+  );
+}
+
+function providerSessionIdFromArgs(args: unknown): number | null {
+  if (!args || typeof args !== "object") return null;
+  const record = args as { sessionId?: unknown; session_id?: unknown };
+  return (
+    positiveProviderSessionId(record.sessionId) ?? positiveProviderSessionId(record.session_id)
+  );
+}
+
+function retainedProcessTerminalProof(
+  result: string,
+  providerSessionId: number,
+): RoutingRetainedProcessTerminalProof | null {
+  if (isExecSessionLostBanner(result, providerSessionId)) {
+    return {
+      outcome: "lost",
+      exitCode: null,
+      reason: "provider_session_lost_banner",
+    };
+  }
+  const exitCode = parseExecBannerExitCode(result);
+  return exitCode === null ? null : { outcome: "exited", exitCode, reason: "provider_exit_banner" };
+}
+
+function formatExecResult(result: unknown): string {
+  if (typeof result === "string") return result;
+  if (!result || typeof result !== "object") {
+    throw new Error("sandbox process-control exec returned an invalid result");
+  }
+  const record = result as {
+    output?: unknown;
+    stdout?: unknown;
+    stderr?: unknown;
+    exitCode?: unknown;
+    exit_code?: unknown;
+    sessionId?: unknown;
+    session_id?: unknown;
+  };
+  const output = [record.output, record.stderr, record.stdout]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join("\n");
+  const sessionId =
+    positiveProviderSessionId(record.sessionId) ?? positiveProviderSessionId(record.session_id);
+  if (sessionId !== null) {
+    return `Process running with session ID ${sessionId}\n\nOutput:\n${output}`;
+  }
+  const exitCode =
+    typeof record.exitCode === "number"
+      ? record.exitCode
+      : typeof record.exit_code === "number"
+        ? record.exit_code
+        : null;
+  if (exitCode !== null && Number.isSafeInteger(exitCode)) {
+    return `Process exited with code ${exitCode}\n\nOutput:\n${output}`;
+  }
+  throw new Error("sandbox process-control exec reported neither session id nor exit code");
 }
 
 /**
@@ -270,6 +417,10 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   // The last-resolved backend, exposed via the `state` getter (a method-free read
   // of the active backend's `state`). Updated on every resolve.
   private lastResolved: ResolvedActiveBackend | undefined;
+  /** Provider session ids are scoped to one backend instance. Each entry copies
+   * that exact resolved route so pointer movement can never redirect stdin,
+   * polling, or process-group helpers to another box. */
+  private readonly retainedProcesses = new Map<number, RetainedProcessRecord>();
 
   // The native-desktop control-plane ops (self-hosted / macOS). Declared as OPTIONAL
   // INSTANCE fields — NOT prototype methods — because their PRESENCE is the selection
@@ -402,6 +553,212 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     });
   }
 
+  private registerRetainedProcess(
+    process: RoutingRetainedProcess,
+    backend: ResolvedActiveBackend,
+  ): RetainedProcessRecord {
+    if (this.retainedProcesses.has(process.providerSessionId)) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "retainProcess",
+        `Provider session ${process.providerSessionId} was yielded while that locator was already retained; neither process was rebound`,
+      );
+    }
+    const record: RetainedProcessRecord = {
+      process,
+      backend,
+      durable: !this.deps.afterMutation,
+      pendingParentPromotion: null,
+      pendingMutationSettlement: null,
+      pendingTerminal: null,
+      settlement: null,
+    };
+    this.retainedProcesses.set(process.providerSessionId, record);
+    return record;
+  }
+
+  private retainedProcess(providerSessionId: number): RetainedProcessRecord {
+    const retained = this.retainedProcesses.get(providerSessionId);
+    if (!retained) throw new RoutingRetainedProcessNotFoundError(providerSessionId);
+    return retained;
+  }
+
+  private async ensureParentPromotion(record: RetainedProcessRecord): Promise<void> {
+    if (record.durable) return;
+    const pending = record.pendingParentPromotion;
+    if (!pending || !this.deps.afterMutation) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "retainProcess",
+        `Retained provider session ${record.process.providerSessionId} has no confirmed durable parent admission`,
+      );
+    }
+    try {
+      await this.deps.afterMutation(pending);
+      record.pendingParentPromotion = null;
+      record.durable = true;
+    } catch (error) {
+      throw new RoutingMutationOutcomeUnknownError(
+        pending.op,
+        `Yielded sandbox process ${record.process.providerSessionId} could not confirm its durable promotion; tracking remains pinned to the original backend`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async settleRetainedProcess(
+    record: RetainedProcessRecord,
+    proof: RoutingRetainedProcessTerminalProof,
+    result: string,
+  ): Promise<void> {
+    record.pendingTerminal ??= { proof, result };
+    const pending = record.pendingTerminal;
+    if (
+      pending.proof.outcome !== proof.outcome ||
+      pending.proof.exitCode !== proof.exitCode ||
+      pending.proof.reason !== proof.reason
+    ) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "settleProcess",
+        `Retained provider session ${record.process.providerSessionId} produced conflicting terminal proof`,
+      );
+    }
+    record.settlement ??= (async () => {
+      await this.ensureParentPromotion(record);
+      await this.deps.settleProcess?.({
+        backend: record.backend,
+        process: record.process,
+        proof: pending.proof,
+      });
+      this.retainedProcesses.delete(record.process.providerSessionId);
+      record.pendingTerminal = null;
+    })();
+    try {
+      await record.settlement;
+    } catch (error) {
+      // A failed DB settlement is not permission to forget the physical process.
+      // Keep the exact route and immutable proof so the next control poll retries
+      // settlement without issuing a command against a new backend.
+      record.settlement = null;
+      throw new RoutingMutationOutcomeUnknownError(
+        "settleProcess",
+        `Retained provider session ${record.process.providerSessionId} reached a terminal state but durable settlement failed; tracking remains pinned`,
+        { cause: error },
+      );
+    }
+  }
+
+  private async flushPendingProcessMutation(record: RetainedProcessRecord): Promise<string | null> {
+    const pending = record.pendingMutationSettlement;
+    if (!pending) return null;
+    try {
+      await this.deps.afterProcessMutation?.(pending);
+      record.pendingMutationSettlement = null;
+    } catch (error) {
+      throw new RoutingMutationOutcomeUnknownError(
+        pending.op,
+        `Retained-process mutation ${pending.op} still lacks durable physical settlement; no later process mutation was admitted`,
+        { cause: error },
+      );
+    }
+    if (pending.outcome === "resolved" && typeof pending.result === "string") {
+      const proof = retainedProcessTerminalProof(pending.result, record.process.providerSessionId);
+      if (proof) {
+        await this.settleRetainedProcess(record, proof, pending.result);
+        return pending.result;
+      }
+    }
+    return null;
+  }
+
+  private async dispatchProcessMutation(args: unknown): Promise<string> {
+    const providerSessionId = providerSessionIdFromArgs(args);
+    if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
+    const record = this.retainedProcess(providerSessionId);
+    const priorTerminal = await this.flushPendingProcessMutation(record);
+    if (priorTerminal !== null) return priorTerminal;
+    if (record.pendingTerminal) {
+      const terminal = record.pendingTerminal;
+      await this.settleRetainedProcess(record, terminal.proof, terminal.result);
+      return terminal.result;
+    }
+    await this.ensureParentPromotion(record);
+    const op = "writeStdin";
+    const admission = await this.deps.beforeProcessMutation?.({
+      op,
+      backend: record.backend,
+      process: record.process,
+    });
+    const write = record.backend.session.writeStdin;
+    if (!write) throw new RoutingUnsupportedError(op, record.backend.kind);
+    let result: string;
+    try {
+      result = await write.call(record.backend.session, args);
+    } catch (error) {
+      if (this.deps.afterProcessMutation) {
+        const pending: PendingProcessMutationSettlement = {
+          op,
+          backend: record.backend,
+          process: record.process,
+          admission,
+          outcome: "rejected",
+        };
+        try {
+          await this.deps.afterProcessMutation(pending);
+        } catch (settlementError) {
+          record.pendingMutationSettlement = pending;
+          throw new RoutingMutationOutcomeUnknownError(
+            op,
+            `Retained-process stdin rejected at the provider but lost durable settlement; it was not replayed`,
+            { cause: settlementError },
+          );
+        }
+      }
+      throw error;
+    }
+    if (this.deps.afterProcessMutation) {
+      const pending: PendingProcessMutationSettlement = {
+        op,
+        backend: record.backend,
+        process: record.process,
+        admission,
+        outcome: "resolved",
+        result,
+      };
+      try {
+        await this.deps.afterProcessMutation(pending);
+      } catch (error) {
+        record.pendingMutationSettlement = pending;
+        throw new RoutingMutationOutcomeUnknownError(
+          op,
+          `Retained-process stdin returned from the provider but lost durable settlement; tracking remains pinned and it was not replayed`,
+          { cause: error },
+        );
+      }
+    }
+    const proof = retainedProcessTerminalProof(result, providerSessionId);
+    if (proof) await this.settleRetainedProcess(record, proof, result);
+    return result;
+  }
+
+  private async dispatchProcessControl(args: unknown): Promise<string> {
+    const providerSessionId = providerSessionIdFromArgs(args);
+    if (providerSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
+    const record = this.retainedProcess(providerSessionId);
+    const priorTerminal = await this.flushPendingProcessMutation(record);
+    if (priorTerminal !== null) return priorTerminal;
+    if (record.pendingTerminal) {
+      const terminal = record.pendingTerminal;
+      await this.settleRetainedProcess(record, terminal.proof, terminal.result);
+      return terminal.result;
+    }
+    await this.ensureParentPromotion(record);
+    const write = record.backend.session.writeStdin;
+    if (!write) throw new RoutingUnsupportedError("writeStdin", record.backend.kind);
+    const result = await write.call(record.backend.session, args);
+    const proof = retainedProcessTerminalProof(result, providerSessionId);
+    if (proof) await this.settleRetainedProcess(record, proof, result);
+    return result;
+  }
+
   /**
    * Dispatch an op to the currently-active backend, retrying on a stale-epoch
    * fence. The sequence per attempt:
@@ -484,23 +841,48 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         continue;
       }
 
+      const yieldedSessionId =
+        mutatesWorkspace && (op === "exec" || op === "execCommand")
+          ? providerSessionIdFromResult(result)
+          : null;
+      const retainedProcess =
+        yieldedSessionId === null
+          ? undefined
+          : { id: crypto.randomUUID(), providerSessionId: yieldedSessionId };
+      const retainedRecord = retainedProcess
+        ? this.registerRetainedProcess(retainedProcess, backend)
+        : null;
+
       if (mutatesWorkspace && this.deps.afterMutation) {
+        const settlement: PendingParentPromotion = {
+          op,
+          backend,
+          admission,
+          outcome: "resolved",
+          result,
+          ...(retainedProcess ? { retainedProcess } : {}),
+        };
         try {
-          await this.deps.afterMutation({
-            op,
-            backend,
-            admission,
-            outcome: "resolved",
-          });
+          await this.deps.afterMutation(settlement);
+          if (retainedRecord) retainedRecord.durable = true;
         } catch (error) {
+          if (retainedRecord) retainedRecord.pendingParentPromotion = settlement;
           this.invalidate(backend);
           throw new RoutingMutationOutcomeUnknownError(
             op,
-            `Mutating sandbox operation "${op}" returned from the provider but lost its durable route settlement; its outcome is unknown and it was not replayed`,
+            retainedRecord
+              ? `Mutating sandbox operation "${op}" yielded provider session ${retainedRecord.process.providerSessionId} but lost durable process promotion; exact-backend tracking remains and the operation was not replayed`
+              : `Mutating sandbox operation "${op}" returned from the provider but lost its durable route settlement; its outcome is unknown and it was not replayed`,
             { cause: error },
           );
         }
       }
+
+      // Durable process promotion validated this exact route under the same
+      // transaction that retained the parent admission. Later pointer movement
+      // cannot invalidate or redirect that process, so return its locator and
+      // let process-aware methods use the copied backend identity.
+      if (retainedRecord) return result;
 
       // Reject output produced by a route that changed while the provider call
       // was in flight. Reads can safely retry on the new route. Mutations cannot:
@@ -604,12 +986,63 @@ export class RoutingSandboxSession implements RoutableBackendSession {
   }
 
   async writeStdin(args: unknown): Promise<string> {
+    const providerSessionId = providerSessionIdFromArgs(args);
+    if (providerSessionId !== null && this.retainedProcesses.has(providerSessionId)) {
+      return await this.dispatchProcessMutation(args);
+    }
     return this.dispatch("writeStdin", true, async (s) => {
       if (!s.writeStdin) {
         throw new RoutingUnsupportedError("writeStdin", this.cached?.kind ?? "unknown");
       }
       return s.writeStdin(args);
     });
+  }
+
+  /** Whether a positive provider session locator is still pinned to the exact
+   * backend that yielded it. This synchronous probe is used only to select the
+   * process-aware routing surface; it is not itself durable authority. */
+  hasRetainedProcess(providerSessionId: number): boolean {
+    return (
+      positiveProviderSessionId(providerSessionId) !== null &&
+      this.retainedProcesses.has(providerSessionId)
+    );
+  }
+
+  /** Model/user-visible stdin is a distinct workspace mutation admission under
+   * the durable retained-process holder. It never re-reads the active pointer. */
+  async writeStdinForProcessMutation(args: unknown): Promise<string> {
+    return await this.dispatchProcessMutation(args);
+  }
+
+  /** Cancellation and drain polling are control operations. They stay pinned to
+   * the process backend and may prove terminal state, but never advance the
+   * workspace generation. */
+  async writeStdinForProcessControl(args: unknown): Promise<string> {
+    return await this.dispatchProcessControl(args);
+  }
+
+  /** Run a PID/PGID marker or signal helper on the retained process's exact
+   * backend. The helper is control-plane work and therefore has no workspace
+   * mutation admission of its own. */
+  async execCommandForProcessControl(providerSessionId: number, args: unknown): Promise<string> {
+    const exactProviderSessionId = positiveProviderSessionId(providerSessionId);
+    if (exactProviderSessionId === null) throw new RoutingRetainedProcessNotFoundError(-1);
+    const record = this.retainedProcess(exactProviderSessionId);
+    const priorTerminal = await this.flushPendingProcessMutation(record);
+    if (priorTerminal !== null) return priorTerminal;
+    if (record.pendingTerminal) {
+      const terminal = record.pendingTerminal;
+      await this.settleRetainedProcess(record, terminal.proof, terminal.result);
+      return terminal.result;
+    }
+    await this.ensureParentPromotion(record);
+    if (record.backend.session.execCommand) {
+      return await record.backend.session.execCommand(args);
+    }
+    if (record.backend.session.exec) {
+      return formatExecResult(await record.backend.session.exec(args));
+    }
+    throw new RoutingUnsupportedError("execCommand", record.backend.kind);
   }
 
   async cancelExecCommand(opId: string): Promise<boolean> {
