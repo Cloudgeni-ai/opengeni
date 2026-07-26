@@ -1,5 +1,21 @@
 # @opengeni/db
 
+## 0.11.0
+
+### Minor Changes
+
+- 0ed0f01: Add per-member session pin preferences with isolated server persistence, bounded/reused stable
+  pagination snapshots, snapshot-free pin polling, typed SDK and React reconciliation, and accessible
+  list and header controls.
+
+### Patch Changes
+
+- b32938f: Preserve the resolved model tool-output policy across pending-call recovery so
+  ordinary and recovered conversation history use one byte-identical bound.
+- Updated dependencies [744a93d]
+  - @opengeni/config@0.6.10
+  - @opengeni/contracts@0.18.1
+
 ## 0.10.7
 
 ### Patch Changes

@@ -1,5 +1,25 @@
 # @opengeni/worker-bundle
 
+## 0.10.9
+
+### Patch Changes
+
+- 744a93d: Add default-off, bounded adaptive Codex fleet decision telemetry with strict deterministic replay, cache-aware and work-conserving policy simulation, secret-safe event/UI observability, and independent future policy gates.
+- b32938f: Preserve the resolved model tool-output policy across pending-call recovery so
+  ordinary and recovered conversation history use one byte-identical bound.
+- Updated dependencies [744a93d]
+- Updated dependencies [0ed0f01]
+- Updated dependencies [b32938f]
+  - @opengeni/config@0.6.10
+  - @opengeni/contracts@0.18.1
+  - @opengeni/db@0.11.0
+  - @opengeni/core@0.10.1
+  - @opengeni/documents@0.2.29
+  - @opengeni/github@0.3.11
+  - @opengeni/runtime@0.13.1
+  - @opengeni/storage@0.2.23
+  - @opengeni/events@0.3.20
+
 ## 0.10.8
 
 ### Patch Changes
