@@ -1,5 +1,3 @@
-import type { Computer, Editor, Tool } from "@openai/agents";
-
 import { runWithToolCallCorrelation, sanitizeOpIdToken } from "./op-correlation";
 import {
   isExecSessionLostBanner,
@@ -14,8 +12,39 @@ const SHELL_GRACEFUL_POLLS = 2;
 const SHELL_POLL_MS = 100;
 const SHELL_MARKER_DIR = "/tmp/opengeni-turn-shell";
 
-type FunctionTool = Extract<Tool<unknown>, { type: "function" }>;
-type FunctionToolInvoke = FunctionTool["invoke"];
+type ToolCallDetails = {
+  toolCall?: {
+    callId?: string;
+  };
+};
+
+type FunctionToolInvoke = (
+  runContext: unknown,
+  input: string,
+  details?: ToolCallDetails,
+) => Promise<unknown>;
+
+type FunctionTool = Record<string, unknown> & {
+  type: "function";
+  name: string;
+  invoke: FunctionToolInvoke;
+};
+
+type ApplyPatchEditor = {
+  createFile(operation: unknown, context?: unknown): Promise<unknown>;
+  updateFile(operation: unknown, context?: unknown): Promise<unknown>;
+  deleteFile(operation: unknown, context?: unknown): Promise<unknown>;
+};
+
+type ApplyPatchTool = Record<string, unknown> & {
+  type: "apply_patch";
+  editor: ApplyPatchEditor;
+};
+
+type ComputerTool = Record<string, unknown> & {
+  type: "computer";
+  computer: unknown;
+};
 
 const delay = async (milliseconds: number): Promise<void> =>
   await new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -117,7 +146,7 @@ export type TurnToolCancellationFence = {
 };
 
 export type TurnToolCancellationController = TurnToolCancellationFence & {
-  wrapTools(tools: Tool<unknown>[], session?: CommandCancellationSession): Tool<unknown>[];
+  wrapTools<T>(tools: T[], session?: CommandCancellationSession): T[];
 };
 
 export class TurnSandboxCommandCancelledError extends Error {
@@ -384,9 +413,12 @@ function identityGuardScript(
   ].join("\n");
 }
 
-function wrapComputer(computer: Computer, track: <T>(operation: () => Promise<T>) => Promise<T>) {
-  const wrapped = Object.create(Object.getPrototypeOf(computer)) as Computer &
-    Record<string, unknown>;
+function wrapComputer<T extends object>(
+  computer: T,
+  track: <U>(operation: () => Promise<U>) => Promise<U>,
+): T {
+  const wrapped = Object.create(Object.getPrototypeOf(computer)) as T & Record<string, unknown>;
+  const wrappedRecord = wrapped as Record<string, unknown>;
   Object.assign(wrapped, computer);
   for (const method of [
     "initRun",
@@ -400,10 +432,10 @@ function wrapComputer(computer: Computer, track: <T>(operation: () => Promise<T>
     "keypress",
     "drag",
   ] as const) {
-    const original = (computer as unknown as Record<string, unknown>)[method];
+    const original = (computer as Record<string, unknown>)[method];
     if (typeof original !== "function") continue;
-    wrapped[method] = (...args: unknown[]) =>
-      track(async () => await original.apply(computer, args)) as never;
+    wrappedRecord[method] = (...args: unknown[]) =>
+      track(async () => await original.apply(computer, args));
   }
   return wrapped;
 }
@@ -663,19 +695,21 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     });
   }
 
-  wrapTools(tools: Tool<unknown>[], session?: CommandCancellationSession): Tool<unknown>[] {
-    for (const tool of tools) {
+  wrapTools<T>(tools: T[], session?: CommandCancellationSession): T[] {
+    const structuralTools = tools as unknown as Array<Record<string, unknown>>;
+    for (const tool of structuralTools) {
       if (tool.type !== "function") continue;
-      if (tool.name === "exec_command") this.rawExecInvoke = tool.invoke;
-      if (tool.name === "write_stdin") this.rawWriteInvoke = tool.invoke;
+      const functionTool = tool as FunctionTool;
+      if (functionTool.name === "exec_command") this.rawExecInvoke = functionTool.invoke;
+      if (functionTool.name === "write_stdin") this.rawWriteInvoke = functionTool.invoke;
     }
 
-    return tools.map((tool) => {
-      if (tool.type === "function") return this.wrapFunctionTool(tool, session);
-      if (tool.type === "apply_patch") return this.wrapApplyPatchTool(tool);
-      if (tool.type === "computer") return this.wrapComputerTool(tool);
+    return structuralTools.map((tool) => {
+      if (tool.type === "function") return this.wrapFunctionTool(tool as FunctionTool, session);
+      if (tool.type === "apply_patch") return this.wrapApplyPatchTool(tool as ApplyPatchTool);
+      if (tool.type === "computer") return this.wrapComputerTool(tool as ComputerTool);
       return tool;
-    });
+    }) as unknown as T[];
   }
 
   private wrapFunctionTool(
@@ -818,9 +852,9 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     };
   }
 
-  private wrapApplyPatchTool(tool: Extract<Tool<unknown>, { type: "apply_patch" }>) {
+  private wrapApplyPatchTool(tool: ApplyPatchTool): ApplyPatchTool {
     const editor = tool.editor;
-    const wrappedEditor: Editor = {
+    const wrappedEditor: ApplyPatchEditor = {
       createFile: (operation, context) =>
         this.track(async () => await editor.createFile(operation, context)),
       updateFile: (operation, context) =>
@@ -831,33 +865,37 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
     return { ...tool, editor: wrappedEditor };
   }
 
-  private wrapComputerTool(tool: Extract<Tool<unknown>, { type: "computer" }>) {
+  private wrapComputerTool(tool: ComputerTool): ComputerTool {
     const computer = tool.computer;
     if (typeof computer === "function") {
+      const createComputer = computer as (...args: unknown[]) => object | Promise<object>;
       return {
         ...tool,
-        computer: async (...args: Parameters<typeof computer>) =>
-          wrapComputer(await this.track(async () => await computer(...args)), (operation) =>
+        computer: async (...args: unknown[]) =>
+          wrapComputer(await this.track(async () => await createComputer(...args)), (operation) =>
             this.track(operation),
           ),
       };
     }
-    if ("create" in computer && typeof computer.create === "function") {
+    if (computer && typeof computer === "object" && "create" in computer) {
+      const provider = computer as Record<string, unknown>;
+      if (typeof provider.create !== "function") return tool;
+      const createComputer = provider.create as (...args: unknown[]) => object | Promise<object>;
       return {
         ...tool,
         computer: {
-          ...computer,
-          create: async (...args: Parameters<typeof computer.create>) =>
-            wrapComputer(
-              await this.track(async () => await computer.create(...args)),
-              (operation) => this.track(operation),
+          ...provider,
+          create: async (...args: unknown[]) =>
+            wrapComputer(await this.track(async () => await createComputer(...args)), (operation) =>
+              this.track(operation),
             ),
         },
       };
     }
+    if (!computer || typeof computer !== "object") return tool;
     return {
       ...tool,
-      computer: wrapComputer(computer as Computer, (operation) => this.track(operation)),
+      computer: wrapComputer(computer, (operation) => this.track(operation)),
     };
   }
 
@@ -1166,7 +1204,7 @@ export function createTurnToolCancellationController(
 
 /** Wrap a capability instance without depending on SDK-private subclasses. */
 export function wrapCapabilityToolsForTurnCancellation(
-  capability: { tools(): Tool<unknown>[]; _session?: CommandCancellationSession },
+  capability: { tools(): unknown[]; _session?: CommandCancellationSession },
   controller: TurnToolCancellationController,
 ): void {
   const originalTools = capability.tools;
