@@ -127,12 +127,16 @@ describe("release schema contract", () => {
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
         (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
+        (migrations.has("0122_codex_capacity_same_turn.sql") ? 1 : 0) +
         2,
     );
     expect(contract.sha256).toBe(
-      "f427b98a02f6ed3feaf59be9ea1b89b709ad6fc42d9b3648f0e240ffea42ff67",
+      "bfd337df99ee1ff23fd961927f1f2b67c52c3fd2b0c2c7ae76b539cbd88ed603",
     );
-    expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
+    expect(contract.latestMigration).toBe("0122_codex_capacity_same_turn.sql");
+    expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
+      deploymentMode: "maintenance",
+    });
 
     const boundarySql = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
