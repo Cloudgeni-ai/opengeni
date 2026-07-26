@@ -59,3 +59,23 @@ export function mergeSessionContinuation(
     failed: false,
   };
 }
+
+/**
+ * Rebase retained rows onto a fresh first-page snapshot after the server says
+ * the previous cursor expired. Delayed rebases are fenced like ordinary page
+ * merges so an A → B → A query transition cannot revive an obsolete cursor.
+ */
+export function rebaseSessionContinuation(
+  state: SessionContinuationState,
+  activeGeneration: number,
+  requestGeneration: number,
+  nextCursor: string | null,
+): SessionContinuationState {
+  if (requestGeneration !== activeGeneration) return state;
+  const active = activeSessionContinuation(state, activeGeneration);
+  return {
+    ...active,
+    nextCursor,
+    failed: false,
+  };
+}
