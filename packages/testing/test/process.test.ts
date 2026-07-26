@@ -1,6 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { runCommand, startProcess, waitFor } from "../src/process";
+import { isMissingProcessLookup, runCommand, startProcess, waitFor } from "../src/process";
+
+describe("process lookup errors", () => {
+  test("treats both vanished files and vanished processes as normal lookup races", () => {
+    expect(isMissingProcessLookup({ code: "ENOENT" })).toBe(true);
+    expect(isMissingProcessLookup({ code: "ESRCH" })).toBe(true);
+    expect(isMissingProcessLookup({ code: "EACCES" })).toBe(false);
+    expect(isMissingProcessLookup(new Error("missing code"))).toBe(false);
+  });
+});
 
 test("waitFor enforces its deadline when one predicate attempt never settles", async () => {
   const startedAt = Date.now();
