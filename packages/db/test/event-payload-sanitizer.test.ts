@@ -325,7 +325,7 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     expect(reparsed.type).toBe("function_call_result");
   });
 
-  test("repairs invalid text without redacting model-visible tool arguments", () => {
+  test("repairs invalid text and redacts model-visible tool arguments", () => {
     const item = {
       type: "function_call",
       callId: "call_secret_arg",
@@ -338,8 +338,8 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     expect(sanitizeModelPayload(item)).toEqual({
       ...item,
       arguments: {
-        token: "actualvalue",
-        headers: { authorization: "Bearer model-visible" },
+        token: "[redacted]",
+        headers: { authorization: "[redacted]" },
       },
     });
     expect(sanitizeEventPayload(item)).toMatchObject({

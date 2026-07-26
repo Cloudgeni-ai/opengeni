@@ -59,6 +59,8 @@ import {
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
   resolveActiveSandboxBackend,
+  safeErrorDiagnostic,
+  secretRedactionModelInputFilter,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -70,6 +72,7 @@ import {
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
+import { createSecretRedactor } from "../src/activities/redaction";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
@@ -212,6 +215,65 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
   }
   return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
+
+describe("turn secret-redaction boundaries", () => {
+  const syntheticSecret = "synthetic-turn-secret-value-123456";
+  const redact = createSecretRedactor([{ name: "TURN_SECRET", value: syntheticSecret }]);
+
+  test("redacts current history before durable append", () => {
+    const result = historyRowsToAppend(
+      [userMessage(`tool output ${syntheticSecret}`)],
+      0,
+      0,
+      undefined,
+      redact,
+    );
+
+    expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
+    expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+  });
+
+  test("redacts replayed and current items at the literal model-call seam", async () => {
+    const filter = secretRedactionModelInputFilter(redact);
+    const output = await filter({
+      modelData: {
+        input: [
+          userMessage(`legacy ${syntheticSecret}`),
+          {
+            type: "function_call_result",
+            callId: "call_safe",
+            output: "Authorization: Bearer synthetic-bearer-value-123456",
+          },
+        ],
+      },
+    } as never);
+
+    const serialized = JSON.stringify(output);
+    expect(serialized).not.toContain(syntheticSecret);
+    expect(serialized).not.toContain("synthetic-bearer-value");
+    expect(serialized).toContain("[redacted:TURN_SECRET]");
+    expect(serialized).toContain("Authorization: Bearer [redacted]");
+  });
+
+  test("safe logging diagnostics exclude stack, cause, and synthetic credentials", () => {
+    const error = Object.assign(new Error(`request rejected; token=${syntheticSecret}`), {
+      status: 401,
+      code: "AUTH_REJECTED",
+      cause: { responseBody: syntheticSecret },
+    });
+    const diagnostic = safeErrorDiagnostic(error, (value) => String(redact(value)));
+
+    expect(diagnostic).toEqual({
+      name: "Error",
+      message: "request rejected; token=[redacted:TURN_SECRET]",
+      status: 401,
+      code: "AUTH_REJECTED",
+    });
+    expect(diagnostic).not.toHaveProperty("stack");
+    expect(diagnostic).not.toHaveProperty("cause");
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticSecret);
+  });
+});
 
 describe("accepted turn execution identity", () => {
   test("separates external billing from the exact Codex allocator identity", () => {

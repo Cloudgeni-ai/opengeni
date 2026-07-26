@@ -1,0 +1,281 @@
+const MIN_REDACTABLE_VALUE_LENGTH = 6;
+const REDACTED = "[redacted]";
+const MAX_REDACTION_DEPTH = 64;
+const CYCLE_MARKER = "[OpenGeni omitted cyclic value during secret redaction]";
+const DEPTH_MARKER = "[OpenGeni omitted value beyond secret-redaction depth]";
+
+export type SecretForRedaction = {
+  name: string;
+  value: string;
+};
+
+type PreparedSecret = {
+  marker: string;
+  value: string;
+};
+
+const SENSITIVE_FIELD_NAMES = new Set([
+  "authorization",
+  "proxyauthorization",
+  "cookie",
+  "setcookie",
+  "accesstoken",
+  "refreshtoken",
+  "idtoken",
+  "token",
+  "apikey",
+  "secret",
+  "clientsecret",
+  "password",
+  "passwd",
+  "privatekey",
+  "credential",
+  "credentials",
+  "credentialencrypted",
+  "encryptedcredential",
+  "headersencrypted",
+  "encryptedpkceverifier",
+  "codeverifier",
+  "signature",
+  "signingkey",
+]);
+
+const SECRET_KEY_SOURCE =
+  "(?:proxy[-_ ]?authorization|authorization|set[-_ ]?cookie|cookie|access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|token|api[-_ ]?key|client[-_ ]?secret|secret|password|passwd|private[-_ ]?key|credential(?:s|[-_ ]?encrypted)?|encrypted[-_ ]?credential|encrypted[-_ ]?pkce[-_ ]?verifier|code[-_ ]?verifier|signature|signing[-_ ]?key)";
+const UNQUOTED_SECRET_KEY_SOURCE =
+  "(?:access[-_ ]?token|refresh[-_ ]?token|id[-_ ]?token|token|api[-_ ]?key|client[-_ ]?secret|secret|password|passwd|private[-_ ]?key|credential(?:s|[-_ ]?encrypted)?|encrypted[-_ ]?credential|encrypted[-_ ]?pkce[-_ ]?verifier|code[-_ ]?verifier|signature|signing[-_ ]?key)";
+
+const AUTHORIZATION_HEADER_PATTERN =
+  /(\b(?:proxy-)?authorization[^\S\r\n]*:[^\S\r\n]*)([^\r\n'"`]+)/gi;
+const COOKIE_HEADER_PATTERN = /(\b(?:set-cookie|cookie)\s*:\s*)([^\r\n'"`]+)/gi;
+const CURL_USER_PATTERN = /((?:^|\s)(?:-u|--user)(?:=|\s+))(?:("[^"]*")|('[^']*')|([^\s]+))/gm;
+const URL_USERINFO_PATTERN = /(https?:\/\/)[^\s/@]+@/gi;
+const SIGNED_QUERY_PATTERN = new RegExp(
+  `([?&](?:sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-signature|x-goog-credential|access_token|refresh_token|token)=)([^&#\\s'"<>]+)`,
+  "gi",
+);
+const QUOTED_SECRET_ASSIGNMENT_PATTERN = new RegExp(
+  `((?:["']${SECRET_KEY_SOURCE}["']|\\b${SECRET_KEY_SOURCE})\\s*[:=]\\s*)(["'])(.*?)\\2`,
+  "gi",
+);
+const UNQUOTED_SECRET_ASSIGNMENT_PATTERN = new RegExp(
+  `((?:\\b${UNQUOTED_SECRET_KEY_SOURCE})\\s*[:=]\\s*)([^\\s,;}&]+)`,
+  "gi",
+);
+const SECRET_ENV_ASSIGNMENT_PATTERN =
+  /((?:^|[\s;])(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL|AUTHORIZATION|COOKIE)[A-Za-z0-9_]*\s*=\s*)(?:("[^"]*")|('[^']*')|([^\s;]+))/gim;
+
+const PROVIDER_TOKEN_PATTERNS = [
+  /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
+  /\bglpat-[A-Za-z0-9_-]{20,}\b/g,
+  /\bsk-[A-Za-z0-9_-]{20,}\b/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/g,
+  /\bAIza[0-9A-Za-z_-]{30,}\b/g,
+  /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g,
+  /\bogd_[A-Za-z0-9._~-]{10,}\b/g,
+  /\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g,
+] as const;
+
+/**
+ * Returns true only for fields whose value is itself credential material.
+ * Container fields such as `headers` and URL fields are intentionally not
+ * included: their nested/value sanitizers retain useful names, hosts, paths,
+ * and non-sensitive query parameters.
+ */
+export function isSensitiveFieldName(name: string): boolean {
+  return SENSITIVE_FIELD_NAMES.has(normalizeFieldName(name));
+}
+
+/**
+ * Redact known secret provenance and common credential-bearing text shapes.
+ * This is deliberately a conservative safety boundary, not a promise of
+ * general-purpose DLP. It never includes a matched value in a marker or error.
+ */
+export function redactSensitiveText(
+  text: string,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): string {
+  let redacted = text;
+  for (const secret of prepareSecrets(knownSecrets)) {
+    if (redacted.includes(secret.value)) {
+      redacted = redacted.split(secret.value).join(secret.marker);
+    }
+  }
+
+  redacted = redacted.replace(
+    AUTHORIZATION_HEADER_PATTERN,
+    (match, prefix: string, rawValue: string) => {
+      const value = rawValue.trimEnd();
+      const trailingWhitespace = rawValue.slice(value.length);
+      const schemeMatch = value.match(/^([A-Za-z][A-Za-z0-9_-]*)(\s+)(.+)$/);
+      if (schemeMatch) {
+        const scheme = schemeMatch[1];
+        const whitespace = schemeMatch[2];
+        const credential = schemeMatch[3];
+        if (scheme && whitespace && credential) {
+          return isRedactionMarker(credential.trim())
+            ? match
+            : `${prefix}${scheme}${whitespace}${REDACTED}${trailingWhitespace}`;
+        }
+      }
+      return isRedactionMarker(value) ? match : `${prefix}${REDACTED}${trailingWhitespace}`;
+    },
+  );
+  redacted = redacted.replace(COOKIE_HEADER_PATTERN, `$1${REDACTED}`);
+  redacted = redacted.replace(CURL_USER_PATTERN, (_match, prefix: string) => {
+    return `${prefix}${REDACTED}`;
+  });
+  redacted = redacted.replace(URL_USERINFO_PATTERN, `$1${REDACTED}@`);
+  redacted = redacted.replace(SIGNED_QUERY_PATTERN, `$1${REDACTED}`);
+  redacted = redacted.replace(
+    QUOTED_SECRET_ASSIGNMENT_PATTERN,
+    (match, prefix: string, quote: string, value: string) =>
+      isRedactionMarker(value) ? match : `${prefix}${quote}${REDACTED}${quote}`,
+  );
+  redacted = redacted.replace(
+    UNQUOTED_SECRET_ASSIGNMENT_PATTERN,
+    (match, prefix: string, value: string) =>
+      isRedactionMarker(value) ? match : `${prefix}${REDACTED}`,
+  );
+  redacted = redacted.replace(
+    SECRET_ENV_ASSIGNMENT_PATTERN,
+    (
+      match,
+      prefix: string,
+      doubleQuoted: string | undefined,
+      singleQuoted: string | undefined,
+      bare: string | undefined,
+    ) => {
+      const value = doubleQuoted ?? singleQuoted ?? bare ?? "";
+      return isRedactionMarker(stripMatchingQuotes(value)) ? match : `${prefix}${REDACTED}`;
+    },
+  );
+  for (const pattern of PROVIDER_TOKEN_PATTERNS) {
+    redacted = redacted.replace(pattern, REDACTED);
+  }
+  return redacted;
+}
+
+/** Deeply redact plain structured data while retaining its diagnostic shape. */
+export function redactSensitiveData<T>(
+  value: T,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): T {
+  return redactSensitiveDataDeep(value, knownSecrets, new WeakSet<object>(), 0);
+}
+
+/** Build the worker-friendly single-argument redactor used at turn boundaries. */
+export function createSecretRedactor(
+  knownSecrets: readonly SecretForRedaction[],
+): (value: unknown) => unknown {
+  const prepared = prepareSecrets(knownSecrets).map(({ marker, value }) => ({
+    name: marker.slice("[redacted:".length, -1),
+    value,
+  }));
+  return (value: unknown) => redactSensitiveData(value, prepared);
+}
+
+/**
+ * Redact a serialized JSON checkpoint without requiring it to be valid JSON.
+ * Valid JSON retains structure; malformed/opaque text still receives text
+ * classification and exact-known-value replacement.
+ */
+export function redactSerializedJson(
+  serialized: string,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): string {
+  try {
+    return JSON.stringify(redactSensitiveData(JSON.parse(serialized), knownSecrets));
+  } catch {
+    return redactSensitiveText(serialized, knownSecrets);
+  }
+}
+
+export function identityRedactor<T>(value: T): T {
+  return value;
+}
+
+function redactSensitiveDataDeep<T>(
+  value: T,
+  knownSecrets: readonly SecretForRedaction[],
+  seen: WeakSet<object>,
+  depth: number,
+): T {
+  if (typeof value === "string") {
+    return redactSensitiveText(value, knownSecrets) as T;
+  }
+  if (!value || typeof value !== "object" || value instanceof Date) {
+    return value;
+  }
+  if (depth >= MAX_REDACTION_DEPTH) {
+    return DEPTH_MARKER as T;
+  }
+  if (seen.has(value)) {
+    return CYCLE_MARKER as T;
+  }
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => redactSensitiveDataDeep(item, knownSecrets, seen, depth + 1)) as T;
+    }
+    if (!isPlainObject(value)) {
+      return value;
+    }
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [
+        key,
+        isSensitiveFieldName(key)
+          ? REDACTED
+          : redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1),
+      ]),
+    ) as T;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function prepareSecrets(knownSecrets: readonly SecretForRedaction[]): PreparedSecret[] {
+  const unique = new Map<string, string>();
+  for (const secret of knownSecrets) {
+    if (secret.value.length < MIN_REDACTABLE_VALUE_LENGTH || unique.has(secret.value)) {
+      continue;
+    }
+    unique.set(secret.value, `[redacted:${safeSecretName(secret.name)}]`);
+  }
+  return [...unique]
+    .map(([value, marker]) => ({ marker, value }))
+    .sort((a, b) => b.value.length - a.value.length || a.marker.localeCompare(b.marker));
+}
+
+function safeSecretName(name: string): string {
+  const safe = name
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return safe.slice(0, 64) || "KNOWN_SECRET";
+}
+
+function normalizeFieldName(name: string): string {
+  return name.toLowerCase().replace(/[-_\s]/g, "");
+}
+
+function isPlainObject(value: object): value is Record<string, unknown> {
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isRedactionMarker(value: string): boolean {
+  return /^\[redacted(?::[A-Z0-9_]{1,64})?\]$/.test(value);
+}
+
+function stripMatchingQuotes(value: string): string {
+  if (
+    value.length >= 2 &&
+    ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'")))
+  ) {
+    return value.slice(1, -1);
+  }
+  return value;
+}

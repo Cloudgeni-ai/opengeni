@@ -21,6 +21,7 @@
 // Liveness between turns is the lease refcount; there is no keepalive loop.
 
 import type { Settings } from "@opengeni/config";
+import { redactSensitiveText } from "@opengeni/contracts";
 import {
   acquireLease,
   beginSandboxRematerialization,
@@ -207,6 +208,17 @@ class SnapshotTimeoutError extends Error {
   }
 }
 
+function safeSnapshotError(error: unknown): { name: string; message: string } {
+  const rawName = error instanceof Error ? error.name : "Error";
+  return {
+    name: /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error",
+    message: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(
+      0,
+      2_048,
+    ),
+  };
+}
+
 export async function waitForWarmSnapshot(
   snapshot: Promise<unknown>,
   timeoutMs: number,
@@ -239,7 +251,10 @@ export async function waitForWarmSnapshot(
   } catch (error) {
     if (signal?.aborted) return false;
     if (error instanceof SnapshotTimeoutError) {
-      console.error("mid-session workspace snapshot wait timed out (turn unaffected)", error);
+      console.error(
+        "mid-session workspace snapshot wait timed out (turn unaffected)",
+        safeSnapshotError(error),
+      );
       return false;
     }
     return true;
@@ -521,7 +536,10 @@ export async function maybePersistWarmWorkspaceSnapshot(
   } catch (error) {
     // Protection, not a dependency: a failed snapshot must never fail (or slow
     // down retrying) the turn. The next heartbeat/turn-end tick retries.
-    console.error("mid-session workspace snapshot failed (turn unaffected)", error);
+    console.error(
+      "mid-session workspace snapshot failed (turn unaffected)",
+      safeSnapshotError(error),
+    );
     return false;
   }
 }

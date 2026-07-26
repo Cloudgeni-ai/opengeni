@@ -1,4 +1,8 @@
-import { boundSessionEventPayload } from "@opengeni/contracts";
+import {
+  boundSessionEventPayload,
+  isSensitiveFieldName,
+  redactSensitiveText,
+} from "@opengeni/contracts";
 
 /**
  * Last line of defense against a session event crashing a whole turn.
@@ -18,21 +22,6 @@ import { boundSessionEventPayload } from "@opengeni/contracts";
 
 const REPLACEMENT = "�";
 const REDACTED = "[redacted]";
-const SENSITIVE_FIELD_NAMES = new Set([
-  "authorization",
-  "headers",
-  "accesstoken",
-  "refreshtoken",
-  "idtoken",
-  "token",
-  "apikey",
-  "secret",
-  "clientsecret",
-  "credential",
-  "credentialencrypted",
-  "encryptedpkceverifier",
-  "codeverifier",
-]);
 
 /**
  * Strip NUL and repair invalid/lone UTF-16 surrogates in a single string.
@@ -128,7 +117,7 @@ function removeProducerTruncationMetadata<T>(payload: T): T {
 
 function sanitizeEventPayloadDeep<T>(payload: T): T {
   if (typeof payload === "string") {
-    return sanitizeEventString(payload) as unknown as T;
+    return sanitizeEventString(redactSensitiveText(payload)) as unknown as T;
   }
   if (Array.isArray(payload)) {
     return payload.map((item) => sanitizeEventPayloadDeep(item)) as unknown as T;
@@ -147,13 +136,12 @@ function sanitizeEventPayloadDeep<T>(payload: T): T {
 }
 
 /**
- * Make model-facing conversation data safe for Postgres without redacting it.
+ * Make model-facing conversation data safe for Postgres and secret-redacted.
  *
- * Session events are an audit/UI projection and deliberately redact fields such
- * as `token` and `authorization`. Conversation history is the replay source for
- * the model, so applying event redaction there silently changes tool arguments
- * and can make recovery diverge from the call that actually ran. This walker
- * performs only the database-safety repair (NUL removal and UTF-16 repair).
+ * Conversation history is the replay source for the model, so this boundary
+ * retains protocol structure and non-sensitive diagnostics while removing
+ * credential-bearing fields and text before durable storage. It also performs
+ * the database-safety repair (NUL removal and UTF-16 repair).
  */
 export function sanitizeModelPayload<T>(payload: T): T {
   return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0);
@@ -165,7 +153,7 @@ const MODEL_PAYLOAD_DEPTH_MARKER = "[OpenGeni omitted model payload beyond datab
 
 function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: number): T {
   if (typeof payload === "string") {
-    return sanitizeEventString(payload) as unknown as T;
+    return sanitizeEventString(redactSensitiveText(payload)) as unknown as T;
   }
   if (!payload || typeof payload !== "object") return payload;
   if (payload instanceof Date) {
@@ -183,7 +171,7 @@ function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: n
     return Object.fromEntries(
       Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
         sanitizeEventString(key),
-        sanitizeModelPayloadDeep(value, seen, depth + 1),
+        isSensitiveFieldName(key) ? REDACTED : sanitizeModelPayloadDeep(value, seen, depth + 1),
       ]),
     ) as unknown as T;
   } finally {
@@ -207,7 +195,9 @@ function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
   if (key === "mcpCredentialUpdates") {
     return sanitizeMcpCredentialUpdateList(value);
   }
-  if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(key))) {
+  // Event payloads retain their longstanding stricter handling for arbitrary
+  // header containers. MCP server/update payloads above preserve only names.
+  if (normalizeFieldName(key) === "headers" || isSensitiveFieldName(key)) {
     return REDACTED;
   }
   return sanitizeEventPayloadDeep(value);

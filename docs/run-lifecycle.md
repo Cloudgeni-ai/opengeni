@@ -452,11 +452,14 @@ A session's content lives in three places. Keep them straight; reaching for the
 wrong one is the classic mistake.
 
 1. **`session_history_items` — conversation truth (the model-facing store).**
-   Ordered, verbatim SDK `AgentInputItem` JSON, unredacted, RLS-scoped. This is
-   what a new turn's input is built from. It is dual-written as the agent
-   streams (reconciled after every model response and at every turn-end path)
-   so a crash loses at most the single in-flight model call. Ordinary inference
-   has no second conversation-memory read path.
+   Ordered, protocol-preserving SDK `AgentInputItem` JSON, secret-redacted and
+   RLS-scoped. Known runtime credential provenance and recognized
+   credential-bearing shapes are redacted before model calls, persistence, and
+   replay; this is a safety boundary, not general-purpose DLP. A new turn's
+   input is built from this store. It is dual-written as the agent streams
+   (reconciled after every model response and at every turn-end path) so a crash
+   loses at most the single in-flight model call. Ordinary inference has no
+   second conversation-memory read path.
 2. **`agent_run_states` — requires-action resume only.** The serialized SDK `RunState`
    blob is an opaque, SDK-version-gated process checkpoint. Its one legitimate
    job is resuming a turn that paused mid-flight for a human approval or

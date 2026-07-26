@@ -496,9 +496,9 @@ async function runCredentialCommand(
   cmd: string,
   commandRunner?: RunCredentialCommandRunner,
 ): Promise<void> {
-  const marked = `set -eu\n${cmd}\nprintf '\\n${COMMAND_OK_MARKER}\\n'`;
+  const marked = `set +x\nset -eu\n${cmd}\nprintf '\\n${COMMAND_OK_MARKER}\\n'`;
   const args: ExecCommandArgs = {
-    cmd: `env -u BASH_ENV bash --noprofile --norc -c ${shellQuote(marked)}`,
+    cmd: `set +x\nenv -u BASH_ENV bash --noprofile --norc -c ${shellQuote(marked)}`,
     yieldTimeMs: 120_000,
     maxOutputTokens: 4_000,
   };

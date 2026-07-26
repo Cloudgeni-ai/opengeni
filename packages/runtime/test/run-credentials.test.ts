@@ -211,6 +211,12 @@ describe("run credential response validation", () => {
       },
     );
     const script = commands.join("\n");
+    expect(commands.every((command) => command.startsWith("set +x\n"))).toBe(true);
+    expect(
+      commands.every((command) =>
+        command.includes("bash --noprofile --norc -c 'set +x\nset -eu\n"),
+      ),
+    ).toBe(true);
     expect(script).toContain("printf %s QQ== | base64 -d");
     expect(script).toContain("base64 -D");
     expect(script).toContain("openssl base64 -d -A");
