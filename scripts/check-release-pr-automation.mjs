@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { verifySourceAdmission } from "./check-source-admission.mjs";
 
@@ -25,6 +26,11 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   checks: Object.freeze({
     sourceAdmission: "Current-base source admission",
     automationCi: "Automation PR CI",
+    requiredSource: Object.freeze([
+      "Typecheck and unit tests",
+      "Deployment artifacts",
+      "Workload image builds",
+    ]),
   }),
 });
 
@@ -658,6 +664,196 @@ async function paginatedArray(api, path, label) {
   throw new Error(`${label} exceeded ${maximumPages * recordsPerPage} records`);
 }
 
+async function paginatedCheckRuns(api, sha) {
+  const rows = [];
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const value = await api.get(
+      repositoryPath(`/commits/${sha}/check-runs?per_page=${recordsPerPage}&page=${page}`),
+    );
+    invariant(Array.isArray(value?.check_runs), "check-run listing is invalid");
+    rows.push(...value.check_runs);
+    if (value.check_runs.length < recordsPerPage) return rows;
+  }
+  throw new Error(`check-run listing exceeded ${maximumPages * recordsPerPage} records`);
+}
+
+function assertSuccessfulCheck(checks, name, sha) {
+  const selected = checks.filter((check) => check?.name === name);
+  invariant(selected.length === 1, `${name} is not represented by exactly one check run on ${sha}`);
+  const check = selected[0];
+  invariant(check?.app?.slug === "github-actions", `${name} is not owned by GitHub Actions`);
+  invariant(
+    check.status === "completed" && check.conclusion === "success",
+    `${name} did not complete successfully`,
+  );
+  return Object.freeze({ name, appSlug: "github-actions" });
+}
+
+function assertCommit(value, expectedSha, label) {
+  invariant(value?.sha === expectedSha, `${label} identity changed`);
+  const treeSha = assertSha(value?.tree?.sha, `${label} tree SHA`);
+  invariant(Array.isArray(value?.parents), `${label} parents are missing`);
+  const parents = value.parents.map((parent, index) =>
+    assertSha(parent?.sha, `${label} parent ${index}`),
+  );
+  return { sha: expectedSha, treeSha, parents };
+}
+
+function assertMergedPull(value, expected) {
+  invariant(value?.number === expected.pullNumber, "associated pull-request number changed");
+  invariant(
+    value?.state === "closed" && value?.merged === true,
+    "associated pull request is not merged",
+  );
+  invariant(value?.merge_commit_sha === expected.sourceSha, "pull-request merge SHA changed");
+  invariant(
+    value?.html_url ===
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}/pull/${expected.pullNumber}`,
+    "pull-request URL changed",
+  );
+  invariant(
+    value?.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
+    "pull-request base changed",
+  );
+  invariant(
+    value?.base?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "pull-request base repository changed",
+  );
+  const baseSha = assertSha(value?.base?.sha, "pull-request base SHA");
+  const headSha = assertSha(value?.head?.sha, "pull-request head SHA");
+  invariant(baseSha !== headSha, "pull-request base and head are identical");
+  invariant(
+    Number.isSafeInteger(value?.commits) && value.commits > 0 && value.commits <= 250,
+    "pull-request commit count is invalid",
+  );
+  invariant(
+    Array.isArray(value?.requested_reviewers),
+    "pull-request requested reviewers are missing",
+  );
+  const mergedAt = assertTimestamp(value?.merged_at, "pull-request merge timestamp");
+  const author = record(value?.user, "pull-request author");
+  assertString(author.login, "pull-request author login");
+  assertPositiveInteger(author.id, "pull-request author ID");
+  invariant(author.type === "User" || author.type === "Bot", "pull-request author type is invalid");
+  const merger = record(value?.merged_by, "pull-request merge actor");
+  assertString(merger.login, "pull-request merge actor login");
+  assertPositiveInteger(merger.id, "pull-request merge actor ID");
+  invariant(
+    merger.type === "User" || merger.type === "Bot",
+    "pull-request merge actor type is invalid",
+  );
+  return { baseSha, headSha, mergedAt, author, merger, commitCount: value.commits };
+}
+
+function exactHeadReviewArtifact(baseSha, headSha) {
+  return {
+    version: 3,
+    kind: "opengeni-exact-head-release-review",
+    repository: RELEASE_AUTOMATION_CONTRACT.repository,
+    reviewedBaseSha: baseSha,
+    reviewedHeadSha: headSha,
+    reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+    reviewProfile: "exact-head-maintainer-v1",
+    verdict: "PASS",
+  };
+}
+
+function canonicalSha256(value) {
+  const canonical = Object.fromEntries(
+    Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+  );
+  return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+function verifyAdminPassBody(body, artifact) {
+  const match =
+    /^<!-- opengeni-exact-head-release-review:v3 -->\n\n?```json\n([\s\S]+)\n```\s*$/.exec(body);
+  invariant(match !== null, "single-maintainer admin PASS body is not canonical");
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    throw new Error("single-maintainer admin PASS body is not valid JSON");
+  }
+  invariant(
+    JSON.stringify(parsed) === JSON.stringify(artifact),
+    "single-maintainer admin PASS does not bind the exact base/head/reviewer",
+  );
+  invariant(
+    body ===
+      `<!-- opengeni-exact-head-release-review:v3 -->\n\n\u0060\u0060\u0060json\n${JSON.stringify(artifact, null, 2)}\n\u0060\u0060\u0060`,
+    "single-maintainer admin PASS body is not canonical",
+  );
+  return canonicalSha256(artifact);
+}
+
+function sameProviderReview(left, right) {
+  return (
+    left?.id === right?.id &&
+    left?.state === right?.state &&
+    left?.commit_id === right?.commit_id &&
+    left?.html_url === right?.html_url &&
+    left?.submitted_at === right?.submitted_at &&
+    left?.body === right?.body &&
+    left?.user?.login === right?.user?.login &&
+    left?.user?.id === right?.user?.id &&
+    left?.user?.type === right?.user?.type
+  );
+}
+
+function validateLinearCompare(value, baseSha, sourceSha, expectedCommitCount) {
+  invariant(
+    value?.status === "ahead",
+    "rewritten release source is not strictly ahead of its PR base",
+  );
+  invariant(value?.base_commit?.sha === baseSha, "compare response base commit changed");
+  invariant(value?.merge_base_commit?.sha === baseSha, "compare response merge base changed");
+  invariant(value?.behind_by === 0, "rewritten release source is behind its PR base");
+  invariant(
+    value?.ahead_by === expectedCommitCount && value?.total_commits === expectedCommitCount,
+    "rewritten release source commit count differs from provider PR evidence",
+  );
+  invariant(
+    Array.isArray(value?.commits) && value.commits.length === expectedCommitCount,
+    "compare response does not contain the complete rewritten commit range",
+  );
+  let parent = baseSha;
+  for (const [index, commit] of value.commits.entries()) {
+    invariant(
+      Array.isArray(commit?.parents) && commit.parents.length === 1,
+      "rewritten release range is not linear",
+    );
+    invariant(commit.parents[0]?.sha === parent, "rewritten release range has a discontinuity");
+    parent = assertSha(commit?.sha, `rewritten release commit ${index}`);
+  }
+  invariant(parent === sourceSha, "rewritten release range does not terminate at the source SHA");
+}
+
+async function classifyMergeOutcome(api, source, pullIdentity) {
+  const exactMerge =
+    source.parents.length === 2 &&
+    source.parents[0] === pullIdentity.baseSha &&
+    source.parents[1] === pullIdentity.headSha;
+  if (exactMerge) return "merge";
+
+  const compare = await api.get(repositoryPath(`/compare/${pullIdentity.baseSha}...${source.sha}`));
+  const sourceCommitCount = Number(compare?.ahead_by);
+  validateLinearCompare(compare, pullIdentity.baseSha, source.sha, sourceCommitCount);
+  invariant(
+    sourceCommitCount === 1 || sourceCommitCount === pullIdentity.commitCount,
+    "rewritten release source is neither an exact squash nor an exact rebase",
+  );
+  if (sourceCommitCount === 1) {
+    invariant(
+      source.parents.length === 1 && source.parents[0] === pullIdentity.baseSha,
+      "squashed release source is not one commit on its exact PR base",
+    );
+    return pullIdentity.commitCount === 1 ? "single-commit-squash-or-rebase" : "squash";
+  }
+  invariant(sourceCommitCount > 1, "rebased release source is empty");
+  return "rebase";
+}
+
 function releaseApprovalContext(env, suppliedSourceSha) {
   requiredEnvironment(env, [
     "GITHUB_API_URL",
@@ -693,13 +889,13 @@ export async function verifyApprovedMerge(options = {}) {
   const logger = options.logger ?? console;
   const context = releaseApprovalContext(env, options.sourceSha);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
-  const commit = await api.get(repositoryPath(`/git/commits/${context.sourceSha}`));
-  invariant(commit?.sha === context.sourceSha, "release source commit changed");
-  invariant(Array.isArray(commit?.parents), "release source parents are missing");
-  invariant(commit.parents.length === 2, "release source is not a two-parent PR merge");
-  const baseSha = assertSha(commit.parents[0]?.sha, "release merge first parent");
-  const headSha = assertSha(commit.parents[1]?.sha, "release merge second parent");
-  invariant(baseSha !== headSha, "release merge parents are identical");
+  const initialMain = await api.get(repositoryPath("/git/ref/heads/main"));
+  assertMainRef(initialMain, context.sourceSha, "initial release main");
+  const source = assertCommit(
+    await api.get(repositoryPath(`/git/commits/${context.sourceSha}`)),
+    context.sourceSha,
+    "release source commit",
+  );
 
   const pulls = await paginatedArray(
     api,
@@ -707,29 +903,32 @@ export async function verifyApprovedMerge(options = {}) {
     "associated pull requests",
   );
   invariant(pulls.length === 1, "release source is not associated with exactly one pull request");
-  const pull = record(pulls[0], "associated pull request");
-  invariant(pull.state === "closed", "associated pull request is not closed");
-  invariant(pull.merge_commit_sha === context.sourceSha, "pull-request merge SHA changed");
+  const associatedPull = record(pulls[0], "associated pull request");
+  const pullNumber = assertPositiveInteger(associatedPull.number, "associated pull-request number");
   invariant(
-    pull.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch,
-    "pull-request base changed",
+    associatedPull.merge_commit_sha === context.sourceSha,
+    "associated pull summary merge SHA changed",
   );
+  const pull = record(await api.get(repositoryPath(`/pulls/${pullNumber}`)), "pull-request detail");
+  const pullIdentity = assertMergedPull(pull, { pullNumber, sourceSha: context.sourceSha });
   invariant(
-    pull.base?.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
-    "pull-request base repository changed",
+    associatedPull.base?.sha === pullIdentity.baseSha &&
+      associatedPull.head?.sha === pullIdentity.headSha,
+    "associated pull summary differs from pull-request detail",
   );
-  invariant(pull.base?.sha === baseSha, "pull-request base is not merge parent one");
-  invariant(pull.head?.sha === headSha, "pull-request head is not merge parent two");
-  const pullNumber = assertPositiveInteger(pull.number, "associated pull-request number");
-  const author = record(pull.user, "pull-request author");
-  assertString(author.login, "pull-request author login");
-  const authorId = assertPositiveInteger(author.id, "pull-request author ID");
-  invariant(author.type === "User" || author.type === "Bot", "pull-request author type is invalid");
+  const [base, head] = await Promise.all([
+    api
+      .get(repositoryPath(`/git/commits/${pullIdentity.baseSha}`))
+      .then((value) => assertCommit(value, pullIdentity.baseSha, "reviewed base commit")),
+    api
+      .get(repositoryPath(`/git/commits/${pullIdentity.headSha}`))
+      .then((value) => assertCommit(value, pullIdentity.headSha, "reviewed head commit")),
+  ]);
   invariant(
-    authorId !== RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
-    "trusted reviewer authored the pull request",
+    source.treeSha === head.treeSha,
+    "release source tree differs from the exact reviewed head",
   );
-  const mergedAt = assertTimestamp(pull.merged_at, "pull-request merge timestamp");
+  const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
 
   const reviews = await paginatedArray(
     api,
@@ -742,8 +941,10 @@ export async function verifyApprovedMerge(options = {}) {
         review?.user?.login === RELEASE_AUTOMATION_CONTRACT.releaseApprover.login &&
         review.user.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
         review.user.type === RELEASE_AUTOMATION_CONTRACT.releaseApprover.type &&
-        review.commit_id === headSha &&
-        decisiveReviewStates.has(review.state),
+        review.commit_id === pullIdentity.headSha &&
+        (decisiveReviewStates.has(review.state) ||
+          (review.state === "COMMENTED" &&
+            review.body?.startsWith("<!-- opengeni-exact-head-release-review:v3 -->"))),
     )
     .map((review) => ({
       id: assertPositiveInteger(review.id, "trusted review ID"),
@@ -754,23 +955,108 @@ export async function verifyApprovedMerge(options = {}) {
   invariant(decisions.length > 0, "trusted reviewer did not review the exact PR head");
   const decision = decisions.at(-1);
   invariant(
-    decision.review.state === "APPROVED",
-    "trusted review does not currently approve the exact head",
+    decision.submittedAt <= pullIdentity.mergedAt,
+    "trusted approval was not submitted before merge",
   );
-  invariant(decision.submittedAt < mergedAt, "trusted approval was not submitted before merge");
   assertIdentity(
     decision.review.user,
     RELEASE_AUTOMATION_CONTRACT.releaseApprover,
     "trusted reviewer",
   );
-  logger.log(`Verified PR #${pullNumber} exact-head approval before merge ${context.sourceSha}.`);
-  return {
+  const reviewUrl =
+    `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+    `/pull/${pullNumber}#pullrequestreview-${decision.id}`;
+  invariant(decision.review.html_url === reviewUrl, "trusted review URL changed");
+  const reviewDetail = await api.get(repositoryPath(`/pulls/${pullNumber}/reviews/${decision.id}`));
+  invariant(
+    sameProviderReview(decision.review, reviewDetail),
+    "trusted review detail differs from provider review history",
+  );
+  invariant(
+    !pull.requested_reviewers.some(
+      (candidate) =>
+        candidate?.login?.toLowerCase() ===
+        RELEASE_AUTOMATION_CONTRACT.releaseApprover.login.toLowerCase(),
+    ),
+    "trusted review is no longer effective because review was re-requested",
+  );
+
+  let reviewType;
+  let reviewEvidenceSha256;
+  if (decision.review.state === "APPROVED") {
+    invariant(
+      pullIdentity.author.id !== RELEASE_AUTOMATION_CONTRACT.releaseApprover.id,
+      "trusted reviewer authored the independently approved pull request",
+    );
+    reviewType = "independent-approval";
+    reviewEvidenceSha256 = canonicalSha256({
+      version: 1,
+      repository: RELEASE_AUTOMATION_CONTRACT.repository,
+      pullRequestNumber: pullNumber,
+      reviewedBaseSha: pullIdentity.baseSha,
+      reviewedHeadSha: pullIdentity.headSha,
+      reviewerLogin: RELEASE_AUTOMATION_CONTRACT.releaseApprover.login,
+      reviewId: decision.id,
+      verdict: "APPROVED",
+    });
+  } else {
+    invariant(
+      decision.review.state === "COMMENTED" &&
+        pullIdentity.author.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
+        pullIdentity.merger.id === RELEASE_AUTOMATION_CONTRACT.releaseApprover.id &&
+        pullIdentity.author.type === "User" &&
+        pullIdentity.merger.type === "User",
+      "trusted review is neither independent approval nor a provider-bound single-maintainer admin PASS",
+    );
+    reviewType = "single-maintainer-admin-pass";
+    reviewEvidenceSha256 = verifyAdminPassBody(
+      decision.review.body ?? "",
+      exactHeadReviewArtifact(pullIdentity.baseSha, pullIdentity.headSha),
+    );
+  }
+
+  const [headChecks, sourceChecks] = await Promise.all([
+    paginatedCheckRuns(api, pullIdentity.headSha),
+    paginatedCheckRuns(api, context.sourceSha),
+  ]);
+  const sourceAdmission = assertSuccessfulCheck(
+    headChecks,
+    RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    pullIdentity.headSha,
+  );
+  const requiredSourceChecks = RELEASE_AUTOMATION_CONTRACT.checks.requiredSource.map((name) =>
+    assertSuccessfulCheck(sourceChecks, name, context.sourceSha),
+  );
+  const terminalMain = await api.get(repositoryPath("/git/ref/heads/main"));
+  assertMainRef(terminalMain, context.sourceSha, "terminal release main");
+
+  const provenance = {
+    version: 1,
+    repository: RELEASE_AUTOMATION_CONTRACT.repository,
     sourceSha: context.sourceSha,
-    baseSha,
-    headSha,
-    pullNumber,
-    reviewId: decision.id,
+    sourceTreeSha: source.treeSha,
+    sourceParents: source.parents,
+    pullRequestNumber: pullNumber,
+    mergeMethod,
+    providerPullCommitCount: pullIdentity.commitCount,
+    mergedAt: new Date(pullIdentity.mergedAt).toISOString(),
+    reviewedBaseSha: pullIdentity.baseSha,
+    reviewedBaseTreeSha: base.treeSha,
+    reviewedHeadSha: pullIdentity.headSha,
+    reviewedHeadTreeSha: head.treeSha,
+    review: {
+      type: reviewType,
+      id: decision.id,
+      url: reviewUrl,
+      evidenceSha256: reviewEvidenceSha256,
+    },
+    sourceAdmission,
+    requiredSourceChecks,
   };
+  logger.log(
+    `Verified PR #${pullNumber} ${mergeMethod} provenance and exact checks for ${context.sourceSha}.`,
+  );
+  return provenance;
 }
 
 function writeOutputs(values, env) {

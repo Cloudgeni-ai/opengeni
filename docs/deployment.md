@@ -205,6 +205,36 @@ bun scripts/release-review.ts \
 Regenerate the body and verdict after every head or base movement. Do not edit a
 submitted review after merge to manufacture evidence retroactively.
 
+Release admission derives the merge outcome exclusively from GitHub records; a
+workflow caller cannot assert a merge method. The exact current `main` SHA is
+fenced before and after admission, must be associated with exactly one merged
+PR, and must retain the PR's provider-recorded base, head, merge SHA, actors,
+commit count, and exact reviewed-head tree. Supported provider-derived outcomes
+are:
+
+- an exact two-parent merge commit with parents `[reviewed base, reviewed head]`;
+- an exact one-commit squash on the reviewed base when the PR had multiple
+  commits;
+- an exact linear multi-commit rebase from the reviewed base with the same
+  provider commit count as the PR; and
+- a one-commit squash/rebase equivalence class when both the PR and rewritten
+  result contain one commit.
+
+GitHub does not retain a distinct manual UI method field for that final
+one-commit case. Admission therefore records the truthful equivalence class
+rather than guessing from mutable commit text or accepting caller metadata.
+Both possible operations have the same admitted security identity: one exact PR,
+base, head, reviewed tree, source tree, and provider merge SHA. Any nonlinear or
+discontinuous range fails closed.
+
+The exact reviewed head must have one successful GitHub Actions `Current-base
+source admission` check. The exact source must separately have one successful
+GitHub Actions result for each required candidate check: `Typecheck and unit
+tests`, `Deployment artifacts`, and `Workload image builds`. Missing,
+duplicated, failed, or foreign-app check runs are rejected. This admission
+metadata does not alter the reproducible schema-v2 candidate receipt or any
+chart, manifest, SBOM, provenance, or workload digest.
+
 That workflow requires the exact current `main` SHA, no pending changesets, and
 the exact expected package set (for example, `@opengeni/react@0.15.0`). It
 builds API, worker, web, relay, and stock headless-sandbox images under
