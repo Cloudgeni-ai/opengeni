@@ -85,22 +85,24 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(98 + currentMainMigrations.length + 1);
+    expect(contract.fileCount).toBe(100 + currentMainMigrations.length + 1);
     expect(contract.sha256).toBe(
-      "d5522079a0b2f1a0beb0726183e97072841996fc8de608bc83e56ec7ed889ec3",
+      "e09923184e59b6b5b22022949680d549c1c75fe0a3e9098cbb74e84d5ae90ab0",
     );
     expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
-    expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
+    expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-8]|0119)_/.test(path)),
+        .filter((path) => /^(?:010[3-8]|0119|012[01])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       "0108_fence_invalidated_warming_epochs.sql",
       "0119_pending_tool_output_policy.sql",
+      "0120_durable_goal_wake.sql",
+      "0121_goal_update_idempotency.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -129,6 +131,14 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
       sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0120_durable_goal_wake.sql")).toMatchObject({
+      sha256: "f3d63dd60c8d933d8729a597d947be940a0483a148665ecca47c8f05909b2577",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0121_goal_update_idempotency.sql")).toMatchObject({
+      sha256: "e90f030e9dfb3c2dc040b2192cdd874fad264020f06b9c82f1c3dcd30a9769ca",
       deploymentMode: "rolling",
     });
   });
