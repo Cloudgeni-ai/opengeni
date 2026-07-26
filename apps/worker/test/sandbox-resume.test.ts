@@ -287,10 +287,12 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       insert into sandbox_leases (
         account_id, workspace_id, sandbox_group_id, liveness, refcount,
         turn_holders, viewer_holders, instance_id, backend, lease_epoch,
+        workspace_generation, archive_generation,
         resume_backend_id, resume_state, expires_at
       ) values (
         ${accountId}, ${workspaceId}, ${groupId}, 'warm', 10,
         10, 0, ${oldInstanceId}, 'local', ${oldEpoch},
+        0, 0,
         'unix_local', ${resumeState}::text::jsonb, now() + interval '60 seconds'
       ) returning id`;
     for (let index = 0; index < 10; index += 1) {
@@ -716,10 +718,11 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
       insert into sandbox_leases (
         account_id, workspace_id, sandbox_group_id, liveness, refcount,
         turn_holders, viewer_holders, backend, lease_epoch,
+        workspace_generation, archive_generation,
         resume_backend_id, resume_state, expires_at
       ) values (
         $1, $2, $3, 'cold', 0, 0, 0,
-        'local', 8, 'unix_local',
+        'local', 8, 0, 0, 'unix_local',
         $4::text::jsonb,
         now() + interval '60s'
       )`,
@@ -872,6 +875,8 @@ describe("P1.2 resumeBoxForTurn — stateless resume-by-id (local backend, real 
           verifiedRevision: verifiedArchive.descriptor.revision,
         },
       });
+      expect(lease?.archiveComplete).toBe(true);
+      expect(lease?.archiveGeneration).toBe(lease?.workspaceGeneration);
       expect(JSON.stringify(lease?.resumeState)).not.toContain(
         "dead-provider-pointer-must-not-resume-or-import",
       );

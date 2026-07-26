@@ -478,6 +478,13 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     });
     expect(committed.committed).toBe(true);
     expect(committed.lease?.leaseEpoch).toBe(acquired.lease.leaseEpoch + 1);
+    // This setup bypasses the capture activity. Mark its structurally valid
+    // archive as the completed capture that the provider-loss path expects.
+    await admin`
+      update sandbox_leases
+      set archive_generation = workspace_generation
+      where workspace_id = ${workspaceId}
+        and sandbox_group_id = ${session.sandboxGroupId}`;
     const warmEpoch = committed.lease!.leaseEpoch;
 
     const operationCalls = Array.from({ length: 24 }, () => 0);

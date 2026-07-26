@@ -419,6 +419,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     });
     expect(begun.status).toBe("started");
+    if (begun.status === "started") {
+      expect(begun.lease.archiveComplete).toBe(true);
+      expect(begun.lease.archiveGeneration).toBe(begun.lease.workspaceGeneration);
+    }
     await admin`
       update sandbox_leases
       set expires_at = now() - interval '1 second'
@@ -544,6 +548,10 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       },
     });
     expect(begun.status).toBe("started");
+    if (begun.status === "started") {
+      expect(begun.lease.archiveComplete).toBe(true);
+      expect(begun.lease.archiveGeneration).toBe(begun.lease.workspaceGeneration);
+    }
     await admin`
       update sandbox_leases
       set expires_at = now() - interval '1 second'
@@ -1958,6 +1966,12 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     });
     expect(firstCommit.committed).toBe(true);
+    // commitWarmingToWarm is not a capture seam. This fixture models an archive
+    // that a prior verified capture already completed before provider loss.
+    await admin`
+      update sandbox_leases
+      set archive_generation = workspace_generation
+      where workspace_id = ${workspaceId} and sandbox_group_id = ${groupId}`;
 
     const losses = await Promise.all(
       Array.from({ length: 24 }, () =>
@@ -2160,6 +2174,8 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
     });
     expect(begun.status).toBe("started");
     if (begun.status === "started") {
+      expect(begun.lease.archiveComplete).toBe(true);
+      expect(begun.lease.archiveGeneration).toBe(begun.lease.workspaceGeneration);
       expect(begun.lease.recovery.archive.current?.revision).toBe(descriptor.revision);
       expect(begun.lease.recovery.restore).toMatchObject({
         status: "restoring",

@@ -514,6 +514,9 @@ async function seedScope(admin: postgres.Sql, label: string, schema?: string): P
   const [workspace] = await admin<Array<{ id: string }>>`
     insert into workspaces (account_id, name)
     values (${account!.id}, ${`migration-0117-${label}-workspace`}) returning id`;
+  await admin`
+    insert into workspace_inference_controls (workspace_id, account_id)
+    values (${workspace!.id}, ${account!.id})`;
   const sessionId = crypto.randomUUID();
   await admin`
     insert into sessions (

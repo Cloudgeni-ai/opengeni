@@ -19457,6 +19457,7 @@ export async function beginSandboxRematerialization(
         let workingResumeState = row.resume_state;
         let workingRow = row;
         let current = recoveryStateFromLeaseRow(workingRow);
+        let importedArchiveGeneration = false;
         if (current.archive.status === "none" && input.archiveSource) {
           const imported = resumeStateWithPreservedArchives(
             workingResumeState,
@@ -19466,6 +19467,19 @@ export async function beginSandboxRematerialization(
             workingResumeState = imported;
             workingRow = { ...workingRow, resume_state: imported };
             current = recoveryStateFromLeaseRow(workingRow);
+            // A session fallback is the last verified archive from before the
+            // lease acquired generation-aware ownership. Importing it is the
+            // one-time protocol-v2 handoff: bind it to the currently locked
+            // workspace generation in the same transaction that selects it.
+            // Runtime still byte/hash/fingerprint-verifies the selected archive
+            // before the warming lease may commit warm.
+            if (current.archive.status === "available" && current.archive.current) {
+              workingRow = {
+                ...workingRow,
+                archive_generation: workingRow.workspace_generation,
+              };
+              importedArchiveGeneration = true;
+            }
           }
         }
         const archiveComplete = hasCompleteWorkspaceArchive(workingRow);
@@ -19569,6 +19583,7 @@ export async function beginSandboxRematerialization(
         const updated = await tx.execute<LeaseRow>(sql`
           update sandbox_leases set
             resume_state = ${resumeStateJson}::jsonb,
+            ${importedArchiveGeneration ? sql`archive_generation = workspace_generation,` : sql``}
             updated_at = now()
           where id = ${row.id}
             and liveness = 'warming'
@@ -20858,6 +20873,7 @@ export async function reArmDrainingLease(
           updated_at = now()
         where workspace_id = ${input.workspaceId} and sandbox_group_id = ${input.sandboxGroupId}
           and liveness = 'draining'
+          and expires_at > now()
         returning id
       `);
       return { rearmed: rows.length > 0 };
