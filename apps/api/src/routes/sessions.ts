@@ -250,6 +250,13 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       chars = "";
     }
   };
+  const failPtyPersistenceAndDrain = (persistenceError: unknown, drainError: unknown): never => {
+    throw new AggregateError(
+      [persistenceError, drainError],
+      "PTY persistence failed and the exact opened process could not be drained",
+      { cause: drainError },
+    );
+  };
   const requestSessionAuthorization = new WeakMap<Request, ResolvedSessionAuthorization>();
   const relatedSessionAccessFor = (c: Context): "target" | "root" =>
     requestSessionAuthorization.get(c.req.raw)?.relatedSessionAccess ?? "root";
@@ -2134,10 +2141,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         try {
           await drainOpenedPty(handle, execSessionId);
         } catch (drainError) {
-          throw new AggregateError(
-            [persistenceError, drainError],
-            "PTY persistence failed and the exact opened process could not be drained",
-          );
+          failPtyPersistenceAndDrain(persistenceError, drainError);
         }
         throw persistenceError;
       }

@@ -2028,6 +2028,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
     // path) OR when the backend is "none". Released + dropped in `finally`.
     let resolvedSandbox: ResumedTurnSandbox | null = null;
+    const requireResolvedSandboxForMutation = (message: string): ResumedTurnSandbox => {
+      if (!resolvedSandbox) throw new Error(message);
+      return resolvedSandbox;
+    };
     // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
     // routing proxy): held so the turn's completion can final-ack this turn's
     // settled op-stream ops AFTER the results are durably persisted.
@@ -6914,11 +6918,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         const credentialSessionToClear = runCredentialSession;
         runCredentialSession = null;
         if (credentialSessionToClear) {
-          if (!resolvedSandbox) {
-            throw new Error("Run credential cleanup has no exact sandbox lease target");
-          }
           await runWorkspaceMutationForSandbox(
-            resolvedSandbox,
+            requireResolvedSandboxForMutation(
+              "Run credential cleanup has no exact sandbox lease target",
+            ),
             "runCredentialAttemptClear",
             async () =>
               await clearRunCredentialsForAttempt(credentialSessionToClear, {
