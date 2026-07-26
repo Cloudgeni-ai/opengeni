@@ -1234,7 +1234,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       from sandbox_workspace_mutation_admissions admission
       join sandbox_retained_processes process on process.parent_admission_id = admission.id
       where admission.id = ${admission.id}`;
-    expect(terminal[0]).toMatchObject({
+    expect(terminal).toMatchObject({
       providerOutcome: "resolved",
       state: "exited",
     });
