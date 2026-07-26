@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { EstablishedSandboxSession } from "@opengeni/runtime";
+import { type EstablishedSandboxSession, SandboxExecReadinessError } from "@opengeni/runtime";
 import {
   SandboxWarmingTimeoutError,
   waitForSandboxExecReadiness,
@@ -25,11 +25,32 @@ describe("sandbox exec readiness", () => {
     await waitForSandboxExecReadiness(
       established("modal", async ({ cmd }) => {
         commands.push(cmd);
-        return { output: "" };
+        return { output: "", exitCode: 0 };
       }),
       100,
     );
     expect(commands).toEqual(["true"]);
+  });
+
+  test("rejects a resolved Modal exec with a nonzero exit code", async () => {
+    await expect(
+      waitForSandboxExecReadiness(
+        established("modal", async () => ({
+          output: "true: not found",
+          exitCode: 127,
+        })),
+        100,
+      ),
+    ).rejects.toBeInstanceOf(SandboxExecReadinessError);
+  });
+
+  test("rejects a resolved Modal exec without an explicit completion status", async () => {
+    await expect(
+      waitForSandboxExecReadiness(
+        established("modal", async () => ({ output: "" })),
+        100,
+      ),
+    ).rejects.toBeInstanceOf(SandboxExecReadinessError);
   });
 
   test("bounds a Modal exec RPC that never returns", async () => {

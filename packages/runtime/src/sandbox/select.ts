@@ -24,6 +24,11 @@ export interface NegotiationContext {
   liveness: "cold" | "warming" | "warm" | "draining";
   /** The lease epoch echoed on viewer heartbeats (the split-brain fence). */
   leaseEpoch: number;
+  /** Numeric/boolean archive completeness truth. Non-persistable targets use
+   * null/null/false; archive locations and provider details are never exposed. */
+  workspaceGeneration?: number | null;
+  archiveGeneration?: number | null;
+  archiveComplete?: boolean;
   /** The deployment desktop toggle (settings.sandboxDesktopEnabled). */
   desktopEnabled: boolean;
   /**
@@ -411,6 +416,9 @@ export function negotiateCapabilities(ctx: NegotiationContext): SessionCapabilit
     os: ctx.os,
     liveness: ctx.liveness,
     leaseEpoch: ctx.leaseEpoch,
+    workspaceGeneration: ctx.workspaceGeneration ?? null,
+    archiveGeneration: ctx.archiveGeneration ?? null,
+    archiveComplete: ctx.archiveComplete ?? false,
     viewerHeartbeatIntervalMs: 30_000,
     FileSystem: fileSystem,
     Terminal: terminal,

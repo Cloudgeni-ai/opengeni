@@ -44,6 +44,7 @@ import {
   SessionGoal,
   SessionMcpServerMetadata,
   SubmitHumanInputResponseRequest,
+  TerminalPtyExitedPayload,
   UpdateSessionMcpApprovalPolicyRequest,
   CLEARED_RUN_STATE_BLOB,
   CLEARED_RUN_STATE_MARKER,
@@ -76,6 +77,15 @@ describe("contracts", () => {
     credentialSource: { kind: "deployment", mechanism: "api_key" },
     billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     definitionVersion: `sha256:${"a".repeat(64)}`,
+  });
+
+  test("distinguishes a lost PTY provider process from an owner departure", () => {
+    const ptyId = "11111111-1111-4111-8111-111111111111";
+    expect(TerminalPtyExitedPayload.parse({ ptyId, exitCode: null, reason: "lost" })).toEqual({
+      ptyId,
+      exitCode: null,
+      reason: "lost",
+    });
   });
 
   test("reads and merges a strict secret-safe turn execution policy without disturbing metadata", () => {

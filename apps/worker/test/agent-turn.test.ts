@@ -72,6 +72,7 @@ import {
 } from "../src/activities/agent-turn";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
+import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
 
 const OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE = "openai-responses";
 
@@ -1990,10 +1991,14 @@ describe("worker shutdown preemption", () => {
   test("does not publish quiescence until tool and credential writers physically drain", async () => {
     const steps: string[] = [];
     let releaseTools!: () => void;
+    let releaseGitWrite!: () => void;
     let releaseToolspaceWrite!: () => void;
     let releaseRunCredentialWrite!: () => void;
     const toolsDrained = new Promise<void>((resolve) => {
       releaseTools = resolve;
+    });
+    const gitWriteDrained = new Promise<void>((resolve) => {
+      releaseGitWrite = resolve;
     });
     const toolspaceWriteDrained = new Promise<void>((resolve) => {
       releaseToolspaceWrite = resolve;
@@ -2001,6 +2006,20 @@ describe("worker shutdown preemption", () => {
     const runCredentialWriteDrained = new Promise<void>((resolve) => {
       releaseRunCredentialWrite = resolve;
     });
+    const gitRenewal = startGitCredentialRenewalLoop({
+      expectedProviders: ["github"],
+      mint: async () => ({ gitTokens: { github: "test-token" }, expiresAt: {} }),
+      write: async () => {
+        steps.push("git-write-started");
+        await gitWriteDrained;
+        steps.push("git-write-drained");
+      },
+      schedule: () => ({ testTimer: true }),
+      clearSchedule: () => undefined,
+    });
+    const gitRefresh = gitRenewal.refreshNow();
+    await Bun.sleep(0);
+    expect(steps).toEqual(["git-write-started"]);
 
     let receipts = 0;
     const boundary = drainAttemptOwnedSandboxWriters({
@@ -2013,6 +2032,7 @@ describe("worker shutdown preemption", () => {
         },
       },
       cancellationReason: new Error("STEER"),
+      gitCredentialRenewals: [gitRenewal],
       toolspaceTokenRenewal: {
         stop: async () => {
           steps.push("toolspace-draining");
@@ -2033,17 +2053,22 @@ describe("worker shutdown preemption", () => {
     });
 
     await Bun.sleep(0);
-    expect(steps).toEqual(["tools-cancelled", "tools-draining"]);
+    expect(steps).toEqual(["git-write-started", "tools-cancelled", "tools-draining"]);
     expect(receipts).toBe(0);
 
     releaseTools();
     await Bun.sleep(0);
     expect(steps).toEqual([
+      "git-write-started",
       "tools-cancelled",
       "tools-draining",
       "tools-drained",
-      "toolspace-draining",
     ]);
+    expect(receipts).toBe(0);
+
+    releaseGitWrite();
+    await Bun.sleep(0);
+    expect(steps.at(-1)).toBe("toolspace-draining");
     expect(receipts).toBe(0);
 
     releaseToolspaceWrite();
@@ -2052,7 +2077,7 @@ describe("worker shutdown preemption", () => {
     expect(receipts).toBe(0);
 
     releaseRunCredentialWrite();
-    await boundary;
+    await Promise.all([boundary, gitRefresh]);
     expect(steps.at(-1)).toBe("receipt");
     expect(receipts).toBe(1);
   });
