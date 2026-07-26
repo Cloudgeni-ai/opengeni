@@ -158,6 +158,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
+import { consumeNewSessionDraftInTransaction } from "./new-session-drafts";
 import {
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
@@ -207,6 +208,7 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./session-control";
 export * from "./session-queue-commands";
+export * from "./new-session-drafts";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {
@@ -1071,17 +1073,25 @@ export async function withWorkspaceSubjectRls<T>(
     db,
     context,
     async (scopedDb) => {
-      await scopedDb.execute(sql`select set_config('opengeni.subject_id', ${subjectId}, true)`);
-      const applied = await scopedDb.execute<{ subject_id: string | null }>(
-        sql`select current_setting('opengeni.subject_id', true) as subject_id`,
-      );
-      if ((applied[0]?.subject_id ?? "") !== subjectId) {
-        throw new Error("Authenticated subject RLS context was not applied on the active backend");
-      }
+      await setSubjectRlsContext(scopedDb, subjectId);
       return await fn(scopedDb);
     },
     transactionConfig,
   );
+}
+
+/** Apply and verify actor-private RLS on an already transaction-pinned handle. */
+export async function setSubjectRlsContext(db: Database, subjectId: string): Promise<void> {
+  if (!subjectId.trim()) {
+    throw new Error("setSubjectRlsContext: a non-empty subjectId is required");
+  }
+  await db.execute(sql`select set_config('opengeni.subject_id', ${subjectId}, true)`);
+  const applied = await db.execute<{ subject_id: string | null }>(
+    sql`select current_setting('opengeni.subject_id', true) as subject_id`,
+  );
+  if ((applied[0]?.subject_id ?? "") !== subjectId) {
+    throw new Error("Authenticated subject RLS context was not applied on the active backend");
+  }
 }
 
 export async function withWorkspaceUsageLock<T>(
@@ -1851,6 +1861,14 @@ export async function removeWorkspaceMember(
         and(
           eq(schema.sessionPins.workspaceId, workspaceId),
           eq(schema.sessionPins.subjectId, subjectId),
+        ),
+      );
+    await scopedDb
+      .delete(schema.newSessionDrafts)
+      .where(
+        and(
+          eq(schema.newSessionDrafts.workspaceId, workspaceId),
+          eq(schema.newSessionDrafts.subjectId, subjectId),
         ),
       );
 
@@ -26482,6 +26500,10 @@ export type InitializeSessionStartInput = {
     successCriteria?: string | null;
     maxAutoContinuations?: number | null;
   } | null;
+  consumeNewSessionDraft?: {
+    subjectId: string;
+    expectedRevision: number;
+  } | null;
 };
 
 export type InitializeSessionStartResult = {
@@ -26583,6 +26605,7 @@ export async function initializeSessionStartAtomically(
         const insertedEvents: Array<typeof schema.sessionEvents.$inferSelect> = [];
         const runnable = effectiveControl.state === "active";
         const publicQueuedStatus: SessionStatus = "queued";
+        let initializedNow = false;
 
         if (!userEvent) {
           const initialPayload = {
@@ -26649,6 +26672,7 @@ export async function initializeSessionStartAtomically(
           insertedEvents.push(...rows);
           userEvent = rows.find((event) => event.type === "user.message");
           if (!userEvent) throw new Error("Failed to create initial user event");
+          initializedNow = true;
         }
 
         let [turn] = await tx
@@ -26771,6 +26795,17 @@ export async function initializeSessionStartAtomically(
               reason: "initial_session",
             })
           : null;
+        if (initializedNow && input.consumeNewSessionDraft) {
+          await setSubjectRlsContext(
+            tx as unknown as Database,
+            input.consumeNewSessionDraft.subjectId,
+          );
+          await consumeNewSessionDraftInTransaction(tx as unknown as Database, {
+            workspaceId: input.workspaceId,
+            subjectId: input.consumeNewSessionDraft.subjectId,
+            expectedRevision: input.consumeNewSessionDraft.expectedRevision,
+          });
+        }
         return {
           events: insertedEvents.map(mapEvent),
           turn: mapSessionTurn(turn),

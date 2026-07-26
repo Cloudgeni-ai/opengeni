@@ -48,6 +48,7 @@ import {
   isTransientProviderError,
   isWorkerShutdownCancellation,
   legacyTurnExecutionPolicyInput,
+  modelAcceptsTypedAttachmentContentForTurn,
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
@@ -2755,6 +2756,20 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("modelAcceptsTypedAttachmentContentForTurn", () => {
+  const resolved = (api: ModelProviderApi) =>
+    ({ provider: { api } }) as Parameters<typeof modelAcceptsTypedAttachmentContentForTurn>[0];
+
+  test("accepts built-in and registry Responses transports", () => {
+    expect(modelAcceptsTypedAttachmentContentForTurn(null)).toBe(true);
+    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("responses"))).toBe(true);
+  });
+
+  test("keeps chat-completions providers on the sandbox-path fallback", () => {
+    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat"))).toBe(false);
   });
 });
 

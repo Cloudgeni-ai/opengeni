@@ -126,10 +126,11 @@ describe("release schema contract", () => {
       108 +
         (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
         (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
+        (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
         (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "6f7910490bf38b5fd1089db6fd1105aacf739c61a56c847e115e1eeb20f4da6e",
+      "1e3706d03458891d62af19d6de0da836ffcc5442fde25d21a9484c086d435b94",
     );
     expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
 
@@ -153,13 +154,14 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-7]|0119)_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
       ...nestedDepthMigrations,
       "0117_sandbox_recovery_generations.sql",
+      "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
@@ -192,6 +194,10 @@ describe("release schema contract", () => {
     expect(migrations.get("0117_sandbox_recovery_generations.sql")).toMatchObject({
       sha256: "365284a9ab495173780d54c4b1470824891b15a7290735bf09b72c2f5fdbc48b",
       deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0118_new_session_drafts.sql")).toMatchObject({
+      sha256: "69ae71b80392eea964c47cadff876cff58db699d6c2470482d35aaf0931de70c",
+      deploymentMode: "rolling",
     });
     expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
       sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
