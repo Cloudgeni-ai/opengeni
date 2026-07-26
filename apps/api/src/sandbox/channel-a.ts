@@ -3,7 +3,7 @@
 // The structured services (FileSystem / Git / Terminal) are SYNCHRONOUS point
 // queries served client -> API -> box IN-PROCESS. Each call:
 //
-//   1. acquires a viewer-kind lease holder (warming the box when cold — the
+//   1. acquires an exact direct-request lease holder (warming the box when cold — the
 //      same cold->warming CAS attachViewer runs; a Postgres txn the API OWNS),
 //   2. resumes the box BY ID from the group lease's resume_state envelope,
 //   3. builds ONE SandboxChannelAService around the live `session` handle,
@@ -53,8 +53,9 @@ import {
   withRunCredentialsSession,
   type ChannelASession,
   type EstablishedSandboxSession,
+  type RoutingSandboxSession,
 } from "@opengeni/runtime/sandbox";
-import { routingEnabled, wrapChannelABoxWithRouting } from "@opengeni/core";
+import { wrapChannelABoxWithRouting } from "@opengeni/core";
 import { establishApiSandboxSpawner } from "./rematerialize";
 
 export type ChannelAServices = {
@@ -76,10 +77,12 @@ export type ChannelAContext = {
 export type ChannelAHandle = {
   service: SandboxChannelAService;
   lease: LeaseSnapshot;
+  routingSession: RoutingSandboxSession;
+  requestId: string;
 };
 
 /**
- * Run a Channel-A op against a live box, API-direct. Acquires a viewer holder
+ * Run a Channel-A op against a live box, API-direct. Acquires an exact direct holder
  * (warming the box when cold), resumes by id, builds the service, runs `fn`, and
  * ALWAYS releases the holder + drops the handle in `finally`. Maps the service's
  * typed errors to HTTP status (the route never sees a raw ChannelA*Error).
@@ -100,7 +103,8 @@ export async function withChannelA<T>(
   }
 
   const sandboxGroupId = session.sandboxGroupId;
-  const viewerId = crypto.randomUUID();
+  const requestId = crypto.randomUUID();
+  const holderId = `direct:${requestId}`;
   const leaseTtlMs = settings.sandboxLeaseTtlMs;
 
   const release = async (): Promise<void> => {
@@ -108,19 +112,19 @@ export async function withChannelA<T>(
       accountId,
       workspaceId,
       sandboxGroupId,
-      kind: "viewer",
-      holderId: viewerId,
+      kind: "direct",
+      holderId,
       idleGraceMs: settings.sandboxIdleGraceMs,
     });
   };
 
-  // Acquire a viewer holder; the cold->warming CAS spawns the box when cold.
+  // Acquire exact request authority; the cold->warming CAS spawns the box when cold.
   const acquired = await acquireLease(db, {
     accountId,
     workspaceId,
     sandboxGroupId,
-    kind: "viewer",
-    holderId: viewerId,
+    kind: "direct",
+    holderId,
     subjectId: session.id,
     backend: session.sandboxBackend,
     os: session.sandboxOs,
@@ -269,29 +273,25 @@ export async function withChannelA<T>(
       );
     };
 
-    // M7 hot-swap: when the selfhosted feature is on, route the Channel-A op to
-    // the session's currently-active sandbox (not always the group box). The
-    // proxy re-reads (active_sandbox_id, active_epoch) on each session method the
-    // service calls and dispatches to the active backend (the group box by
-    // default, or a swapped-to selfhosted machine). With the flag off the
-    // established group session is used unchanged.
-    const routedSession = routingEnabled(settings)
-      ? wrapChannelABoxWithRouting(
-          { db, settings, bus },
-          {
-            accountId,
-            workspaceId,
-            sessionId: session.id,
-            homeLease: {
-              sandboxGroupId,
-              leaseEpoch: leaseSnapshot.leaseEpoch,
-              instanceId: leaseSnapshot.instanceId!,
-              backend: session.sandboxBackend,
-            },
-          },
-          established,
-        ).session
-      : established.session;
+    // Route every call through the same proxy, even when hot-swap is disabled:
+    // routing may be dormant, but its direct mutation admission is mandatory for
+    // every persistable provider write.
+    const routedSession = wrapChannelABoxWithRouting(
+      { db, settings, bus },
+      {
+        accountId,
+        workspaceId,
+        sessionId: session.id,
+        homeLease: {
+          sandboxGroupId,
+          leaseEpoch: leaseSnapshot.leaseEpoch,
+          instanceId: leaseSnapshot.instanceId!,
+          backend: session.sandboxBackend,
+        },
+        directRequest: { requestId, holderId },
+      },
+      established,
+    ).session as RoutingSandboxSession;
     const credentialSession = withRunCredentialsSession(routedSession as object, session.id);
     const scopedSession = environment.OPENGENI_TOOLSPACE_TOKEN_FILE
       ? withToolspaceTokenSession(
@@ -306,7 +306,7 @@ export async function withChannelA<T>(
       emit,
     });
 
-    return await fn({ service, lease: leaseSnapshot });
+    return await fn({ service, lease: leaseSnapshot, routingSession: routedSession, requestId });
   } catch (error) {
     throw mapChannelAError(error);
   } finally {

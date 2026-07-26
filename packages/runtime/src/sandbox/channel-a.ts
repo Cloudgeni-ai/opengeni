@@ -101,6 +101,18 @@ export type ChannelASession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }): Promise<string>;
+  writeStdinForProcessMutation?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  writeStdinForProcessControl?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
 };
@@ -1203,10 +1215,13 @@ export class SandboxChannelAService {
    *  it as terminal.pty.output.delta). Throws ChannelAUnsupportedError when the
    *  backend has no writeStdin. */
   async ptyWrite(_req: PtyWriteRequest, execSessionId: number, data: string): Promise<string> {
-    if (!this.session.writeStdin) {
+    const write =
+      this.session.writeStdinForProcessMutation?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
-    const out = await this.session.writeStdin({
+    const out = await write({
       sessionId: execSessionId,
       chars: data,
       yieldTimeMs: 250,
@@ -1228,25 +1243,27 @@ export class SandboxChannelAService {
   /** Resize an open PTY (SIGWINCH via stty against the exec-session). The SDK has
    *  no resize method; stty in the same tty session updates the geometry. */
   async ptyResize(req: PtyResizeRequest, execSessionId: number): Promise<void> {
-    if (!this.session.writeStdin) return;
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) return;
     // Send a stty in-band on the same pty session.
-    await this.session.writeStdin({
+    await write({
       sessionId: execSessionId,
       chars: `stty cols ${req.cols} rows ${req.rows}\n`,
       yieldTimeMs: 50,
     });
   }
 
-  /** Close an open PTY: write exit/EOF. The caller marks the row closed + emits
-   *  terminal.pty.exited. */
-  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<void> {
-    if (execSessionId !== null && this.session.writeStdin) {
-      try {
-        await this.session.writeStdin({ sessionId: execSessionId, chars: "", yieldTimeMs: 50 }); // EOF
-      } catch {
-        // best-effort; the row is marked closed regardless.
-      }
-    }
+  /** Ask an open PTY to exit and return the exact provider banner. The routing
+   * session settles durable process authority only when that banner proves this
+   * locator exited or was lost; callers must keep metadata open otherwise. */
+  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<string> {
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (execSessionId === null || !write) return "";
+    return await write({ sessionId: execSessionId, chars: "", yieldTimeMs: 250 }); // EOF
   }
 
   // ──────────────────────────── helpers ──────────────────────────────────────

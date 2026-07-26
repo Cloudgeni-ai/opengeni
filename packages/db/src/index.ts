@@ -17581,8 +17581,17 @@ export type SandboxPtySessionRow = {
   accountId: string;
   workspaceId: string;
   sessionId: string;
+  leaseId: string | null;
+  sandboxGroupId: string | null;
+  retainedProcessId: string | null;
+  openAdmissionId: string | null;
   execSessionId: number | null;
   leaseEpoch: number;
+  providerBackend: string | null;
+  providerInstanceId: string | null;
+  routeKind: "home" | "active" | null;
+  routeTargetId: string | null;
+  routeEpoch: number | null;
   cols: number;
   rows: number;
   shell: string;
@@ -17594,14 +17603,43 @@ export type SandboxPtySessionRow = {
   closedAt: string | null;
 };
 
+export type SandboxPtyProcessIdentity = {
+  leaseId: string;
+  sandboxGroupId: string;
+  retainedProcessId: string;
+  openAdmissionId: string;
+  execSessionId: number;
+  leaseEpoch: number;
+  providerBackend: string;
+  providerInstanceId: string;
+  routeKind: "home" | "active";
+  routeTargetId: string | null;
+  routeEpoch: number;
+};
+
+export type SandboxOpenPtySessionRow = Omit<
+  SandboxPtySessionRow,
+  keyof SandboxPtyProcessIdentity | "status"
+> &
+  SandboxPtyProcessIdentity & { status: "open" };
+
 function mapPtySession(row: typeof schema.sandboxPtySessions.$inferSelect): SandboxPtySessionRow {
   return {
     id: row.id,
     accountId: row.accountId,
     workspaceId: row.workspaceId,
     sessionId: row.sessionId,
+    leaseId: row.leaseId ?? null,
+    sandboxGroupId: row.sandboxGroupId ?? null,
+    retainedProcessId: row.retainedProcessId ?? null,
+    openAdmissionId: row.openAdmissionId ?? null,
     execSessionId: row.execSessionId ?? null,
     leaseEpoch: row.leaseEpoch,
+    providerBackend: row.providerBackend ?? null,
+    providerInstanceId: row.providerInstanceId ?? null,
+    routeKind: (row.routeKind as "home" | "active" | null) ?? null,
+    routeTargetId: row.routeTargetId ?? null,
+    routeEpoch: row.routeEpoch ?? null,
     cols: row.cols,
     rows: row.rows,
     shell: row.shell,
@@ -17614,6 +17652,46 @@ function mapPtySession(row: typeof schema.sandboxPtySessions.$inferSelect): Sand
   };
 }
 
+function mapOpenPtySession(
+  row: typeof schema.sandboxPtySessions.$inferSelect,
+): SandboxOpenPtySessionRow {
+  const mapped = mapPtySession(row);
+  if (
+    mapped.status !== "open" ||
+    mapped.leaseId === null ||
+    mapped.sandboxGroupId === null ||
+    mapped.retainedProcessId === null ||
+    mapped.openAdmissionId === null ||
+    mapped.execSessionId === null ||
+    mapped.execSessionId <= 0 ||
+    mapped.providerBackend === null ||
+    mapped.providerInstanceId === null ||
+    mapped.routeKind === null ||
+    mapped.routeEpoch === null
+  ) {
+    throw new Error("Open PTY row lacks exact retained-process identity");
+  }
+  return mapped as SandboxOpenPtySessionRow;
+}
+
+function exactPtyIdentityPredicates(identity: SandboxPtyProcessIdentity): SQL[] {
+  return [
+    eq(schema.sandboxPtySessions.leaseId, identity.leaseId),
+    eq(schema.sandboxPtySessions.sandboxGroupId, identity.sandboxGroupId),
+    eq(schema.sandboxPtySessions.retainedProcessId, identity.retainedProcessId),
+    eq(schema.sandboxPtySessions.openAdmissionId, identity.openAdmissionId),
+    eq(schema.sandboxPtySessions.execSessionId, identity.execSessionId),
+    eq(schema.sandboxPtySessions.leaseEpoch, identity.leaseEpoch),
+    eq(schema.sandboxPtySessions.providerBackend, identity.providerBackend),
+    eq(schema.sandboxPtySessions.providerInstanceId, identity.providerInstanceId),
+    eq(schema.sandboxPtySessions.routeKind, identity.routeKind),
+    identity.routeTargetId === null
+      ? isNull(schema.sandboxPtySessions.routeTargetId)
+      : eq(schema.sandboxPtySessions.routeTargetId, identity.routeTargetId),
+    eq(schema.sandboxPtySessions.routeEpoch, identity.routeEpoch),
+  ];
+}
+
 export async function insertPtySession(
   db: Database,
   input: {
@@ -17621,15 +17699,14 @@ export async function insertPtySession(
     accountId: string;
     workspaceId: string;
     sessionId: string;
-    execSessionId?: number | null;
-    leaseEpoch: number;
+    identity: SandboxPtyProcessIdentity;
     cols: number;
     rows: number;
     shell: string;
     cwd: string;
     openedBy: string;
   },
-): Promise<SandboxPtySessionRow> {
+): Promise<SandboxOpenPtySessionRow> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -17641,8 +17718,17 @@ export async function insertPtySession(
           accountId: input.accountId,
           workspaceId: input.workspaceId,
           sessionId: input.sessionId,
-          execSessionId: input.execSessionId ?? null,
-          leaseEpoch: input.leaseEpoch,
+          leaseId: input.identity.leaseId,
+          sandboxGroupId: input.identity.sandboxGroupId,
+          retainedProcessId: input.identity.retainedProcessId,
+          openAdmissionId: input.identity.openAdmissionId,
+          execSessionId: input.identity.execSessionId,
+          leaseEpoch: input.identity.leaseEpoch,
+          providerBackend: input.identity.providerBackend,
+          providerInstanceId: input.identity.providerInstanceId,
+          routeKind: input.identity.routeKind,
+          routeTargetId: input.identity.routeTargetId,
+          routeEpoch: input.identity.routeEpoch,
           cols: input.cols,
           rows: input.rows,
           shell: input.shell,
@@ -17651,7 +17737,7 @@ export async function insertPtySession(
           openedBy: input.openedBy,
         })
         .returning();
-      return mapPtySession(row!);
+      return mapOpenPtySession(row!);
     },
   );
 }
@@ -17659,38 +17745,39 @@ export async function insertPtySession(
 /** Read an OPEN PTY row by ptyId. Returns null when absent or already closed. */
 export async function getOpenPtySession(
   db: Database,
-  workspaceId: string,
-  ptyId: string,
-): Promise<SandboxPtySessionRow | null> {
-  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+  input: { workspaceId: string; sessionId: string; ptyId: string },
+): Promise<SandboxOpenPtySessionRow | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
       .from(schema.sandboxPtySessions)
       .where(
         and(
-          eq(schema.sandboxPtySessions.workspaceId, workspaceId),
-          eq(schema.sandboxPtySessions.id, ptyId),
+          eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+          eq(schema.sandboxPtySessions.sessionId, input.sessionId),
+          eq(schema.sandboxPtySessions.id, input.ptyId),
           eq(schema.sandboxPtySessions.status, "open"),
         ),
       )
       .limit(1);
-    return row ? mapPtySession(row) : null;
+    return row ? mapOpenPtySession(row) : null;
   });
 }
 
-/** Stamp the SDK exec-session id (known only after the open exec yields a still-
- *  running process) + refresh the input-activity TTL. */
+/** Refresh activity/geometry only when the full retained-process identity still
+ * matches. A numeric provider locator or PTY UUID alone is never authority. */
 export async function updatePtySessionActivity(
   db: Database,
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     ptyId: string;
-    execSessionId?: number | null;
+    identity: SandboxPtyProcessIdentity;
     cols?: number;
     rows?: number;
   },
-): Promise<SandboxPtySessionRow | null> {
+): Promise<SandboxOpenPtySessionRow | null> {
   return await withRlsContext(
     db,
     { accountId: input.accountId, workspaceId: input.workspaceId },
@@ -17698,7 +17785,6 @@ export async function updatePtySessionActivity(
       const set: Partial<typeof schema.sandboxPtySessions.$inferInsert> = {
         lastInputAt: new Date(),
       };
-      if (input.execSessionId !== undefined) set.execSessionId = input.execSessionId;
       if (input.cols !== undefined) set.cols = input.cols;
       if (input.rows !== undefined) set.rows = input.rows;
       const [row] = await scopedDb
@@ -17707,12 +17793,14 @@ export async function updatePtySessionActivity(
         .where(
           and(
             eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+            eq(schema.sandboxPtySessions.sessionId, input.sessionId),
             eq(schema.sandboxPtySessions.id, input.ptyId),
             eq(schema.sandboxPtySessions.status, "open"),
+            ...exactPtyIdentityPredicates(input.identity),
           ),
         )
         .returning();
-      return row ? mapPtySession(row) : null;
+      return row ? mapOpenPtySession(row) : null;
     },
   );
 }
@@ -17723,7 +17811,9 @@ export async function closePtySession(
   input: {
     accountId: string;
     workspaceId: string;
+    sessionId: string;
     ptyId: string;
+    identity: SandboxPtyProcessIdentity;
   },
 ): Promise<SandboxPtySessionRow | null> {
   return await withRlsContext(
@@ -17736,7 +17826,10 @@ export async function closePtySession(
         .where(
           and(
             eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+            eq(schema.sandboxPtySessions.sessionId, input.sessionId),
             eq(schema.sandboxPtySessions.id, input.ptyId),
+            eq(schema.sandboxPtySessions.status, "open"),
+            ...exactPtyIdentityPredicates(input.identity),
           ),
         )
         .returning();
@@ -17750,7 +17843,7 @@ export async function listOpenPtySessions(
   db: Database,
   workspaceId: string,
   sessionId: string,
-): Promise<SandboxPtySessionRow[]> {
+): Promise<SandboxOpenPtySessionRow[]> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const rows = await scopedDb
       .select()
@@ -17763,7 +17856,7 @@ export async function listOpenPtySessions(
         ),
       )
       .orderBy(desc(schema.sandboxPtySessions.createdAt));
-    return rows.map(mapPtySession);
+    return rows.map(mapOpenPtySession);
   });
 }
 

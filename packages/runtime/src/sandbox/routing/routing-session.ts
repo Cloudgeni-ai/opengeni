@@ -115,6 +115,21 @@ export type RoutingRetainedProcess = {
   providerSessionId: number;
 };
 
+/** Exact copied route identity required to reconstruct an already-durable
+ * retained process after the request/runtime object that opened it is gone.
+ * The live session is deliberately not caller-supplied: adoption may bind only
+ * to this proxy's construction-time default backend, so it cannot resolve or
+ * follow the current active pointer. */
+export type RoutingRetainedProcessAdoption = {
+  process: RoutingRetainedProcess;
+  backend: {
+    sandboxId: string | null;
+    leaseEpoch?: number;
+    providerInstanceId?: string;
+    activeEpoch: number;
+  };
+};
+
 export type RoutingRetainedProcessTerminalProof =
   | { outcome: "exited"; exitCode: number; reason: "provider_exit_banner" }
   | { outcome: "lost"; exitCode: null; reason: "provider_session_lost_banner" };
@@ -314,6 +329,10 @@ function isFenceError(error: unknown): boolean {
 
 function positiveProviderSessionId(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
+}
+
+function canonicalUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 }
 
 function providerSessionIdFromResult(result: unknown): number | null {
@@ -580,6 +599,60 @@ export class RoutingSandboxSession implements RoutableBackendSession {
     const retained = this.retainedProcesses.get(providerSessionId);
     if (!retained) throw new RoutingRetainedProcessNotFoundError(providerSessionId);
     return retained;
+  }
+
+  /** Reconstruct one process that was already promoted durably by an earlier
+   * request. Adoption never reads the active pointer and never repeats parent
+   * promotion. It can bind only to the exact construction-time default backend;
+   * callers must reject non-default routes until they can independently rebuild
+   * that provider session from its copied durable identity. */
+  adoptRetainedProcess(input: RoutingRetainedProcessAdoption): void {
+    const providerSessionId = positiveProviderSessionId(input.process.providerSessionId);
+    const seed = this.deps.defaultResolved;
+    if (
+      providerSessionId === null ||
+      !canonicalUuid(input.process.id) ||
+      !seed ||
+      seed.sandboxId !== input.backend.sandboxId ||
+      seed.leaseEpoch !== input.backend.leaseEpoch ||
+      seed.providerInstanceId !== input.backend.providerInstanceId ||
+      !Number.isSafeInteger(input.backend.activeEpoch) ||
+      input.backend.activeEpoch < 0
+    ) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "adoptRetainedProcess",
+        `Retained provider session ${input.process.providerSessionId} did not match the exact default backend identity`,
+      );
+    }
+    const existing = this.retainedProcesses.get(providerSessionId);
+    if (existing) {
+      if (
+        existing.process.id === input.process.id &&
+        existing.backend.session === seed.session &&
+        existing.backend.sandboxId === input.backend.sandboxId &&
+        existing.backend.leaseEpoch === input.backend.leaseEpoch &&
+        existing.backend.providerInstanceId === input.backend.providerInstanceId &&
+        existing.backend.activeEpoch === input.backend.activeEpoch
+      ) {
+        return;
+      }
+      throw new RoutingMutationOutcomeUnknownError(
+        "adoptRetainedProcess",
+        `Provider session ${providerSessionId} is already bound to a different retained process identity`,
+      );
+    }
+    this.retainedProcesses.set(providerSessionId, {
+      process: { ...input.process },
+      backend: {
+        ...seed,
+        activeEpoch: input.backend.activeEpoch,
+      },
+      durable: true,
+      pendingParentPromotion: null,
+      pendingMutationSettlement: null,
+      pendingTerminal: null,
+      settlement: null,
+    });
   }
 
   private async ensureParentPromotion(record: RetainedProcessRecord): Promise<void> {
@@ -1006,6 +1079,14 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       positiveProviderSessionId(providerSessionId) !== null &&
       this.retainedProcesses.has(providerSessionId)
     );
+  }
+
+  /** Return only OpenGeni's durable UUID + provider locator. Backend/session
+   * objects remain private so a caller cannot forge route authority from this
+   * diagnostic handoff. */
+  retainedProcessIdentity(providerSessionId: number): RoutingRetainedProcess | null {
+    const record = this.retainedProcesses.get(providerSessionId);
+    return record ? { ...record.process } : null;
   }
 
   /** Model/user-visible stdin is a distinct workspace mutation admission under

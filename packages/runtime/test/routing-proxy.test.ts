@@ -447,6 +447,132 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(newWrites).toBe(0);
   });
 
+  test("an adopted durable process stays on the exact default backend without reading a moved pointer", async () => {
+    let pointerReads = 0;
+    let oldWrites = 0;
+    let newWrites = 0;
+    let settled = 0;
+    const home: RoutableBackendSession = {
+      async writeStdin() {
+        oldWrites += 1;
+        return "Process exited with code 17\n\nOutput:\ndone";
+      },
+    };
+    const rival: RoutableBackendSession = {
+      async writeStdin() {
+        newWrites += 1;
+        return "Process exited with code 0\n\nOutput:\nwrong";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: {
+        session: home,
+        sandboxId: null,
+        kind: "modal",
+        leaseEpoch: 9,
+        providerInstanceId: "box-home",
+      },
+      readPointer: async () => {
+        pointerReads += 1;
+        return { activeSandboxId: "22222222-2222-4222-8222-222222222222", activeEpoch: 12 };
+      },
+      resolveActiveBackend: async () => ({
+        session: rival,
+        sandboxId: "22222222-2222-4222-8222-222222222222",
+        kind: "selfhosted",
+      }),
+      settleProcess: async ({ proof }) => {
+        expect(proof).toEqual({
+          outcome: "exited",
+          exitCode: 17,
+          reason: "provider_exit_banner",
+        });
+        settled += 1;
+      },
+    });
+
+    proxy.adoptRetainedProcess({
+      process: {
+        id: "33333333-3333-4333-8333-333333333333",
+        providerSessionId: 88,
+      },
+      backend: {
+        sandboxId: null,
+        leaseEpoch: 9,
+        providerInstanceId: "box-home",
+        activeEpoch: 4,
+      },
+    });
+    expect(proxy.retainedProcessIdentity(88)).toEqual({
+      id: "33333333-3333-4333-8333-333333333333",
+      providerSessionId: 88,
+    });
+    expect(await proxy.writeStdinForProcessControl({ sessionId: 88, chars: "" })).toContain(
+      "code 17",
+    );
+    expect(pointerReads).toBe(0);
+    expect(oldWrites).toBe(1);
+    expect(newWrites).toBe(0);
+    expect(settled).toBe(1);
+    expect(proxy.hasRetainedProcess(88)).toBe(false);
+  });
+
+  test("retained-process adoption rejects stale provider identity and conflicting duplicates", () => {
+    const home: RoutableBackendSession = {
+      async writeStdin() {
+        return "";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      defaultResolved: {
+        session: home,
+        sandboxId: null,
+        kind: "modal",
+        leaseEpoch: 5,
+        providerInstanceId: "box-current",
+      },
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: home, sandboxId: null, kind: "modal" }),
+    });
+    const process = {
+      id: "44444444-4444-4444-8444-444444444444",
+      providerSessionId: 91,
+    };
+
+    expect(() =>
+      proxy.adoptRetainedProcess({
+        process,
+        backend: {
+          sandboxId: null,
+          leaseEpoch: 4,
+          providerInstanceId: "box-old",
+          activeEpoch: 3,
+        },
+      }),
+    ).toThrow(RoutingMutationOutcomeUnknownError);
+
+    proxy.adoptRetainedProcess({
+      process,
+      backend: {
+        sandboxId: null,
+        leaseEpoch: 5,
+        providerInstanceId: "box-current",
+        activeEpoch: 3,
+      },
+    });
+    expect(() =>
+      proxy.adoptRetainedProcess({
+        process: { ...process, id: "55555555-5555-4555-8555-555555555555" },
+        backend: {
+          sandboxId: null,
+          leaseEpoch: 5,
+          providerInstanceId: "box-current",
+          activeEpoch: 3,
+        },
+      }),
+    ).toThrow(RoutingMutationOutcomeUnknownError);
+  });
+
   test("the eager editor path cannot bypass route resolution or mutation admission", async () => {
     const events: string[] = [];
     const eagerEditor = {

@@ -380,6 +380,7 @@ export {
   type RoutableBackendSession,
   type ResolvedActiveBackend,
   type RoutingRetainedProcess,
+  type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,
   type RoutingSandboxSessionDeps,
   type RoutingTransitionEvent,
