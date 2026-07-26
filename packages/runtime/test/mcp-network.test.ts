@@ -130,17 +130,21 @@ describe("MCP network and payload boundary", () => {
   });
 
   test("rejects aggregate entry overflow across providers without committing the failed source", () => {
-    const budget = new McpAggregateToolListBudget(
-      "aggregate test",
-      4_096,
-      Number.MAX_SAFE_INTEGER,
+    const budget = new McpAggregateToolListBudget("aggregate test", 4_096, Number.MAX_SAFE_INTEGER);
+    for (let provider = 0; provider < 4; provider += 1) {
+      budget.replace(
+        `provider-${provider}`,
+        Array.from({ length: 1_000 }, (_, index) => ({
+          name: `provider-${provider}-${index}`,
+        })),
+      );
+    }
+    budget.replace(
+      "provider-remainder",
+      Array.from({ length: 96 }, (_, index) => ({ name: `remainder-${index}` })),
     );
-    const firstProvider = Array.from({ length: 4_096 }, (_, index) => ({
-      name: `provider-a-${index}`,
-    }));
-    budget.replace("provider-a", firstProvider);
 
-    expect(() => budget.replace("provider-b", [{ name: "one-more" }])).toThrow(
+    expect(() => budget.replace("provider-overflow", [{ name: "one-more" }])).toThrow(
       McpPayloadTooLargeError,
     );
     expect(budget.snapshot().entries).toBe(4_096);

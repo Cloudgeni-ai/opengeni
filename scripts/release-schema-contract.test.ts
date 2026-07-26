@@ -85,7 +85,8 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(97 + currentMainMigrations.length);
+    expect(contract.fileCount).toBe(98 + currentMainMigrations.length);
+    expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
     expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
     expect(
       contract.migrations

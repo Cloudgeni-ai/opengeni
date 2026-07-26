@@ -184,6 +184,27 @@ Candidate or operator admission must fail closed when those provider identities
 do not match; do not weaken the provenance check or recreate approval from a
 comment, commit message, or local record.
 
+For a single-maintainer source PR, generate the exact structured review body
+before merging. Submit the result as a native `COMMENTED` pull-request review;
+the formatter can also print the canonical SHA-256 needed by an external
+operator to bind the same artifact:
+
+```bash
+bun scripts/release-review.ts \
+  --base <exact-current-main-sha> \
+  --head <exact-reviewed-pr-head-sha> \
+  --reviewer <trusted-maintainer-login>
+
+bun scripts/release-review.ts \
+  --base <exact-current-main-sha> \
+  --head <exact-reviewed-pr-head-sha> \
+  --reviewer <trusted-maintainer-login> \
+  --digest
+```
+
+Regenerate the body and verdict after every head or base movement. Do not edit a
+submitted review after merge to manufacture evidence retroactively.
+
 That workflow requires the exact current `main` SHA, no pending changesets, and
 the exact expected package set (for example, `@opengeni/react@0.15.0`). It
 builds API, worker, web, relay, and stock headless-sandbox images under

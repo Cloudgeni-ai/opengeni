@@ -8,12 +8,12 @@ import type {
   SessionEvent,
 } from "@opengeni/sdk";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../session-context";
+import { useEmbeddedSession, type EmbeddedSessionClientOverride } from "../session-context";
 import { useSessionEventTrigger, type SessionEventFeedOptions } from "./internal";
 
 export type ComposerSendExtras = Omit<SendMessageInput, "text" | "clientEventId">;
 
-export type UseComposerOptions = ClientOverride &
+export type UseComposerOptions = EmbeddedSessionClientOverride &
   SessionEventFeedOptions & {
     /** Called with the accepted text after a successful send. */
     onSent?: ((text: string) => void) | undefined;
@@ -75,7 +75,7 @@ export function useComposer(
   sessionId: string | null | undefined,
   options: UseComposerOptions = {},
 ): ComposerState {
-  const { client, workspaceId, registerSessionReconciler } = useOpenGeni(options);
+  const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const durableDrafts = options.draftPersistence !== "disabled";
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const [value, setValue] = useState("");
@@ -584,6 +584,11 @@ export function useComposer(
           const workspaceBlocker = options.effectiveControl?.blockers.find(
             (blocker) => blocker.kind === "workspace",
           );
+          if (!client.setWorkspaceInferenceState) {
+            throw new Error(
+              "@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.",
+            );
+          }
           await client.setWorkspaceInferenceState(workspaceId, {
             action: "resume",
             clientEventId: generateClientEventId(),

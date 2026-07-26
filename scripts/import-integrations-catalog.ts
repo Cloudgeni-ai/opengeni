@@ -176,26 +176,26 @@ export function normalizeCatalogSnapshot(
     const domain = normalizeDomain(candidate.domain);
     const rawMcpUrl = stringValue(candidate.mcpUrl);
     if (!domain) {
-      skipped.push({ domain: null, mcpUrl: rawMcpUrl ?? null, reason: "missing_domain" });
+      skipped.push({ domain: null, mcpUrl: null, reason: "missing_domain" });
       continue;
     }
     if (deadDemoDomains.has(domain)) {
-      skipped.push({ domain, mcpUrl: rawMcpUrl ?? null, reason: "dead_demo_domain" });
+      skipped.push({ domain, mcpUrl: null, reason: "dead_demo_domain" });
       continue;
     }
     if (!rawMcpUrl) {
       skipped.push({ domain, mcpUrl: null, reason: "missing_url" });
       continue;
     }
-    const importable = importableMcpUrl(rawMcpUrl);
-    if (!importable.ok) {
-      skipped.push({ domain, mcpUrl: rawMcpUrl, reason: importable.reason });
+    const rejectionReason = catalogMcpUrlRejection(rawMcpUrl);
+    if (rejectionReason) {
+      skipped.push({ domain, mcpUrl: null, reason: rejectionReason });
       continue;
     }
     const mcpUrl = canonicalMcpUrl(rawMcpUrl);
     const transport = normalizeTransport(candidate.transport ?? candidate.transports);
     if (!transport) {
-      skipped.push({ domain, mcpUrl, reason: "transport_not_streamable_http" });
+      skipped.push({ domain, mcpUrl: null, reason: "transport_not_streamable_http" });
       continue;
     }
     const key = `${domain}\n${mcpUrl}`;
@@ -210,7 +210,7 @@ export function normalizeCatalogSnapshot(
         unverifiedRows += 1;
         skipped.push({
           domain,
-          mcpUrl,
+          mcpUrl: null,
           reason: probeStatus
             ? `probe_${probeStatus}:${stringValue(probe?.reason) ?? "unknown"}`
             : "probe_missing",
@@ -220,7 +220,7 @@ export function normalizeCatalogSnapshot(
     }
     const authKind = normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
-      skipped.push({ domain, mcpUrl, reason: "auth_unknown" });
+      skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
       continue;
     }
     const authContract = normalizeAuthContract(
@@ -252,13 +252,13 @@ export function normalizeCatalogSnapshot(
       // Credential prose is not a machine-actionable runtime contract. Keep
       // the row out of the registry rather than exposing a server that cannot
       // be connected safely.
-      skipped.push({ domain, mcpUrl, reason: "api_key_metadata_unactionable" });
+      skipped.push({ domain, mcpUrl: null, reason: "api_key_metadata_unactionable" });
       continue;
     }
     // Only accepted rows claim their normalized surface key. A missing or
     // failed probe must not shadow a later alias carrying usable evidence.
     if (seen.has(key)) {
-      skipped.push({ domain, mcpUrl, reason: "duplicate_surface" });
+      skipped.push({ domain, mcpUrl: null, reason: "duplicate_surface" });
       continue;
     }
     seen.add(key);
@@ -272,7 +272,7 @@ export function normalizeCatalogSnapshot(
     const winner = bestCatalogRow(existing, row);
     const loser = winner === existing ? row : existing;
     candidatesByDomainName.set(domainNameKey, winner);
-    skipped.push({ domain: loser.domain, mcpUrl: loser.mcpUrl, reason: "duplicate_domain_name" });
+    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_domain_name" });
   }
 
   const candidatesByEndpoint = new Map<string, CatalogIntegrationRow>();
@@ -287,7 +287,7 @@ export function normalizeCatalogSnapshot(
     const winner = bestCatalogRow(existing, row);
     const loser = winner === existing ? row : existing;
     candidatesByEndpoint.set(endpointKey, winner);
-    skipped.push({ domain: loser.domain, mcpUrl: loser.mcpUrl, reason: "duplicate_endpoint" });
+    skipped.push({ domain: loser.domain, mcpUrl: null, reason: "duplicate_endpoint" });
   }
 
   const rows = [...candidatesByEndpoint.values()].sort(
@@ -662,13 +662,6 @@ function deriveAuthKind(
 function deriveAuthContract(surface: UnknownRecord): Record<string, unknown> | null {
   const auth = asRecord(surface.auth);
   return normalizeAuthContract(surface.authContract ?? auth?.authContract ?? auth?.headerContract);
-}
-
-function importableMcpUrl(
-  value: string | null | undefined,
-): { ok: true } | { ok: false; reason: string } {
-  const reason = catalogMcpUrlRejection(value);
-  return reason ? { ok: false, reason } : { ok: true };
 }
 
 /**

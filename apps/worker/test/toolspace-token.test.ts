@@ -8,13 +8,10 @@ const workspaceId = "22222222-2222-4222-8222-222222222222";
 const sessionId = "33333333-3333-4333-8333-333333333333";
 const authority = {
   sessionId,
-  turnId: "44444444-4444-4444-8444-444444444444",
-  attemptId: "55555555-5555-4555-8555-555555555555",
-  executionGeneration: 1,
 };
 
 describe("toolspace token mint and sandbox delivery pointers", () => {
-  test("renewal preserves frozen authority while advancing the signed expiry", async () => {
+  test("renewal preserves session authority while advancing the signed expiry", async () => {
     const settings = testSettings({
       delegationSecret: "toolspace-secret",
       toolspaceEnabled: true,
@@ -102,14 +99,14 @@ describe("toolspace token mint and sandbox delivery pointers", () => {
     expect(payload).toMatchObject({
       accountId,
       workspaceId,
-      subjectId: `sandbox:${authority.turnId}`,
+      subjectId: `sandbox:${sessionId}`,
       subjectLabel: "sandbox toolspace",
       permissions: ["toolspace:call"],
       sessionId,
-      turnId: authority.turnId,
-      attemptId: authority.attemptId,
-      executionGeneration: authority.executionGeneration,
     });
+    expect(payload.turnId).toBeUndefined();
+    expect(payload.attemptId).toBeUndefined();
+    expect(payload.executionGeneration).toBeUndefined();
   });
 
   test("connected-machine (selfhosted) turns mint the token too — there is no skip path", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/runtime",
-  "version": "0.12.6",
+  "version": "0.13.0",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -52,8 +52,8 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
-    "debug": "4.4.3",
     "@opengeni/network": "workspace:*",
+    "debug": "4.4.3",
     "modal": "0.7.6",
     "openai": "6.47.0",
     "ws": "8.21.1"

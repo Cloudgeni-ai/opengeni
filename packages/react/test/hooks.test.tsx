@@ -703,9 +703,22 @@ describe("useSessionControl", () => {
     expect(sent).toEqual([
       { kind: "pause", reason: "stop now" },
       { kind: "resume", reason: "continue" },
-      { kind: "decision", approvalId: "ap-1", decision: "approve", message: "looks safe" },
-      { kind: "decision", approvalId: "ap-2", decision: "reject" },
+      {
+        kind: "decision",
+        approvalId: "ap-1",
+        decision: "approve",
+        message: "looks safe",
+        clientEventId: expect.any(String),
+      },
+      {
+        kind: "decision",
+        approvalId: "ap-2",
+        decision: "reject",
+        clientEventId: expect.any(String),
+      },
     ]);
+    const decisions = sent.slice(2) as Array<{ clientEventId: string }>;
+    expect(decisions[0]?.clientEventId).not.toBe(decisions[1]?.clientEventId);
     expect(hook.result.current.error).toBeNull();
     await hook.unmount();
   });
@@ -1066,14 +1079,19 @@ describe("useComposer durable draft and control binding", () => {
     );
     await flush();
 
-    const pendingSend = hook.result.current.send("old-session message");
+    let pendingSend!: Promise<boolean>;
+    await flushing(() => {
+      pendingSend = hook.result.current.send("old-session message");
+    });
     await saveStarted;
     await hook.rerender(sessionB);
     await flush();
     expect(hook.result.current.value).toBe("draft B");
 
-    releaseSave({ ...draftA, revision: 2, text: "old-session message" });
-    await expect(pendingSend).resolves.toBe(false);
+    await flushing(async () => {
+      releaseSave({ ...draftA, revision: 2, text: "old-session message" });
+      expect(await pendingSend).toBe(false);
+    });
     await flush();
     expect(sent).toEqual([]);
     expect(hook.result.current.value).toBe("draft B");
@@ -1126,11 +1144,16 @@ describe("useComposer durable draft and control binding", () => {
     );
     await flush();
 
-    const pendingPause = hook.result.current.pause("old-session pause");
+    let pendingPause!: Promise<void>;
+    await flushing(() => {
+      pendingPause = hook.result.current.pause("old-session pause");
+    });
     await pauseStarted;
     await hook.rerender(sessionB);
-    releasePause();
-    await pendingPause;
+    await flushing(async () => {
+      releasePause();
+      await pendingPause;
+    });
     await flush();
     expect(hook.result.current.pausing).toBe(false);
     expect(hook.result.current.error).toBeNull();
