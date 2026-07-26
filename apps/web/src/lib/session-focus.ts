@@ -1,6 +1,18 @@
 export type SessionFocusTarget = "row" | "actions";
 
 /**
+ * Boundary navigation is a visual no-op when the requested index is already
+ * focused. It must not leave an intent behind for a later list refresh to
+ * interpret as a request to move DOM focus back to the row.
+ */
+export function shouldRecordSessionRowFocusIntent(
+  requestedIndex: number | null,
+  currentIndex: number,
+): boolean {
+  return requestedIndex !== null && requestedIndex !== currentIndex;
+}
+
+/**
  * Roving focus may move real DOM focus only for an explicit keyboard-navigation
  * intent. A pin mutation can reorder/remount the same row while preserving its
  * focus index; that derived change must not steal focus from a restored row

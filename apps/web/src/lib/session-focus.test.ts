@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 
-import { shouldMoveSessionRowFocus, shouldRestoreSessionFocus } from "./session-focus";
+import {
+  shouldMoveSessionRowFocus,
+  shouldRecordSessionRowFocusIntent,
+  shouldRestoreSessionFocus,
+} from "./session-focus";
 
 const SESSION_ID = "session-26";
 
@@ -21,6 +25,13 @@ function fakeElement(
 }
 
 describe("session pin focus restoration", () => {
+  test("does not retain intent for boundary navigation that is already current", () => {
+    expect(shouldRecordSessionRowFocusIntent(0, 0)).toBe(false);
+    expect(shouldRecordSessionRowFocusIntent(2, 2)).toBe(false);
+    expect(shouldRecordSessionRowFocusIntent(1, 0)).toBe(true);
+    expect(shouldRecordSessionRowFocusIntent(null, 0)).toBe(false);
+  });
+
   test("does not turn a pin remount reorder into a roving row-focus request", () => {
     // The actions trigger is restored by the pin operation after its row
     // remount. The subsequent focus-index effect has no keyboard intent and

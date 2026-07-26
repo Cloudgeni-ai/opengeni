@@ -279,6 +279,29 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
     const targetRow = pinnedB.getByRole("button", {
       name: /^Open Master pin target/,
     });
+
+    // A boundary key is a navigation no-op. If it records the already-current
+    // row as an intent, moving to that row's actions and then refreshing the
+    // list incorrectly steals focus back to the row.
+    const boundaryRow = pageB
+      .locator("[data-sessionpin-session-list] button[data-session-row]")
+      .first();
+    const boundarySessionId = await boundaryRow.getAttribute("data-session-row");
+    if (!boundarySessionId) throw new Error("expected a visible boundary session row");
+    await boundaryRow.focus();
+    await pageB.keyboard.press("Home");
+    const boundaryActions = pageB.locator(`button[data-session-actions="${boundarySessionId}"]`);
+    await boundaryActions.focus();
+    const boundaryRefresh = pageB.waitForResponse(
+      (response) => successfulSessionPageResponse(response, workspaceId),
+      { timeout: 10_000 },
+    );
+    await pageB.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await boundaryRefresh;
+    expect(
+      await pageB.evaluate(() => document.activeElement?.getAttribute("data-session-actions")),
+    ).toBe(boundarySessionId);
+
     await targetRow.focus();
     await pageB.keyboard.press("ArrowDown");
     expect(

@@ -57,6 +57,7 @@ import {
 } from "@/lib/session-rail";
 import {
   sessionFocusAttribute,
+  shouldRecordSessionRowFocusIntent,
   shouldMoveSessionRowFocus,
   shouldRestoreSessionFocus,
   type SessionFocusTarget,
@@ -834,9 +835,14 @@ export function SessionList() {
         nextIndex = flat.length - 1;
       }
       const next = nextIndex === null ? null : flat[nextIndex];
-      if (next) {
+      if (next && shouldRecordSessionRowFocusIntent(nextIndex, focusIndex)) {
         rowFocusIntent.current = next.id;
         setFocusedSessionId(next.id);
+      } else {
+        // A boundary key is a navigation no-op. Clear any older intent
+        // synchronously so a later list refresh cannot steal focus from a row
+        // action that the user focused after the no-op.
+        rowFocusIntent.current = null;
       }
     },
     [flat, focusIndex],
