@@ -94,6 +94,7 @@ const LEGACY_MIGRATION_REFERENCE_ALLOWLIST = new Set([
   "packages/db/drizzle/0068_workspace_control_event_bounds.sql",
   "packages/db/drizzle/0069_session_event_history_backfill.sql",
   "packages/db/drizzle/0074_session_activity_revisions.sql",
+  "packages/db/drizzle/0120_durable_goal_wake.sql",
 ]);
 const CATALOG_SNAPSHOT = "data/catalog/integrations-snapshot.json";
 const PUBLIC_FITNESS_DOMAIN = ["one", "pelo", "ton", ".com"].join("");

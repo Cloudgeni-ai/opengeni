@@ -738,12 +738,12 @@ describe("durable active-goal wake", () => {
       const ctx = await runningGoalFixture();
       await settleIdle(ctx);
       const suffix = crypto.randomUUID().replaceAll("-", "");
-      const functionName = `ope59_fault_${suffix}`;
-      const triggerName = `ope59_fault_${suffix}`;
+      const functionName = `durable_goal_wake_fault_${suffix}`;
+      const triggerName = `durable_goal_wake_fault_${suffix}`;
       await shared.admin.unsafe(`
         create function ${functionName}() returns trigger language plpgsql as $$
         begin
-          raise exception 'ope59 injected ${fault.name} failure';
+          raise exception 'injected durable goal wake ${fault.name} failure';
         end $$;
         create trigger ${triggerName} ${fault.timing} on ${fault.table}
         for each row when (${fault.condition}) execute function ${functionName}();
@@ -820,7 +820,7 @@ describe("durable active-goal wake", () => {
     expect(Number(goalTurns!.count)).toBe(0);
   });
 
-  test("a racing Steer remains the final authoritative direction in the coalesced goal turn", async () => {
+  test("a racing Steer remains the causal system direction while coalescing the goal update", async () => {
     const ctx = await runningGoalFixture();
     await settleIdle(ctx);
     expect((await materialize(ctx)).action).toBe("continue");
@@ -836,7 +836,7 @@ describe("durable active-goal wake", () => {
       ) values (
         ${ctx.grant.accountId}, ${ctx.grant.workspaceId!}, ${ctx.session.id},
         'agent_steer_instruction', 'action_required', ${ctx.session.id},
-        ${`ope59-steer:${operationId}`}, 'operator direction wins',
+        ${`durable-goal-wake-steer:${operationId}`}, 'operator direction wins',
         ${shared.admin.json({
           type: "agent_steer_instruction",
           instruction: "operator direction wins",
@@ -856,7 +856,7 @@ describe("durable active-goal wake", () => {
     });
     expect(claimed.action).toBe("claimed");
     if (claimed.action !== "claimed") throw new Error("coalesced Steer was not claimed");
-    expect(claimed.turn.source).toBe("goal");
+    expect(claimed.turn.source).toBe("system");
     const delivered = await listSessionSystemUpdatesForTurn(
       client.db,
       ctx.grant.workspaceId!,
@@ -873,8 +873,8 @@ describe("durable active-goal wake", () => {
   test("active-turn event writes and agent goal mutations complete without workspace/session lock inversion", async () => {
     const ctx = await runningGoalFixture();
     const suffix = crypto.randomUUID().replaceAll("-", "");
-    const functionName = `ope59_slow_event_${suffix}`;
-    const triggerName = `ope59_slow_event_${suffix}`;
+    const functionName = `durable_goal_wake_slow_event_${suffix}`;
+    const triggerName = `durable_goal_wake_slow_event_${suffix}`;
     await shared.admin.unsafe(`
       create function ${functionName}() returns trigger language plpgsql as $$
       begin

@@ -1832,10 +1832,10 @@ export const sessionGoals = pgTable(
     maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
     lastContinuationTurnId: uuid("last_continuation_turn_id"),
     versionAtLastContinuation: integer("version_at_last_continuation"),
-    // OPE-59: Postgres owns the continuation obligation. Terminal settlement
-    // advances wakeRevision in the same transaction that makes the session
-    // idle; materialization advances observedRevision only alongside the one
-    // typed update, timeline events, usage row, and workflow-wake outbox row.
+    // Postgres owns the continuation obligation. Terminal settlement advances
+    // wakeRevision in the same transaction that makes the session idle;
+    // materialization advances observedRevision only alongside the one typed
+    // update, timeline events, usage row, and workflow-wake outbox row.
     // Temporal signals and workflow history are replaceable nudges over these
     // monotonic revisions.
     continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })

@@ -38,8 +38,14 @@ describe("release schema contract", () => {
       fileCount: 2,
       latestMigration: "0002_second.sql",
       migrations: [
-        expect.objectContaining({ path: "0001_first.sql", deploymentMode: "historical" }),
-        expect.objectContaining({ path: "0002_second.sql", deploymentMode: "rolling" }),
+        expect.objectContaining({
+          path: "0001_first.sql",
+          deploymentMode: "historical",
+        }),
+        expect.objectContaining({
+          path: "0002_second.sql",
+          deploymentMode: "rolling",
+        }),
       ],
     });
   });
@@ -65,7 +71,7 @@ describe("release schema contract", () => {
     );
   });
 
-  test("preserves published host-export history and appends the forward repair", async () => {
+  test("preserves published host-export history and appends reserved forward migrations", async () => {
     const contract = await buildSchemaContract();
     const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
     const currentMainMigrations = [
@@ -85,9 +91,9 @@ describe("release schema contract", () => {
               : []),
           ],
     );
-    expect(contract.fileCount).toBe(98 + currentMainMigrations.length);
+    expect(contract.fileCount).toBe(100 + currentMainMigrations.length);
     expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
-    expect(contract.latestMigration).toBe("0108_fence_invalidated_warming_epochs.sql");
+    expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
     expect(
       contract.migrations
         .map((migration) => migration.path)
@@ -121,6 +127,14 @@ describe("release schema contract", () => {
     }
     expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
       sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0120_durable_goal_wake.sql")).toMatchObject({
+      sha256: "f3d63dd60c8d933d8729a597d947be940a0483a148665ecca47c8f05909b2577",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0121_goal_update_idempotency.sql")).toMatchObject({
+      sha256: "e90f030e9dfb3c2dc040b2192cdd874fad264020f06b9c82f1c3dcd30a9769ca",
       deploymentMode: "rolling",
     });
   });
