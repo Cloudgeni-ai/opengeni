@@ -1,5 +1,22 @@
 # @opengeni/config
 
+## 0.7.0
+
+### Minor Changes
+
+- 46bac05: Enforce a configurable inclusive nested-agent depth at the transactional
+  session-creation boundary with a server default of three. Persist immutable
+  lineage and policy snapshots, and return idempotent typed denial evidence without
+  creating run, workflow, sandbox, usage, or billing artifacts.
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+
 ## 0.6.10
 
 ### Patch Changes
