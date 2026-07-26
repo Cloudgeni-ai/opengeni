@@ -232,7 +232,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const exited: TerminalPtyExitedPayload = {
       ptyId,
       exitCode: process.exitCode,
-      reason: process.state === "exited" ? "exit" : "owner_gone",
+      reason: process.state === "exited" ? "exit" : "lost",
     };
     await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
       { type: "terminal.pty.exited", payload: exited },
@@ -2064,7 +2064,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
       throw new HTTPException(409, {
         message:
-          "interactive terminal persistence is unavailable on Connected Machines; use synchronous exec or attach the session home sandbox",
+          "durable interactive terminals require the session-home provider route and are unavailable on active swaps or non-persistable routes; use synchronous exec or attach the session home sandbox",
       });
     }
     const ptyId = crypto.randomUUID();

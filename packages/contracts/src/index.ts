@@ -5446,7 +5446,7 @@ export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDelt
 export const TerminalPtyExitedPayload = z.object({
   ptyId: z.string().uuid(),
   exitCode: z.number().int().nullable(),
-  reason: z.enum(["exit", "killed", "owner_gone", "timeout"]),
+  reason: z.enum(["exit", "killed", "owner_gone", "timeout", "lost"]),
 });
 export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 

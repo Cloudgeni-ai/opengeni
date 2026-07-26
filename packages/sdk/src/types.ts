@@ -1052,7 +1052,7 @@ export type TerminalPtyOutputDeltaPayload = {
 export type TerminalPtyExitedPayload = {
   ptyId: string;
   exitCode: number | null;
-  reason: "exit" | "killed" | "owner_gone" | "timeout";
+  reason: "exit" | "killed" | "owner_gone" | "timeout" | "lost";
 };
 
 // A2 FileSystem request/response.
