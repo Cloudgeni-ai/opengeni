@@ -122,9 +122,7 @@ describe("release schema contract", () => {
         "0116_nested_agent_depth_index.sql",
       ].filter((file) => migrations.has(file)),
     );
-    expect(contract.fileCount).toBe(
-      108 + (migrations.has(currentMainToolPolicyMigration) ? 1 : 0),
-    );
+    expect(contract.fileCount).toBe(108 + (migrations.has(currentMainToolPolicyMigration) ? 1 : 0));
     expect(contract.latestMigration).toBe("0116_nested_agent_depth_index.sql");
 
     const boundarySql = await readFile(
@@ -143,9 +141,7 @@ describe("release schema contract", () => {
     expect(sourceTableLock).toBeGreaterThanOrEqual(0);
     expect(guardInstall).toBeGreaterThan(sourceTableLock);
     expect(firstLedgerReconciliation).toBeGreaterThan(sourceTableLock);
-    expect(boundarySql.indexOf("DO $reconcile$", sourceTableLock)).toBeGreaterThan(
-      sourceTableLock,
-    );
+    expect(boundarySql.indexOf("DO $reconcile$", sourceTableLock)).toBeGreaterThan(sourceTableLock);
     expect(
       contract.migrations
         .map((migration) => migration.path)
