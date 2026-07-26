@@ -122,6 +122,8 @@ export type AppContextValue = {
   selectedInstallationId: number | null;
   repositoryGroups: RepositoryGroup[];
   toolMcpServers: McpServerOption[];
+  /** Capability MCP servers currently enabled as the workspace default. */
+  workspaceDefaultToolIds: string[];
   currentResources: ResourceRef[];
   addManualRepository: () => void;
   forgetAccessKey: () => void;
@@ -981,6 +983,7 @@ export function RootRouteComponent() {
           selectedInstallationId,
           repositoryGroups,
           toolMcpServers,
+          workspaceDefaultToolIds: workspaceMcpServers.map((server) => server.id),
           currentResources,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
@@ -1055,6 +1058,7 @@ export function RootRouteComponent() {
     setModelForSession,
     setSession,
     toolMcpServers,
+    workspaceMcpServers,
     workspaces,
   ]);
 

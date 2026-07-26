@@ -60,6 +60,7 @@ import type {
   SessionMcpApprovalPolicy,
   SessionMcpServerMetadata,
   SessionStatus,
+  SessionToolPolicy,
   SessionTurn,
   SessionQueueSnapshot,
   SessionSystemUpdate,
@@ -102,6 +103,7 @@ import {
   SESSION_EVENT_ENVELOPE_MAX_BYTES,
   SESSION_EVENT_TYPE_MAX_BYTES,
   resolveSessionEventTypeFilters,
+  capabilityCatalogItemIsTrustedForExposure,
   metadataWithTurnExecutionPolicyV1,
   readTurnExecutionPolicyV1,
   reasoningEffortForMetadata,
@@ -2970,6 +2972,7 @@ export type EnqueueSessionTurnInput = {
   turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolsProvided?: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
@@ -3965,7 +3968,17 @@ export async function listCapabilityCatalogItems(
         ),
       )
       .orderBy(asc(schema.capabilityCatalogItems.kind), asc(schema.capabilityCatalogItems.name));
-    return rows.map(mapCapabilityCatalogItem);
+    const installations = await scopedDb
+      .select()
+      .from(schema.capabilityInstallations)
+      .where(eq(schema.capabilityInstallations.workspaceId, workspaceId));
+    const installationByCapabilityId = new Map(
+      installations.map((installation) => [installation.capabilityId, installation]),
+    );
+    return rows.flatMap((row) => {
+      const exposure = catalogExposureState(row, installationByCapabilityId.get(row.id) ?? null);
+      return exposure === "blocked" ? [] : [mapCapabilityCatalogItem(row, exposure)];
+    });
   });
 }
 
@@ -3989,7 +4002,21 @@ export async function getCapabilityCatalogItem(
       )
       .orderBy(asc(sql`(${schema.capabilityCatalogItems.workspaceId} is null)`))
       .limit(1);
-    return row ? mapCapabilityCatalogItem(row) : null;
+    if (!row) {
+      return null;
+    }
+    const [installation] = await scopedDb
+      .select()
+      .from(schema.capabilityInstallations)
+      .where(
+        and(
+          eq(schema.capabilityInstallations.workspaceId, workspaceId),
+          eq(schema.capabilityInstallations.capabilityId, capabilityId),
+        ),
+      )
+      .limit(1);
+    const exposure = catalogExposureState(row, installation ?? null);
+    return exposure === "blocked" ? null : mapCapabilityCatalogItem(row, exposure);
   });
 }
 
@@ -4168,7 +4195,11 @@ export async function listEnabledMcpCapabilityServers(
   }
 
   return [...preferredByInstallation.values()].flatMap(({ item, installation }) => {
-    if (!item.endpointUrl || !mcpConnectivityOk(installation.metadata)) {
+    if (
+      catalogExposureState(item, installation) === "blocked" ||
+      !item.endpointUrl ||
+      !mcpConnectivityOk(installation.metadata)
+    ) {
       return [];
     }
     const headersEncrypted = encryptedHeadersConfig(installation.config.headersEncrypted);
@@ -12752,6 +12783,7 @@ export async function createSession(
     initialTurnInstructions?: string | null;
     resources: ResourceRef[];
     tools?: ToolRef[];
+    toolPolicy?: SessionToolPolicy | null;
     metadata: Record<string, unknown>;
     /**
      * Frozen creator authority. Legacy/test-only callers may omit this and get
@@ -12802,6 +12834,7 @@ export async function createSession(
             initialTurnInstructions: input.initialTurnInstructions ?? null,
             resources: input.resources,
             tools: input.tools ?? [],
+            toolPolicy: input.toolPolicy ?? null,
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
@@ -12856,6 +12889,7 @@ export async function createSessionWithIdempotencyKey(
     initialTurnInstructions?: string | null;
     resources: ResourceRef[];
     tools?: ToolRef[];
+    toolPolicy?: SessionToolPolicy | null;
     metadata: Record<string, unknown>;
     createdBy?: TurnInitiator;
     createdByContext?: TurnInitiatorContext;
@@ -12899,6 +12933,7 @@ export async function createSessionWithIdempotencyKey(
             initialTurnInstructions: input.initialTurnInstructions ?? null,
             resources: input.resources,
             tools: input.tools ?? [],
+            toolPolicy: input.toolPolicy ?? null,
             metadata: input.metadata,
             ...creatorColumns(frozenCreator),
             model: input.model,
@@ -15336,6 +15371,39 @@ export async function listSessionEvents(
 export type ToolspaceCallReservation =
   | { reserved: true; count: number; turn: SessionTurnForExecution }
   | { reserved: false; reason: TurnAttemptFenceRejectReason | "budget_exhausted" };
+
+export type ToolspaceTurnAttemptClaims = {
+  sessionId: string;
+  turnId: string;
+  attemptId: string;
+  executionGeneration: number;
+};
+
+/**
+ * Admit one exact Toolspace bearer before any session credential is decrypted or
+ * any upstream schema is enumerated. This intentionally reuses the canonical
+ * activity write fence so Pause/Steer, attempt replacement, generation changes,
+ * and terminal settlement revoke a copied token at the same linearization point
+ * as other attempt-owned writes.
+ */
+export async function admitToolspaceTurnAttempt(
+  db: Database,
+  workspaceId: string,
+  claims: ToolspaceTurnAttemptClaims,
+): Promise<boolean> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    return await scopedDb.transaction(async (tx) => {
+      const fence = await lockTurnAttemptWriteFenceTx(tx, {
+        workspaceId,
+        sessionId: claims.sessionId,
+        turnId: claims.turnId,
+        attemptId: claims.attemptId,
+        executionGeneration: claims.executionGeneration,
+      });
+      return fence.allowed && fence.turn.status === "running";
+    });
+  });
+}
 
 /**
  * Atomically reserve one toolspace call against a turn's per-turn budget.
@@ -23079,6 +23147,7 @@ export async function initializeSessionStartAtomically(
               turnInstructions: session.initialTurnInstructions ?? null,
               resources: session.resources,
               tools: session.tools,
+              toolsProvided: session.toolPolicy?.mode === "explicit",
               model: session.model,
               reasoningEffort: reasoningEffortForMetadata(
                 session.metadata,
@@ -23228,6 +23297,7 @@ export async function enqueueSessionTurn(
             turnInstructions: input.turnInstructions ?? null,
             resources: input.resources,
             tools: input.tools,
+            toolsProvided: input.toolsProvided ?? false,
             model: input.model,
             reasoningEffort: input.reasoningEffort,
             sandboxBackend: input.sandboxBackend,
@@ -29049,6 +29119,10 @@ function mapSession(
     instructions: row.instructions ?? null,
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
+    toolPolicy: (row.toolPolicy as SessionToolPolicy | null) ?? {
+      mode: "legacy",
+      inheritedFromSessionId: null,
+    },
     metadata: row.metadata,
     createdBy: initiatorFromStorage(
       row.createdByKind,
@@ -29149,6 +29223,7 @@ function mapSessionTurn(row: typeof schema.sessionTurns.$inferSelect): SessionTu
     prompt: row.prompt,
     resources: row.resources as ResourceRef[],
     tools: row.tools as ToolRef[],
+    toolsProvided: row.toolsProvided,
     model: row.model,
     reasoningEffort: row.reasoningEffort as ReasoningEffort,
     sandboxBackend: row.sandboxBackend as SandboxBackend,
@@ -29324,9 +29399,76 @@ function mapImportBatch(row: typeof schema.importBatches.$inferSelect): ImportBa
   };
 }
 
+type CatalogExposureState = "trusted" | "legacy_active" | "blocked";
+
+function catalogExposureState(
+  item: typeof schema.capabilityCatalogItems.$inferSelect,
+  installation: typeof schema.capabilityInstallations.$inferSelect | null,
+): CatalogExposureState {
+  if (
+    capabilityCatalogItemIsTrustedForExposure({
+      source: item.source as CapabilitySource,
+      stale: item.stale,
+      authKind: item.authKind as CapabilityCatalogItem["authKind"],
+      metadata: item.metadata,
+    })
+  ) {
+    return "trusted";
+  }
+  // Rolling compatibility for installations enabled before registry probe
+  // provenance existed. This is deliberately narrower than the normal trust
+  // gate: only an already-active, non-stale, known-auth row with enable-time
+  // connectivity evidence can continue. A present-but-non-real probe is an
+  // explicit negative verdict and can never be grandfathered.
+  if (
+    item.source !== registryCapabilitySource ||
+    item.stale ||
+    Object.prototype.hasOwnProperty.call(item.metadata, "mcpProbe") ||
+    !item.authKind ||
+    item.authKind === "unknown" ||
+    installation?.status !== "active" ||
+    !mcpConnectivityOk(installation.metadata)
+  ) {
+    return "blocked";
+  }
+  const hasCredentialBinding =
+    !!encryptedHeadersConfig(installation.config.headersEncrypted) ||
+    !!connectionRefConfig(installation.config.connectionRef);
+  if (item.authModel && !hasCredentialBinding) {
+    return "blocked";
+  }
+  return "legacy_active";
+}
+
 function mapCapabilityCatalogItem(
   row: typeof schema.capabilityCatalogItems.$inferSelect,
+  exposure: "trusted" | "legacy_active" | "unverified" = capabilityCatalogItemIsTrustedForExposure({
+    source: row.source as CapabilitySource,
+    stale: row.stale,
+    authKind: row.authKind as CapabilityCatalogItem["authKind"],
+    metadata: row.metadata,
+  })
+    ? "trusted"
+    : "unverified",
 ): CapabilityCatalogItem {
+  const catalogTrust =
+    exposure === "legacy_active"
+      ? {
+          state: "legacy_active" as const,
+          reason: "active_installation_compatibility" as const,
+        }
+      : exposure === "trusted"
+        ? {
+            state: "trusted" as const,
+            reason:
+              row.source === registryCapabilitySource
+                ? ("verified_probe" as const)
+                : ("trusted_source" as const),
+          }
+        : {
+            state: "unverified" as const,
+            reason: "missing_verification" as const,
+          };
   const runtime =
     row.kind === "mcp" && row.endpointUrl
       ? {
@@ -29336,6 +29478,7 @@ function mapCapabilityCatalogItem(
           notes: row.authModel
             ? "Requires credential headers supplied in the enable request."
             : null,
+          catalogTrust,
         }
       : {
           available: false,
@@ -29343,6 +29486,7 @@ function mapCapabilityCatalogItem(
             row.kind === "mcp"
               ? "Remote streamable HTTP endpoint is required for runtime use."
               : null,
+          catalogTrust,
         };
   return {
     id: row.id,

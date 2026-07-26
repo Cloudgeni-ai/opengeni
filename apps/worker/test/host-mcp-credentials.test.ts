@@ -46,6 +46,7 @@ describe("connectionTokenResolverForTurn", () => {
       workspaceId: "workspace-1",
       subjectId: "worker:first-party-mcp",
       serverId: "gitlab",
+      destinationUrl: "https://gitlab.example/mcp",
       toolName: "merge_request_create",
       connectionRef: {
         provider: "gitlab",
@@ -70,6 +71,7 @@ describe("connectionTokenResolverForTurn", () => {
       surface: "model",
       serverId: "gitlab",
       toolName: "merge_request_create",
+      destinationUrl: "https://gitlab.example/mcp",
       connectionRef: {
         provider: "gitlab",
         providerDomain: "gitlab.example",

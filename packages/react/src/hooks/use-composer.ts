@@ -27,23 +27,15 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     effectiveControl?: EffectiveSessionControl | null | undefined;
     /** Apply durable model/tool/reasoning settings in the host's controlled UI. */
     onDraftApplied?: ((draft: ComposerDraft) => void) | undefined;
-    /**
-     * Opt out of OpenGeni's remote composer-draft reads and writes. Embedded
-     * hosts can use this when their human lane permits messages and controls but
-     * deliberately withholds draft mutation because model/tool policy is
-     * server-owned. The unsent value remains local React state and send/steer
-     * continue to work without a draft revision fence. Queue checkout is hidden
-     * because the current queue-edit contract necessarily creates a durable
-     * composer draft.
-     *
-     * @default "durable"
-     */
+    /** Disable remote composer-draft reads and writes for embedded hosts. */
     draftPersistence?: "durable" | "disabled" | undefined;
   };
 
 export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
+  /** Read the current draft synchronously before a destructive replacement. */
+  hasDraftContent: () => boolean;
   /** Append the draft behind prompts already visible in the queue. */
   send: (text?: string) => Promise<boolean>;
   /** Supersede current direction with the draft. */
@@ -61,12 +53,7 @@ export type ComposerState = {
   draftLoading: boolean;
   draftSaving: boolean;
   draftConflict: Error | null;
-  /**
-   * Whether this controller owns a durable server-side draft. Custom
-   * controllers that omit the field retain the historical durable behavior.
-   * Queue checkout is unavailable when persistence is disabled because the
-   * current queue-edit contract atomically moves the turn into that draft.
-   */
+  /** Whether this controller owns a durable server-side draft. */
   draftPersistence?: "durable" | "disabled" | undefined;
   /** Apply an atomic queue Edit checkout without a second read. */
   applyDraft: (draft: ComposerDraft) => void;
@@ -92,6 +79,8 @@ export function useComposer(
   const durableDrafts = options.draftPersistence !== "disabled";
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
   const [value, setValue] = useState("");
+  // Keep rendered state behind the committed target identity for one frame:
+  // a parent may switch sessionId without remounting this public hook.
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
   const [sending, setSending] = useState(false);
   const [pausing, setPausing] = useState(false);
@@ -103,11 +92,12 @@ export function useComposer(
   const [draftConflict, setDraftConflict] = useState<Error | null>(null);
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
   const pendingClientEventId = useRef<string | null>(null);
+  const valueRef = useRef("");
   const draftRef = useRef<ComposerDraft | null>(null);
-  const draftLoadErrorRef = useRef<Error | null>(null);
-  const draftReadGeneration = useRef(0);
+  const restoredResourcesRef = useRef<ResourceRef[]>([]);
   const localEditRevision = useRef(0);
   const targetGeneration = useRef(0);
+  const draftReadGeneration = useRef(0);
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
@@ -115,29 +105,25 @@ export function useComposer(
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
-  useLayoutEffect(() => {
-    sendExtrasRef.current = options.sendExtras;
-  }, [options.sendExtras]);
-  const liveExtras = resolveSendExtras(options.sendExtras);
-  const liveExtrasVersion = JSON.stringify(liveExtras);
+  sendExtrasRef.current = options.sendExtras;
+  const liveExtrasVersion = JSON.stringify(resolveSendExtras(options.sendExtras));
 
   // A composer is bound to one session: switching targets must not leak the
-  // previous session's draft, error, or retry idempotency key. Revoke the old
-  // target only when the new render commits: a suspended transition must leave
-  // the still-visible composer fully interactive.
+  // previous session's draft, error, or retry idempotency key.
   const targetKeyRef = useRef(targetKey);
   useLayoutEffect(() => {
     if (targetKeyRef.current === targetKey) return;
     targetKeyRef.current = targetKey;
     targetGeneration.current += 1;
+    draftReadGeneration.current += 1;
     pendingClientEventId.current = null;
     localEditRevision.current = 0;
-    draftReadGeneration.current += 1;
+    valueRef.current = "";
     draftRef.current = null;
-    draftLoadErrorRef.current = null;
+    restoredResourcesRef.current = [];
     lastSavedSignature.current = null;
-    // An unresolved save for the old target must neither block nor join the
-    // new target's autosave chain. Its own generation fence drops settlement.
+    // Old saves may still be awaiting the network. Their generation fence
+    // prevents settlement, and a fresh chain avoids blocking this target.
     saveChain.current = Promise.resolve();
     setStateTargetKey(targetKey);
     setValue("");
@@ -158,6 +144,8 @@ export function useComposer(
       if (!durableDrafts) {
         pendingClientEventId.current = null;
         localEditRevision.current += 1;
+        valueRef.current = next.text;
+        restoredResourcesRef.current = next.resources;
         draftRef.current = null;
         lastSavedSignature.current = null;
         setDraft(null);
@@ -166,7 +154,9 @@ export function useComposer(
         setDraftConflict(null);
         return;
       }
+      valueRef.current = next.text;
       draftRef.current = next;
+      restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
       pendingClientEventId.current = null;
@@ -180,7 +170,7 @@ export function useComposer(
   );
 
   const loadDraft = useCallback(
-    async (replaceLocal: boolean, rejectOnFailure = false): Promise<void> => {
+    async (replaceLocal: boolean): Promise<void> => {
       if (targetKeyRef.current !== targetKey) return;
       if (!sessionId || !durableDrafts) {
         setDraftLoading(false);
@@ -189,47 +179,57 @@ export function useComposer(
       const generation = targetGeneration.current;
       const readTicket = ++draftReadGeneration.current;
       const localAtStart = localEditRevision.current;
+      const baseAtStart = draftRef.current;
+      const extrasAtStart = resolveSendExtras(sendExtrasRef.current);
+      const localSignatureAtStart = baseAtStart
+        ? draftSignature(
+            composerDraftPayload(
+              baseAtStart,
+              valueRef.current,
+              restoredResourcesRef.current,
+              extrasAtStart,
+            ),
+          )
+        : null;
+      const localWasDirtyAtStart =
+        localSignatureAtStart === null
+          ? localAtStart !== 0
+          : localSignatureAtStart !== lastSavedSignature.current;
       setDraftLoading(true);
       try {
         const fetched = await client.getComposerDraft(workspaceId, sessionId);
-        if (generation !== targetGeneration.current || targetKeyRef.current !== targetKey) {
+        if (
+          generation !== targetGeneration.current ||
+          targetKeyRef.current !== targetKey ||
+          readTicket !== draftReadGeneration.current
+        ) {
           return;
         }
-        const ownsLatestRead = readTicket === draftReadGeneration.current;
         const currentRevision = draftRef.current?.revision ?? -1;
-        if ((ownsLatestRead || rejectOnFailure) && fetched.revision >= currentRevision) {
+        if (fetched.revision >= currentRevision) {
           draftRef.current = fetched;
           setDraft(fetched);
           setDraftConflict(null);
-          if (replaceLocal || localAtStart === localEditRevision.current) {
+          if (
+            replaceLocal ||
+            (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
+          ) {
+            valueRef.current = fetched.text;
+            restoredResourcesRef.current = fetched.resources;
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
             onDraftApplied?.(fetched);
           }
         }
-        const authoritativeRevision = draftRef.current?.revision ?? -1;
-        if (rejectOnFailure && authoritativeRevision < fetched.revision) {
-          throw new TypeError("Composer draft reconciliation did not commit authoritative state");
-        }
-        if (ownsLatestRead || rejectOnFailure) {
-          const recoveredError = draftLoadErrorRef.current;
-          draftLoadErrorRef.current = null;
-          if (recoveredError) {
-            setError((current) => (current === recoveredError ? null : current));
-          }
-        }
       } catch (cause) {
         if (
           generation === targetGeneration.current &&
           targetKeyRef.current === targetKey &&
-          (readTicket === draftReadGeneration.current || rejectOnFailure)
+          readTicket === draftReadGeneration.current
         ) {
-          const failure = asError(cause);
-          draftLoadErrorRef.current = failure;
-          setError(failure);
+          setError(asError(cause));
         }
-        if (rejectOnFailure) throw cause;
       } finally {
         if (
           generation === targetGeneration.current &&
@@ -264,29 +264,23 @@ export function useComposer(
       enabled: Boolean(sessionId) && durableDrafts,
       ...(options.events !== undefined ? { events: options.events } : {}),
     },
-    async () => await loadDraft(false, true),
   );
 
   const currentDraftPayload = useCallback((): SaveComposerDraftRequest | null => {
-    if (targetKeyRef.current !== targetKey) return null;
+    if (!durableDrafts || targetKeyRef.current !== targetKey) return null;
     const base = draftRef.current;
     if (!base) return null;
     const extras = resolveSendExtras(sendExtrasRef.current);
-    return {
-      expectedRevision: base.revision,
-      text: value,
-      resources: mergeResources(restoredResources, extras.resources ?? []),
-      tools: extras.tools ?? base.tools,
-      model: extras.model ?? base.model,
-      reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
-    };
-  }, [restoredResources, targetKey, value]);
+    return composerDraftPayload(base, value, restoredResources, extras);
+  }, [durableDrafts, restoredResources, targetKey, value]);
 
   const persistPayload = useCallback(
     async (payload: SaveComposerDraftRequest): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
-      if (!sessionId || targetKeyRef.current !== ownedTargetKey) return false;
+      if (!sessionId || !durableDrafts || targetKeyRef.current !== ownedTargetKey) {
+        return false;
+      }
       let success = false;
       const run = async () => {
         if (
@@ -339,7 +333,7 @@ export function useComposer(
       await saveChain.current;
       return success;
     },
-    [client, sessionId, targetKey, workspaceId],
+    [client, durableDrafts, sessionId, targetKey, workspaceId],
   );
 
   // Private durable autosave. A newer local edit is never replaced by an older
@@ -394,11 +388,10 @@ export function useComposer(
       setSending(true);
       setError(null);
       try {
-        // Trimming is only an emptiness check. A non-blank prompt must be sent
-        // byte-for-byte as the user wrote it, because expectedDraftRevision
-        // binds the submission to that exact durable draft. File-only messages
-        // use the same non-blank placeholder in both the saved draft and the
-        // submitted prompt so the content fence cannot reject its own client.
+        // Trimming is only an emptiness check. A non-blank prompt is persisted
+        // and submitted byte-for-byte, while file-only sends use the same
+        // placeholder for both operations so the server content fence cannot
+        // reject its own client.
         const sendText = hasText ? rawText : FILE_ONLY_MESSAGE_TEXT;
         const currentPayload = currentDraftPayload();
         const payload = currentPayload ? { ...currentPayload, text: sendText } : null;
@@ -409,11 +402,22 @@ export function useComposer(
         ) {
           return false;
         }
-        const input = composeSendInput(sendText, pendingClientEventId.current, extras, {
+        // The wire contract requires non-empty text (z.string().min(1)) and the
+        // worker rejects whitespace-only text; a file-only message therefore
+        // carries a minimal default so the attachments still get delivered.
+        const acknowledgedDraft = draftRef.current;
+        const sendExtras =
+          acknowledgedDraft?.toolsProvided === true &&
+          !Object.prototype.hasOwnProperty.call(extras, "tools")
+            ? { ...extras, tools: acknowledgedDraft.tools }
+            : extras;
+        const input = composeSendInput(sendText, pendingClientEventId.current, sendExtras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
             : {}),
-          ...(draftRef.current ? { expectedDraftRevision: draftRef.current.revision } : {}),
+          ...(durableDrafts && draftRef.current
+            ? { expectedDraftRevision: draftRef.current.revision }
+            : {}),
           resources: mergeResources(restoredResources, extras.resources ?? []),
         });
         if (delivery === "steer") {
@@ -440,6 +444,7 @@ export function useComposer(
             updatedAt: null,
           };
           draftRef.current = cleared;
+          restoredResourcesRef.current = [];
           setDraft(cleared);
           setRestoredResources([]);
           lastSavedSignature.current = draftSignature(draftPayload(cleared));
@@ -447,7 +452,10 @@ export function useComposer(
         if (explicit === undefined) {
           // Clear only the draft that was sent: edits made while the request
           // was in flight were never delivered and must survive.
-          setValue((current) => (current === draftAtSend ? "" : current));
+          if (valueRef.current === draftAtSend) {
+            valueRef.current = "";
+            setValue("");
+          }
         }
         onSent?.(sendText);
         return true;
@@ -471,6 +479,7 @@ export function useComposer(
     [
       client,
       currentDraftPayload,
+      durableDrafts,
       onSent,
       options.effectiveControl?.controlEtag,
       persistPayload,
@@ -491,7 +500,9 @@ export function useComposer(
   // — keeping useComposer attachment-agnostic while still lighting up the send
   // affordance the moment a file is ready. ChatComposer additionally gates this
   // on its `attachments.uploading` flag so a message never departs mid-upload.
-  const hasReadyResources = restoredResources.length > 0 || (liveExtras.resources?.length ?? 0) > 0;
+  const hasReadyResources =
+    restoredResources.length > 0 ||
+    (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
 
   const pause = useCallback(
     async (reason?: string): Promise<void> => {
@@ -570,12 +581,14 @@ export function useComposer(
       setError(null);
       try {
         if (option.scope === "workspace") {
-          if (!client.setWorkspaceInferenceState) {
-            throw new Error("Workspace-level resume is not available through this client");
-          }
           const workspaceBlocker = options.effectiveControl?.blockers.find(
             (blocker) => blocker.kind === "workspace",
           );
+          if (!client.setWorkspaceInferenceState) {
+            throw new Error(
+              "@opengeni/react: workspace-scoped resume requires setWorkspaceInferenceState.",
+            );
+          }
           await client.setWorkspaceInferenceState(workspaceId, {
             action: "resume",
             clientEventId: generateClientEventId(),
@@ -623,6 +636,7 @@ export function useComposer(
       if (targetKeyRef.current !== targetKey) return;
       pendingClientEventId.current = null;
       localEditRevision.current += 1;
+      valueRef.current = next;
       setValue(next);
     },
     [targetKey],
@@ -632,10 +646,26 @@ export function useComposer(
     (index: number) => {
       if (targetKeyRef.current !== targetKey) return;
       localEditRevision.current += 1;
-      setRestoredResources((current) => current.filter((_, candidate) => candidate !== index));
+      const next = restoredResourcesRef.current.filter((_, candidate) => candidate !== index);
+      restoredResourcesRef.current = next;
+      setRestoredResources(next);
     },
     [targetKey],
   );
+
+  const hasDraftContent = useCallback((): boolean => {
+    const current = draftRef.current;
+    const extras = resolveSendExtras(sendExtrasRef.current);
+    const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
+    const tools = toolsProvidedByHost ? (extras.tools ?? []) : (current?.tools ?? []);
+    return (
+      valueRef.current.length > 0 ||
+      restoredResourcesRef.current.length > 0 ||
+      (extras.resources?.length ?? 0) > 0 ||
+      tools.length > 0 ||
+      (current?.sourceTurnId !== null && current?.sourceTurnId !== undefined)
+    );
+  }, []);
 
   const resolveDraftConflict = useCallback(
     async (choice: "keep_mine" | "use_remote"): Promise<void> => {
@@ -679,6 +709,7 @@ export function useComposer(
   return {
     value: identityMatches ? value : "",
     setValue: updateValue,
+    hasDraftContent,
     send,
     steer,
     sending: identityMatches ? sending : false,
@@ -774,8 +805,27 @@ function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
     text: draft.text,
     resources: draft.resources,
     tools: draft.tools,
+    toolsProvided: draft.toolsProvided,
     model: draft.model,
     reasoningEffort: draft.reasoningEffort,
+  };
+}
+
+function composerDraftPayload(
+  base: ComposerDraft,
+  text: string,
+  restoredResources: ResourceRef[],
+  extras: ComposerSendExtras,
+): SaveComposerDraftRequest {
+  const toolsProvidedByHost = Object.prototype.hasOwnProperty.call(extras, "tools");
+  return {
+    expectedRevision: base.revision,
+    text,
+    resources: mergeResources(restoredResources, extras.resources ?? []),
+    tools: toolsProvidedByHost ? (extras.tools ?? []) : base.tools,
+    toolsProvided: toolsProvidedByHost ? true : base.toolsProvided,
+    model: extras.model ?? base.model,
+    reasoningEffort: extras.reasoningEffort ?? base.reasoningEffort,
   };
 }
 

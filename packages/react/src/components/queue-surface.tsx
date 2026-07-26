@@ -2,6 +2,7 @@ import { Loader2Icon } from "lucide-react";
 import { lazy, Suspense, type ComponentType } from "react";
 
 import type { QueueSurfaceProps } from "./queue-surface-implementation";
+export { requestQueueDraftEdit } from "./queue-draft-policy";
 import { EmptyQueueStateSurface } from "./queue-surface-state";
 
 export type { QueueSurfaceProps } from "./queue-surface-implementation";

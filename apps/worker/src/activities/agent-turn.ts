@@ -166,13 +166,15 @@ import {
   CODEX_CLIENT_VERSION,
   CODEX_FALLBACK_MODEL_SLUGS,
   CodexReloginRequired,
+  classifyCodexResponseTimeoutError,
   classifyCodexUsageLimitError,
   codexRequestStorage,
   isCodexTransportError,
   type CodexRequestContext,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
-import { mergeResourceRefs, mergeToolRefs } from "./common";
+import { mergeResourceRefs } from "./common";
+import { enabledCapabilityMcpToolRefs, resolveSessionToolPolicy } from "@opengeni/core";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
@@ -3423,6 +3425,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // Build it once and wrap BOTH the compaction summarizer (a separate model
       // call on the same codex client) and the main run; otherwise the summarizer
       // would hit the codex backend unauthenticated.
+      let codexModelRequestSequence = 0;
       const codexContext: CodexRequestContext | null =
         resolvedModel?.provider.kind === "codex-subscription"
           ? ((): CodexRequestContext => {
@@ -3453,6 +3456,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 onUsageHeaders: (snapshot) => {
                   latestCodexUsage = snapshot;
                 }, // latest wins; flushed once in finally
+                nextRequestId: () => `${dispatchId}:${++codexModelRequestSequence}`,
+                onModelRequestEvent: async (event) => {
+                  if (!publish || !turnId) {
+                    throw new Error("Codex model request started before the turn event producer");
+                  }
+                  await publish([
+                    {
+                      type: "agent.model.request",
+                      payload: {
+                        ...event,
+                        provider: "codex-subscription",
+                        turnId,
+                        attemptId: input.attemptId,
+                        dispatchId,
+                        executionGeneration,
+                      },
+                    },
+                  ]);
+                },
               };
             })()
           : null;
@@ -3647,9 +3669,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // connector scopes); no-op for every other turn. Its refreshing bearer is
       // resolved at connect time from the codex ALS (see the withCodex-wrapped
       // prepareTools call below).
+      // Resolve the durable policy at the turn boundary. Workspace-default
+      // sessions may discover newly enabled capability MCPs, while explicit,
+      // inherited-fixed, and legacy sessions remain narrowed to their stored
+      // materialized allow-list. `withCodexAppsTool` below keeps the existing
+      // single Codex lazy router/connector overlay; it is not a second policy
+      // or discovery path.
+      const effectivePolicyTools = resolveSessionToolPolicy({
+        ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
+        sessionTools: session.tools,
+        turnTools: turn.tools,
+        ...(turn.toolsProvided !== undefined ? { turnToolsProvided: turn.toolsProvided } : {}),
+        availableMcpServerIds: runSettings.mcpServers.map((server) => server.id),
+        defaultMcpServerIds: enabledCapabilityMcpToolRefs(settings, mcpSettings).map(
+          (tool) => tool.id,
+        ),
+      }).toolRefs;
       const turnTools = withCodexAppsTool(
         runSettings,
-        withFirstPartyTools(runSettings, mergeToolRefs(session.tools, turn.tools)),
+        withFirstPartyTools(runSettings, effectivePolicyTools),
       );
       // §7.6 connection-credential provider — load (and decrypt) the variable set via the host
       // `sandboxSecrets` provider when bound; unset → today's local decrypt.
@@ -3881,9 +3919,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           : undefined;
       const toolspaceAuthority = {
         sessionId: input.sessionId,
-        turnId: turn.id,
-        attemptId: input.attemptId,
-        executionGeneration: turn.executionGeneration,
       };
       const {
         environment: sandboxEnvironment,
@@ -4531,9 +4566,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // token skip does NOT transfer: that token is inert on a connected
         // machine (it uses its own git creds), but the toolspace token is the
         // machine's ONLY path to programmatic tool calling and grants no more
-        // than toolspace:call for its own session (own-session-bound, turn TTL,
-        // budgeted, approval-tools excluded). The runtime seeds it to the box's
-        // token file over the same exec channel, off-manifest, on every backend.
+        // than toolspace:call for its own session (own-session-bound,
+        // short-lived and renewable, per-active-turn budgeted, approval-tools
+        // excluded). The runtime seeds it to the box's token file over the same
+        // exec channel, off-manifest, on every backend.
         ...(sandboxToolspaceToken
           ? {
               toolspaceTokenSeed: sandboxToolspaceToken,
@@ -6528,7 +6564,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // truth, recover this SAME accepted turn, then let the workflow re-claim
       // it after a pacing delay. This is independent of goal state and never
       // relies on a synthetic continuation prompt.
-      const failure = agentRunFailurePayload(error);
+      const failure = agentRunFailurePayload(error, { isCodexTurn });
       if (isSessionEventPersistenceError(error)) {
         // Never pass the original Drizzle/postgres-js error to telemetry: its
         // nested cause may contain raw SQL and bound parameters. The typed DB
@@ -7155,11 +7191,17 @@ export function isTransientProviderError(error: unknown): boolean {
   );
 }
 
-export function agentRunFailurePayload(error: unknown): {
+export function agentRunFailurePayload(
+  error: unknown,
+  options: { isCodexTurn?: boolean } = {},
+): {
   error: string;
   code?: string;
   retryable?: boolean;
   detail?: string;
+  timeoutClass?: string;
+  responseObserved?: boolean;
+  requestId?: string;
   correlationId?: string;
   stage?: string;
   sqlState?: string | null;
@@ -7224,6 +7266,22 @@ export function agentRunFailurePayload(error: unknown): {
   const usageLimit = classifyCodexUsageLimitError(error);
   if (usageLimit) {
     return codexUsageLimitFailurePayload(usageLimit, message);
+  }
+  const codexTimeout = classifyCodexResponseTimeoutError(error, {
+    allowLegacyRequestTimeout: options.isCodexTurn === true,
+  });
+  if (codexTimeout) {
+    return {
+      error: codexTimeout.responseObserved
+        ? "The Codex response timed out after streaming began. Observed output was checkpointed; automatic replay is disabled because the upstream operation may still be active."
+        : "The Codex response timed out before any response was observed. Upstream acceptance is unknown, so automatic replay is disabled.",
+      code: "codex_response_timeout",
+      retryable: false,
+      timeoutClass: codexTimeout.timeoutClass,
+      responseObserved: codexTimeout.responseObserved,
+      ...(codexTimeout.requestId ? { requestId: codexTimeout.requestId } : {}),
+      ...(codexTimeout.message ? { detail: codexTimeout.message } : {}),
+    };
   }
   const mcpTimeout = classifyMcpTransportTimeoutError(error);
   if (mcpTimeout) {

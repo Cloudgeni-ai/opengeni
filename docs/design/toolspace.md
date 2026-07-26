@@ -107,7 +107,7 @@ short-lived `ogd_` token during environment preparation:
 {
   accountId,
   workspaceId,
-  subjectId: `sandbox:${runId}`,
+  subjectId: `sandbox:${sessionId}`,
   subjectLabel: "sandbox toolspace",
   permissions: ["toolspace:call"],
   sessionId,
@@ -116,10 +116,15 @@ short-lived `ogd_` token during environment preparation:
 ```
 
 Each bearer has a one-hour TTL. After the initial seed reaches a real sandbox
-session, the worker proactively re-signs the same account/workspace/session/run
+session, the worker proactively re-signs the same account/workspace/session
 authority and atomically replaces the file on a bounded cadence. Renewal is
 single-flight, retries transient write failures, and is stopped and drained at
-attempt finalization so a settled attempt cannot land a late replacement.
+attempt finalization so a settled attempt cannot land a late replacement. The
+bearer itself remains session-bound: each Toolspace request resolves the
+currently active turn, then uses that turn's exact attempt fence for budgeting,
+credential resolution, events, and late-output rejection. A later turn can use
+the same still-valid bearer; a session with no active turn cannot dial or call
+an upstream.
 Delivery mirrors `OPENGENI_GIT_TOKEN_FILE`: the token value is
 written into a sandbox file and the environment exposes only one stable legacy
 `OPENGENI_TOOLSPACE_TOKEN_FILE` pointer plus `OPENGENI_TOOLSPACE_URL`. That

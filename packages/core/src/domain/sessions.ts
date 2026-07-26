@@ -8,6 +8,7 @@ import {
 } from "@opengeni/config";
 import {
   CreateSessionRequest,
+  DEFAULT_FIRST_PARTY_MCP_PERMISSIONS,
   ServiceTurnInitiator,
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
@@ -26,6 +27,7 @@ import {
   type SessionMcpServerMetadata,
   type UpdateSessionMcpApprovalPolicyResponse,
   type SessionAuthorizationPort,
+  type SessionToolPolicy,
   type SessionTurn,
   type ToolRef,
   type TurnInitiator,
@@ -86,11 +88,14 @@ import { swapActiveSandbox, type FleetContext } from "../sandbox/fleet";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { requireVariableSetEncryption, validateVariableSetAttachment } from "./environments";
 import {
+  assertToolRefsSubset,
+  availableToolRefs,
   mergeToolRefs,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
   validateToolRefs,
+  validateToolRefsForSessionPolicy,
   withDefaultEnabledCapabilityMcpTools,
 } from "./resources";
 
@@ -449,6 +454,10 @@ export async function createAndStartSession(input: {
   turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  // Public admission always supplies provenance; optional keeps internal
+  // callers that predate durable tool-policy provenance source-compatible
+  // during the rolling deploy.
+  toolPolicy?: SessionToolPolicy;
   clientEventId?: string;
   model: string;
   reasoningEffort: Settings["openaiReasoningEffort"];
@@ -541,6 +550,7 @@ export async function createAndStartSession(input: {
       initialTurnInstructions: input.turnInstructions ?? null,
       resources: input.resources,
       tools: input.tools,
+      ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
       metadata: sessionMetadata,
       ...(input.createdBy ? { createdBy: input.createdBy } : {}),
       ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
@@ -574,6 +584,7 @@ export async function createAndStartSession(input: {
     initialTurnInstructions: input.turnInstructions ?? null,
     resources: input.resources,
     tools: input.tools,
+    ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
     metadata: sessionMetadata,
     ...(input.createdBy ? { createdBy: input.createdBy } : {}),
     ...(input.createdByContext ? { createdByContext: input.createdByContext } : {}),
@@ -608,6 +619,7 @@ async function finishStartSession(
     turnInstructions?: string | null;
     resources: ResourceRef[];
     tools: ToolRef[];
+    toolPolicy?: SessionToolPolicy;
     clientEventId?: string;
     model: string;
     reasoningEffort: Settings["openaiReasoningEffort"];
@@ -664,6 +676,7 @@ async function finishStartSession(
     reasoningEffortFallback: input.reasoningEffort,
     turnExecutionPolicy: input.turnExecutionPolicy,
     createdEventPayload: {
+      ...(input.toolPolicy ? { toolPolicy: input.toolPolicy } : {}),
       ...(input.variableSet
         ? { variableSetId: input.variableSet.id, variableSetName: input.variableSet.name }
         : {}),
@@ -833,6 +846,7 @@ export async function postUserMessageTurn(input: {
   turnInstructions?: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolsProvided: boolean;
   model?: string | null;
   reasoningEffort?: Settings["openaiReasoningEffort"] | null;
   clientEventId?: string;
@@ -877,6 +891,7 @@ export async function postUserMessageTurn(input: {
           turnInstructions: input.turnInstructions ?? null,
           resources: input.resources,
           tools: input.tools,
+          toolsProvided: input.toolsProvided,
           model: requestedModel,
           reasoningEffort: requestedReasoningEffort,
           reasoningEffortFallback: input.reasoningEffortFallback ?? settings.openaiReasoningEffort,
@@ -1007,21 +1022,58 @@ export async function createSessionForRequest(
       ? payload.resources
       : (parentSession?.resources ?? payload.resources),
   );
+  const toolsProvided = hasOwnProperty(rawPayload, "tools");
   const requestedTools = validateToolRefs(
-    hasOwnProperty(rawPayload, "tools") ? payload.tools : (parentSession?.tools ?? payload.tools),
+    toolsProvided ? payload.tools : (parentSession?.tools ?? payload.tools),
     runtimeSettings,
   );
-  const defaultedTools =
-    hasOwnProperty(rawPayload, "tools") || parentSession
-      ? requestedTools
-      : withDefaultEnabledCapabilityMcpTools(requestedTools, settings, capabilityRuntimeSettings);
+  let selectedTools: ToolRef[];
+  let toolPolicy: SessionToolPolicy;
+  if (parentSession) {
+    const parentTracksWorkspaceDefaults = parentSession.toolPolicy?.mode === "workspace_default";
+    const parentEffective = withFirstPartyTools(
+      parentTracksWorkspaceDefaults
+        ? withDefaultEnabledCapabilityMcpTools(
+            availableToolRefs(parentSession.tools, runtimeSettings),
+            settings,
+            runtimeSettings,
+          )
+        : parentSession.tools,
+      runtimeSettings,
+    );
+    if (toolsProvided) {
+      assertToolRefsSubset(
+        requestedTools,
+        parentEffective,
+        "child tools may only narrow the parent session tool policy",
+      );
+      selectedTools = requestedTools;
+      toolPolicy = { mode: "explicit", inheritedFromSessionId: parentSession.id };
+    } else {
+      selectedTools = parentEffective;
+      toolPolicy = {
+        mode: parentTracksWorkspaceDefaults ? "workspace_default" : "inherited",
+        inheritedFromSessionId: parentSession.id,
+      };
+    }
+  } else if (toolsProvided) {
+    selectedTools = requestedTools;
+    toolPolicy = { mode: "explicit", inheritedFromSessionId: null };
+  } else {
+    selectedTools = withDefaultEnabledCapabilityMcpTools(
+      requestedTools,
+      settings,
+      capabilityRuntimeSettings,
+    );
+    toolPolicy = { mode: "workspace_default", inheritedFromSessionId: null };
+  }
   // The first-party MCP server is attached to EVERY session. It hosts the
   // session's own metadata tool (set_session_title) + goal tools, and — only
   // when the grant carries the permission — the orchestration/variableSet/
   // github tools. Capability is gated per-tool by permission, never by whether
   // the server is attached, so a bare chat still gets titling while the
   // dangerous tools stay off by default.
-  const tools = withFirstPartyTools(defaultedTools, runtimeSettings);
+  const tools = withFirstPartyTools(selectedTools, runtimeSettings);
   await validateGitHubRepositorySelection(db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -1094,8 +1146,30 @@ export async function createSessionForRequest(
   // normal worker defaults. A child omission inherits its creator's exact
   // effective grant, preserving a host/operator's narrowed capability boundary
   // through the whole session tree.
+  const parentFirstPartyMcpPermissions = parentSession
+    ? [...(parentSession.firstPartyMcpPermissions ?? DEFAULT_FIRST_PARTY_MCP_PERMISSIONS)]
+    : null;
+  if (
+    parentFirstPartyMcpPermissions &&
+    payload.firstPartyMcpPermissions?.some(
+      (permission) => !hasPermission(parentFirstPartyMcpPermissions, permission),
+    )
+  ) {
+    throw new HTTPException(403, {
+      message: "child first-party MCP permissions may only narrow the parent session grant",
+    });
+  }
+  // A worker-signed creator may itself carry less authority than its parent
+  // session (for example a narrowly delegated spawn token). Inherit the
+  // intersection in the shared canonical default order so null/default parent
+  // policies cannot expand when runtime signing resolves them.
   let firstPartyMcpPermissions =
-    payload.firstPartyMcpPermissions ?? (parentSessionId ? [...new Set(grant.permissions)] : null);
+    payload.firstPartyMcpPermissions ??
+    (parentFirstPartyMcpPermissions
+      ? parentFirstPartyMcpPermissions.filter((permission) =>
+          hasPermission(grant.permissions, permission),
+        )
+      : null);
   if (firstPartyMcpPermissions && firstPartyMcpPermissions.length === 0) {
     // An empty set would sign an unusable zero-permission token; the default
     // worker set is expressed by omitting the field.
@@ -1360,6 +1434,7 @@ export async function createSessionForRequest(
       turnInstructions: payload.turnInstructions ?? null,
       resources,
       tools,
+      toolPolicy,
       ...(payload.clientEventId ? { clientEventId: payload.clientEventId } : {}),
       model,
       reasoningEffort,
@@ -1435,8 +1510,9 @@ export async function createSessionForRequest(
  * Full accept-user-message flow shared by the `user.message` branch of
  * `POST /sessions/:id/events` and the first-party MCP `session_send_message`
  * tool: resource/tool validation, usage limits, the locked append + turn
- * enqueue, and usage recording. `toolsProvided: false` applies the
- * workspace's default capability MCP tools, matching an absent `tools` key.
+ * enqueue, and usage recording. `toolsProvided: false` durably preserves an
+ * absent `tools` key so execution inherits the session policy; an explicit
+ * empty array is a deliberate per-turn narrowing.
  */
 export async function acceptSessionUserMessage(
   deps: AcceptSessionUserMessageDependencies,
@@ -1459,6 +1535,12 @@ export async function acceptSessionUserMessage(
     expectedDraftRevision?: number | null;
   },
 ): Promise<{ accepted: SessionEvent; turn: SessionTurn }> {
+  if (input.toolsProvided && !deps.settings.sessionTurnToolReplacementEnabled) {
+    throw new HTTPException(503, {
+      message:
+        "explicit follow-up tool replacement is temporarily unavailable until provenance-aware turn workers finish rolling out; omit tools to inherit the session policy and retry",
+    });
+  }
   const { settings, db, bus, workflowClient, objectStorage } = deps;
   await requireSessionAuthorization(deps, grant, {
     sessionId,
@@ -1497,10 +1579,26 @@ export async function acceptSessionUserMessage(
     existingSession.mcpServers,
   );
   const requestedResources = normalizeResources(input.resources ?? []);
-  const validatedTools = validateToolRefs(input.tools ?? [], runtimeSettings);
-  const requestedTools = input.toolsProvided
-    ? validatedTools
-    : withDefaultEnabledCapabilityMcpTools(validatedTools, settings, capabilityRuntimeSettings);
+  const tracksWorkspaceDefaults = existingSession.toolPolicy?.mode === "workspace_default";
+  const sessionPolicyTools = withFirstPartyTools(
+    tracksWorkspaceDefaults
+      ? withDefaultEnabledCapabilityMcpTools(
+          availableToolRefs(existingSession.tools, runtimeSettings),
+          settings,
+          capabilityRuntimeSettings,
+        )
+      : existingSession.tools,
+    runtimeSettings,
+  );
+  const validatedTools = input.toolsProvided
+    ? validateToolRefsForSessionPolicy({
+        requested: input.tools ?? [],
+        settings: runtimeSettings,
+        allowedTools: sessionPolicyTools,
+        message: "message tools may only narrow the session tool policy",
+      })
+    : [];
+  const requestedTools = input.toolsProvided ? validatedTools : [];
   await requireLimit(deps, {
     accountId: grant.accountId,
     workspaceId,
@@ -1535,6 +1633,7 @@ export async function acceptSessionUserMessage(
     turnInstructions: input.turnInstructions ?? null,
     resources: requestedResources,
     tools: requestedTools,
+    toolsProvided: input.toolsProvided,
     model: input.model ?? null,
     reasoningEffort: input.reasoningEffort ?? null,
     reasoningEffortFallback: sessionReasoningEffort,

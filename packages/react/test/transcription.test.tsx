@@ -142,6 +142,7 @@ function TestComposer({
   const composer: ComposerState = {
     value,
     setValue,
+    hasDraftContent: () => value.length > 0,
     send: async () => {
       sends.push(value);
       return true;
