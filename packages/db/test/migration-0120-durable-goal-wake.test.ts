@@ -408,7 +408,14 @@ describe("migration 0120 (durable goal wake)", () => {
           `create role ${quoteIdentifier(migrationRole)} login password '${migrationPassword}' nosuperuser nobypassrls`,
         );
         roleCreated = true;
-        await admin.unsafe(`grant usage on schema public to ${quoteIdentifier(migrationRole)}`);
+        // The migration runner's schema_migrations preflight uses
+        // CREATE TABLE IF NOT EXISTS, which requires CREATE on the schema
+        // even when the table already exists. This role remains explicitly
+        // non-superuser and non-bypassrls, so FORCE RLS still exercises the
+        // same owner-visible boundary as production.
+        await admin.unsafe(
+          `grant usage, create on schema public to ${quoteIdentifier(migrationRole)}`,
+        );
         await admin<never[]>`
           insert into schema_migrations (name) values ('0121_goal_update_idempotency.sql')
           on conflict do nothing`;
