@@ -548,25 +548,43 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
     expect(errors.every((error) => error instanceof RoutingBackendRecoveryRequiredError)).toBe(
       true,
     );
-    const recoveries = errors.map(
-      (error) => (error as RoutingBackendRecoveryRequiredError).recovery,
+    const recoveryErrors = errors as RoutingBackendRecoveryRequiredError[];
+    const recoveries = recoveryErrors.map((error) => error.recovery);
+    expect(recoveries.every((status) => status === "pending" || status === "superseded")).toBe(
+      true,
     );
-    expect(recoveries.filter((status) => status === "pending")).toHaveLength(1);
-    expect(recoveries.filter((status) => status === "superseded")).toHaveLength(23);
+
+    // Concurrent calls may already hold the shared provider handle, or may
+    // re-resolve after the winner invalidates it. Exactly one provider caller
+    // retires warm -> cold as pending; other provider callers lose that CAS as
+    // superseded. Re-resolved callers observe durable pending recovery before
+    // provider dispatch. These are scheduler-dependent subsets, but the durable
+    // election, disposition, and no-replay invariants are exact.
+    const providerFailures = recoveryErrors.filter((error) => error.op === "writeFile");
+    const reResolvedFailures = recoveryErrors.filter(
+      (error) => error.op === "resolve_home_backend",
+    );
+    expect(providerFailures.length + reResolvedFailures.length).toBe(operationCalls.length);
+    expect(providerFailures.length).toBeGreaterThanOrEqual(1);
+    expect(providerFailures.filter((error) => error.recovery === "pending")).toHaveLength(1);
+    expect(providerFailures.filter((error) => error.recovery === "superseded")).toHaveLength(
+      providerFailures.length - 1,
+    );
+    expect(reResolvedFailures.every((error) => error.recovery === "pending")).toBe(true);
     expect(
-      errors.every(
-        (error) =>
-          (error as RoutingBackendRecoveryRequiredError).leaseEpoch === warmEpoch + 1 &&
-          (error as RoutingBackendRecoveryRequiredError).retryable,
+      recoveryErrors.every(
+        (error) => error.leaseEpoch === warmEpoch + 1 && error.retryable,
       ),
     ).toBe(true);
-    expect(operationCalls.every((calls) => calls === 1)).toBe(true);
-    expect(deadProviderCalls).toBe(24);
+    expect(operationCalls.every((calls) => calls === 0 || calls === 1)).toBe(true);
+    expect(operationCalls.reduce((sum, calls) => sum + calls, 0)).toBe(deadProviderCalls);
+    expect(providerFailures).toHaveLength(deadProviderCalls);
+    const callsAfterConcurrentLoss = deadProviderCalls;
 
     // The route pointer itself did not move in any of the three incidents. The
     // stable proxy must still discard its cached provider handle after the loss
     // transition: the next independent call re-resolves durable cold/recovery
-    // truth and never invokes the dead backend a 25th time.
+    // truth and never invokes the dead backend again.
     const followUpError = await proxy
       .writeFile({ path: "/workspace/post-loss", index: 24 })
       .catch((error) => error);
@@ -576,7 +594,7 @@ describe("M7 worker routing — wrapTurnBoxWithRouting + a real DB pointer + set
       recovery: "pending",
       retryable: true,
     });
-    expect(deadProviderCalls).toBe(24);
+    expect(deadProviderCalls).toBe(callsAfterConcurrentLoss);
     expect(lossEvents).toEqual([
       {
         sandboxGroupId: session.sandboxGroupId,

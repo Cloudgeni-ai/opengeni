@@ -181,7 +181,9 @@ async function assertExpiredDrainFence(
     leaseTtlMs: 45_000,
   });
   expect(next.role).toBe("spawner");
-  expect(next.lease.leaseEpoch).toBe(oldEpoch + 1);
+  // Expiry attribution fences the old creator with the first bump; confirmed
+  // provider teardown/cold settlement owns the second bump before re-election.
+  expect(next.lease.leaseEpoch).toBe(oldEpoch + 2);
   const nextCommit = await commitWarmingToWarm(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
