@@ -53,6 +53,7 @@ function releaseHeadRuleset() {
     source: RELEASE_AUTOMATION_CONTRACT.repository,
     enforcement: "active",
     bypass_actors: [],
+    updated_at: "2026-07-26T23:16:17.229Z",
     conditions: {
       ref_name: {
         include: [`refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}*`],
@@ -334,6 +335,8 @@ function admissionFixture(
   } = {},
 ) {
   const requests: RequestRecord[] = [];
+  const checks: Array<Record<string, any>> = [];
+  let nextCheckId = 850;
   let mainReads = 0;
   let retainedHeadSha = options.releaseHeadRefSha;
   const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
@@ -351,6 +354,22 @@ function admissionFixture(
         },
         201,
       );
+    }
+    if (method === "POST" && options.seal && url.pathname === `${prefix}/check-runs`) {
+      const check = {
+        ...body,
+        id: nextCheckId++,
+        app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+      };
+      checks.push(check);
+      return response(check, 201);
+    }
+    const checkMatch = url.pathname.match(new RegExp(`^${prefix}/check-runs/(\\d+)$`));
+    if (method === "PATCH" && options.seal && checkMatch) {
+      const check = checks.find((candidate) => candidate.id === Number(checkMatch[1]));
+      if (!check) return response({ message: "missing check" }, 404);
+      Object.assign(check, body);
+      return response(check);
     }
     if (method !== "GET") return response({ message: "read-only fixture" }, 405);
     if (url.pathname === prefix) return response(repository());
@@ -412,13 +431,23 @@ function admissionFixture(
     if (options.seal && url.pathname === `${prefix}/commits/${headSha}/check-runs`)
       return response({
         check_runs: [
-          {
-            name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
-            head_sha: headSha,
-            status: "completed",
-            conclusion: options.sourceAdmissionConclusion ?? "success",
-            app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
-          },
+          ...(!url.searchParams.get("check_name") ||
+          url.searchParams.get("check_name") === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission
+            ? [
+                {
+                  name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+                  head_sha: headSha,
+                  status: "completed",
+                  conclusion: options.sourceAdmissionConclusion ?? "success",
+                  app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+                },
+              ]
+            : []),
+          ...checks.filter(
+            (check) =>
+              !url.searchParams.get("check_name") ||
+              check.name === url.searchParams.get("check_name"),
+          ),
         ],
       });
     if (url.pathname === `${prefix}/compare/${baseSha}...${headSha}`)
@@ -446,7 +475,7 @@ function admissionFixture(
       });
     return response({ message: `unexpected GET ${url.pathname}` }, 404);
   }
-  return { fetchImpl, requests };
+  return { checks, fetchImpl, requests };
 }
 
 describe("automation CI admission", () => {
@@ -505,6 +534,7 @@ function sealReleaseHeadEnv(overrides: Record<string, string> = {}) {
     GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
     GITHUB_SHA: baseSha,
     GITHUB_TOKEN: "fixture-token",
+    GITHUB_RUN_ID: "789",
     GITHUB_WORKFLOW_REF:
       `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
       `${RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath}@refs/heads/main`,
@@ -554,6 +584,25 @@ describe("release head evidence retention", () => {
         (request) => request.method === "POST" && request.path.endsWith("/git/refs"),
       ),
     ).toHaveLength(1);
+    expect(fixture.checks).toHaveLength(1);
+    expect(fixture.checks[0]).toMatchObject({
+      name: RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+      head_sha: headSha,
+      status: "completed",
+      conclusion: "success",
+    });
+    expect(fixture.checks[0]?.external_id).toMatch(
+      new RegExp(
+        `^opengeni:release-automation:release-head-retention:v1:` +
+          `pr:${pullNumber}:head:${headSha}:protection-sha256:[0-9a-f]{64}$`,
+      ),
+    );
+    expect(
+      fixture.requests.filter(
+        (request) => request.method === "POST" && request.path.endsWith("/check-runs"),
+      ),
+    ).toHaveLength(1);
+    expect(fixture.requests.filter((request) => request.method === "PATCH")).toHaveLength(3);
   });
 
   test("fails before mutation when the exact-head source-admission check is not successful", async () => {
@@ -687,8 +736,18 @@ test("exact-head check markers update idempotently instead of duplicating", asyn
   };
   await beginVersionPrChecks(options);
   await beginVersionPrChecks(options);
-  expect(fixture.checks).toHaveLength(2);
-  expect(new Set(fixture.checks.map((check) => check.external_id)).size).toBe(2);
+  expect(fixture.checks).toHaveLength(3);
+  expect(new Set(fixture.checks.map((check) => check.external_id)).size).toBe(3);
+  expect(
+    fixture.checks.find(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    )?.external_id,
+  ).toMatch(
+    new RegExp(
+      `^opengeni:release-automation:release-head-retention:v1:` +
+        `pr:${pullNumber}:head:${headSha}:protection-sha256:[0-9a-f]{64}$`,
+    ),
+  );
   expect(
     fixture.checks.every(
       (check) => check.head_sha === headSha && check.external_id.includes(`head:${headSha}`),
@@ -703,8 +762,8 @@ test("exact-head check markers update idempotently instead of duplicating", asyn
     fixture.requests.filter(
       (request) => request.method === "POST" && request.path.endsWith("/check-runs"),
     ),
-  ).toHaveLength(2);
-  expect(fixture.requests.filter((request) => request.method === "PATCH")).toHaveLength(2);
+  ).toHaveLength(3);
+  expect(fixture.requests.filter((request) => request.method === "PATCH")).toHaveLength(3);
 });
 
 test("exact-head check creation rejects a conflicting retained release head", async () => {
@@ -732,6 +791,31 @@ test("exact-head check creation rejects missing immutable tag protection", async
       (request) => request.method === "POST" && request.path.endsWith("/git/refs"),
     ),
   ).toBe(false);
+});
+
+test("release-head retention refuses to reuse or duplicate a changed protection revision", async () => {
+  const fixtureOptions = { ruleset: releaseHeadRuleset() };
+  const fixture = checksFixture(fixtureOptions);
+  await beginVersionPrChecks({
+    env: automationCiEnv(),
+    fetchImpl: fixture.fetchImpl,
+  });
+  fixtureOptions.ruleset = {
+    ...releaseHeadRuleset(),
+    updated_at: "2026-07-27T00:00:00.000Z",
+  };
+
+  await expect(
+    beginVersionPrChecks({
+      env: automationCiEnv(),
+      fetchImpl: fixture.fetchImpl,
+    }),
+  ).rejects.toThrow("conflicts with the exact idempotency identity");
+  expect(
+    fixture.checks.filter(
+      (check) => check.name === RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    ),
+  ).toHaveLength(1);
 });
 
 function approvalEnv(overrides: Record<string, string> = {}) {
@@ -1006,6 +1090,7 @@ describe("release approval provenance", () => {
           refPattern: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}*`,
           rules: ["deletion", "update"],
           bypassActorCount: 0,
+          updatedAt: "2026-07-26T23:16:17.229Z",
         },
         releaseHead: {
           name: `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
@@ -1366,7 +1451,7 @@ describe("workflow contracts", () => {
     });
     expect(seal.permissions).toEqual({ contents: "read" });
     expect(seal.jobs.seal.permissions).toEqual({
-      checks: "read",
+      checks: "write",
       contents: "write",
       "pull-requests": "read",
     });
