@@ -322,6 +322,43 @@ describe("turn secret-redaction boundaries", () => {
       },
     ]);
   });
+
+  test("pairs renewed custom MCP values with current names, not stale session metadata", () => {
+    const currentValue = "synthetic-current-private-token-123456";
+    const currentResolvedServer = {
+      id: "crm",
+      headers: { "Private-Token": currentValue, "X-Page-Token": "page-2" },
+      headerNames: ["Private-Token"],
+    };
+    const staleSessionProjection = {
+      id: currentResolvedServer.id,
+      headerNames: ["Old-Private-Token"],
+    };
+    const staleRegistration = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentResolvedServer.headers,
+      staleSessionProjection.headerNames,
+    );
+    const currentHeaderNamesById = new Map([
+      [currentResolvedServer.id, currentResolvedServer.headerNames],
+    ]);
+    const currentRegistration = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentResolvedServer.headers,
+      currentHeaderNamesById.get(currentResolvedServer.id),
+    );
+    const redacted = createSecretRedactor(currentRegistration)(currentResolvedServer.headers);
+
+    expect(staleRegistration).toHaveLength(0);
+    expect(currentRegistration).toEqual([
+      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
+    ]);
+    expect(redacted).toMatchObject({
+      "Private-Token": "[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]",
+      "X-Page-Token": "page-2",
+    });
+    expect(JSON.stringify(redacted)).not.toContain(currentValue);
+  });
 });
 
 describe("accepted turn execution identity", () => {

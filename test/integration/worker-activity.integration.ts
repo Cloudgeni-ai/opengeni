@@ -44,6 +44,7 @@ import {
   saveRunState,
   mutateWorkspaceControlInTransaction,
   sumUsageQuantity,
+  updateSessionMcpServerCredentials,
   updateScheduledTask,
   withWorkspaceRls,
   type Database,
@@ -63,7 +64,11 @@ import {
 } from "@opengeni/runtime";
 import { createActivityTestHarness as createWorkerActivities } from "../../apps/worker/src/activities";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
-import { PROVIDER_BACKPRESSURE_DELAY_MS } from "../../apps/worker/src/activities/agent-turn";
+import {
+  headerSecretRedactions,
+  PROVIDER_BACKPRESSURE_DELAY_MS,
+} from "../../apps/worker/src/activities/agent-turn";
+import { createSecretRedactor } from "../../apps/worker/src/activities/redaction";
 import {
   loadWorkspaceEnvironmentForRun,
   sandboxEnvironmentForRun,
@@ -219,6 +224,94 @@ describe("worker activities integration", () => {
       requireApproval: false,
       headers: { Authorization: "Bearer run-secret" },
     });
+  });
+
+  test("uses current encrypted MCP header names after a custom-header rotation", async () => {
+    const grant = await testGrant(dbClient.db);
+    const encryptionKey = Buffer.alloc(32, 10);
+    const oldValue = "synthetic-old-private-token-123456";
+    const currentValue = "synthetic-current-private-token-123456";
+    const session = await createOwnedSession(dbClient.db, grant, {
+      initialMessage: "use rotating custom MCP credential",
+      resources: [],
+      tools: [{ kind: "mcp", id: "crm" }],
+      metadata: {},
+      model: "scripted-model",
+      sandboxBackend: "none",
+      mcpServers: [
+        {
+          id: "crm",
+          name: "CRM MCP",
+          url: "https://crm.example/mcp",
+          headersEncrypted: {
+            "Old-Private-Token": encryptEnvironmentValue(encryptionKey, oldValue),
+          },
+        },
+      ],
+    });
+    const attemptId = await claimOwnedSessionAttempt(
+      dbClient.db,
+      grant,
+      session.id,
+      "use rotating custom MCP credential",
+    );
+    // This is the agent-turn's early session read. A concurrent accepted
+    // credential update can make this projection stale before the run-row load.
+    const staleProjection = await getSession(dbClient.db, grant.workspaceId, session.id);
+    await updateSessionMcpServerCredentials(dbClient.db, {
+      workspaceId: grant.workspaceId,
+      sessionId: session.id,
+      updates: [
+        {
+          id: "crm",
+          headersEncrypted: {
+            "Private-Token": encryptEnvironmentValue(encryptionKey, currentValue),
+          },
+        },
+      ],
+    });
+
+    let resolvedHeaderNames: readonly string[] = [];
+    const runSettings = await settingsWithSessionMcpServersForRun(
+      dbClient.db,
+      grant.workspaceId,
+      session.id,
+      attemptId,
+      testSettings({
+        databaseUrl: services.databaseUrl,
+        environmentsEncryptionKey: encryptionKey.toString("base64"),
+      }),
+      {
+        onResolvedServers: (servers) => {
+          resolvedHeaderNames = servers.find((server) => server.id === "crm")?.headerNames ?? [];
+        },
+      },
+    );
+    const currentServer = runSettings.mcpServers.find((server) => server.id === "crm");
+    const staleNames = staleProjection?.mcpServers.find(
+      (server) => server.id === "crm",
+    )?.headerNames;
+    const staleRedactions = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentServer?.headers,
+      staleNames,
+    );
+    const currentRedactions = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentServer?.headers,
+      resolvedHeaderNames,
+    );
+    const redactedCurrent = createSecretRedactor(currentRedactions)({ echoed: currentValue });
+
+    expect(staleNames).toEqual(["Old-Private-Token"]);
+    expect(resolvedHeaderNames).toEqual(["Private-Token"]);
+    expect(currentServer?.headers).toEqual({ "Private-Token": currentValue });
+    expect(staleRedactions).toHaveLength(0);
+    expect(currentRedactions).toEqual([
+      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
+    ]);
+    expect(JSON.stringify(redactedCurrent)).not.toContain(currentValue);
+    expect(JSON.stringify(redactedCurrent)).toContain("[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]");
   });
 
   test("overlays host-backed session MCP refs without a local encryption key", async () => {

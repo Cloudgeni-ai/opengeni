@@ -3657,23 +3657,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         openaiReasoningEffort: turn.reasoningEffort,
         sandboxBackend: turn.sandboxBackend,
       };
+      const sessionMcpHeaderNames = new Map<string, readonly string[]>();
       const runSettings = await settingsWithSessionMcpServersForRun(
         db,
         input.workspaceId,
         input.sessionId,
         input.attemptId,
         baseRunSettings,
+        {
+          onResolvedServers: (servers) => {
+            for (const server of servers) {
+              sessionMcpHeaderNames.set(server.id, server.headerNames);
+            }
+          },
+        },
       );
       registerSecretRedactions([
         ...(runSettings.accessKey
           ? [{ name: "OPENGENI_ACCESS_KEY", value: runSettings.accessKey }]
           : []),
         ...runSettings.mcpServers.flatMap((server) => {
-          const sessionServer = session.mcpServers.find((candidate) => candidate.id === server.id);
           return headerSecretRedactions(
             `MCP_${server.id.toUpperCase()}_STATIC`,
             server.headers,
-            sessionServer?.headerNames,
+            sessionMcpHeaderNames.get(server.id),
           );
         }),
       ]);

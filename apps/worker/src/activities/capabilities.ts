@@ -43,6 +43,9 @@ export async function settingsWithSessionMcpServersForRun(
   sessionId: string,
   attemptId: string,
   settings: Settings,
+  options?: {
+    onResolvedServers?: (servers: readonly SessionMcpServerForRun[]) => void;
+  },
 ): Promise<Settings> {
   const encryptionKey = environmentsEncryptionKeyBytes(settings);
   if (!encryptionKey) {
@@ -56,10 +59,18 @@ export async function settingsWithSessionMcpServersForRun(
       );
     }
   }
-  return settingsWithSessionMcpServers(
-    settings,
-    await listSessionMcpServersForRun(db, workspaceId, sessionId, attemptId, encryptionKey ?? null),
+  const servers = await listSessionMcpServersForRun(
+    db,
+    workspaceId,
+    sessionId,
+    attemptId,
+    encryptionKey ?? null,
   );
+  // Keep credential provenance coupled to the exact decrypted rows that are
+  // overlaid into settings. A session projection read earlier in the turn can
+  // be stale after a concurrent mcpCredentialUpdates renewal.
+  options?.onResolvedServers?.(servers);
+  return settingsWithSessionMcpServers(settings, servers);
 }
 
 export function settingsWithSessionMcpServers(
