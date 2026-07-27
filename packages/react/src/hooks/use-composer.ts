@@ -108,6 +108,14 @@ export function useComposer(
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
   const onDraftApplied = options.onDraftApplied;
+  // Read through a ref so live session/policy projections can replace their
+  // apply callback without invalidating the draft loader and re-running its
+  // initial-load effect. Publish only committed callbacks: a suspended target
+  // render must not retarget an in-flight read owned by the committed session.
+  const onDraftAppliedRef = useRef(onDraftApplied);
+  useLayoutEffect(() => {
+    onDraftAppliedRef.current = onDraftApplied;
+  }, [onDraftApplied]);
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
@@ -172,9 +180,9 @@ export function useComposer(
       setValue(next.text);
       setRestoredResources(next.resources);
       setDraftConflict(null);
-      onDraftApplied?.(next);
+      onDraftAppliedRef.current?.(next);
     },
-    [durableDrafts, onDraftApplied, targetKey],
+    [durableDrafts, targetKey],
   );
 
   const loadDraft = useCallback(
@@ -227,7 +235,7 @@ export function useComposer(
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
-            onDraftApplied?.(fetched);
+            onDraftAppliedRef.current?.(fetched);
           }
         }
       } catch (cause) {
@@ -248,7 +256,7 @@ export function useComposer(
         }
       }
     },
-    [client, durableDrafts, onDraftApplied, sessionId, targetKey, workspaceId],
+    [client, durableDrafts, sessionId, targetKey, workspaceId],
   );
 
   useEffect(() => {

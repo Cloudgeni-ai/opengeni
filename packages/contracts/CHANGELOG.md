@@ -1,5 +1,14 @@
 # @opengeni/contracts
 
+## 0.19.1
+
+### Patch Changes
+
+- de20184: Redact known runtime credentials and recognized authorization, cookie, signed
+  URL, assignment, and provider-token shapes before model calls, durable session
+  history, events, logs, and telemetry. Disable credential-bearing shell xtrace
+  and raw Agents SDK model, tool, and MCP transport payload logging.
+
 ## 0.19.0
 
 ### Minor Changes

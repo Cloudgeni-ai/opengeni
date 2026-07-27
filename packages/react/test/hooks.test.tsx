@@ -1671,6 +1671,73 @@ describe("useComposer queue-vs-steer", () => {
 });
 
 describe("useComposer durable draft and control binding", () => {
+  test("callback churn does not reload drafts outside target, explicit, or event triggers", async () => {
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const reads: string[] = [];
+    const applied: string[] = [];
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        reads.push(sessionId);
+        return {
+          revision: reads.length,
+          text: `${sessionId}:read-${reads.length}`,
+          resources: [],
+          tools: [],
+          toolsProvided: false,
+          model: "model-x",
+          reasoningEffort: "medium",
+          sourceTurnId: null,
+          sourceTurnVersion: null,
+          updatedAt: new Date().toISOString(),
+        } satisfies ComposerDraft;
+      },
+    });
+    type Props = {
+      sessionId: string;
+      policyVersion: number;
+      events: SessionEvent[];
+    };
+    const hook = await renderHook(
+      (props: Props) =>
+        useComposer(props.sessionId, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          events: props.events,
+          onDraftApplied: (draft) => {
+            applied.push(`${props.policyVersion}:${draft.text}`);
+          },
+        }),
+      { sessionId: SESSION_ID, policyVersion: 0, events: noEvents },
+    );
+    await flush();
+    expect(reads).toEqual([SESSION_ID]);
+    expect(applied).toEqual([`0:${SESSION_ID}:read-1`]);
+
+    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 1, events: noEvents });
+    await hook.rerender({ sessionId: SESSION_ID, policyVersion: 2, events: noEvents });
+    await flush();
+    expect(reads).toEqual([SESSION_ID]);
+
+    await flushing(async () => await hook.result.current.reloadDraft());
+    expect(reads).toEqual([SESSION_ID, SESSION_ID]);
+    expect(applied.at(-1)).toBe(`2:${SESSION_ID}:read-2`);
+
+    await hook.rerender({
+      sessionId: SESSION_ID,
+      policyVersion: 3,
+      events: [makeEvent(1, "session.queue.changed", { operation: "edit" })],
+    });
+    await flush();
+    expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID]);
+    expect(applied.at(-1)).toBe(`3:${SESSION_ID}:read-3`);
+
+    await hook.rerender({ sessionId: sessionB, policyVersion: 4, events: noEvents });
+    await flush();
+    expect(reads).toEqual([SESSION_ID, SESSION_ID, SESSION_ID, sessionB]);
+    expect(applied.at(-1)).toBe(`4:${sessionB}:read-4`);
+    await hook.unmount();
+  });
+
   test("a live queue mutation reloads the authoritative draft in another tab", async () => {
     let current: ComposerDraft = {
       revision: 1,
@@ -2166,6 +2233,80 @@ describe("session hook concurrent target ownership", () => {
       container.remove();
       globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
     }
+  });
+
+  test("a suspended target render cannot retarget a committed draft callback", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const draftA: ComposerDraft = {
+      revision: 1,
+      text: "A draft",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-a",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let resolveA!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        if (sessionId !== sessionA) throw new Error("uncommitted B must not read");
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveA = resolve;
+        });
+      },
+    });
+    const applied: string[] = [];
+    let setTarget!: (target: string) => void;
+    let renderedB = false;
+    const suspended = new Promise<never>(() => {});
+
+    function Harness() {
+      const [target, setTargetState] = useState(sessionA);
+      setTarget = setTargetState;
+      useComposer(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+        onDraftApplied: (draft) => applied.push(`${target}:${draft.text}`),
+      });
+      if (target === sessionB) {
+        renderedB = true;
+        throw suspended;
+      }
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        root.render(
+          <Suspense fallback={null}>
+            <Harness />
+          </Suspense>,
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      startTransition(() => setTarget(sessionB));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderedB).toBe(true);
+
+      resolveA(draftA);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(applied).toEqual([`${sessionA}:A draft`]);
+    } finally {
+      flushSync(() => root.unmount());
+      container.remove();
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
   });
 });
 
