@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { Database } from "bun:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
@@ -17,7 +18,7 @@ import {
   type FSWatcher,
 } from "node:fs";
 import { arch, platform } from "node:os";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
   ALL_DEP_FIELDS,
   publishableWorkspacePackages,
@@ -34,6 +35,7 @@ const BUILD_CACHE_VERSION = 3;
 const buildCacheRoot = join(repoRoot, ".opengeni", "build-cache", "packages");
 const workspacePackagesByName = workspacePackageByName();
 const INPUT_EXCLUDED_DIRECTORY_NAMES = new Set(["dist", "node_modules", ".opengeni"]);
+const INPUT_EXCLUDED_FILE_PATTERNS = [/^tsup\.config\.bundled_[^.]+\.mjs$/u];
 const LOCK_INITIALIZATION_GRACE_MS = 250;
 const LOCK_DRAIN_TIMEOUT_MS = 2_000;
 const LOCK_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
@@ -96,8 +98,62 @@ function packageLockPath(pkg: WorkspacePackage): string {
   return `${packageCachePath(pkg)}.lock`;
 }
 
+function packageLockClaimPath(lockPath: string): string {
+  return `${lockPath}.claim.sqlite`;
+}
+
 function sleepSync(milliseconds: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function isExcludedInputFile(path: string): boolean {
+  const name = basename(path);
+  return INPUT_EXCLUDED_FILE_PATTERNS.some((pattern) => pattern.test(name));
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  return (error as { code?: string }).code === "SQLITE_BUSY";
+}
+
+function withPackageLockGenerationClaim<T>(lockPath: string, operation: () => T): T {
+  const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS;
+
+  while (true) {
+    const claim = new Database(packageLockClaimPath(lockPath), { create: true, strict: true });
+    try {
+      claim.run("PRAGMA busy_timeout = 0");
+      claim.run("BEGIN EXCLUSIVE");
+    } catch (error) {
+      claim.close();
+      if (!isSqliteBusy(error) || Date.now() >= deadline) {
+        throw error;
+      }
+      sleepSync(25);
+      continue;
+    }
+
+    try {
+      // SQLite owns the compare-atomic generation claim. Its transaction lock
+      // is released by the OS when this process dies, so stale recovery never
+      // needs to check-then-remove the claim itself. Every shared lock-path
+      // publication, takeover, and release revalidates the owner token while
+      // holding this claim; a B successor or C contender therefore cannot
+      // interpose between the comparison and path mutation.
+      const result = operation();
+      claim.run("COMMIT");
+      return result;
+    } catch (error) {
+      try {
+        claim.run("ROLLBACK");
+      } catch {
+        // Preserve the operation/commit failure; close() still releases the
+        // crash-safe claim if SQLite has already rolled the transaction back.
+      }
+      throw error;
+    } finally {
+      claim.close();
+    }
+  }
 }
 
 function lockOwnerPath(lockPath: string): string {
@@ -323,9 +379,10 @@ function staleLockCanBeReclaimed(lockPath: string, owner: LockOwner | null): boo
   }
 }
 
-function tryReclaimStaleLock(lockPath: string): boolean {
+function tryReclaimStaleLockUnderClaim(lockPath: string): boolean {
   const owner = readLockOwner(lockPath);
   if (!staleLockCanBeReclaimed(lockPath, owner)) {
+    pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_RECLAIM_REVALIDATION");
     return false;
   }
 
@@ -382,11 +439,11 @@ function tryReclaimStaleLock(lockPath: string): boolean {
       return false;
     }
 
-    // The lock directory is the immutable generation publication. Move only
-    // the generation that was validated above to a unique quarantine path;
-    // never recursively delete the shared lock path after a check. A
-    // successor can publish a new generation at lockPath as soon as this move
-    // wins, and a late reclaimer must be unable to remove it.
+    // The SQLite transaction is the compare-atomic generation claim. Every
+    // publisher and releaser needs the same claim, so the exact owner token
+    // validated above remains authoritative through this rename. There is no
+    // move-then-post-check/restore gap in which B can be displaced and C can
+    // publish at the shared path.
     const quarantinePath = lockQuarantinePath(
       lockPath,
       reclaimer.ownerToken ?? "ownerless",
@@ -401,21 +458,6 @@ function tryReclaimStaleLock(lockPath: string): boolean {
       }
       throw error;
     }
-    const quarantinedOwner = readLockOwner(quarantinePath);
-    if ((quarantinedOwner?.token ?? null) !== reclaimer.ownerToken) {
-      // A successor may have won the shared path between our last read and
-      // rename. Restore this moved generation only if no newer generation has
-      // already been published; never overwrite that newer path.
-      try {
-        renameSync(quarantinePath, lockPath);
-      } catch (restoreError) {
-        const code = (restoreError as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST" && code !== "ENOENT") {
-          throw restoreError;
-        }
-      }
-      return false;
-    }
     rmSync(quarantinePath, { recursive: true, force: true });
     return true;
   } finally {
@@ -423,36 +465,35 @@ function tryReclaimStaleLock(lockPath: string): boolean {
   }
 }
 
-function releasePackageLock(lockPath: string, token: string): void {
+function tryReclaimStaleLock(lockPath: string): boolean {
+  const observedOwner = readLockOwner(lockPath);
+  if (!staleLockCanBeReclaimed(lockPath, observedOwner)) {
+    pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_LIVE_LOCK_OBSERVATION");
+    return false;
+  }
+  pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_STALE_OBSERVATION");
+  return withPackageLockGenerationClaim(lockPath, () => tryReclaimStaleLockUnderClaim(lockPath));
+}
+
+function releasePackageLockUnderClaim(lockPath: string, token: string): void {
   const owner = readLockOwner(lockPath);
   if (owner?.token !== token) {
     return;
   }
+  pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_BEFORE_RELEASE_QUARANTINE");
   const releasePath = lockQuarantinePath(lockPath, token, "release");
   try {
     renameSync(lockPath, releasePath);
-    const releasedOwner = readLockOwner(releasePath);
-    if (releasedOwner?.token === token) {
-      rmSync(releasePath, { recursive: true, force: true });
-    } else {
-      // The generation moved under our token check but did not contain the
-      // same owner marker. Restore it only when the active path is still
-      // absent; never overwrite a successor.
-      try {
-        renameSync(releasePath, lockPath);
-      } catch (restoreError) {
-        const code = (restoreError as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST" && code !== "ENOENT") {
-          throw restoreError;
-        }
-      }
-      return;
-    }
+    rmSync(releasePath, { recursive: true, force: true });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;
     }
   }
+}
+
+function releasePackageLock(lockPath: string, token: string): void {
+  withPackageLockGenerationClaim(lockPath, () => releasePackageLockUnderClaim(lockPath, token));
 }
 
 function scriptPathForSupervisor(): string {
@@ -540,7 +581,18 @@ function publishPackageLock(lockPath: string, pkg: WorkspacePackage): PackageLoc
       state: "waiting",
       createdAt: Date.now(),
     });
-    renameSync(candidatePath, lockPath);
+    const published = withPackageLockGenerationClaim(lockPath, () => {
+      if (existsSync(lockPath)) {
+        return false;
+      }
+      renameSync(candidatePath, lockPath);
+      return true;
+    });
+    if (!published) {
+      stopUnpublishedSupervisor(supervisor);
+      removeCandidateLock(lockPath, token);
+      return null;
+    }
 
     return {
       path: lockPath,
@@ -670,6 +722,9 @@ function inputEntriesUnder(directory: string): BuildInput[] {
       const path = join(current, entry.name);
       const stats = lstatSync(path);
       if (stats.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
+        continue;
+      }
+      if (!stats.isDirectory() && isExcludedInputFile(path)) {
         continue;
       }
       entries.push(inputEntry(path));
@@ -829,6 +884,30 @@ function inputWatchDirectories(pkg: WorkspacePackage): string[] {
   return [...directories];
 }
 
+function isPathWithin(directory: string, path: string): boolean {
+  const relativePath = relative(directory, path);
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
+  );
+}
+
+function isBuildInputPath(pkg: WorkspacePackage, path: string): boolean {
+  if (
+    ["bun.lock", "package.json", "tsconfig.base.json"].some(
+      (relativePath) => path === join(repoRoot, relativePath),
+    )
+  ) {
+    return true;
+  }
+  if (isPathWithin(join(repoRoot, "scripts"), path)) {
+    return true;
+  }
+  return workspaceDependencyClosure(pkg).some((dependency) =>
+    isPathWithin(join(repoRoot, dependency.dir), path),
+  );
+}
+
 function startInputMutationMonitor(
   pkg: WorkspacePackage,
   initialInputSha256: string,
@@ -841,14 +920,20 @@ function startInputMutationMonitor(
     try {
       watchers.push(
         watch(directory, (_eventType, filename) => {
-          // A null filename is an ambiguous directory notification. The
-          // polling/final snapshot below still detects real input changes;
-          // treating it as dirty would mistake package dist replacement for
-          // a source mutation on platforms that omit the filename.
+          // Notifications are generation evidence, not merely prompts to
+          // re-read the current bytes. Latch every ambiguous notification and
+          // every relevant path immediately: if A changes to B and back to A
+          // while this event loop is paused, a later hash can only see A, but
+          // the queued notification still proves the build did not observe one
+          // stable input generation.
           if (!filename) {
+            dirty = true;
             return;
           }
           const changedPath = join(directory, filename.toString());
+          if (isExcludedInputFile(changedPath)) {
+            return;
+          }
           const changedRelativePath = relative(repoRoot, changedPath);
           if (
             changedRelativePath
@@ -857,13 +942,10 @@ function startInputMutationMonitor(
           ) {
             return;
           }
-          try {
-            if (packageInputSha256(pkg) !== initialInputSha256) {
-              dirty = true;
-            }
-          } catch {
-            dirty = true;
+          if (!isBuildInputPath(pkg, changedPath)) {
+            return;
           }
+          dirty = true;
         }),
       );
     } catch {
@@ -888,16 +970,20 @@ function startInputMutationMonitor(
       checking = false;
     }
   }, BUILD_SOURCE_POLL_MS);
+  pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_INPUT_MONITOR_START");
 
   return {
     changed: () => dirty,
     finish: async () => {
       clearInterval(poller);
+      // A detached build can finish while this wrapper is scheduler-paused.
+      // Drain the poll phase before closing the watchers: close() discards
+      // queued notifications, so closing first would lose the exact A-B-A
+      // evidence this monitor exists to latch.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       for (const watcher of watchers) {
         watcher.close();
       }
-      // Let queued fs.watch notifications run before the final snapshot.
-      await new Promise<void>((resolve) => setImmediate(resolve));
       let inputSha256 = initialInputSha256;
       try {
         inputSha256 = packageInputSha256(pkg);
