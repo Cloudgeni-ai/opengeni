@@ -88,6 +88,59 @@ describe("integrations.sh catalog import normalization", () => {
     ]);
   });
 
+  test("promotes Slack's official hosted MCP contract with its complete OAuth scope surface", () => {
+    const normalized = normalizeCatalogSnapshot({
+      generatedAt: "2026-07-27T00:00:00.000Z",
+      importRows: [
+        row({
+          domain: "slack.com",
+          name: "slack.com – openai",
+          mcpUrl: "https://mcp.slack.com/mcp",
+          authKind: "oauth2",
+          provenance: "discovered",
+          probe: { status: "real", reason: "auth_challenge", httpStatus: 401 },
+        }),
+      ],
+    });
+
+    expect(normalized.rows).toHaveLength(1);
+    expect(normalized.rows[0]).toMatchObject({
+      domain: "slack.com",
+      name: "Slack",
+      tier: "verified",
+      provenance: "official:docs.slack.dev/ai/slack-mcp-server",
+      authKind: "oauth2",
+      scopesHint: [
+        "search:read.public",
+        "search:read.private",
+        "search:read.mpim",
+        "search:read.im",
+        "search:read.files",
+        "search:read.users",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "im:history",
+        "canvases:read",
+        "canvases:write",
+        "users:read",
+        "users:read.email",
+        "reactions:write",
+        "reactions:read",
+        "emoji:read",
+        "files:read",
+        "channels:write",
+        "groups:write",
+        "im:write",
+        "mpim:write",
+        "channels:read",
+        "groups:read",
+        "mpim:read",
+      ],
+    });
+  });
+
   test("does not let an unverified duplicate surface shadow a verified row", () => {
     const normalized = normalizeCatalogSnapshot({
       generatedAt: "2026-07-03T00:00:00.000Z",

@@ -29568,7 +29568,7 @@ export async function peekSessionWork(
     if (
       latestInterruption &&
       latestInterruption.quiescedAt === null &&
-      ["settled", "rejected_stale"].includes(latestInterruption.interruptionState)
+      latestInterruption.interruptionState === "settled"
     ) {
       return {
         kind: "cancellation-wait",
