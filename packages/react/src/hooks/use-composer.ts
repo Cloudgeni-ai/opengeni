@@ -174,7 +174,7 @@ function rememberPendingComposerOperation(
   operation: PendingComposerOperation,
 ): void {
   if (!key) return;
-  const { mcpCredentialUpdates: _mcp, canRetry: _retry, ...safeOperation } = operation;
+  const { canRetry: _retry, ...safeOperation } = operation;
   const { input: originalInput, ...withoutInput } = safeOperation;
   const { mcpCredentialUpdates: _storedMcp, ...safeInput } = originalInput;
   const stored = {

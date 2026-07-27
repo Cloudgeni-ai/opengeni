@@ -1,7 +1,7 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
-import { HumanInputForm, MessageTimeline, QueueSurface } from "@opengeni/react";
+import { HumanInputForm, MessageTimeline, QueueSurface } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
   projectPendingApprovals,

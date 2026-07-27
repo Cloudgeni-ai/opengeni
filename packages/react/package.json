@@ -31,6 +31,10 @@
       "types": "./src/session.ts",
       "default": "./src/session.ts"
     },
+    "./session-ui": {
+      "types": "./src/session-ui.ts",
+      "default": "./src/session-ui.ts"
+    },
     "./machines": {
       "types": "./src/machines.ts",
       "default": "./src/machines.ts"
