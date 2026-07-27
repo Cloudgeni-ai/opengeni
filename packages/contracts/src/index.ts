@@ -78,6 +78,206 @@ export const SandboxBackend = z.enum([
 ]);
 export type SandboxBackend = z.infer<typeof SandboxBackend>;
 
+// Immutable, provider-neutral sandbox resource profiles. Public session/rig
+// selectors name only an exact {name, version}; mutable aliases such as
+// "latest" are deliberately not representable. The fully resolved values are
+// persisted with a sandbox group so catalog changes affect new groups only.
+const SandboxResourceProfileName = z
+  .string()
+  .trim()
+  .min(1)
+  .max(63)
+  .regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u);
+
+export const SandboxResourceProfileRef = z
+  .object({
+    name: SandboxResourceProfileName,
+    version: z.number().int().positive().max(2_147_483_647),
+  })
+  .strict();
+export type SandboxResourceProfileRef = z.infer<typeof SandboxResourceProfileRef>;
+
+const SandboxCpuResources = z
+  .object({
+    request: z.number().finite().positive(),
+    limit: z.number().finite().positive(),
+  })
+  .strict()
+  .superRefine((resources, context) => {
+    if (resources.request > resources.limit) {
+      context.addIssue({
+        code: "custom",
+        path: ["request"],
+        message: "CPU request must not exceed the finite CPU limit",
+      });
+    }
+  });
+
+const SandboxMemoryResources = z
+  .object({
+    request: z.number().int().positive().max(2_147_483_647),
+    limit: z.number().int().positive().max(2_147_483_647),
+  })
+  .strict()
+  .superRefine((resources, context) => {
+    if (resources.request > resources.limit) {
+      context.addIssue({
+        code: "custom",
+        path: ["request"],
+        message: "memory request must not exceed the finite memory limit",
+      });
+    }
+  });
+
+export const SandboxResourceValues = z
+  .object({
+    cpuCores: SandboxCpuResources,
+    memoryMiB: SandboxMemoryResources,
+  })
+  .strict();
+export type SandboxResourceValues = z.infer<typeof SandboxResourceValues>;
+
+export const SandboxResourceProfileCostPreview = z
+  .object({
+    // Public rate-card arithmetic is useful for engineering admission and cost
+    // previews, but it is never represented as a provider invoice or actual use.
+    source: z.literal("public_rate_card"),
+    currency: z.literal("USD"),
+    requestFloorPerActiveHour: z.number().finite().nonnegative(),
+    limitCeilingPerActiveHour: z.number().finite().nonnegative(),
+    capturedAt: z.string().datetime({ offset: true }),
+    sourceUrl: z.string().url(),
+  })
+  .strict()
+  .superRefine((preview, context) => {
+    if (preview.requestFloorPerActiveHour > preview.limitCeilingPerActiveHour) {
+      context.addIssue({
+        code: "custom",
+        path: ["requestFloorPerActiveHour"],
+        message: "request-floor estimate must not exceed the limit-ceiling estimate",
+      });
+    }
+  });
+export type SandboxResourceProfileCostPreview = z.infer<typeof SandboxResourceProfileCostPreview>;
+
+export const SandboxResourceProfileDefinition = SandboxResourceProfileRef.extend({
+  displayName: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(2000).nullable().default(null),
+  resources: SandboxResourceValues,
+  // Mapping availability is explicit and generic across SandboxBackend. A
+  // provider absent from this list must fail before any provider-side effect.
+  supportedBackends: z.array(SandboxBackend).min(1).max(SandboxBackend.options.length),
+  costPreview: SandboxResourceProfileCostPreview.nullable().default(null),
+})
+  .strict()
+  .superRefine((definition, context) => {
+    if (new Set(definition.supportedBackends).size !== definition.supportedBackends.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["supportedBackends"],
+        message: "supported backends must be unique",
+      });
+    }
+  });
+export type SandboxResourceProfileDefinition = z.infer<typeof SandboxResourceProfileDefinition>;
+
+export const SandboxResourceProfileEnforcement = z.enum(["legacy_optional", "required"]);
+export type SandboxResourceProfileEnforcement = z.infer<typeof SandboxResourceProfileEnforcement>;
+
+export const SandboxResourceProfileDeploymentConfig = z
+  .object({
+    profiles: z.array(SandboxResourceProfileDefinition).max(256).default([]),
+    default: SandboxResourceProfileRef.nullable().default(null),
+    enforcement: SandboxResourceProfileEnforcement.default("legacy_optional"),
+  })
+  .strict()
+  .superRefine((catalog, context) => {
+    const keys = new Set<string>();
+    for (const [index, profile] of catalog.profiles.entries()) {
+      const key = `${profile.name}@${profile.version}`;
+      if (keys.has(key)) {
+        context.addIssue({
+          code: "custom",
+          path: ["profiles", index],
+          message: `duplicate immutable profile identity: ${key}`,
+        });
+      }
+      keys.add(key);
+    }
+    if (catalog.default) {
+      const defaultKey = `${catalog.default.name}@${catalog.default.version}`;
+      if (!keys.has(defaultKey)) {
+        context.addIssue({
+          code: "custom",
+          path: ["default"],
+          message: "deployment default must name an exact configured profile",
+        });
+      }
+    }
+  });
+export type SandboxResourceProfileDeploymentConfig = z.infer<
+  typeof SandboxResourceProfileDeploymentConfig
+>;
+
+export const WorkspaceSandboxResourceProfilePolicy = z
+  .object({
+    allowed: z.array(SandboxResourceProfileRef).max(256).default([]),
+    default: SandboxResourceProfileRef.nullable().default(null),
+  })
+  .strict()
+  .superRefine((policy, context) => {
+    const keys = new Set<string>();
+    for (const [index, ref] of policy.allowed.entries()) {
+      const key = `${ref.name}@${ref.version}`;
+      if (keys.has(key)) {
+        context.addIssue({
+          code: "custom",
+          path: ["allowed", index],
+          message: `duplicate allowed profile identity: ${key}`,
+        });
+      }
+      keys.add(key);
+    }
+    if (policy.default && !keys.has(`${policy.default.name}@${policy.default.version}`)) {
+      context.addIssue({
+        code: "custom",
+        path: ["default"],
+        message: "workspace default must also appear in the exact allowlist",
+      });
+    }
+  });
+export type WorkspaceSandboxResourceProfilePolicy = z.infer<
+  typeof WorkspaceSandboxResourceProfilePolicy
+>;
+
+export const SandboxResourceProfileBinding = z
+  .object({
+    schemaVersion: z.literal(1),
+    profile: SandboxResourceProfileRef,
+    resources: SandboxResourceValues,
+  })
+  .strict();
+export type SandboxResourceProfileBinding = z.infer<typeof SandboxResourceProfileBinding>;
+
+export function sandboxResourceProfileRefKey(ref: SandboxResourceProfileRef): string {
+  return `${ref.name}@${ref.version}`;
+}
+
+export function sandboxResourceProfileRefsEqual(
+  left: SandboxResourceProfileRef | null | undefined,
+  right: SandboxResourceProfileRef | null | undefined,
+): boolean {
+  return (
+    left === right ||
+    (left !== null &&
+      left !== undefined &&
+      right !== null &&
+      right !== undefined &&
+      left.name === right.name &&
+      left.version === right.version)
+  );
+}
+
 // OS axis. Only "linux" is reachable in v1; macos/windows are seam placeholders.
 export const SandboxOs = z.enum(["linux", "macos", "windows"]);
 export type SandboxOs = z.infer<typeof SandboxOs>;
@@ -597,6 +797,10 @@ export const Permission = z.enum([
   // super-wildcard over both.
   "rigs:use",
   "rigs:manage",
+  // Explicitly selecting a sandbox resource profile is a separate compute-cost
+  // capability. It is intentionally absent from the default first-party MCP
+  // set; workspace/rig defaults remain admin-owned configuration surfaces.
+  "sandbox_profiles:use",
 ]);
 export type Permission = z.infer<typeof Permission>;
 

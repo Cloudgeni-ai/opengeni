@@ -7,12 +7,14 @@ import {
   ProductAccessMode,
   ReasoningEffort,
   SandboxBackend,
+  SandboxResourceProfileDeploymentConfig,
   SessionMcpApprovalPolicy,
   StaticUsageLimits,
   TurnExecutionPolicyV1,
   UsageLimitsMode,
   type TurnExecutionModelSourceV1,
   type TurnExecutionReasoningSourceV1,
+  type SandboxResourceProfileDeploymentConfig as SandboxResourceProfileDeploymentConfigType,
 } from "@opengeni/contracts";
 import { CODEX_MODEL_TOOL_OUTPUT_TRUNCATION_TOKENS } from "@opengeni/codex";
 import {
@@ -403,6 +405,12 @@ const SettingsSchema = z.object({
   azureOpenaiAdToken: z.string().optional(),
   disableOpenaiTracing: EnvBoolean.default(false),
   sandboxBackend: SandboxBackend.default("docker"),
+  // Immutable named compute profiles are configured as one exact deployment
+  // catalog. The empty legacy-optional catalog preserves current behavior until
+  // an operator deliberately admits profiles and a default.
+  sandboxResourceProfilesJson: z
+    .string()
+    .default('{"profiles":[],"default":null,"enforcement":"legacy_optional"}'),
   dockerImage: z.string().default("opengeni-sandbox:local"),
   dockerExposedPorts: z.string().default(""),
   dockerNetwork: z.string().optional(),
@@ -1404,6 +1412,7 @@ export function getSettings(): Settings {
     azureOpenaiAdToken: optional("OPENGENI_AZURE_OPENAI_AD_TOKEN"),
     disableOpenaiTracing: optional("OPENGENI_DISABLE_OPENAI_TRACING"),
     sandboxBackend: optional("OPENGENI_SANDBOX_BACKEND"),
+    sandboxResourceProfilesJson: optional("OPENGENI_SANDBOX_RESOURCE_PROFILES_JSON"),
     dockerImage: optional("OPENGENI_DOCKER_IMAGE"),
     dockerExposedPorts: optional("OPENGENI_DOCKER_EXPOSED_PORTS"),
     dockerNetwork: optional("OPENGENI_DOCKER_NETWORK"),
@@ -3060,6 +3069,32 @@ export function sandboxWarmRateMicrosPerSecond(settings: Settings, backend: stri
   return table[backend] ?? 0;
 }
 
+/** Parse the exact deployment catalog for immutable sandbox resource profiles. */
+export function parseSandboxResourceProfilesJson(
+  raw: string,
+): SandboxResourceProfileDeploymentConfigType {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_SANDBOX_RESOURCE_PROFILES_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
+  }
+  const result = SandboxResourceProfileDeploymentConfig.safeParse(parsed);
+  if (!result.success) {
+    throw new Error(`OPENGENI_SANDBOX_RESOURCE_PROFILES_JSON is invalid: ${result.error.message}`);
+  }
+  return result.data;
+}
+
+export function configuredSandboxResourceProfiles(
+  settings: Pick<Settings, "sandboxResourceProfilesJson">,
+): SandboxResourceProfileDeploymentConfigType {
+  return parseSandboxResourceProfilesJson(settings.sandboxResourceProfilesJson);
+}
+
 /**
  * Parse + validate the extra-provider registry JSON. `[]` (or empty/whitespace)
  * yields an empty list. Surfaces JSON and zod errors prefixed with the env-var
@@ -3557,6 +3592,7 @@ function validateSettings(settings: Settings): void {
   sandboxLifecycleHookIds(settings);
   // Fail fast on a malformed warm-rate table (P2.1).
   parseSandboxWarmRateJson(settings.sandboxWarmRateMicrosPerSecondJson);
+  parseSandboxResourceProfilesJson(settings.sandboxResourceProfilesJson);
   const serverIds = new Set<string>();
   for (const server of settings.mcpServers) {
     if (serverIds.has(server.id)) {
