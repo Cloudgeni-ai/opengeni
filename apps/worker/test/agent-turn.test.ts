@@ -22,6 +22,7 @@ import {
   CompactionProviderResponseError,
   CompactionNeededError,
   EmptyCompactionSummaryError,
+  WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
   sanitizeHistoryItemsForModel,
@@ -1978,6 +1979,23 @@ describe("lazy sandbox provisioner single-flight", () => {
     expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
       true,
     );
+    expect(
+      isLazySandboxProvisionRetryable(
+        new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_unavailable",
+          "fingerprint unavailable",
+          { retryable: true },
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isLazySandboxProvisionRetryable(
+        new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_mismatch",
+          "fingerprint mismatch",
+        ),
+      ),
+    ).toBe(false);
   });
 
   test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {

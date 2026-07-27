@@ -76,6 +76,13 @@ export function sandboxLeaseHolderIdForAttempt(attemptId: string): TurnSandboxLe
   return `turn-attempt:${normalized}`;
 }
 
+export function isRetryableDegradedRestore(restore: {
+  status: string;
+  retryable?: boolean;
+}): boolean {
+  return restore.status === "degraded" && restore.retryable === true;
+}
+
 /** The minimal services surface resumeBoxForTurn needs. A subset of
  *  ActivityServices so a test (and the API later) can pass a lean bag. */
 export type SandboxResumeServices = {
@@ -1010,6 +1017,12 @@ async function waitForWarm(
       throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
     }
     if (lease.liveness === "cold") {
+      if (isRetryableDegradedRestore(lease.recovery.restore)) {
+        // The elected spawner hit a transient archive verification failure.
+        // Re-enter admission so one caller can become the next fenced spawner;
+        // the archive remains authoritative and must not become terminal.
+        throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+      }
       if (
         lease.recovery.restore.status === "degraded" ||
         lease.recovery.restore.status === "unrecoverable"

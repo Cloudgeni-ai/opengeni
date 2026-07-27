@@ -104,6 +104,7 @@ import {
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
   RoutingMutationOutcomeUnknownError,
+  WorkspaceArchiveIntegrityError,
   swapTargetEstablishability,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
@@ -1760,6 +1761,9 @@ function sleep(ms: number): Promise<void> {
 export function isLazySandboxProvisionRetryable(error: unknown): boolean {
   if (error instanceof SandboxImageConflictError) {
     return false;
+  }
+  if (error instanceof WorkspaceArchiveIntegrityError) {
+    return error.retryable;
   }
   if (error instanceof SandboxLeaseSupersededError || error instanceof SandboxWarmingTimeoutError) {
     return true;
