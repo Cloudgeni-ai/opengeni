@@ -19437,7 +19437,7 @@ export async function acquireLease(
         if (liveness === "cold") {
           const recovery = recoveryStateFromLeaseRow(row);
           if (
-            recovery.restore.status === "degraded" ||
+            (recovery.restore.status === "degraded" && recovery.restore.retryable !== true) ||
             recovery.restore.status === "unrecoverable"
           ) {
             return {
