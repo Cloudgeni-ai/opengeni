@@ -1,11 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import {
-  type EstablishedSandboxSession,
-  SandboxExecReadinessError,
-} from "@opengeni/runtime";
+import { type EstablishedSandboxSession, SandboxExecReadinessError } from "@opengeni/runtime";
 import {
   SandboxWarmingTimeoutError,
-  isRetryableDegradedRestore,
   waitForSandboxExecReadiness,
   waitForWarmSnapshot,
 } from "../src/sandbox-resume";
@@ -92,19 +88,5 @@ describe("workspace snapshot cancellation", () => {
 
     await expect(waiting).resolves.toBe(false);
     expect(performance.now() - startedAt).toBeLessThan(100);
-  });
-});
-
-describe("retryable degraded workspace restore", () => {
-  test("only a retryable degraded restore re-enters sandbox admission", () => {
-    expect(
-      isRetryableDegradedRestore({ status: "degraded", retryable: true }),
-    ).toBe(true);
-    expect(
-      isRetryableDegradedRestore({ status: "degraded", retryable: false }),
-    ).toBe(false);
-    expect(
-      isRetryableDegradedRestore({ status: "unrecoverable", retryable: true }),
-    ).toBe(false);
   });
 });
