@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.7.3
+
+### Patch Changes
+
+- fdc0c98: Add the restricted runtime database posture contract and workspace-scoped RLS context validation, together with the runtime-role configuration required by standalone API and worker startup.
+- Updated dependencies [de20184]
+  - @opengeni/contracts@0.19.1
+
 ## 0.7.2
 
 ### Patch Changes
