@@ -102,6 +102,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     }),
     modelProvidersJson: "[]",
     codexSubscriptionEnabled: false,
+    codexConnectedAppsEnabled: false,
     codexToolSearchEnabled: false,
     codexCredentialLeasingEnabled: false,
     codexFleetPolicyShadowEnabled: false,

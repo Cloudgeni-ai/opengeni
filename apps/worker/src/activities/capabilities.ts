@@ -115,6 +115,9 @@ export async function settingsWithCodexCredential(
     return settings; // disabled / not connected / needs_relogin / error -> leave settings unchanged
   }
   const withProvider = withCodexProvider(settings);
+  if (!settings.codexConnectedAppsEnabled) {
+    return withProvider;
+  }
   // Additive: append the synthetic codex_apps connectors MCP server for ANY
   // active credential. Connector access is gated SERVER-SIDE per ChatGPT account
   // (via chatgpt-account-id), NOT by token scopes — confirmed live: a `pro` token
