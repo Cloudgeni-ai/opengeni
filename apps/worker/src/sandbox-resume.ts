@@ -68,12 +68,21 @@ export type ResumeHolderKind = LeaseHolderKind;
  */
 export type TurnSandboxLeaseHolderId = `turn-attempt:${string}`;
 
-export function sandboxLeaseHolderIdForAttempt(attemptId: string): TurnSandboxLeaseHolderId {
+export function sandboxLeaseHolderIdForAttempt(
+  attemptId: string,
+): TurnSandboxLeaseHolderId {
   const normalized = attemptId.trim();
   if (!normalized) {
     throw new Error("Sandbox lease holder requires a turn attempt id");
   }
   return `turn-attempt:${normalized}`;
+}
+
+export function isRetryableDegradedRestore(restore: {
+  status: string;
+  retryable?: boolean;
+}): boolean {
+  return restore.status === "degraded" && restore.retryable === true;
 }
 
 /** The minimal services surface resumeBoxForTurn needs. A subset of
@@ -194,7 +203,11 @@ export async function waitForSandboxExecReadiness(
   try {
     await verifySandboxExecReadiness(established, timeoutMs);
   } catch (error) {
-    if (/sandbox creation timed out/i.test(error instanceof Error ? error.message : "")) {
+    if (
+      /sandbox creation timed out/i.test(
+        error instanceof Error ? error.message : "",
+      )
+    ) {
       throw new SandboxWarmingTimeoutError(established.backendId, timeoutMs);
     }
     throw error;
@@ -212,10 +225,9 @@ function safeSnapshotError(error: unknown): { name: string; message: string } {
   const rawName = error instanceof Error ? error.name : "Error";
   return {
     name: /^[A-Za-z][A-Za-z0-9_.-]{0,79}$/.test(rawName) ? rawName : "Error",
-    message: redactSensitiveText(error instanceof Error ? error.message : String(error)).slice(
-      0,
-      2_048,
-    ),
+    message: redactSensitiveText(
+      error instanceof Error ? error.message : String(error),
+    ).slice(0, 2_048),
   };
 }
 
@@ -234,15 +246,25 @@ export async function waitForWarmSnapshot(
         ? [
             new Promise<never>((_resolve, reject) => {
               cancelListener = () =>
-                reject(signal.reason ?? new Error("workspace snapshot wait cancelled"));
+                reject(
+                  signal.reason ??
+                    new Error("workspace snapshot wait cancelled"),
+                );
               signal.addEventListener("abort", cancelListener, { once: true });
               if (signal.aborted) cancelListener();
             }),
           ]
         : []),
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new SnapshotTimeoutError(timeoutMs)), timeoutMs);
-        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
+        timeout = setTimeout(
+          () => reject(new SnapshotTimeoutError(timeoutMs)),
+          timeoutMs,
+        );
+        if (
+          timeout &&
+          "unref" in timeout &&
+          typeof timeout.unref === "function"
+        ) {
           timeout.unref();
         }
       }),
@@ -275,7 +297,10 @@ async function terminateEstablishedSandbox(
   const client = established.client as {
     delete?: (state: unknown) => Promise<unknown>;
   };
-  if (typeof client.delete === "function" && established.sessionState !== undefined) {
+  if (
+    typeof client.delete === "function" &&
+    established.sessionState !== undefined
+  ) {
     try {
       await client.delete(established.sessionState);
       return true;
@@ -315,9 +340,15 @@ async function terminateEstablishedSandbox(
   }
 }
 
-function asSandboxWarmingError(error: unknown, backend: string, timeoutMs: number): unknown {
+function asSandboxWarmingError(
+  error: unknown,
+  backend: string,
+  timeoutMs: number,
+): unknown {
   const message = error instanceof Error ? error.message : String(error);
-  return /sandbox creation timed out|warming timed out|capacity.*timed out/i.test(message)
+  return /sandbox creation timed out|warming timed out|capacity.*timed out/i.test(
+    message,
+  )
     ? new SandboxWarmingTimeoutError(backend, timeoutMs)
     : error;
 }
@@ -340,7 +371,9 @@ function workspaceArchiveFieldsFromEnvelope(
   envelope: Record<string, unknown> | null | undefined,
 ): Record<string, unknown> | null {
   const sessionState =
-    envelope && typeof envelope.sessionState === "object" && envelope.sessionState !== null
+    envelope &&
+    typeof envelope.sessionState === "object" &&
+    envelope.sessionState !== null
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   const archive = sessionState?.workspaceArchive;
@@ -357,7 +390,9 @@ function workspaceArchiveFieldsFromEnvelope(
     ...(typeof previous === "string" && previous.length > 0
       ? { workspaceArchivePrev: previous }
       : {}),
-    ...(previousMetadata !== undefined ? { workspaceArchivePrevMeta: previousMetadata } : {}),
+    ...(previousMetadata !== undefined
+      ? { workspaceArchivePrevMeta: previousMetadata }
+      : {}),
     ...(typeof capturedAt === "string" && capturedAt.length > 0
       ? { workspaceArchiveAt: capturedAt }
       : {}),
@@ -377,7 +412,8 @@ function withoutProviderIdentity(
       ? (envelope.sessionState as Record<string, unknown>)
       : null;
   if (!sessionState) return envelope;
-  const { providerState: _providerState, ...providerIndependentState } = sessionState;
+  const { providerState: _providerState, ...providerIndependentState } =
+    sessionState;
   return { ...envelope, sessionState: providerIndependentState };
 }
 
@@ -454,13 +490,15 @@ export async function maybePersistWarmWorkspaceSnapshot(
     }
     const sessionState =
       lease.resumeState && typeof lease.resumeState === "object"
-        ? (lease.resumeState as { sessionState?: Record<string, unknown> }).sessionState
+        ? (lease.resumeState as { sessionState?: Record<string, unknown> })
+            .sessionState
         : undefined;
     const priorAtRaw =
       sessionState && typeof sessionState === "object"
         ? sessionState.workspaceArchiveAt
         : undefined;
-    const priorAtMs = typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
+    const priorAtMs =
+      typeof priorAtRaw === "string" ? Date.parse(priorAtRaw) : Number.NaN;
     if (
       preflight.archiveComplete &&
       Number.isFinite(priorAtMs) &&
@@ -494,8 +532,15 @@ export async function maybePersistWarmWorkspaceSnapshot(
           ]
         : []),
       new Promise<undefined>((resolve) => {
-        timeout = setTimeout(() => resolve(undefined), settings.sandboxSnapshotTimeoutMs);
-        if (timeout && "unref" in timeout && typeof timeout.unref === "function") {
+        timeout = setTimeout(
+          () => resolve(undefined),
+          settings.sandboxSnapshotTimeoutMs,
+        );
+        if (
+          timeout &&
+          "unref" in timeout &&
+          typeof timeout.unref === "function"
+        ) {
           timeout.unref();
         }
       }),
@@ -627,7 +672,10 @@ export async function resumeBoxForTurn(
       holderId,
     }).catch(() => undefined);
   }, 10_000);
-  if ("unref" in holderLivenessTimer && typeof holderLivenessTimer.unref === "function") {
+  if (
+    "unref" in holderLivenessTimer &&
+    typeof holderLivenessTimer.unref === "function"
+  ) {
     holderLivenessTimer.unref();
   }
 
@@ -645,7 +693,10 @@ export async function resumeBoxForTurn(
   }
   if (acquired.role === "fenced") {
     await release();
-    throw new SandboxLeaseSupersededError(ids.sandboxGroupId, acquired.lease.leaseEpoch);
+    throw new SandboxLeaseSupersededError(
+      ids.sandboxGroupId,
+      acquired.lease.leaseEpoch,
+    );
   }
 
   // SPAWNER: we won the cold->warming CAS. Establish (cold-restore/create),
@@ -658,7 +709,11 @@ export async function resumeBoxForTurn(
       selectedRevision: string;
     } | null = null;
     try {
-      const envelope = await getSandboxSessionEnvelope(db, ids.workspaceId, ids.sessionId);
+      const envelope = await getSandboxSessionEnvelope(
+        db,
+        ids.workspaceId,
+        ids.sessionId,
+      );
       // The lease is authoritative. A legacy per-session fallback archive may
       // only be used after beginSandboxRematerialization imports its archive
       // fields under the warming-row lock and records one selected revision.
@@ -670,7 +725,8 @@ export async function resumeBoxForTurn(
         workspaceArchiveFieldsFromEnvelope(envelope) !== null
           ? withoutProviderIdentity(envelope)
           : null;
-      const spawnEnvelope = fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
+      const spawnEnvelope =
+        fallbackArchiveEnvelope ?? acquired.lease.resumeState ?? envelope;
       const archiveSource =
         acquired.lease.recovery.archive.status === "none"
           ? fallbackArchiveEnvelope
@@ -689,7 +745,10 @@ export async function resumeBoxForTurn(
           archiveSource,
         });
         if (begun.status !== "started") {
-          if (begun.code === "stale_epoch" || begun.code === "attempt_conflict") {
+          if (
+            begun.code === "stale_epoch" ||
+            begun.code === "attempt_conflict"
+          ) {
             throw new SandboxLeaseSupersededError(
               ids.sandboxGroupId,
               begun.lease?.leaseEpoch ?? expectedEpoch,
@@ -698,7 +757,9 @@ export async function resumeBoxForTurn(
           throw new SandboxLeaseRecoveryBlockedError(
             ids.sandboxGroupId,
             begun.lease?.leaseEpoch ?? expectedEpoch,
-            begun.code === "archive_unverified" ? "restore_degraded" : "restore_unrecoverable",
+            begun.code === "archive_unverified"
+              ? "restore_degraded"
+              : "restore_unrecoverable",
             begun.lease?.recovery ?? acquired.lease.recovery,
           );
         }
@@ -727,62 +788,79 @@ export async function resumeBoxForTurn(
       // spawner branch: the lease's resume_state is authoritative; the session
       // `_sandbox` envelope is the per-session fallback. Without this a turn-first
       // re-warm after a drain->cold would ignore the archive and start an EMPTY box.
-      const established = await establishSandboxSessionFromEnvelope(settings, spawnEnvelope, {
-        sessionId: ids.sessionId,
-        recovery: "create-or-restore",
-        backendOverride: ids.backend as never,
-        ...(ids.environment ? { environment: ids.environment } : {}),
-        ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
-        onSandboxCreated: async (created) => {
-          createdEstablished = created;
-          const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
-            await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
-            created.backendId,
-          );
-          const recorded = await recordWarmingSandboxCreated(db, {
-            accountId: ids.accountId,
-            workspaceId: ids.workspaceId,
-            sandboxGroupId: ids.sandboxGroupId,
-            expectedEpoch,
-            rematerializationId: rematerialization?.id ?? null,
-            instanceId: created.instanceId,
-            resumeBackendId: created.backendId,
-            resumeState: resumeEnvelope,
-            leaseTtlMs,
-            // Keep the warming budget after create(): manifest setup and
-            // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
-            warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
-          });
-          if (!recorded.recorded) {
-            throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
-          }
-          if (created.backendId === "modal") {
-            await tagModalSandbox(settings, created.instanceId, {
-              leaseId: acquired.lease.id,
+      const established = await establishSandboxSessionFromEnvelope(
+        settings,
+        spawnEnvelope,
+        {
+          sessionId: ids.sessionId,
+          recovery: "create-or-restore",
+          backendOverride: ids.backend as never,
+          ...(ids.environment ? { environment: ids.environment } : {}),
+          ...(services.sandboxMetrics
+            ? { metrics: services.sandboxMetrics }
+            : {}),
+          onSandboxCreated: async (created) => {
+            createdEstablished = created;
+            const resumeEnvelope = requirePersistableReplacementSandboxEnvelope(
+              await serializeReplacementSandboxEnvelope(created, spawnEnvelope),
+              created.backendId,
+            );
+            const recorded = await recordWarmingSandboxCreated(db, {
+              accountId: ids.accountId,
               workspaceId: ids.workspaceId,
               sandboxGroupId: ids.sandboxGroupId,
-            }).catch(() => undefined);
-          }
+              expectedEpoch,
+              rematerializationId: rematerialization?.id ?? null,
+              instanceId: created.instanceId,
+              resumeBackendId: created.backendId,
+              resumeState: resumeEnvelope,
+              leaseTtlMs,
+              // Keep the warming budget after create(): manifest setup and
+              // commitWarmingToWarm still run, and can exceed the 90s turn TTL.
+              warmingLeaseTtlMs: settings.sandboxWarmingTimeoutMs,
+            });
+            if (!recorded.recorded) {
+              throw new SandboxLeaseSupersededError(
+                ids.sandboxGroupId,
+                expectedEpoch,
+              );
+            }
+            if (created.backendId === "modal") {
+              await tagModalSandbox(settings, created.instanceId, {
+                leaseId: acquired.lease.id,
+                workspaceId: ids.workspaceId,
+                sandboxGroupId: ids.sandboxGroupId,
+              }).catch(() => undefined);
+            }
+          },
+          onWorkspaceRestoreVerifying: async (
+            descriptor: WorkspaceArchiveDescriptor,
+          ) => {
+            if (
+              !rematerialization ||
+              descriptor.revision !== rematerialization.selectedRevision
+            ) {
+              throw new WorkspaceArchiveIntegrityError(
+                "archive_metadata_invalid",
+                `hydrated archive revision ${descriptor.revision} does not match the selected rematerialization revision`,
+              );
+            }
+            const verifying = await markSandboxRestoreVerifying(db, {
+              accountId: ids.accountId,
+              workspaceId: ids.workspaceId,
+              sandboxGroupId: ids.sandboxGroupId,
+              expectedEpoch,
+              rematerializationId: rematerialization.id,
+            });
+            if (!verifying.wrote) {
+              throw new SandboxLeaseSupersededError(
+                ids.sandboxGroupId,
+                expectedEpoch,
+              );
+            }
+          },
         },
-        onWorkspaceRestoreVerifying: async (descriptor: WorkspaceArchiveDescriptor) => {
-          if (!rematerialization || descriptor.revision !== rematerialization.selectedRevision) {
-            throw new WorkspaceArchiveIntegrityError(
-              "archive_metadata_invalid",
-              `hydrated archive revision ${descriptor.revision} does not match the selected rematerialization revision`,
-            );
-          }
-          const verifying = await markSandboxRestoreVerifying(db, {
-            accountId: ids.accountId,
-            workspaceId: ids.workspaceId,
-            sandboxGroupId: ids.sandboxGroupId,
-            expectedEpoch,
-            rematerializationId: rematerialization.id,
-          });
-          if (!verifying.wrote) {
-            throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
-          }
-        },
-      });
+      );
       createdEstablished = established;
       // A sandbox handle is not sufficient evidence that Modal's command router
       // is live. Do not publish a warm lease until one bounded no-op exec works.
@@ -812,7 +890,8 @@ export async function resumeBoxForTurn(
       );
       if (
         rematerialization &&
-        established.restoredArchive?.revision !== rematerialization.selectedRevision
+        established.restoredArchive?.revision !==
+          rematerialization.selectedRevision
       ) {
         throw new WorkspaceArchiveIntegrityError(
           "workspace_fingerprint_mismatch",
@@ -858,7 +937,10 @@ export async function resumeBoxForTurn(
           });
         }
         await release();
-        throw new SandboxLeaseSupersededError(ids.sandboxGroupId, expectedEpoch);
+        throw new SandboxLeaseSupersededError(
+          ids.sandboxGroupId,
+          expectedEpoch,
+        );
       }
       return { established, leaseEpoch: committed.lease.leaseEpoch, release };
     } catch (error) {
@@ -885,7 +967,10 @@ export async function resumeBoxForTurn(
               error instanceof WorkspaceArchiveIntegrityError
                 ? error.code
                 : "sandbox_rematerialization_failed",
-            retryable: error instanceof WorkspaceArchiveIntegrityError ? error.retryable : true,
+            retryable:
+              error instanceof WorkspaceArchiveIntegrityError
+                ? error.retryable
+                : true,
           });
         } else {
           await failWarmingToCold(db, {
@@ -929,17 +1014,26 @@ export async function resumeBoxForTurn(
       live.leaseEpoch !== leaseEpoch ||
       live.instanceId === null
     ) {
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, live?.leaseEpoch ?? leaseEpoch);
+      throw new SandboxLeaseSupersededError(
+        ids.sandboxGroupId,
+        live?.leaseEpoch ?? leaseEpoch,
+      );
     }
     let established: EstablishedSandboxSession;
     try {
-      established = await establishSandboxSessionFromEnvelope(settings, live.resumeState, {
-        sessionId: ids.sessionId,
-        recovery: "resume-only",
-        backendOverride: ids.backend as never,
-        ...(ids.environment ? { environment: ids.environment } : {}),
-        ...(services.sandboxMetrics ? { metrics: services.sandboxMetrics } : {}),
-      });
+      established = await establishSandboxSessionFromEnvelope(
+        settings,
+        live.resumeState,
+        {
+          sessionId: ids.sessionId,
+          recovery: "resume-only",
+          backendOverride: ids.backend as never,
+          ...(ids.environment ? { environment: ids.environment } : {}),
+          ...(services.sandboxMetrics
+            ? { metrics: services.sandboxMetrics }
+            : {}),
+        },
+      );
     } catch (error) {
       if (!isProviderSandboxNotFoundError(ids.backend, error)) {
         throw error;
@@ -1007,9 +1101,21 @@ async function waitForWarm(
       // The warming attempt either failed into drain or committed+released before
       // this waiter observed it. Re-dispatch so acquireLease can re-arm or spawn
       // through the normal path.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+      throw new SandboxLeaseSupersededError(
+        ids.sandboxGroupId,
+        lease.leaseEpoch,
+      );
     }
     if (lease.liveness === "cold") {
+      if (isRetryableDegradedRestore(lease.recovery.restore)) {
+        // The elected spawner hit a transient archive verification failure.
+        // Re-enter admission so one caller can become the next fenced spawner;
+        // the archive remains authoritative and must not become terminal.
+        throw new SandboxLeaseSupersededError(
+          ids.sandboxGroupId,
+          lease.leaseEpoch,
+        );
+      }
       if (
         lease.recovery.restore.status === "degraded" ||
         lease.recovery.restore.status === "unrecoverable"
@@ -1025,9 +1131,15 @@ async function waitForWarm(
       }
       // The spawner died; re-dispatch so the normal acquireLease path can win
       // cold->warming and run the full spawner branch.
-      throw new SandboxLeaseSupersededError(ids.sandboxGroupId, lease.leaseEpoch);
+      throw new SandboxLeaseSupersededError(
+        ids.sandboxGroupId,
+        lease.leaseEpoch,
+      );
     }
     // still warming — keep polling.
   }
-  throw new SandboxWarmingTimeoutError(ids.backend, settings.sandboxWarmingTimeoutMs);
+  throw new SandboxWarmingTimeoutError(
+    ids.backend,
+    settings.sandboxWarmingTimeoutMs,
+  );
 }

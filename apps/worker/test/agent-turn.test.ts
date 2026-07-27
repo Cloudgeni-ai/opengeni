@@ -22,6 +22,7 @@ import {
   CompactionProviderResponseError,
   CompactionNeededError,
   EmptyCompactionSummaryError,
+  WorkspaceArchiveIntegrityError,
   contextRobustnessFilterForSettings,
   modelResponseUsageFromResponse,
   sanitizeHistoryItemsForModel,
@@ -107,14 +108,24 @@ function functionResult(callId: string) {
 describe("structured human-input identity", () => {
   test("is stable for one logical tool call and distinct across calls or turns", () => {
     const first = stableHumanInputRequestId("session-1", "turn-1", "call-1");
-    expect(stableHumanInputRequestId("session-1", "turn-1", "call-1")).toBe(first);
-    expect(stableHumanInputRequestId("session-1", "turn-1", "call-2")).not.toBe(first);
-    expect(stableHumanInputRequestId("session-1", "turn-2", "call-1")).not.toBe(first);
-    expect(first).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-1")).toBe(
+      first,
+    );
+    expect(stableHumanInputRequestId("session-1", "turn-1", "call-2")).not.toBe(
+      first,
+    );
+    expect(stableHumanInputRequestId("session-1", "turn-2", "call-1")).not.toBe(
+      first,
+    );
+    expect(first).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 });
 
-async function actualCodexStreamingFailure(event: Record<string, unknown>): Promise<{
+async function actualCodexStreamingFailure(
+  event: Record<string, unknown>,
+): Promise<{
   calls: number;
   error: unknown;
   forwarded: string;
@@ -161,7 +172,10 @@ async function actualCodexStreamingFailure(event: Record<string, unknown>): Prom
   return { calls, error, forwarded };
 }
 
-async function actualCodexNullBodyFailure(): Promise<{ calls: number; error: unknown }> {
+async function actualCodexNullBodyFailure(): Promise<{
+  calls: number;
+  error: unknown;
+}> {
   let calls = 0;
   const token = {
     accessToken: "worker-test-token",
@@ -203,7 +217,9 @@ async function actualCodexNullBodyFailure(): Promise<{ calls: number; error: unk
  * in position order, after onConflictDoNothing-on-position is applied (a
  * position is frozen by the first row written to it).
  */
-function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>>) {
+function persistAcrossReconciles(
+  snapshots: Array<Array<Record<string, unknown>>>,
+) {
   const persistedByPosition = new Map<number, Record<string, unknown>>();
   let watermark = 0;
   for (const snapshot of snapshots) {
@@ -215,12 +231,16 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
     }
     watermark = nextWatermark;
   }
-  return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
+  return [...persistedByPosition.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, item]) => item);
 }
 
 describe("turn secret-redaction boundaries", () => {
   const syntheticSecret = "synthetic-turn-secret-value-123456";
-  const redact = createSecretRedactor([{ name: "TURN_SECRET", value: syntheticSecret }]);
+  const redact = createSecretRedactor([
+    { name: "TURN_SECRET", value: syntheticSecret },
+  ]);
 
   test("redacts current history before durable append", () => {
     const result = historyRowsToAppend(
@@ -258,12 +278,17 @@ describe("turn secret-redaction boundaries", () => {
   });
 
   test("safe logging diagnostics exclude stack, cause, and synthetic credentials", () => {
-    const error = Object.assign(new Error(`request rejected; token=${syntheticSecret}`), {
-      status: 401,
-      code: "AUTH_REJECTED",
-      cause: { responseBody: syntheticSecret },
-    });
-    const diagnostic = safeErrorDiagnostic(error, (value) => String(redact(value)));
+    const error = Object.assign(
+      new Error(`request rejected; token=${syntheticSecret}`),
+      {
+        status: 401,
+        code: "AUTH_REJECTED",
+        cause: { responseBody: syntheticSecret },
+      },
+    );
+    const diagnostic = safeErrorDiagnostic(error, (value) =>
+      String(redact(value)),
+    );
 
     expect(diagnostic).toEqual({
       name: "Error",
@@ -289,9 +314,18 @@ describe("turn secret-redaction boundaries", () => {
         "x-signature": "sha256=public-digest",
       }),
     ).toEqual([
-      { name: "MCP_AUTHORIZATION", value: "Bearer synthetic-mcp-auth-value-123456" },
-      { name: "MCP_AUTHORIZATION_CREDENTIAL", value: "synthetic-mcp-auth-value-123456" },
-      { name: "MCP_COOKIE", value: "session=synthetic-mcp-cookie-value-123456" },
+      {
+        name: "MCP_AUTHORIZATION",
+        value: "Bearer synthetic-mcp-auth-value-123456",
+      },
+      {
+        name: "MCP_AUTHORIZATION_CREDENTIAL",
+        value: "synthetic-mcp-auth-value-123456",
+      },
+      {
+        name: "MCP_COOKIE",
+        value: "session=synthetic-mcp-cookie-value-123456",
+      },
       { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
     ]);
   });
@@ -313,9 +347,11 @@ describe("turn secret-redaction boundaries", () => {
 
   test("registers every renewed MCP header returned by the credential broker", () => {
     expect(
-      headerSecretRedactions("MCP", { "Private-Token": "synthetic-renewed-private-token-123456" }, [
-        "Private-Token",
-      ]),
+      headerSecretRedactions(
+        "MCP",
+        { "Private-Token": "synthetic-renewed-private-token-123456" },
+        ["Private-Token"],
+      ),
     ).toEqual([
       {
         name: "MCP_PRIVATE_TOKEN",
@@ -348,7 +384,9 @@ describe("turn secret-redaction boundaries", () => {
       currentResolvedServer.headers,
       currentHeaderNamesById.get(currentResolvedServer.id),
     );
-    const redacted = createSecretRedactor(currentRegistration)(currentResolvedServer.headers);
+    const redacted = createSecretRedactor(currentRegistration)(
+      currentResolvedServer.headers,
+    );
 
     expect(staleRegistration).toHaveLength(0);
     expect(currentRegistration).toEqual([
@@ -389,7 +427,10 @@ describe("accepted turn execution identity", () => {
         providerId: "codex-subscription",
         upstreamModelId: "gpt-5.6-sol",
         credentialSource: { kind: "connected_subscription", provider: "codex" },
-        billing: { upstreamPayer: "connected_subscription", metering: "external" },
+        billing: {
+          upstreamPayer: "connected_subscription",
+          metering: "external",
+        },
       }),
     ).toEqual({ externallyBilled: true, codexSubscription: true });
     expect(
@@ -452,7 +493,10 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     // The live worker's durable receipt gate deliberately skips the partial B
     // snapshot (the response batch is not settled) and reconciles only after both
     // raw results exist, when the SDK history is stable again.
-    const persisted = persistAcrossReconciles([[user], [user, callA, callB, resultB, resultA]]);
+    const persisted = persistAcrossReconciles([
+      [user],
+      [user, callA, callB, resultB, resultA],
+    ]);
     expect(persisted).toEqual([user, callA, callB, resultB, resultA]);
   });
 
@@ -540,17 +584,27 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     // Snapshot 2: tool A settled; A's call+result are now present, B still
     // pending and pruned. History grew but at DIFFERENT positions than a naive
     // append-only view assumed.
-    const snap2 = [userMessage("do A and B"), functionCall("call_a"), functionResult("call_a")];
+    const snap2 = [
+      userMessage("do A and B"),
+      functionCall("call_a"),
+      functionResult("call_a"),
+    ];
     // Snapshot 3 (abnormal end): the goal paused; B was cancelled mid-batch and
     // never produced a result, so B stays pruned. Final history is A's settled
     // pair only.
-    const snap3 = [userMessage("do A and B"), functionCall("call_a"), functionResult("call_a")];
+    const snap3 = [
+      userMessage("do A and B"),
+      functionCall("call_a"),
+      functionResult("call_a"),
+    ];
 
     const persisted = persistAcrossReconciles([snap1, snap2, snap3]);
 
     // Every persisted result has its call earlier in the persisted rows.
     const callIds = new Set(
-      persisted.filter((item) => item.type === "function_call").map((item) => item.callId),
+      persisted
+        .filter((item) => item.type === "function_call")
+        .map((item) => item.callId),
     );
     for (const item of persisted) {
       if (item.type === "function_call_result") {
@@ -578,7 +632,11 @@ describe("conversation-truth reconcile (orphaned tool output guard)", () => {
     expect(first.rows.map((row) => row.item)).toEqual([userMessage("go")]);
     expect(first.nextWatermark).toBe(1);
     // Next reconcile: the result arrived; call and result persist together.
-    const snapSettled = [userMessage("go"), functionCall("call_x"), functionResult("call_x")];
+    const snapSettled = [
+      userMessage("go"),
+      functionCall("call_x"),
+      functionResult("call_x"),
+    ];
     const second = historyRowsToAppend(snapSettled, first.nextWatermark);
     expect(second.rows.map((row) => row.item)).toEqual([
       functionCall("call_x"),
@@ -675,7 +733,9 @@ describe("reconcile seed watermark (issue-61 skew: raw vs sanitized active count
     // genuinely-new "new trigger" item; worse, on a multi-step turn it can skip a
     // function_call while later persisting its function_call_result alone.
     const old = historyRowsToAppend(stateHistory, rawActiveCount);
-    expect(old.rows.map((row) => row.item)).not.toContainEqual(userMessage("new trigger"));
+    expect(old.rows.map((row) => row.item)).not.toContainEqual(
+      userMessage("new trigger"),
+    );
 
     // FIXED behavior (sanitized seed = 2): the slice starts exactly at the first
     // genuinely-new item; every new item is persisted and no result is stranded.
@@ -718,18 +778,27 @@ describe("reconcile seed watermark (issue-61 skew: raw vs sanitized active count
     const fixedRows = historyRowsToAppend(stateHistory, seed);
     const persisted = fixedRows.rows.map((row) => row.item);
     const callIds = new Set(
-      persisted.filter((item) => item.type === "function_call").map((item) => item.callId),
+      persisted
+        .filter((item) => item.type === "function_call")
+        .map((item) => item.callId),
     );
     for (const item of persisted) {
       if (item.type === "function_call_result") {
         expect(callIds.has(item.callId)).toBe(true);
       }
     }
-    expect(persisted).toEqual([functionCall("call_new"), functionResult("call_new")]);
+    expect(persisted).toEqual([
+      functionCall("call_new"),
+      functionResult("call_new"),
+    ]);
   });
 
   test("orphan-free active history: sanitized seed equals raw count (common path unchanged)", () => {
-    const activeRows = [userMessage("hi"), functionCall("c1"), functionResult("c1")];
+    const activeRows = [
+      userMessage("hi"),
+      functionCall("c1"),
+      functionResult("c1"),
+    ];
     expect(sanitizedSeed(activeRows)).toBe(activeRows.length);
   });
 });
@@ -836,11 +905,17 @@ describe("model usage source key (re-dispatch charge stability)", () => {
 
 describe("sandbox lease holder identity", () => {
   test("does not collide when sibling workflows reuse the same Temporal activity id", () => {
-    const siblingAttemptA = sandboxLeaseHolderIdForAttempt("11111111-1111-4111-8111-111111111111");
-    const siblingAttemptB = sandboxLeaseHolderIdForAttempt("22222222-2222-4222-8222-222222222222");
+    const siblingAttemptA = sandboxLeaseHolderIdForAttempt(
+      "11111111-1111-4111-8111-111111111111",
+    );
+    const siblingAttemptB = sandboxLeaseHolderIdForAttempt(
+      "22222222-2222-4222-8222-222222222222",
+    );
 
     expect(siblingAttemptA).not.toBe(siblingAttemptB);
-    expect(siblingAttemptA).toBe("turn-attempt:11111111-1111-4111-8111-111111111111");
+    expect(siblingAttemptA).toBe(
+      "turn-attempt:11111111-1111-4111-8111-111111111111",
+    );
   });
 
   test("is stable for an activity retry of the same durable attempt", () => {
@@ -942,19 +1017,27 @@ describe("production model-response usage callback authority", () => {
     } as any);
     const rawTerminal = new RunRawModelStreamEvent({
       type: "model",
-      providerData: { rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE },
+      providerData: {
+        rawModelEventSource: OPENAI_RESPONSES_RAW_MODEL_EVENT_SOURCE,
+      },
       event: { type: "response.completed", response },
     } as any);
 
-    const observability = createObservability(testSettings(), { component: "worker" });
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
     const billingRows = new Map<string, Record<string, unknown>>();
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
-        if (!billingRows.has(input.idempotencyKey)) {
-          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
-        }
-      },
-    );
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEvent",
+    ).mockImplementation(async (_db, input) => {
+      if (!billingRows.has(input.idempotencyKey)) {
+        billingRows.set(
+          input.idempotencyKey,
+          input as unknown as Record<string, unknown>,
+        );
+      }
+    });
     try {
       const durableUsageSourceKeys = new Set<string>();
       const publish = async (batch: any[]) => ({
@@ -966,7 +1049,9 @@ describe("production model-response usage callback authority", () => {
           return {
             ...event,
             id: crypto.randomUUID(),
-            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+            turnAssociation: duplicate
+              ? ("duplicate" as const)
+              : ("current" as const),
             ...(duplicate
               ? {
                   duplicateOfEventId: crypto.randomUUID(),
@@ -979,7 +1064,11 @@ describe("production model-response usage callback authority", () => {
       const fencedInputs: number[] = [];
       const state = createModelResponseUsageEventState();
       const emittedSourceKeys = new Set<string>();
-      const process = (event: any, targetState = state, dispatchId = "activity-A") =>
+      const process = (
+        event: any,
+        targetState = state,
+        dispatchId = "activity-A",
+      ) =>
         processModelResponseUsageEvent({
           event,
           state: targetState,
@@ -1019,14 +1108,22 @@ describe("production model-response usage callback authority", () => {
           contextCompactionSignal: () => modelResponseUsageContextSignal(state),
         },
       );
-      const first = [{ type: "message", role: "user", content: "start" }] as any;
-      await filter({ modelData: { input: first, instructions: "system" }, agent: {} as any });
+      const first = [
+        { type: "message", role: "user", content: "start" },
+      ] as any;
+      await filter({
+        modelData: { input: first, instructions: "system" },
+        agent: {} as any,
+      });
       const second = [
         ...first,
         { type: "message", role: "assistant", content: "first response" },
         { type: "message", role: "user", content: "continue" },
       ] as any;
-      await filter({ modelData: { input: second, instructions: "system" }, agent: {} as any });
+      await filter({
+        modelData: { input: second, instructions: "system" },
+        agent: {} as any,
+      });
 
       expect((await process(normalizedTerminal)).status).toBe("processed");
       expect((await process(rawTerminal)).status).toBe("duplicate");
@@ -1067,7 +1164,10 @@ describe("production model-response usage callback authority", () => {
         { type: "message", role: "user", content: "continue again" },
       ] as any;
       await expect(
-        filter({ modelData: { input: third, instructions: "system" }, agent: {} as any }),
+        filter({
+          modelData: { input: third, instructions: "system" },
+          agent: {} as any,
+        }),
       ).rejects.toBeInstanceOf(CompactionNeededError);
 
       // A worker restart/re-dispatch rebuilds local state. The stable provider
@@ -1125,15 +1225,21 @@ describe("production model-response usage callback authority", () => {
   });
 
   test("keeps no-id response ordinals unique across an in-activity compaction retry", async () => {
-    const observability = createObservability(testSettings(), { component: "worker" });
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
     const billingRows = new Map<string, Record<string, unknown>>();
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
-        if (!billingRows.has(input.idempotencyKey)) {
-          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
-        }
-      },
-    );
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEvent",
+    ).mockImplementation(async (_db, input) => {
+      if (!billingRows.has(input.idempotencyKey)) {
+        billingRows.set(
+          input.idempotencyKey,
+          input as unknown as Record<string, unknown>,
+        );
+      }
+    });
     try {
       const durableUsageSourceKeys = new Set<string>();
       const publish = async (batch: any[]) => ({
@@ -1145,7 +1251,9 @@ describe("production model-response usage callback authority", () => {
           return {
             ...event,
             id: crypto.randomUUID(),
-            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+            turnAssociation: duplicate
+              ? ("duplicate" as const)
+              : ("current" as const),
           };
         }),
       });
@@ -1228,15 +1336,21 @@ describe("production model-response usage callback authority", () => {
   });
 
   test("claims compaction usage before retry side effects and defers restart authority to durable usage", async () => {
-    const observability = createObservability(testSettings(), { component: "worker" });
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
     const billingRows = new Map<string, Record<string, unknown>>();
-    const recordUsageSpy = spyOn(opengeniDb, "recordUsageEvent").mockImplementation(
-      async (_db, input) => {
-        if (!billingRows.has(input.idempotencyKey)) {
-          billingRows.set(input.idempotencyKey, input as unknown as Record<string, unknown>);
-        }
-      },
-    );
+    const recordUsageSpy = spyOn(
+      opengeniDb,
+      "recordUsageEvent",
+    ).mockImplementation(async (_db, input) => {
+      if (!billingRows.has(input.idempotencyKey)) {
+        billingRows.set(
+          input.idempotencyKey,
+          input as unknown as Record<string, unknown>,
+        );
+      }
+    });
     try {
       const durableUsageSourceKeys = new Set<string>();
       const publish = async (batch: any[]) => ({
@@ -1248,7 +1362,9 @@ describe("production model-response usage callback authority", () => {
           return {
             ...event,
             id: crypto.randomUUID(),
-            turnAssociation: duplicate ? ("duplicate" as const) : ("current" as const),
+            turnAssociation: duplicate
+              ? ("duplicate" as const)
+              : ("current" as const),
           };
         }),
       });
@@ -1301,13 +1417,18 @@ describe("production model-response usage callback authority", () => {
         sourceKey: usage.responseId,
         authoritative: true,
       });
-      expect(await process()).toEqual({ status: "duplicate", sourceKey: usage.responseId });
+      expect(await process()).toEqual({
+        status: "duplicate",
+        sourceKey: usage.responseId,
+      });
       expect(state.usageCount).toBe(1);
       expect(leaseRenewals).toBe(1);
       expect(billingRows.size).toBe(1);
 
       const restartedState = createCompactionModelUsageEventState();
-      expect(await process(restartedState, new Set<string>(), "activity-B")).toMatchObject({
+      expect(
+        await process(restartedState, new Set<string>(), "activity-B"),
+      ).toMatchObject({
         status: "processed",
         sourceKey: usage.responseId,
         authoritative: false,
@@ -1332,7 +1453,8 @@ describe("model call usage observability", () => {
     const infos: Array<Record<string, unknown>> = [];
     const events: Array<{ type: string; payload: unknown }> = [];
     const observability = {
-      info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+      info: (_message: string, attributes: Record<string, unknown>) =>
+        infos.push(attributes),
       warn: mock(),
     };
 
@@ -1411,7 +1533,8 @@ describe("model call usage observability", () => {
   test("logs the opaque serving-account tag and account-switch flag when provided", async () => {
     const infos: Array<Record<string, unknown>> = [];
     const observability = {
-      info: (_message: string, attributes: Record<string, unknown>) => infos.push(attributes),
+      info: (_message: string, attributes: Record<string, unknown>) =>
+        infos.push(attributes),
       warn: mock(),
     };
 
@@ -1455,9 +1578,13 @@ describe("model call usage observability", () => {
 
   test("does not log a duplicate usage observation as authoritative", async () => {
     const infos: Array<Record<string, unknown>> = [];
-    const observability = createObservability(testSettings(), { component: "worker" });
-    observability.info = (_message: string, attributes: Record<string, unknown>) =>
-      infos.push(attributes);
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
+    observability.info = (
+      _message: string,
+      attributes: Record<string, unknown>,
+    ) => infos.push(attributes);
     observability.warn = mock();
     await emitModelCallUsage({
       observability,
@@ -1489,7 +1616,9 @@ describe("model call usage observability", () => {
   });
 
   test("wires raw response cache writes through the authoritative production metric path", async () => {
-    const observability = createObservability(testSettings(), { component: "worker" });
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
     const responseUsage = modelResponseUsageFromResponse({
       id: "resp-write",
       usage: {
@@ -1535,7 +1664,9 @@ describe("model call usage observability", () => {
   });
 
   test("sums SDK aggregate retries once and dedupes an authoritative source key", async () => {
-    const observability = createObservability(testSettings(), { component: "worker" });
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
     const aggregate = new Usage();
     aggregate.add(
       new Usage({
@@ -1609,7 +1740,9 @@ describe("model call usage observability", () => {
   });
 
   test("keeps malformed provider usage out of durable payloads and emits bounded diagnostics", async () => {
-    const observability = createObservability(testSettings(), { component: "worker" });
+    const observability = createObservability(testSettings(), {
+      component: "worker",
+    });
     const info = mock();
     const warn = mock();
     observability.info = info;
@@ -1659,7 +1792,9 @@ describe("model call usage observability", () => {
       cacheWriteTokens: null,
       reasoningTokens: null,
     });
-    expect(Object.values(payloads[0] ?? {})).not.toContain(Number.POSITIVE_INFINITY);
+    expect(Object.values(payloads[0] ?? {})).not.toContain(
+      Number.POSITIVE_INFINITY,
+    );
     expect(info).toHaveBeenCalledWith(
       "model call usage",
       expect.objectContaining({ cacheWriteTokens: null }),
@@ -1667,7 +1802,9 @@ describe("model call usage observability", () => {
     expect(warn).toHaveBeenCalledWith(
       "model call usage fields rejected",
       expect.objectContaining({
-        rejectedFields: expect.stringContaining("inputTokensDetails.cache_write_tokens"),
+        rejectedFields: expect.stringContaining(
+          "inputTokensDetails.cache_write_tokens",
+        ),
       }),
     );
     const rejectedFields = (warn.mock.calls[0]?.[1] as Record<string, unknown>)
@@ -1691,9 +1828,13 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     // Home backend stays cloud (e.g. modal) but the active sandbox is a BYO
     // machine — buildAgent must be told "selfhosted" so the repository clone hook
     // is skipped (never `git clone` onto the user's real disk).
-    expect(await resolveActiveSandboxBackend(true, selfhostedPointer, selfhostedKind)).toBe(
-      "selfhosted",
-    );
+    expect(
+      await resolveActiveSandboxBackend(
+        true,
+        selfhostedPointer,
+        selfhostedKind,
+      ),
+    ).toBe("selfhosted");
   });
 
   test("returns undefined when routing is off (flag gated; home backend default)", async () => {
@@ -1728,7 +1869,11 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
   test("returns undefined when the active swap target is itself a cloud (modal) box", async () => {
     // A swap to a sibling cloud box is still cloud — the clone hook stays enabled.
     expect(
-      await resolveActiveSandboxBackend(true, selfhostedPointer, async () => "modal"),
+      await resolveActiveSandboxBackend(
+        true,
+        selfhostedPointer,
+        async () => "modal",
+      ),
     ).toBeUndefined();
   });
 
@@ -1744,9 +1889,13 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
   });
 
   test("never throws: a sandbox-kind-load failure falls back to the home backend default", async () => {
-    const backend = await resolveActiveSandboxBackend(true, selfhostedPointer, async () => {
-      throw new Error("db unreachable");
-    });
+    const backend = await resolveActiveSandboxBackend(
+      true,
+      selfhostedPointer,
+      async () => {
+        throw new Error("db unreachable");
+      },
+    );
     expect(backend).toBeUndefined();
   });
 
@@ -1778,11 +1927,15 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
 
 describe("machine-primary sandbox ownership isolation", () => {
   test("does not acquire the managed-home lease for a Connected Machine turn", () => {
-    expect(managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group")).toBeNull();
+    expect(
+      managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group"),
+    ).toBeNull();
   });
 
   test("keeps managed sandbox turns on their exact attempt-derived holder", () => {
-    expect(managedSandboxOwnershipForTurn(false, "attempt-1", "cloud-home-group")).toEqual({
+    expect(
+      managedSandboxOwnershipForTurn(false, "attempt-1", "cloud-home-group"),
+    ).toEqual({
       holderId: sandboxLeaseHolderIdForAttempt("attempt-1"),
       sandboxGroupId: "cloud-home-group",
     });
@@ -1801,21 +1954,23 @@ describe("turn-start pointer reconcile classification (issue #341 invariant B)",
   });
 
   test("an unknown backend kind → unsupported_backend_context", () => {
-    expect(pointerReconcileReason({ kind: "daytona", enrollmentId: null })).toBe(
-      "unsupported_backend_context",
-    );
+    expect(
+      pointerReconcileReason({ kind: "daytona", enrollmentId: null }),
+    ).toBe("unsupported_backend_context");
   });
 
   test("a selfhosted sandbox with no enrollment id → offline_enrollment", () => {
-    expect(pointerReconcileReason({ kind: "selfhosted", enrollmentId: null })).toBe(
-      "offline_enrollment",
-    );
+    expect(
+      pointerReconcileReason({ kind: "selfhosted", enrollmentId: null }),
+    ).toBe("offline_enrollment");
   });
 
   test("an enrolled machine is LEFT IN PLACE (null) even if momentarily offline — never reconciled", () => {
     // The user's explicit machine target is not abandoned for a transient control-
     // plane blip; the machine may recover mid-turn and surfaces agent_offline lazily.
-    expect(pointerReconcileReason({ kind: "selfhosted", enrollmentId: "enroll-1" })).toBeNull();
+    expect(
+      pointerReconcileReason({ kind: "selfhosted", enrollmentId: "enroll-1" }),
+    ).toBeNull();
   });
 });
 
@@ -1832,13 +1987,19 @@ describe("turn-time Modal private-registry warm", () => {
     );
     const ensureRegistryImage = mock(async (_settings: Settings) => undefined);
 
-    await ensureTurnModalRegistryImage(runSettings, "modal", ensureRegistryImage);
+    await ensureTurnModalRegistryImage(
+      runSettings,
+      "modal",
+      ensureRegistryImage,
+    );
 
     expect(ensureRegistryImage).toHaveBeenCalledTimes(1);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(packImage);
-    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret).toBe(
-      "acr-credentials-gecko",
+    expect(ensureRegistryImage.mock.calls[0]?.[0].modalImageRef).toBe(
+      packImage,
     );
+    expect(
+      ensureRegistryImage.mock.calls[0]?.[0].modalImageRegistrySecret,
+    ).toBe("acr-credentials-gecko");
   });
 
   test("keeps non-modal or public-image turns on the no-op path", async () => {
@@ -1914,12 +2075,18 @@ describe("on-turn recording gate (selfhosted machines have no in-box capture plu
   });
 
   test("recording disabled by policy: skips regardless of backend", () => {
-    expect(shouldStartOnTurnRecording({ ...base, recordingEnabled: false })).toBe(false);
-    expect(shouldStartOnTurnRecording({ ...base, desktopEnabled: false })).toBe(false);
+    expect(
+      shouldStartOnTurnRecording({ ...base, recordingEnabled: false }),
+    ).toBe(false);
+    expect(shouldStartOnTurnRecording({ ...base, desktopEnabled: false })).toBe(
+      false,
+    );
   });
 
   test("headless / non-desktop established backend: skips (existing static feasibility gate holds)", () => {
-    expect(shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" })).toBe(false);
+    expect(
+      shouldStartOnTurnRecording({ ...base, establishedBackendId: "none" }),
+    ).toBe(false);
   });
 });
 
@@ -1932,7 +2099,9 @@ describe("lazy sandbox provisioner single-flight", () => {
       return { ok: true, attempt: establishes };
     });
 
-    const results = await Promise.all(Array.from({ length: 12 }, () => provisioner.get()));
+    const results = await Promise.all(
+      Array.from({ length: 12 }, () => provisioner.get()),
+    );
 
     expect(establishes).toBe(1);
     expect(results.every((result) => result === results[0])).toBe(true);
@@ -1946,7 +2115,9 @@ describe("lazy sandbox provisioner single-flight", () => {
       throw new SandboxImageConflictError("group-1", "old", "new");
     });
 
-    const first = await Promise.allSettled(Array.from({ length: 5 }, () => provisioner.get()));
+    const first = await Promise.allSettled(
+      Array.from({ length: 5 }, () => provisioner.get()),
+    );
     expect(first.every((result) => result.status === "rejected")).toBe(true);
     expect(establishes).toBe(1);
 
@@ -1973,11 +2144,32 @@ describe("lazy sandbox provisioner single-flight", () => {
 
   test("image conflict is actionable and not retried", async () => {
     expect(
-      isLazySandboxProvisionRetryable(new SandboxImageConflictError("group-1", "old", "new")),
+      isLazySandboxProvisionRetryable(
+        new SandboxImageConflictError("group-1", "old", "new"),
+      ),
     ).toBe(false);
-    expect(isLazySandboxProvisionRetryable(new SandboxLeaseSupersededError("group-1", 1))).toBe(
-      true,
-    );
+    expect(
+      isLazySandboxProvisionRetryable(
+        new SandboxLeaseSupersededError("group-1", 1),
+      ),
+    ).toBe(true);
+    expect(
+      isLazySandboxProvisionRetryable(
+        new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_unavailable",
+          "fingerprint unavailable",
+          { retryable: true },
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      isLazySandboxProvisionRetryable(
+        new WorkspaceArchiveIntegrityError(
+          "workspace_fingerprint_mismatch",
+          "fingerprint mismatch",
+        ),
+      ),
+    ).toBe(false);
   });
 
   test("Steer/Pause cancels a pending provision immediately and disposes its late lease", async () => {
@@ -2030,8 +2222,10 @@ describe("lazy sandbox provisioner single-flight", () => {
       resolveEstablish = resolve;
     });
     let releases = 0;
-    const pending = waitForTurnOperation(establish, controller.signal, async (late) =>
-      late.release(),
+    const pending = waitForTurnOperation(
+      establish,
+      controller.signal,
+      async (late) => late.release(),
     );
 
     const temporalCancellation = new CancelledFailure("CANCELLED");
@@ -2040,7 +2234,9 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     const wrapped = await pending.catch((error: unknown) => error);
     expect(wrapped).toBeInstanceOf(TurnOperationCancelledError);
-    expect(turnOperationCancellationFailure(wrapped)).toBe(temporalCancellation);
+    expect(turnOperationCancellationFailure(wrapped)).toBe(
+      temporalCancellation,
+    );
     expect(performance.now() - cancelledAt).toBeLessThan(100);
 
     resolveEstablish({ release: () => (releases += 1) });
@@ -2054,7 +2250,9 @@ describe("lazy sandbox provisioner single-flight", () => {
 
     expect(cancellation).toBeInstanceOf(CancelledFailure);
     expect(cancellation?.message).toBe("TURN_SANDBOX_PROVISION_CANCELLED");
-    expect(turnOperationCancellationFailure(new Error("provider failed"))).toBeNull();
+    expect(
+      turnOperationCancellationFailure(new Error("provider failed")),
+    ).toBeNull();
   });
 
   test("a committed control outranks a same-checkpoint provider failure", async () => {
@@ -2075,12 +2273,20 @@ describe("lazy sandbox provisioner single-flight", () => {
 
 describe("worker shutdown preemption", () => {
   test("classifies only WORKER_SHUTDOWN cancellations as graceful preemption", () => {
-    expect(isWorkerShutdownCancellation(new CancelledFailure("WORKER_SHUTDOWN"))).toBe(true);
+    expect(
+      isWorkerShutdownCancellation(new CancelledFailure("WORKER_SHUTDOWN")),
+    ).toBe(true);
     // Workflow-requested Pause/Steer cancellation keeps its control path.
-    expect(isWorkerShutdownCancellation(new CancelledFailure("CANCELLED"))).toBe(false);
+    expect(
+      isWorkerShutdownCancellation(new CancelledFailure("CANCELLED")),
+    ).toBe(false);
     // Server-side heartbeat timeout after a hard kill must stay terminal.
-    expect(isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT"))).toBe(false);
-    expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(false);
+    expect(
+      isWorkerShutdownCancellation(new CancelledFailure("TIMED_OUT")),
+    ).toBe(false);
+    expect(isWorkerShutdownCancellation(new Error("WORKER_SHUTDOWN"))).toBe(
+      false,
+    );
     expect(isWorkerShutdownCancellation(undefined)).toBe(false);
   });
 
@@ -2106,7 +2312,9 @@ describe("worker shutdown preemption", () => {
   });
 
   test("turns an unconfirmed physical tool fence into a hard failure", () => {
-    const fenceFailure = new Error("remote process identity could not be verified");
+    const fenceFailure = new Error(
+      "remote process identity could not be verified",
+    );
     expect(() =>
       assertPhysicalToolQuiescenceForCancellation({
         acknowledgeQuiescence: true,
@@ -2170,7 +2378,10 @@ describe("worker shutdown preemption", () => {
     });
     const gitRenewal = startGitCredentialRenewalLoop({
       expectedProviders: ["github"],
-      mint: async () => ({ gitTokens: { github: "test-token" }, expiresAt: {} }),
+      mint: async () => ({
+        gitTokens: { github: "test-token" },
+        expiresAt: {},
+      }),
       write: async () => {
         steps.push("git-write-started");
         await gitWriteDrained;
@@ -2215,7 +2426,11 @@ describe("worker shutdown preemption", () => {
     });
 
     await Bun.sleep(0);
-    expect(steps).toEqual(["git-write-started", "tools-cancelled", "tools-draining"]);
+    expect(steps).toEqual([
+      "git-write-started",
+      "tools-cancelled",
+      "tools-draining",
+    ]);
     expect(receipts).toBe(0);
 
     releaseTools();
@@ -2365,7 +2580,11 @@ describe("worker shutdown preemption", () => {
       rejectProvider = reject;
     });
     const startedAt = performance.now();
-    const cleanup = waitForTurnStreamCleanup(flush, providerCompleted, controller.signal);
+    const cleanup = waitForTurnStreamCleanup(
+      flush,
+      providerCompleted,
+      controller.signal,
+    );
     controller.abort(new Error("STEER"));
     await expect(cleanup).resolves.toBeUndefined();
     expect(performance.now() - startedAt).toBeLessThan(100);
@@ -2403,10 +2622,12 @@ describe("sandbox file materialization note", () => {
       },
     ];
 
-    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set(["file-1"]))).toEqual([
-      downloads[1],
-    ]);
-    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set())).toBe(downloads);
+    expect(
+      filterUnmaterializedSandboxFileDownloads(downloads, new Set(["file-1"])),
+    ).toEqual([downloads[1]]);
+    expect(filterUnmaterializedSandboxFileDownloads(downloads, new Set())).toBe(
+      downloads,
+    );
   });
 });
 
@@ -2416,7 +2637,9 @@ describe("context window overflow classifier", () => {
       code: "context_length_exceeded",
       status: 400,
     });
-    expect(classifyContextWindowOverflowError(byCode)?.code).toBe("context_length_exceeded");
+    expect(classifyContextWindowOverflowError(byCode)?.code).toBe(
+      "context_length_exceeded",
+    );
 
     expect(
       classifyContextWindowOverflowError(
@@ -2434,7 +2657,8 @@ describe("context window overflow classifier", () => {
       status: 400,
       error: {
         code: "BadRequest",
-        message: "The request failed because the input exceeds the context window.",
+        message:
+          "The request failed because the input exceeds the context window.",
       },
     };
     expect(classifyContextWindowOverflowError(nested)?.detail).toContain(
@@ -2443,7 +2667,9 @@ describe("context window overflow classifier", () => {
   });
 
   test("does not match unrelated provider failures", () => {
-    expect(classifyContextWindowOverflowError(new Error("Too Many Requests"))).toBeNull();
+    expect(
+      classifyContextWindowOverflowError(new Error("Too Many Requests")),
+    ).toBeNull();
     expect(
       classifyContextWindowOverflowError(
         Object.assign(new Error("invalid tool call"), { status: 400 }),
@@ -2461,12 +2687,16 @@ describe("context window overflow classifier", () => {
 describe("escaped MCP transport timeout classifier", () => {
   test("matches the production -32001 request-timeout shape and nested transport errors", () => {
     const exact = new Error("MCP error -32001: Request timed out");
-    expect(classifyMcpTransportTimeoutError(exact)?.message).toBe(exact.message);
+    expect(classifyMcpTransportTimeoutError(exact)?.message).toBe(
+      exact.message,
+    );
 
     const nested = {
       error: { message: "MCP transport request timeout while listing tools" },
     };
-    expect(classifyMcpTransportTimeoutError(nested)?.detail).toContain("MCP transport");
+    expect(classifyMcpTransportTimeoutError(nested)?.detail).toContain(
+      "MCP transport",
+    );
 
     expect(agentRunFailurePayload(exact)).toEqual({
       error:
@@ -2480,11 +2710,17 @@ describe("escaped MCP transport timeout classifier", () => {
   test("does not absorb auth-needed or unrelated timeout failures", () => {
     expect(
       classifyMcpTransportTimeoutError(
-        new Error("MCP error -32001: Authentication required - a connection link was posted"),
+        new Error(
+          "MCP error -32001: Authentication required - a connection link was posted",
+        ),
       ),
     ).toBeNull();
-    expect(classifyMcpTransportTimeoutError(new Error("sandbox creation timed out"))).toBeNull();
-    expect(classifyMcpTransportTimeoutError(new Error("Too Many Requests"))).toBeNull();
+    expect(
+      classifyMcpTransportTimeoutError(new Error("sandbox creation timed out")),
+    ).toBeNull();
+    expect(
+      classifyMcpTransportTimeoutError(new Error("Too Many Requests")),
+    ).toBeNull();
   });
 });
 
@@ -2494,22 +2730,27 @@ describe("Codex response timeout fail-closed settlement", () => {
       name: "APIConnectionTimeoutError",
     });
     expect(agentRunFailurePayload(legacy).retryable).toBeUndefined();
-    expect(agentRunFailurePayload(legacy, { isCodexTurn: true })).toMatchObject({
-      code: "codex_response_timeout",
-      retryable: false,
-      timeoutClass: "headers",
-      responseObserved: false,
-    });
+    expect(agentRunFailurePayload(legacy, { isCodexTurn: true })).toMatchObject(
+      {
+        code: "codex_response_timeout",
+        retryable: false,
+        timeoutClass: "headers",
+        responseObserved: false,
+      },
+    );
   });
 
   test("preserves structured partial-stream timeout evidence without same-turn replay", () => {
-    const structured = Object.assign(new Error("Codex response idle stream timed out"), {
-      name: "CodexResponseTimeoutError",
-      type: "opengeni_codex_response_timeout",
-      timeoutClass: "idle_stream",
-      requestId: "dispatch-7:3",
-      responseObserved: true,
-    });
+    const structured = Object.assign(
+      new Error("Codex response idle stream timed out"),
+      {
+        name: "CodexResponseTimeoutError",
+        type: "opengeni_codex_response_timeout",
+        timeoutClass: "idle_stream",
+        requestId: "dispatch-7:3",
+        responseObserved: true,
+      },
+    );
     expect(agentRunFailurePayload(structured)).toMatchObject({
       code: "codex_response_timeout",
       retryable: false,
@@ -2554,7 +2795,11 @@ describe("transient provider error classifier", () => {
     });
 
     const wrapped = new CompactionProviderResponseError(
-      { httpStatus: 502, code: "invalid_sse_terminal", type: "invalid_sse_terminal" },
+      {
+        httpStatus: 502,
+        code: "invalid_sse_terminal",
+        type: "invalid_sse_terminal",
+      },
       observed.error,
     );
     expect(agentRunFailurePayload(wrapped)).toEqual({
@@ -2587,7 +2832,9 @@ describe("transient provider error classifier", () => {
       code: "provider_unavailable",
       retryable: true,
     });
-    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(JSON.stringify({ error: observed.error, payload })).not.toContain(
+      "SECRET",
+    );
     expect(providerRecoveryResult()).toEqual({
       status: "recovering",
       continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
@@ -2616,7 +2863,9 @@ describe("transient provider error classifier", () => {
     const payload = agentRunFailurePayload(observed.error);
     expect(payload).toEqual({ error: "The Codex response failed" });
     expect(payload.retryable).toBeUndefined();
-    expect(JSON.stringify({ error: observed.error, payload })).not.toContain("SECRET");
+    expect(JSON.stringify({ error: observed.error, payload })).not.toContain(
+      "SECRET",
+    );
   });
 
   test("actual streamed Codex rate and usage terminals keep distinct truthful settlement", async () => {
@@ -2628,7 +2877,8 @@ describe("transient provider error classifier", () => {
     expect(rate.calls).toBe(1);
     expect(rate.forwarded).toBe("");
     expect(agentRunFailurePayload(rate.error)).toEqual({
-      error: "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
+      error:
+        "Model provider rate limit hit. Try again in a minute or lower the reasoning effort.",
       code: "provider_rate_limited",
       retryable: true,
       detail: "The Codex response stream reported an error",
@@ -2651,7 +2901,9 @@ describe("transient provider error classifier", () => {
     const usagePayload = agentRunFailurePayload(usage.error);
     expect(usagePayload.code).toBe("codex_usage_limit_reached");
     expect(usagePayload.retryable).toBe(false);
-    expect(JSON.stringify({ rate, usage, usagePayload })).not.toContain("SECRET");
+    expect(JSON.stringify({ rate, usage, usagePayload })).not.toContain(
+      "SECRET",
+    );
   });
 
   test("classifies nested database truth without retrying provider work or exposing SQL", () => {
@@ -2697,14 +2949,17 @@ describe("transient provider error classifier", () => {
         correlationId: "corr-unknown-safe",
       },
       async () => {
-        throw Object.assign(new Error("Failed query containing private-token"), {
-          query: "insert into session_events values ($1)",
-          params: ["private-token"],
-          driverError: {
-            table_name: "session_events",
-            detail: "private-token",
+        throw Object.assign(
+          new Error("Failed query containing private-token"),
+          {
+            query: "insert into session_events values ($1)",
+            params: ["private-token"],
+            driverError: {
+              table_name: "session_events",
+              detail: "private-token",
+            },
           },
-        });
+        );
       },
     ).catch((caught) => caught);
 
@@ -2754,14 +3009,18 @@ describe("transient provider error classifier", () => {
     ).toBe(true);
     expect(
       isTransientProviderError(
-        new Error("Our servers are currently overloaded. Please try again later."),
+        new Error(
+          "Our servers are currently overloaded. Please try again later.",
+        ),
       ),
     ).toBe(true);
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
   });
 
   test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {
-    const observed = new Error("Unable to connect. Is the computer able to access the url?");
+    const observed = new Error(
+      "Unable to connect. Is the computer able to access the url?",
+    );
 
     expect(isTransientProviderError(observed)).toBe(true);
     expect(agentRunFailurePayload(observed)).toEqual({
@@ -2777,38 +3036,60 @@ describe("transient provider error classifier", () => {
 
     // HTTP status remains authoritative: a request-owned 4xx with the same body
     // must not be mistaken for platform connectivity and retried forever.
-    const rejectedRequest = Object.assign(new Error(observed.message), { status: 400 });
+    const rejectedRequest = Object.assign(new Error(observed.message), {
+      status: 400,
+    });
     expect(isTransientProviderError(rejectedRequest)).toBe(false);
-    expect(agentRunFailurePayload(rejectedRequest)).toEqual({ error: observed.message });
+    expect(agentRunFailurePayload(rejectedRequest)).toEqual({
+      error: observed.message,
+    });
 
     for (const nearMatch of [
       `Authentication failed: ${observed.message}`,
       `${observed.message} Unexpected suffix`,
     ]) {
       expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
-      expect(agentRunFailurePayload(new Error(nearMatch))).toEqual({ error: nearMatch });
+      expect(agentRunFailurePayload(new Error(nearMatch))).toEqual({
+        error: nearMatch,
+      });
     }
   });
 
   test("classifies node/undici network fault codes as transient", () => {
-    for (const code of ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE"]) {
-      expect(isTransientProviderError(Object.assign(new Error("socket"), { code }))).toBe(true);
+    for (const code of [
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+      "ECONNREFUSED",
+      "EPIPE",
+    ]) {
+      expect(
+        isTransientProviderError(Object.assign(new Error("socket"), { code })),
+      ).toBe(true);
     }
   });
 
   test("does NOT treat 4xx request faults or usage caps as transient", () => {
-    expect(isTransientProviderError(Object.assign(new Error("Bad Request"), { status: 400 }))).toBe(
-      false,
-    );
     expect(
-      isTransientProviderError(Object.assign(new Error("Unprocessable Entity"), { status: 422 })),
+      isTransientProviderError(
+        Object.assign(new Error("Bad Request"), { status: 400 }),
+      ),
     ).toBe(false);
-    expect(isTransientProviderError(Object.assign(new Error("Not Found"), { status: 404 }))).toBe(
-      false,
-    );
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Unprocessable Entity"), { status: 422 }),
+      ),
+    ).toBe(false);
+    expect(
+      isTransientProviderError(
+        Object.assign(new Error("Not Found"), { status: 404 }),
+      ),
+    ).toBe(false);
     // A 429 is handled by the dedicated rate-limit / usage-cap branches, never here.
     expect(
-      isTransientProviderError(Object.assign(new Error("Too Many Requests"), { status: 429 })),
+      isTransientProviderError(
+        Object.assign(new Error("Too Many Requests"), { status: 429 }),
+      ),
     ).toBe(false);
   });
 
@@ -2817,9 +3098,12 @@ describe("transient provider error classifier", () => {
     // fault must NOT fall through to the message heuristics and auto-retry forever.
     expect(
       isTransientProviderError(
-        Object.assign(new Error("Connection error. (from a validation-rejected request)"), {
-          status: 400,
-        }),
+        Object.assign(
+          new Error("Connection error. (from a validation-rejected request)"),
+          {
+            status: 400,
+          },
+        ),
       ),
     ).toBe(false);
     expect(
@@ -2836,7 +3120,9 @@ describe("transient provider error classifier", () => {
 
   test("agentRunFailurePayload marks transient provider errors retryable, keeping the body", () => {
     const overloaded = Object.assign(
-      new Error("Our servers are currently overloaded. Please try again later."),
+      new Error(
+        "Our servers are currently overloaded. Please try again later.",
+      ),
       { status: 503 },
     );
     expect(agentRunFailurePayload(overloaded)).toEqual({
@@ -2859,9 +3145,12 @@ describe("transient provider error classifier", () => {
   });
 
   test("agentRunFailurePayload still hard-fails a non-transient 4xx (no retryable marker)", () => {
-    const validation = Object.assign(new Error("Invalid 'input': expected a string"), {
-      status: 400,
-    });
+    const validation = Object.assign(
+      new Error("Invalid 'input': expected a string"),
+      {
+        status: 400,
+      },
+    );
     const payload = agentRunFailurePayload(validation);
     expect(payload.retryable).toBeUndefined();
     expect(payload.code).toBeUndefined();
@@ -2871,7 +3160,10 @@ describe("transient provider error classifier", () => {
   test("only transient provider compaction failures use same-turn recovery", () => {
     expect(
       shouldRecoverCompactionProviderFailure(
-        new CompactionProviderResponseError({ httpStatus: 503, code: "server_error" }),
+        new CompactionProviderResponseError({
+          httpStatus: 503,
+          code: "server_error",
+        }),
       ),
     ).toBe(true);
     expect(
@@ -2890,16 +3182,23 @@ describe("transient provider error classifier", () => {
         }),
       ),
     ).toBe(false);
-    expect(shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError())).toBe(false);
+    expect(
+      shouldRecoverCompactionProviderFailure(new EmptyCompactionSummaryError()),
+    ).toBe(false);
   });
 
   test("a 503 recovers the same turn after backpressure pacing, independent of goal state", () => {
     // Classifier → retryable, then the retryable turn-failure branch recovers the
     // accepted turn itself. No goal lookup or synthetic continuation is involved.
     const failure = agentRunFailurePayload(
-      Object.assign(new Error("Our servers are currently overloaded. Please try again later."), {
-        status: 503,
-      }),
+      Object.assign(
+        new Error(
+          "Our servers are currently overloaded. Please try again later.",
+        ),
+        {
+          status: 503,
+        },
+      ),
     );
     expect(failure.retryable).toBe(true); // enters the recovery branch (not the terminal one)
     expect(providerRecoveryResult()).toEqual({
@@ -2928,22 +3227,30 @@ describe("transient provider error classifier", () => {
 // the model instance's constructor name. This seam pins the provider→mode mapping.
 describe("computerToolModeForTurn (explicit computer-use transport derivation)", () => {
   const resolved = (kind: RegistryProviderKind, api: ModelProviderApi) =>
-    ({ provider: { kind, api } }) as Parameters<typeof computerToolModeForTurn>[0];
+    ({ provider: { kind, api } }) as Parameters<
+      typeof computerToolModeForTurn
+    >[0];
 
   test("codex-subscription → function-image (ChatGPT backend rejects hosted tools, SEES structured images)", () => {
     // api is irrelevant once kind is codex-subscription — codex wins.
-    expect(computerToolModeForTurn(resolved("codex-subscription", "responses"))).toBe(
-      "function-image",
-    );
-    expect(computerToolModeForTurn(resolved("codex-subscription", "chat"))).toBe("function-image");
+    expect(
+      computerToolModeForTurn(resolved("codex-subscription", "responses")),
+    ).toBe("function-image");
+    expect(
+      computerToolModeForTurn(resolved("codex-subscription", "chat")),
+    ).toBe("function-image");
   });
 
   test("a chat-wire (OpenAIChatCompletionsModel) provider → function-text", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe("function-text");
+    expect(computerToolModeForTurn(resolved("api-key", "chat"))).toBe(
+      "function-text",
+    );
   });
 
   test("a registry responses provider → hosted", () => {
-    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe("hosted");
+    expect(computerToolModeForTurn(resolved("api-key", "responses"))).toBe(
+      "hosted",
+    );
   });
 
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
@@ -2953,34 +3260,54 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
 describe("modelAcceptsTypedAttachmentContentForTurn", () => {
   const resolved = (api: ModelProviderApi) =>
-    ({ provider: { api } }) as Parameters<typeof modelAcceptsTypedAttachmentContentForTurn>[0];
+    ({ provider: { api } }) as Parameters<
+      typeof modelAcceptsTypedAttachmentContentForTurn
+    >[0];
 
   test("accepts built-in and registry Responses transports", () => {
     expect(modelAcceptsTypedAttachmentContentForTurn(null)).toBe(true);
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("responses"))).toBe(true);
+    expect(
+      modelAcceptsTypedAttachmentContentForTurn(resolved("responses")),
+    ).toBe(true);
   });
 
   test("keeps chat-completions providers on the sandbox-path fallback", () => {
-    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat"))).toBe(false);
+    expect(modelAcceptsTypedAttachmentContentForTurn(resolved("chat"))).toBe(
+      false,
+    );
   });
 });
 
 describe("acceptsPromptCacheKeyForTurn", () => {
-  const resolved = (kind: RegistryProviderKind, api: ModelProviderApi, builtin = false) =>
-    ({ provider: { kind, api, builtin } }) as Parameters<typeof acceptsPromptCacheKeyForTurn>[0];
+  const resolved = (
+    kind: RegistryProviderKind,
+    api: ModelProviderApi,
+    builtin = false,
+  ) =>
+    ({ provider: { kind, api, builtin } }) as Parameters<
+      typeof acceptsPromptCacheKeyForTurn
+    >[0];
 
   test("accepts the legacy built-in OpenAI/Azure fallback", () => {
     expect(acceptsPromptCacheKeyForTurn(null)).toBe(true);
   });
 
   test("accepts built-in OpenAI/Azure providers and the codex backend", () => {
-    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses", true))).toBe(true);
-    expect(acceptsPromptCacheKeyForTurn(resolved("codex-subscription", "responses"))).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn(resolved("api-key", "responses", true)),
+    ).toBe(true);
+    expect(
+      acceptsPromptCacheKeyForTurn(resolved("codex-subscription", "responses")),
+    ).toBe(true);
   });
 
   test("excludes registry providers such as Fireworks or Z.AI/GLM", () => {
-    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(false);
-    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(false);
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "chat"))).toBe(
+      false,
+    );
+    expect(acceptsPromptCacheKeyForTurn(resolved("api-key", "responses"))).toBe(
+      false,
+    );
   });
 });
 
