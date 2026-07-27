@@ -17,7 +17,7 @@ on:
         required: true
         type: string
       merged_source_sha:
-        description: Optional exact merged source SHA when recovering a missing retention check for an already-immutable head.
+        description: Optional exact merged source SHA when recovering missing exact-head checks for an already-immutable head.
         required: false
         default: ""
         type: string

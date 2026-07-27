@@ -707,6 +707,7 @@ function recoverySealEnv(overrides: Record<string, string> = {}) {
 function recoverySealFixture(
   options: {
     currentMainContainsSource?: boolean;
+    existingSourceAdmission?: boolean;
     release?: Record<string, unknown> | null;
     sourceTreeSha?: string;
   } = {},
@@ -740,6 +741,7 @@ function recoverySealFixture(
       repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
     },
     commits: 1,
+    changed_files: 1,
     requested_reviewers: [],
   };
   const sourceAdmission = {
@@ -780,6 +782,12 @@ function recoverySealFixture(
         tree: { sha: options.sourceTreeSha ?? headTreeSha },
         parents: [{ sha: baseSha }, { sha: headSha }],
       });
+    if (url.pathname === `${prefix}/git/commits/${baseSha}`)
+      return response({
+        sha: baseSha,
+        tree: { sha: baseTreeSha },
+        parents: [{ sha: "1".repeat(40) }],
+      });
     if (url.pathname === `${prefix}/git/commits/${headSha}`)
       return response({
         sha: headSha,
@@ -809,12 +817,35 @@ function recoverySealFixture(
         behind_by: options.currentMainContainsSource === false ? 1 : 0,
         ahead_by: 1,
       });
+    if (url.pathname === `${prefix}/compare/${baseSha}...${headSha}`)
+      return response({
+        status: "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: { sha: baseSha },
+        behind_by: 0,
+        ahead_by: 1,
+        commits: [{ sha: headSha }],
+      });
+    if (url.pathname === `${prefix}/pulls/${pullNumber}/files`)
+      return response([{ filename: "package.json", status: "modified" }]);
+    if (url.pathname === `${prefix}/git/trees/${baseTreeSha}`)
+      return response({
+        sha: baseTreeSha,
+        truncated: false,
+        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
+      });
+    if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
+      return response({
+        sha: headTreeSha,
+        truncated: false,
+        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) }],
+      });
     if (url.pathname === `${prefix}/commits/${headSha}/check-runs`) {
       const checkName = url.searchParams.get("check_name");
       return response({
         check_runs: checkName
           ? checks.filter((check) => check.name === checkName)
-          : [sourceAdmission, ...checks],
+          : [...(options.existingSourceAdmission ? [sourceAdmission] : []), ...checks],
       });
     }
     if (url.pathname === `${prefix}/git/ref/tags/${releaseTag}`)
@@ -851,13 +882,18 @@ describe("release head retention recovery", () => {
         sha: headSha,
       },
     });
-    expect(fixture.checks).toHaveLength(1);
-    expect(fixture.checks[0]).toMatchObject({
-      name: RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
-      head_sha: headSha,
-      status: "completed",
-      conclusion: "success",
-    });
+    expect(fixture.checks).toHaveLength(2);
+    for (const name of [
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    ]) {
+      expect(fixture.checks.find((check) => check.name === name)).toMatchObject({
+        name,
+        head_sha: headSha,
+        status: "completed",
+        conclusion: "success",
+      });
+    }
     expect(
       fixture.requests.some(
         (request) =>
