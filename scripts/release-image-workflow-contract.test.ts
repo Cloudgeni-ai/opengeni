@@ -119,6 +119,13 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("helm package");
     expect(finalJob).toContain("Publish or reconcile the exact accepted Helm chart");
     expect(finalJob).toContain("helm push");
+    expect(finalJob).toContain(
+      'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(finalJob).toContain("for attempt in $(seq 1 10)");
+    expect(finalJob).toContain(
+      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+    );
     expect(finalJob).toContain("name: production-release");
     expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
       finalJob.indexOf("Promote exact accepted manifests"),
@@ -184,6 +191,15 @@ describe("release image workflow contract", () => {
     expect(release).toContain("uses: changesets/action@");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
+    expect(release).toContain('[ "$GITHUB_REF" = "refs/heads/main" ]');
+    expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
+    expect(release).toContain(
+      'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(release).toContain("for attempt in $(seq 1 10)");
+    expect(release).toContain(
+      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+    );
     expect(release).toContain('OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"');
     expect(release).toContain("bun scripts/resolve-github-release-state.ts");
     expect(release).not.toContain('gh release view "$tag"');

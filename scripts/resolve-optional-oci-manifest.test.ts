@@ -9,17 +9,24 @@ describe("optional OCI manifest resolution", () => {
     await expect(
       resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({
         exitCode: 0,
-        stdout: `${digest}\n`,
+        stdout: JSON.stringify({ mediaType: "application/vnd.oci.image.manifest.v1+json", digest }),
         stderr: "",
       })),
     ).resolves.toBe(digest);
     await expect(
       resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({
         exitCode: 0,
-        stdout: "latest\n",
+        stdout: JSON.stringify({ digest: "latest" }),
         stderr: "",
       })),
     ).rejects.toThrow("invalid manifest digest");
+    await expect(
+      resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({
+        exitCode: 0,
+        stdout: "not-json",
+        stderr: "",
+      })),
+    ).rejects.toThrow("invalid manifest document");
   });
 
   test("classifies only an explicit missing manifest as absent", async () => {
@@ -28,6 +35,7 @@ describe("optional OCI manifest resolution", () => {
       "code: MANIFEST_UNKNOWN",
       "unexpected status: 404 Not Found",
       "ERROR: registry.example/image:1.0.0: not found",
+      "warning from the local shell\nERROR: registry.example/image:1.0.0: not found",
     ]) {
       await expect(
         resolveOptionalOciManifest("registry.example/image:1.0.0", async () => ({
