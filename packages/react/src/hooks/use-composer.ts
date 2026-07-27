@@ -38,6 +38,62 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     draftPersistence?: "durable" | "disabled" | undefined;
   };
 
+type PendingComposerOperation = {
+  delivery: "send" | "steer";
+  input: SendMessageInput;
+  draftAtSend: string;
+  resourcesAtSend: ResourceRef[];
+  clearDraftOnAccept: boolean;
+  /** False after remount when the original input carried secret credentials. */
+  canRetry: boolean;
+};
+
+type StoredPendingComposerOperation = Omit<PendingComposerOperation, "input" | "canRetry"> & {
+  input: Omit<SendMessageInput, "mcpCredentialUpdates">;
+  hasMcpCredentialUpdates: boolean;
+};
+
+// A remount must not manufacture a new operation while the previous mutation
+// is still outcome-unknown. Keep only non-credential request fields here; the
+// mounted hook retains the exact input, including any credential updates.
+const pendingComposerOperations = new Map<string, StoredPendingComposerOperation>();
+
+function pendingComposerOperationKey(
+  workspaceId: string,
+  sessionId: string | null | undefined,
+): string | null {
+  return sessionId ? `${workspaceId}\u0000${sessionId}` : null;
+}
+
+function restorePendingComposerOperation(
+  key: string | null,
+): PendingComposerOperation | null {
+  const stored = key ? pendingComposerOperations.get(key) : undefined;
+  if (!stored) return null;
+  return {
+    ...stored,
+    input: stored.input,
+    canRetry: !stored.hasMcpCredentialUpdates,
+  };
+}
+
+function rememberPendingComposerOperation(
+  key: string | null,
+  operation: PendingComposerOperation,
+): void {
+  if (!key) return;
+  const { mcpCredentialUpdates: _mcpCredentialUpdates, ...safeInput } = operation.input;
+  pendingComposerOperations.set(key, {
+    ...operation,
+    input: safeInput,
+    hasMcpCredentialUpdates: operation.input.mcpCredentialUpdates !== undefined,
+  });
+}
+
+function forgetPendingComposerOperation(key: string | null): void {
+  if (key) pendingComposerOperations.delete(key);
+}
+
 export type ComposerState = {
   value: string;
   setValue: (value: string) => void;
@@ -98,7 +154,13 @@ export function useComposer(
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftConflict, setDraftConflict] = useState<Error | null>(null);
   const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
-  const pendingClientEventId = useRef<string | null>(null);
+  const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
+  const pendingOperationRef = useRef<PendingComposerOperation | null>(
+    restorePendingComposerOperation(pendingOperationKey),
+  );
+  const pendingClientEventId = useRef<string | null>(
+    pendingOperationRef.current?.input.clientEventId ?? null,
+  );
   const valueRef = useRef("");
   const draftRef = useRef<ComposerDraft | null>(null);
   const restoredResourcesRef = useRef<ResourceRef[]>([]);
@@ -133,7 +195,8 @@ export function useComposer(
     targetKeyRef.current = targetKey;
     targetGeneration.current += 1;
     draftReadGeneration.current += 1;
-    pendingClientEventId.current = null;
+    pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
+    pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
     localEditRevision.current = 0;
     valueRef.current = "";
     draftRef.current = null;
@@ -153,13 +216,12 @@ export function useComposer(
     setDraftSaving(false);
     setDraftConflict(null);
     setRestoredResources([]);
-  }, [durableDrafts, sessionId, targetKey]);
+  }, [durableDrafts, pendingOperationKey, sessionId, targetKey]);
 
   const applyDraft = useCallback(
     (next: ComposerDraft): void => {
       if (targetKeyRef.current !== targetKey) return;
       if (!durableDrafts) {
-        pendingClientEventId.current = null;
         localEditRevision.current += 1;
         valueRef.current = next.text;
         restoredResourcesRef.current = next.resources;
@@ -176,7 +238,6 @@ export function useComposer(
       restoredResourcesRef.current = next.resources;
       lastSavedSignature.current = draftSignature(draftPayload(next));
       localEditRevision.current += 1;
-      pendingClientEventId.current = null;
       setDraft(next);
       setValue(next.text);
       setRestoredResources(next.resources);
@@ -362,7 +423,8 @@ export function useComposer(
       draftLoading ||
       sending ||
       !draftRef.current ||
-      draftConflict
+      draftConflict ||
+      pendingOperationRef.current
     )
       return;
     const payload = currentDraftPayload();
@@ -384,15 +446,22 @@ export function useComposer(
     async (delivery: "send" | "steer", explicit?: string): Promise<boolean> => {
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
+      const operationKey = pendingComposerOperationKey(workspaceId, sessionId);
+      const pending =
+        pendingOperationRef.current ?? restorePendingComposerOperation(operationKey);
+      if (pending && !pendingOperationRef.current) {
+        pendingOperationRef.current = pending;
+        pendingClientEventId.current = pending.input.clientEventId ?? null;
+      }
       const draftAtSend = value;
       const rawText = explicit ?? draftAtSend;
       const hasText = rawText.trim().length > 0;
       // Resolve the extras once: a file-only message (empty text + ≥1 ready
       // resource) is legitimate, so we must not bail on empty text alone.
-      const extras = resolveSendExtras(sendExtrasRef.current);
+      const extras = pending ? {} : resolveSendExtras(sendExtrasRef.current);
       const hasResources = restoredResources.length > 0 || (extras.resources?.length ?? 0) > 0;
       if (
-        (!hasText && !hasResources) ||
+        (!pending && (!hasText && !hasResources)) ||
         !sessionId ||
         sending ||
         sendBlockedRef.current?.() === true ||
@@ -400,12 +469,117 @@ export function useComposer(
       ) {
         return false;
       }
-      // Reuse the clientEventId across retries of the same draft so a
-      // timeout + resend cannot double-deliver the message.
-      pendingClientEventId.current ??= generateClientEventId();
+
+      const clearPending = (): void => {
+        pendingOperationRef.current = null;
+        pendingClientEventId.current = null;
+        forgetPendingComposerOperation(operationKey);
+      };
+
+      const settleAccepted = (operation: PendingComposerOperation): void => {
+        clearPending();
+        const draftWasUnchanged = valueRef.current === operation.draftAtSend;
+        const resourcesWereUnchanged =
+          JSON.stringify(restoredResourcesRef.current) ===
+          JSON.stringify(operation.resourcesAtSend);
+        const previousDraft = draftRef.current;
+        if (previousDraft) {
+          const cleared = {
+            ...previousDraft,
+            revision: 0,
+            text: "",
+            resources: [],
+            sourceTurnId: null,
+            sourceTurnVersion: null,
+            updatedAt: null,
+          };
+          draftRef.current = cleared;
+          setDraft(cleared);
+          lastSavedSignature.current = draftSignature(draftPayload(cleared));
+        }
+        if (resourcesWereUnchanged) {
+          restoredResourcesRef.current = [];
+          setRestoredResources([]);
+        }
+        if (operation.clearDraftOnAccept && draftWasUnchanged) {
+          valueRef.current = "";
+          setValue("");
+        }
+        onSent?.(operation.input.text, operation.input);
+      };
+
+      const deliver = async (operation: PendingComposerOperation): Promise<void> => {
+        if (operation.delivery === "steer") {
+          await client.steerMessage(workspaceId, sessionId, operation.input);
+        } else {
+          await client.sendMessage(workspaceId, sessionId, operation.input);
+        }
+      };
+
       setSending(true);
       setError(null);
       try {
+        if (pending) {
+          let accepted = false;
+          try {
+            const events = await client.listEvents(workspaceId, sessionId, {
+              includeTypes: ["user.message"],
+              limit: 100,
+              payloadMode: "none",
+            });
+            accepted = events.some(
+              (event) =>
+                event.type === "user.message" &&
+                event.clientEventId === pending.input.clientEventId,
+            );
+          } catch (cause) {
+            if (
+              targetKeyRef.current === ownedTargetKey &&
+              targetGeneration.current === ownedGeneration
+            ) {
+              setError(asError(cause));
+            }
+            return false;
+          }
+          if (
+            targetKeyRef.current !== ownedTargetKey ||
+            targetGeneration.current !== ownedGeneration
+          ) {
+            return false;
+          }
+          if (accepted) {
+            settleAccepted(pending);
+            return true;
+          }
+          if (!pending.canRetry) {
+            setError(
+              new Error(
+                "OpenGeni cannot safely retry this uncertain request after remount; reconcile the session before sending again.",
+              ),
+            );
+            return false;
+          }
+          try {
+            await deliver(pending);
+          } catch (cause) {
+            if (
+              targetKeyRef.current === ownedTargetKey &&
+              targetGeneration.current === ownedGeneration
+            ) {
+              setError(asError(cause));
+            }
+            return false;
+          }
+          if (
+            targetKeyRef.current !== ownedTargetKey ||
+            targetGeneration.current !== ownedGeneration
+          ) {
+            return false;
+          }
+          settleAccepted(pending);
+          return true;
+        }
+
         // Trimming is only an emptiness check. A non-blank prompt is persisted
         // and submitted byte-for-byte, while file-only sends use the same
         // placeholder for both operations so the server content fence cannot
@@ -429,6 +603,7 @@ export function useComposer(
           !Object.prototype.hasOwnProperty.call(extras, "tools")
             ? { ...extras, tools: acknowledgedDraft.tools }
             : extras;
+        pendingClientEventId.current ??= generateClientEventId();
         const input = composeSendInput(sendText, pendingClientEventId.current, sendExtras, {
           ...(options.effectiveControl?.controlEtag
             ? { controlEtag: options.effectiveControl.controlEtag }
@@ -438,10 +613,29 @@ export function useComposer(
             : {}),
           resources: mergeResources(restoredResources, extras.resources ?? []),
         });
-        if (delivery === "steer") {
-          await client.steerMessage(workspaceId, sessionId, input);
-        } else {
-          await client.sendMessage(workspaceId, sessionId, input);
+        const operation: PendingComposerOperation = {
+          delivery,
+          input,
+          draftAtSend,
+          resourcesAtSend: [...restoredResources],
+          clearDraftOnAccept: explicit === undefined,
+          canRetry: true,
+        };
+        pendingOperationRef.current = operation;
+        rememberPendingComposerOperation(operationKey, operation);
+        try {
+          await deliver(operation);
+        } catch (cause) {
+          if (!isOutcomeUnknownError(cause)) {
+            clearPending();
+          }
+          if (
+            targetKeyRef.current === ownedTargetKey &&
+            targetGeneration.current === ownedGeneration
+          ) {
+            setError(asError(cause));
+          }
+          return false;
         }
         if (
           targetKeyRef.current !== ownedTargetKey ||
@@ -449,42 +643,8 @@ export function useComposer(
         ) {
           return false;
         }
-        pendingClientEventId.current = null;
-        const previousDraft = draftRef.current;
-        if (previousDraft) {
-          const cleared = {
-            ...previousDraft,
-            revision: 0,
-            text: "",
-            resources: [],
-            sourceTurnId: null,
-            sourceTurnVersion: null,
-            updatedAt: null,
-          };
-          draftRef.current = cleared;
-          restoredResourcesRef.current = [];
-          setDraft(cleared);
-          setRestoredResources([]);
-          lastSavedSignature.current = draftSignature(draftPayload(cleared));
-        }
-        if (explicit === undefined) {
-          // Clear only the draft that was sent: edits made while the request
-          // was in flight were never delivered and must survive.
-          if (valueRef.current === draftAtSend) {
-            valueRef.current = "";
-            setValue("");
-          }
-        }
-        onSent?.(sendText, input);
+        settleAccepted(operation);
         return true;
-      } catch (cause) {
-        if (
-          targetKeyRef.current === ownedTargetKey &&
-          targetGeneration.current === ownedGeneration
-        ) {
-          setError(cause instanceof Error ? cause : new Error(String(cause)));
-        }
-        return false;
       } finally {
         if (
           targetKeyRef.current === ownedTargetKey &&
@@ -521,6 +681,7 @@ export function useComposer(
   const hasReadyResources =
     restoredResources.length > 0 ||
     (resolveSendExtras(sendExtrasRef.current).resources?.length ?? 0) > 0;
+  const hasPendingOperation = pendingOperationRef.current !== null;
 
   const pause = useCallback(
     async (reason?: string): Promise<void> => {
@@ -652,7 +813,6 @@ export function useComposer(
   const updateValue = useCallback(
     (next: string) => {
       if (targetKeyRef.current !== targetKey) return;
-      pendingClientEventId.current = null;
       localEditRevision.current += 1;
       valueRef.current = next;
       setValue(next);
@@ -736,7 +896,7 @@ export function useComposer(
       Boolean(sessionId) &&
       !sending &&
       sendBlockedRef.current?.() !== true &&
-      (value.trim().length > 0 || hasReadyResources),
+      (hasPendingOperation || value.trim().length > 0 || hasReadyResources),
     pause,
     pausing: identityMatches ? pausing : false,
     resume,
@@ -812,6 +972,14 @@ export function shouldSteerOnKey(event: { metaKey?: boolean; ctrlKey?: boolean }
 
 function generateClientEventId(): string {
   return globalThis.crypto.randomUUID();
+}
+
+function isOutcomeUnknownError(cause: unknown): boolean {
+  return (
+    typeof cause === "object" &&
+    cause !== null &&
+    (cause as { outcomeUnknown?: unknown }).outcomeUnknown === true
+  );
 }
 
 function asError(cause: unknown): Error {

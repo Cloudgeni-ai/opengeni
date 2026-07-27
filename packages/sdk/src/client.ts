@@ -2778,36 +2778,59 @@ export class OpenGeniClient {
     options: OpenGeniRequestOptions = {},
   ): Promise<T> {
     const correlationId = crypto.randomUUID();
-    const response = await this.fetchImpl(this.url(path, query), {
-      method,
-      headers: {
-        ...this.headers(correlationId),
-        Accept: "application/json",
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path, query), {
+        method,
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/json",
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
     assertApiContractResponse(response);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
     }
     await assertJsonResponse(response, { method, correlationId });
-    return (await response.json()) as T;
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
   }
 
   /** Like `requestJson` for endpoints that respond with no body (204). */
   private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
     const correlationId = crypto.randomUUID();
-    const response = await this.fetchImpl(this.url(path), {
-      method,
-      headers: {
-        ...this.headers(correlationId),
-        Accept: "application/json",
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path), {
+        method,
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/json",
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch (error) {
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
     assertApiContractResponse(response);
     if (!response.ok) {
       throw await apiErrorFromResponse(response, { method, correlationId });
@@ -2878,6 +2901,17 @@ function isJsonContentType(value: string | null): boolean {
 
 function isMutationMethod(method: string): boolean {
   return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+function mutationTransportError(correlationId: string): OpenGeniApiError {
+  return new OpenGeniApiError(0, "", {
+    code: "network_error",
+    retryable: true,
+    correlationId,
+    outcomeUnknown: true,
+    mutation: true,
+    displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
+  });
 }
 
 async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {

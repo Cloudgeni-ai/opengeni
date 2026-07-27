@@ -2104,6 +2104,108 @@ describe("useComposer durable draft and control binding", () => {
     });
   }
 
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} reconciles an outcome-unknown request before retrying`, async () => {
+      const initial: ComposerDraft = {
+        revision: 9,
+        text: "do not send twice",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      let acceptedEvent: SessionEvent | null = null;
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        listEvents: async () => (acceptedEvent ? [acceptedEvent] : []),
+        sendMessage: async (_workspaceId, _sessionId, input) => {
+          attempts.push(input);
+          if (attempts.length === 1) throw gatewayError(503);
+          return makeEvent(2, "user.message");
+        },
+        steerMessage: async (_workspaceId, _sessionId, input) => {
+          attempts.push(input);
+          if (attempts.length === 1) throw gatewayError(503);
+          return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
+        },
+      });
+      const hook = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      acceptedEvent = {
+        ...makeEvent(1, "user.message"),
+        clientEventId: attempts[0]!.clientEventId,
+      };
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(1);
+      expect(hook.result.current.value).toBe("");
+      await hook.unmount();
+    });
+  }
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} keeps the original key and payload across edit and remount`, async () => {
+      const initial: ComposerDraft = {
+        revision: 10,
+        text: "original uncertain prompt",
+        resources: [],
+        tools: [],
+        toolsProvided: false,
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        sendMessage: async (_workspaceId, _sessionId, input) => {
+          attempts.push(input);
+          if (attempts.length === 1) throw gatewayError(502);
+          return makeEvent(2, "user.message");
+        },
+        steerMessage: async (_workspaceId, _sessionId, input) => {
+          attempts.push(input);
+          if (attempts.length === 1) throw gatewayError(502);
+          return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
+        },
+      });
+
+      const first = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+      await flushing(async () => expect(await first.result.current[delivery]()).toBe(false));
+      await first.unmount();
+
+      const second = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+      await flushing(() => second.result.current.setValue("edited after timeout"));
+      await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
+
+      expect(attempts).toHaveLength(2);
+      expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
+      expect(attempts[1]!.text).toBe("original uncertain prompt");
+      expect(second.result.current.value).toBe("edited after timeout");
+      await second.unmount();
+    });
+  }
+
   test("an autosave conflict preserves the local text and exposes both resolution choices", async () => {
     const initial = {
       revision: 1,

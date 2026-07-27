@@ -560,6 +560,35 @@ describe("OpenGeniClient", () => {
     expect(JSON.parse(requests[0]!.body!)).toEqual({});
   });
 
+  test("mutation transport failures become typed outcome-unknown errors without raw details", async () => {
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async () => {
+        throw new TypeError("PRIVATE proxy body and bearer secret");
+      },
+    });
+    const error = await client
+      .sendMessage(WORKSPACE_ID, SESSION_ID, {
+        text: "preserve this operation",
+        clientEventId: "same-id-on-retry",
+      })
+      .catch((caught) => caught);
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 0,
+      code: "network_error",
+      retryable: true,
+      outcomeUnknown: true,
+      body: "",
+    });
+    expect((error as Error).message).toMatch(
+      /^OpenGeni could not confirm the request — reconcile before retrying\. Reference: [0-9a-f-]{36}\.$/,
+    );
+    expect((error as Error).message).not.toContain("PRIVATE");
+    expect((error as Error).message).not.toContain("bearer");
+  });
+
   test("non-JSON error responses discard the body instead of surfacing proxy text", async () => {
     const { client } = makeClient(() => new Response("workspace not found", { status: 404 }));
     const error = await client.getSession(WORKSPACE_ID, SESSION_ID).then(
