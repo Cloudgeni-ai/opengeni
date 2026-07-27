@@ -184,7 +184,11 @@ import {
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
 import { mergeResourceRefs } from "./common";
-import { enabledCapabilityMcpToolRefs, resolveSessionToolPolicy } from "@opengeni/core";
+import {
+  enabledCapabilityMcpToolRefs,
+  resolveSessionToolPolicy,
+  sessionToolPolicyAllowsDefaultNativeTools,
+} from "@opengeni/core";
 import { maybeCompactContext } from "./context-compaction";
 import { TurnAttemptFencedError } from "./turn-attempt-fenced";
 import {
@@ -1656,6 +1660,22 @@ export function computerToolModeForTurn(
 }
 
 /**
+ * Native web search requires two independent grants: the resolved provider
+ * must advertise runnable support, and the immutable session/turn policy must
+ * still track workspace defaults. The null model is the legacy built-in
+ * Responses path, whose deployment flag is its provider capability gate.
+ * There is deliberately no cross-provider or sandbox/curl fallback.
+ */
+export function hostedWebSearchForTurn(
+  resolvedModel: { configured: { hostedWebSearch: boolean } } | null,
+  deploymentWebSearchEnabled: boolean,
+  defaultNativeToolsAllowed: boolean,
+): boolean {
+  if (!defaultNativeToolsAllowed) return false;
+  return resolvedModel?.configured.hostedWebSearch ?? deploymentWebSearchEnabled;
+}
+
+/**
  * Decide whether this turn's provider accepts typed file/image content in a
  * user message. The legacy built-in client and registry Responses clients use
  * the Agents SDK Responses converter, which supports `input_image` and
@@ -2340,6 +2360,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       await current?.flush().catch(() => undefined);
     };
     let preparedTools: Awaited<ReturnType<OpenGeniRuntime["prepareTools"]>> | null = null;
+    // Resolved with the MCP policy at the immutable turn boundary. Provider
+    // capability is checked separately when buildAgent is called; this flag is
+    // only the durable omission/narrowing entitlement.
+    let defaultNativeToolsAllowed = false;
     const toolCancellationFenceRef: {
       current: TurnToolCancellationFence | null;
     } = {
@@ -4051,7 +4075,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // materialized allow-list. `withCodexAppsTool` below keeps the existing
       // single Codex lazy router/connector overlay; it is not a second policy
       // or discovery path.
-      const effectivePolicyTools = resolveSessionToolPolicy({
+      const resolvedToolPolicy = resolveSessionToolPolicy({
         ...(session.toolPolicy ? { toolPolicy: session.toolPolicy } : {}),
         sessionTools: session.tools,
         turnTools: turn.tools,
@@ -4060,7 +4084,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         defaultMcpServerIds: enabledCapabilityMcpToolRefs(settings, mcpSettings).map(
           (tool) => tool.id,
         ),
-      }).toolRefs;
+      });
+      const effectivePolicyTools = resolvedToolPolicy.toolRefs;
+      defaultNativeToolsAllowed = sessionToolPolicyAllowsDefaultNativeTools(
+        resolvedToolPolicy.effectivePolicy,
+      );
       const turnTools = withCodexAppsTool(
         runSettings,
         withFirstPartyTools(runSettings, effectivePolicyTools),
@@ -5007,6 +5035,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             }
           : {};
+      const hostedWebSearch = hostedWebSearchForTurn(
+        resolvedModel,
+        runSettings.webSearchEnabled,
+        defaultNativeToolsAllowed,
+      );
       const agent = runtime.buildAgent(modelRunSettings, turnResources, {
         reasoningEffort: turn.reasoningEffort,
         ...(humanInputResume ? { humanInputResponse: humanInputResume } : {}),
@@ -5066,11 +5099,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // store/compaction follow the provider's compaction mode (registry
         // providers resolve to "client"); encrypted reasoning is only
         // round-tripped on the Responses wire API; hosted web search is attached
-        // only when the model opts in; the effective context window drives the
-        // compaction threshold.
+        // only when BOTH the model opts in and this immutable turn still tracks
+        // workspace defaults (an explicit session/turn remains narrowed); the
+        // effective context window drives the compaction threshold.
+        hostedWebSearch,
         ...(resolvedModel
           ? {
-              hostedWebSearch: resolvedModel.configured.hostedWebSearch,
               encryptedReasoning:
                 resolvedModel.provider.api === "responses" &&
                 runSettings.openaiReasoningEncryptedContent,

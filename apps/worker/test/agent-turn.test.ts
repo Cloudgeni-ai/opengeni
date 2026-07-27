@@ -46,6 +46,7 @@ import {
   filterUnmaterializedSandboxFileDownloads,
   headerSecretRedactions,
   historyRowsToAppend,
+  hostedWebSearchForTurn,
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
   isWorkerShutdownCancellation,
@@ -102,6 +103,30 @@ function functionResult(callId: string) {
     callId,
     status: "completed",
     output: { type: "text", text: "ok" },
+  };
+}
+
+function citedAssistantMessage() {
+  return {
+    type: "message",
+    role: "assistant",
+    content: [
+      {
+        type: "output_text",
+        text: "OpenGeni is documented here [1].",
+        providerData: {
+          annotations: [
+            {
+              type: "url_citation",
+              start_index: 28,
+              end_index: 31,
+              url: "https://docs.opengeni.example/search",
+              title: "OpenGeni search documentation",
+            },
+          ],
+        },
+      },
+    ],
   };
 }
 
@@ -234,6 +259,24 @@ describe("turn secret-redaction boundaries", () => {
 
     expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
     expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+  });
+
+  test("preserves provider citations in the structured durable assistant item", () => {
+    const cited = citedAssistantMessage();
+    const result = historyRowsToAppend([cited], 0);
+
+    expect(result.rows).toEqual([{ position: 0, item: cited }]);
+    expect(
+      (
+        (result.rows[0]!.item.content as Array<Record<string, unknown>>)[0]!.providerData as {
+          annotations: Array<Record<string, unknown>>;
+        }
+      ).annotations[0],
+    ).toMatchObject({
+      type: "url_citation",
+      url: "https://docs.opengeni.example/search",
+      title: "OpenGeni search documentation",
+    });
   });
 
   test("redacts replayed and current items at the literal model-call seam", async () => {
@@ -2966,6 +3009,26 @@ describe("computerToolModeForTurn (explicit computer-use transport derivation)",
 
   test("the LEGACY global-client fallback (resolveTurnModel → null) → hosted EXPLICITLY", () => {
     expect(computerToolModeForTurn(null)).toBe("hosted");
+  });
+});
+
+describe("hostedWebSearchForTurn (provider support × durable policy)", () => {
+  const resolved = (hostedWebSearch: boolean) =>
+    ({ configured: { hostedWebSearch } }) as Parameters<typeof hostedWebSearchForTurn>[0];
+
+  test("enables a supported provider only for workspace-default turns", () => {
+    expect(hostedWebSearchForTurn(resolved(true), true, true)).toBe(true);
+    expect(hostedWebSearchForTurn(resolved(true), true, false)).toBe(false);
+  });
+
+  test("does not invent a fallback for an unsupported resolved provider", () => {
+    expect(hostedWebSearchForTurn(resolved(false), true, true)).toBe(false);
+  });
+
+  test("applies the deployment capability gate to the legacy built-in path", () => {
+    expect(hostedWebSearchForTurn(null, true, true)).toBe(true);
+    expect(hostedWebSearchForTurn(null, false, true)).toBe(false);
+    expect(hostedWebSearchForTurn(null, true, false)).toBe(false);
   });
 });
 

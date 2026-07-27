@@ -151,6 +151,30 @@ await client.resumeSession(workspaceId, sessionId, {
 await client.sendApprovalDecision(workspaceId, sessionId, { approvalId, decision: "approve" });
 ```
 
+## Session tool policy and native web search
+
+Omitting `tools` when creating a top-level session selects the current
+workspace-default capability policy. Supported Responses providers can then
+attach their native bounded web-search tool without requiring a sandbox.
+Passing `tools`, including `[]`, is an intentional fixed narrowing.
+
+Existing explicit sessions are not widened when a new default capability is
+introduced. Opt one in explicitly with the current optimistic-concurrency
+version; the audited change takes effect on its next attempt:
+
+```ts
+const session = await client.getSession(workspaceId, sessionId);
+const updated = await client.updateSessionToolPolicy(workspaceId, sessionId, {
+  mode: "workspace_default",
+  expectedVersion: session.toolPolicyVersion ?? 1,
+});
+```
+
+To keep a fixed MCP allow-list instead, use the backward-compatible explicit
+shape `{ tools, expectedVersion }`. `tool_search` discovers deferred MCP
+schemas; it is not public web search. Unsupported providers do not receive a
+cross-provider, MCP, or sandbox fallback.
+
 ## Goals
 
 ```ts

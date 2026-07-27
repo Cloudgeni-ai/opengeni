@@ -11,7 +11,7 @@ import {
   CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
   CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
 } from "@opengeni/codex";
-import { compactionThresholdTokens } from "@opengeni/runtime";
+import { buildOpenGeniAgent, compactionThresholdTokens } from "@opengeni/runtime";
 import { testSettings } from "@opengeni/testing";
 import type { Database } from "@opengeni/db";
 import {
@@ -35,6 +35,42 @@ describe("withCodexProvider", () => {
     expect(codex?.models.every((m) => m.upstreamModelId === m.id.slice("codex/".length))).toBe(
       true,
     );
+    expect(codex?.models.every((m) => m.hostedWebSearch === true)).toBe(true);
+    expect(
+      configuredModels(result)
+        .filter((model) => model.providerId === "codex-subscription")
+        .every(
+          (model) =>
+            model.hostedWebSearch === true &&
+            model.capabilities.hostedTools.webSearch.upstream === "supported" &&
+            model.capabilities.hostedTools.webSearch.runnable === true,
+        ),
+    ).toBe(true);
+  });
+
+  test("builds the bounded native web-search manifest only when the turn policy allows it", () => {
+    const settings = withCodexProvider(testSettings({ modelProvidersJson: "[]" }));
+    const resolved = resolveModelProvider(settings, "codex/gpt-5.6-sol")!;
+    const webSearchTools = (allowed: boolean) => {
+      const agent = buildOpenGeniAgent(settings, [], {
+        model: resolved.model.upstreamModelId,
+        hostedWebSearch: resolved.model.hostedWebSearch && allowed,
+      });
+      return agent.tools.filter(
+        (tool) =>
+          tool.type === "hosted_tool" &&
+          (tool.providerData as { type?: unknown } | undefined)?.type === "web_search",
+      );
+    };
+
+    const workspaceDefault = webSearchTools(true);
+    expect(workspaceDefault).toHaveLength(1);
+    expect(workspaceDefault[0]?.providerData).toMatchObject({
+      type: "web_search",
+      name: "web_search",
+      search_context_size: "medium",
+    });
+    expect(webSearchTools(false)).toHaveLength(0);
   });
 
   test("declares Codex CLI's raw, effective, and auto-compact token limits", () => {

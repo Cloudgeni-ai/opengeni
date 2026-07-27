@@ -276,10 +276,17 @@ export type SessionToolPolicy = {
   inheritedFromSessionId: string | null;
 };
 
-export type UpdateSessionToolPolicyRequest = {
-  tools: ToolRef[];
-  expectedVersion: number;
-};
+export type UpdateSessionToolPolicyRequest =
+  | {
+      mode: "workspace_default";
+      expectedVersion: number;
+    }
+  | {
+      /** Omitted for compatibility with the original explicit-only API. */
+      mode?: "explicit" | undefined;
+      tools: ToolRef[];
+      expectedVersion: number;
+    };
 
 export type SessionEffectiveToolPolicy = {
   mode: SessionToolPolicy["mode"];
