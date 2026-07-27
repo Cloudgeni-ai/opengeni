@@ -6,10 +6,13 @@ import {
 } from "@opengeni/config";
 import {
   ClientConfig,
+  ErrorEnvelope,
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
   resolveWorkspaceMemoryEnabled,
   type AccessGrant,
+  type ErrorCode,
 } from "@opengeni/contracts";
 import {
   createDocumentServices,
@@ -24,6 +27,7 @@ import { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
 import {
   hasPermission,
@@ -83,6 +87,7 @@ export { workflowIdForSession } from "@opengeni/core";
 export { replaySessionEvents, sseSessionStream, sseWorkspaceControlStream } from "./http/sse";
 
 export const API_MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024;
+const API_PUBLIC_ERROR_MESSAGE_MAX_BYTES = 512;
 
 export function createApp(deps: AppDependencies): Hono {
   const managedAuth = deps.managedAuth ?? createManagedAuth(deps.settings, deps.db);
@@ -148,6 +153,15 @@ export function createApp(deps: AppDependencies): Hono {
     resumeBoxById,
   };
   const app = new Hono();
+  const correlationIds = new WeakMap<Request, string>();
+
+  app.use("*", async (c, next) => {
+    const correlationId =
+      boundedCorrelationId(c.req.header(OPENGENI_CORRELATION_HEADER)) ?? crypto.randomUUID();
+    correlationIds.set(c.req.raw, correlationId);
+    c.header(OPENGENI_CORRELATION_HEADER, correlationId);
+    await next();
+  });
 
   app.use(
     "*",
@@ -159,9 +173,10 @@ export function createApp(deps: AppDependencies): Hono {
         "Content-Type",
         "X-OpenGeni-Access-Key",
         "X-OpenGeni-Api-Contract",
+        "X-OpenGeni-Correlation-Id",
         "X-OpenGeni-Subject",
       ],
-      exposeHeaders: ["X-OpenGeni-Api-Contract"],
+      exposeHeaders: ["X-OpenGeni-Api-Contract", "X-OpenGeni-Correlation-Id"],
       origin: (origin) => {
         if (!origin) {
           return null;
@@ -183,6 +198,7 @@ export function createApp(deps: AppDependencies): Hono {
   app.use("*", async (c, next) => {
     const url = new URL(c.req.url);
     const route = routeLabel(url.pathname);
+    const correlationId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
     const start = performance.now();
     const span = observability.startSpan(`HTTP ${c.req.method} ${route}`, {
       "http.request.method": c.req.method,
@@ -212,15 +228,22 @@ export function createApp(deps: AppDependencies): Hono {
         durationMs: Math.round(durationSeconds * 1000),
         traceId: span.traceId,
         spanId: span.spanId,
+        correlationId,
       });
     } catch (error) {
       const status = httpStatusForError(error);
+      const errorCode = errorCodeForStatus(status);
       const durationSeconds = (performance.now() - start) / 1000;
       observability.recordHttpRequest({
         method: c.req.method,
         route,
         status,
         durationSeconds,
+      });
+      observability.incrementCounter({
+        name: "opengeni_http_errors_total",
+        help: "Total OpenGeni HTTP request failures by bounded route, status, and stable code.",
+        labels: { route, status: String(status), code: errorCode },
       });
       span.end({
         attributes: {
@@ -236,7 +259,9 @@ export function createApp(deps: AppDependencies): Hono {
         durationMs: Math.round(durationSeconds * 1000),
         traceId: span.traceId,
         spanId: span.spanId,
-        error: error instanceof Error ? error.message : String(error),
+        correlationId,
+        errorCode,
+        errorClass: error instanceof Error ? error.name : "NonErrorThrown",
       });
       throw error;
     }
@@ -405,6 +430,43 @@ export function createApp(deps: AppDependencies): Hono {
   registerScheduledTaskRoutes(app, routeDeps);
   registerCodexRoutes(app, routeDeps);
 
+  app.notFound((c) => {
+    if (!new URL(c.req.url).pathname.startsWith("/v1/")) return c.text("Not Found", 404);
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    return c.json(
+      ErrorEnvelope.parse({
+        error: {
+          status: 404,
+          code: "not_found",
+          message: "Resource not found.",
+          retryable: false,
+          requestId,
+        },
+      }),
+      404,
+    );
+  });
+
+  app.onError((error, c) => {
+    const status = httpStatusForError(error);
+    const code = errorCodeForStatus(status);
+    const requestId = correlationIds.get(c.req.raw) ?? crypto.randomUUID();
+    c.header(OPENGENI_CORRELATION_HEADER, requestId);
+    if (new URL(c.req.url).pathname.startsWith("/v1/")) {
+      c.header(OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION);
+    }
+    const envelope = ErrorEnvelope.parse({
+      error: {
+        status,
+        code,
+        message: publicErrorMessage(error, status),
+        retryable: retryableHttpStatus(status),
+        requestId,
+      },
+    });
+    return c.json(envelope, status as ContentfulStatusCode);
+  });
+
   return app;
 }
 
@@ -465,6 +527,50 @@ export function httpStatusForError(error: unknown): number {
     return 413;
   }
   return 500;
+}
+
+export function errorCodeForStatus(status: number): ErrorCode {
+  if (status === 401) return "unauthenticated";
+  if (status === 403) return "forbidden";
+  if (status === 404) return "not_found";
+  if (status === 409) return "conflict";
+  if (status === 413 || status === 422 || status === 400) return "validation_failed";
+  if (status === 429) return "limit_exceeded";
+  if (status === 502 || status === 503 || status === 504) return "upstream_unavailable";
+  return "internal_error";
+}
+
+function retryableHttpStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+function publicErrorMessage(error: unknown, status: number): string {
+  if (status === 502 || status === 503 || status === 504) {
+    return "OpenGeni is temporarily unavailable — retry.";
+  }
+  if (status >= 500) {
+    return "OpenGeni could not complete the request.";
+  }
+  if (error instanceof HTTPException) {
+    return boundedPublicMessage(error.message) ?? "Request failed.";
+  }
+  if (error instanceof McpPayloadTooLargeError) {
+    return "Request payload is too large.";
+  }
+  return "Request failed.";
+}
+
+function boundedPublicMessage(value: string): string | null {
+  const normalized = value.replace(/[\u0000-\u001f\u007f]+/g, " ").trim();
+  if (!normalized) return null;
+  const bytes = new TextEncoder().encode(normalized);
+  if (bytes.byteLength <= API_PUBLIC_ERROR_MESSAGE_MAX_BYTES) return normalized;
+  return new TextDecoder().decode(bytes.slice(0, API_PUBLIC_ERROR_MESSAGE_MAX_BYTES)).trim();
+}
+
+function boundedCorrelationId(value: string | undefined): string | null {
+  if (!value || value.length > 128 || !/^[A-Za-z0-9._:-]+$/.test(value)) return null;
+  return value;
 }
 
 type ReadinessCheckName = "db" | "nats" | "temporal";
