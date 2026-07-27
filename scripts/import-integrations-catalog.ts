@@ -100,9 +100,56 @@ export type NormalizedCatalogSnapshot = {
   };
 };
 
-const brandedNamesByMcpUrl = new Map([
-  ["https://mcp.linear.app/mcp", "Linear"],
-  ["https://mcp.slack.com/mcp", "Slack"],
+const brandedNamesByMcpUrl = new Map([["https://mcp.linear.app/mcp", "Linear"]]);
+
+/**
+ * Reviewed first-party contracts override weaker registry metadata. Keep this
+ * list deliberately small: each entry must be backed by the provider's own
+ * current MCP documentation, not inferred from an aggregator.
+ */
+const officialCatalogContractsByMcpUrl = new Map<
+  string,
+  Pick<CatalogIntegrationRow, "name" | "tier" | "provenance" | "authKind" | "scopesHint">
+>([
+  [
+    "https://mcp.slack.com/mcp",
+    {
+      name: "Slack",
+      tier: "verified",
+      provenance: "official:docs.slack.dev/ai/slack-mcp-server",
+      authKind: "oauth2",
+      // Slack's tools/list is grant-dependent. These are the complete scopes
+      // advertised by its official OAuth protected-resource metadata.
+      scopesHint: [
+        "search:read.public",
+        "search:read.private",
+        "search:read.mpim",
+        "search:read.im",
+        "search:read.files",
+        "search:read.users",
+        "chat:write",
+        "channels:history",
+        "groups:history",
+        "mpim:history",
+        "im:history",
+        "canvases:read",
+        "canvases:write",
+        "users:read",
+        "users:read.email",
+        "reactions:write",
+        "reactions:read",
+        "emoji:read",
+        "files:read",
+        "channels:write",
+        "groups:write",
+        "im:write",
+        "mpim:write",
+        "channels:read",
+        "groups:read",
+        "mpim:read",
+      ],
+    },
+  ],
 ]);
 
 export type LogoStorageResult =
@@ -218,7 +265,8 @@ export function normalizeCatalogSnapshot(
         continue;
       }
     }
-    const authKind = normalizeAuthKind(candidate.authKind);
+    const official = officialCatalogContractsByMcpUrl.get(mcpUrl);
+    const authKind = official?.authKind ?? normalizeAuthKind(candidate.authKind);
     if (authKind === "unknown") {
       skipped.push({ domain, mcpUrl: null, reason: "auth_unknown" });
       continue;
@@ -228,14 +276,15 @@ export function normalizeCatalogSnapshot(
     );
     const row: CatalogIntegrationRow = {
       domain,
-      name: brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
+      name:
+        official?.name ?? brandedNamesByMcpUrl.get(mcpUrl) ?? stringValue(candidate.name) ?? domain,
       mcpUrl,
       transport: "streamable-http",
       authKind,
-      scopesHint: stringArray(candidate.scopesHint),
+      scopesHint: official?.scopesHint ?? stringArray(candidate.scopesHint),
       credentialFacts: recordArray(candidate.credentialFacts),
-      tier: provenance === "detected" ? "verified" : "community",
-      provenance,
+      tier: official?.tier ?? (provenance === "detected" ? "verified" : "community"),
+      provenance: official?.provenance ?? provenance,
       logoSourceUrl:
         stringValue(candidate.logoAsset) ??
         stringValue(candidate.logoSourceUrl) ??
