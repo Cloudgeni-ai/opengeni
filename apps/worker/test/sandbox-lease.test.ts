@@ -1612,7 +1612,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       liveness: "cold",
       leaseEpoch: currentEpoch,
       workspaceGeneration: 2,
-      archiveGeneration: 0,
+      archiveGeneration: null,
       archiveComplete: false,
     });
 
@@ -1624,7 +1624,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedLostEpoch: lostEpoch,
       expectedLostInstanceId: lostInstanceId,
       expectedWorkspaceGeneration: 3,
-      expectedArchiveGeneration: 0,
+      expectedArchiveGeneration: null,
       expectedArchiveComplete: false,
     });
     expect(stale.status).toBe("stale");
@@ -1640,7 +1640,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedLostEpoch: lostEpoch,
       expectedLostInstanceId: lostInstanceId,
       expectedWorkspaceGeneration: 2,
-      expectedArchiveGeneration: 0,
+      expectedArchiveGeneration: null,
       expectedArchiveComplete: false,
     });
     expect(reconciled.status).toBe("reconciled");
@@ -1655,7 +1655,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       liveness: "cold",
       leaseEpoch: currentEpoch,
       workspaceGeneration: 2,
-      archiveGeneration: 0,
+      archiveGeneration: null,
       archiveComplete: false,
       refcount: 1,
     });
@@ -1680,7 +1680,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
       expectedLostEpoch: lostEpoch,
       expectedLostInstanceId: lostInstanceId,
       expectedWorkspaceGeneration: 2,
-      expectedArchiveGeneration: 0,
+      expectedArchiveGeneration: null,
       expectedArchiveComplete: false,
     });
     expect(duplicate.status).toBe("reconciled");
