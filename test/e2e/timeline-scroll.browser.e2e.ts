@@ -6,7 +6,7 @@ import { chromium, type Browser, type Page } from "playwright";
 
 const repoRoot = new URL("../..", import.meta.url).pathname;
 const demoRoot = `${repoRoot}/packages/react/demo`;
-const artifactDir = process.env.OPE99_ARTIFACT_DIR;
+const artifactDir = process.env.TIMELINE_SCROLL_ARTIFACT_DIR;
 
 type VisibleRow = { id: string | null; top: number | null };
 
@@ -139,7 +139,7 @@ describe("timeline scroll ownership browser regression", () => {
         overlay.dataset.timelineEvidence = "";
         overlay.style.cssText =
           "position:fixed;left:16px;top:16px;z-index:9999;max-width:620px;padding:14px;background:#fff;color:#111;border:3px solid #17803d;font:13px/1.35 monospace;white-space:pre-wrap";
-        overlay.textContent = `OPE-99 repaired progressive prepend\nAnchor preserved: ${result.afterWheel.id} @ ${result.afterWheel.top}px through prepend, delayed growth, and append.\nFrames: ${result.frameCount}; p95 ${result.frameIntervalP95Ms}ms; max ${result.maxFrameIntervalMs}ms; long tasks ${result.longTaskCount}; network ${result.networkRequests}.`;
+        overlay.textContent = `Timeline scroll progressive prepend verified\nAnchor preserved: ${result.afterWheel.id} @ ${result.afterWheel.top}px through prepend, delayed growth, and append.\nFrames: ${result.frameCount}; p95 ${result.frameIntervalP95Ms}ms; max ${result.maxFrameIntervalMs}ms; long tasks ${result.longTaskCount}; network ${result.networkRequests}.`;
         document.body.append(overlay);
       }, evidence);
       await captureEvidenceMatrix(page, artifactDir);
