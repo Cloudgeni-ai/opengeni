@@ -74,8 +74,8 @@ jobs:
             echo "checked-out source does not match source_sha" >&2
             exit 1
           }
-          [ "$GITHUB_SHA" = "$SOURCE_SHA" ] || {
-            echo "dispatch ref must resolve to source_sha" >&2
+          [ "$GITHUB_REF" = "refs/heads/main" ] || {
+            echo "embedded releases must be dispatched from main" >&2
             exit 1
           }
           git fetch --no-tags origin main
@@ -224,7 +224,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           resolved="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
@@ -291,7 +291,7 @@ jobs:
           RELEASE_VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
-          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
@@ -305,7 +305,16 @@ jobs:
             cmp "$chart_path" ".release/chart-reconcile/opengeni-${RELEASE_VERSION}.tgz"
           else
             helm push "$chart_path" "$chart_oci"
-            resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+            resolved_manifest=""
+            for attempt in $(seq 1 10); do
+              resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
+              if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                break
+              fi
+              if [ "$attempt" -lt 10 ]; then
+                sleep 2
+              fi
+            done
           fi
           [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
             echo "official OCI chart manifest digest was not resolved" >&2
@@ -437,9 +446,9 @@ jobs:
             --destination .release/anonymous-chart
           cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
             ".release/anonymous-chart/opengeni-${RELEASE_VERSION}.tgz"
-          [ "$(docker buildx imagetools inspect \
-            "${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}" \
-            --format '{{.Manifest.Digest}}')" = "$CHART_MANIFEST_DIGEST" ]
+          [ "$(bun scripts/resolve-optional-oci-manifest.ts \
+            "${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}")" \
+            = "$CHART_MANIFEST_DIGEST" ]
 
       - name: Upload release BOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
