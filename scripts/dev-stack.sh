@@ -60,6 +60,8 @@ choose_port OPENGENI_TEMPORAL_HOST_PORT 7233
 choose_port OPENGENI_MINIO_HOST_PORT 9000
 choose_port OPENGENI_MINIO_CONSOLE_HOST_PORT 9001
 choose_port OPENGENI_API_PORT 8000
+choose_port OPENGENI_WORKER_HTTP_PORT 8001
+choose_port OPENGENI_TURN_WORKER_HTTP_PORT 8002
 choose_port OPENGENI_WEB_PORT 3000
 
 default_database_url="postgres://opengeni_app:opengeni_app@127.0.0.1:5432/opengeni"
@@ -118,7 +120,11 @@ trap cleanup EXIT INT TERM
 (cd apps/api && bun run dev) &
 pids+=("$!")
 
-(cd apps/worker && bun run dev) &
+(cd apps/worker && OPENGENI_WORKER_ROLE=control bun run dev) &
+pids+=("$!")
+
+(cd apps/worker && OPENGENI_WORKER_ROLE=turn \
+  OPENGENI_WORKER_HTTP_PORT="${OPENGENI_TURN_WORKER_HTTP_PORT}" bun run dev) &
 pids+=("$!")
 
 (cd apps/web && bunx vite dev --port "${OPENGENI_WEB_PORT}" --host 0.0.0.0) &

@@ -141,7 +141,7 @@ Start the full local stack:
 bun run dev
 ```
 
-`bun run dev` installs dependencies, creates `.env` from `.env.example` when missing, starts Docker infrastructure, runs migrations, builds the local sandbox image, and starts the API, worker, and web app.
+`bun run dev` installs dependencies, creates `.env` from `.env.example` when missing, starts Docker infrastructure, runs migrations, builds the local sandbox image, and starts the API, both workers (control and turn), and the web app.
 
 Open:
 
@@ -163,9 +163,14 @@ docker compose up -d postgres nats temporal minio minio-init
 bun run db:migrate
 docker build -f docker/sandbox.Dockerfile -t opengeni-sandbox:local .
 bun run dev:api
-bun run dev:worker
+bun run dev:worker:control
+bun run dev:worker:turn
 bun run dev:web
 ```
+
+The control and turn workers poll separate Temporal task queues, so both must run.
+A stack with only the control worker serves the API and web app normally but never
+executes an agent turn.
 
 ## Configuration
 
