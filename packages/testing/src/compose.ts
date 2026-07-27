@@ -1,4 +1,5 @@
 import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 import { Connection } from "@temporalio/client";
 import { connect as connectNats } from "nats";
 import postgres from "postgres";
@@ -19,6 +20,8 @@ export type TestServices = {
   minioPort?: number;
   minioConsolePort?: number;
   databaseUrl: string;
+  /** Restricted opengeni_app URL for starting API/worker entry points. */
+  runtimeDatabaseUrl: string;
   natsUrl: string;
   temporalHost: string;
   dockerNetwork: string;
@@ -105,6 +108,7 @@ async function startTestServicesAttempt(
       ? { minioPort: ports.minio, minioConsolePort: ports.minioConsole }
       : {}),
     databaseUrl: `postgres://opengeni:opengeni@127.0.0.1:${ports.postgres}/opengeni`,
+    runtimeDatabaseUrl: `postgres://opengeni_app:opengeni_app@127.0.0.1:${ports.postgres}/opengeni`,
     natsUrl: `nats://127.0.0.1:${ports.nats}`,
     temporalHost: `127.0.0.1:${ports.temporal}`,
     dockerNetwork: `${projectName}_default`,
@@ -116,6 +120,11 @@ async function startTestServicesAttempt(
       : {}),
     migrate: async () => {
       await migrate(services.databaseUrl);
+      await provisionRoles(services.databaseUrl, {
+        appRole: "opengeni_app",
+        appPassword: "opengeni_app",
+        rlsStrategy: "force",
+      });
     },
     down: () => (downPromise ??= stopTestServices(projectName, composeFile, cwd)),
   };

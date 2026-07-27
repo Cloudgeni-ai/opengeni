@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import postgres from "postgres";
 import { migrate } from "@opengeni/db/migrate";
+import { provisionRoles } from "@opengeni/db/provision-roles";
 
 const execFileAsync = promisify(execFile);
 
@@ -253,20 +254,14 @@ async function ensureTemplateBuilt(): Promise<void> {
   // 0000_initial inside migrate()).
   await migrate(templateUrl);
 
-  // Grant the non-superuser login role the same way each per-file database used
-  // to be granted (the migrations' grants are IF EXISTS-guarded and skipped in a
-  // fresh database); clones inherit these object grants from the template.
-  const grantsSql = postgres(templateUrl, { max: 1 });
-  try {
-    await grantsSql.unsafe(`
-      GRANT USAGE ON SCHEMA public TO opengeni_app;
-      GRANT USAGE ON SCHEMA opengeni_private TO opengeni_app;
-      GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO opengeni_app;
-      GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA opengeni_private TO opengeni_app;
-    `);
-  } finally {
-    await grantsSql.end().catch(() => undefined);
-  }
+  // Apply the exact production role/DML contract. Clones inherit these object
+  // grants from the template, including the intentional absence of access to
+  // schema_migrations and one-time repair-audit tables.
+  await provisionRoles(templateUrl, {
+    appRole: "opengeni_app",
+    appPassword: APP_PASSWORD,
+    rlsStrategy: "force",
+  });
 
   // Flip the ready sentinel. This must run with NO open connections to the
   // template; the migrate + grant pools above are already closed. Marking it a
@@ -341,7 +336,11 @@ async function ensureContainerAndAcquire(): Promise<boolean> {
         await admin.unsafe(`
           DO $$ BEGIN
             IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='opengeni_app') THEN
-              CREATE ROLE opengeni_app LOGIN PASSWORD '${APP_PASSWORD}';
+              CREATE ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
+            ELSE
+              ALTER ROLE opengeni_app WITH LOGIN NOSUPERUSER NOBYPASSRLS
+                NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT PASSWORD '${APP_PASSWORD}';
             END IF;
           END $$;`);
       } finally {
