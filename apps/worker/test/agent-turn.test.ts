@@ -2598,6 +2598,28 @@ describe("transient provider error classifier", () => {
     expect(isTransientProviderError(new Error("Connection error."))).toBe(true);
   });
 
+  test("classifies the exact fresh no-rig pre-model connectivity failure as typed recovery", () => {
+    const observed = new Error("Unable to connect. Is the computer able to access the url?");
+
+    expect(isTransientProviderError(observed)).toBe(true);
+    expect(agentRunFailurePayload(observed)).toEqual({
+      error:
+        "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+      code: "upstream_connectivity_unavailable",
+      retryable: true,
+    });
+    expect(providerRecoveryResult()).toEqual({
+      status: "recovering",
+      continueDelayMs: PROVIDER_BACKPRESSURE_DELAY_MS,
+    });
+
+    // HTTP status remains authoritative: a request-owned 4xx with the same body
+    // must not be mistaken for platform connectivity and retried forever.
+    const rejectedRequest = Object.assign(new Error(observed.message), { status: 400 });
+    expect(isTransientProviderError(rejectedRequest)).toBe(false);
+    expect(agentRunFailurePayload(rejectedRequest)).toEqual({ error: observed.message });
+  });
+
   test("classifies node/undici network fault codes as transient", () => {
     for (const code of ["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "ECONNREFUSED", "EPIPE"]) {
       expect(isTransientProviderError(Object.assign(new Error("socket"), { code }))).toBe(true);

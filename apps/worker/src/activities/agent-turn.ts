@@ -7498,7 +7498,7 @@ export function isTransientProviderError(error: unknown): boolean {
     return true;
   }
   const message = error instanceof Error ? error.message : String(error);
-  return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
+  return /overloaded|an error occurred while processing your request|connection error|unable to connect\. is the computer able to access the url\?|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
 }
@@ -7624,6 +7624,14 @@ export function agentRunFailurePayload(
   // retryable so a goal-bearing session idles and auto-continues instead of going
   // terminal on a provider's bad minute. See isTransientProviderError.
   if (isTransientProviderError(error)) {
+    if (/^unable to connect\. is the computer able to access the url\?$/i.test(message.trim())) {
+      return {
+        error:
+          "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+        code: "upstream_connectivity_unavailable",
+        retryable: true,
+      };
+    }
     return { error: message, code: "provider_unavailable", retryable: true };
   }
   return { error: message };
