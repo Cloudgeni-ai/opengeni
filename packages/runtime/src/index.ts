@@ -49,6 +49,7 @@ import {
   boundedParallelMap,
   cancelMcpResponseBody,
   guardedMcpFetch,
+  mcpOuterConnectTimeoutMs,
   undiciFetch,
 } from "./mcp-network";
 import {
@@ -2342,7 +2343,7 @@ export type ConnectedMcpServerBatches = {
  */
 export async function connectMcpServersInBatches(
   servers: MCPServer[],
-  options: { strict: boolean },
+  options: { strict: boolean; connectTimeoutMs?: number },
 ): Promise<ConnectedMcpServerBatches> {
   assertMcpServerSelectionWithinBounds(servers);
   const batches: ConnectedMcpServerBatch[] = [];
@@ -2352,6 +2353,9 @@ export async function connectMcpServersInBatches(
         await connectMcpServers(
           servers.slice(offset, offset + MCP_MAX_CONCURRENT_SERVER_OPERATIONS),
           {
+            ...(options.connectTimeoutMs === undefined
+              ? {}
+              : { connectTimeoutMs: options.connectTimeoutMs }),
             connectInParallel: true,
             strict: options.strict,
           },
@@ -2478,24 +2482,33 @@ export async function prepareAgentTools(
         server,
         bestEffort,
         optional,
+        timeoutMs: config.timeoutMs,
       };
     },
   );
-  const requiredServers = servers.filter((entry) => !entry.bestEffort).map((entry) => entry.server);
-  const bestEffortServers = servers
-    .filter((entry) => entry.bestEffort)
-    .map((entry) => entry.server);
+  const requiredEntries = servers.filter((entry) => !entry.bestEffort);
+  const bestEffortEntries = servers.filter((entry) => entry.bestEffort);
+  const requiredServers = requiredEntries.map((entry) => entry.server);
+  const bestEffortServers = bestEffortEntries.map((entry) => entry.server);
   // Names of the OPTIONAL servers (not codex_apps) so a drop is surfaced as a
   // warning; codex_apps keeps its historically-quiet drop (a not-logged-in
   // ChatGPT plan is a normal, non-noteworthy state).
   const optionalServerNames = new Set(
     servers.filter((entry) => entry.optional).map((entry) => entry.server.name),
   );
-  const connectedRequired = await connectMcpServersInBatches(requiredServers, { strict: true });
+  const connectedRequired = await connectMcpServersInBatches(requiredServers, {
+    strict: true,
+    connectTimeoutMs: mcpOuterConnectTimeoutMs(requiredEntries.map((entry) => entry.timeoutMs)),
+  });
   let connectedBestEffort: ConnectedMcpServerBatches | null = null;
   try {
     connectedBestEffort = bestEffortServers.length
-      ? await connectMcpServersInBatches(bestEffortServers, { strict: false })
+      ? await connectMcpServersInBatches(bestEffortServers, {
+          strict: false,
+          connectTimeoutMs: mcpOuterConnectTimeoutMs(
+            bestEffortEntries.map((entry) => entry.timeoutMs),
+          ),
+        })
       : null;
   } catch (error) {
     await connectedRequired.close().catch(() => undefined);

@@ -34,6 +34,7 @@ import {
   HUMAN_INPUT_TOOL_NAME,
   buildManifest,
   composeAgentInstructions,
+  connectMcpServersInBatches,
   coreInstructions,
   appendPersistentSessionSettings,
   appendTurnInstructions,
@@ -118,6 +119,23 @@ const CODEX_APPS_ENTRY = (url: string) => ({
   name: "codex_apps",
   url,
   cacheToolsList: false,
+});
+
+test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle", async () => {
+  const slowServer = {
+    name: "slow-connect",
+    connect: async () => {
+      await Bun.sleep(50);
+    },
+    close: async () => {},
+  } as unknown as MCPServer;
+
+  await expect(
+    connectMcpServersInBatches([slowServer], {
+      strict: true,
+      connectTimeoutMs: 5,
+    }),
+  ).rejects.toThrow("MCP server connect timed out after 5ms");
 });
 
 describe("structured human-input runtime boundary", () => {
