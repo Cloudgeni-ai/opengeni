@@ -756,6 +756,8 @@ export const sessions = pgTable(
     // mapSession exposes those rows as `legacy` instead of guessing omitted vs
     // explicit [].
     toolPolicy: jsonb("tool_policy").$type<SessionToolPolicy>(),
+    // Optimistic-concurrency fence for durable session tool-policy writes.
+    toolPolicyVersion: integer("tool_policy_version").notNull().default(1),
     // The manager session that spawned this one via session_create. Set only
     // when the creating grant carried a worker-signed sessionId claim (a session
     // spawning a worker); null for direct API creates and scheduled-task runs.

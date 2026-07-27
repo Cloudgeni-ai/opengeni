@@ -113,6 +113,54 @@ describe("buildCreateSessionRequest", () => {
     expect(result.tools).not.toBe(tools);
   });
 
+  test("omits tools only when the ready catalog selection equals workspace defaults", () => {
+    const result = build([], [], {
+      selectedTools: [
+        { kind: "mcp", id: "opengeni" },
+        { kind: "mcp", id: "docs" },
+        { kind: "mcp", id: "files" },
+      ],
+      workspaceDefaultMcpServerIds: ["files", "docs", "opengeni"],
+      workspaceMcpCatalogReady: true,
+    });
+
+    expect(result).not.toHaveProperty("tools");
+  });
+
+  test("keeps explicit empty, subset, and partially hydrated selections on the wire", () => {
+    const common = {
+      workspaceDefaultMcpServerIds: ["docs", "opengeni"],
+      workspaceMcpCatalogReady: true,
+    };
+    expect(
+      build([], [], {
+        ...common,
+        selectedTools: [],
+      }).tools,
+    ).toEqual([]);
+    expect(
+      build([], [], {
+        ...common,
+        selectedTools: [{ kind: "mcp", id: "opengeni" }],
+      }).tools,
+    ).toEqual([{ kind: "mcp", id: "opengeni" }]);
+    expect(
+      build([], [], {
+        ...common,
+        selectedTools: [
+          { kind: "mcp", id: "opengeni" },
+          { kind: "mcp", id: "docs" },
+          { kind: "mcp", id: "files" },
+        ],
+        workspaceMcpCatalogReady: false,
+      }).tools,
+    ).toEqual([
+      { kind: "mcp", id: "opengeni" },
+      { kind: "mcp", id: "docs" },
+      { kind: "mcp", id: "files" },
+    ]);
+  });
+
   test("omits workspace resources for a connected machine but keeps attachments", () => {
     const attachment: ResourceRef = {
       kind: "file",

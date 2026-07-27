@@ -411,6 +411,7 @@ export type {
   UpdateSessionMcpApprovalPolicyResponse,
   UpdateSessionPinRequest,
   UpdateSessionRequest,
+  UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
   UpdateWorkspaceEnvironmentRequest,
   UpdateWorkspaceMemberRequest,

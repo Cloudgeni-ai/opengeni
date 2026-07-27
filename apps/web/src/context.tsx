@@ -129,6 +129,8 @@ export type AppContextValue = {
   toolMcpServers: McpServerOption[];
   /** Capability MCP servers currently enabled as the workspace default. */
   workspaceDefaultToolIds: string[];
+  /** True once the workspace capability catalog has completed its authoritative load. */
+  workspaceMcpCatalogReady: boolean;
   currentResources: ResourceRef[];
   addManualRepository: () => void;
   forgetAccessKey: () => void;
@@ -246,13 +248,14 @@ export function RootRouteComponent() {
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
+  const [workspaceMcpCatalogReady, setWorkspaceMcpCatalogReady] = useState(false);
   const [selectedCapabilityToolIds, setSelectedCapabilityToolIds] = useState<Set<string>>(
     () => new Set(),
   );
   // Seed "docs" as already-seen so Document Search is not auto-selected on first
   // load (it stays opt-in, as the old Docs toggle was). Every other tool server,
   // including the first-party "opengeni", is auto-selected when it first appears.
-  const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs"]));
+  const previousCapabilityToolIds = useRef<Set<string>>(new Set(["docs", "files"]));
   const githubRefreshId = useRef(0);
   const mcpRefreshId = useRef(0);
   // Stable CREATE idempotency key for the in-flight session create. Generated
@@ -704,6 +707,7 @@ export function RootRouteComponent() {
         return;
       }
       setWorkspaceMcpServers(enabledWorkspaceCapabilityMcpServers(catalog.items));
+      setWorkspaceMcpCatalogReady(true);
     },
     [client],
   );
@@ -720,6 +724,12 @@ export function RootRouteComponent() {
   ): Promise<Session | null> {
     setBusy(true);
     try {
+      if (!workspaceMcpCatalogReady) {
+        toast.error("Tools are still loading", {
+          description: "Wait for the workspace tool catalog to finish loading, then try again.",
+        });
+        return null;
+      }
       const selectedTools = buildTools(submission.tools, [...selectedCapabilityToolIds]);
       const freshIdempotencyKey = crypto.randomUUID();
       const attempt = prepareCreateSessionAttempt({
@@ -736,6 +746,11 @@ export function RootRouteComponent() {
           defaultReasoningEffort: reasoningEffort,
           clientEventId: crypto.randomUUID(),
           idempotencyKey: freshIdempotencyKey,
+          workspaceDefaultMcpServerIds: [
+            "opengeni",
+            ...workspaceMcpServers.map((server) => server.id),
+          ],
+          workspaceMcpCatalogReady,
           targetSandboxId: options?.targetSandboxId,
           workingDir: options?.workingDir,
           expectedNewSessionDraftRevision: options?.expectedNewSessionDraftRevision,
@@ -913,6 +928,7 @@ export function RootRouteComponent() {
     setGithubStatus(null);
     setGithubRepos([]);
     setWorkspaceMcpServers([]);
+    setWorkspaceMcpCatalogReady(false);
   }, []);
 
   // Context actions keep one identity while reading the newest committed state
@@ -980,6 +996,7 @@ export function RootRouteComponent() {
           repositoryGroups,
           toolMcpServers,
           workspaceDefaultToolIds: workspaceMcpServers.map((server) => server.id),
+          workspaceMcpCatalogReady,
           currentResources,
           addManualRepository: contextAddManualRepository,
           forgetAccessKey: contextForgetAccessKey,
@@ -1054,6 +1071,7 @@ export function RootRouteComponent() {
     setModelForSession,
     setSession,
     toolMcpServers,
+    workspaceMcpCatalogReady,
     workspaceMcpServers,
     workspaces,
   ]);

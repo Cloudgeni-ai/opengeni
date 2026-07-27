@@ -261,6 +261,16 @@ export * from "./memory-domain";
 // unaffected.
 export type Database = PgDatabase<any, typeof schema>;
 
+/** Raised when a durable session tool-policy write lost its version fence. */
+export class SessionToolPolicyVersionConflictError extends Error {
+  readonly code = "SESSION_TOOL_POLICY_CONFLICT";
+
+  constructor(readonly currentVersion: number) {
+    super("The session tool policy changed in another client");
+    this.name = "SessionToolPolicyVersionConflictError";
+  }
+}
+
 export type DbClient = {
   db: Database;
   close: () => Promise<void>;
@@ -32944,6 +32954,9 @@ function sessionEventTypesAdvanceActivity(inputs: ReadonlyArray<{ type: string }
 function sessionMutationAdvancesActivity(update: {
   resources?: ResourceRef[];
   tools?: ToolRef[];
+  toolPolicy?: SessionToolPolicy;
+  toolPolicyVersion?: number;
+  expectedToolPolicyVersion?: number;
   model?: string;
   metadata?: Record<string, unknown>;
   status?: SessionStatus;
@@ -33532,6 +33545,7 @@ type LockedSessionUpdateContext = {
     requireApproval: SessionMcpApprovalPolicy,
   ) => Promise<UpdateSessionMcpApprovalPolicyResult>;
   listPendingSessionTurns: () => Promise<SessionTurn[]>;
+  getLockedSession: (sessionId: string) => Promise<Session | null>;
 };
 
 type LockedSessionUpdateResult = {
@@ -33539,6 +33553,9 @@ type LockedSessionUpdateResult = {
   update?: {
     resources?: ResourceRef[];
     tools?: ToolRef[];
+    toolPolicy?: SessionToolPolicy;
+    toolPolicyVersion?: number;
+    expectedToolPolicyVersion?: number;
     model?: string;
     metadata?: Record<string, unknown>;
     status?: SessionStatus;
@@ -33554,18 +33571,39 @@ export async function appendSessionEventsWithLockedSessionUpdate(
     session: Session,
     context: LockedSessionUpdateContext,
   ) => LockedSessionUpdateResult | Promise<LockedSessionUpdateResult>,
+  options: { lockParentSession?: boolean } = {},
 ): Promise<SessionEvent[]> {
   return await withWorkspaceRls(
     db,
     workspaceId,
     async (scopedDb) =>
       await scopedDb.transaction(async (tx) => {
-        const locks = await lockSessionEventWriteRows(tx as unknown as Database, {
+        const firstLocks = await lockSessionEventWriteRows(tx as unknown as Database, {
           workspaceId,
           controlLock: "share",
           sessionIds: [sessionId],
         });
-        const sessionRow = locks.sessions[0];
+        const firstSessionRow = firstLocks.sessions.find((row) => row.id === sessionId);
+        if (!firstSessionRow) {
+          throw new Error(`Session not found: ${sessionId}`);
+        }
+        // Child-policy updates must serialize with a concurrent parent-policy
+        // update. The target lock establishes the parent id, then the second
+        // call acquires the complete UUID-ordered set under the already-held
+        // workspace/control prefix.
+        const lockSessionIds = options.lockParentSession
+          ? [sessionId, firstSessionRow.parentSessionId].filter((id): id is string => Boolean(id))
+          : [sessionId];
+        const locks =
+          lockSessionIds.length === 1
+            ? firstLocks
+            : await lockSessionEventWriteRows(tx as unknown as Database, {
+                workspaceId,
+                controlLock: "already_locked",
+                workspaceLock: "already_locked",
+                sessionIds: lockSessionIds,
+              });
+        const sessionRow = locks.sessions.find((row) => row.id === sessionId);
         if (!sessionRow) {
           throw new Error(`Session not found: ${sessionId}`);
         }
@@ -33604,6 +33642,18 @@ export async function appendSessionEventsWithLockedSessionUpdate(
               .orderBy(asc(schema.sessionTurns.position), asc(schema.sessionTurns.createdAt));
             return rows.map(mapSessionTurn);
           },
+          getLockedSession: async (lockedSessionId) => {
+            const row = locks.sessions.find((candidate) => candidate.id === lockedSessionId);
+            return row
+              ? await mapSessionWithControl(
+                  tx as unknown as Database,
+                  row,
+                  [],
+                  undefined,
+                  locks.control ?? undefined,
+                )
+              : null;
+          },
         });
         if (built.events.length === 0) {
           return [];
@@ -33641,12 +33691,16 @@ export async function appendSessionEventsWithLockedSessionUpdate(
         const update = built.update ?? {};
         const advancesActivity =
           sessionMutationAdvancesActivity(update) || sessionEventTypesAdvanceActivity(values);
-        await tx
+        const updated = await tx
           .update(schema.sessions)
           .set({
             lastSequence: sequence,
             ...(update.resources !== undefined ? { resources: update.resources } : {}),
             ...(update.tools !== undefined ? { tools: update.tools } : {}),
+            ...(update.toolPolicy !== undefined ? { toolPolicy: update.toolPolicy } : {}),
+            ...(update.toolPolicyVersion !== undefined
+              ? { toolPolicyVersion: update.toolPolicyVersion }
+              : {}),
             ...(update.model !== undefined ? { model: update.model } : {}),
             ...(update.metadata !== undefined ? { metadata: update.metadata } : {}),
             ...(update.status !== undefined ? { status: update.status } : {}),
@@ -33654,8 +33708,27 @@ export async function appendSessionEventsWithLockedSessionUpdate(
             ...(advancesActivity ? { updatedAt: now } : {}),
           })
           .where(
-            and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+            and(
+              eq(schema.sessions.workspaceId, workspaceId),
+              eq(schema.sessions.id, sessionId),
+              ...(update.expectedToolPolicyVersion !== undefined
+                ? [eq(schema.sessions.toolPolicyVersion, update.expectedToolPolicyVersion)]
+                : []),
+            ),
+          )
+          .returning({ id: schema.sessions.id });
+        if (updated.length === 0) {
+          const [current] = await tx
+            .select({ toolPolicyVersion: schema.sessions.toolPolicyVersion })
+            .from(schema.sessions)
+            .where(
+              and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)),
+            )
+            .limit(1);
+          throw new SessionToolPolicyVersionConflictError(
+            Number(current?.toolPolicyVersion ?? update.expectedToolPolicyVersion ?? 1),
           );
+        }
         return inserted.map(mapEvent);
       }),
   );
@@ -33716,6 +33789,7 @@ function mapSession(
       mode: "legacy",
       inheritedFromSessionId: null,
     },
+    toolPolicyVersion: Number(row.toolPolicyVersion ?? 1),
     metadata: row.metadata,
     createdBy: initiatorFromStorage(
       row.createdByKind,

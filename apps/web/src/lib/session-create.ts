@@ -30,6 +30,7 @@ import type {
   ToolRef,
   TurnSubmission,
 } from "@/types";
+import { buildTools } from "./session-tools";
 
 // ── Compute target — the promoted top-level "Where should this run?" choice ──
 
@@ -115,6 +116,10 @@ export type BuildCreateSessionRequestInput = {
   targetSandboxId?: string | null;
   workingDir?: string | null;
   expectedNewSessionDraftRevision?: number;
+  /** Server-authoritative omitted-tools defaults, including mandatory opengeni. */
+  workspaceDefaultMcpServerIds?: string[];
+  /** Prevent a partially hydrated capability catalog from becoming a pin. */
+  workspaceMcpCatalogReady?: boolean;
 };
 
 export type PendingCreateAttempt = {
@@ -138,10 +143,28 @@ export function buildCreateSessionRequest(
     [...baseResources, ...(input.submission.resources ?? [])],
     { rejectConflicts: true },
   );
+  const selectedToolIds = [
+    ...new Set(
+      buildTools(
+        [],
+        input.selectedTools.map((tool) => tool.id),
+      ).map((tool) => tool.id),
+    ),
+  ].sort();
+  const defaultToolIds = input.workspaceDefaultMcpServerIds
+    ? [...new Set(input.workspaceDefaultMcpServerIds)].sort()
+    : null;
+  const tools =
+    input.workspaceMcpCatalogReady === true &&
+    defaultToolIds &&
+    selectedToolIds.join("\u0000") ===
+      [...new Set(buildTools([], defaultToolIds).map((tool) => tool.id))].sort().join("\u0000")
+      ? undefined
+      : [...input.selectedTools];
   return {
     initialMessage: input.submission.text,
     resources,
-    tools: [...input.selectedTools],
+    ...(tools === undefined ? {} : { tools }),
     model: input.submission.model ?? input.defaultModel,
     reasoningEffort: input.submission.reasoningEffort ?? input.defaultReasoningEffort,
     clientEventId: input.clientEventId,

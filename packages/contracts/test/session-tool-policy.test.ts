@@ -3,9 +3,20 @@ import {
   capabilityCatalogItemIsTrustedForExposure,
   SessionEffectiveToolPolicy,
   SessionToolPolicy,
+  UpdateSessionToolPolicyRequest,
 } from "../src";
 
 describe("session tool policy contracts", () => {
+  test("requires a positive optimistic version and preserves explicit empty tools", () => {
+    expect(
+      UpdateSessionToolPolicyRequest.parse({
+        tools: [],
+        expectedVersion: 1,
+      }),
+    ).toEqual({ tools: [], expectedVersion: 1 });
+    expect(() => UpdateSessionToolPolicyRequest.parse({ tools: [], expectedVersion: 0 })).toThrow();
+  });
+
   test("accepts the durable policy modes and rejects invalid inheritance", () => {
     expect(SessionToolPolicy.parse({ mode: "legacy", inheritedFromSessionId: null })).toEqual({
       mode: "legacy",

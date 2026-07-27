@@ -276,6 +276,11 @@ export type SessionToolPolicy = {
   inheritedFromSessionId: string | null;
 };
 
+export type UpdateSessionToolPolicyRequest = {
+  tools: ToolRef[];
+  expectedVersion: number;
+};
+
 export type SessionEffectiveToolPolicy = {
   mode: SessionToolPolicy["mode"];
   inheritedFromSessionId: string | null;
@@ -472,6 +477,7 @@ export type Session = {
   resources: ResourceRef[];
   tools: ToolRef[];
   toolPolicy?: SessionToolPolicy | undefined;
+  toolPolicyVersion?: number | undefined;
   effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
   /** Frozen creator fact; later turns carry their own independent initiator. */
@@ -762,6 +768,7 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.exited",
   "session.title_set",
   "session.mcp.approval_policy.updated",
+  "session.tool_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   // credential allocator metadata-only per-turn credential selection audit.

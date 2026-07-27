@@ -3134,6 +3134,13 @@ export const UpdateSessionRequest = z.object({
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
+/** Replace an existing session's durable MCP tool policy. */
+export const UpdateSessionToolPolicyRequest = z.object({
+  tools: z.array(ToolRef).max(64),
+  expectedVersion: z.number().int().positive(),
+});
+export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
+
 /**
  * A member's personal pin preference for a session. `expectedVersion` is
  * optional: ordinary pin/unpin actions are idempotent last-write-wins, while a
@@ -3275,6 +3282,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.human_input.write",
   "session.title.write",
   "session.mcp.approval_policy.write",
+  "session.tool_policy.write",
   "session.goal.read",
   "session.goal.write",
   "session.child.create",
@@ -4853,6 +4861,10 @@ export const Session = z.object({
   // Origin of the persisted tool allow-list. Optional for rolling client
   // compatibility; current servers emit it and legacy rows map to `legacy`.
   toolPolicy: SessionToolPolicy.optional(),
+  // Optimistic-concurrency fence for durable policy mutations. Optional for
+  // older clients/fixtures; current servers always emit the authoritative
+  // value.
+  toolPolicyVersion: z.number().int().positive().optional(),
   // Secret-safe current resolution, computed at an API/read or execution
   // boundary from IDs only. Optional because internal DB readers need not load
   // the workspace runtime registry.
@@ -5103,6 +5115,7 @@ export const SessionEventType = z.enum([
   "terminal.pty.exited", // PTY session ended (exitCode/reason)
   "session.title_set",
   "session.mcp.approval_policy.updated",
+  "session.tool_policy.updated",
   // Multi-account Codex (P1): the account a session's turn runs on changed
   // (manual switch in P1; failover/rotation in P3 reuse the same event). Drives
   // the in-session "Running on:" indicator's live flip.
@@ -5268,6 +5281,7 @@ export const SESSION_EVENT_SEMANTIC_CLASS_TYPES = {
     "session.queue.changed",
     "session.queue.prompt.cancelled",
     "session.mcp.approval_policy.updated",
+    "session.tool_policy.updated",
   ],
   terminal: [
     "turn.completed",

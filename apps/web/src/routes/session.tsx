@@ -579,6 +579,16 @@ function SessionChatPane(props: {
   const [selectedSessionToolIds, setSelectedSessionToolIds] = useState<Set<string>>(
     () => new Set(policyToolIds),
   );
+  const [durableSessionToolIds, setDurableSessionToolIds] = useState<Set<string>>(
+    () => new Set(policyToolIds),
+  );
+  const [durableToolPolicyVersion, setDurableToolPolicyVersion] = useState(
+    () => props.session.toolPolicyVersion ?? 1,
+  );
+  const [durableToolsHydrated, setDurableToolsHydrated] = useState(false);
+  const durableToolsSessionId = useRef(props.session.id);
+  const [durableToolsSaving, setDurableToolsSaving] = useState(false);
+  const [durableToolsError, setDurableToolsError] = useState<string | null>(null);
   const [toolSelectionExplicit, setToolSelectionExplicit] = useState(false);
   // The model is session-scoped: this session remembers its own pick (falling
   // back to the deployment default), so a switch here doesn't bleed into others.
@@ -589,6 +599,88 @@ function SessionChatPane(props: {
       setSelectedSessionToolIds(new Set(policyToolIds));
     }
   }, [policyToolIds, toolSelectionExplicit]);
+  useEffect(() => {
+    if (durableToolsSessionId.current !== props.session.id) {
+      durableToolsSessionId.current = props.session.id;
+      setDurableToolsHydrated(false);
+      return;
+    }
+    if (!context.workspaceMcpCatalogReady) {
+      if (durableToolsHydrated) {
+        setDurableToolsHydrated(false);
+      }
+      return;
+    }
+    if (durableToolsHydrated) {
+      return;
+    }
+    setDurableSessionToolIds(new Set(policyToolIds));
+    setDurableToolPolicyVersion(props.session.toolPolicyVersion ?? 1);
+    setDurableToolsHydrated(true);
+  }, [
+    context.workspaceMcpCatalogReady,
+    durableToolsHydrated,
+    policyToolIds,
+    props.session.id,
+    props.session.toolPolicyVersion,
+  ]);
+  const saveDurableToolPolicy = useCallback(
+    async (next: Set<string>) => {
+      setDurableSessionToolIds(new Set(next));
+      setDurableToolsSaving(true);
+      setDurableToolsError(null);
+      try {
+        const tools = toolsForPolicySelection({
+          selectedMcpServerIds: next,
+          baselineMcpServerIds: [],
+          forceExplicit: true,
+        });
+        const updated = await context.client.updateSessionToolPolicy(
+          props.session.workspaceId,
+          props.session.id,
+          {
+            tools: tools ?? [],
+            expectedVersion: durableToolPolicyVersion,
+          },
+        );
+        const selectable = context.toolMcpServers.map((server) => server.id);
+        setDurableSessionToolIds(
+          sessionPolicyPickerIds(updated, selectable, context.workspaceDefaultToolIds),
+        );
+        setDurableToolPolicyVersion(updated.toolPolicyVersion ?? durableToolPolicyVersion + 1);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setDurableToolsError(message);
+        toast.error("Failed to save session tools", { description: message });
+        // Reconcile with the server after both a 409 and a transport failure;
+        // the failed local click must never be presented as durable truth.
+        try {
+          const refreshed = await context.client.getSession(
+            props.session.workspaceId,
+            props.session.id,
+          );
+          const selectable = context.toolMcpServers.map((server) => server.id);
+          setDurableSessionToolIds(
+            sessionPolicyPickerIds(refreshed, selectable, context.workspaceDefaultToolIds),
+          );
+          setDurableToolPolicyVersion(refreshed.toolPolicyVersion ?? 1);
+        } catch {
+          // Keep the last authoritative selection when reconciliation is also
+          // unavailable; the visible error makes the state non-silent.
+        }
+      } finally {
+        setDurableToolsSaving(false);
+      }
+    },
+    [
+      context.client,
+      context.toolMcpServers,
+      context.workspaceDefaultToolIds,
+      durableToolPolicyVersion,
+      props.session.id,
+      props.session.workspaceId,
+    ],
+  );
   const applyComposerSettings = useCallback(
     (draft: ComposerDraft) => {
       setModelForSession(props.session.id, draft.model);
@@ -861,11 +953,32 @@ function SessionChatPane(props: {
                   servers={context.toolMcpServers}
                   selectedIds={selectedSessionToolIds}
                   disabled={composer.sending || terminal}
+                  label="Tools for this turn"
                   onChange={(next) => {
                     setToolSelectionExplicit(true);
                     setSelectedSessionToolIds(next);
                   }}
                 />
+                <EnabledMcpToolPicker
+                  servers={context.toolMcpServers}
+                  selectedIds={durableSessionToolIds}
+                  disabled={
+                    composer.sending || terminal || durableToolsSaving || !durableToolsHydrated
+                  }
+                  label={
+                    durableToolsSaving
+                      ? "Saving session tools"
+                      : durableToolsHydrated
+                        ? "Session tools"
+                        : "Loading session tools"
+                  }
+                  onChange={(next) => void saveDurableToolPolicy(next)}
+                />
+                {durableToolsError ? (
+                  <span className="sr-only" role="alert">
+                    {durableToolsError}
+                  </span>
+                ) : null}
               </div>
             }
           />

@@ -5,7 +5,11 @@ import {
   OpenGeniApiError,
   OpenGeniSessionListCursorError,
 } from "../src/errors";
-import { OPENGENI_API_CONTRACT_HEADER, OPENGENI_API_CONTRACT_REVISION } from "../src/types";
+import {
+  OPENGENI_API_CONTRACT_HEADER,
+  OPENGENI_API_CONTRACT_REVISION,
+  type Session,
+} from "../src/types";
 import { collect, makeEvent, SESSION_ID, sseBlock, WORKSPACE_ID } from "./helpers";
 
 type RecordedRequest = {
@@ -225,6 +229,26 @@ describe("OpenGeniClient", () => {
     );
     expect(JSON.parse(requests[0]!.body!)).toEqual({
       requireApproval: ["write_record"],
+    });
+  });
+
+  test("updates an existing session tool policy through the dedicated route", async () => {
+    const response = { id: SESSION_ID, toolPolicyVersion: 2 } as unknown as Session;
+    const { client, requests } = makeClient(() => jsonResponse(response));
+    expect(
+      await client.updateSessionToolPolicy(WORKSPACE_ID, SESSION_ID, {
+        tools: [],
+        expectedVersion: 1,
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PUT");
+    expect(requests[0]!.url).toBe(
+      `https://api.example.test/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/tool-policy`,
+    );
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      tools: [],
+      expectedVersion: 1,
     });
   });
 
