@@ -275,6 +275,20 @@ describe("release image workflow contract", () => {
     expect(login).not.toContain("admin-password");
   });
 
+  test("agent publication creates only immutable-compatible versioned releases", async () => {
+    const agentRelease = await workflow("agent-release.yml");
+
+    expect(agentRelease).toContain(
+      "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+    );
+    expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
+    expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
+    expect(agentRelease).toContain("OPENGENI_AGENT_STABLE_VERSION");
+    expect(agentRelease).not.toContain("gh release delete");
+    expect(agentRelease).not.toContain("gh release create agent-latest");
+    expect(agentRelease).not.toContain("releases/download/agent-latest");
+  });
+
   test("release-state parsing accepts a valid absent release without weakening type checks", async () => {
     const candidate = await workflow("release-candidate.yml");
     const release = await workflow("release.yml");

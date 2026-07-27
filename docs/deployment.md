@@ -215,51 +215,75 @@ will be used directly as a release source, dispatch
 `.github/workflows/seal-release-head.yml` from exact current `main` with the PR
 number and exact base/head SHAs before merging. The base-owned workflow reruns
 the complete source-admission verifier, requires the existing successful
-exact-head admission check, then creates or verifies the tag idempotently. Once
-the complete tag/ruleset/PR identity has been re-read without drift, it
-idempotently publishes a successful `Release-head retention` check on the
-exact head with external identity
-`opengeni:release-automation:release-head-retention:v1:pr:<number>:head:<sha>:protection-sha256:<digest>`.
-The digest binds the provider ruleset ID and revision, exact ref pattern and
-rules, and the authenticated no-bypass result. An anonymous downstream
-operator can therefore compare the current visible ruleset revision and
-configuration with the check without receiving a cross-repository credential.
+exact-head admission check, then creates or verifies the tag idempotently. It
+also publishes a prerelease named `Retained OpenGeni release head <sha>` for
+that exact tag. Repository-level immutable releases must be enabled: the
+provider response must identify the GitHub Actions bot as author and report the
+published prerelease as `immutable: true`, or sealing fails closed. GitHub then
+locks the tag and emits its native release attestation.
+
+Before the first seal, a repository administrator must enable the provider
+feature with the API version that introduced its management endpoint:
+
+```bash
+gh api \
+  --method PUT \
+  --header "Accept: application/vnd.github+json" \
+  --header "X-GitHub-Api-Version: 2026-03-10" \
+  repos/Cloudgeni-ai/opengeni/immutable-releases
+gh api \
+  --header "Accept: application/vnd.github+json" \
+  --header "X-GitHub-Api-Version: 2026-03-10" \
+  repos/Cloudgeni-ai/opengeni/immutable-releases \
+  --jq '.enabled'
+```
+
+The verification command must print `true`. Enablement affects releases created
+after it is switched on, so a mutable failed bootstrap release cannot be
+promoted into evidence; push and seal a fresh exact head instead.
+
+Once the complete tag/immutable-release/PR identity has been re-read without
+drift, the workflow idempotently publishes a successful
+`Release-head retention` check on the exact head with external identity
+`opengeni:release-automation:release-head-retention:v2:pr:<number>:head:<sha>:release-sha256:<digest>`.
+The digest binds the publicly readable immutable release identity. An
+anonymous downstream operator can therefore re-read the exact tag and release,
+require `immutable: true`, and reconstruct the check identity without receiving
+a cross-repository credential. Consumers may additionally verify GitHub's
+cryptographically signed release attestation with `gh release verify`.
 Its byte contract is SHA-256 over newline-free UTF-8 `JSON.stringify` of this
 object with the top-level keys sorted in ascending ASCII order:
 
 ```json
 {
-  "bypassActorCount": 0,
-  "enforcement": "active",
+  "authorId": 41898282,
+  "authorLogin": "github-actions[bot]",
+  "authorType": "Bot",
+  "draft": false,
   "id": 123,
-  "name": "Immutable OpenGeni release heads",
-  "refPattern": "refs/tags/opengeni-release-head-*",
-  "rules": ["deletion", "update"],
-  "target": "tag",
-  "updatedAt": "2026-07-26T23:16:17.229Z"
+  "immutable": true,
+  "name": "Retained OpenGeni release head <sha>",
+  "prerelease": true,
+  "publishedAt": "2026-07-27T02:00:00.000Z",
+  "tagName": "opengeni-release-head-<sha>",
+  "url": "https://github.com/Cloudgeni-ai/opengeni/releases/tag/opengeni-release-head-<sha>"
 }
 ```
 
-`id` is the live positive ruleset ID and `updatedAt` is the live provider
-`updated_at` value normalized through `new Date(value).toISOString()`. The
-array order shown above is canonical. If the ruleset revision changes after a
-retention check exists, sealing fails rather than creating a second proof; push
-a new head based on current `main`, let source admission pass, and seal that new
-head.
+`id` is the live positive release ID and `publishedAt` is the provider
+`published_at` value normalized through `new Date(value).toISOString()`. If an
+existing release differs from this identity after a retention check exists,
+sealing fails rather than creating a second proof; push a new head based on
+current `main`, let source admission pass, and seal that new head.
 Trusted Version-PR admission publishes the same check. This gives downstream
-release operators a provider-owned proof of the full ruleset contract without
-requiring a credential that crosses repository boundaries. A tag is retention
-evidence, not approval: the native pre-merge review and every later
-source/acceptance gate remain mandatory. A missing, moved, indirect, or
-post-hoc substitute ref fails release provenance.
-
-The repository must keep one active tag ruleset named
-`Immutable OpenGeni release heads`, targeting only
-`refs/tags/opengeni-release-head-*`, with update and deletion restrictions and
-no bypass actors. Both sealing and final provenance read the public ruleset
-detail and fail closed unless that exact contract is active before trusting or
-creating a retained ref. These tags intentionally accumulate for the lifetime
-of their release evidence; never include them in routine tag cleanup.
+release operators a provider-owned proof of immutable source retention without
+requiring a credential that crosses repository boundaries. A tag and immutable
+prerelease are retention evidence, not approval: the native pre-merge review
+and every later source/acceptance gate remain mandatory. A missing, moved,
+indirect, mutable, non-provider-authored, or post-hoc substitute fails release
+provenance. Retained-head prereleases and their tags intentionally accumulate
+for the lifetime of their release evidence; never include them in routine
+release or tag cleanup.
 
 Release admission derives the merge outcome exclusively from GitHub records; a
 workflow caller cannot assert a merge method. The exact current `main` SHA is
@@ -797,6 +821,14 @@ matches the running control plane (the per-SHA binary baked into the API image),
 with no dependency on an external CDN. A public release archive is the fallback
 for other OS/arch assets and the self-update channel. Route these paths (and an
 optional `get.<domain>` host) to the `api` service in the ingress.
+
+`/agent/latest/<asset>` is a compatibility route backed by the immutable
+versioned release selected by `OPENGENI_AGENT_STABLE_VERSION` (default `0.1.8`).
+`OPENGENI_AGENT_RELEASES_BASE_URL` selects the archive origin. Promote or roll
+back the stable channel by changing the configured version only after the
+corresponding `agent-v<version>` release and its signed assets exist; never move
+or delete an agent release tag. A baked asset still takes precedence so a
+deployed control-plane image serves its release-coherent binary directly.
 
 ### Enrolling a machine
 

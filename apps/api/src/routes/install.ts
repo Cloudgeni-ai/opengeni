@@ -144,6 +144,7 @@ const VERSION_SEG = /^v[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
   const releasesBase = deps.settings.agentReleasesBaseUrl.replace(/\/+$/, "");
+  const stableAgentTag = `agent-v${deps.settings.agentStableVersion}`;
 
   for (const [path, { file, contentType }] of Object.entries(TEXT_ASSETS)) {
     app.get(path, async (c) => {
@@ -185,20 +186,18 @@ export function registerInstallRoutes(app: Hono, deps: ApiRouteDeps): void {
     return new Response(null, { status: 302, headers: { location: redirectUrl } });
   }
 
-  // `latest` → the BAKED binary if present, else the dedicated moving
-  // `agent-latest` GitHub Release. We deliberately do NOT use GitHub's
-  // repo-global `releases/latest` alias here: in this monorepo that alias is
-  // perpetually shadowed by the frequent changesets package releases (e.g.
-  // `@opengeni/contracts@x.y.z`), which carry no agent binaries → 404. The
-  // `agent-latest` release is maintained by .github/workflows/agent-release.yml
-  // as a moving tag that always points at the newest signed mac/windows
-  // binaries (+ checksums, install scripts, minisign pubkey).
+  // `latest` → the BAKED binary if present, else the operator-selected immutable
+  // `agent-v<version>` release. We deliberately do NOT use GitHub's repo-global
+  // `releases/latest` alias here: in this monorepo that alias is shadowed by
+  // frequent changesets package releases, which carry no agent binaries. The
+  // explicit stable-version setting also makes promotion and rollback auditable
+  // without moving or deleting a provider tag.
   app.get("/agent/latest/:asset", async (c) => {
     const asset = c.req.param("asset");
     if (!ASSET_NAME.test(asset)) {
       throw new HTTPException(400, { message: "invalid asset name" });
     }
-    return serveAsset(asset, `${releasesBase}/download/agent-latest/${asset}`);
+    return serveAsset(asset, `${releasesBase}/download/${stableAgentTag}/${asset}`);
   });
 
   // The version segment is the literal `v<ver>` (e.g. `v1.2.3`) — Hono cannot bind
