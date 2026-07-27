@@ -240,7 +240,11 @@ gh api \
 
 The verification command must print `true`. Enablement affects releases created
 after it is switched on, so a mutable failed bootstrap release cannot be
-promoted into evidence; push and seal a fresh exact head instead.
+promoted into evidence; push and seal a fresh exact head instead. Treat that
+first fresh seal as an activation test: use a low-risk documentation-only PR,
+then re-read its exact tag, immutable prerelease, native attestation, and
+provider-owned retention check before relying on the mechanism for release
+source.
 
 Once the complete tag/immutable-release/PR identity has been re-read without
 drift, the workflow idempotently publishes a successful
