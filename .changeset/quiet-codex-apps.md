@@ -1,6 +1,6 @@
 ---
 "@opengeni/config": patch
-"@opengeni/worker": patch
+"@opengeni/worker-bundle": patch
 ---
 
 Keep Codex connected-app MCP tools disabled by default behind the independent
