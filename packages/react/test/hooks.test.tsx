@@ -59,6 +59,16 @@ function makeEvent(
 
 const noEvents: SessionEvent[] = [];
 
+function gatewayError(status = 502): OpenGeniApiError {
+  return new OpenGeniApiError(status, "", {
+    code: "upstream_unavailable",
+    retryable: true,
+    correlationId: `edge-${status}-safe`,
+    outcomeUnknown: true,
+    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+  });
+}
+
 function queueSnapshot(
   items: SessionTurn[],
   overrides: Partial<SessionQueueSnapshot> = {},
@@ -1954,6 +1964,145 @@ describe("useComposer durable draft and control binding", () => {
     expect(submittedTexts).toEqual([FILE_ONLY_MESSAGE_TEXT]);
     await hook.unmount();
   });
+
+  test("a transient draft save preserves text and resources without claiming a cross-tab conflict", async () => {
+    const resource = {
+      kind: "file" as const,
+      fileId: "33333333-3333-4333-8333-333333333333",
+    };
+    const initial: ComposerDraft = {
+      revision: 4,
+      text: "local draft",
+      resources: [resource],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async () => {
+        throw gatewayError(503);
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("local edit survives"));
+    await flush(600);
+
+    expect(hook.result.current.value).toBe("local edit survives");
+    expect(hook.result.current.restoredResources).toEqual([resource]);
+    expect(hook.result.current.draftConflict).toBeNull();
+    expect(hook.result.current.error).toMatchObject({
+      status: 503,
+      retryable: true,
+      outcomeUnknown: true,
+    });
+    expect(hook.result.current.error?.message).toBe(
+      "OpenGeni is temporarily unavailable — retry. Reference: edge-503-safe.",
+    );
+    await hook.unmount();
+  });
+
+  test("a failed draft reload never replaces newer local text or restored resources", async () => {
+    const resource = {
+      kind: "file" as const,
+      fileId: "44444444-4444-4444-8444-444444444444",
+    };
+    const initial: ComposerDraft = {
+      revision: 2,
+      text: "server draft",
+      resources: [resource],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let reads = 0;
+    const client = fakeClient({
+      getComposerDraft: async () => {
+        reads += 1;
+        if (reads === 1) return initial;
+        throw gatewayError(504);
+      },
+    });
+    const hook = await renderHook(
+      () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+      undefined,
+    );
+    await flush();
+    await flushing(() => hook.result.current.setValue("newer unsaved local edit"));
+    await flushing(async () => await hook.result.current.reloadDraft());
+
+    expect(hook.result.current.value).toBe("newer unsaved local edit");
+    expect(hook.result.current.restoredResources).toEqual([resource]);
+    expect(hook.result.current.error?.message).not.toContain("html");
+    expect(hook.result.current.error?.message.length).toBeLessThan(160);
+    await hook.unmount();
+  });
+
+  for (const delivery of ["send", "steer"] as const) {
+    test(`${delivery} retries an outcome-unknown gateway failure with one idempotency key`, async () => {
+      const resource = {
+        kind: "file" as const,
+        fileId: "55555555-5555-4555-8555-555555555555",
+      };
+      const initial: ComposerDraft = {
+        revision: 7,
+        text: "do not duplicate this",
+        resources: [resource],
+        tools: [],
+        toolsProvided: false,
+        model: "model-x",
+        reasoningEffort: "medium",
+        sourceTurnId: null,
+        sourceTurnVersion: null,
+        updatedAt: new Date().toISOString(),
+      };
+      const attempts: SendMessageInput[] = [];
+      const deliver = async (input: string | SendMessageInput) => {
+        const typed = typeof input === "string" ? { text: input } : input;
+        attempts.push(typed);
+        if (attempts.length === 1) throw gatewayError(502);
+        return makeEvent(1, "user.message");
+      };
+      const client = fakeClient({
+        getComposerDraft: async () => initial,
+        sendMessage: async (_workspaceId, _sessionId, input) => await deliver(input),
+        steerMessage: async (_workspaceId, _sessionId, input) => ({
+          accepted: await deliver(input),
+          turn: fakeTurn(),
+        }),
+      });
+      const hook = await renderHook(
+        () => useComposer(SESSION_ID, { client, workspaceId: WORKSPACE_ID }),
+        undefined,
+      );
+      await flush();
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(false));
+      expect(hook.result.current.value).toBe(initial.text);
+      expect(hook.result.current.restoredResources).toEqual([resource]);
+      expect(hook.result.current.error).toMatchObject({ outcomeUnknown: true });
+
+      await flushing(async () => expect(await hook.result.current[delivery]()).toBe(true));
+      expect(attempts).toHaveLength(2);
+      expect(attempts[0]!.clientEventId).toBe(attempts[1]!.clientEventId);
+      expect(attempts[0]!.resources).toEqual([resource]);
+      expect(hook.result.current.value).toBe("");
+      expect(hook.result.current.restoredResources).toEqual([]);
+      await hook.unmount();
+    });
+  }
 
   test("an autosave conflict preserves the local text and exposes both resolution choices", async () => {
     const initial = {

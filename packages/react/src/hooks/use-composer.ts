@@ -1,3 +1,4 @@
+import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   ComposerDraft,
   EffectiveControlResumeOption,
@@ -333,7 +334,7 @@ export function useComposer(
             targetGeneration.current === ownedGeneration
           ) {
             const problem = asError(cause);
-            setDraftConflict(problem);
+            if (isDraftConflictError(problem)) setDraftConflict(problem);
             setError(problem);
           }
         } finally {
@@ -815,6 +816,15 @@ function generateClientEventId(): string {
 
 function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause));
+}
+
+function isDraftConflictError(error: Error): boolean {
+  return (
+    error instanceof OpenGeniApiError &&
+    error.status === 409 &&
+    !error.outcomeUnknown &&
+    (error.code === undefined || error.code === "conflict" || error.code === "idempotency_conflict")
+  );
 }
 
 function draftPayload(draft: ComposerDraft): SaveComposerDraftRequest {
