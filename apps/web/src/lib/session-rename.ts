@@ -95,6 +95,11 @@ export function useInlineRename(session: Session, onRename: RenameFn): InlineRen
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(display);
   const [saving, setSaving] = useState(false);
+  // Enter and blur can fire back-to-back while the first commit is still
+  // awaiting the PATCH response. A ref closes that window synchronously;
+  // `saving` is deliberately retained as render state for consumers but is
+  // not authoritative for event handlers from the previous render.
+  const commitInFlightRef = useRef(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   // Reseed the draft whenever the displayed title changes while not editing
@@ -122,7 +127,7 @@ export function useInlineRename(session: Session, onRename: RenameFn): InlineRen
   }, [display]);
 
   const commit = useCallback(async () => {
-    if (saving) {
+    if (commitInFlightRef.current || saving) {
       return;
     }
     const next = resolveRenameSubmission(draft, display);
@@ -130,12 +135,14 @@ export function useInlineRename(session: Session, onRename: RenameFn): InlineRen
     if (next === null) {
       return;
     }
+    commitInFlightRef.current = true;
     setSaving(true);
     try {
       // Same resolve-and-persist as performRename; the draft is already
       // resolved here so we skip straight to the call.
       await onRename(session.workspaceId, session.id, next);
     } finally {
+      commitInFlightRef.current = false;
       setSaving(false);
     }
   }, [saving, draft, display, onRename, session.workspaceId, session.id]);

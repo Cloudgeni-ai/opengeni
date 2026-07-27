@@ -1,5 +1,5 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useOpenGeni, type ClientOverride } from "../provider";
 import {
   useMutationRunner,
@@ -66,10 +66,13 @@ export function useSession(
   const base = data ?? null;
   // The override only ever carries title/titleSource patches; it is reset on
   // every fresh load so it can never go stale against the server snapshot.
-  const session =
-    base && override && override.id === base.id
-      ? { ...base, title: override.title, titleSource: override.titleSource }
-      : base;
+  const session = useMemo(
+    () =>
+      base && override && override.id === base.id
+        ? { ...base, title: override.title, titleSource: override.titleSource }
+        : base,
+    [base, override],
+  );
 
   // Live-patch the title on auto (agent) + cross-client (user/agent) renames so
   // the UI reflects the new title without polling or a full re-fetch.
