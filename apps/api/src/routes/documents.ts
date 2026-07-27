@@ -25,7 +25,6 @@ import {
 } from "@opengeni/db";
 import {
   addDocumentToBase,
-  canViewDocument,
   createDocumentBase,
   deleteDocumentFromBase,
   ensureDefaultBase,
@@ -99,6 +98,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         workspaceId,
         baseId: c.req.param("baseId"),
         createdBy: grant.subjectId,
+        access: { viewerSubjectId: grant.subjectId },
       });
       const wasCreated =
         document.status === "queued" && document.chunkCount === 0 && document.error === null;
@@ -147,17 +147,12 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       const workspaceId = c.req.param("workspaceId");
       const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
       try {
-        // A private document another subject dropped is invisible — deleting it
-        // must look like a 404, exactly as reading it does.
-        const document = await getDocument(db, workspaceId, c.req.param("documentId"));
-        if (document && !canViewDocument(document, grant.subjectId)) {
-          throw new HTTPException(404, { message: "document not found" });
-        }
         await deleteDocumentFromBase(db, {
           accountId: grant.accountId,
           workspaceId,
           baseId: c.req.param("baseId"),
           documentId: c.req.param("documentId"),
+          access: { viewerSubjectId: grant.subjectId },
         });
         return c.body(null, 204);
       } catch (error) {
@@ -184,8 +179,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         quantity: 0,
       });
       try {
-        const document = await getDocument(db, workspaceId, c.req.param("documentId"));
-        if (!document || !canViewDocument(document, grant.subjectId)) {
+        const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
+          viewerSubjectId: grant.subjectId,
+        });
+        if (!document) {
           throw new HTTPException(404, { message: "document not found" });
         }
         if (document.status !== "failed") {
@@ -194,7 +191,9 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         if (document.baseId !== c.req.param("baseId")) {
           throw new HTTPException(404, { message: "document not found" });
         }
-        const queued = await queueDocumentForReindex(db, workspaceId, document.id);
+        const queued = await queueDocumentForReindex(db, workspaceId, document.id, {
+          viewerSubjectId: grant.subjectId,
+        });
         const indexed =
           (await documentIndexer.indexDocument({
             accountId: grant.accountId,
@@ -355,6 +354,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         baseId: defaultBase.id,
         createdBy: grant.subjectId,
         curationStatus: "pending",
+        access: { viewerSubjectId: grant.subjectId },
       });
       const wasCreated =
         document.status === "queued" && document.chunkCount === 0 && document.error === null;
@@ -394,8 +394,10 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");
     const payload = MoveDocumentRequest.parse(await c.req.json().catch(() => ({})));
     try {
-      const document = await getDocument(db, workspaceId, c.req.param("documentId"));
-      if (!document || !canViewDocument(document, grant.subjectId)) {
+      const document = await getDocument(db, workspaceId, c.req.param("documentId"), {
+        viewerSubjectId: grant.subjectId,
+      });
+      if (!document) {
         throw new HTTPException(404, { message: "document not found" });
       }
       return c.json(
@@ -405,6 +407,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
             workspaceId,
             documentId: document.id,
             targetBaseId: payload.targetBaseId ?? null,
+            access: { viewerSubjectId: grant.subjectId },
           }),
         ),
       );
@@ -556,7 +559,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       grant.accountId,
       workspaceId,
       getDocumentServices(),
-      { createdBySessionId: sessionId },
+      { createdBySessionId: sessionId, viewerSubjectId: grant.subjectId },
     );
     await server.connect(transport);
     return await transport.handleRequest(c.req.raw);

@@ -1154,6 +1154,9 @@ export const documentBases = pgTable(
       table.workspaceId,
       table.createdAt,
     ),
+    defaultName: uniqueIndex("document_bases_workspace_default_name_uq")
+      .on(table.workspaceId)
+      .where(sql`lower(btrim(${table.name})) = 'default'`),
   }),
 );
 
@@ -1223,6 +1226,26 @@ export const documents = pgTable(
     curationStatus: index("documents_workspace_curation_status_idx").on(
       table.workspaceId,
       table.curationStatus,
+    ),
+    visibilityState: check(
+      "documents_visibility_chk",
+      sql`${table.visibility} in ('workspace', 'private')`,
+    ),
+    curationState: check(
+      "documents_curation_status_chk",
+      sql`${table.curationStatus} in ('none', 'pending', 'suggested', 'auto_filed', 'failed')`,
+    ),
+    privateCreator: check(
+      "documents_private_creator_chk",
+      sql`${table.visibility} <> 'private' or ${table.createdBy} is not null`,
+    ),
+    topicsArray: check(
+      "documents_topics_array_chk",
+      sql`jsonb_typeof(${table.topics}) = 'array'`,
+    ),
+    curationObject: check(
+      "documents_curation_object_chk",
+      sql`${table.curation} is null or jsonb_typeof(${table.curation}) = 'object'`,
     ),
   }),
 );

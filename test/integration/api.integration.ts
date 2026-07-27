@@ -63,6 +63,7 @@ import {
 } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
+import { buildDocumentsMcpServer } from "../../apps/api/src/mcp/documents";
 import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
@@ -83,6 +84,7 @@ import {
   createDocumentServices,
   DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
+  getDocument,
   searchDocuments,
 } from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -5741,6 +5743,37 @@ describe("API component integration", () => {
     );
     expect(noTargetMove.status).toBe(422);
   });
+
+  test("keeps provider=none drops uncured instead of applying heuristic fallback", async () => {
+    const app = createApp({
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        documentCurationProvider: "none",
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const response = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+      method: "POST",
+      body: JSON.stringify({
+        text: "The title should remain caller supplied when curation is disabled.",
+        title: "Caller supplied title",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({
+      title: "Caller supplied title",
+      summary: null,
+      topics: [],
+      curationStatus: "none",
+      curation: null,
+      sourceKind: "manual_upload",
+    });
+  });
+
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
     let indexCalls = 0;

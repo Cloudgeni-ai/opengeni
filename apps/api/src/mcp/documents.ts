@@ -45,16 +45,23 @@ export function buildDocumentsMcpServer(
   accountId: string,
   workspaceId: string,
   documentServices: DocumentServices,
-  options: { createdBySessionId?: string | undefined } = {},
+  options: {
+    createdBySessionId?: string | undefined;
+    /** The human subject whose agent is making this retrieval request. */
+    viewerSubjectId?: string | undefined;
+  } = {},
 ): McpServer {
   const server = new McpServer({
     name: "opengeni-documents",
     version: "1.0.0",
   });
-  // This server is the agent retrieval surface: only workspace-visible
-  // documents whose agent_access flag is on are reachable. Private and
-  // agent-disabled documents stay human/REST-only.
-  const agentAccess: DocumentAccessFilter = { agentOnly: true };
+  // This server is the agent retrieval surface. Agent-disabled documents are
+  // never reachable. Workspace-visible documents are shared; private
+  // documents are available only to the creating subject's agent.
+  const agentAccess: DocumentAccessFilter = {
+    agentOnly: true,
+    ...(options.viewerSubjectId ? { viewerSubjectId: options.viewerSubjectId } : {}),
+  };
 
   server.registerTool(
     "list_document_bases",

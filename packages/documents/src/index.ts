@@ -110,7 +110,11 @@ export type DocumentServices = {
 export type DocumentAccessFilter = {
   /** Grant subject id of the human viewer; null/undefined hides private docs. */
   viewerSubjectId?: string | null | undefined;
-  /** Agent retrieval surface: only workspace-visible, agent-enabled documents. */
+  /**
+   * Agent retrieval surface: only agent-enabled documents. Workspace-visible
+   * documents are available to every agent; private documents are available
+   * only when the agent carries the creating subject as its viewer subject.
+   */
   agentOnly?: boolean | undefined;
 };
 
@@ -603,17 +607,43 @@ export async function ensureDefaultBase(
   db: Database,
   input: { accountId: string; workspaceId: string },
 ): Promise<DocumentBase> {
-  const bases = await listDocumentBases(db, input.workspaceId);
-  const existing = bases.find(
-    (base) => base.name.trim().toLowerCase() === DEFAULT_BASE_NAME.toLowerCase(),
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (tx) => {
+        const defaultName = sql`lower(btrim(${schema.documentBases.name})) = ${DEFAULT_BASE_NAME.toLowerCase()}`;
+        const [existing] = await tx
+          .select()
+          .from(schema.documentBases)
+          .where(and(eq(schema.documentBases.workspaceId, input.workspaceId), defaultName))
+          .limit(1);
+        if (existing) return mapDocumentBase(existing);
+
+        // The partial unique index is the serialization point for concurrent
+        // first drops. A losing insert re-reads the winner instead of
+        // surfacing a duplicate-base error.
+        const [inserted] = await tx
+          .insert(schema.documentBases)
+          .values({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            name: DEFAULT_BASE_NAME,
+            description: DEFAULT_BASE_DESCRIPTION,
+          })
+          .onConflictDoNothing()
+          .returning();
+        if (inserted) return mapDocumentBase(inserted);
+
+        const [raced] = await tx
+          .select()
+          .from(schema.documentBases)
+          .where(and(eq(schema.documentBases.workspaceId, input.workspaceId), defaultName))
+          .limit(1);
+        if (raced) return mapDocumentBase(raced);
+        throw new Error("Failed to create Default document base");
+      }),
   );
-  if (existing) return existing;
-  return await createDocumentBase(db, {
-    accountId: input.accountId,
-    workspaceId: input.workspaceId,
-    name: DEFAULT_BASE_NAME,
-    description: DEFAULT_BASE_DESCRIPTION,
-  });
 }
 
 export async function addDocumentToBase(
@@ -624,6 +654,7 @@ export async function addDocumentToBase(
     baseId: string;
     createdBy?: string | null | undefined;
     curationStatus?: DocumentCurationStatus | undefined;
+    access?: DocumentAccessFilter | undefined;
   },
 ): Promise<Document> {
   return await withRlsContext(
@@ -633,6 +664,9 @@ export async function addDocumentToBase(
       const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
       if (!base) throw new Error(`Document base not found: ${input.baseId}`);
       const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
+      if (input.visibility === "private" && !input.createdBy) {
+        throw new Error("private documents require a creating subject");
+      }
       const now = new Date();
       const [existing] = await scopedDb
         .select()
@@ -646,9 +680,14 @@ export async function addDocumentToBase(
         )
         .limit(1);
       if (existing) {
+        if (!documentMatchesAccess(existing, input.access)) {
+          throw new Error(`Document not found: ${existing.id}`);
+        }
         // Idempotent re-add: refresh caller-supplied source metadata on the
         // existing row instead of silently discarding it (aclTags especially —
-        // a re-add that tightens tags must not be a no-op).
+        // a re-add that tightens tags must not be a no-op). Access policy is
+        // deliberately inherited: re-adding a known file is not an implicit
+        // visibility/agent-policy update that another manager can exploit.
         const [updated] = await scopedDb
           .update(schema.documents)
           .set({
@@ -662,8 +701,6 @@ export async function addDocumentToBase(
             sourceUpdatedAt: parseOptionalDate(input.sourceUpdatedAt) ?? existing.sourceUpdatedAt,
             sourceVersion: cleanString(input.sourceVersion) ?? existing.sourceVersion,
             ...(input.aclTags !== undefined ? { aclTags: cleanStringArray(input.aclTags) } : {}),
-            ...(input.visibility !== undefined ? { visibility: input.visibility } : {}),
-            ...(input.agentAccess !== undefined ? { agentAccess: input.agentAccess } : {}),
             updatedAt: now,
           })
           .where(
@@ -719,6 +756,7 @@ export async function moveDocumentToBase(
     workspaceId: string;
     documentId: string;
     targetBaseId?: string | null | undefined;
+    access?: DocumentAccessFilter | undefined;
   },
 ): Promise<Document> {
   return await withRlsContext(
@@ -732,6 +770,7 @@ export async function moveDocumentToBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.id, input.documentId),
+            ...documentAccessConditions(input.access),
           ),
         )
         .limit(1);
@@ -796,7 +835,13 @@ export async function moveDocumentToBase(
 
 export async function deleteDocumentFromBase(
   db: Database,
-  input: { accountId: string; workspaceId: string; baseId: string; documentId: string },
+  input: {
+    accountId: string;
+    workspaceId: string;
+    baseId: string;
+    documentId: string;
+    access?: DocumentAccessFilter | undefined;
+  },
 ): Promise<void> {
   await withRlsContext(
     db,
@@ -809,6 +854,7 @@ export async function deleteDocumentFromBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.id, input.documentId),
+            ...documentAccessConditions(input.access),
           ),
         )
         .limit(1);
@@ -856,13 +902,18 @@ export async function getDocument(
   db: Database,
   workspaceId: string,
   documentId: string,
+  access?: DocumentAccessFilter,
 ): Promise<Document | null> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
       .select()
       .from(schema.documents)
       .where(
-        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+        and(
+          eq(schema.documents.workspaceId, workspaceId),
+          eq(schema.documents.id, documentId),
+          ...documentAccessConditions(access),
+        ),
       )
       .limit(1);
     return row ? mapDocument(row) : null;
@@ -873,6 +924,7 @@ export async function queueDocumentForReindex(
   db: Database,
   workspaceId: string,
   documentId: string,
+  access?: DocumentAccessFilter,
 ): Promise<Document> {
   return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
     const [row] = await scopedDb
@@ -883,7 +935,11 @@ export async function queueDocumentForReindex(
         updatedAt: new Date(),
       })
       .where(
-        and(eq(schema.documents.workspaceId, workspaceId), eq(schema.documents.id, documentId)),
+        and(
+          eq(schema.documents.workspaceId, workspaceId),
+          eq(schema.documents.id, documentId),
+          ...documentAccessConditions(access),
+        ),
       )
       .returning();
     if (!row) throw new Error(`Document not found: ${documentId}`);
@@ -1046,6 +1102,33 @@ async function curateDroppedDocument(
   parsed: ParsedDocument,
   file: FileAsset,
 ): Promise<DocumentRow> {
+  // `none` is an explicit disabled-curation policy. Do not silently replace
+  // it with heuristics: indexing still proceeds, but the drop remains an
+  // ordinary uncured document with its caller-supplied title and metadata.
+  if (!services.curator) {
+    const [updated] = await withWorkspaceRls(
+      db,
+      document.workspaceId,
+      async (scopedDb) =>
+        await scopedDb
+          .update(schema.documents)
+          .set({
+            curationStatus: "none",
+            summary: null,
+            topics: [],
+            curation: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(schema.documents.workspaceId, document.workspaceId),
+              eq(schema.documents.id, document.id),
+            ),
+          )
+          .returning(),
+    );
+    return updated ?? document;
+  }
   const bases = await listDocumentBases(db, document.workspaceId);
   const candidates: DocumentCurationCandidateBase[] = bases
     .filter((base) => base.id !== document.baseId)
@@ -1059,21 +1142,16 @@ async function curateDroppedDocument(
   let outcome: DocumentCurationOutcome;
   let model: string;
   let failure: string | null = null;
-  if (services.curator) {
-    try {
-      outcome = await services.curator.curate(input);
-      model = services.curator.model;
-    } catch (error) {
-      failure = error instanceof Error ? error.message : String(error);
-      console.warn("document curation failed; applying heuristic fallback", {
-        workspaceId: document.workspaceId,
-        documentId: document.id,
-        error: failure,
-      });
-      outcome = heuristicCuration(input, file.contentType);
-      model = "heuristic";
-    }
-  } else {
+  try {
+    outcome = await services.curator.curate(input);
+    model = services.curator.model;
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+    console.warn("document curation failed; applying heuristic fallback", {
+      workspaceId: document.workspaceId,
+      documentId: document.id,
+      error: failure,
+    });
     outcome = heuristicCuration(input, file.contentType);
     model = "heuristic";
   }
@@ -1340,7 +1418,14 @@ type CombinedSearchRow = SearchRowBase & {
  */
 function documentAccessConditions(access: DocumentAccessFilter | undefined): SQL[] {
   if (access?.agentOnly) {
-    return [eq(schema.documents.agentAccess, true), eq(schema.documents.visibility, "workspace")];
+    const viewer = access.viewerSubjectId;
+    const visibility = viewer
+      ? or(
+          eq(schema.documents.visibility, "workspace"),
+          eq(schema.documents.createdBy, viewer),
+        )
+      : eq(schema.documents.visibility, "workspace");
+    return [eq(schema.documents.agentAccess, true), ...(visibility ? [visibility] : [])];
   }
   const viewer = access?.viewerSubjectId;
   if (viewer) {
@@ -1351,6 +1436,20 @@ function documentAccessConditions(access: DocumentAccessFilter | undefined): SQL
     return condition ? [condition] : [];
   }
   return [eq(schema.documents.visibility, "workspace")];
+}
+
+function documentMatchesAccess(
+  document: Pick<Document, "visibility" | "createdBy" | "agentAccess">,
+  access: DocumentAccessFilter | undefined,
+): boolean {
+  if (access?.agentOnly) {
+    return (
+      document.agentAccess &&
+      (document.visibility !== "private" ||
+        (!!access.viewerSubjectId && document.createdBy === access.viewerSubjectId))
+    );
+  }
+  return canViewDocument(document, access?.viewerSubjectId);
 }
 
 /** Whether a single already-fetched document is readable by this human viewer. */
