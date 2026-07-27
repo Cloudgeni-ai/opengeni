@@ -7711,6 +7711,13 @@ async function assertGitHubTokenMintSelectionAuthorized(
  * that will NOT clear on retry) is classified and returned BEFORE this in
  * agentRunFailurePayload, so it never reaches here.
  */
+const STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE =
+  "unable to connect. is the computer able to access the url?";
+
+function isExactStatuslessUpstreamConnectivityMessage(message: string): boolean {
+  return message.trim().toLowerCase() === STATUSLESS_UPSTREAM_CONNECTIVITY_MESSAGE;
+}
+
 export function isTransientProviderError(error: unknown): boolean {
   const status =
     typeof error === "object" && error !== null && "status" in error
@@ -7732,6 +7739,9 @@ export function isTransientProviderError(error: unknown): boolean {
     return true;
   }
   const message = error instanceof Error ? error.message : String(error);
+  if (isExactStatuslessUpstreamConnectivityMessage(message)) {
+    return true;
+  }
   return /overloaded|an error occurred while processing your request|connection error|service unavailable|bad gateway|gateway timeout/i.test(
     message,
   );
@@ -7858,6 +7868,14 @@ export function agentRunFailurePayload(
   // retryable so a goal-bearing session idles and auto-continues instead of going
   // terminal on a provider's bad minute. See isTransientProviderError.
   if (isTransientProviderError(error)) {
+    if (isExactStatuslessUpstreamConnectivityMessage(message)) {
+      return {
+        error:
+          "OpenGeni could not reach an upstream service. The same turn will retry after a short delay.",
+        code: "upstream_connectivity_unavailable",
+        retryable: true,
+      };
+    }
     return { error: message, code: "provider_unavailable", retryable: true };
   }
   return { error: message };
