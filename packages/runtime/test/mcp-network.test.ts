@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import {
+  MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS,
   MCP_MAX_INBOUND_REQUEST_BYTES,
   MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -13,6 +14,7 @@ import {
   boundedParallelMap,
   boundMcpResponseBody,
   guardedMcpFetch,
+  mcpOuterConnectTimeoutMs,
 } from "../src/mcp-network";
 
 const testSettings = {
@@ -21,6 +23,12 @@ const testSettings = {
 };
 
 describe("MCP network and payload boundary", () => {
+  test("keeps the outer Agents SDK connect fence at least as large as configured transports", () => {
+    expect(mcpOuterConnectTimeoutMs([])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
+    expect(mcpOuterConnectTimeoutMs([5_000, undefined])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
+    expect(mcpOuterConnectTimeoutMs([30_000, 15_000, undefined])).toBe(30_000);
+  });
+
   test("pins the final transport, forces manual redirects, and rejects declared oversize", async () => {
     let redirect: RequestRedirect | undefined;
     const guarded = guardedMcpFetch(

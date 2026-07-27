@@ -18,6 +18,10 @@ export const MCP_MAX_TOOL_RESULT_BYTES = 1024 * 1024;
 export const MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES = 256 * 1024;
 export const MCP_MAX_SELECTED_SERVERS = 64;
 export const MCP_MAX_CONCURRENT_SERVER_OPERATIONS = 8;
+// @openai/agents has a separate lifecycle fence around MCPServer.connect().
+// It defaults to 10 seconds and can otherwise preempt a larger per-server
+// transport timeout before that server finishes its own handshake.
+export const MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS = 10_000;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_ENTRIES = 4_096;
 export const MCP_MAX_AGGREGATE_TOOL_LIST_BYTES = 16 * 1024 * 1024;
 export const MCP_MAX_TOOL_SEARCH_SOURCES = 64;
@@ -85,6 +89,15 @@ export function assertMcpServerSelectionWithinBounds<T>(servers: readonly T[]): 
     );
   }
   return servers;
+}
+
+export function mcpOuterConnectTimeoutMs(
+  configuredTimeouts: readonly (number | undefined)[],
+): number {
+  return Math.max(
+    MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS,
+    ...configuredTimeouts.flatMap((timeoutMs) => (timeoutMs === undefined ? [] : [timeoutMs])),
+  );
 }
 
 type McpToolListContribution = {
