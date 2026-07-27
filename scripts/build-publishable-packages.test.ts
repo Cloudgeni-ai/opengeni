@@ -292,7 +292,7 @@ test("keeps the supervisor alive through atomic lock publication", async () => {
   expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
 });
 
-test("latches an A-B-A input mutation while the wrapper is scheduler-paused", async () => {
+test("rejects a paused A-B-A mutation when watch delivery is dropped", async () => {
   const root = createFixture();
   const fixturePath = join(root, "packages", "demo", "build-fixture.ts");
   let fixture = readFileSync(fixturePath, "utf8");
@@ -317,6 +317,7 @@ test("latches an A-B-A input mutation while the wrapper is scheduler-paused", as
   const builder = startBuilder(root, {
     OPENGENI_BUILD_VARIANT: "A",
     BUILD_FIXTURE_GATE: gate,
+    OPENGENI_BUILD_CACHE_DROP_INPUT_WATCH_EVENTS: "1",
     OPENGENI_BUILD_CACHE_PAUSE_AFTER_INPUT_MONITOR_START: monitorReady,
   });
   expect(await waitForPath(`${monitorReady}.ready`)).toBe(true);
@@ -355,6 +356,7 @@ test("latches an A-B-A input mutation while the wrapper is scheduler-paused", as
 
   const warm = await runBuilder(root, {
     OPENGENI_BUILD_VARIANT: "A",
+    OPENGENI_BUILD_CACHE_DROP_INPUT_WATCH_EVENTS: "1",
     OPENGENI_BUILD_CACHE_PAUSE_AFTER_INPUT_MONITOR_START: monitorReady,
   });
   expect(warm.code).toBe(0);

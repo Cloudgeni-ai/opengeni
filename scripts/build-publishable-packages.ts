@@ -52,6 +52,28 @@ type BuildInput =
   | { path: string; kind: "file"; mode: number; size: number; sha256: string }
   | { path: string; kind: "directory"; mode: number }
   | { path: string; kind: "symlink"; mode: number; target: string };
+type BuildInputGeneration =
+  | {
+      path: string;
+      kind: "file";
+      mode: number;
+      size: string;
+      device: string;
+      inode: string;
+      modifiedAtNs: string;
+      changedAtNs: string;
+    }
+  | { path: string; kind: "directory"; mode: number; device: string; inode: string }
+  | {
+      path: string;
+      kind: "symlink";
+      mode: number;
+      target: string;
+      device: string;
+      inode: string;
+      modifiedAtNs: string;
+      changedAtNs: string;
+    };
 type BuildCacheRecord = {
   version: number;
   inputSha256: string;
@@ -675,6 +697,18 @@ function workspaceDependencyClosure(pkg: WorkspacePackage): WorkspacePackage[] {
   return [...selected.values()].sort((a, b) => a.dir.localeCompare(b.dir));
 }
 
+function packageInputRoots(pkg: WorkspacePackage): string[] {
+  return [
+    "bun.lock",
+    "package.json",
+    "tsconfig.base.json",
+    "scripts/build-publishable-packages.ts",
+    "scripts/publishable-workspaces.ts",
+    "scripts",
+    ...workspaceDependencyClosure(pkg).map((dependency) => dependency.dir),
+  ].map((path) => join(repoRoot, path));
+}
+
 function inputEntry(path: string): BuildInput {
   const stats = lstatSync(path);
   const relativePath = relative(repoRoot, path);
@@ -737,6 +771,84 @@ function inputEntriesUnder(directory: string): BuildInput[] {
   return entries.sort((a, b) => a.path.localeCompare(b.path));
 }
 
+function inputGenerationEntry(path: string): BuildInputGeneration {
+  const stats = lstatSync(path, { bigint: true });
+  const relativePath = relative(repoRoot, path);
+  const mode = Number(stats.mode & 0o7777n);
+  const identity = {
+    device: stats.dev.toString(),
+    inode: stats.ino.toString(),
+  };
+  if (stats.isDirectory()) {
+    // Build commands legitimately replace excluded dist/scratch entries under
+    // input roots, which changes parent-directory timestamps. Stable
+    // structural differences remain covered by the complete content manifest;
+    // persistent generation metadata is reserved for files and symlinks whose
+    // bytes/targets can influence the build.
+    return { path: relativePath, kind: "directory", mode, ...identity };
+  }
+  const generation = {
+    ...identity,
+    modifiedAtNs: stats.mtimeNs.toString(),
+    changedAtNs: stats.ctimeNs.toString(),
+  };
+  if (stats.isFile()) {
+    return {
+      path: relativePath,
+      kind: "file",
+      mode,
+      size: stats.size.toString(),
+      ...generation,
+    };
+  }
+  if (stats.isSymbolicLink()) {
+    return {
+      path: relativePath,
+      kind: "symlink",
+      mode,
+      target: readlinkSync(path),
+      ...generation,
+    };
+  }
+  throw new Error(`Unsupported build input type at ${relativePath}`);
+}
+
+function inputGenerationEntriesUnder(directory: string): BuildInputGeneration[] {
+  let rootEntry: BuildInputGeneration;
+  try {
+    rootEntry = inputGenerationEntry(directory);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+
+  if (rootEntry.kind !== "directory") {
+    return [rootEntry];
+  }
+
+  const entries: BuildInputGeneration[] = [rootEntry];
+  const visit = (current: string): void => {
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      const stats = lstatSync(path);
+      if (stats.isDirectory() && INPUT_EXCLUDED_DIRECTORY_NAMES.has(entry.name)) {
+        continue;
+      }
+      if (!stats.isDirectory() && isExcludedInputFile(path)) {
+        continue;
+      }
+      entries.push(inputGenerationEntry(path));
+      if (stats.isDirectory()) {
+        visit(path);
+      }
+    }
+  };
+  visit(directory);
+  return entries.sort((a, b) => a.path.localeCompare(b.path));
+}
+
 function buildEnvironmentFingerprint(): string {
   const relevant = Object.keys(process.env)
     .filter(
@@ -758,31 +870,32 @@ function packageInputSha256(pkg: WorkspacePackage): string {
   hash.update(`bun:${process.versions.bun ?? process.version}\n`);
   hash.update(`env:\n${buildEnvironmentFingerprint()}\n`);
 
-  const rootInputs = [
-    "bun.lock",
-    "package.json",
-    "tsconfig.base.json",
-    "scripts/build-publishable-packages.ts",
-    "scripts/publishable-workspaces.ts",
-  ];
   const inputs = new Map<string, BuildInput>();
   const addInput = (path: string): void => {
     for (const entry of inputEntriesUnder(path)) {
       inputs.set(entry.path, entry);
     }
   };
-  for (const path of rootInputs) {
-    addInput(join(repoRoot, path));
-  }
-  // Some package build commands delegate to helpers outside their package
-  // directory (for example, the worker workflow bundle). Include the whole
-  // helper tree so a helper edit can never serve an old package artifact.
-  addInput(join(repoRoot, "scripts"));
-  for (const dependency of workspaceDependencyClosure(pkg)) {
-    addInput(join(repoRoot, dependency.dir));
+  for (const path of packageInputRoots(pkg)) {
+    addInput(path);
   }
 
   for (const entry of [...inputs.values()].sort((a, b) => a.path.localeCompare(b.path))) {
+    hash.update(JSON.stringify(entry));
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
+function packageInputGenerationSha256(pkg: WorkspacePackage): string {
+  const hash = createHash("sha256");
+  const entries = new Map<string, BuildInputGeneration>();
+  for (const path of packageInputRoots(pkg)) {
+    for (const entry of inputGenerationEntriesUnder(path)) {
+      entries.set(entry.path, entry);
+    }
+  }
+  for (const entry of [...entries.values()].sort((a, b) => a.path.localeCompare(b.path))) {
     hash.update(JSON.stringify(entry));
     hash.update("\0");
   }
@@ -868,18 +981,8 @@ function inputWatchDirectories(pkg: WorkspacePackage): string[] {
     }
   };
 
-  for (const path of [
-    "bun.lock",
-    "package.json",
-    "tsconfig.base.json",
-    "scripts/build-publishable-packages.ts",
-    "scripts/publishable-workspaces.ts",
-    "scripts",
-  ]) {
-    addInput(join(repoRoot, path));
-  }
-  for (const dependency of workspaceDependencyClosure(pkg)) {
-    addInput(join(repoRoot, dependency.dir));
+  for (const path of packageInputRoots(pkg)) {
+    addInput(path);
   }
   return [...directories];
 }
@@ -914,12 +1017,16 @@ function startInputMutationMonitor(
 ): InputMutationMonitor {
   let dirty = false;
   let checking = false;
+  const initialInputGenerationSha256 = packageInputGenerationSha256(pkg);
   const watchers: FSWatcher[] = [];
   const watchDirectories = inputWatchDirectories(pkg);
   for (const directory of watchDirectories) {
     try {
       watchers.push(
         watch(directory, (_eventType, filename) => {
+          if (process.env.OPENGENI_BUILD_CACHE_DROP_INPUT_WATCH_EVENTS === "1") {
+            return;
+          }
           // Notifications are generation evidence, not merely prompts to
           // re-read the current bytes. Latch every ambiguous notification and
           // every relevant path immediately: if A changes to B and back to A
@@ -961,7 +1068,10 @@ function startInputMutationMonitor(
     }
     checking = true;
     try {
-      if (packageInputSha256(pkg) !== initialInputSha256) {
+      if (
+        packageInputGenerationSha256(pkg) !== initialInputGenerationSha256 ||
+        packageInputSha256(pkg) !== initialInputSha256
+      ) {
         dirty = true;
       }
     } catch {
@@ -986,6 +1096,9 @@ function startInputMutationMonitor(
       }
       let inputSha256 = initialInputSha256;
       try {
+        if (packageInputGenerationSha256(pkg) !== initialInputGenerationSha256) {
+          dirty = true;
+        }
         inputSha256 = packageInputSha256(pkg);
       } catch {
         dirty = true;
