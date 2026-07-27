@@ -229,6 +229,91 @@ test("serializes concurrent builders and keeps environment keys bound to their b
   expect(aWarm.stdout).toContain("cached @opengeni/demo");
 });
 
+test("does not expose an ownerless lock while initializer publication is paused", async () => {
+  const root = createFixture();
+  const pausePath = join(root, "initializer-pause");
+  const countPath = join(root, "initializer-count.txt");
+  const first = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_PAUSE_AFTER_CANDIDATE: pausePath,
+  });
+  expect(await waitForPath(`${pausePath}.ready`)).toBe(true);
+
+  const successor = await runBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    BUILD_FIXTURE_COUNT: countPath,
+  });
+  expect(successor.code).toBe(0);
+  expect(readFileSync(countPath, "utf8").trim().split("\n")).toEqual(["BASE"]);
+
+  writeFileSync(`${pausePath}.release`, "release\n");
+  const firstResult = await first.result;
+  expect(firstResult.code).toBe(0);
+  expect(firstResult.stdout).toContain("[build:packages] @opengeni/demo");
+  expect(readFileSync(countPath, "utf8").trim().split("\n")).toEqual(["BASE"]);
+});
+
+test("keeps the supervisor alive through atomic lock publication", async () => {
+  const root = createFixture();
+  const pausePath = join(root, "supervisor-publication-pause");
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_PAUSE_AFTER_SUPERVISOR_SPAWN: pausePath,
+  });
+  expect(await waitForPath(`${pausePath}.ready`)).toBe(true);
+
+  const lockPath = join(root, ".opengeni", "build-cache", "packages", "_opengeni_demo.json.lock");
+  expect(existsSync(lockPath)).toBe(false);
+
+  writeFileSync(`${pausePath}.release`, "release\n");
+  const result = await builder.result;
+  expect(result.code).toBe(0);
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
+test("rejects an A-B-A input mutation instead of publishing B under A", async () => {
+  const root = createFixture();
+  const fixturePath = join(root, "packages", "demo", "build-fixture.ts");
+  let fixture = readFileSync(fixturePath, "utf8");
+  fixture = fixture
+    .replace(
+      'if (variant === "A" && gate) {\n  while (!existsSync(marker("release"))) {',
+      'if (variant === "A" && gate) {\n  while (!existsSync(marker("source-release"))) {',
+    )
+    .replace(
+      "rmSync(dist, { recursive: true, force: true });",
+      'const lateInput = readFileSync(join(packageRoot, "target-a.txt"), "utf8").trim();\nif (variant === "A" && gate) {\n  writeFileSync(marker("source-read"), "read\\n");\n  while (!existsSync(marker("release"))) {\n    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);\n  }\n}\nrmSync(dist, { recursive: true, force: true });',
+    )
+    .replace(
+      'variant + "|" + linkedInput + "|" + modeInput',
+      'variant + "|" + lateInput + "|" + modeInput',
+    );
+  writeFileSync(fixturePath, fixture);
+
+  const gate = join(root, "aba-gate");
+  mkdirSync(gate);
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "A",
+    BUILD_FIXTURE_GATE: gate,
+  });
+  expect(await waitForPath(join(gate, "a-started"))).toBe(true);
+  writeFileSync(join(root, "packages", "demo", "target-a.txt"), "B\n");
+  writeFileSync(join(gate, "source-release"), "release\n");
+  expect(await waitForPath(join(gate, "source-read"))).toBe(true);
+  writeFileSync(join(root, "packages", "demo", "target-a.txt"), "A\n");
+  writeFileSync(join(gate, "release"), "release\n");
+
+  const result = await builder.result;
+  expect(result.code).toBe(0);
+  expect(result.stdout).toContain("source changed during @opengeni/demo");
+  expect(readFileSync(outputPath(root), "utf8")).toBe("A|A|644\n");
+
+  const warm = await runBuilder(root, { OPENGENI_BUILD_VARIANT: "A" });
+  expect(warm.code).toBe(0);
+  expect(warm.stdout).toContain("cached @opengeni/demo");
+  expect(readFileSync(outputPath(root), "utf8")).toBe("A|A|644\n");
+});
+
 test("invalidates warm builds when an input symlink retargets or a mode changes", async () => {
   const root = createFixture();
   const environment = { OPENGENI_BUILD_VARIANT: "BASE" };
@@ -325,5 +410,86 @@ test("drains a killed builder's detached child before admitting its successor", 
   writeFileSync(join(gate, "release"), "release\n");
   await new Promise((resolve) => setTimeout(resolve, 250));
   expect(existsSync(join(gate, "a-finished"))).toBe(false);
+  expect(readFileSync(outputPath(root), "utf8")).toBe("B|A|644\n");
+});
+
+test("restores a successor generation after a stale reclaimer loses the ABA race", async () => {
+  const root = createFixture();
+  const lockPath = join(root, ".opengeni", "build-cache", "packages", "_opengeni_demo.json.lock");
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(
+    join(lockPath, "owner"),
+    `${JSON.stringify({
+      token: "dead-owner",
+      pid: 2_147_483_647,
+      buildPid: null,
+      processGroupId: null,
+      state: "building",
+      createdAt: Date.now() - 60_000,
+    })}\n`,
+  );
+
+  const pausePath = join(root, "reclaimer-pause");
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "BASE",
+    OPENGENI_BUILD_CACHE_PAUSE_BEFORE_RECLAIM_QUARANTINE: pausePath,
+  });
+  expect(await waitForPath(`${pausePath}.ready`)).toBe(true);
+
+  rmSync(lockPath, { recursive: true, force: true });
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(
+    join(lockPath, "owner"),
+    `${JSON.stringify({
+      token: "successor-generation",
+      pid: process.pid,
+      requesterPid: process.pid,
+      buildPid: null,
+      processGroupId: null,
+      state: "publishing",
+      createdAt: Date.now(),
+    })}\n`,
+  );
+  writeFileSync(`${pausePath}.release`, "release\n");
+
+  expect(await waitForPath(join(lockPath, "owner"))).toBe(true);
+  expect(JSON.parse(readFileSync(join(lockPath, "owner"), "utf8"))).toMatchObject({
+    token: "successor-generation",
+  });
+  rmSync(lockPath, { recursive: true, force: true });
+
+  const result = await builder.result;
+  expect(result.code).toBe(0);
+  expect(readFileSync(outputPath(root), "utf8")).toBe("BASE|A|644\n");
+});
+
+test("drains the build group when the wrapper dies during supervisor spawn publication", async () => {
+  const root = createFixture();
+  const gate = join(root, "spawn-window-gate");
+  const pausePath = join(root, "spawn-window-pause");
+  mkdirSync(gate);
+  const builder = startBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "A",
+    BUILD_FIXTURE_GATE: gate,
+    BUILD_FIXTURE_ORPHAN: "1",
+    OPENGENI_BUILD_CACHE_PAUSE_AFTER_BUILD_SPAWN: pausePath,
+  });
+  expect(await waitForPath(`${pausePath}.ready`)).toBe(true);
+
+  const lockPath = join(root, ".opengeni", "build-cache", "packages", "_opengeni_demo.json.lock");
+  const owner = JSON.parse(readFileSync(join(lockPath, "owner"), "utf8"));
+  expect(owner.buildPid).toBeNull();
+  expect(owner.processGroupId).toBe(owner.pid);
+  expect(builder.child.kill("SIGKILL")).toBe(true);
+  writeFileSync(`${pausePath}.release`, "release\n");
+  const deadWrapper = await builder.result;
+  expect(deadWrapper.code).not.toBe(0);
+
+  const successor = await runBuilder(root, {
+    OPENGENI_BUILD_VARIANT: "B",
+    BUILD_FIXTURE_GATE: gate,
+    BUILD_FIXTURE_ORPHAN: "1",
+  });
+  expect(successor.code).toBe(0);
   expect(readFileSync(outputPath(root), "utf8")).toBe("B|A|644\n");
 });

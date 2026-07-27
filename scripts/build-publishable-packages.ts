@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import {
   existsSync,
+  watch,
   linkSync,
   lstatSync,
   mkdirSync,
@@ -13,9 +14,10 @@ import {
   renameSync,
   unlinkSync,
   writeFileSync,
+  type FSWatcher,
 } from "node:fs";
 import { arch, platform } from "node:os";
-import { join, relative } from "node:path";
+import { dirname, join, relative } from "node:path";
 import {
   ALL_DEP_FIELDS,
   publishableWorkspacePackages,
@@ -28,13 +30,16 @@ import {
 
 const packages = topologicallySortedPackages(publishableWorkspacePackages());
 
-const BUILD_CACHE_VERSION = 2;
+const BUILD_CACHE_VERSION = 3;
 const buildCacheRoot = join(repoRoot, ".opengeni", "build-cache", "packages");
 const workspacePackagesByName = workspacePackageByName();
 const INPUT_EXCLUDED_DIRECTORY_NAMES = new Set(["dist", "node_modules", ".opengeni"]);
 const LOCK_INITIALIZATION_GRACE_MS = 250;
 const LOCK_DRAIN_TIMEOUT_MS = 2_000;
 const LOCK_WAIT_TIMEOUT_MS = 5 * 60 * 1000;
+const BUILD_SOURCE_POLL_MS = 25;
+const MAX_SOURCE_MUTATION_RETRIES = 3;
+const BUILD_SUPERVISOR_ARG = "--build-supervisor";
 
 type BuildOutput =
   | { path: string; kind: "file"; mode: number; size: number; sha256: string }
@@ -54,6 +59,7 @@ type BuildCacheRecord = {
 type LockOwner = {
   token: string;
   pid: number;
+  requesterPid: number;
   buildPid: number | null;
   processGroupId: number | null;
   state: "waiting" | "building" | "publishing";
@@ -68,9 +74,17 @@ type LockReclaimer = {
 };
 
 type PackageLock = {
+  path: string;
   token: string;
-  update: (update: Partial<Omit<LockOwner, "token" | "pid" | "createdAt">>) => void;
+  startBuild: () => void;
+  waitForBuild: () => Promise<number>;
+  markPublishing: () => void;
   release: () => void;
+};
+
+type InputMutationMonitor = {
+  changed: () => boolean;
+  finish: () => Promise<{ changed: boolean; inputSha256: string }>;
 };
 
 function packageCachePath(pkg: WorkspacePackage): string {
@@ -131,6 +145,19 @@ function processGroupIsAlive(processGroupId: number | null): boolean {
     return true;
   } catch (error) {
     return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function pauseForFailureInjection(environmentName: string): void {
+  const pausePath = process.env[environmentName];
+  if (!pausePath) {
+    return;
+  }
+  const readyPath = `${pausePath}.ready`;
+  const releasePath = `${pausePath}.release`;
+  writeFileSync(readyPath, `${process.pid}\n`);
+  while (!existsSync(releasePath)) {
+    sleepSync(10);
   }
 }
 
@@ -241,8 +268,52 @@ function writeLockReclaimer(lockPath: string, reclaimer: LockReclaimer): void {
   }
 }
 
+function lockQuarantinePath(lockPath: string, token: string, kind: string): string {
+  return `${lockPath}.${kind}-${token}-${randomUUID()}`;
+}
+
+function removeReclaimerIfOwned(lockPath: string, token: string): void {
+  const reclaimerPath = lockReclaimerPath(lockPath);
+  const current = readLockReclaimer(lockPath);
+  if (current?.token !== token) {
+    return;
+  }
+
+  const quarantinePath = lockQuarantinePath(lockPath, token, "reclaim-quarantine");
+  try {
+    renameSync(reclaimerPath, quarantinePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  const quarantined = readJsonFile<LockReclaimer>(quarantinePath);
+  if (quarantined?.token === token) {
+    rmSync(quarantinePath, { recursive: true, force: true });
+  }
+}
+
+function quarantineLegacyReclaimer(lockPath: string): void {
+  const reclaimerPath = lockReclaimerPath(lockPath);
+  const quarantinePath = lockQuarantinePath(lockPath, "legacy", "reclaim-quarantine");
+  try {
+    renameSync(reclaimerPath, quarantinePath);
+    rmSync(quarantinePath, { recursive: true, force: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
+
 function staleLockCanBeReclaimed(lockPath: string, owner: LockOwner | null): boolean {
   if (owner) {
+    if (owner.requesterPid && !processIsAlive(owner.requesterPid)) {
+      return true;
+    }
     return !processIsAlive(owner.pid);
   }
   try {
@@ -263,7 +334,7 @@ function tryReclaimStaleLock(lockPath: string): boolean {
     if (processIsAlive(existingReclaimer.pid)) {
       return false;
     }
-    rmSync(lockReclaimerPath(lockPath), { recursive: true, force: true });
+    removeReclaimerIfOwned(lockPath, existingReclaimer.token);
   } else if (existsSync(lockReclaimerPath(lockPath))) {
     // A process can die after creating an old-style directory marker or
     // before publishing a malformed marker. Do not let that partial state
@@ -275,7 +346,7 @@ function tryReclaimStaleLock(lockPath: string): boolean {
       ) {
         return false;
       }
-      rmSync(lockReclaimerPath(lockPath), { recursive: true, force: true });
+      quarantineLegacyReclaimer(lockPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw error;
@@ -292,7 +363,7 @@ function tryReclaimStaleLock(lockPath: string): boolean {
   try {
     writeLockReclaimer(lockPath, reclaimer);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+    if (["EEXIST", "ENOENT"].includes((error as NodeJS.ErrnoException).code ?? "")) {
       return false;
     }
     throw error;
@@ -310,12 +381,45 @@ function tryReclaimStaleLock(lockPath: string): boolean {
     if ((finalOwner?.token ?? null) !== reclaimer.ownerToken) {
       return false;
     }
-    rmSync(lockPath, { recursive: true, force: true });
+
+    // The lock directory is the immutable generation publication. Move only
+    // the generation that was validated above to a unique quarantine path;
+    // never recursively delete the shared lock path after a check. A
+    // successor can publish a new generation at lockPath as soon as this move
+    // wins, and a late reclaimer must be unable to remove it.
+    const quarantinePath = lockQuarantinePath(
+      lockPath,
+      reclaimer.ownerToken ?? "ownerless",
+      "lock",
+    );
+    pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_BEFORE_RECLAIM_QUARANTINE");
+    try {
+      renameSync(lockPath, quarantinePath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return false;
+      }
+      throw error;
+    }
+    const quarantinedOwner = readLockOwner(quarantinePath);
+    if ((quarantinedOwner?.token ?? null) !== reclaimer.ownerToken) {
+      // A successor may have won the shared path between our last read and
+      // rename. Restore this moved generation only if no newer generation has
+      // already been published; never overwrite that newer path.
+      try {
+        renameSync(quarantinePath, lockPath);
+      } catch (restoreError) {
+        const code = (restoreError as NodeJS.ErrnoException).code;
+        if (code !== "EEXIST" && code !== "ENOENT") {
+          throw restoreError;
+        }
+      }
+      return false;
+    }
+    rmSync(quarantinePath, { recursive: true, force: true });
     return true;
   } finally {
-    if (existsSync(lockPath)) {
-      rmSync(lockReclaimerPath(lockPath), { recursive: true, force: true });
-    }
+    removeReclaimerIfOwned(lockPath, reclaimer.token);
   }
 }
 
@@ -324,17 +428,16 @@ function releasePackageLock(lockPath: string, token: string): void {
   if (owner?.token !== token) {
     return;
   }
-  const releasePath = `${lockPath}.release-${token}`;
+  const releasePath = lockQuarantinePath(lockPath, token, "release");
   try {
     renameSync(lockPath, releasePath);
     const releasedOwner = readLockOwner(releasePath);
     if (releasedOwner?.token === token) {
       rmSync(releasePath, { recursive: true, force: true });
     } else {
-      // A stale reclaimer or an already-admitted successor may have changed
-      // the path between the first token check and the rename. Never remove
-      // that other owner; restore this lock only when the active path is
-      // still absent, otherwise leave the successor untouched.
+      // The generation moved under our token check but did not contain the
+      // same owner marker. Restore it only when the active path is still
+      // absent; never overwrite a successor.
       try {
         renameSync(releasePath, lockPath);
       } catch (restoreError) {
@@ -343,11 +446,140 @@ function releasePackageLock(lockPath: string, token: string): void {
           throw restoreError;
         }
       }
+      return;
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       throw error;
     }
+  }
+}
+
+function scriptPathForSupervisor(): string {
+  const scriptPath = process.argv[1];
+  if (!scriptPath) {
+    throw new Error("Package build supervisor cannot determine its script path");
+  }
+  return scriptPath;
+}
+
+function stopUnpublishedSupervisor(supervisor: ReturnType<typeof spawn>): void {
+  if (!supervisor.pid) {
+    return;
+  }
+  try {
+    supervisor.kill("SIGTERM");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
+      throw error;
+    }
+  }
+}
+
+function candidateLockPath(lockPath: string, token: string): string {
+  return `${lockPath}.candidate-${token}`;
+}
+
+function removeCandidateLock(lockPath: string, token: string): void {
+  rmSync(candidateLockPath(lockPath, token), { recursive: true, force: true });
+}
+
+function publishPackageLock(lockPath: string, pkg: WorkspacePackage): PackageLock | null {
+  if (existsSync(lockPath)) {
+    return null;
+  }
+  const token = randomUUID();
+  const candidatePath = candidateLockPath(lockPath, token);
+  let supervisor: ReturnType<typeof spawn> | null = null;
+
+  try {
+    mkdirSync(candidatePath);
+    pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_CANDIDATE");
+    supervisor = spawn(
+      process.execPath,
+      [
+        scriptPathForSupervisor(),
+        BUILD_SUPERVISOR_ARG,
+        lockPath,
+        token,
+        pkg.dir,
+        String(process.pid),
+      ],
+      {
+        cwd: repoRoot,
+        detached: process.platform !== "win32",
+        stdio: "inherit",
+      },
+    );
+    if (!supervisor.pid) {
+      throw new Error(`Could not start package build supervisor for ${pkg.name}`);
+    }
+    pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_SUPERVISOR_SPAWN");
+    const supervisorResult = new Promise<number>((resolve, reject) => {
+      let settled = false;
+      supervisor?.once("error", (error) => {
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      });
+      supervisor?.once("close", (status) => {
+        if (!settled) {
+          settled = true;
+          resolve(status ?? 1);
+        }
+      });
+    });
+
+    writeLockOwner(candidatePath, {
+      token,
+      pid: supervisor.pid,
+      requesterPid: process.pid,
+      buildPid: null,
+      processGroupId: process.platform === "win32" ? null : supervisor.pid,
+      state: "waiting",
+      createdAt: Date.now(),
+    });
+    renameSync(candidatePath, lockPath);
+
+    return {
+      path: lockPath,
+      token,
+      startBuild: () => {
+        const owner = readLockOwner(lockPath);
+        if (owner?.token !== token) {
+          throw new Error(`Package build lock ownership changed: ${lockPath}`);
+        }
+        writeFileSync(join(lockPath, `start-${token}`), `${token}\n`);
+      },
+      waitForBuild: () => supervisorResult,
+      markPublishing: () => {
+        const owner = readLockOwner(lockPath);
+        if (owner?.token !== token) {
+          throw new Error(`Package build lock ownership changed: ${lockPath}`);
+        }
+        writeLockOwner(lockPath, {
+          ...owner,
+          pid: process.pid,
+          requesterPid: process.pid,
+          buildPid: null,
+          processGroupId: null,
+          state: "publishing",
+        });
+      },
+      release: () => releasePackageLock(lockPath, token),
+    };
+  } catch (error) {
+    if (supervisor) {
+      stopUnpublishedSupervisor(supervisor);
+    }
+    if (existsSync(candidatePath)) {
+      rmSync(candidatePath, { recursive: true, force: true });
+    }
+    if (["EEXIST", "ENOTEMPTY"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+      return null;
+    }
+    throw error;
   }
 }
 
@@ -357,45 +589,17 @@ function acquirePackageLock(pkg: WorkspacePackage): PackageLock {
   const deadline = Date.now() + LOCK_WAIT_TIMEOUT_MS;
 
   while (true) {
-    try {
-      mkdirSync(lockPath);
-      const token = randomUUID();
-      try {
-        writeLockOwner(lockPath, {
-          token,
-          pid: process.pid,
-          buildPid: null,
-          processGroupId: null,
-          state: "waiting",
-          createdAt: Date.now(),
-        });
-      } catch (error) {
-        rmSync(lockPath, { recursive: true, force: true });
-        throw error;
-      }
-      return {
-        token,
-        update: (update) => {
-          const owner = readLockOwner(lockPath);
-          if (owner?.token !== token) {
-            throw new Error(`Package build lock ownership changed: ${lockPath}`);
-          }
-          writeLockOwner(lockPath, { ...owner, ...update });
-        },
-        release: () => releasePackageLock(lockPath, token),
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") {
-        throw error;
-      }
-      if (tryReclaimStaleLock(lockPath)) {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`Timed out waiting for package build lock: ${lockPath}`, { cause: error });
-      }
-      sleepSync(25);
+    const lock = publishPackageLock(lockPath, pkg);
+    if (lock) {
+      return lock;
     }
+    if (tryReclaimStaleLock(lockPath)) {
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`Timed out waiting for package build lock: ${lockPath}`);
+    }
+    sleepSync(25);
   }
 }
 
@@ -597,20 +801,155 @@ function hasValidCachedBuild(pkg: WorkspacePackage, inputSha256: string): boolea
   });
 }
 
-function recordSuccessfulBuild(pkg: WorkspacePackage, inputSha256: string): void {
+function inputWatchDirectories(pkg: WorkspacePackage): string[] {
+  const directories = new Set<string>();
+  const addInput = (path: string): void => {
+    for (const entry of inputEntriesUnder(path)) {
+      directories.add(
+        entry.kind === "directory"
+          ? join(repoRoot, entry.path)
+          : dirname(join(repoRoot, entry.path)),
+      );
+    }
+  };
+
+  for (const path of [
+    "bun.lock",
+    "package.json",
+    "tsconfig.base.json",
+    "scripts/build-publishable-packages.ts",
+    "scripts/publishable-workspaces.ts",
+    "scripts",
+  ]) {
+    addInput(join(repoRoot, path));
+  }
+  for (const dependency of workspaceDependencyClosure(pkg)) {
+    addInput(join(repoRoot, dependency.dir));
+  }
+  return [...directories];
+}
+
+function startInputMutationMonitor(
+  pkg: WorkspacePackage,
+  initialInputSha256: string,
+): InputMutationMonitor {
+  let dirty = false;
+  let checking = false;
+  const watchers: FSWatcher[] = [];
+  const watchDirectories = inputWatchDirectories(pkg);
+  for (const directory of watchDirectories) {
+    try {
+      watchers.push(
+        watch(directory, (_eventType, filename) => {
+          // A null filename is an ambiguous directory notification. The
+          // polling/final snapshot below still detects real input changes;
+          // treating it as dirty would mistake package dist replacement for
+          // a source mutation on platforms that omit the filename.
+          if (!filename) {
+            return;
+          }
+          const changedPath = join(directory, filename.toString());
+          const changedRelativePath = relative(repoRoot, changedPath);
+          if (
+            changedRelativePath
+              .split(/[\\/]+/u)
+              .some((part) => INPUT_EXCLUDED_DIRECTORY_NAMES.has(part))
+          ) {
+            return;
+          }
+          try {
+            if (packageInputSha256(pkg) !== initialInputSha256) {
+              dirty = true;
+            }
+          } catch {
+            dirty = true;
+          }
+        }),
+      );
+    } catch {
+      // A source directory that disappears while the build is running is a
+      // mutation. Fail closed rather than publishing an unobserved key.
+      dirty = true;
+    }
+  }
+
+  const poller = setInterval(() => {
+    if (checking || dirty) {
+      return;
+    }
+    checking = true;
+    try {
+      if (packageInputSha256(pkg) !== initialInputSha256) {
+        dirty = true;
+      }
+    } catch {
+      dirty = true;
+    } finally {
+      checking = false;
+    }
+  }, BUILD_SOURCE_POLL_MS);
+
+  return {
+    changed: () => dirty,
+    finish: async () => {
+      clearInterval(poller);
+      for (const watcher of watchers) {
+        watcher.close();
+      }
+      // Let queued fs.watch notifications run before the final snapshot.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      let inputSha256 = initialInputSha256;
+      try {
+        inputSha256 = packageInputSha256(pkg);
+      } catch {
+        dirty = true;
+      }
+      if (inputSha256 !== initialInputSha256) {
+        dirty = true;
+      }
+      return { changed: dirty, inputSha256 };
+    },
+  };
+}
+
+function removeCacheRecordIfMatches(pkg: WorkspacePackage, inputSha256: string): void {
+  const record = readJsonFile<BuildCacheRecord>(packageCachePath(pkg));
+  if (record?.version === BUILD_CACHE_VERSION && record.inputSha256 === inputSha256) {
+    unlinkSync(packageCachePath(pkg));
+  }
+}
+
+function recordSuccessfulBuild(
+  pkg: WorkspacePackage,
+  inputSha256: string,
+  monitor: InputMutationMonitor,
+): boolean {
   const outputs = buildOutputs(pkg);
   if (!outputs?.length) {
     process.stdout.write(`[build:packages] no cache record for ${pkg.name} (no dist output)\n`);
-    return;
+    return true;
   }
   mkdirSync(buildCacheRoot, { recursive: true });
   const cachePath = packageCachePath(pkg);
-  const temporaryPath = `${cachePath}.${process.pid}.tmp`;
-  writeFileSync(
-    temporaryPath,
-    `${JSON.stringify({ version: BUILD_CACHE_VERSION, inputSha256, outputs }, null, 2)}\n`,
-  );
-  renameSync(temporaryPath, cachePath);
+  const temporaryPath = `${cachePath}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    if (monitor.changed() || packageInputSha256(pkg) !== inputSha256) {
+      return false;
+    }
+    writeFileSync(
+      temporaryPath,
+      `${JSON.stringify({ version: BUILD_CACHE_VERSION, inputSha256, outputs }, null, 2)}\n`,
+    );
+    if (monitor.changed() || packageInputSha256(pkg) !== inputSha256) {
+      return false;
+    }
+    renameSync(temporaryPath, cachePath);
+    return true;
+  } finally {
+    if (existsSync(temporaryPath)) {
+      unlinkSync(temporaryPath);
+    }
+  }
 }
 
 for (const pkg of packages) {
@@ -619,51 +958,183 @@ for (const pkg of packages) {
   }
 }
 
-async function runPackageBuild(pkg: WorkspacePackage, lock: PackageLock): Promise<number> {
+async function runBuildSupervisor(
+  lockPath: string,
+  token: string,
+  packageDirectory: string,
+  requesterPid: number,
+): Promise<number> {
+  const startPath = join(lockPath, `start-${token}`);
+  const candidatePath = candidateLockPath(lockPath, token);
+  const startupDeadline = Date.now() + LOCK_WAIT_TIMEOUT_MS;
+  while (true) {
+    if (!existsSync(lockPath)) {
+      if (!existsSync(candidatePath)) {
+        return 1;
+      }
+      if (!processIsAlive(requesterPid)) {
+        removeCandidateLock(lockPath, token);
+        return 1;
+      }
+      if (Date.now() >= startupDeadline) {
+        removeCandidateLock(lockPath, token);
+        return 1;
+      }
+      sleepSync(25);
+      continue;
+    }
+    const owner = readLockOwner(lockPath);
+    if (owner?.token !== token) {
+      return 1;
+    }
+    if (existsSync(startPath)) {
+      break;
+    }
+    if (!processIsAlive(requesterPid)) {
+      return 1;
+    }
+    if (Date.now() >= startupDeadline) {
+      return 1;
+    }
+    sleepSync(25);
+  }
+
   const child = spawn(process.execPath, ["run", "build"], {
-    cwd: join(repoRoot, pkg.dir),
-    detached: process.platform !== "win32",
+    cwd: join(repoRoot, packageDirectory),
+    // The supervisor is the immutable process-group owner published before
+    // this spawn. Keeping the build in its group means a reclaimer can drain
+    // the whole tree even if this exact spawn/update interval is interrupted.
+    detached: false,
     stdio: "inherit",
   });
   if (!child.pid) {
-    throw new Error(`Could not start package build for ${pkg.name}`);
+    return 1;
   }
-  lock.update({
+
+  pauseForFailureInjection("OPENGENI_BUILD_CACHE_PAUSE_AFTER_BUILD_SPAWN");
+
+  const currentOwner = readLockOwner(lockPath);
+  if (currentOwner?.token !== token) {
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // The generation was already replaced; its reclaimer owns cleanup.
+    }
+    return 1;
+  }
+  writeLockOwner(lockPath, {
+    ...currentOwner,
     state: "building",
     buildPid: child.pid,
-    processGroupId: process.platform === "win32" ? null : child.pid,
+    processGroupId: process.platform === "win32" ? null : process.pid,
   });
-  return await new Promise<number>((resolve, reject) => {
+
+  let requesterDied = false;
+  const requesterPoller = setInterval(() => {
+    if (!processIsAlive(requesterPid)) {
+      requesterDied = true;
+      try {
+        if (process.platform === "win32") {
+          child.kill();
+        } else {
+          // The supervisor is the group leader; this drains itself and every
+          // build descendant without leaving an orphan for a successor.
+          process.kill(-process.pid, "SIGTERM");
+        }
+      } catch {
+        // The child/supervisor may already be exiting.
+      }
+    }
+  }, 25);
+
+  const status = await new Promise<number>((resolve, reject) => {
     child.once("error", reject);
-    child.once("close", (status) => resolve(status ?? 1));
-  });
+    child.once("close", (exitStatus) => resolve(exitStatus ?? 1));
+  }).finally(() => clearInterval(requesterPoller));
+
+  if (requesterDied) {
+    return status === 0 ? 1 : status;
+  }
+  const finalOwner = readLockOwner(lockPath);
+  if (finalOwner?.token === token) {
+    writeLockOwner(lockPath, {
+      ...finalOwner,
+      state: "publishing",
+      buildPid: null,
+      processGroupId: process.platform === "win32" ? null : process.pid,
+    });
+  }
+  return status;
+}
+
+async function runPackageBuild(pkg: WorkspacePackage, lock: PackageLock): Promise<number> {
+  lock.startBuild();
+  return await lock.waitForBuild();
 }
 
 async function main(): Promise<void> {
   for (const pkg of packages) {
-    const lock = acquirePackageLock(pkg);
-    try {
-      // A competing builder may have changed the shared dist tree or cache record
-      // while this process was waiting. Derive the key only after ownership is
-      // established, then keep the lock through validation, build, and publish.
-      const inputSha256 = packageInputSha256(pkg);
-      if (hasValidCachedBuild(pkg, inputSha256)) {
-        process.stdout.write(`[build:packages] cached ${pkg.name} (${pkg.dir})\n`);
-        continue;
-      }
+    for (let attempt = 1; attempt <= MAX_SOURCE_MUTATION_RETRIES; attempt += 1) {
+      const lock = acquirePackageLock(pkg);
+      try {
+        // A competing builder may have changed the shared dist tree or cache
+        // record while this process was waiting. Derive the key only after
+        // ownership is established, then keep the lock through validation,
+        // build, and publish.
+        const inputSha256 = packageInputSha256(pkg);
+        if (hasValidCachedBuild(pkg, inputSha256)) {
+          process.stdout.write(`[build:packages] cached ${pkg.name} (${pkg.dir})\n`);
+          break;
+        }
 
-      process.stdout.write(`[build:packages] ${pkg.name} (${pkg.dir})\n`);
-      const result = await runPackageBuild(pkg, lock);
-      lock.update({ state: "publishing", buildPid: null, processGroupId: null });
-      if (result !== 0) {
-        process.exitCode = result;
-        break;
+        process.stdout.write(`[build:packages] ${pkg.name} (${pkg.dir})\n`);
+        const monitor = startInputMutationMonitor(pkg, inputSha256);
+        try {
+          const result = await runPackageBuild(pkg, lock);
+          lock.markPublishing();
+          if (result !== 0) {
+            process.exitCode = result;
+            await monitor.finish();
+            break;
+          }
+
+          const recorded = recordSuccessfulBuild(pkg, inputSha256, monitor);
+          const observation = await monitor.finish();
+          if (!recorded || observation.changed || observation.inputSha256 !== inputSha256) {
+            if (recorded) {
+              removeCacheRecordIfMatches(pkg, inputSha256);
+            }
+            if (attempt === MAX_SOURCE_MUTATION_RETRIES) {
+              throw new Error(
+                `Build inputs changed during ${pkg.name} build; refusing to publish a cache record`,
+              );
+            }
+            process.stdout.write(
+              `[build:packages] source changed during ${pkg.name}; retrying (${attempt}/${MAX_SOURCE_MUTATION_RETRIES})\n`,
+            );
+            continue;
+          }
+          break;
+        } catch (error) {
+          await monitor.finish();
+          throw error;
+        }
+      } finally {
+        lock.release();
       }
-      recordSuccessfulBuild(pkg, inputSha256);
-    } finally {
-      lock.release();
     }
   }
 }
 
-await main();
+if (process.argv[2] === BUILD_SUPERVISOR_ARG) {
+  const lockPath = process.argv[3];
+  const token = process.argv[4];
+  const packageDirectory = process.argv[5];
+  const requesterPid = Number(process.argv[6]);
+  if (!lockPath || !token || !packageDirectory || !Number.isInteger(requesterPid)) {
+    throw new Error("Invalid package build supervisor arguments");
+  }
+  process.exitCode = await runBuildSupervisor(lockPath, token, packageDirectory, requesterPid);
+} else {
+  await main();
+}
