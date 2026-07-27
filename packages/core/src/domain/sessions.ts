@@ -14,6 +14,7 @@ import {
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
+  stableJson,
   type AccessGrant,
   type CreateSessionResponse,
   type GoalSpec,
@@ -106,6 +107,9 @@ import {
 const reservedSessionMcpServerIds = new Set(["opengeni", "files", "docs", "codex_apps"]);
 const maxSessionMcpCredentialHeaders = 16;
 const maxSessionMcpCredentialHeaderValueLength = 4096;
+// Keep the durable snapshot below the shared event-preview array boundary so
+// the generic lossy projection cannot silently rewrite this audit fact.
+const maxToolPolicyAuditRefs = 40;
 // RFC 9110 field-name token characters.
 const sessionMcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -1860,11 +1864,37 @@ export async function updateSessionMcpApprovalPolicy(
 
 function toolPolicyAuditSnapshot(session: Session, tools: ToolRef[]) {
   const policy = session.toolPolicy ?? { mode: "legacy" as const, inheritedFromSessionId: null };
+  // Tool policy refs contain only public server ids and the optional/strict
+  // execution mode; they never carry URLs, names, headers, credentials,
+  // schemas, or arguments. The request is capped at 64 refs and the mandatory
+  // first-party server can add one more, so the complete snapshot remains a
+  // small bounded payload rather than silently dropping security-relevant
+  // optional/strict changes.
+  const allToolRefs = mergeToolRefs([], tools)
+    .sort((left, right) => {
+      // Keep the mandatory first-party authority visible even when the
+      // bounded audit preview has to omit the middle of a large selection.
+      const leftMandatory = left.kind === "mcp" && left.id === "opengeni";
+      const rightMandatory = right.kind === "mcp" && right.id === "opengeni";
+      if (leftMandatory !== rightMandatory) return leftMandatory ? -1 : 1;
+      return `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`);
+    })
+    .map((tool) => ({
+      kind: tool.kind,
+      id: tool.id,
+      ...(tool.optional === undefined ? {} : { optional: tool.optional }),
+    }));
+  const toolRefs = allToolRefs.slice(0, maxToolPolicyAuditRefs);
   return {
     mode: policy.mode,
     inheritedFromSessionId: policy.inheritedFromSessionId,
     // IDs only: no MCP URLs, names, headers, credentials, schemas, or args.
-    toolIds: [...new Set(tools.map((tool) => tool.id))].sort().slice(0, 64),
+    toolIds: [...toolRefs]
+      .sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`))
+      .map((tool) => tool.id),
+    toolRefs,
+    toolCount: allToolRefs.length,
+    truncated: allToolRefs.length > toolRefs.length,
   };
 }
 
@@ -1953,9 +1983,13 @@ export async function updateSessionToolPolicy(
         mode: "legacy" as const,
         inheritedFromSessionId: null,
       };
+      // JSONB normalizes object-key order on the round trip, so plain
+      // JSON.stringify would turn an identical retry into a second mutation
+      // (and version bump) merely because the persisted key order differs from
+      // the request object. Compare canonical JSON instead.
       const unchanged =
-        JSON.stringify({ tools: session.tools, policy: currentPolicy }) ===
-        JSON.stringify({ tools: nextTools, policy: nextPolicy });
+        stableJson({ tools: session.tools, policy: currentPolicy }) ===
+        stableJson({ tools: nextTools, policy: nextPolicy });
       if (unchanged) {
         return { events: [] };
       }

@@ -134,7 +134,7 @@ describe("release schema contract", () => {
         (migrations.has("0123_session_tool_policy_version.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "REPLACE_AFTER_CONTRACT_REBUILD",
+      "462ac183560fbea0afd625cd11fdd3e8e6d488437c4844d6281455265b957026",
     );
     expect(contract.latestMigration).toBe("0123_session_tool_policy_version.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({

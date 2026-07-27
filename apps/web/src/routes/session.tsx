@@ -952,7 +952,11 @@ function SessionChatPane(props: {
                 <EnabledMcpToolPicker
                   servers={context.toolMcpServers}
                   selectedIds={selectedSessionToolIds}
-                  disabled={composer.sending || terminal}
+                  // Draft hydration applies the authoritative server draft to
+                  // this external picker. Keep the trigger fenced until that
+                  // apply has settled; otherwise a click can be overwritten by
+                  // the delayed draft response immediately afterward.
+                  disabled={composer.sending || composer.draftLoading || terminal}
                   label="Tools for this turn"
                   onChange={(next) => {
                     setToolSelectionExplicit(true);

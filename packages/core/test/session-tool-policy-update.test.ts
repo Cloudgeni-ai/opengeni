@@ -18,6 +18,7 @@ import { updateSessionToolPolicy } from "../src/domain/sessions";
 
 const OPENGENI: ToolRef = { kind: "mcp", id: "opengeni" };
 const DOCS: ToolRef = { kind: "mcp", id: "docs" };
+const OPTIONAL_DOCS: ToolRef = { kind: "mcp", id: "docs", optional: true };
 const FILES: ToolRef = { kind: "mcp", id: "files" };
 const EXPLICIT: SessionToolPolicy = {
   mode: "explicit",
@@ -105,8 +106,8 @@ function grant(workspaceId: string, accountId: string): AccessGrant {
   };
 }
 
-function deps(db: Database, bus: MemoryEventBus) {
-  return { db, bus, settings };
+function deps(db: Database, bus: MemoryEventBus, settingsOverride = settings) {
+  return { db, bus, settings: settingsOverride };
 }
 
 describe("durable session tool-policy updates", () => {
@@ -177,6 +178,73 @@ describe("durable session tool-policy updates", () => {
         },
       ),
     ).rejects.toMatchObject({ status: 422 });
+  }, 180_000);
+
+  test("keeps optional-to-strict changes visible in the durable audit snapshot", async () => {
+    if (!available) return;
+    const owner = await workspace("optional-to-strict");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI, OPTIONAL_DOCS],
+    });
+    const bus = new MemoryEventBus();
+
+    await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+    );
+
+    const payload = bus.published[0]![0]!.payload as {
+      before: { toolRefs: ToolRef[]; toolCount: number; truncated: boolean };
+      after: { toolRefs: ToolRef[]; toolCount: number; truncated: boolean };
+    };
+    expect(payload.before.toolRefs).toContainEqual(OPTIONAL_DOCS);
+    expect(payload.before.toolCount).toBe(2);
+    expect(payload.before.truncated).toBe(false);
+    expect(payload.after.toolRefs).toContainEqual(DOCS);
+    expect(payload.after.toolRefs).not.toContainEqual(OPTIONAL_DOCS);
+    expect(payload.after.toolCount).toBe(2);
+    expect(payload.after.truncated).toBe(false);
+  }, 180_000);
+
+  test("records the mandatory first-party ref beyond the 64-ref request cap", async () => {
+    if (!available) return;
+    const extraServers = Array.from({ length: 64 }, (_, index) => ({
+      id: `audit-server-${index.toString().padStart(2, "0")}`,
+      url: `https://audit-${index}.example/mcp`,
+      cacheToolsList: false,
+    }));
+    const largeSettings = testSettings({
+      mcpServers: [
+        {
+          id: "opengeni",
+          url: "https://opengeni.example/mcp",
+          cacheToolsList: false,
+        },
+        ...extraServers,
+      ],
+    });
+    const owner = await workspace("audit-cap");
+    const created = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    const bus = new MemoryEventBus();
+    const requestedTools = extraServers.map(({ id }) => ({ kind: "mcp" as const, id }));
+
+    await updateSessionToolPolicy(
+      deps(firstDb, bus, largeSettings),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { tools: requestedTools, expectedVersion: 1 },
+    );
+
+    const payload = bus.published[0]![0]!.payload as {
+      after: { toolRefs: ToolRef[]; toolCount: number; truncated: boolean };
+    };
+    expect(payload.after.toolCount).toBe(65);
+    expect(payload.after.toolRefs).toHaveLength(40);
+    expect(payload.after.toolRefs).toContainEqual(OPENGENI);
+    expect(payload.after.truncated).toBe(true);
   }, 180_000);
 
   test("enforces the immediate parent ceiling while allowing a parent-approved child update", async () => {
