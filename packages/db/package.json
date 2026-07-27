@@ -44,6 +44,7 @@
     "generate": "drizzle-kit generate",
     "migrate": "bun src/migrate.ts",
     "provision-roles": "bun src/provision-roles.ts",
+    "assert-runtime-posture": "bun src/runtime-posture-cli.ts",
     "typecheck": "tsgo --noEmit",
     "build": "tsup",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"

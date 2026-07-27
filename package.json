@@ -26,6 +26,7 @@
     "dev:web": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/web && bun run dev",
     "db:migrate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run migrate",
     "db:provision-roles": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run provision-roles",
+    "db:assert-runtime-posture": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run assert-runtime-posture",
     "db:generate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run generate",
     "catalog:refresh": "bun scripts/refresh-integrations-catalog.ts",
     "catalog:import": "set -a; [ -f .env ] && . ./.env; set +a; bun scripts/import-integrations-catalog.ts",

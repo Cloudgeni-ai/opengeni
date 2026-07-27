@@ -210,7 +210,7 @@ function apiPath(path: string): string {
 function stackEnv(services: TestServices, localApiPort: number): Record<string, string> {
   return {
     OPENGENI_ENVIRONMENT: "test",
-    OPENGENI_DATABASE_URL: services.databaseUrl,
+    OPENGENI_DATABASE_URL: services.runtimeDatabaseUrl,
     OPENGENI_NATS_URL: services.natsUrl,
     OPENGENI_TEMPORAL_HOST: services.temporalHost,
     OPENGENI_TEMPORAL_NAMESPACE: "default",
