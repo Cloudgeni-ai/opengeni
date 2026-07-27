@@ -1,8 +1,8 @@
-import { OpenGeniApiError } from "@opengeni/sdk";
 import type {
   ComposerDraft,
   EffectiveControlResumeOption,
   EffectiveSessionControl,
+  OpenGeniApiError,
   ResourceRef,
   SaveComposerDraftRequest,
   SendMessageInput,
@@ -819,11 +819,13 @@ function asError(cause: unknown): Error {
 }
 
 function isDraftConflictError(error: Error): boolean {
+  const apiError = error as Partial<OpenGeniApiError>;
   return (
-    error instanceof OpenGeniApiError &&
-    error.status === 409 &&
-    !error.outcomeUnknown &&
-    (error.code === undefined || error.code === "conflict" || error.code === "idempotency_conflict")
+    apiError.status === 409 &&
+    apiError.outcomeUnknown === false &&
+    (apiError.code === undefined ||
+      apiError.code === "conflict" ||
+      apiError.code === "idempotency_conflict")
   );
 }
 

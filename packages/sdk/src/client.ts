@@ -2823,7 +2823,6 @@ function assertApiContractResponse(response: Response): void {
 }
 
 const API_ERROR_MAX_BYTES = 16 * 1024;
-const API_ERROR_MESSAGE_MAX_BYTES = 512;
 
 type ApiErrorRequestContext = {
   method: string;
@@ -2834,29 +2833,9 @@ async function apiErrorFromResponse(
   response: Response,
   context: ApiErrorRequestContext,
 ): Promise<OpenGeniApiError> {
-  const rawBody = await readBoundedJsonErrorBody(response);
-  const decoded = decodeStructuredApiError(rawBody);
-  const status = response.status;
-  const gatewayFailure = status === 502 || status === 503 || status === 504;
-  const correlationId = boundedCorrelationId(
-    decoded?.requestId ??
-      response.headers.get(OPENGENI_CORRELATION_HEADER) ??
-      context.correlationId,
-  );
-  return new OpenGeniApiError(status, decoded ? rawBody : "", {
-    ...(decoded?.code
-      ? { code: decoded.code }
-      : gatewayFailure
-        ? { code: "upstream_unavailable" }
-        : {}),
-    retryable: decoded?.retryable ?? retryableApiStatus(status),
-    ...(correlationId ? { correlationId } : {}),
-    outcomeUnknown: gatewayFailure && isMutationMethod(context.method) && decoded === null,
-    displayMessage: gatewayFailure
-      ? "OpenGeni is temporarily unavailable — retry."
-      : decoded?.message
-        ? `OpenGeni API ${status}: ${decoded.message}`
-        : `OpenGeni API ${status}: Request failed.`,
+  return new OpenGeniApiError(response.status, await readBoundedJsonErrorBody(response), {
+    correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
+    mutation: isMutationMethod(context.method),
   });
 }
 
@@ -2866,13 +2845,10 @@ async function assertJsonResponse(
 ): Promise<void> {
   if (isJsonContentType(response.headers.get("content-type"))) return;
   await cancelResponseBody(response, "unexpected non-JSON API response");
-  const correlationId = boundedCorrelationId(
-    response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
-  );
   throw new OpenGeniApiError(502, "", {
     code: "upstream_unavailable",
     retryable: true,
-    ...(correlationId ? { correlationId } : {}),
+    correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
     outcomeUnknown: isMutationMethod(context.method),
     displayMessage: "OpenGeni is temporarily unavailable — retry.",
   });
@@ -2880,106 +2856,28 @@ async function assertJsonResponse(
 
 async function readBoundedJsonErrorBody(response: Response): Promise<string> {
   if (!isJsonContentType(response.headers.get("content-type"))) {
-    await cancelResponseBody(response, "discarding non-JSON API error body");
+    await cancelResponseBody(response, "discarding API error body");
     return "";
   }
-  const contentLength = response.headers.get("content-length");
-  if (contentLength && /^\d+$/.test(contentLength) && Number(contentLength) > API_ERROR_MAX_BYTES) {
-    await cancelResponseBody(response, "discarding oversized API error body");
+  if (Number(response.headers.get("content-length")) > API_ERROR_MAX_BYTES) {
+    await cancelResponseBody(response, "discarding API error body");
     return "";
   }
-  if (!response.body) return "";
-
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
   try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      total += value.byteLength;
-      if (total > API_ERROR_MAX_BYTES) {
-        await reader.cancel("discarding oversized API error body").catch(() => undefined);
-        return "";
-      }
-      chunks.push(value);
-    }
+    return new TextDecoder().decode(
+      await readBoundedResponseBytes(response, API_ERROR_MAX_BYTES, null),
+    );
   } catch {
     return "";
-  } finally {
-    reader.releaseLock();
   }
-  const bytes = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(bytes);
-}
-
-function decodeStructuredApiError(body: string): {
-  code?: string | undefined;
-  message?: string | undefined;
-  retryable?: boolean | undefined;
-  requestId?: string | undefined;
-} | null {
-  if (!body) return null;
-  try {
-    const parsed: unknown = JSON.parse(body);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
-    const record = parsed as Record<string, unknown>;
-    const nested =
-      record.error && typeof record.error === "object" && !Array.isArray(record.error)
-        ? (record.error as Record<string, unknown>)
-        : record;
-    const code = boundedApiField(nested.code);
-    const message = boundedApiField(nested.message);
-    const requestId = boundedCorrelationId(nested.requestId);
-    if (!code && !message && !requestId && typeof nested.retryable !== "boolean") return null;
-    return {
-      ...(code ? { code } : {}),
-      ...(message ? { message } : {}),
-      ...(typeof nested.retryable === "boolean" ? { retryable: nested.retryable } : {}),
-      ...(requestId ? { requestId } : {}),
-    };
-  } catch {
-    return null;
-  }
-}
-
-function boundedApiField(value: unknown): string | undefined {
-  if (typeof value !== "string" || !value) return undefined;
-  const bytes = new TextEncoder().encode(value);
-  if (bytes.byteLength <= API_ERROR_MESSAGE_MAX_BYTES) return value;
-  return new TextDecoder().decode(bytes.slice(0, API_ERROR_MESSAGE_MAX_BYTES));
-}
-
-function boundedCorrelationId(value: unknown): string | undefined {
-  if (
-    typeof value !== "string" ||
-    value.length < 1 ||
-    value.length > 128 ||
-    !/^[A-Za-z0-9._:-]+$/.test(value)
-  ) {
-    return undefined;
-  }
-  return value;
 }
 
 function isJsonContentType(value: string | null): boolean {
-  if (!value) return false;
-  const mediaType = value.split(";", 1)[0]?.trim().toLowerCase() ?? "";
-  return mediaType === "application/json" || mediaType.endsWith("+json");
+  return /^(application\/json|[^;]+\+json)\s*(;|$)/i.test(value ?? "");
 }
 
 function isMutationMethod(method: string): boolean {
-  return !new Set(["GET", "HEAD", "OPTIONS"]).has(method.toUpperCase());
-}
-
-function retryableApiStatus(status: number): boolean {
-  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+  return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
 }
 
 async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {
