@@ -31,6 +31,7 @@ export function testSettings(overrides: Partial<Settings> = {}): Settings {
     authAllowMetrics: false,
     publicBaseUrl: "http://127.0.0.1:3000",
     agentReleasesBaseUrl: "https://github.com/Cloudgeni-ai/opengeni/releases",
+    agentStableVersion: "0.1.8",
     productAccessMode: "local",
     billingMode: "disabled",
     entitlementsMode: "none",

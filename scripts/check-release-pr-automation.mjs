@@ -15,7 +15,7 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   sealWorkflowPath: ".github/workflows/seal-release-head.yml",
   sourceAdmissionWorkflowPath: ".github/workflows/source-admission.yml",
   releaseHeadTagPrefix: "opengeni-release-head-",
-  releaseHeadRulesetName: "Immutable OpenGeni release heads",
+  releaseHeadReleaseNamePrefix: "Retained OpenGeni release head ",
   versionAuthor: Object.freeze({
     login: "github-actions[bot]",
     id: 41898282,
@@ -194,63 +194,72 @@ async function ensureReleaseHeadRef(api, headSha) {
   return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
 }
 
-async function verifyReleaseHeadProtection(api) {
-  const summaries = await api.get(repositoryPath("/rulesets?includes_parents=true&per_page=100"));
-  invariant(Array.isArray(summaries), "release head ruleset listing is invalid");
-  const matches = summaries.filter(
-    (ruleset) =>
-      ruleset?.name === RELEASE_AUTOMATION_CONTRACT.releaseHeadRulesetName &&
-      ruleset?.target === "tag" &&
-      ruleset?.source_type === "Repository",
-  );
-  invariant(matches.length === 1, "release head protection ruleset is not unique");
-  const id = assertPositiveInteger(matches[0]?.id, "release head ruleset ID");
-  const ruleset = record(
-    await api.get(repositoryPath(`/rulesets/${id}`)),
-    "release head protection ruleset",
+function releaseHeadReleaseName(headSha) {
+  return `${RELEASE_AUTOMATION_CONTRACT.releaseHeadReleaseNamePrefix}${assertSha(
+    headSha,
+    "release head SHA",
+  )}`;
+}
+
+function assertReleaseHeadRelease(value, headSha) {
+  const release = record(value, "release head immutable release");
+  const id = assertPositiveInteger(release.id, "release head immutable release ID");
+  const tagName = releaseHeadTagName(headSha);
+  invariant(release.tag_name === tagName, "release head immutable release tag changed");
+  invariant(
+    release.name === releaseHeadReleaseName(headSha),
+    "release head immutable release name changed",
   );
   invariant(
-    ruleset.id === id &&
-      ruleset.name === RELEASE_AUTOMATION_CONTRACT.releaseHeadRulesetName &&
-      ruleset.target === "tag" &&
-      ruleset.source_type === "Repository" &&
-      ruleset.source === RELEASE_AUTOMATION_CONTRACT.repository &&
-      ruleset.enforcement === "active",
-    "release head protection ruleset identity is invalid",
+    release.draft === false && release.prerelease === true && release.immutable === true,
+    "release head evidence is not a published immutable prerelease",
   );
-  const refName = record(ruleset.conditions?.ref_name, "release head ruleset ref condition");
-  const expectedPattern = `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}*`;
-  invariant(
-    Array.isArray(refName.include) &&
-      refName.include.length === 1 &&
-      refName.include[0] === expectedPattern &&
-      Array.isArray(refName.exclude) &&
-      refName.exclude.length === 0,
-    "release head protection ruleset ref condition is invalid",
+  assertIdentity(
+    release.author,
+    RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+    "release head immutable release author",
   );
-  invariant(Array.isArray(ruleset.rules), "release head protection rules are missing");
-  const ruleTypes = ruleset.rules.map((rule) => rule?.type).sort();
-  invariant(
-    JSON.stringify(ruleTypes) === JSON.stringify(["deletion", "update"]),
-    "release head protection must forbid every update and deletion",
-  );
-  invariant(
-    Array.isArray(ruleset.bypass_actors) && ruleset.bypass_actors.length === 0,
-    "release head protection must not have bypass actors",
-  );
-  const updatedAt = new Date(
-    assertTimestamp(ruleset.updated_at, "release head protection ruleset update time"),
+  const publishedAt = new Date(
+    assertTimestamp(release.published_at, "release head immutable release publication time"),
   ).toISOString();
+  const url =
+    `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+    `/releases/tag/${tagName}`;
+  invariant(release.html_url === url, "release head immutable release URL changed");
   return {
     id,
-    name: RELEASE_AUTOMATION_CONTRACT.releaseHeadRulesetName,
-    target: "tag",
-    enforcement: "active",
-    refPattern: expectedPattern,
-    rules: ruleTypes,
-    bypassActorCount: 0,
-    updatedAt,
+    tagName,
+    name: releaseHeadReleaseName(headSha),
+    immutable: true,
+    draft: false,
+    prerelease: true,
+    authorId: RELEASE_AUTOMATION_CONTRACT.versionAuthor.id,
+    authorLogin: RELEASE_AUTOMATION_CONTRACT.versionAuthor.login,
+    authorType: RELEASE_AUTOMATION_CONTRACT.versionAuthor.type,
+    publishedAt,
+    url,
   };
+}
+
+async function ensureReleaseHeadRelease(api, headSha) {
+  const tagName = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/releases/tags/${tagName}`);
+  const existing = await api.getOptional(path);
+  if (existing === null) {
+    await api.post(repositoryPath("/releases"), {
+      tag_name: tagName,
+      name: releaseHeadReleaseName(headSha),
+      body:
+        `Provider-retained exact release-source head ${headSha}. ` +
+        "This prerelease exists only as immutable source-retention evidence.",
+      draft: false,
+      prerelease: true,
+      make_latest: "false",
+    });
+  } else {
+    assertReleaseHeadRelease(existing, headSha);
+  }
+  return assertReleaseHeadRelease(await api.get(path), headSha);
 }
 
 function assertIdentity(actual, expected, label) {
@@ -697,13 +706,13 @@ export async function sealReleaseHeadEvidence(options = {}) {
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
     context.headSha,
   );
-  const releaseHeadProtection = await verifyReleaseHeadProtection(api);
   const releaseHead = await ensureReleaseHeadRef(api, context.headSha);
+  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.headSha);
 
   const now = options.now ?? (() => new Date());
   await upsertCheckRun(
     api,
-    { ...context, releaseHeadProtection },
+    { ...context, releaseHeadRelease },
     "release-head-retention",
     {
       status: "in_progress",
@@ -718,9 +727,12 @@ export async function sealReleaseHeadEvidence(options = {}) {
   ]);
   assertMainRef(terminalMain, context.baseSha, "terminal release-head default branch");
   assertOpenReleasePull(terminalPull, context);
-  const terminalProtection = await verifyReleaseHeadProtection(api);
   const terminalReleaseHeadName = assertReleaseHeadRef(
     await api.get(repositoryPath(`/git/ref/tags/${releaseHead.name}`)),
+    context.headSha,
+  );
+  const terminalReleaseHeadRelease = assertReleaseHeadRelease(
+    await api.get(repositoryPath(`/releases/tags/${releaseHead.name}`)),
     context.headSha,
   );
   const terminalReleaseHead = {
@@ -729,8 +741,8 @@ export async function sealReleaseHeadEvidence(options = {}) {
     sha: context.headSha,
   };
   invariant(
-    JSON.stringify(terminalProtection) === JSON.stringify(releaseHeadProtection),
-    "release head protection moved during sealing",
+    JSON.stringify(terminalReleaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    "release head immutable release moved during sealing",
   );
   invariant(
     JSON.stringify(terminalReleaseHead) === JSON.stringify(releaseHead),
@@ -738,7 +750,7 @@ export async function sealReleaseHeadEvidence(options = {}) {
   );
   await upsertCheckRun(
     api,
-    { ...context, releaseHeadProtection: terminalProtection },
+    { ...context, releaseHeadRelease: terminalReleaseHeadRelease },
     "release-head-retention",
     {
       status: "completed",
@@ -746,7 +758,7 @@ export async function sealReleaseHeadEvidence(options = {}) {
       title: "Release head retained immutably",
       summary:
         `PR #${context.prNumber} exact head ${context.headSha} is retained at ${releaseHead.ref} ` +
-        `under ruleset ${releaseHeadProtection.id}.`,
+        `by immutable prerelease ${releaseHeadRelease.id}.`,
     },
     now,
   );
@@ -757,8 +769,8 @@ export async function sealReleaseHeadEvidence(options = {}) {
     ...context,
     admission,
     sourceAdmission,
-    releaseHeadProtection,
     releaseHead,
+    releaseHeadRelease,
   };
 }
 
@@ -773,18 +785,18 @@ function checkIdentity(kind, context) {
       : kind === "automation-ci"
         ? RELEASE_AUTOMATION_CONTRACT.checks.automationCi
         : RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention;
-  const protectionIdentity =
+  const retentionIdentity =
     kind === "release-head-retention"
-      ? `:protection-sha256:${canonicalSha256(
-          record(context.releaseHeadProtection, "release head protection check identity"),
+      ? `:release-sha256:${canonicalSha256(
+          record(context.releaseHeadRelease, "release head immutable release check identity"),
         )}`
       : "";
   return {
     name,
     exclusive: kind === "release-head-retention",
     externalId:
-      `opengeni:release-automation:${kind}:v1:pr:${context.prNumber}:head:${context.headSha}` +
-      protectionIdentity,
+      `opengeni:release-automation:${kind}:${kind === "release-head-retention" ? "v2" : "v1"}:` +
+      `pr:${context.prNumber}:head:${context.headSha}${retentionIdentity}`,
   };
 }
 
@@ -863,13 +875,13 @@ export async function beginVersionPrChecks(options = {}) {
   const context = automationCiContext(env, options.inputs);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
   await terminalVersionIdentity(api, context);
-  const releaseHeadProtection = await verifyReleaseHeadProtection(api);
   const releaseHead = await ensureReleaseHeadRef(api, context.headSha);
+  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.headSha);
   await terminalVersionIdentity(api, context);
   const now = options.now ?? (() => new Date());
   await upsertCheckRun(
     api,
-    { ...context, releaseHeadProtection },
+    { ...context, releaseHeadRelease },
     "release-head-retention",
     {
       status: "completed",
@@ -877,7 +889,7 @@ export async function beginVersionPrChecks(options = {}) {
       title: "Release head retained immutably",
       summary:
         `Version PR #${context.prNumber} exact head ${context.headSha} is retained at ` +
-        `${releaseHead.ref} under ruleset ${releaseHeadProtection.id}.`,
+        `${releaseHead.ref} by immutable prerelease ${releaseHeadRelease.id}.`,
     },
     now,
   );
@@ -903,7 +915,7 @@ export async function beginVersionPrChecks(options = {}) {
     },
     now,
   );
-  return { ...context, releaseHeadProtection, releaseHead };
+  return { ...context, releaseHead, releaseHeadRelease };
 }
 
 export async function completeVersionPrChecks(options = {}) {
@@ -1355,14 +1367,18 @@ export async function verifyApprovedMerge(options = {}) {
     );
   }
 
-  const releaseHeadProtection = await verifyReleaseHeadProtection(api);
   const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
-  const [headChecks, sourceChecks, releaseHeadRef] = await Promise.all([
+  const [headChecks, sourceChecks, releaseHeadRef, releaseHeadReleaseValue] = await Promise.all([
     paginatedCheckRuns(api, pullIdentity.headSha),
     paginatedCheckRuns(api, context.sourceSha),
     api.get(repositoryPath(`/git/ref/tags/${releaseHeadTag}`)),
+    api.get(repositoryPath(`/releases/tags/${releaseHeadTag}`)),
   ]);
   assertReleaseHeadRef(releaseHeadRef, pullIdentity.headSha);
+  const releaseHeadRelease = assertReleaseHeadRelease(
+    releaseHeadReleaseValue,
+    pullIdentity.headSha,
+  );
   const sourceAdmission = assertSuccessfulCheck(
     headChecks,
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
@@ -1375,7 +1391,7 @@ export async function verifyApprovedMerge(options = {}) {
   assertMainRef(terminalMain, context.sourceSha, "terminal release main");
 
   const provenance = {
-    version: 1,
+    version: 2,
     repository: RELEASE_AUTOMATION_CONTRACT.repository,
     sourceSha: context.sourceSha,
     sourceTreeSha: source.treeSha,
@@ -1388,12 +1404,12 @@ export async function verifyApprovedMerge(options = {}) {
     reviewedBaseTreeSha: base.treeSha,
     reviewedHeadSha: pullIdentity.headSha,
     reviewedHeadTreeSha: head.treeSha,
-    releaseHeadProtection,
     releaseHead: {
       name: releaseHeadTag,
       ref: `refs/tags/${releaseHeadTag}`,
       sha: pullIdentity.headSha,
     },
+    releaseHeadRelease,
     review: {
       type: reviewType,
       id: decision.id,

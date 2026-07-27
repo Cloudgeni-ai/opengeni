@@ -211,11 +211,18 @@ const SettingsSchema = z.object({
   publicBaseUrl: z.string().url().optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
-  // appends `/download/agent-v<ver>/<asset>` (or `/latest/download/<asset>`).
+  // appends `/download/agent-v<ver>/<asset>`.
   agentReleasesBaseUrl: z
     .string()
     .url()
     .default("https://github.com/Cloudgeni-ai/opengeni/releases"),
+  // Explicit operator-controlled promotion pointer for `/agent/latest/*`.
+  // Versioned agent releases are immutable; changing this setting promotes or
+  // rolls back the stable channel without moving or deleting a provider tag.
+  agentStableVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .default("0.1.8"),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
@@ -1319,6 +1326,7 @@ export function getSettings(): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
+    agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
