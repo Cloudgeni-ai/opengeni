@@ -106,6 +106,9 @@ export type WorkbenchAcceptanceBundle = {
   };
   productionCanary: {
     sourceSha: string;
+    sourceTreeSha: string;
+    imageDigests: ImageDigests;
+    chart: ReleaseChartCandidate;
     startedAt: string;
     endedAt: string;
     expectedCycles: number;
@@ -261,6 +264,9 @@ export function validateWorkbenchAcceptanceBundle(
   validateCanary(
     bundle.productionCanary,
     expected.sourceSha,
+    expectedCandidateReceipt.sourceTreeSha,
+    expectedCandidateImages,
+    expectedCandidateReceipt.chart,
     expected.productionCanaryEvidenceUrl,
     errors,
   );
@@ -304,12 +310,26 @@ function environmentBinding(
 function validateCanary(
   value: unknown,
   sourceSha: string,
+  sourceTreeSha: string,
+  expectedImages: ImageDigests,
+  expectedChart: ReleaseChartCandidate,
   expectedUrl: string | undefined,
   errors: string[],
 ): void {
   const canary = record(value, "productionCanary", errors);
   if (string(canary.sourceSha, "productionCanary.sourceSha", errors) !== sourceSha) {
     errors.push(`productionCanary.sourceSha must equal ${sourceSha}`);
+  }
+  if (string(canary.sourceTreeSha, "productionCanary.sourceTreeSha", errors) !== sourceTreeSha) {
+    errors.push(`productionCanary.sourceTreeSha must equal ${sourceTreeSha}`);
+  }
+  const images = imageDigests(canary.imageDigests, "productionCanary.imageDigests", errors);
+  if (images) {
+    sameImages(expectedImages, images, "candidate and production canary", errors);
+  }
+  const chart = chartIdentity(canary.chart, "productionCanary.chart", errors);
+  if (chart) {
+    sameChart(expectedChart, chart, "candidate and production canary", errors);
   }
   const startedAt = isoDate(canary.startedAt, "productionCanary.startedAt", errors);
   const endedAt = isoDate(canary.endedAt, "productionCanary.endedAt", errors);
