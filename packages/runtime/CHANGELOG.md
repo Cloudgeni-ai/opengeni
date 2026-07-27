@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.13.3
+
+### Patch Changes
+
+- 43e3503: Honor configured MCP transport budgets during the outer Agents SDK connection lifecycle.
+
 ## 0.13.2
 
 ### Patch Changes
