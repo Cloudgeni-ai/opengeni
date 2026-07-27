@@ -1,5 +1,29 @@
 # @opengeni/worker-bundle
 
+## 0.11.4
+
+### Patch Changes
+
+- 7c6aa7c: Keep Codex connected-app MCP tools disabled by default behind the independent
+  `OPENGENI_CODEX_CONNECTED_APPS_ENABLED` deployment switch.
+- Updated dependencies [7c6aa7c]
+  - @opengeni/config@0.7.2
+  - @opengeni/db@0.12.2
+  - @opengeni/core@0.11.4
+  - @opengeni/documents@0.2.32
+  - @opengeni/github@0.3.14
+  - @opengeni/runtime@0.13.6
+  - @opengeni/storage@0.2.26
+  - @opengeni/events@0.3.23
+
+## 0.11.3
+
+### Patch Changes
+
+- Updated dependencies [d03ee4b]
+  - @opengeni/runtime@0.13.5
+  - @opengeni/core@0.11.3
+
 ## 0.11.2
 
 ### Patch Changes

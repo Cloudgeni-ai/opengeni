@@ -411,7 +411,7 @@ describe("accepted turn execution policy", () => {
     ).toMatchObject({ action: "waiting" });
 
     const blockedTurn = await getSessionTurn(client.db, value.workspaceId, value.turnId);
-    expect(blockedTurn).toMatchObject({ status: "failed", activeAttemptId: null });
+    expect(blockedTurn).toMatchObject({ status: "waiting_capacity", activeAttemptId: null });
     expect(readTurnExecutionPolicyV1(blockedTurn!.metadata)).toEqual({
       kind: "valid",
       policy: acceptedPolicy,

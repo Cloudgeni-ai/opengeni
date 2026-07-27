@@ -41,6 +41,66 @@ kubectl -n opengeni create secret generic opengeni-runtime \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
+### Database identities and runtime posture
+
+Standalone deployments using the default `OPENGENI_RLS_STRATEGY=force` require
+two distinct secret paths:
+
+- **migration/provisioning:** `OPENGENI_MIGRATIONS_DATABASE_URL`,
+  `OPENGENI_APP_DATABASE_USER=opengeni_app`, and the corresponding
+  `OPENGENI_APP_DATABASE_PASSWORD`; this identity owns/applies schema and is
+  available only to migration and role-provision Jobs;
+- **ordinary runtime:** `OPENGENI_DATABASE_URL`, structurally targeting the same
+  database but authenticating as `opengeni_app`; this is the only database URL
+  available to API and worker containers.
+
+After every migration and before rolling workloads, run:
+
+```bash
+bun run db:provision-roles
+bun run db:assert-runtime-posture
+```
+
+The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
+role membership or ownership, revokes database/schema creation and all table
+privileges, then grants the exact current-ledger table contract: full CRUD on 81
+ordinary runtime tables, SELECT only on `nested_agent_depth_configuration`,
+SELECT + INSERT on append-only `session_spawn_denials`, and no direct table DML
+on the five FORCE-RLS host-export tables.
+The runtime assertion connects through the runtime URL and checks, using only
+PostgreSQL catalogs in a repeatable-read/read-only transaction:
+
+- exact current/session role, attributes, zero role-graph edges, and
+  `row_security=on`;
+- no database/schema/relation/private-routine ownership and no database/schema
+  CREATE;
+- exactly 77 declared tenant tables with ENABLE + FORCE + active RLS and at
+  least one policy each;
+- exact SELECT/INSERT/UPDATE/DELETE grants for each declared privilege class,
+  absence of TRUNCATE/REFERENCES/TRIGGER everywhere, and no privileges on any
+  undeclared or protected no-direct-DML table;
+- access to the `opengeni_private` helpers.
+
+API and worker startup run the same assertion before NATS, Temporal, HTTP
+serving, or workflow polling begins. Their readiness endpoints repeat it instead
+of treating `select 1` as database readiness. `OPENGENI_RUNTIME_DATABASE_ROLE`
+defaults to and should remain `opengeni_app` for standalone deployments.
+
+The `scoped` strategy is an explicit embedding contract: OpenGeni checks only
+coherent connectivity/identity because the host owns the role and isolation
+boundary. It must not be used to bypass the standalone `force` posture.
+
+Changing an existing standalone environment from an owner, superuser, or
+`BYPASSRLS` runtime identity to `opengeni_app` is an identity/ownership cutover,
+not an ordinary rolling secret edit. Serialize the first transition through a
+reviewed maintenance plan: stop admission/claiming, preserve the migration-only
+URL, update the runtime Secret to the restricted URL, provision, run the posture
+probe from that exact Secret, then start only the posture-gated runtime. A
+rollback may restore a compatible image digest, but must never restore the old
+broad database URL or role attributes. If an older image cannot run through the
+restricted role, remain in maintenance and fix forward.
+
 For Azure managed Blob storage, the artifact generator can consume the
 sensitive Terraform output `object_storage_azure_connection_string` into the
 private `runtime.env` file. Keep the Terraform output JSON under `.agent/` or
@@ -222,6 +282,16 @@ provider response must identify the GitHub Actions bot as author and report the
 published prerelease as `immutable: true`, or sealing fails closed. GitHub then
 locks the tag and emits its native release attestation.
 
+If a seal creates and publishes that immutable tag/release but is interrupted
+before its source-admission and retention checks complete, dispatch the same
+workflow from current `main` with `merged_source_sha` set to the exact accepted
+PR merge source. This is recovery, not a late seal: it refuses to create either
+retained artifact. Before the first check mutation it reconstructs the complete
+historical base-to-head tree/file admission, proves the original PR
+base/head/merge and tree, re-reads the unchanged GitHub Actions-owned immutable
+release, and proves the merged source's ancestry into current `main`. It then
+idempotently restores only whichever exact provider checks are absent.
+
 Before the first seal, a repository administrator must enable the provider
 feature with the API version that introduced its management endpoint:
 
@@ -385,8 +455,23 @@ head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
 OpenGeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
-before validating every schema-v2 row. No dispatcher can select an evidence
-URL, hash, repository, workflow path, or artifact name.
+before validating every schema-v2 row. The canary row is bound to the same
+source tree, exact chart bytes, and complete API/migration/worker/web/relay/
+sandbox digest map as candidate, staging, and production; a source-only canary
+claim fails closed. Acceptance requires the accepted source to remain an
+ancestor of current `main`, but does not require it to remain the current tip:
+compatible reviewed work can continue to merge during the canary window without
+freezing `main` or invalidating an otherwise unchanged proven train. No
+dispatcher can select an evidence URL, hash, repository, workflow path, or
+artifact name.
+
+Cloud-hosted operators must keep the corresponding private release ledger
+equally exact: staging and production use the candidate artifacts with
+`rebuild:false`; every required role is deployed; stale Helm, hotfix, and source
+metadata is truthfully rewritten or cleared; and any rollback target is bound to
+its source, tree, chart, and image digests and independently known safe. These
+provider inventory details remain in operator-controlled evidence rather than
+the sanitized public bundle, but they are mandatory dependencies of acceptance.
 
 Public release is then an explicit dispatch of `.github/workflows/release.yml`
 from a ref pinned to the accepted source SHA. Evidence admission accepts the
@@ -636,9 +721,10 @@ Use this boundary when building a production cluster:
 | TLS | cert-manager, cloud load balancer certificates, or an existing ingress/TLS stack | `ingress.tls` and SSE-safe ingress annotations |
 | Observability | OpenTelemetry Collector/Operator, Prometheus Operator CRDs, or a managed OTLP/Prometheus backend | `/metrics`, OTLP env, `ServiceMonitor`, `PrometheusRule` |
 
-The secret must provide runtime values such as:
+The runtime secret must provide values such as:
 
 - `OPENGENI_DATABASE_URL`
+- `OPENGENI_RUNTIME_DATABASE_ROLE=opengeni_app` for standalone FORCE-RLS deployments (the default)
 - `OPENGENI_TEMPORAL_HOST`
 - `OPENGENI_TEMPORAL_API_KEY` for Temporal Cloud; it enables TLS automatically
 - `OPENGENI_TEMPORAL_TLS_ENABLED=true` for server-auth TLS without an API key
@@ -659,6 +745,10 @@ The secret must provide runtime values such as:
 - sandbox backend credentials when required
 
 Do not commit real secret values.
+
+Keep `OPENGENI_MIGRATIONS_DATABASE_URL` and
+`OPENGENI_APP_DATABASE_PASSWORD` out of the runtime Secret. Put them in a
+separate migration-only Secret referenced by `migrations.secret.existingSecret`.
 
 OpenGeni's storage package intentionally exposes a small provider-neutral boundary instead of calling provider SDKs directly from routes. The current shipped backends are `s3-compatible`, `azure-blob`, `aws-s3`, and `gcs`; sandbox file resources are emitted as native storage mounts when the sandbox backend supports them, or materialized through short-lived signed downloads when a backend cannot mount that provider directly. Additional providers should be added behind the same boundary, or bridged through a library such as `files-sdk` if that becomes the lowest-maintenance adapter layer.
 

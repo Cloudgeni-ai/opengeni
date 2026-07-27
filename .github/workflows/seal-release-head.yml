@@ -16,6 +16,11 @@ on:
         description: Exact admitted pull-request head SHA to retain immutably.
         required: true
         type: string
+      merged_source_sha:
+        description: Optional exact merged source SHA when recovering missing exact-head checks for an already-immutable head.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -47,4 +52,10 @@ jobs:
           RELEASE_HEAD_PR_NUMBER: ${{ inputs.pull_request_number }}
           RELEASE_HEAD_BASE_SHA: ${{ inputs.reviewed_base_sha }}
           RELEASE_HEAD_SHA: ${{ inputs.reviewed_head_sha }}
-        run: node scripts/check-release-pr-automation.mjs seal-release-head
+          RELEASE_HEAD_MERGED_SOURCE_SHA: ${{ inputs.merged_source_sha }}
+        run: |
+          if [ -n "$RELEASE_HEAD_MERGED_SOURCE_SHA" ]; then
+            node scripts/check-release-pr-automation.mjs recover-release-head
+          else
+            node scripts/check-release-pr-automation.mjs seal-release-head
+          fi

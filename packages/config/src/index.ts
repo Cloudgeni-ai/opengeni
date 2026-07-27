@@ -191,6 +191,10 @@ const SettingsSchema = z.object({
   // non-owner `opengeni_app` role. "scoped" = the embedded owner-role path (the
   // GUC is still emitted defensively, so the query path is identical).
   rlsStrategy: z.enum(["force", "scoped"]).default("force"),
+  // Exact PostgreSQL login identity required by the standalone FORCE-RLS
+  // startup/readiness assertion. Embedded `scoped` hosts own their role model
+  // and are deliberately not constrained to this name.
+  runtimeDatabaseRole: z.string().min(1).default("opengeni_app"),
   natsUrl: z.string().default("nats://127.0.0.1:4222"),
   temporalHost: z.string().default("127.0.0.1:7233"),
   temporalNamespace: z.string().default("default"),
@@ -332,6 +336,10 @@ const SettingsSchema = z.object({
   // subscription is injected as a synthetic "codex-subscription" registry
   // provider whose models route through the ChatGPT backend (@opengeni/codex).
   codexSubscriptionEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_SUBSCRIPTION_ENABLED
+  // Expose the connected apps attached to a Codex subscription through the
+  // synthetic codex_apps MCP server. Independent from subscription routing so
+  // operators can use Codex models without exposing ChatGPT connectors.
+  codexConnectedAppsEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_CONNECTED_APPS_ENABLED
   codexProductSku: z.string().optional(), // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
   // Progressive connector disclosure (Codex-CLI-style tool_search): on a codex
   // turn, flag the ~217 codex_apps connector tools `defer_loading:true` (dropping
@@ -1301,6 +1309,7 @@ export function getSettings(): Settings {
     databaseUrl: optional("OPENGENI_DATABASE_URL"),
     dbSchema: optional("OPENGENI_DB_SCHEMA"),
     rlsStrategy: optional("OPENGENI_RLS_STRATEGY"),
+    runtimeDatabaseRole: optional("OPENGENI_RUNTIME_DATABASE_ROLE"),
     natsUrl: optional("OPENGENI_NATS_URL"),
     temporalHost: optional("OPENGENI_TEMPORAL_HOST"),
     temporalNamespace: optional("OPENGENI_TEMPORAL_NAMESPACE"),
@@ -1374,6 +1383,7 @@ export function getSettings(): Settings {
     modelPricingJson: optional("OPENGENI_MODEL_PRICING_JSON"),
     modelProvidersJson: optional("OPENGENI_MODEL_PROVIDERS_JSON"),
     codexSubscriptionEnabled: optional("OPENGENI_CODEX_SUBSCRIPTION_ENABLED"),
+    codexConnectedAppsEnabled: optional("OPENGENI_CODEX_CONNECTED_APPS_ENABLED"),
     codexToolSearchEnabled: optional("OPENGENI_CODEX_TOOL_SEARCH_ENABLED"),
     codexCredentialLeasingEnabled: optional("OPENGENI_CODEX_CREDENTIAL_LEASING_ENABLED"),
     codexFleetPolicyShadowEnabled: optional("OPENGENI_CODEX_FLEET_POLICY_SHADOW_ENABLED"),

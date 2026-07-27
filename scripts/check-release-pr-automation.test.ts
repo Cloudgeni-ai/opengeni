@@ -4,6 +4,7 @@ import { join } from "node:path";
 import {
   RELEASE_AUTOMATION_CONTRACT,
   beginVersionPrChecks,
+  recoverReleaseHeadEvidence,
   sealReleaseHeadEvidence,
   validateVersionPrCiAdmission,
   validateVersionPrDispatch,
@@ -18,6 +19,7 @@ const releaseAutomationPath = join(root, "scripts/check-release-pr-automation.mj
 const baseSha = "b".repeat(40);
 const headSha = "c".repeat(40);
 const mergeSha = "d".repeat(40);
+const currentMainSha = "9".repeat(40);
 const baseTreeSha = "e".repeat(40);
 const headTreeSha = "f".repeat(40);
 const rebasedFirstSha = "a".repeat(40);
@@ -677,6 +679,248 @@ describe("release head evidence retention", () => {
       }),
     ).rejects.toThrow("workflow source SHA differs from its event SHA");
     expect(drift.requests).toHaveLength(0);
+  });
+});
+
+function recoverySealEnv(overrides: Record<string, string> = {}) {
+  return {
+    GITHUB_API_URL: RELEASE_AUTOMATION_CONTRACT.apiUrl,
+    GITHUB_EVENT_NAME: "workflow_dispatch",
+    GITHUB_REF: "refs/heads/main",
+    GITHUB_REPOSITORY: RELEASE_AUTOMATION_CONTRACT.repository,
+    GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
+    GITHUB_SHA: currentMainSha,
+    GITHUB_TOKEN: "fixture-token",
+    GITHUB_RUN_ID: "790",
+    GITHUB_WORKFLOW_REF:
+      `${RELEASE_AUTOMATION_CONTRACT.repository}/` +
+      `${RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath}@refs/heads/main`,
+    GITHUB_WORKFLOW_SHA: currentMainSha,
+    RELEASE_HEAD_PR_NUMBER: String(pullNumber),
+    RELEASE_HEAD_BASE_SHA: baseSha,
+    RELEASE_HEAD_SHA: headSha,
+    RELEASE_HEAD_MERGED_SOURCE_SHA: mergeSha,
+    ...overrides,
+  };
+}
+
+function recoverySealFixture(
+  options: {
+    currentMainContainsSource?: boolean;
+    existingSourceAdmission?: boolean;
+    release?: Record<string, unknown> | null;
+    sourceTreeSha?: string;
+  } = {},
+) {
+  const requests: RequestRecord[] = [];
+  const checks: Array<Record<string, any>> = [];
+  const prefix = `/repos/${RELEASE_AUTOMATION_CONTRACT.repository}`;
+  const releaseTag = `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`;
+  const merger = { login: "merge-maintainer", id: 1234567, type: "User" };
+  let nextCheckId = 900;
+  const mergedPull = {
+    number: pullNumber,
+    html_url:
+      `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+      `/pull/${pullNumber}`,
+    state: "closed",
+    merged: true,
+    merge_commit_sha: mergeSha,
+    merged_at: "2026-07-27T09:00:00Z",
+    draft: false,
+    user: RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+    merged_by: merger,
+    base: {
+      ref: "main",
+      sha: baseSha,
+      repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+    },
+    head: {
+      ref: "changeset-release/main",
+      sha: headSha,
+      repo: { full_name: RELEASE_AUTOMATION_CONTRACT.repository },
+    },
+    commits: 1,
+    changed_files: 1,
+    requested_reviewers: [],
+  };
+  const sourceAdmission = {
+    name: RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    head_sha: headSha,
+    status: "completed",
+    conclusion: "success",
+    app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+  };
+  async function fetchImpl(input: string | URL | Request, init?: RequestInit) {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+    requests.push({ method, path: url.pathname, query: url.searchParams, body });
+    if (method === "POST" && url.pathname === `${prefix}/check-runs`) {
+      const check = {
+        ...body,
+        id: nextCheckId++,
+        app: RELEASE_AUTOMATION_CONTRACT.githubActionsApp,
+      };
+      checks.push(check);
+      return response(check, 201);
+    }
+    const checkMatch = url.pathname.match(new RegExp(`^${prefix}/check-runs/(\\d+)$`));
+    if (method === "PATCH" && checkMatch) {
+      const check = checks.find((candidate) => candidate.id === Number(checkMatch[1]));
+      if (!check) return response({ message: "missing check" }, 404);
+      Object.assign(check, body);
+      return response(check);
+    }
+    if (method !== "GET") return response({ message: "unexpected mutation" }, 405);
+    if (url.pathname === prefix) return response(repository());
+    if (url.pathname === `${prefix}/git/ref/heads/main`) return response(mainRef(currentMainSha));
+    if (url.pathname === `${prefix}/pulls/${pullNumber}`) return response(mergedPull);
+    if (url.pathname === `${prefix}/git/commits/${mergeSha}`)
+      return response({
+        sha: mergeSha,
+        tree: { sha: options.sourceTreeSha ?? headTreeSha },
+        parents: [{ sha: baseSha }, { sha: headSha }],
+      });
+    if (url.pathname === `${prefix}/git/commits/${baseSha}`)
+      return response({
+        sha: baseSha,
+        tree: { sha: baseTreeSha },
+        parents: [{ sha: "1".repeat(40) }],
+      });
+    if (url.pathname === `${prefix}/git/commits/${headSha}`)
+      return response({
+        sha: headSha,
+        tree: { sha: headTreeSha },
+        parents: [{ sha: baseSha }],
+      });
+    if (url.pathname === `${prefix}/issues/${pullNumber}/timeline`)
+      return response([
+        {
+          id: 7002,
+          node_id: "ME_recovery_fixture",
+          url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/issues/events/7002`,
+          event: "merged",
+          actor: merger,
+          commit_id: mergeSha,
+          commit_url: `${RELEASE_AUTOMATION_CONTRACT.apiUrl}${prefix}/commits/${mergeSha}`,
+          created_at: "2026-07-27T09:00:00Z",
+        },
+      ]);
+    if (url.pathname === `${prefix}/compare/${mergeSha}...${currentMainSha}`)
+      return response({
+        status: options.currentMainContainsSource === false ? "diverged" : "ahead",
+        base_commit: { sha: mergeSha },
+        merge_base_commit: {
+          sha: options.currentMainContainsSource === false ? baseSha : mergeSha,
+        },
+        behind_by: options.currentMainContainsSource === false ? 1 : 0,
+        ahead_by: 1,
+      });
+    if (url.pathname === `${prefix}/compare/${baseSha}...${headSha}`)
+      return response({
+        status: "ahead",
+        base_commit: { sha: baseSha },
+        merge_base_commit: { sha: baseSha },
+        behind_by: 0,
+        ahead_by: 1,
+        commits: [{ sha: headSha }],
+      });
+    if (url.pathname === `${prefix}/pulls/${pullNumber}/files`)
+      return response([{ filename: "package.json", status: "modified" }]);
+    if (url.pathname === `${prefix}/git/trees/${baseTreeSha}`)
+      return response({
+        sha: baseTreeSha,
+        truncated: false,
+        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "1".repeat(40) }],
+      });
+    if (url.pathname === `${prefix}/git/trees/${headTreeSha}`)
+      return response({
+        sha: headTreeSha,
+        truncated: false,
+        tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "2".repeat(40) }],
+      });
+    if (url.pathname === `${prefix}/commits/${headSha}/check-runs`) {
+      const checkName = url.searchParams.get("check_name");
+      return response({
+        check_runs: checkName
+          ? checks.filter((check) => check.name === checkName)
+          : [...(options.existingSourceAdmission ? [sourceAdmission] : []), ...checks],
+      });
+    }
+    if (url.pathname === `${prefix}/git/ref/tags/${releaseTag}`)
+      return response({
+        ref: `refs/tags/${releaseTag}`,
+        object: { type: "commit", sha: headSha },
+      });
+    if (url.pathname === `${prefix}/releases/tags/${releaseTag}`)
+      return options.release === null
+        ? response({ message: "missing immutable release" }, 404)
+        : response(options.release ?? releaseHeadRelease());
+    return response({ message: `unexpected GET ${url.pathname}` }, 404);
+  }
+  return { checks, fetchImpl, requests };
+}
+
+describe("release head retention recovery", () => {
+  test("recovers only the missing provider check from an existing immutable merged head", async () => {
+    const fixture = recoverySealFixture();
+    const result = await recoverReleaseHeadEvidence({
+      env: recoverySealEnv(),
+      fetchImpl: fixture.fetchImpl,
+      logger: { log() {} },
+      now: () => new Date("2026-07-27T09:30:00Z"),
+    });
+    expect(result).toMatchObject({
+      prNumber: pullNumber,
+      baseSha,
+      headSha,
+      sourceSha: mergeSha,
+      mergeMethod: "merge",
+      releaseHead: {
+        ref: `refs/tags/${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${headSha}`,
+        sha: headSha,
+      },
+    });
+    expect(fixture.checks).toHaveLength(2);
+    for (const name of [
+      RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+      RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention,
+    ]) {
+      expect(fixture.checks.find((check) => check.name === name)).toMatchObject({
+        name,
+        head_sha: headSha,
+        status: "completed",
+        conclusion: "success",
+      });
+    }
+    expect(
+      fixture.requests.some(
+        (request) =>
+          request.method === "POST" &&
+          (request.path.endsWith("/git/refs") || request.path.endsWith("/releases")),
+      ),
+    ).toBe(false);
+  });
+
+  test("fails closed before check mutation when retained evidence is absent or main lost ancestry", async () => {
+    const missing = recoverySealFixture({ release: null });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: missing.fetchImpl,
+      }),
+    ).rejects.toThrow("failed with HTTP 404");
+    expect(missing.checks).toHaveLength(0);
+
+    const diverged = recoverySealFixture({ currentMainContainsSource: false });
+    await expect(
+      recoverReleaseHeadEvidence({
+        env: recoverySealEnv(),
+        fetchImpl: diverged.fetchImpl,
+      }),
+    ).rejects.toThrow("current main is not ahead of the merged source");
+    expect(diverged.checks).toHaveLength(0);
   });
 });
 
@@ -1498,6 +1742,7 @@ describe("workflow contracts", () => {
       pull_request_number: expect.objectContaining({ required: true }),
       reviewed_base_sha: expect.objectContaining({ required: true }),
       reviewed_head_sha: expect.objectContaining({ required: true }),
+      merged_source_sha: expect.objectContaining({ required: false, default: "" }),
     });
     expect(seal.permissions).toEqual({ contents: "read" });
     expect(seal.jobs.seal.permissions).toEqual({
@@ -1507,6 +1752,7 @@ describe("workflow contracts", () => {
     });
     expect(seal.jobs.seal.if).toBe("${{ github.ref == 'refs/heads/main' }}");
     expect(sealText).toContain("seal-release-head");
+    expect(sealText).toContain("recover-release-head");
     expect(sealText).not.toContain("pull_request_target");
     expect(sealText).not.toContain("pull-requests: write");
     expect(seal.jobs.seal.steps[0].uses).toBe(

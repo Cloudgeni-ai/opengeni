@@ -169,6 +169,16 @@ describe("Temporal connection security", () => {
   });
 });
 
+describe("runtime database role posture", () => {
+  test("defaults to the restricted standalone role and accepts an explicit role", () => {
+    expect(withEnv({}, () => getSettings()).runtimeDatabaseRole).toBe("opengeni_app");
+    expect(
+      withEnv({ OPENGENI_RUNTIME_DATABASE_ROLE: "runtime_test" }, () => getSettings())
+        .runtimeDatabaseRole,
+    ).toBe("runtime_test");
+  });
+});
+
 describe("sandbox preparation profiles", () => {
   test("defaults to no sandbox environment exposure or lifecycle hooks", () => {
     const settings = withEnv({}, () => getSettings());

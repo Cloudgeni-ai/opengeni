@@ -165,6 +165,8 @@ describe("release image workflow contract", () => {
     expect(acceptance).toContain("verify-operator-acceptance-provenance.ts");
     expect(acceptance).toContain("assemble-release-acceptance.ts");
     expect(acceptance).toContain("OPERATOR_ARTIFACT_DIGEST#sha256:");
+    expect(acceptance).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(acceptance).not.toContain('[ "$(git rev-parse origin/main)" = "$SOURCE_SHA" ]');
     expect(acceptance).not.toContain("operator_artifact_url:");
     expect(acceptance).not.toContain("operator_artifact_sha256:");
     expect(acceptance).toContain("release-acceptance-${{ inputs.source_sha }}");

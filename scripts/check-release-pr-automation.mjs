@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { verifySourceAdmission } from "./check-source-admission.mjs";
+import {
+  verifyHistoricalSourceAdmission,
+  verifySourceAdmission,
+} from "./check-source-admission.mjs";
 
 export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   apiUrl: "https://api.github.com",
@@ -677,6 +680,244 @@ function assertOpenReleasePull(pull, context) {
   invariant(pull?.head?.sha === context.headSha, "release-head pull-request head changed");
   assertString(pull?.head?.ref, "release-head pull-request head branch");
   assertString(pull?.head?.repo?.full_name, "release-head pull-request head repository");
+}
+
+function releaseHeadRecoveryContext(env, suppliedInputs) {
+  const github = baseGithubContext(
+    env,
+    RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath,
+    "workflow_dispatch",
+  );
+  requiredEnvironment(env, ["GITHUB_RUN_ID"]);
+  const values = suppliedInputs ?? {
+    prNumber: env.RELEASE_HEAD_PR_NUMBER,
+    baseSha: env.RELEASE_HEAD_BASE_SHA,
+    headSha: env.RELEASE_HEAD_SHA,
+    sourceSha: env.RELEASE_HEAD_MERGED_SOURCE_SHA,
+  };
+  const context = {
+    ...github,
+    prNumber: assertPositiveInteger(values.prNumber, "release-head PR number"),
+    baseSha: assertSha(values.baseSha, "release-head base SHA"),
+    headSha: assertSha(values.headSha, "release-head SHA"),
+    sourceSha: assertSha(values.sourceSha, "release-head merged source SHA"),
+    workflowRunId: assertPositiveInteger(env.GITHUB_RUN_ID, "seal workflow run ID"),
+  };
+  invariant(context.headSha !== context.baseSha, "release head SHA equals its base SHA");
+  invariant(
+    context.sourceSha !== context.baseSha && context.sourceSha !== context.headSha,
+    "merged source SHA is not distinct from the reviewed base and head",
+  );
+  return context;
+}
+
+function assertRecoveryReleasePull(pull, context) {
+  const identity = assertMergedPull(pull, {
+    pullNumber: context.prNumber,
+    sourceSha: context.sourceSha,
+  });
+  invariant(identity.baseSha === context.baseSha, "release-head recovery base SHA changed");
+  invariant(identity.headSha === context.headSha, "release-head recovery head SHA changed");
+  assertIdentity(
+    pull?.user,
+    RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+    "release-head recovery pull-request author",
+  );
+  invariant(
+    pull?.head?.ref === RELEASE_AUTOMATION_CONTRACT.versionBranch &&
+      pull.head.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository,
+    "release-head recovery pull-request head branch changed",
+  );
+  return identity;
+}
+
+async function assertSourceAncestorOfCurrentMain(api, sourceSha, currentMainSha) {
+  if (sourceSha === currentMainSha) return;
+  const comparison = await api.get(repositoryPath(`/compare/${sourceSha}...${currentMainSha}`));
+  invariant(comparison?.status === "ahead", "current main is not ahead of the merged source");
+  invariant(
+    comparison?.base_commit?.sha === sourceSha && comparison?.merge_base_commit?.sha === sourceSha,
+    "current main does not retain the merged source as its exact ancestor",
+  );
+  invariant(comparison?.behind_by === 0, "current main is behind the merged source");
+  invariant(
+    Number.isSafeInteger(comparison?.ahead_by) && comparison.ahead_by > 0,
+    "current main ancestry distance is invalid",
+  );
+}
+
+async function readExistingReleaseHeadEvidence(api, headSha) {
+  const name = releaseHeadTagName(headSha);
+  const ref = `refs/tags/${name}`;
+  const retainedName = assertReleaseHeadRef(
+    await api.get(repositoryPath(`/git/ref/tags/${name}`)),
+    headSha,
+  );
+  const release = assertReleaseHeadRelease(
+    await api.get(repositoryPath(`/releases/tags/${name}`)),
+    headSha,
+  );
+  return {
+    releaseHead: { name: retainedName, ref, sha: headSha },
+    releaseHeadRelease: release,
+  };
+}
+
+export async function recoverReleaseHeadEvidence(options = {}) {
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? console;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const context = releaseHeadRecoveryContext(env, options.inputs);
+  const api = githubClient(fetchImpl, context.token);
+  const [repository, main, pull] = await Promise.all([
+    api.get(repositoryPath("")),
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+  ]);
+  assertRepository(repository);
+  assertMainRef(main, context.sha, "release-head recovery default branch");
+  const pullIdentity = assertRecoveryReleasePull(pull, context);
+  const [source, head, timeline] = await Promise.all([
+    api
+      .get(repositoryPath(`/git/commits/${context.sourceSha}`))
+      .then((value) => assertCommit(value, context.sourceSha, "release-head merged source")),
+    api
+      .get(repositoryPath(`/git/commits/${context.headSha}`))
+      .then((value) => assertCommit(value, context.headSha, "release-head reviewed head")),
+    paginatedArray(
+      api,
+      repositoryPath(`/issues/${context.prNumber}/timeline`),
+      "release-head pull-request timeline",
+    ),
+  ]);
+  invariant(
+    source.treeSha === head.treeSha,
+    "release-head merged source tree differs from the reviewed head",
+  );
+  assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
+  const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
+  await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
+  const historicalAdmission = await verifyHistoricalSourceAdmission({
+    number: context.prNumber,
+    baseSha: context.baseSha,
+    headSha: context.headSha,
+    headRef: pull.head.ref,
+    headRepository: pull.head.repo.full_name,
+    token: context.token,
+    fetchImpl,
+    logger,
+  });
+  const { releaseHead, releaseHeadRelease } = await readExistingReleaseHeadEvidence(
+    api,
+    context.headSha,
+  );
+  const [preMutationMain, preMutationPull, preMutationEvidence] = await Promise.all([
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+    readExistingReleaseHeadEvidence(api, context.headSha),
+  ]);
+  assertMainRef(preMutationMain, context.sha, "pre-mutation release-head recovery default branch");
+  assertRecoveryReleasePull(preMutationPull, context);
+  invariant(
+    JSON.stringify(preMutationEvidence.releaseHead) === JSON.stringify(releaseHead) &&
+      JSON.stringify(preMutationEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    "release head evidence moved before recovery mutation",
+  );
+
+  const now = options.now ?? (() => new Date());
+  const checkContext = { ...context, releaseHeadRelease };
+  const sourceChecks = (await paginatedCheckRuns(api, context.headSha)).filter(
+    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+  );
+  if (sourceChecks.length === 0) {
+    await upsertCheckRun(
+      api,
+      checkContext,
+      "source-admission",
+      {
+        status: "in_progress",
+        title: "Recovering exact historical source admission",
+        summary:
+          `Reconstructing base ${context.baseSha} to head ${context.headSha}; ` +
+          `manifest ${historicalAdmission.manifestSha256}.`,
+      },
+      now,
+    );
+    await upsertCheckRun(
+      api,
+      checkContext,
+      "source-admission",
+      {
+        status: "completed",
+        conclusion: "success",
+        title: "Historical source admission recovered",
+        summary:
+          `PR #${context.prNumber} exact base/head tree delta is provider-complete; ` +
+          `manifest ${historicalAdmission.manifestSha256}.`,
+      },
+      now,
+    );
+  }
+  const sourceAdmission = assertSuccessfulCheck(
+    await paginatedCheckRuns(api, context.headSha),
+    RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    context.headSha,
+  );
+  await upsertCheckRun(
+    api,
+    checkContext,
+    "release-head-retention",
+    {
+      status: "in_progress",
+      title: "Recovering immutable release-head retention evidence",
+      summary:
+        `Recovering the provider check for retained head ${context.headSha} ` +
+        `from merged source ${context.sourceSha}.`,
+    },
+    now,
+  );
+
+  const [terminalMain, terminalPull, terminalEvidence] = await Promise.all([
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+    readExistingReleaseHeadEvidence(api, context.headSha),
+  ]);
+  assertMainRef(terminalMain, context.sha, "terminal release-head recovery default branch");
+  assertRecoveryReleasePull(terminalPull, context);
+  invariant(
+    JSON.stringify(terminalEvidence.releaseHead) === JSON.stringify(releaseHead),
+    "release head ref moved during recovery",
+  );
+  invariant(
+    JSON.stringify(terminalEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    "release head immutable release moved during recovery",
+  );
+  await upsertCheckRun(
+    api,
+    checkContext,
+    "release-head-retention",
+    {
+      status: "completed",
+      conclusion: "success",
+      title: "Release head retention evidence recovered",
+      summary:
+        `PR #${context.prNumber} exact head ${context.headSha} remains retained at ` +
+        `${releaseHead.ref} by immutable prerelease ${releaseHeadRelease.id}; ` +
+        `the accepted merge source is ${context.sourceSha}.`,
+    },
+    now,
+  );
+  logger.log(
+    `Recovered release-head retention check for ${context.headSha} ` +
+      `from merged source ${context.sourceSha}.`,
+  );
+  return {
+    ...context,
+    mergeMethod,
+    sourceAdmission,
+    releaseHead,
+    releaseHeadRelease,
+  };
 }
 
 export async function sealReleaseHeadEvidence(options = {}) {
@@ -1473,6 +1714,19 @@ async function runCommand(env = process.env) {
         release_head_pr_number: result.prNumber,
         release_head_sha: result.headSha,
         release_head_ref: result.releaseHead.ref,
+      },
+      env,
+    );
+    return;
+  }
+  if (command === "recover-release-head") {
+    const result = await recoverReleaseHeadEvidence({ env });
+    writeOutputs(
+      {
+        release_head_pr_number: result.prNumber,
+        release_head_sha: result.headSha,
+        release_head_ref: result.releaseHead.ref,
+        release_head_merged_source_sha: result.sourceSha,
       },
       env,
     );
