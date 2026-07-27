@@ -115,10 +115,10 @@ export function PageHeader(props: {
   return (
     <div className="flex flex-col gap-3 border-b border-border pb-4 lg:flex-row lg:items-center lg:justify-between">
       <div className="min-w-0">
-        <div className="flex items-center gap-2 text-base font-semibold">
+        <h1 className="flex items-center gap-2 text-base font-semibold">
           <span className="text-brand">{props.icon}</span>
           {props.title}
-        </div>
+        </h1>
         <p className="mt-1 text-sm leading-5 text-fg-muted">{props.description}</p>
       </div>
       {props.actions ? (

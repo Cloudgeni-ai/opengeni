@@ -1,4 +1,4 @@
-// The workspace-memory audit pane on the Documents page: humans browse, seed,
+// The first-class workspace-memory surface: humans browse, seed,
 // pin, correct, and hybrid-search the long-lived memory that agents read and
 // write across sessions. It stays usable whether or not the workspace has the
 // memory setting enabled — when disabled it leads with a short explanation and
@@ -23,7 +23,9 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { LoadErrorState } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { ContentSurface, ContentSurfaceHeader } from "@/components/ui/content-layout";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,6 +35,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { MetaChip } from "@/components/ui/meta-chip";
 import { Notice } from "@/components/ui/notice";
+import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { useAppContext } from "@/context";
 import { relativeTimeLabel } from "@/lib/sessions-group";
@@ -77,9 +80,6 @@ const statusFilterOptions: KnowledgeMemoryStatus[] = [
   "archived",
   "superseded",
 ];
-
-const selectClass =
-  "h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]";
 
 /** Pinned first, then most-recently-updated — mirrors the working-set render order. */
 function sortMemories(memories: KnowledgeMemory[]): KnowledgeMemory[] {
@@ -382,44 +382,46 @@ export function MemoryPane({
   );
 
   return (
-    <div className="mt-6 border-t border-[color:var(--color-border)] pt-4">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 text-sm font-medium">
-          <BrainCircuitIcon className="size-4 text-[color:var(--color-brand)]" />
-          Memory
-        </div>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => setAdding((current) => !current)}
-            aria-label="Add memory"
-            title="Add a memory"
-          >
-            <PlusIcon className="size-4" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            onClick={() => void refresh()}
-            disabled={loading}
-            aria-label="Refresh memories"
-            title="Refresh"
-          >
-            {loading ? (
-              <Loader2Icon className="size-4 animate-spin" />
-            ) : (
-              <RefreshCwIcon className="size-4" />
-            )}
-          </Button>
-        </div>
-      </div>
-
-      <p className="mt-1 text-xs leading-5 text-[color:var(--color-fg-muted)]">
-        Durable facts agents carry across sessions in this workspace.
-      </p>
+    <ContentSurface className="mt-5">
+      <ContentSurfaceHeader
+        title={
+          <span className="flex items-center gap-2">
+            <BrainCircuitIcon className="size-4 text-brand" />
+            Working set
+          </span>
+        }
+        description="Durable facts agents carry across sessions in this workspace."
+        actions={
+          <>
+            <Button
+              type="button"
+              size="sm"
+              className="pointer-coarse:min-h-10"
+              onClick={() => setAdding((current) => !current)}
+              aria-expanded={adding}
+              aria-controls="add-memory-form"
+            >
+              <PlusIcon className="size-3.5" />
+              Add memory
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="pointer-coarse:min-h-10"
+              onClick={() => void refresh()}
+              disabled={loading}
+            >
+              {loading ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <RefreshCwIcon className="size-3.5" />
+              )}
+              Refresh
+            </Button>
+          </>
+        }
+      />
 
       {!memoryEnabled ? (
         <Notice
@@ -440,31 +442,36 @@ export function MemoryPane({
       ) : null}
 
       {adding ? (
-        <div className="mt-3 grid gap-2 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3">
+        <div
+          id="add-memory-form"
+          className="mt-4 grid gap-3 rounded-lg border border-border bg-bg/25 p-3"
+        >
           <Textarea
             autoFocus
+            aria-label="Memory text"
             value={draftText}
             onChange={(event) => setDraftText(event.target.value)}
             placeholder="A durable fact, preference, decision, or procedure for this workspace"
             className="min-h-20 text-xs"
           />
-          <div className="grid grid-cols-[1fr_auto_auto] gap-2">
-            <select
+          <div className="grid gap-2 sm:grid-cols-[minmax(10rem,1fr)_auto_auto]">
+            <Select
+              aria-label="Memory kind"
               value={draftKind}
               onChange={(event) => setDraftKind(event.target.value as KnowledgeMemoryKind)}
-              className={selectClass}
+              className="h-9 text-xs pointer-coarse:min-h-10"
             >
               {kindFilterOptions.map((kind) => (
                 <option key={kind} value={kind}>
                   {KIND_LABEL[kind]}
                 </option>
               ))}
-            </select>
+            </Select>
             <Button
               type="button"
               variant="ghost"
               size="sm"
-              className="h-8"
+              className="h-8 pointer-coarse:min-h-10"
               onClick={() => {
                 setAdding(false);
                 setDraftText("");
@@ -475,7 +482,7 @@ export function MemoryPane({
             <Button
               type="button"
               size="sm"
-              className="h-8"
+              className="h-8 pointer-coarse:min-h-10"
               disabled={creating || !draftText.trim()}
               onClick={() => void handleCreate()}
             >
@@ -490,12 +497,13 @@ export function MemoryPane({
         </div>
       ) : null}
 
-      <div className="mt-3 flex gap-2">
+      <div className="mt-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
         <Input
+          aria-label="Search memory"
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           placeholder="Search memory"
-          className="h-8 text-xs"
+          className="h-9 min-w-0 text-xs pointer-coarse:min-h-10"
           onKeyDown={(event) => {
             if (event.key === "Enter") void handleSearch();
           }}
@@ -503,7 +511,7 @@ export function MemoryPane({
         <Button
           type="button"
           size="sm"
-          className="h-8 shrink-0"
+          className="h-9 pointer-coarse:min-h-10"
           disabled={searching || !query.trim()}
           onClick={() => void handleSearch()}
         >
@@ -574,22 +582,24 @@ export function MemoryPane({
         </div>
       ) : (
         <>
-          <div className="mt-3 grid grid-cols-2 gap-2">
-            <select
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            <Select
+              aria-label="Memory status"
               value={statusFilter}
               onChange={(event) => setStatusFilter(event.target.value as KnowledgeMemoryStatus)}
-              className={selectClass}
+              className="h-9 text-xs pointer-coarse:min-h-10"
             >
               {statusFilterOptions.map((status) => (
                 <option key={status} value={status}>
                   {STATUS_LABEL[status]}
                 </option>
               ))}
-            </select>
-            <select
+            </Select>
+            <Select
+              aria-label="Memory kind filter"
               value={kindFilter}
               onChange={(event) => setKindFilter(event.target.value as KnowledgeMemoryKind | "")}
-              className={selectClass}
+              className="h-9 text-xs pointer-coarse:min-h-10"
             >
               <option value="">All kinds</option>
               {kindFilterOptions.map((kind) => (
@@ -597,7 +607,7 @@ export function MemoryPane({
                   {KIND_LABEL[kind]}
                 </option>
               ))}
-            </select>
+            </Select>
           </div>
 
           <div className="mt-3 space-y-2">
@@ -612,22 +622,11 @@ export function MemoryPane({
                     render — so a deep-linked record (injected even when the
                     browse list fails) still mounts, scrolls, and highlights. */}
                 {error ? (
-                  <Notice
-                    tone="failed"
+                  <LoadErrorState
                     title="Couldn't load memory"
-                    action={
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="xs"
-                        onClick={() => void refresh()}
-                      >
-                        Retry
-                      </Button>
-                    }
-                  >
-                    {error.message}
-                  </Notice>
+                    error={error}
+                    onRetry={() => void refresh()}
+                  />
                 ) : null}
                 {memories.length > 0 ? (
                   memories.map(renderMemoryCard)
@@ -643,7 +642,7 @@ export function MemoryPane({
           </div>
         </>
       )}
-    </div>
+    </ContentSurface>
   );
 }
 
@@ -676,6 +675,8 @@ function MemoryCard(props: {
   return (
     <div
       ref={props.innerRef}
+      data-memory-id={memory.id}
+      data-highlighted={props.highlighted ? "true" : undefined}
       className={cn(
         "scroll-mt-4 rounded-lg border border-[color:var(--color-border)] bg-[color:var(--color-surface)]/35 p-3 transition-shadow duration-300",
         faded && "opacity-70",
@@ -683,8 +684,8 @@ function MemoryCard(props: {
           "ring-2 ring-[color:var(--color-brand)] ring-offset-2 ring-offset-[color:var(--color-bg)]",
       )}
     >
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           {memory.pinned ? (
             <PinIcon className="size-3 shrink-0 text-[color:var(--color-brand)]" />
           ) : null}
@@ -706,7 +707,13 @@ function MemoryCard(props: {
           ) : !editing ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button type="button" variant="ghost" size="icon-xs" aria-label="Memory actions">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  className="pointer-coarse:size-10"
+                  aria-label="Memory actions"
+                >
                   <MoreHorizontalIcon className="size-3.5" />
                 </Button>
               </DropdownMenuTrigger>
@@ -751,6 +758,7 @@ function MemoryCard(props: {
       {editing ? (
         <div className="mt-2 grid gap-2">
           <Textarea
+            aria-label="Edit memory text"
             value={props.editText}
             onChange={(event) => props.onEditTextChange(event.target.value)}
             className="min-h-20 text-xs"
@@ -772,7 +780,7 @@ function MemoryCard(props: {
           </div>
         </div>
       ) : (
-        <p className="mt-2 whitespace-pre-wrap text-xs leading-5 text-[color:var(--color-fg-muted)]">
+        <p className="mt-2 whitespace-pre-wrap break-words [overflow-wrap:anywhere] text-xs leading-5 text-[color:var(--color-fg-muted)]">
           {memory.text}
         </p>
       )}
@@ -802,7 +810,7 @@ function MemoryCard(props: {
             type="button"
             size="sm"
             variant="secondary"
-            className="h-7 flex-1"
+            className="h-7 flex-1 pointer-coarse:min-h-10"
             disabled={busy}
             onClick={props.onApprove}
           >
@@ -813,7 +821,7 @@ function MemoryCard(props: {
             type="button"
             size="sm"
             variant="ghost"
-            className="h-7 flex-1"
+            className="h-7 flex-1 pointer-coarse:min-h-10"
             disabled={busy}
             onClick={props.onReject}
           >
