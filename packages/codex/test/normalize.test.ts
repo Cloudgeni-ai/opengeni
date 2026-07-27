@@ -172,6 +172,24 @@ describe("normalizeCodexRequestBody", () => {
     expect(tools.map((t) => t.name)).toEqual(["keep_me", "keep_me_too"]);
   });
 
+  test("preserves the provider-native web_search tool while dropping hosted MCP", () => {
+    const webSearch = {
+      type: "web_search",
+      search_context_size: "medium",
+    };
+    const body = normalizeCodexRequestBody(
+      {
+        tools: [
+          webSearch,
+          { type: "mcp", server_label: "unsupported", server_url: "https://example.com/mcp" },
+        ],
+      },
+      identity,
+    );
+
+    expect(body.tools).toEqual([webSearch]);
+  });
+
   test("applies the model resolver to body.model", () => {
     const body = normalizeCodexRequestBody(
       { model: "gpt-5.2-codex-high" },

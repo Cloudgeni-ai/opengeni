@@ -252,6 +252,28 @@ describe("OpenGeniClient", () => {
     });
   });
 
+  test("opts an existing session back in to workspace-default tools", async () => {
+    const response = {
+      id: SESSION_ID,
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+      toolPolicyVersion: 4,
+    } as unknown as Session;
+    const { client, requests } = makeClient(() => jsonResponse(response));
+
+    expect(
+      await client.updateSessionToolPolicy(WORKSPACE_ID, SESSION_ID, {
+        mode: "workspace_default",
+        expectedVersion: 3,
+      }),
+    ).toEqual(response);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]!.method).toBe("PUT");
+    expect(JSON.parse(requests[0]!.body!)).toEqual({
+      mode: "workspace_default",
+      expectedVersion: 3,
+    });
+  });
+
   test("listEventPage round-trips monitoring filters and exact page headers", async () => {
     const event = makeEvent(42, "turn.completed", { result: "authoritative" });
     const body = JSON.stringify([event]);

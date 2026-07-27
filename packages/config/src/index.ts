@@ -2040,6 +2040,11 @@ export function withCodexCatalogProvider(settings: Settings): Settings {
       upstreamModelId: slug,
       label: slug,
       reasoningEffort: true,
+      // The ChatGPT/Codex Responses backend accepts the native web_search
+      // hosted tool (unlike hosted apply_patch/computer transports). Declaring
+      // this here makes provider resolution truthful; the worker still applies
+      // the durable session/turn policy gate before attaching it.
+      hostedWebSearch: true,
       contextWindowTokens: CODEX_MODEL_CONTEXT_WINDOW_TOKENS,
       effectiveContextWindowTokens: CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS,
       autoCompactTokenLimit: CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,

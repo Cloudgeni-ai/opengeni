@@ -3134,11 +3134,27 @@ export const UpdateSessionRequest = z.object({
 });
 export type UpdateSessionRequest = z.infer<typeof UpdateSessionRequest>;
 
-/** Replace an existing session's durable MCP tool policy. */
-export const UpdateSessionToolPolicyRequest = z.object({
-  tools: z.array(ToolRef).max(64),
-  expectedVersion: z.number().int().positive(),
-});
+/**
+ * Replace an existing session's durable tool policy, or explicitly opt back in
+ * to the current workspace defaults. The mode-less explicit shape is retained
+ * for compatibility with clients released before workspace-default adoption
+ * was supported.
+ */
+export const UpdateSessionToolPolicyRequest = z.union([
+  z
+    .object({
+      mode: z.literal("workspace_default"),
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      mode: z.literal("explicit").optional(),
+      tools: z.array(ToolRef).max(64),
+      expectedVersion: z.number().int().positive(),
+    })
+    .strict(),
+]);
 export type UpdateSessionToolPolicyRequest = z.infer<typeof UpdateSessionToolPolicyRequest>;
 
 /**
