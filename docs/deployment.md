@@ -222,6 +222,14 @@ provider response must identify the GitHub Actions bot as author and report the
 published prerelease as `immutable: true`, or sealing fails closed. GitHub then
 locks the tag and emits its native release attestation.
 
+If a seal creates and publishes that immutable tag/release but is interrupted
+before its retention check completes, dispatch the same workflow from current
+`main` with `merged_source_sha` set to the exact accepted PR merge source. This
+is recovery, not a late seal: it refuses to create either retained artifact and
+only backfills the check after proving the original PR base/head/merge and tree,
+the successful source-admission check, the unchanged GitHub Actions-owned
+immutable release, and the merged source's ancestry into current `main`.
+
 Before the first seal, a repository administrator must enable the provider
 feature with the API version that introduced its management endpoint:
 
