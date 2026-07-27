@@ -131,12 +131,13 @@ describe("release schema contract", () => {
         (migrations.has("0120_durable_goal_wake.sql") ? 1 : 0) +
         (migrations.has("0121_goal_update_idempotency.sql") ? 1 : 0) +
         (migrations.has("0122_codex_capacity_same_turn.sql") ? 1 : 0) +
-        (migrations.has("0123_session_tool_policy_version.sql") ? 1 : 0),
+        (migrations.has("0123_session_tool_policy_version.sql") ? 1 : 0) +
+        (migrations.has("0124_session_event_duplicate_lookup.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "462ac183560fbea0afd625cd11fdd3e8e6d488437c4844d6281455265b957026",
+      "07738b1c68e7acc8030fc53e9334e7aab5e7abdda0ba54560c78d162eb2b25b4",
     );
-    expect(contract.latestMigration).toBe("0123_session_tool_policy_version.sql");
+    expect(contract.latestMigration).toBe("0124_session_event_duplicate_lookup.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
       deploymentMode: "maintenance",
@@ -162,7 +163,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-3])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-4])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -175,6 +176,7 @@ describe("release schema contract", () => {
       "0121_goal_update_idempotency.sql",
       "0122_codex_capacity_same_turn.sql",
       "0123_session_tool_policy_version.sql",
+      "0124_session_event_duplicate_lookup.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -225,6 +227,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0123_session_tool_policy_version.sql")).toMatchObject({
       sha256: "d23abd0ea9ac21c114a397eaa2a6a524652b9554683dd8e68937ee232e22711e",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0124_session_event_duplicate_lookup.sql")).toMatchObject({
+      sha256: "115dbd71c528c78d340cf3be476f2973db273740e8bcbf47196da96c2d9f94c1",
       deploymentMode: "rolling",
     });
   });

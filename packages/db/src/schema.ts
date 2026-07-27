@@ -2122,6 +2122,7 @@ export const sessionEvents = pgTable(
       .where(
         sql`${table.type} not in ('agent.message.delta', 'agent.reasoning.delta', 'sandbox.command.output.delta', 'terminal.pty.output.delta')`,
       ),
+    duplicateOfEvent: index("session_events_duplicate_of_event_idx").on(table.duplicateOfEventId),
     payloadBytes: check(
       "session_events_payload_bytes_check",
       sql`octet_length(${table.payload}::text) <= 65536`,
