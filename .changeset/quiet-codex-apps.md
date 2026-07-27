@@ -1,5 +1,6 @@
 ---
 "@opengeni/config": patch
+"@opengeni/db": patch
 "@opengeni/worker-bundle": patch
 ---
 
