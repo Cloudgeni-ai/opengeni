@@ -72,6 +72,34 @@ describe("verified workspace archives", () => {
     expect(fake.counts()).toEqual({ probes: 2, captures: 1 });
   });
 
+  test("accepts Modal execCommand output wrapped in the provider response banner", async () => {
+    const line = fingerprintLine(stableTree);
+    let probes = 0;
+    const session = {
+      async execCommand() {
+        probes += 1;
+        return [
+          "Chunk ID: abc123",
+          "Wall time: 0.2 seconds",
+          "Process exited with code 0",
+          "Final output:",
+          "",
+          "Output:",
+          line,
+          "",
+        ].join("\n");
+      },
+      async persistWorkspace() {
+        return new TextEncoder().encode("modal-workspace-archive");
+      },
+    };
+
+    const verified = await captureVerifiedWorkspaceArchive(session, 1_900_000_000_004);
+
+    expect(verified.descriptor.workspace).toEqual(stableTree);
+    expect(probes).toBe(2);
+  });
+
   test("a workspace mutation during capture rejects the candidate revision", async () => {
     const changedTree: WorkspaceTreeFingerprint = {
       ...stableTree,

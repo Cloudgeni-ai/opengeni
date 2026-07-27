@@ -151,7 +151,10 @@ export function readVerifiedWorkspaceArchive(
 }
 
 function stdoutFromExecResult(value: unknown): string {
-  if (typeof value === "string") return value;
+  if (typeof value === "string") {
+    const delimiter = /\r?\nOutput:\r?\n/u.exec(value);
+    return delimiter ? value.slice(delimiter.index + delimiter[0].length) : value;
+  }
   if (!value || typeof value !== "object") return "";
   const output = value as { stdout?: unknown; output?: unknown };
   return typeof output.stdout === "string"
