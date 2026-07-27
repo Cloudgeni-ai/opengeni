@@ -51,7 +51,7 @@ output "aks_control_plane_principal_id" {
 
 output "aks_kubelet_object_id" {
   description = "AKS kubelet identity object id. Use this to grant AcrPull when Terraform cannot manage role assignments."
-  value       = azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id
+  value       = try(azurerm_kubernetes_cluster.this.kubelet_identity[0].object_id, null)
 }
 
 output "aks_egress_public_ip" {
