@@ -6,7 +6,7 @@
 //        turn's EFFECTIVE backend is a connected machine, and STILL mints for cloud.
 //   (D1) establishSelfhostedTurnSession binds the live machine session DIRECTLY —
 //        no Modal box, env threaded into the manifest (env-parity), agent id + cwd
-//        bound — so a machine-primary turn never establishes/leases a phantom box.
+//        bound — so a machine-primary turn never establishes or leases a phantom box.
 //   (warm-rate) the warm meter, keyed off the EFFECTIVE backend, accrues ZERO
 //        cost for selfhosted even when a cloud rate is configured (the money bug).
 
