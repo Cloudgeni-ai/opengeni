@@ -31,6 +31,7 @@ import {
   getScheduledTask,
   getSessionGoal,
   getWorkspaceEnvironmentValuesForRun,
+  grantWorkspaceAccess,
   listGitHubInstallationAccessForWorkspace,
   initializeSessionStartAtomically,
   listSessionEvents,
@@ -63,7 +64,6 @@ import {
 } from "@opengeni/contracts";
 import { createApp, type SessionWorkflowClient } from "../../apps/api/src/app";
 import { buildOpenGeniMcpServer } from "../../apps/api/src/mcp/server";
-import { buildDocumentsMcpServer } from "../../apps/api/src/mcp/documents";
 import {
   settingsWithCodexCredential,
   settingsWithEnabledCapabilityMcpServers,
@@ -84,7 +84,7 @@ import {
   createDocumentServices,
   DEFAULT_DOCUMENT_EMBEDDING_DIMENSIONS,
   DEFAULT_DOCUMENT_EMBEDDING_MODEL,
-  getDocument,
+  getDocumentChunk,
   searchDocuments,
 } from "../../packages/documents/src";
 import { submitTestHumanPrompt } from "./helpers/session-control";
@@ -5744,6 +5744,245 @@ describe("API component integration", () => {
     expect(noTargetMove.status).toBe(422);
   });
 
+  test("serializes concurrent first knowledge drops into one Default base", async () => {
+    const app = createApp({
+      settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const workspaceId = await defaultWorkspaceId(app);
+    const responses = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        app.request(workspacePath(workspaceId, "/knowledge/drops"), {
+          method: "POST",
+          body: JSON.stringify({
+            text: `Concurrent knowledge note ${index}\n\nThis drop must share one deterministic Default base.`,
+          }),
+          headers: { "content-type": "application/json" },
+        }),
+      ),
+    );
+    expect(responses.map((response) => response.status)).toEqual(Array(6).fill(201));
+    const documents = (await Promise.all(responses.map((response) => response.json()))) as Array<{
+      id: string;
+      baseId: string;
+    }>;
+    expect(new Set(documents.map((document) => document.baseId)).size).toBe(1);
+
+    const bases = (await (
+      await app.request(workspacePath(workspaceId, "/document-bases"))
+    ).json()) as Array<{ id: string; name: string }>;
+    const defaultBases = bases.filter((base) => base.name.trim().toLowerCase() === "default");
+    expect(defaultBases).toHaveLength(1);
+    expect(documents[0]?.baseId).toBe(defaultBases[0]?.id);
+    const listed = (await (
+      await app.request(
+        workspacePath(workspaceId, `/document-bases/${defaultBases[0]!.id}/documents`),
+      )
+    ).json()) as Array<{ id: string }>;
+    expect(listed.map((document) => document.id).sort()).toEqual(
+      documents.map((document) => document.id).sort(),
+    );
+  });
+
+  test("enforces subject-aware privacy across REST, search, agent retrieval, and re-add", async () => {
+    const delegationSecret = "test-delegation-secret";
+    const app = createApp({
+      settings: {
+        ...objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
+        productAccessMode: "configured",
+        delegationSecret,
+      },
+      db: dbClient.db,
+      bus: new MemoryEventBus(),
+      workflowClient: new FakeWorkflowClient(),
+    });
+    const owner = await bootstrapWorkspace(dbClient.db, {
+      accountExternalSource: "test:documents-subjects",
+      accountExternalId: crypto.randomUUID(),
+      accountName: "Document subjects",
+      workspaceExternalSource: "test:documents-subjects",
+      workspaceExternalId: crypto.randomUUID(),
+      workspaceName: "Document subject workspace",
+      subjectId: `test:document-owner:${crypto.randomUUID()}`,
+      subjectLabel: "Document owner",
+    });
+    const ownerGrant = owner.workspaceGrants[0]!;
+    const otherSubject = `test:document-other:${crypto.randomUUID()}`;
+    await grantWorkspaceAccess(dbClient.db, {
+      accountId: ownerGrant.accountId,
+      workspaceId: ownerGrant.workspaceId,
+      subjectId: otherSubject,
+      subjectLabel: "Other subject",
+      permissions: allWorkspacePermissions,
+    });
+    const ownerHeaders = {
+      authorization: await signDelegatedBearer(delegationSecret, ownerGrant, {
+        subjectId: ownerGrant.subjectId,
+        permissions: allWorkspacePermissions,
+      }),
+    };
+    const otherHeaders = {
+      authorization: await signDelegatedBearer(delegationSecret, ownerGrant, {
+        subjectId: otherSubject,
+        permissions: allWorkspacePermissions,
+      }),
+    };
+    const path = (suffix: string) => workspacePath(ownerGrant.workspaceId, suffix);
+
+    const dropResponse = await app.request(path("/knowledge/drops"), {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        text: "Subject-only contract details must never cross the grant boundary.",
+        title: "Subject-only contract",
+        visibility: "private",
+        agentAccess: true,
+      }),
+    });
+    expect(dropResponse.status).toBe(201);
+    const drop = (await dropResponse.json()) as {
+      id: string;
+      baseId: string;
+      fileId: string;
+      status: string;
+      visibility: string;
+      agentAccess: boolean;
+    };
+    expect(drop).toMatchObject({ visibility: "private", agentAccess: true, status: "ready" });
+
+    const ownerList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      headers: ownerHeaders,
+    });
+    expect(ownerList.status).toBe(200);
+    expect((await ownerList.json()) as Array<{ id: string }>).toEqual([
+      expect.objectContaining({ id: drop.id }),
+    ]);
+    const otherList = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      headers: otherHeaders,
+    });
+    expect(otherList.status).toBe(200);
+    expect(await otherList.json()).toEqual([]);
+
+    const ownerSearch = await app.request(path("/knowledge/search"), {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ query: "contract details", mode: "keyword" }),
+    });
+    expect(ownerSearch.status).toBe(200);
+    const ownerResults = (await ownerSearch.json()) as {
+      results: Array<{ documentId: string; chunkId: string }>;
+    };
+    expect(ownerResults.results.map((result) => result.documentId)).toContain(drop.id);
+    const otherSearch = await app.request(path("/knowledge/search"), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ query: "contract details", mode: "keyword" }),
+    });
+    expect(otherSearch.status).toBe(200);
+    expect(await otherSearch.json()).toEqual({ results: [] });
+
+    const ownerAgentResults = await searchDocuments(dbClient.db, {
+      workspaceId: ownerGrant.workspaceId,
+      query: "contract details",
+      mode: "keyword",
+      access: { agentOnly: true, viewerSubjectId: ownerGrant.subjectId },
+    });
+    expect(ownerAgentResults.map((result) => result.documentId)).toContain(drop.id);
+    const otherAgentResults = await searchDocuments(dbClient.db, {
+      workspaceId: ownerGrant.workspaceId,
+      query: "contract details",
+      mode: "keyword",
+      access: { agentOnly: true, viewerSubjectId: otherSubject },
+    });
+    expect(otherAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
+    const anonymousAgentResults = await searchDocuments(dbClient.db, {
+      workspaceId: ownerGrant.workspaceId,
+      query: "contract details",
+      mode: "keyword",
+      access: { agentOnly: true },
+    });
+    expect(anonymousAgentResults.map((result) => result.documentId)).not.toContain(drop.id);
+    const chunkId = ownerAgentResults.find((result) => result.documentId === drop.id)?.chunkId;
+    expect(chunkId).toBeTruthy();
+    await expect(
+      getDocumentChunk(dbClient.db, ownerGrant.workspaceId, chunkId!, {
+        agentOnly: true,
+        viewerSubjectId: ownerGrant.subjectId,
+      }),
+    ).resolves.toMatchObject({ documentId: drop.id });
+    await expect(
+      getDocumentChunk(dbClient.db, ownerGrant.workspaceId, chunkId!, {
+        agentOnly: true,
+        viewerSubjectId: otherSubject,
+      }),
+    ).resolves.toBeNull();
+
+    const otherReadd = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        fileId: drop.fileId,
+        visibility: "workspace",
+        agentAccess: false,
+        title: "forged re-add",
+      }),
+    });
+    expect(otherReadd.status).toBe(404);
+
+    const ownerReadd = await app.request(path(`/document-bases/${drop.baseId}/documents`), {
+      method: "POST",
+      headers: { ...ownerHeaders, "content-type": "application/json" },
+      body: JSON.stringify({
+        fileId: drop.fileId,
+        visibility: "workspace",
+        agentAccess: false,
+        title: "owner metadata refresh",
+      }),
+    });
+    expect(ownerReadd.status).toBe(200);
+    expect(await ownerReadd.json()).toMatchObject({
+      id: drop.id,
+      title: "owner metadata refresh",
+      visibility: "private",
+      agentAccess: true,
+    });
+
+    await dbClient.db.execute(dbSql`
+      update documents
+      set status = 'failed', error = 'subject-aware retry fixture', updated_at = now()
+      where workspace_id = ${ownerGrant.workspaceId} and id = ${drop.id}
+    `);
+    const otherReindex = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}/reindex`),
+      { method: "POST", headers: otherHeaders },
+    );
+    expect(otherReindex.status).toBe(404);
+    const ownerReindex = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}/reindex`),
+      { method: "POST", headers: ownerHeaders },
+    );
+    expect(ownerReindex.status).toBe(200);
+
+    const otherMove = await app.request(path(`/documents/${drop.id}/move`), {
+      method: "POST",
+      headers: { ...otherHeaders, "content-type": "application/json" },
+      body: JSON.stringify({ targetBaseId: drop.baseId }),
+    });
+    expect(otherMove.status).toBe(404);
+    const otherDelete = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}`),
+      { method: "DELETE", headers: otherHeaders },
+    );
+    expect(otherDelete.status).toBe(404);
+    const ownerDelete = await app.request(
+      path(`/document-bases/${drop.baseId}/documents/${drop.id}`),
+      { method: "DELETE", headers: ownerHeaders },
+    );
+    expect(ownerDelete.status).toBe(204);
+  });
+
   test("keeps provider=none drops uncured instead of applying heuristic fallback", async () => {
     const app = createApp({
       settings: {
@@ -5773,7 +6012,6 @@ describe("API component integration", () => {
       sourceKind: "manual_upload",
     });
   });
-
 
   test("reindex returns queued document state when production indexer enqueues async work", async () => {
     let indexCalls = 0;

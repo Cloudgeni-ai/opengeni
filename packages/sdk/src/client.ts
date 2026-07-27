@@ -2175,8 +2175,9 @@ export class OpenGeniClient {
 
   /**
    * Drop raw text or an already-uploaded file into the workspace's Default
-   * base. Auto-curation names, summarizes, categorizes, and (confidence
-   * permitting) files the document into the best-matching base.
+   * base. When curation is enabled, it may name, summarize, categorize, and
+   * (confidence permitting) file the document into the best-matching base;
+   * provider=none leaves caller metadata and Default placement unchanged.
    */
   async createKnowledgeDrop(
     workspaceId: string,

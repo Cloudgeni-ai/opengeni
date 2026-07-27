@@ -3,6 +3,7 @@ import {
   DeterministicEmbeddingProvider,
   HeuristicCurationProvider,
   RecursiveTextChunker,
+  canViewDocument,
   chunkText,
   deterministicEmbedding,
   documentOpenAIEmbeddingConfig,
@@ -12,6 +13,14 @@ import {
 } from "../src";
 
 describe("documents", () => {
+  test("fails closed for private documents without the creating subject", () => {
+    const document = { visibility: "private", createdBy: "subject:owner" } as const;
+    expect(canViewDocument(document, undefined)).toBe(false);
+    expect(canViewDocument(document, "subject:other")).toBe(false);
+    expect(canViewDocument(document, "subject:owner")).toBe(true);
+    expect(canViewDocument({ visibility: "workspace", createdBy: null }, undefined)).toBe(true);
+  });
+
   test("parses uploaded text bytes into normalized document text", async () => {
     const parsed = await parseDocumentBytes(new TextEncoder().encode("  hello\0 world  "), {
       id: "file-1",

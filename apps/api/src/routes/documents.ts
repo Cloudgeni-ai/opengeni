@@ -273,7 +273,8 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
 
   // Knowledge drop: raw text or an uploaded file, no metadata required. Lands
   // in the workspace Default base with curationStatus 'pending'; indexing then
-  // names, summarizes, categorizes, and (confidence permitting) auto-files it.
+  // applies the configured curation provider, or leaves it as 'none' when
+  // curation is disabled.
   app.post("/v1/workspaces/:workspaceId/knowledge/drops", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "documents:manage");

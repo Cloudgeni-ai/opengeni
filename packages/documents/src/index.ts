@@ -32,10 +32,9 @@ export const DOCUMENT_CURATION_MAX_INPUT_CHARS = 24_000;
 // confidence; below it the suggestion is surfaced for human review instead.
 export const DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE = 0.75;
 // The per-workspace default base: where knowledge drops land (created on
-// first drop) and stay unless auto-curation files them into a topical base.
+// first drop) and stay unless configured curation files them into a topical base.
 export const DEFAULT_BASE_NAME = "Default";
-export const DEFAULT_BASE_DESCRIPTION =
-  "Default base for dropped files and notes; auto-curation files them into topical bases from here.";
+export const DEFAULT_BASE_DESCRIPTION = "Default base for dropped files and notes.";
 
 export type ParsedDocument = {
   text: string;
@@ -599,7 +598,7 @@ export async function getDocumentBase(
 
 /**
  * Find-or-create the workspace's Default base — where knowledge drops land
- * before auto-curation files them elsewhere. Matched by name
+ * before configured curation files them elsewhere. Matched by name
  * (case-insensitive) so a user-created "Default" is adopted rather than
  * duplicated.
  */
@@ -664,7 +663,7 @@ export async function addDocumentToBase(
       const base = await getDocumentBase(scopedDb, input.workspaceId, input.baseId);
       if (!base) throw new Error(`Document base not found: ${input.baseId}`);
       const file = await requireReadyFile(scopedDb, input.workspaceId, input.fileId);
-      if (input.visibility === "private" && !input.createdBy) {
+      if (input.visibility === "private" && !cleanString(input.createdBy ?? null)) {
         throw new Error("private documents require a creating subject");
       }
       const now = new Date();
@@ -707,6 +706,7 @@ export async function addDocumentToBase(
             and(
               eq(schema.documents.workspaceId, input.workspaceId),
               eq(schema.documents.id, existing.id),
+              ...documentAccessConditions(input.access),
             ),
           )
           .returning();
@@ -813,18 +813,21 @@ export async function moveDocumentToBase(
             and(
               eq(schema.documents.workspaceId, input.workspaceId),
               eq(schema.documents.id, input.documentId),
+              ...documentAccessConditions(input.access),
             ),
           )
           .returning();
-        await tx
-          .update(schema.documentChunks)
-          .set({ baseId: targetBaseId })
-          .where(
-            and(
-              eq(schema.documentChunks.workspaceId, input.workspaceId),
-              eq(schema.documentChunks.documentId, input.documentId),
-            ),
-          );
+        if (updated) {
+          await tx
+            .update(schema.documentChunks)
+            .set({ baseId: targetBaseId })
+            .where(
+              and(
+                eq(schema.documentChunks.workspaceId, input.workspaceId),
+                eq(schema.documentChunks.documentId, input.documentId),
+              ),
+            );
+        }
         return updated;
       });
       if (!moved) throw new Error(`Document not found: ${input.documentId}`);
@@ -870,6 +873,7 @@ export async function deleteDocumentFromBase(
           and(
             eq(schema.documents.workspaceId, input.workspaceId),
             eq(schema.documents.id, input.documentId),
+            ...documentAccessConditions(input.access),
           ),
         );
     },
@@ -986,10 +990,10 @@ export async function indexDocumentNow(
   try {
     const bytes = await objectStorage.getFileBytes(file);
     const parsed = await services.parser.parse(bytes, file);
-    // Knowledge drops (curationStatus 'pending') get named/summarized/filed
-    // between parse and chunking, so chunk metadata and the base placement
-    // reflect the curated truth. Fail-soft: a curation error never blocks
-    // indexing — the heuristic fallback still names and summarizes the drop.
+    // Knowledge drops (curationStatus 'pending') are curated between parse and
+    // chunking when a provider is enabled, so chunk metadata and base placement
+    // reflect the curated truth. Disabled curation leaves caller metadata intact;
+    // enabled-provider failures remain fail-soft through the heuristic fallback.
     if (document.curationStatus === "pending") {
       document = await curateDroppedDocument(db, services, document, parsed, file);
     }
@@ -1088,7 +1092,12 @@ export async function indexDocumentNow(
     if (!failed) throw error;
     return mapDocument(failed);
   }
-  const updated = await getDocument(db, workspaceId, documentId);
+  // Internal indexing must be able to return a private document to the caller
+  // that created/queued it. Public reads remain fail-closed when no subject is
+  // supplied; the creator subject is the document's frozen access principal.
+  const updated = await getDocument(db, workspaceId, documentId, {
+    viewerSubjectId: document.createdBy,
+  });
   if (!updated) throw new Error(`Document disappeared after indexing: ${documentId}`);
   return updated;
 }
@@ -1420,10 +1429,7 @@ function documentAccessConditions(access: DocumentAccessFilter | undefined): SQL
   if (access?.agentOnly) {
     const viewer = access.viewerSubjectId;
     const visibility = viewer
-      ? or(
-          eq(schema.documents.visibility, "workspace"),
-          eq(schema.documents.createdBy, viewer),
-        )
+      ? or(eq(schema.documents.visibility, "workspace"), eq(schema.documents.createdBy, viewer))
       : eq(schema.documents.visibility, "workspace");
     return [eq(schema.documents.agentAccess, true), ...(visibility ? [visibility] : [])];
   }
@@ -1439,7 +1445,7 @@ function documentAccessConditions(access: DocumentAccessFilter | undefined): SQL
 }
 
 function documentMatchesAccess(
-  document: Pick<Document, "visibility" | "createdBy" | "agentAccess">,
+  document: Pick<DocumentAccessRecord, "visibility" | "createdBy" | "agentAccess">,
   access: DocumentAccessFilter | undefined,
 ): boolean {
   if (access?.agentOnly) {
@@ -1454,7 +1460,7 @@ function documentMatchesAccess(
 
 /** Whether a single already-fetched document is readable by this human viewer. */
 export function canViewDocument(
-  document: Pick<Document, "visibility" | "createdBy">,
+  document: Pick<DocumentAccessRecord, "visibility" | "createdBy">,
   viewerSubjectId: string | null | undefined,
 ): boolean {
   return (
@@ -1462,6 +1468,12 @@ export function canViewDocument(
     (!!viewerSubjectId && document.createdBy === viewerSubjectId)
   );
 }
+
+type DocumentAccessRecord = {
+  visibility: string;
+  createdBy: string | null;
+  agentAccess: boolean;
+};
 
 function documentSearchConditions(input: DocumentSearchInput, embeddingModel?: string): SQL[] {
   const conditions: SQL[] = [

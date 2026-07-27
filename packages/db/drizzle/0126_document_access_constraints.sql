@@ -1,12 +1,10 @@
 -- deployment-mode: rolling
 -- Document access and knowledge-drop state hardening.
 --
--- The partial unique index is the database serialization point for concurrent
--- first knowledge drops. It deliberately covers only the reserved Default
--- base; users may still create separately named bases with their own naming
--- policy. Existing raced Default rows are consolidated before the index is
--- created, preserving one document per file where the retained base already
--- has the same file.
+-- Existing raced Default rows are consolidated before the unique index is
+-- installed by the following concurrent migration. This migration also
+-- repairs legacy document state before adding validated checks, so an upgrade
+-- cannot strand an otherwise readable database behind an invalid old value.
 
 DO $$
 DECLARE
@@ -59,9 +57,29 @@ BEGIN
 END
 $$;
 
-CREATE UNIQUE INDEX IF NOT EXISTS "document_bases_workspace_default_name_uq"
-  ON "document_bases" ("workspace_id")
-  WHERE lower(btrim("name")) = 'default';
+-- Rows written before these fields were governed may contain values outside
+-- the new state machine. Preserve the document and its retrieval posture while
+-- normalizing only states that have no safe interpretation.
+UPDATE "documents"
+SET "visibility" = 'workspace'
+WHERE "visibility" IS NULL OR "visibility" NOT IN ('workspace', 'private');
+
+UPDATE "documents"
+SET "visibility" = 'workspace', "created_by" = NULL
+WHERE "visibility" = 'private' AND NULLIF(btrim("created_by"), '') IS NULL;
+
+UPDATE "documents"
+SET "curation_status" = 'none'
+WHERE "curation_status" IS NULL
+   OR "curation_status" NOT IN ('none', 'pending', 'suggested', 'auto_filed', 'failed');
+
+UPDATE "documents"
+SET "topics" = '[]'::jsonb
+WHERE "topics" IS NULL OR jsonb_typeof("topics") <> 'array';
+
+UPDATE "documents"
+SET "curation" = NULL
+WHERE "curation" IS NOT NULL AND jsonb_typeof("curation") <> 'object';
 
 DO $$
 BEGIN
@@ -90,7 +108,7 @@ BEGIN
   ) THEN
     ALTER TABLE "documents"
       ADD CONSTRAINT "documents_private_creator_chk"
-      CHECK ("visibility" <> 'private' OR "created_by" IS NOT NULL) NOT VALID;
+      CHECK ("visibility" <> 'private' OR NULLIF(btrim("created_by"), '') IS NOT NULL) NOT VALID;
   END IF;
   IF NOT EXISTS (
     SELECT 1 FROM pg_constraint

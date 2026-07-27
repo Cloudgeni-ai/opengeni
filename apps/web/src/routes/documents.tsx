@@ -251,7 +251,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       });
       setDropText("");
       toast.success("Dropped into knowledge", {
-        description: "Auto-curation is naming, summarizing, and filing it.",
+        description: dropResultDescription(document),
       });
       await finishDrop(document);
     } catch (error) {
@@ -283,7 +283,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       toast.success(
         files.length === 1 ? "Dropped into knowledge" : `${files.length} files dropped`,
         {
-          description: "Auto-curation is naming, summarizing, and filing them.",
+          description: last ? dropResultDescription(last) : "The files were added to Default.",
         },
       );
       if (last) await finishDrop(last);
@@ -440,7 +440,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             <SparklesIcon className="size-4 text-brand" />
             Drop anything
             <span className="text-2xs font-normal text-fg-subtle">
-              Auto-curation names, summarizes, and files it for you.
+              Drops start in Default; enabled curation may name, summarize, and file them.
             </span>
           </div>
           <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
@@ -461,7 +461,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                 className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
               >
                 <option value="workspace">Everyone in workspace</option>
-                <option value="private">Only me</option>
+                <option value="private">Private — creator subject only</option>
               </select>
               <label className="flex items-center gap-2 text-xs text-fg-muted">
                 <input
@@ -470,7 +470,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                   onChange={(event) => setDropAgentAccess(event.target.checked)}
                   disabled={dropping}
                 />
-                Agents can read it
+                Subject-aware agents can read it
               </label>
               <div className="flex gap-2">
                 <input
@@ -680,7 +680,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                       className="h-8 text-xs pointer-coarse:min-h-10"
                     >
                       <option value="workspace">Everyone in workspace</option>
-                      <option value="private">Only me</option>
+                      <option value="private">Private — creator subject only</option>
                     </Select>
                   </FormField>
                   <FormField label="Agent access">
@@ -689,7 +689,7 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                       onChange={(event) => setUploadAgentAccess(event.target.value === "on")}
                       className="h-8 text-xs pointer-coarse:min-h-10"
                     >
-                      <option value="on">Agents can read</option>
+                      <option value="on">Subject-aware agents can read</option>
                       <option value="off">Agents blocked</option>
                     </Select>
                   </FormField>
@@ -781,15 +781,19 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                             {document.visibility === "private" ? (
                               <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
                                 <LockIcon className="size-3" />
-                                only me
+                                creator subject only
                               </span>
                             ) : null}
-                            {document.agentAccess === false ? (
-                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                              {document.agentAccess === false ? (
                                 <BotOffIcon className="size-3" />
-                                agents blocked
-                              </span>
-                            ) : null}
+                              ) : null}
+                              {document.agentAccess
+                                ? document.visibility === "private"
+                                  ? "creator's subject-aware agent can read"
+                                  : "subject-aware agents can read"
+                                : "agents blocked"}
+                            </span>
                             {document.curationStatus === "auto_filed" ? (
                               <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
                                 <SparklesIcon className="size-3" />
@@ -1010,6 +1014,21 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       </section>
     </ContentPage>
   );
+}
+
+function dropResultDescription(document: Pick<IndexedDocument, "curationStatus">): string {
+  switch (document.curationStatus) {
+    case "none":
+      return "Curation is disabled; the document stays in Default with its supplied metadata.";
+    case "pending":
+      return "The document was added to Default; curation is still processing.";
+    case "suggested":
+      return "Curation suggested a destination; review the suggestion below.";
+    case "auto_filed":
+      return "Curation named, summarized, and filed the document automatically.";
+    case "failed":
+      return "Curation failed softly; the document remains searchable with safe fallback metadata.";
+  }
 }
 
 function documentStatusTone(status: IndexedDocument["status"]): StatusTone {

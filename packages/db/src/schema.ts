@@ -1237,12 +1237,9 @@ export const documents = pgTable(
     ),
     privateCreator: check(
       "documents_private_creator_chk",
-      sql`${table.visibility} <> 'private' or ${table.createdBy} is not null`,
+      sql`${table.visibility} <> 'private' or nullif(btrim(${table.createdBy}), '') is not null`,
     ),
-    topicsArray: check(
-      "documents_topics_array_chk",
-      sql`jsonb_typeof(${table.topics}) = 'array'`,
-    ),
+    topicsArray: check("documents_topics_array_chk", sql`jsonb_typeof(${table.topics}) = 'array'`),
     curationObject: check(
       "documents_curation_object_chk",
       sql`${table.curation} is null or jsonb_typeof(${table.curation}) = 'object'`,
