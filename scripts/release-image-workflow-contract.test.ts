@@ -122,6 +122,11 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain(
       'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
     );
+    expect(finalJob).toContain('chart_pull_oci="${chart_oci}/opengeni"');
+    expect(finalJob).toContain('helm pull "$chart_pull_oci"');
+    expect(finalJob).toContain(
+      'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
+    );
     expect(finalJob).toContain("for attempt in $(seq 1 10)");
     expect(finalJob).toContain(
       'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
@@ -195,6 +200,11 @@ describe("release image workflow contract", () => {
     expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
     expect(release).toContain(
       'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(release).toContain('chart_pull_oci="${chart_oci}/opengeni"');
+    expect(release).toContain('helm pull "$chart_pull_oci"');
+    expect(release).toContain(
+      'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
     );
     expect(release).toContain("for attempt in $(seq 1 10)");
     expect(release).toContain(

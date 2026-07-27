@@ -606,9 +606,10 @@ jobs:
           mkdir -p .release/chart-pull
           chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
+          chart_pull_oci="${chart_oci}/opengeni"
           resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$resolved_manifest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-            helm pull "$chart_oci" \
+            helm pull "$chart_pull_oci" \
               --version "$RELEASE_VERSION" \
               --destination .release/chart-pull
             cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz" || {
@@ -634,7 +635,7 @@ jobs:
           fi
           rm -rf .release/chart-pull
           mkdir -p .release/chart-pull
-          helm pull "$chart_oci" \
+          helm pull "$chart_pull_oci" \
             --version "$RELEASE_VERSION" \
             --destination .release/chart-pull
           cmp "$chart_path" ".release/chart-pull/opengeni-${RELEASE_VERSION}.tgz"
@@ -749,7 +750,7 @@ jobs:
           done
           helm registry logout "$REGISTRY"
           mkdir -p .release/anonymous-chart
-          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni" \
+          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni" \
             --version "$RELEASE_VERSION" \
             --destination .release/anonymous-chart
           cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \

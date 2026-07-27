@@ -226,11 +226,12 @@ jobs:
           set -euo pipefail
           chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
+          chart_pull_oci="${chart_oci}/opengeni"
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           resolved="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [ -n "$resolved" ]; then
             mkdir -p .release/chart-preflight
-            helm pull "$chart_oci" \
+            helm pull "$chart_pull_oci" \
               --version "$RELEASE_VERSION" \
               --destination .release/chart-preflight
             cmp "$chart_path" ".release/chart-preflight/opengeni-${RELEASE_VERSION}.tgz" || {
@@ -293,13 +294,14 @@ jobs:
           set -euo pipefail
           chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_oci="oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni"
+          chart_pull_oci="${chart_oci}/opengeni"
           chart_path=".release/opengeni-${RELEASE_VERSION}.tgz"
           expected_bytes="$(jq -er .chart.bytesSha256 evidence/release-candidate.json)"
           printf '%s  %s\n' "$expected_bytes" "$chart_path" | sha256sum --check --strict -
           resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [ -n "$resolved_manifest" ]; then
             mkdir -p .release/chart-reconcile
-            helm pull "$chart_oci" \
+            helm pull "$chart_pull_oci" \
               --version "$RELEASE_VERSION" \
               --destination .release/chart-reconcile
             cmp "$chart_path" ".release/chart-reconcile/opengeni-${RELEASE_VERSION}.tgz"
@@ -441,7 +443,7 @@ jobs:
           done
           helm registry logout "$REGISTRY"
           mkdir -p .release/anonymous-chart
-          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni" \
+          helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni" \
             --version "$RELEASE_VERSION" \
             --destination .release/anonymous-chart
           cmp ".release/opengeni-${RELEASE_VERSION}.tgz" \
