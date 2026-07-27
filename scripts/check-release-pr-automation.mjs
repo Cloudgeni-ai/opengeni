@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { verifySourceAdmission } from "./check-source-admission.mjs";
+import {
+  verifyHistoricalSourceAdmission,
+  verifySourceAdmission,
+} from "./check-source-admission.mjs";
 
 export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   apiUrl: "https://api.github.com",
@@ -794,18 +797,72 @@ export async function recoverReleaseHeadEvidence(options = {}) {
   assertProviderMergeEvent(timeline, context.sourceSha, pullIdentity);
   const mergeMethod = await classifyMergeOutcome(api, source, pullIdentity);
   await assertSourceAncestorOfCurrentMain(api, context.sourceSha, context.sha);
+  const historicalAdmission = await verifyHistoricalSourceAdmission({
+    number: context.prNumber,
+    baseSha: context.baseSha,
+    headSha: context.headSha,
+    headRef: pull.head.ref,
+    headRepository: pull.head.repo.full_name,
+    token: context.token,
+    fetchImpl,
+    logger,
+  });
+  const { releaseHead, releaseHeadRelease } = await readExistingReleaseHeadEvidence(
+    api,
+    context.headSha,
+  );
+  const [preMutationMain, preMutationPull, preMutationEvidence] = await Promise.all([
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+    readExistingReleaseHeadEvidence(api, context.headSha),
+  ]);
+  assertMainRef(preMutationMain, context.sha, "pre-mutation release-head recovery default branch");
+  assertRecoveryReleasePull(preMutationPull, context);
+  invariant(
+    JSON.stringify(preMutationEvidence.releaseHead) === JSON.stringify(releaseHead) &&
+      JSON.stringify(preMutationEvidence.releaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    "release head evidence moved before recovery mutation",
+  );
+
+  const now = options.now ?? (() => new Date());
+  const checkContext = { ...context, releaseHeadRelease };
+  const sourceChecks = (await paginatedCheckRuns(api, context.headSha)).filter(
+    (check) => check?.name === RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+  );
+  if (sourceChecks.length === 0) {
+    await upsertCheckRun(
+      api,
+      checkContext,
+      "source-admission",
+      {
+        status: "in_progress",
+        title: "Recovering exact historical source admission",
+        summary:
+          `Reconstructing base ${context.baseSha} to head ${context.headSha}; ` +
+          `manifest ${historicalAdmission.manifestSha256}.`,
+      },
+      now,
+    );
+    await upsertCheckRun(
+      api,
+      checkContext,
+      "source-admission",
+      {
+        status: "completed",
+        conclusion: "success",
+        title: "Historical source admission recovered",
+        summary:
+          `PR #${context.prNumber} exact base/head tree delta is provider-complete; ` +
+          `manifest ${historicalAdmission.manifestSha256}.`,
+      },
+      now,
+    );
+  }
   const sourceAdmission = assertSuccessfulCheck(
     await paginatedCheckRuns(api, context.headSha),
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
     context.headSha,
   );
-  const { releaseHead, releaseHeadRelease } = await readExistingReleaseHeadEvidence(
-    api,
-    context.headSha,
-  );
-
-  const now = options.now ?? (() => new Date());
-  const checkContext = { ...context, releaseHeadRelease };
   await upsertCheckRun(
     api,
     checkContext,
