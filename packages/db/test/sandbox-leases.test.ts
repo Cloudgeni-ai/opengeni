@@ -7,6 +7,7 @@ import {
   commitWarmingToWarm,
   confirmDrainCold,
   createDb,
+  failSandboxRematerialization,
   failWarmingToCold,
   getMaterializedSandboxFileResources,
   heartbeatLeaseHolder,
@@ -592,6 +593,102 @@ describe("0017 sandbox lease state machine (real packages/db + RLS)", () => {
       leaseTtlMs: 45_000,
     });
     expect(late.recorded).toBe(false);
+  }, 60_000);
+
+  test("(1b-4) a retryable degraded restore can elect one new rematerialization attempt", async () => {
+    if (!available) return;
+    const { accountId, workspaceId, groupId } = await freshWorkspace();
+    const archive = Buffer.from("retryable-restore-archive").toString("base64");
+    const archiveHash = "a".repeat(64);
+    const descriptor = {
+      version: 1 as const,
+      revision: `wa1:1900000003000:${archiveHash}`,
+      archiveSha256: archiveHash,
+      archiveBytes: Buffer.from(archive, "base64").length,
+      capturedAt: "2030-03-17T17:46:43.000Z",
+      workspace: {
+        algorithm: "sha256" as const,
+        sha256: "b".repeat(64),
+        entryCount: 3,
+        fileCount: 2,
+        totalFileBytes: 41,
+      },
+    };
+    const first = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "first-restore",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(first.role).toBe("spawner");
+    const firstAttempt = crypto.randomUUID();
+    const begun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: first.lease.leaseEpoch,
+      rematerializationId: firstAttempt,
+      archiveSource: {
+        backendId: "modal",
+        sessionState: { workspaceArchive: archive, workspaceArchiveMeta: descriptor },
+      },
+    });
+    expect(begun.status).toBe("started");
+
+    const failed = await failSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: first.lease.leaseEpoch,
+      rematerializationId: firstAttempt,
+      failureCode: "workspace_fingerprint_unavailable",
+      retryable: true,
+    });
+    expect(failed.failed).toBe(true);
+    expect(failed.lease).toMatchObject({
+      liveness: "cold",
+      recovery: {
+        archive: { status: "available", current: { revision: descriptor.revision } },
+        restore: {
+          status: "degraded",
+          failureCode: "workspace_fingerprint_unavailable",
+          retryable: true,
+        },
+      },
+    });
+
+    const successor = await acquireLease(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      kind: "turn",
+      holderId: "second-restore",
+      backend: "modal",
+      leaseTtlMs: 45_000,
+    });
+    expect(successor.role).toBe("spawner");
+    expect(successor.lease.leaseEpoch).toBe(first.lease.leaseEpoch + 1);
+
+    const successorAttempt = crypto.randomUUID();
+    const successorBegun = await beginSandboxRematerialization(db, {
+      accountId,
+      workspaceId,
+      sandboxGroupId: groupId,
+      expectedEpoch: successor.lease.leaseEpoch,
+      rematerializationId: successorAttempt,
+    });
+    expect(successorBegun.status).toBe("started");
+    if (successorBegun.status === "started") {
+      expect(successorBegun.lease.recovery.restore).toMatchObject({
+        status: "restoring",
+        rematerializationId: successorAttempt,
+        selectedRevision: descriptor.revision,
+      });
+      expect(successorBegun.lease.archiveComplete).toBe(true);
+    }
   }, 60_000);
 
   test("(1d) invalidated warming epochs fence a late create and its cleanup from a successor", async () => {
