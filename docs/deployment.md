@@ -385,8 +385,23 @@ head remains on `main`, resolves exactly one unexpired source-SHA-named artifact
 and its provider digest, and accepts only the two expected sanitized files.
 OpenGeni then replaces all operator-supplied candidate/public-producer authority
 with its independently verified candidate and current acceptance-run metadata
-before validating every schema-v2 row. No dispatcher can select an evidence
-URL, hash, repository, workflow path, or artifact name.
+before validating every schema-v2 row. The canary row is bound to the same
+source tree, exact chart bytes, and complete API/migration/worker/web/relay/
+sandbox digest map as candidate, staging, and production; a source-only canary
+claim fails closed. Acceptance requires the accepted source to remain an
+ancestor of current `main`, but does not require it to remain the current tip:
+compatible reviewed work can continue to merge during the canary window without
+freezing `main` or invalidating an otherwise unchanged proven train. No
+dispatcher can select an evidence URL, hash, repository, workflow path, or
+artifact name.
+
+Cloud-hosted operators must keep the corresponding private release ledger
+equally exact: staging and production use the candidate artifacts with
+`rebuild:false`; every required role is deployed; stale Helm, hotfix, and source
+metadata is truthfully rewritten or cleared; and any rollback target is bound to
+its source, tree, chart, and image digests and independently known safe. These
+provider inventory details remain in operator-controlled evidence rather than
+the sanitized public bundle, but they are mandatory dependencies of acceptance.
 
 Public release is then an explicit dispatch of `.github/workflows/release.yml`
 from a ref pinned to the accepted source SHA. Evidence admission accepts the
