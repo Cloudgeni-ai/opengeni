@@ -1,5 +1,11 @@
 # @opengeni/runtime
 
+## 0.13.5
+
+### Patch Changes
+
+- d03ee4b: Correct the Terraform Stack troubleshooting example to use a portable placeholder for an absolute module path.
+
 ## 0.13.4
 
 ### Patch Changes
