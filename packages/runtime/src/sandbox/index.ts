@@ -379,6 +379,7 @@ export {
   type DefaultBackendLossResult,
   type RoutableBackendSession,
   type ResolvedActiveBackend,
+  type RoutingMutationSettlementResult,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessAdoption,
   type RoutingRetainedProcessTerminalProof,

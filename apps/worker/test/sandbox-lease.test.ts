@@ -40,12 +40,15 @@ import {
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
   listLiveModalSandboxLeaseAttributions,
+  markWarmLeaseInstanceLost,
   persistDrainSnapshot,
   persistWarmSnapshot,
   readWorkspaceArchiveCapturePreflight,
   recordWarmingSandboxCreated,
   readLease,
+  reconcileColdLostLeaseInstanceBlockers,
   retainWorkspaceMutationProcess,
+  SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
   touchLeaseHolder,
@@ -1165,8 +1168,14 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         },
       });
     const stale = await promote().catch((error) => error);
+    expect(stale).toBeInstanceOf(SandboxRetainedProcessPromotionFencedError);
     expect(stale).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((stale as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
+    expect((stale as SandboxRetainedProcessPromotionFencedError).process).toMatchObject({
+      id: processId,
+      providerSessionId: 41,
+      state: "active",
+    });
 
     const retained = await admin<
       {
@@ -1208,6 +1217,7 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     ).toBeNull();
 
     const replay = await promote().catch((error) => error);
+    expect(replay).toBeInstanceOf(SandboxRetainedProcessPromotionFencedError);
     expect(replay).toBeInstanceOf(SandboxWorkspaceMutationFencedError);
     expect((replay as SandboxWorkspaceMutationFencedError).code).toBe("route_fenced");
     const [afterReplay] = await admin<{ count: number; startedAt: Date }[]>`
@@ -1249,6 +1259,439 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
         liveness: "warm",
       }),
     ).toMatchObject({ workspaceGeneration: admission.workspaceGeneration });
+  }, 60_000);
+
+  test("(1b-provider-loss) exact provider loss closes only matching process/admission/PTY blockers", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const lostEpoch = 20;
+    const lostInstanceId = "box-provider-loss";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: lostEpoch,
+      expiresInMs: 600_000,
+      instanceId: lostInstanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: lostInstanceId } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+
+    const promote = async (operation: string, providerSessionId: number) => {
+      const admission = await advanceWorkspaceGeneration(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        ...attempt,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: lostEpoch,
+        expectedInstanceId: lostInstanceId,
+        operation,
+      });
+      const processId = crypto.randomUUID();
+      await retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: attempt.sessionId,
+        processId,
+        providerSessionId,
+        admissionId: admission.id,
+        admittedWorkspaceGeneration: admission.workspaceGeneration,
+        operation,
+        owner: {
+          kind: "turn",
+          turnId: attempt.turnId,
+          executionGeneration: attempt.executionGeneration,
+          attemptId: attempt.attemptId,
+          holderId: attempt.holderId,
+          sandboxGroupId: ids.groupId,
+          expectedEpoch: lostEpoch,
+          expectedInstanceId: lostInstanceId,
+          routeKind: admission.routeKind,
+          routeTargetId: admission.routeTargetId,
+          routeEpoch: admission.routeEpoch,
+        },
+      });
+      return { admission, processId, providerSessionId };
+    };
+
+    const terminal = await promote("terminalBeforeProviderLoss", 51);
+    await settleRetainedProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId: terminal.processId,
+      outcome: "exited",
+      exitCode: 0,
+      reason: "provider exited before instance loss",
+      idleGraceMs: REAPER_SETTINGS.sandboxIdleGraceMs,
+    });
+    const active = await promote("activeAtProviderLoss", 52);
+    const orphan = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: lostEpoch,
+      expectedInstanceId: lostInstanceId,
+      operation: "orphanAtProviderLoss",
+    });
+
+    const ptyId = crypto.randomUUID();
+    await admin`
+      insert into sandbox_pty_sessions (
+        id, account_id, workspace_id, session_id, lease_id, sandbox_group_id,
+        retained_process_id, open_admission_id, exec_session_id, lease_epoch,
+        provider_backend, provider_instance_id, route_kind, route_target_id,
+        route_epoch, cols, rows, shell, cwd, status, opened_by
+      ) values (
+        ${ptyId}, ${ids.accountId}, ${ids.workspaceId}, ${attempt.sessionId},
+        ${leaseId}, ${ids.groupId}, ${active.processId}, ${active.admission.id},
+        ${active.providerSessionId}, ${lostEpoch}, 'modal', ${lostInstanceId},
+        ${active.admission.routeKind}, ${active.admission.routeTargetId},
+        ${active.admission.routeEpoch}, 120, 40, '/bin/bash', '/workspace',
+        'open', 'provider-loss-test'
+      )`;
+
+    // A deliberately impossible future-provider row proves the cleanup predicate
+    // never broadens from the exact lost identity. It remains a blocker for an
+    // independent reconciliation rather than being forged terminal here.
+    const unrelatedAdmissionId = crypto.randomUUID();
+    const unrelatedProcessId = crypto.randomUUID();
+    const unrelatedHolderId = `process:${unrelatedProcessId}`;
+    await admin`
+      update sandbox_leases set workspace_generation = workspace_generation + 1
+      where id = ${leaseId}`;
+    const [generation] = await admin<{ workspaceGeneration: number }[]>`
+      select workspace_generation as "workspaceGeneration" from sandbox_leases where id = ${leaseId}`;
+    await admin`
+      insert into sandbox_workspace_mutation_admissions (
+        id, account_id, workspace_id, lease_id, sandbox_group_id, session_id,
+        actor_kind, actor_id, turn_id, attempt_id, execution_generation,
+        holder_kind, holder_id, lease_epoch, provider_backend,
+        provider_instance_id, route_kind, route_target_id, route_epoch,
+        workspace_generation, operation, provider_outcome
+      ) values (
+        ${unrelatedAdmissionId}, ${ids.accountId}, ${ids.workspaceId}, ${leaseId},
+        ${ids.groupId}, ${attempt.sessionId}, 'turn', ${attempt.attemptId},
+        ${attempt.turnId}, ${attempt.attemptId}, ${attempt.executionGeneration},
+        'turn', ${attempt.holderId}, ${lostEpoch + 1}, 'modal', 'future-provider',
+        'home', null, 0, ${generation!.workspaceGeneration},
+        'futureProviderProcess', 'retained'
+      )`;
+    await admin`
+      insert into sandbox_lease_holders (
+        account_id, workspace_id, lease_id, kind, holder_id, subject_id
+      ) values (
+        ${ids.accountId}, ${ids.workspaceId}, ${leaseId}, 'process',
+        ${unrelatedHolderId}, ${attempt.sessionId}
+      )`;
+    await admin`
+      insert into sandbox_retained_processes (
+        id, account_id, workspace_id, session_id, lease_id, sandbox_group_id,
+        parent_admission_id, holder_id, owner_actor_kind, owner_actor_id,
+        owner_turn_id, owner_attempt_id, owner_execution_generation, lease_epoch,
+        provider_backend, provider_instance_id, route_kind, route_target_id,
+        route_epoch, provider_session_id, state
+      ) values (
+        ${unrelatedProcessId}, ${ids.accountId}, ${ids.workspaceId},
+        ${attempt.sessionId}, ${leaseId}, ${ids.groupId}, ${unrelatedAdmissionId},
+        ${unrelatedHolderId}, 'turn', ${attempt.attemptId}, ${attempt.turnId},
+        ${attempt.attemptId}, ${attempt.executionGeneration}, ${lostEpoch + 1},
+        'modal', 'future-provider', 'home', null, 0, 53, 'active'
+      )`;
+    await admin`
+      update sandbox_leases set refcount = refcount + 1 where id = ${leaseId}`;
+
+    const pendingLoss: { value?: ReturnType<typeof markWarmLeaseInstanceLost> } = {};
+    await admin.begin(async (tx) => {
+      const [locker] = await tx<{ pid: number }[]>`
+        select pg_backend_pid()::integer as pid`;
+      await tx`
+        select id from sandbox_retained_processes
+        where id = ${active.processId}
+        for update`;
+      pendingLoss.value = markWarmLeaseInstanceLost(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: lostEpoch,
+        expectedInstanceId: lostInstanceId,
+        diagnostic: "provider_not_found_test",
+      });
+
+      // Wait until loss cleanup is physically blocked on the process row held
+      // above. It must not hold the lease while waiting: ordinary process
+      // settlement takes process -> admission -> lease, and the reverse order
+      // creates a deterministic deadlock cycle.
+      let processWaitObserved = false;
+      for (let pollIndex = 0; pollIndex < 200; pollIndex += 1) {
+        const [state] = await admin<{ blocked: boolean }[]>`
+          select exists (
+            select 1 from pg_stat_activity
+            where ${locker!.pid} = any(pg_blocking_pids(pid))
+              and wait_event_type = 'Lock'
+              and query ilike '%sandbox_retained_processes%'
+          ) as blocked`;
+        if (state?.blocked) {
+          processWaitObserved = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(processWaitObserved).toBe(true);
+      await tx`set local lock_timeout = '5s'`;
+      await tx`select id from sandbox_leases where id = ${leaseId} for update`;
+    });
+    const loss = await pendingLoss.value!;
+    expect(loss.status).toBe("marked");
+    if (loss.status !== "marked") throw new Error("Expected exact provider loss to win");
+    expect(loss.settlement).toEqual({
+      processesLost: 1,
+      admissionsRejected: 2,
+      ptysClosed: 1,
+      processHoldersDeleted: 1,
+    });
+    expect(loss.lease).toMatchObject({
+      liveness: "cold",
+      leaseEpoch: lostEpoch + 1,
+      refcount: 2,
+      turnHolders: 1,
+      viewerHolders: 0,
+      archiveComplete: false,
+    });
+
+    const processes = await admin<
+      { id: string; state: string; reason: string | null; exitCode: number | null }[]
+    >`
+      select id, state, settlement_reason as reason, exit_code as "exitCode"
+      from sandbox_retained_processes
+      where lease_id = ${leaseId} order by provider_session_id`;
+    expect(processes).toEqual([
+      {
+        id: terminal.processId,
+        state: "exited",
+        reason: "provider exited before instance loss",
+        exitCode: 0,
+      },
+      {
+        id: active.processId,
+        state: "lost",
+        reason: "provider_instance_lost",
+        exitCode: null,
+      },
+      { id: unrelatedProcessId, state: "active", reason: null, exitCode: null },
+    ]);
+    const admissions = await admin<{ id: string; outcome: string | null; settled: boolean }[]>`
+      select id, provider_outcome as outcome, settled_at is not null as settled
+      from sandbox_workspace_mutation_admissions
+      where id in (${active.admission.id}, ${orphan.id}, ${unrelatedAdmissionId})
+      order by workspace_generation`;
+    expect(admissions).toEqual([
+      { id: active.admission.id, outcome: "rejected", settled: true },
+      { id: orphan.id, outcome: "rejected", settled: true },
+      { id: unrelatedAdmissionId, outcome: "retained", settled: false },
+    ]);
+    const [pty] = await admin<{ status: string; closedAt: Date | null }[]>`
+      select status, closed_at as "closedAt" from sandbox_pty_sessions where id = ${ptyId}`;
+    expect(pty?.status).toBe("closed");
+    expect(pty?.closedAt).toBeInstanceOf(Date);
+    const holders = await admin<{ holderId: string }[]>`
+      select holder_id as "holderId" from sandbox_lease_holders
+      where lease_id = ${leaseId} and kind = 'process' order by holder_id`;
+    expect(holders).toEqual([{ holderId: unrelatedHolderId }]);
+
+    const duplicate = await markWarmLeaseInstanceLost(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: lostEpoch,
+      expectedInstanceId: lostInstanceId,
+    });
+    expect(duplicate.status).toBe("stale");
+  }, 60_000);
+
+  test("(1b-cold-loss-reconcile) pre-fix cold loss requires the exact observed tuple and preserves archive truth", async () => {
+    if (!available) return;
+    const ids = await freshWorkspace();
+    const attempt = await freshWarmSnapshotAttempt(ids);
+    ids.groupId = attempt.sandboxGroupId;
+    const lostEpoch = 30;
+    const currentEpoch = 31;
+    const lostInstanceId = "box-pre-fix-cold-loss";
+    const leaseId = await insertLease(ids, {
+      liveness: "warm",
+      refcount: 1,
+      turnHolders: 1,
+      leaseEpoch: lostEpoch,
+      expiresInMs: 600_000,
+      instanceId: lostInstanceId,
+      backend: "modal",
+      resumeBackendId: "modal",
+      resumeState: {
+        backendId: "modal",
+        sessionState: { providerState: { sandboxId: lostInstanceId } },
+      },
+    });
+    await insertHolder(ids, leaseId, "turn", attempt.holderId, 0, attempt.sessionId);
+    const admission = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: lostEpoch,
+      expectedInstanceId: lostInstanceId,
+      operation: "preFixRetainedProcess",
+    });
+    const processId = crypto.randomUUID();
+    await retainWorkspaceMutationProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+      providerSessionId: 61,
+      admissionId: admission.id,
+      admittedWorkspaceGeneration: admission.workspaceGeneration,
+      operation: "preFixRetainedProcess",
+      owner: {
+        kind: "turn",
+        turnId: attempt.turnId,
+        executionGeneration: attempt.executionGeneration,
+        attemptId: attempt.attemptId,
+        holderId: attempt.holderId,
+        sandboxGroupId: ids.groupId,
+        expectedEpoch: lostEpoch,
+        expectedInstanceId: lostInstanceId,
+        routeKind: admission.routeKind,
+        routeTargetId: admission.routeTargetId,
+        routeEpoch: admission.routeEpoch,
+      },
+    });
+    const orphan = await advanceWorkspaceGeneration(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      ...attempt,
+      sandboxGroupId: ids.groupId,
+      expectedEpoch: lostEpoch,
+      expectedInstanceId: lostInstanceId,
+      operation: "preFixOrphanAdmission",
+    });
+    const observedAt = new Date().toISOString();
+    const recovery = {
+      provider: {
+        status: "missing",
+        instanceId: lostInstanceId,
+        observedAt,
+        diagnostic: "pre_fix_provider_loss",
+      },
+      archive: { status: "none", current: null, previous: null },
+      restore: {
+        status: "unrecoverable",
+        rematerializationId: null,
+        selectedRevision: null,
+        startedAt: null,
+        completedAt: null,
+        failureCode: "archive_unavailable",
+        retryable: false,
+      },
+      workspace: { status: "unrecoverable", verifiedRevision: null, verifiedAt: null },
+    };
+    await admin`
+      update sandbox_leases set
+        liveness = 'cold', instance_id = null, lease_epoch = ${currentEpoch},
+        resume_state = ${JSON.stringify({ backendId: "modal", opengeniRecovery: recovery })}::text::jsonb
+      where id = ${leaseId}`;
+    const before = await readLease(db, ids.workspaceId, ids.groupId);
+    expect(before).toMatchObject({
+      liveness: "cold",
+      leaseEpoch: currentEpoch,
+      workspaceGeneration: 2,
+      archiveGeneration: 0,
+      archiveComplete: false,
+    });
+
+    const stale = await reconcileColdLostLeaseInstanceBlockers(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedCurrentEpoch: currentEpoch,
+      expectedLostEpoch: lostEpoch,
+      expectedLostInstanceId: lostInstanceId,
+      expectedWorkspaceGeneration: 3,
+      expectedArchiveGeneration: 0,
+      expectedArchiveComplete: false,
+    });
+    expect(stale.status).toBe("stale");
+    const [stillActive] = await admin<{ state: string }[]>`
+      select state from sandbox_retained_processes where id = ${processId}`;
+    expect(stillActive?.state).toBe("active");
+
+    const reconciled = await reconcileColdLostLeaseInstanceBlockers(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedCurrentEpoch: currentEpoch,
+      expectedLostEpoch: lostEpoch,
+      expectedLostInstanceId: lostInstanceId,
+      expectedWorkspaceGeneration: 2,
+      expectedArchiveGeneration: 0,
+      expectedArchiveComplete: false,
+    });
+    expect(reconciled.status).toBe("reconciled");
+    if (reconciled.status !== "reconciled") throw new Error("Expected cold reconciliation");
+    expect(reconciled.settlement).toEqual({
+      processesLost: 1,
+      admissionsRejected: 2,
+      ptysClosed: 0,
+      processHoldersDeleted: 1,
+    });
+    expect(reconciled.lease).toMatchObject({
+      liveness: "cold",
+      leaseEpoch: currentEpoch,
+      workspaceGeneration: 2,
+      archiveGeneration: 0,
+      archiveComplete: false,
+      refcount: 1,
+    });
+    expect(reconciled.lease.recovery).toEqual(before?.recovery);
+    const rows = await admin<{ id: string; outcome: string; state: string | null }[]>`
+      select admission.id, admission.provider_outcome as outcome, process.state
+      from sandbox_workspace_mutation_admissions admission
+      left join sandbox_retained_processes process
+        on process.parent_admission_id = admission.id
+      where admission.id in (${admission.id}, ${orphan.id})
+      order by admission.workspace_generation`;
+    expect(rows).toEqual([
+      { id: admission.id, outcome: "rejected", state: "lost" },
+      { id: orphan.id, outcome: "rejected", state: null },
+    ]);
+
+    const duplicate = await reconcileColdLostLeaseInstanceBlockers(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sandboxGroupId: ids.groupId,
+      expectedCurrentEpoch: currentEpoch,
+      expectedLostEpoch: lostEpoch,
+      expectedLostInstanceId: lostInstanceId,
+      expectedWorkspaceGeneration: 2,
+      expectedArchiveGeneration: 0,
+      expectedArchiveComplete: false,
+    });
+    expect(duplicate.status).toBe("reconciled");
+    if (duplicate.status === "reconciled") {
+      expect(duplicate.settlement).toEqual({
+        processesLost: 0,
+        admissionsRejected: 0,
+        ptysClosed: 0,
+        processHoldersDeleted: 0,
+      });
+    }
   }, 60_000);
 
   test("(1b-retention) the last verified fallback survives warm + drain rotations until a newer revision is verified", async () => {

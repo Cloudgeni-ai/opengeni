@@ -7256,8 +7256,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           );
         }
         await drainAttemptOwnedSandboxWriters({
-          toolCancellationFence: acknowledgeQuiescence ? toolCancellationFence : null,
-          cancellationReason: cancellationSignal?.reason,
+          // Normal turn completion owns the same process boundary as
+          // Pause/Steer: yielded provider shells must be terminated, polled,
+          // and durably settled before workspace capture. Only receipt
+          // publication remains conditional on acknowledgeQuiescence.
+          toolCancellationFence,
+          cancellationReason: cancellationSignal?.reason ?? new Error("TURN_ATTEMPT_FINALIZED"),
           gitCredentialRenewals: gitRenewalsToStop,
           toolspaceTokenRenewal: toolspaceRenewalToStop,
           runCredentialRenewal: runRenewalToStop,

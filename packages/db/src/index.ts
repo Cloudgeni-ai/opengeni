@@ -20138,9 +20138,185 @@ export async function recordWarmingSandboxCreated(
   );
 }
 
+export type LostProviderWorkspaceSettlement = {
+  processesLost: number;
+  admissionsRejected: number;
+  ptysClosed: number;
+  processHoldersDeleted: number;
+};
+
 export type MarkWarmLeaseInstanceLostResult =
-  | { status: "marked"; lease: LeaseSnapshot }
+  | {
+      status: "marked";
+      lease: LeaseSnapshot;
+      settlement: LostProviderWorkspaceSettlement;
+    }
   | { status: "stale"; lease: LeaseSnapshot | null };
+
+const LOST_PROVIDER_PROCESS_REASON = "provider_instance_lost";
+
+/** Lock the exact provider-owned blocker set before taking the lease row. Normal
+ * retained-process settlement locks process -> admission -> lease, so provider
+ * loss must not hold the lease while waiting for one of those rows. The lease
+ * tuple is revalidated under FOR UPDATE after these locks are acquired. */
+async function lockExactLostProviderWorkspaceBlockersTx(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    leaseId: string;
+    sandboxGroupId: string;
+    lostEpoch: number;
+    lostInstanceId: string;
+  },
+): Promise<void> {
+  await tx.execute(sql`
+    select id from sandbox_retained_processes
+    where account_id = ${input.accountId}
+      and workspace_id = ${input.workspaceId}
+      and lease_id = ${input.leaseId}
+      and sandbox_group_id = ${input.sandboxGroupId}
+      and lease_epoch = ${input.lostEpoch}
+      and provider_instance_id = ${input.lostInstanceId}
+      and state = 'active'
+    order by id
+    for update
+  `);
+  await tx.execute(sql`
+    select id from sandbox_workspace_mutation_admissions
+    where account_id = ${input.accountId}
+      and workspace_id = ${input.workspaceId}
+      and lease_id = ${input.leaseId}
+      and sandbox_group_id = ${input.sandboxGroupId}
+      and lease_epoch = ${input.lostEpoch}
+      and provider_instance_id = ${input.lostInstanceId}
+      and settled_at is null
+    order by id
+    for update
+  `);
+  await tx.execute(sql`
+    select id from sandbox_pty_sessions
+    where account_id = ${input.accountId}
+      and workspace_id = ${input.workspaceId}
+      and lease_id = ${input.leaseId}
+      and sandbox_group_id = ${input.sandboxGroupId}
+      and lease_epoch = ${input.lostEpoch}
+      and provider_instance_id = ${input.lostInstanceId}
+      and status = 'open'
+    order by id
+    for update
+  `);
+}
+
+async function settleExactLostProviderWorkspaceBlockersTx(
+  tx: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    leaseId: string;
+    sandboxGroupId: string;
+    lostEpoch: number;
+    lostInstanceId: string;
+  },
+): Promise<LostProviderWorkspaceSettlement> {
+  const lostProcesses = await tx
+    .update(schema.sandboxRetainedProcesses)
+    .set({
+      state: "lost",
+      exitCode: null,
+      settlementReason: LOST_PROVIDER_PROCESS_REASON,
+      settledAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+        eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+        eq(schema.sandboxRetainedProcesses.leaseId, input.leaseId),
+        eq(schema.sandboxRetainedProcesses.sandboxGroupId, input.sandboxGroupId),
+        eq(schema.sandboxRetainedProcesses.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxRetainedProcesses.providerInstanceId, input.lostInstanceId),
+        eq(schema.sandboxRetainedProcesses.state, "active"),
+      ),
+    )
+    .returning({
+      id: schema.sandboxRetainedProcesses.id,
+      holderId: schema.sandboxRetainedProcesses.holderId,
+    });
+
+  const rejectedAdmissions = await tx
+    .update(schema.sandboxWorkspaceMutationAdmissions)
+    .set({ providerOutcome: "rejected", settledAt: new Date() })
+    .where(
+      and(
+        eq(schema.sandboxWorkspaceMutationAdmissions.accountId, input.accountId),
+        eq(schema.sandboxWorkspaceMutationAdmissions.workspaceId, input.workspaceId),
+        eq(schema.sandboxWorkspaceMutationAdmissions.leaseId, input.leaseId),
+        eq(schema.sandboxWorkspaceMutationAdmissions.sandboxGroupId, input.sandboxGroupId),
+        eq(schema.sandboxWorkspaceMutationAdmissions.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxWorkspaceMutationAdmissions.providerInstanceId, input.lostInstanceId),
+        isNull(schema.sandboxWorkspaceMutationAdmissions.settledAt),
+      ),
+    )
+    .returning({ id: schema.sandboxWorkspaceMutationAdmissions.id });
+
+  const closedPtys = await tx
+    .update(schema.sandboxPtySessions)
+    .set({ status: "closed", closedAt: new Date() })
+    .where(
+      and(
+        eq(schema.sandboxPtySessions.accountId, input.accountId),
+        eq(schema.sandboxPtySessions.workspaceId, input.workspaceId),
+        eq(schema.sandboxPtySessions.leaseId, input.leaseId),
+        eq(schema.sandboxPtySessions.sandboxGroupId, input.sandboxGroupId),
+        eq(schema.sandboxPtySessions.leaseEpoch, input.lostEpoch),
+        eq(schema.sandboxPtySessions.providerInstanceId, input.lostInstanceId),
+        eq(schema.sandboxPtySessions.status, "open"),
+      ),
+    )
+    .returning({ id: schema.sandboxPtySessions.id });
+
+  const deletedHolders =
+    lostProcesses.length === 0
+      ? []
+      : await tx
+          .delete(schema.sandboxLeaseHolders)
+          .where(
+            and(
+              eq(schema.sandboxLeaseHolders.accountId, input.accountId),
+              eq(schema.sandboxLeaseHolders.workspaceId, input.workspaceId),
+              eq(schema.sandboxLeaseHolders.leaseId, input.leaseId),
+              eq(schema.sandboxLeaseHolders.kind, "process"),
+              inArray(
+                schema.sandboxLeaseHolders.holderId,
+                lostProcesses.map((process) => process.holderId),
+              ),
+            ),
+          )
+          .returning({ holderId: schema.sandboxLeaseHolders.holderId });
+
+  await tx.execute(sql`
+    update sandbox_leases as lease set
+      refcount = counts.total,
+      turn_holders = counts.turns,
+      viewer_holders = counts.viewers,
+      updated_at = now()
+    from (
+      select count(*)::int as total,
+        count(*) filter (where kind = 'turn')::int as turns,
+        count(*) filter (where kind = 'viewer')::int as viewers
+      from sandbox_lease_holders
+      where lease_id = ${input.leaseId}
+    ) as counts
+    where lease.id = ${input.leaseId}
+  `);
+
+  return {
+    processesLost: lostProcesses.length,
+    admissionsRejected: rejectedAdmissions.length,
+    ptysClosed: closedPtys.length,
+    processHoldersDeleted: deletedHolders.length,
+  };
+}
 
 /**
  * Atomically retire one exact warm provider instance after a resume-only caller
@@ -20149,10 +20325,11 @@ export type MarkWarmLeaseInstanceLostResult =
  * box, but only the first one transitions the lease to cold and advances its
  * epoch. The next ordinary acquire elects one cold->warming spawner.
  *
- * Holders remain intact because their logical work/viewer interest still exists.
- * Only live provider identity is cleared. A persisted workspace archive is
- * reduced to the same minimal cold envelope used by the drain/failure paths, so
- * the elected replacement can hydrate it without carrying the dead box id.
+ * Logical turn/viewer interest remains intact, while holders for active
+ * processes that physically belonged to the lost provider are removed with
+ * their terminal loss proof. A persisted workspace archive is reduced to the
+ * same minimal cold envelope used by the drain/failure paths, so the elected
+ * replacement can hydrate it without carrying the dead box id.
  */
 export async function markWarmLeaseInstanceLost(
   db: Database,
@@ -20172,6 +20349,33 @@ export async function markWarmLeaseInstanceLost(
     async (scopedDb) =>
       await scopedDb.transaction(async (txRaw) => {
         const tx = txRaw as unknown as Database;
+        const observedRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+        `);
+        const observed = observedRows[0];
+        if (
+          !observed ||
+          observed.liveness !== "warm" ||
+          Number(observed.lease_epoch) !== input.expectedEpoch ||
+          observed.instance_id !== input.expectedInstanceId
+        ) {
+          return {
+            status: "stale" as const,
+            lease: observed ? mapLeaseRow(observed) : null,
+          };
+        }
+
+        const blockerScope = {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          leaseId: observed.id,
+          sandboxGroupId: input.sandboxGroupId,
+          lostEpoch: input.expectedEpoch,
+          lostInstanceId: input.expectedInstanceId,
+        };
+        await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
         const currentRows = await tx.execute<LeaseRow>(sql`
           select * from sandbox_leases
           where workspace_id = ${input.workspaceId}
@@ -20181,6 +20385,7 @@ export async function markWarmLeaseInstanceLost(
         const current = currentRows[0];
         if (
           !current ||
+          current.id !== observed.id ||
           current.liveness !== "warm" ||
           Number(current.lease_epoch) !== input.expectedEpoch ||
           current.instance_id !== input.expectedInstanceId
@@ -20190,6 +20395,8 @@ export async function markWarmLeaseInstanceLost(
             lease: current ? mapLeaseRow(current) : null,
           };
         }
+
+        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
 
         const observedAt = new Date().toISOString();
         const before = recoveryStateFromLeaseRow(current);
@@ -20261,7 +20468,126 @@ export async function markWarmLeaseInstanceLost(
         if (!updated) {
           throw new Error(`Warm sandbox lease vanished while retiring instance ${current.id}`);
         }
-        return { status: "marked" as const, lease: mapLeaseRow(updated) };
+        return { status: "marked" as const, lease: mapLeaseRow(updated), settlement };
+      }),
+  );
+}
+
+export type ReconcileColdLostLeaseInstanceBlockersResult =
+  | {
+      status: "reconciled";
+      lease: LeaseSnapshot;
+      settlement: LostProviderWorkspaceSettlement;
+    }
+  | { status: "stale"; lease: LeaseSnapshot | null };
+
+/**
+ * Settle blockers left by a provider-loss transition that predates exact loss
+ * cleanup. This is deliberately narrower than markWarmLeaseInstanceLost: it
+ * requires the already-cold lease to match the full operator-observed
+ * generation/archive tuple, the current epoch to be exactly lostEpoch + 1, and
+ * recovery truth to name the same missing provider. It never advances an epoch,
+ * rematerializes a provider, or changes archive/recovery completeness.
+ */
+export async function reconcileColdLostLeaseInstanceBlockers(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sandboxGroupId: string;
+    expectedCurrentEpoch: number;
+    expectedLostEpoch: number;
+    expectedLostInstanceId: string;
+    expectedWorkspaceGeneration: number;
+    expectedArchiveGeneration: number | null;
+    expectedArchiveComplete: boolean;
+  },
+): Promise<ReconcileColdLostLeaseInstanceBlockersResult> {
+  if (
+    !Number.isSafeInteger(input.expectedCurrentEpoch) ||
+    !Number.isSafeInteger(input.expectedLostEpoch) ||
+    input.expectedCurrentEpoch !== input.expectedLostEpoch + 1
+  ) {
+    throw new Error("Cold lost-provider reconciliation requires currentEpoch = lostEpoch + 1");
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const observedRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+        `);
+        const observed = observedRows[0];
+        const observedRecovery = observed ? recoveryStateFromLeaseRow(observed) : null;
+        if (
+          !observed ||
+          observed.liveness !== "cold" ||
+          observed.instance_id !== null ||
+          Number(observed.lease_epoch) !== input.expectedCurrentEpoch ||
+          Number(observed.workspace_generation) !== input.expectedWorkspaceGeneration ||
+          (observed.archive_generation === null ? null : Number(observed.archive_generation)) !==
+            input.expectedArchiveGeneration ||
+          hasCompleteWorkspaceArchive(observed) !== input.expectedArchiveComplete ||
+          observedRecovery?.provider.status !== "missing" ||
+          observedRecovery.provider.instanceId !== input.expectedLostInstanceId
+        ) {
+          return {
+            status: "stale" as const,
+            lease: observed ? mapLeaseRow(observed) : null,
+          };
+        }
+
+        const blockerScope = {
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          leaseId: observed.id,
+          sandboxGroupId: input.sandboxGroupId,
+          lostEpoch: input.expectedLostEpoch,
+          lostInstanceId: input.expectedLostInstanceId,
+        };
+        await lockExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        const currentRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${input.sandboxGroupId}
+          for update
+        `);
+        const current = currentRows[0];
+        const recovery = current ? recoveryStateFromLeaseRow(current) : null;
+        if (
+          !current ||
+          current.id !== observed.id ||
+          current.liveness !== "cold" ||
+          current.instance_id !== null ||
+          Number(current.lease_epoch) !== input.expectedCurrentEpoch ||
+          Number(current.workspace_generation) !== input.expectedWorkspaceGeneration ||
+          (current.archive_generation === null ? null : Number(current.archive_generation)) !==
+            input.expectedArchiveGeneration ||
+          hasCompleteWorkspaceArchive(current) !== input.expectedArchiveComplete ||
+          recovery?.provider.status !== "missing" ||
+          recovery.provider.instanceId !== input.expectedLostInstanceId
+        ) {
+          return {
+            status: "stale" as const,
+            lease: current ? mapLeaseRow(current) : null,
+          };
+        }
+
+        const settlement = await settleExactLostProviderWorkspaceBlockersTx(tx, blockerScope);
+        const refreshedRows = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases where id = ${current.id}
+        `);
+        const refreshed = refreshedRows[0];
+        if (!refreshed) throw new Error("Cold sandbox lease vanished during reconciliation");
+        return {
+          status: "reconciled" as const,
+          lease: mapLeaseRow(refreshed),
+          settlement,
+        };
       }),
   );
 }
@@ -21129,7 +21455,7 @@ export async function confirmDrainCold(
 // The fence is the split-brain guard: a stale-epoch reaper writes ZERO rows and
 // is told not to terminate.
 export class SandboxWorkspaceMutationFencedError extends Error {
-  readonly name = "SandboxWorkspaceMutationFencedError";
+  readonly name: string = "SandboxWorkspaceMutationFencedError";
 
   constructor(
     public readonly code:
@@ -21196,6 +21522,28 @@ export type SandboxRetainedProcess = {
   startedAt: string;
   settledAt: string | null;
 };
+
+/** Durable promotion committed before a mutable route/turn authority check
+ * rejected the provider output. The process identity is safe to hand to the
+ * exact-backend cancellation path; callers must still reject the output and
+ * must never replay the provider mutation. */
+export class SandboxRetainedProcessPromotionFencedError extends SandboxWorkspaceMutationFencedError {
+  readonly name = "SandboxRetainedProcessPromotionFencedError";
+
+  constructor(
+    code:
+      | "attempt_fenced"
+      | "holder_fenced"
+      | "lease_fenced"
+      | "route_fenced"
+      | "process_fenced"
+      | "admission_fenced",
+    message: string,
+    public readonly process: SandboxRetainedProcess,
+  ) {
+    super(code, message);
+  }
+}
 
 type SandboxWorkspaceMutationSettlementResult =
   | { failure: null }
@@ -22396,7 +22744,11 @@ export async function retainWorkspaceMutationProcess(
       }),
   );
   if (result.failure.failure !== null) {
-    throw new SandboxWorkspaceMutationFencedError(result.failure.failure, result.failure.detail);
+    throw new SandboxRetainedProcessPromotionFencedError(
+      result.failure.failure,
+      result.failure.detail,
+      result.process,
+    );
   }
   return result.process;
 }

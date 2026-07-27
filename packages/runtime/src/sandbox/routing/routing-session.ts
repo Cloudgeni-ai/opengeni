@@ -115,6 +115,15 @@ export type RoutingRetainedProcess = {
   providerSessionId: number;
 };
 
+/** A yielded process was durably promoted, but the mutable authority checked
+ * after that commit was stale. The provider output must still be rejected;
+ * this result carries only the safe process identity needed to drain the exact
+ * original backend without replaying the mutation. */
+export type RoutingMutationSettlementResult = {
+  status: "retained_process_durable_output_rejected";
+  retainedProcess: RoutingRetainedProcess;
+};
+
 /** Exact copied route identity required to reconstruct an already-durable
  * retained process after the request/runtime object that opened it is gone.
  * The live session is deliberately not caller-supplied: adoption may bind only
@@ -184,7 +193,7 @@ export interface RoutingSandboxSessionDeps {
     /** Stable candidate generated before durable promotion is attempted. It is
      * supplied only when the provider returned a positive yielded-session id. */
     retainedProcess?: RoutingRetainedProcess;
-  }) => Promise<void>;
+  }) => Promise<void | RoutingMutationSettlementResult>;
   /** Admit one model/user-visible stdin mutation under the already-durable
    * retained process authority. Control polling and helper execs never call it. */
   beforeProcessMutation?: (input: {
@@ -265,13 +274,15 @@ export class RoutingBackendRecoveryRequiredError extends Error {
 export class RoutingMutationOutcomeUnknownError extends Error {
   readonly name = "RoutingMutationOutcomeUnknownError";
   readonly retryable = false;
+  readonly retainedProcess: RoutingRetainedProcess | null;
 
   constructor(
     public readonly op: string,
     message: string,
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; retainedProcess?: RoutingRetainedProcess },
   ) {
     super(message, options);
+    this.retainedProcess = options?.retainedProcess ?? null;
   }
 }
 
@@ -665,7 +676,8 @@ export class RoutingSandboxSession implements RoutableBackendSession {
       );
     }
     try {
-      await this.deps.afterMutation(pending);
+      const result = await this.deps.afterMutation(pending);
+      if (result) this.confirmDurableRejectedPromotion(record, result);
       record.pendingParentPromotion = null;
       record.durable = true;
     } catch (error) {
@@ -675,6 +687,24 @@ export class RoutingSandboxSession implements RoutableBackendSession {
         { cause: error },
       );
     }
+  }
+
+  private confirmDurableRejectedPromotion(
+    record: RetainedProcessRecord,
+    result: RoutingMutationSettlementResult,
+  ): void {
+    if (
+      result.status !== "retained_process_durable_output_rejected" ||
+      result.retainedProcess.id !== record.process.id ||
+      result.retainedProcess.providerSessionId !== record.process.providerSessionId
+    ) {
+      throw new RoutingMutationOutcomeUnknownError(
+        "retainProcess",
+        `Durable promotion result did not match retained provider session ${record.process.providerSessionId}`,
+      );
+    }
+    record.pendingParentPromotion = null;
+    record.durable = true;
   }
 
   private async settleRetainedProcess(
@@ -936,9 +966,24 @@ export class RoutingSandboxSession implements RoutableBackendSession {
           ...(retainedProcess ? { retainedProcess } : {}),
         };
         try {
-          await this.deps.afterMutation(settlement);
+          const settlementResult = await this.deps.afterMutation(settlement);
+          if (retainedRecord && settlementResult) {
+            this.confirmDurableRejectedPromotion(retainedRecord, settlementResult);
+            this.invalidate(backend);
+            throw new RoutingMutationOutcomeUnknownError(
+              op,
+              `Mutating sandbox operation "${op}" yielded provider session ${retainedRecord.process.providerSessionId}; durable promotion succeeded but stale authority rejected its output, and the operation was not replayed`,
+              { retainedProcess: retainedRecord.process },
+            );
+          }
           if (retainedRecord) retainedRecord.durable = true;
         } catch (error) {
+          if (
+            error instanceof RoutingMutationOutcomeUnknownError &&
+            error.retainedProcess !== null
+          ) {
+            throw error;
+          }
           if (retainedRecord) retainedRecord.pendingParentPromotion = settlement;
           this.invalidate(backend);
           throw new RoutingMutationOutcomeUnknownError(
