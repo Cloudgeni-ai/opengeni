@@ -1,5 +1,13 @@
 # @opengeni/api-router
 
+## 0.11.1
+
+### Patch Changes
+
+- Updated dependencies [43e3503]
+  - @opengeni/runtime@0.13.3
+  - @opengeni/core@0.11.1
+
 ## 0.11.0
 
 ### Minor Changes
