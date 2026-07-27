@@ -127,6 +127,8 @@ describe("release image workflow contract", () => {
     expect(finalJob).toContain(
       'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
     );
+    expect(finalJob).toContain('helm push "$chart_path" "$chart_oci"');
+    expect(finalJob).toContain('--arg reference "$chart_pull_oci"');
     expect(finalJob).toContain("for attempt in $(seq 1 10)");
     expect(finalJob).toContain(
       'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
@@ -206,6 +208,8 @@ describe("release image workflow contract", () => {
     expect(release).toContain(
       'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
     );
+    expect(release).toContain('helm push "$chart_path" "$chart_oci"');
+    expect(release).toContain('--arg reference "$chart_pull_oci"');
     expect(release).toContain("for attempt in $(seq 1 10)");
     expect(release).toContain(
       'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
