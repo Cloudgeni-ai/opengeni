@@ -23,6 +23,8 @@
     "dev:stack": "bash scripts/dev-stack.sh",
     "dev:api": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/api && bun run dev",
     "dev:worker": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/worker && bun run dev",
+    "dev:worker:control": "set -a; [ -f .env ] && . ./.env; set +a; export OPENGENI_WORKER_ROLE=control; cd apps/worker && bun run dev",
+    "dev:worker:turn": "set -a; [ -f .env ] && . ./.env; set +a; export OPENGENI_WORKER_ROLE=turn; export OPENGENI_WORKER_HTTP_PORT=\"${OPENGENI_TURN_WORKER_HTTP_PORT:-8002}\"; cd apps/worker && bun run dev",
     "dev:web": "set -a; [ -f .env ] && . ./.env; set +a; cd apps/web && bun run dev",
     "db:migrate": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run migrate",
     "db:provision-roles": "set -a; [ -f .env ] && . ./.env; set +a; cd packages/db && bun run provision-roles",

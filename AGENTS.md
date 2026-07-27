@@ -54,9 +54,13 @@ Manual equivalent:
 
    ```bash
    bun run dev:api
-   bun run dev:worker
+   bun run dev:worker:control
+   bun run dev:worker:turn
    bun run dev:web
    ```
+
+   The control and turn workers poll separate Temporal task queues; both must run
+   or sessions are accepted but never execute a turn.
 
 Default URLs:
 
