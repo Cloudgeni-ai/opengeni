@@ -5,6 +5,7 @@ type WorkflowControlActivities = Pick<
   typeof activities,
   | "dispatchScheduledTaskRun"
   | "enqueueGoalRetryWake"
+  | "expireSessionHumanInput"
   | "failSessionAttempt"
   | "getCodexCapacityWait"
   | "markSessionIdle"
@@ -33,9 +34,10 @@ export const activity = proxyActivities<WorkflowControlActivities>({
   },
 });
 
-/** Goal continuation is advisory at an idle boundary. A transient failure gets
- * a short retry window, then records an explicit delayed outbox wake instead
- * of relying on an unrelated future mutation. */
+/** Goal continuation evaluates a durable Postgres obligation at an idle
+ * boundary. A transient failure gets a short retry window, then records an
+ * explicit delayed outbox wake instead of relying on an unrelated mutation or
+ * keeping workflow history alive with polling. */
 export const goalActivity = proxyActivities<Pick<typeof activities, "maybeContinueGoal">>({
   startToCloseTimeout: "30 seconds",
   retry: {

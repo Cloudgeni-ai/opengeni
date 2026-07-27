@@ -1,4 +1,5 @@
 import {
+  canonicalizeConfiguredModelId,
   configuredAllowedModels,
   configuredAllowedReasoningEfforts,
   configuredModels,
@@ -24,12 +25,20 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { HTTPException } from "hono/http-exception";
 import type { ApiRouteDeps, AppDependencies } from "@opengeni/core";
-import { hasPermission, requireAccessGrant, requirePermission } from "@opengeni/core";
+import {
+  hasPermission,
+  requireAccessGrant,
+  requirePermission,
+  requireSessionAuthorization,
+  SessionAuthorizationDeniedError,
+  SessionAuthorizationUnavailableError,
+} from "@opengeni/core";
 import { createManagedAuth } from "./auth/managed-auth";
 import { createApiSandboxClient, makeResumeBoxById } from "./sandbox/access";
 import { requireLimit } from "@opengeni/core";
 import { buildOpenGeniMcpServer } from "./mcp/server";
 import { isToolspaceGrant, prepareToolspaceMcpSurface } from "./mcp/toolspace";
+import { boundedMcpRequest, McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import { requireAccessKey } from "./http/auth";
 import { registerCapabilityRoutes } from "./routes/capabilities";
 import { registerCatalogAssetRoutes } from "./routes/catalog-assets";
@@ -50,6 +59,7 @@ import { registerScheduledTaskRoutes } from "./routes/scheduled-tasks";
 import { registerSessionRoutes } from "./routes/sessions";
 import { registerSocialRoutes } from "./routes/social";
 import { registerWorkspaceRoutes } from "./routes/workspaces";
+import { projectClientModel } from "./model-catalog";
 
 export type {
   ApiRouteDeps,
@@ -65,6 +75,7 @@ export {
   validateFileResources,
   validateGitHubRepositorySelection,
   validateGitHubRepositorySelectionShape,
+  validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
 } from "@opengeni/core";
@@ -284,22 +295,13 @@ export function createApp(deps: AppDependencies): Hono {
         deploymentRevision: deps.settings.deploymentRevision,
         apiContractRevision: OPENGENI_API_CONTRACT_REVISION,
         ...(deps.settings.serverVersion ? { serverVersion: deps.settings.serverVersion } : {}),
-        defaultModel: deps.settings.openaiModel,
+        defaultModel: canonicalizeConfiguredModelId(deps.settings, deps.settings.openaiModel),
         allowedModels: configuredAllowedModels(deps.settings),
         // Provider-grouped model list for the picker. configuredModels() carries the
         // union of the built-in allow-list and every registry provider's models, in
         // selection order (default model first); project each to the client-safe
         // ClientModel shape (ConfiguredModel.providerId → ClientModel.provider).
-        models: configuredModels(deps.settings).map((model) => ({
-          id: model.id,
-          label: model.label,
-          provider: model.providerId,
-          providerLabel: model.providerLabel,
-          api: model.api,
-          ...(model.contextWindowTokens === undefined
-            ? {}
-            : { contextWindowTokens: model.contextWindowTokens }),
-        })),
+        models: configuredModels(deps.settings).map(projectClientModel),
         defaultReasoningEffort: deps.settings.openaiReasoningEffort,
         allowedReasoningEfforts: configuredAllowedReasoningEfforts(deps.settings),
         mcpServers: deps.settings.mcpServers.map((server) => ({
@@ -322,10 +324,49 @@ export function createApp(deps: AppDependencies): Hono {
 
   app.all("/v1/workspaces/:workspaceId/mcp", async (c) => {
     const workspaceId = c.req.param("workspaceId");
+    let boundedRequest: Request;
+    try {
+      boundedRequest = await boundedMcpRequest(c.req.raw);
+    } catch (error) {
+      if (error instanceof McpPayloadTooLargeError) {
+        throw new HTTPException(413, { message: "MCP request body exceeds the safety limit" });
+      }
+      throw error;
+    }
     const grant = await requireMcpAccessGrant(c, routeDeps, workspaceId);
-    const toolspace = isToolspaceGrant(routeDeps.settings, grant)
-      ? await prepareToolspaceMcpSurface({ deps: routeDeps, grant })
-      : null;
+    const toolspaceGrant = isToolspaceGrant(routeDeps.settings, grant);
+    const boundSessionId = grant.metadata?.sessionId;
+    if (toolspaceGrant || typeof boundSessionId === "string") {
+      if (typeof boundSessionId !== "string") {
+        throw new HTTPException(404, { message: "session not found" });
+      }
+      try {
+        await requireSessionAuthorization(routeDeps, grant, {
+          sessionId: boundSessionId,
+          operation: toolspaceGrant ? "session.toolspace.call" : "session.first_party_mcp.call",
+          surface: toolspaceGrant ? "toolspace" : "first_party_mcp",
+        });
+      } catch (error) {
+        if (error instanceof SessionAuthorizationDeniedError) {
+          throw new HTTPException(404, { message: "session not found" });
+        }
+        if (error instanceof SessionAuthorizationUnavailableError) {
+          throw new HTTPException(503, { message: "session authorization is unavailable" });
+        }
+        throw error;
+      }
+    }
+    let toolspace: Awaited<ReturnType<typeof prepareToolspaceMcpSurface>> = null;
+    if (toolspaceGrant) {
+      try {
+        toolspace = await prepareToolspaceMcpSurface({ deps: routeDeps, grant });
+      } catch (error) {
+        if (error instanceof McpPayloadTooLargeError) {
+          throw new HTTPException(413, { message: "MCP tool list exceeds the safety limit" });
+        }
+        throw error;
+      }
+    }
     const workspace = await getWorkspace(routeDeps.db, workspaceId);
     const workspaceMemoryEnabled = resolveWorkspaceMemoryEnabled(workspace?.settings);
     const transport = new WebStandardStreamableHTTPServerTransport({
@@ -338,7 +379,7 @@ export function createApp(deps: AppDependencies): Hono {
     });
     try {
       await mcp.connect(transport);
-      return await transport.handleRequest(c.req.raw);
+      return await transport.handleRequest(boundedRequest);
     } finally {
       await toolspace?.close().catch(() => undefined);
     }
@@ -419,6 +460,9 @@ export function allowedCorsOrigin(pattern: string, origin: string): boolean {
 export function httpStatusForError(error: unknown): number {
   if (error instanceof HTTPException) {
     return error.status;
+  }
+  if (error instanceof McpPayloadTooLargeError) {
+    return 413;
   }
   return 500;
 }
@@ -631,6 +675,14 @@ const routeLabelPatterns: Array<{ pattern: RegExp; label: string }> = [
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/files\/[^/]+$/,
     label: "/v1/workspaces/:workspaceId/files/:id",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/artifacts\/[^/]+\/content$/,
+    label: "/v1/workspaces/:workspaceId/artifacts/:id/content",
+  },
+  {
+    pattern: /^\/v1\/workspaces\/[^/]+\/artifacts\/[^/]+$/,
+    label: "/v1/workspaces/:workspaceId/artifacts/:id",
   },
   {
     pattern: /^\/v1\/workspaces\/[^/]+\/api-keys$/,

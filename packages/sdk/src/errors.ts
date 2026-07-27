@@ -1,15 +1,36 @@
 /** Error for a non-2xx OpenGeni API response. */
 export class OpenGeniApiError extends Error {
   readonly status: number;
+  readonly code: string | undefined;
   readonly body: string;
 
   constructor(status: number, body: string) {
-    super(`OpenGeni API ${status}: ${body || "(empty body)"}`);
+    const decoded = decodeApiErrorBody(body);
+    super(`OpenGeni API ${status}: ${decoded.message ?? (body || "(empty body)")}`);
     this.name = "OpenGeniApiError";
     this.status = status;
+    this.code = decoded.code;
     this.body = body;
   }
 }
+
+function decodeApiErrorBody(body: string): { code?: string; message?: string } {
+  if (!body) return {};
+  try {
+    const decoded: unknown = JSON.parse(body);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return {};
+    const record = decoded as Record<string, unknown>;
+    return {
+      ...(typeof record.code === "string" && record.code ? { code: record.code } : {}),
+      ...(typeof record.message === "string" && record.message ? { message: record.message } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** A short-lived session-list snapshot cursor can no longer be continued. */
+export class OpenGeniSessionListCursorError extends OpenGeniApiError {}
 
 /** The browser bundle and API disagree about their state-changing wire contract. */
 export class OpenGeniApiContractMismatchError extends Error {

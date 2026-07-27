@@ -1,3 +1,5 @@
+import type { WorkspaceTranscriptionPolicy } from "./transcription";
+
 // Hand-written mirrors of the public wire shapes in `@opengeni/contracts`.
 // The SDK keeps zero runtime dependencies so it stays framework-agnostic and
 // publishable on its own; `test/contract-parity.test.ts` pins these types to
@@ -63,6 +65,9 @@ export type SessionCapabilities = {
   os: SandboxOs;
   liveness: "cold" | "warming" | "warm" | "draining";
   leaseEpoch: number;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   FileSystem: {
     available: boolean;
@@ -180,6 +185,9 @@ export type ViewerHolder = {
   sandboxGroupId: string;
   liveness: "cold" | "warming" | "warm" | "draining";
   leaseEpoch: number;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   dataPlaneUrl: string | null;
 };
@@ -222,14 +230,24 @@ export type ViewerHeartbeatResponse = { alive: boolean };
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export type GitCredentialProvider = "github" | "gitlab" | "azure_devops";
+export type GitCredentialBindingId = string;
+export type GitRepositoryAccess = "read" | "write";
 
 export type RepositoryResourceRef = {
   kind: "repository";
   uri: string;
   ref: string;
+  /**
+   * Optional workspace-relative override. When omitted, OpenGeni persists
+   * `repos/<encoded-host>/<owner>/<repo>` so equal names on different Git
+   * providers do not collide. Explicit paths are portable, traversal-free, and
+   * collision-checked case-insensitively before sandbox execution.
+   */
   mountPath?: string | undefined;
   subpath?: string | undefined;
   provider?: GitCredentialProvider | undefined;
+  credentialBindingId?: GitCredentialBindingId | undefined;
+  access?: GitRepositoryAccess | undefined;
   repositoryId?: number | string | undefined;
   installationId?: number | string | undefined;
   projectId?: number | string | undefined;
@@ -241,6 +259,7 @@ export type RepositoryResourceRef = {
 export type FileResourceRef = {
   kind: "file";
   fileId: string;
+  /** Optional workspace-relative override; defaults to `files/<file-id>`. */
   mountPath?: string | undefined;
 };
 
@@ -249,6 +268,35 @@ export type ResourceRef = RepositoryResourceRef | FileResourceRef;
 export type ToolRef = {
   kind: "mcp";
   id: string;
+  optional?: boolean | undefined;
+};
+
+export type SessionToolPolicy = {
+  mode: "workspace_default" | "explicit" | "inherited" | "legacy";
+  inheritedFromSessionId: string | null;
+};
+
+export type SessionEffectiveToolPolicy = {
+  mode: SessionToolPolicy["mode"];
+  inheritedFromSessionId: string | null;
+  selectedIds: string[];
+  effectiveIds: string[];
+  mandatoryIds: string[];
+  lazyRouter: {
+    state: "required" | "disabled";
+    deferredIds: string[];
+  };
+  configuredIds: string[];
+  droppedIds: string[];
+  counts: {
+    selected: number;
+    effective: number;
+    mandatory: number;
+    deferred: number;
+    configured: number;
+    dropped: number;
+  };
+  idsTruncated: boolean;
 };
 
 export type GoalSpec = {
@@ -264,7 +312,10 @@ export type SessionMcpServerInput = {
   allowedTools?: string[] | undefined;
   timeoutMs?: number | undefined;
   cacheToolsList?: boolean | undefined;
+  /** Require human approval for every tool, or only the listed unprefixed tool names. */
+  requireApproval?: boolean | string[] | undefined;
   headers?: Record<string, string> | undefined;
+  connectionRef?: McpServerConnectionRef | undefined;
 };
 
 export type SessionMcpCredentialUpdateInput = {
@@ -272,12 +323,25 @@ export type SessionMcpCredentialUpdateInput = {
   headers: Record<string, string>;
 };
 
+export type SessionMcpApprovalPolicy = boolean | string[];
+
 export type SessionMcpServerMetadata = {
   id: string;
   name: string | null;
   url: string;
   headerNames: string[];
   credentialVersion: number;
+  requireApproval: SessionMcpApprovalPolicy;
+  connectionRef: McpServerConnectionRef | null;
+};
+
+export type UpdateSessionMcpApprovalPolicyRequest = {
+  requireApproval: SessionMcpApprovalPolicy;
+};
+
+export type UpdateSessionMcpApprovalPolicyResponse = {
+  server: SessionMcpServerMetadata;
+  effectiveFrom: "next_attempt";
 };
 
 export type ConnectionKind = "oauth2" | "api_key" | "app_install" | "delegated";
@@ -285,10 +349,17 @@ export type ConnectionStatus = "active" | "needs_reauth" | "revoked" | "error";
 
 export type McpServerConnectionRef = {
   connectionId?: string | undefined;
+  provider?: string | undefined;
   providerDomain: string;
   kind?: ConnectionKind | undefined;
   scopes?: string[] | undefined;
   resource?: string | undefined;
+  selectedResources?:
+    | Array<{
+        id: string;
+        kind: "repository";
+      }>
+    | undefined;
   subjectScope?: "workspace" | "subject" | undefined;
 };
 
@@ -364,6 +435,20 @@ export type OAuthStartResponse = {
   expiresAt: string;
 };
 
+/** The immutable principal whose authority accepted a session or turn. */
+export type TurnInitiator = {
+  kind: "subject" | "service";
+  subjectId: string;
+  /** Display-only snapshot; never an authorization input. */
+  label?: string | undefined;
+};
+
+/** A trusted embedding host's causal machine/service principal. */
+export type ServiceTurnInitiator = TurnInitiator & { kind: "service" };
+
+/** Bounded host provenance; OpenGeni-owned lineage keys are reserved. */
+export type ServiceTurnInitiatorContext = Record<string, unknown>;
+
 export type IntegrationClientMetadata = {
   client_id: string;
   client_name: "OpenGeni";
@@ -386,7 +471,12 @@ export type Session = {
   instructions: string | null;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolPolicy?: SessionToolPolicy | undefined;
+  effectiveToolPolicy?: SessionEffectiveToolPolicy | undefined;
   metadata: Record<string, unknown>;
+  /** Frozen creator fact; later turns carry their own independent initiator. */
+  createdBy: TurnInitiator;
+  createdByContext: Record<string, unknown>;
   model: string;
   sandboxBackend: SandboxBackend;
   sandboxOs: SandboxOs;
@@ -403,6 +493,13 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
+  /** Immutable server-authored nested-agent lineage and policy snapshot. */
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  maxNestedAgentDepthOverride: number | null;
+  effectiveMaxNestedAgentDepth: number;
+  nestedAgentDepthPolicySource: "session" | "workspace" | "deployment" | "default";
+  nestedAgentDepthPolicySessionId: string | null;
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
@@ -437,6 +534,11 @@ export type Session = {
     | undefined;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Additive receipt returned by POST /sessions. */
+export type CreateSessionResponse = Session & {
+  initialTurnId: string | null;
 };
 
 export type SessionSummary = Session;
@@ -498,6 +600,7 @@ export type SessionTurn = {
   prompt: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  toolsProvided?: boolean | undefined;
   model: string;
   reasoningEffort: ReasoningEffort;
   sandboxBackend: SandboxBackend;
@@ -507,10 +610,73 @@ export type SessionTurn = {
   executionGeneration: number;
   activeAttemptId: string | null;
   lineage: Record<string, unknown>;
+  initiator: TurnInitiator;
+  initiatorContext: Record<string, unknown>;
   cancelledBy?: string | null;
   cancelReason?: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HumanInputQuestionKind = "text" | "single_select" | "multi_select";
+
+export type HumanInputOption = {
+  id: string;
+  label: string;
+  description?: string | null | undefined;
+};
+
+export type HumanInputQuestion = {
+  id: string;
+  kind: HumanInputQuestionKind;
+  prompt: string;
+  label?: string | null | undefined;
+  helpText?: string | null | undefined;
+  options: HumanInputOption[];
+  required: boolean;
+  allowOther: boolean;
+  validation?:
+    | {
+        minLength?: number | null | undefined;
+        maxLength?: number | null | undefined;
+        minSelections?: number | null | undefined;
+        maxSelections?: number | null | undefined;
+      }
+    | null
+    | undefined;
+};
+
+export type HumanInputAnswer = {
+  questionId: string;
+  values: string[];
+  other?: string | null | undefined;
+};
+
+export type HumanInputResponse =
+  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | { outcome: "skipped" | "expired" | "cancelled" };
+
+export type SubmitHumanInputResponseRequest =
+  | { outcome: "answered"; answers: HumanInputAnswer[] }
+  | { outcome: "skipped" };
+
+export type SessionHumanInputRequest = {
+  id: string;
+  workspaceId: string;
+  sessionId: string;
+  turnId: string;
+  turnGeneration: number;
+  creationAttemptId: string;
+  toolCallId: string;
+  status: "pending" | "answered" | "skipped" | "expired" | "cancelled";
+  questions: HumanInputQuestion[];
+  allowSkip: boolean;
+  response: HumanInputResponse | null;
+  respondedBy: string | null;
+  respondedAt: string | null;
+  expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -521,6 +687,7 @@ export const SESSION_EVENT_TYPES = [
   "session.event.envelope_omitted",
   "session.status.changed",
   "session.requiresAction",
+  "session.humanInput.requested",
   "session.context.compaction.requested",
   "session.context.compacted",
   "session.context.compaction.skipped",
@@ -528,6 +695,7 @@ export const SESSION_EVENT_TYPES = [
   "user.message",
   "user.pause",
   "user.approvalDecision",
+  "user.humanInputResponse",
   "turn.queued",
   "turn.started",
   "turn.completed",
@@ -541,8 +709,10 @@ export const SESSION_EVENT_TYPES = [
   "agent.reasoning.delta",
   "agent.toolCall.created",
   "agent.toolCall.output",
+  "agent.model.request",
   "agent.model.usage",
   "tool.auth_needed",
+  "credential.auth_needed",
   "agent.updated",
   "rig.setup.started",
   "rig.setup.completed",
@@ -591,10 +761,13 @@ export const SESSION_EVENT_TYPES = [
   "terminal.pty.output.delta",
   "terminal.pty.exited",
   "session.title_set",
+  "session.mcp.approval_policy.updated",
   // Multi-account Codex (P1): the session's inference account changed.
   "codex.account.switched",
   // credential allocator metadata-only per-turn credential selection audit.
   "codex.credential.selected",
+  // Bounded, identity-free deterministic shadow/replay decision.
+  "codex.fleet.decision",
   // credential allocator durable zero-capacity wait lifecycle. These are system/runtime
   // events, never synthetic user messages.
   "codex.capacity.waiting",
@@ -658,9 +831,11 @@ export type SessionEventSemanticClass =
   | "checkpoint"
   | "tool_receipt"
   | "provider_account";
+export type SessionEventLatestClass = SessionEventSemanticClass | "receipt";
 export type SessionEventPayloadMode = "none" | "summary" | "full";
 export type SessionEventReadMode = "monitoring" | "forensic";
 export type SessionEventReadDirection = "after" | "before";
+export type SessionEventResultMode = "events" | "compact";
 
 type SessionEventListCommonOptions = {
   after?: number;
@@ -670,6 +845,7 @@ type SessionEventListCommonOptions = {
   mode?: SessionEventReadMode;
   direction?: SessionEventReadDirection;
   payloadMode?: SessionEventPayloadMode;
+  resultMode?: "events";
 };
 
 export type SessionEventListOptions = SessionEventListCommonOptions &
@@ -683,13 +859,69 @@ export type SessionEventListOptions = SessionEventListCommonOptions &
       }
     | {
         /** Exclusive lookup for the newest event in exactly this semantic class. */
-        latest: SessionEventSemanticClass;
+        latest: SessionEventLatestClass;
         includeTypes?: never;
         excludeTypes?: never;
         includeClasses?: never;
         excludeClasses?: never;
       }
   );
+
+export type SessionEventCompactResult = {
+  version: 1;
+  semanticClass: SessionEventSemanticClass;
+  source: {
+    id: string;
+    type: SessionEventType;
+    sequence: number;
+    occurredAt: string;
+    turnId: string | null;
+    turnGeneration: number | null;
+    turnAttemptId: string | null;
+    turnAssociation: SessionEvent["turnAssociation"];
+  };
+  id: string;
+  type: SessionEventType;
+  sequence: number;
+  occurredAt: string;
+  turnId: string | null;
+  turnGeneration: number | null;
+  turnAttemptId: string | null;
+  turnAssociation: SessionEvent["turnAssociation"];
+  coveredSequence: { first: number; last: number };
+  status:
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "superseded"
+    | "checkpoint"
+    | "receipt"
+    | "unknown";
+  text: string | null;
+  output: unknown;
+  result: unknown;
+  failure: {
+    error: string | null;
+    code: string | null;
+    retryable: boolean | null;
+    recovery: string | null;
+  } | null;
+  checkpoint: unknown;
+  receipt: unknown;
+  truncation: {
+    truncated: boolean;
+    fields: string[];
+    originalBytes: number | null;
+    deliveredBytes: number;
+  };
+};
+
+export type SessionEventCompactResultOptions = {
+  latest: SessionEventLatestClass;
+  resultMode: "compact";
+  mode?: SessionEventReadMode;
+  payloadMode?: SessionEventPayloadMode;
+};
 
 export type SessionEventPage = {
   events: SessionEvent[];
@@ -711,10 +943,18 @@ export type ToolAuthNeededPayload = {
   serverId: string;
   toolName?: string | null | undefined;
   providerDomain: string;
+  provider?: string | undefined;
   connectionId?: string | null | undefined;
-  reason: "missing_connection" | "expired" | "insufficient_scope" | "refresh_failed";
+  reason:
+    | "missing_connection"
+    | "expired"
+    | "insufficient_scope"
+    | "refresh_failed"
+    | "unsupported_auth"
+    | "resource_scope_unavailable";
   scopes?: string[] | undefined;
   resource?: string | undefined;
+  selectedResources?: Array<{ id: string; kind: "repository" }> | undefined;
   authorizationUrl?: string | undefined;
   subjectId?: string | null | undefined;
 };
@@ -731,6 +971,89 @@ export type AgentToolCallCreatedPayload = {
 };
 export type AgentToolCallOutputPayload = { id: string | null; output: unknown };
 export type SessionStatusChangedPayload = { status: SessionStatus };
+
+// Adaptive-fleet shadow event. This is the typed, identity-free view
+// consumed by UI/manager tooling; the durable replay record also contains the
+// complete normalized policy/input needed for offline deterministic replay.
+export type CodexFleetConfidence = "unknown" | "low" | "medium" | "high";
+export type CodexFleetCacheState = "unknown" | "healthy" | "collapsed";
+export type CodexFleetShadowComparison =
+  | "match"
+  | "different_candidate"
+  | "different_outcome"
+  | "not_comparable_truncated";
+export type CodexFleetDecisionScore = {
+  candidateKey: string;
+  eligible: boolean;
+  rejectionReason:
+    | "allocator_disabled"
+    | "unavailable"
+    | "cooling"
+    | "quota_ceiling"
+    | "overlay_isolation"
+    | null;
+  quotaPressure: number;
+  leasePressure: number;
+  observedBurnPressure: number;
+  inferredBurnPressure: number;
+  runwayPressure: number;
+  uncertaintyPressure: number;
+  cacheAffinityBenefit: number;
+  cacheState: CodexFleetCacheState;
+  overlayPreferenceBenefit: number;
+  total: number;
+  confidence: CodexFleetConfidence;
+};
+export type CodexFleetDecisionEventPayload = {
+  schemaVersion: 1;
+  mode: "shadow";
+  actual: {
+    outcome: "selected" | "waiting" | "none";
+    candidateKey: string | null;
+    reason: "lease_reused" | "pin" | "rotation" | "active" | "all_capped" | "none";
+  };
+  comparison: CodexFleetShadowComparison;
+  replay: {
+    schemaVersion: 1;
+    policyVersion: "adaptive-shadow-v1";
+    mode: "shadow";
+    input: { candidates: Array<{ key: string }> } & Record<string, unknown>;
+    truncatedCandidateCount: number;
+    inputFingerprint: string;
+    decisionFingerprint: string;
+    decision: {
+      outcome: "selected" | "paced" | "none";
+      selectedCandidateKey: string | null;
+      reason:
+        | "fenced_in_flight"
+        | "fenced_candidate_missing"
+        | "admission_paced"
+        | "no_eligible_candidate"
+        | "overlay_isolated_empty"
+        | "best_score"
+        | "affinity_best"
+        | "hysteresis_hold";
+      admission: {
+        outcome: "admit" | "pace";
+        reason:
+          | "fenced_in_flight"
+          | "pacing_disabled"
+          | "capacity_unknown"
+          | "capacity_available"
+          | "work_conserving_borrow"
+          | "manager_priority"
+          | "standard_starvation_bound"
+          | "capacity_saturated"
+          | "emergency_fuse";
+        borrowedIdleCapacity: boolean;
+      };
+      borrowedOverlayCapacity: boolean;
+      strandedEligibleCount: number;
+      confidence: CodexFleetConfidence;
+      scores: CodexFleetDecisionScore[];
+    };
+  } & Record<string, unknown>;
+};
 
 // Recording payloads (P4.3 — plain TS mirror of the contracts Zod schemas; the
 // SDK is zero-runtime-dep so these are TYPES, not Zod, F15). The contract-parity
@@ -821,7 +1144,7 @@ export type TerminalPtyOutputDeltaPayload = {
 export type TerminalPtyExitedPayload = {
   ptyId: string;
   exitCode: number | null;
-  reason: "exit" | "killed" | "owner_gone" | "timeout";
+  reason: "exit" | "killed" | "owner_gone" | "timeout" | "lost";
 };
 
 // A2 FileSystem request/response.
@@ -1108,8 +1431,8 @@ export type TerminalExecRequest = {
 export type TerminalExecResponse = {
   stdout: string;
   stderr: string;
-  exitCode: number | null;
-  running: boolean;
+  exitCode: number;
+  running: false;
   wallTimeSeconds: number;
 };
 export type PtyOpenRequest = {
@@ -1173,6 +1496,7 @@ export type ScheduledTaskAgentConfig = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type ScheduledTask = {
@@ -1198,7 +1522,13 @@ export type ScheduledTask = {
 };
 
 export type CreateSessionRequest = {
+  // Optional UUID preallocated by an embedding host so it can durably link its
+  // projection before OpenGeni admits the initial turn. Replays must retain the
+  // same UUID and idempotency key.
+  requestedSessionId?: string | undefined;
   initialMessage: string;
+  /** System instructions scoped to the initial turn; never visible timeline text. */
+  turnInstructions?: string | undefined;
   // Per-session agent persona/system instructions (org-visible metadata, not a
   // secret). Delivered system-level, composed AFTER the per-workspace persona —
   // how a host supplies per-agent-type prompts without leaking them into the
@@ -1228,6 +1558,10 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
+  // Exact actor-private pre-session draft revision represented by this create.
+  // The server consumes only this revision after durable initialization.
+  expectedNewSessionDraftRevision?: number | undefined;
+  maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -1296,6 +1630,68 @@ export type Permission = KnownPermission | (string & {});
 
 export type ProductAccessMode = "local" | "configured" | "managed";
 
+export type ModelCapabilitySupportV1 = "supported" | "unsupported" | "unknown";
+
+export type ModelCapabilityStateV1 = {
+  upstream: ModelCapabilitySupportV1;
+  runnable: boolean;
+};
+
+export type ModelCapabilitiesV1 = {
+  reasoning: ModelCapabilityStateV1 & {
+    efforts: ReasoningEffort[];
+    defaultEffort: ReasoningEffort | null;
+    required: boolean;
+  };
+  functionCalling: ModelCapabilityStateV1;
+  structuredOutput: ModelCapabilityStateV1;
+  hostedTools: {
+    webSearch: ModelCapabilityStateV1;
+    xSearch: ModelCapabilityStateV1;
+    codeExecution: ModelCapabilityStateV1;
+  };
+  inputModalities: Array<"text" | "image" | "audio">;
+  outputModalities: Array<"text" | "image" | "audio">;
+  transports: {
+    sse: ModelCapabilityStateV1;
+    responsesWebSocket: ModelCapabilityStateV1;
+    realtimeAudio: ModelCapabilityStateV1;
+  };
+  latencyModes: Array<{
+    id: "standard" | "priority" | "fast";
+    upstream: ModelCapabilitySupportV1;
+    runnable: boolean;
+    billingMultiplierBps?: number | undefined;
+  }>;
+};
+
+export type ModelCredentialSourceV1 =
+  | { kind: "deployment"; mechanism: "api_key" | "azure_ad_bearer" }
+  | { kind: "connected_subscription"; provider: "codex" }
+  | { kind: "workspace_connection"; mechanism: "api_key" };
+
+export type ModelBillingAttributionV1 = {
+  upstreamPayer: "deployment" | "workspace" | "connected_subscription";
+  metering: "opengeni_credits" | "external";
+};
+
+export type ModelPricingV1 = {
+  inputMicrosPerMillionTokens: number;
+  cachedInputMicrosPerMillionTokens?: number | undefined;
+  outputMicrosPerMillionTokens: number;
+  marginBps?: number | undefined;
+};
+
+export type ModelPricingScheduleV1 = {
+  default: ModelPricingV1;
+  inputTokenTiers?:
+    | Array<{
+        minimumInputTokens: number;
+        pricing: ModelPricingV1;
+      }>
+    | undefined;
+};
+
 /**
  * One model a client may select at send time, plus the provider that serves it.
  * The wire API (`responses` | `chat`) lets a client reason about provider
@@ -1310,6 +1706,64 @@ export type ClientModel = {
   providerLabel: string;
   api: "responses" | "chat";
   contextWindowTokens?: number | undefined;
+  schemaVersion?: 1 | undefined;
+  aliases?: string[] | undefined;
+  deployment?:
+    | {
+        upstreamModelId: string;
+        wireApi: "responses" | "chat";
+      }
+    | undefined;
+  executionLimits?:
+    | {
+        contextWindowTokens: number | null;
+        effectiveContextWindowTokens: number | null;
+        autoCompactTokenLimit: number | null;
+        toolOutputTruncationTokens: number | null;
+      }
+    | undefined;
+  credentialSource?: ModelCredentialSourceV1 | undefined;
+  billing?: ModelBillingAttributionV1 | undefined;
+  capabilities?: ModelCapabilitiesV1 | undefined;
+  pricing?: ModelPricingScheduleV1 | undefined;
+  definitionVersion?: string | undefined;
+};
+
+export type ModelAvailabilityV1 = {
+  status: "available" | "unavailable" | "degraded" | "unknown";
+  selectable: boolean;
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "credential_not_ready"
+    | "not_entitled"
+    | "provider_unhealthy"
+    | "policy_blocked"
+    | "unsupported"
+    | null;
+  checkedAt: string | null;
+};
+
+export type ModelCredentialReadinessV1 = {
+  status: "ready" | "not_ready" | "error";
+  reason:
+    | "missing_credential"
+    | "needs_reauth"
+    | "prerequisites_missing"
+    | "resolver_error"
+    | "observation_stale"
+    | null;
+  basis: "configuration" | "connection" | "resolver";
+  checkedAt: string | null;
+};
+
+export type WorkspaceModelCatalogModel = ClientModel & {
+  credentialReadiness: ModelCredentialReadinessV1;
+  availability: ModelAvailabilityV1;
+};
+
+export type WorkspaceModelCatalogResponse = {
+  models: WorkspaceModelCatalogModel[];
 };
 
 /**
@@ -1361,6 +1815,8 @@ export type CodexUsagePayload = {
   weekly: CodexUsageWindow | null;
   limitReached: boolean;
   fetchedAt: string;
+  /** Authoritative count-only summary from /wham/usage; never synthesized rows. */
+  rateLimitResetCredits?: { availableCount: number; credits: null } | null;
   /** Present only on an auth/refresh failure path. */
   reason?: "needs_relogin";
   additionalLimits?: Array<{
@@ -1397,6 +1853,76 @@ export type CodexAccount = {
   // P3 rotation cooldown: ISO timestamp until which this account is cooling-down
   // (rotated-off after a usage cap). null/absent ⇒ not cooling.
   exhaustedUntil?: string | null;
+  /** Controls only NEW automatic allocations. */
+  allocatorEnabled: boolean;
+  /** Independent OCC sequence; credential/token `version` is never exposed. */
+  allocatorVersion: number;
+  allocatorUpdatedAt?: string | null;
+  /** Cached authoritative summary count, never detailed redemption authority. */
+  resetCreditAvailableCount?: number | null;
+  resetCreditsCheckedAt?: string | null;
+};
+
+export type CodexResetCredit = {
+  id: string;
+  resetType: "codexRateLimits" | "unknown";
+  status: "available" | "redeeming" | "redeemed" | "unknown";
+  /** Unix seconds from the provider contract. */
+  grantedAt: number;
+  /** Unix seconds, or null when the provider reports no expiry. */
+  expiresAt: number | null;
+  title: string | null;
+  description: string | null;
+  /** True only for fresh, complete, owning-human provider detail. */
+  actionable: boolean;
+};
+
+/** Owning-human recovery metadata. It contains no token, browser-session hash, or provider key. */
+export type CodexResetRedemptionRecovery = {
+  attemptId: string;
+  creditId: string;
+  status: "provider_started" | "completed";
+  outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed" | null;
+  providerStartedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CodexAccountOverview = {
+  accountId: string;
+  usage: {
+    source: "provider" | "cache" | "none";
+    fetchedAt: string | null;
+    stale: boolean;
+    error: string | null;
+    value: CodexUsagePayload | null;
+  };
+  resetCredits: {
+    source: "provider" | "cache" | "none";
+    fetchedAt: string | null;
+    stale: boolean;
+    error: string | null;
+    detailState: "detailed" | "count_only" | "capped" | "unsupported" | "unknown" | "error";
+    detailsComplete: boolean;
+    availableCount: number | null;
+    credits: CodexResetCredit[];
+  };
+  canRedeem: boolean;
+  /** Owning managed-cookie human may replay durable completion without a healthy provider token. */
+  canResumeRedemption: boolean;
+  /** Durable owner-scoped ambiguity/completion discovery; never redemption authority for agents. */
+  redemptions: CodexResetRedemptionRecovery[];
+};
+
+/** Independently settled live overview keyed by workspace credential id. */
+export type CodexOverviewResponse = { accounts: Record<string, CodexAccountOverview> };
+
+export type CodexAllocatorUpdate = {
+  allocatorEnabled: boolean;
+  allocatorVersion: number;
+  allocatorUpdatedAt: string | null;
+  changed: boolean;
 };
 
 /** Per-workspace Codex rotation/active settings. P1: rotation inert, only activeCredentialId loads. */
@@ -1465,7 +1991,7 @@ export type ClientAuthConfig =
 
 // Kept value-identical to @opengeni/contracts and pinned by the SDK contract
 // parity suite. The SDK has no runtime dependency on the Zod contracts package.
-export const OPENGENI_API_CONTRACT_REVISION = "2026-07-session-control-v1" as const;
+export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
 
 /**
@@ -1517,6 +2043,8 @@ export type AccessGrant = {
   subjectLabel?: string | undefined;
   permissions: Permission[];
   metadata?: Record<string, unknown> | undefined;
+  serviceInitiator?: ServiceTurnInitiator | undefined;
+  serviceInitiatorContext?: ServiceTurnInitiatorContext | undefined;
 };
 
 export type AccessContext = {
@@ -1552,11 +2080,15 @@ export type Workspace = {
 
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
+  transcription?: WorkspaceTranscriptionPolicy | undefined;
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
@@ -1641,6 +2173,36 @@ export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
 
+export type SessionGoalContinuationState =
+  | "inactive"
+  | "scheduled"
+  | "running"
+  | "blocked"
+  | "invariant_broken";
+
+export type SessionGoalContinuationReason =
+  | "goal_inactive"
+  | "wake_pending"
+  | "continuation_pending"
+  | "human_work_pending"
+  | "goal_turn_running"
+  | "human_turn_running"
+  | "workstream_paused"
+  | "approval_required"
+  | "provider_backpressure"
+  | "session_cancelled"
+  | "system_work_pending"
+  | "missing_obligation";
+
+export type SessionGoalContinuation = {
+  state: SessionGoalContinuationState;
+  reason: SessionGoalContinuationReason;
+  wakeRevision: number;
+  observedRevision: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+};
+
 export type SessionGoal = {
   id: string;
   accountId: string;
@@ -1658,6 +2220,8 @@ export type SessionGoal = {
   noProgressStreak: number;
   maxAutoContinuations: number | null;
   metadata: Record<string, unknown>;
+  /** Optional for source compatibility; the API always supplies this projection. */
+  continuation?: SessionGoalContinuation | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -1710,7 +2274,12 @@ export type EffectiveSessionControl = {
   blockers: EffectiveControlBlocker[];
   resumeOptions: EffectiveControlResumeOption[];
   override: { rootSessionId: string; revision: number } | null;
-  settlement: { state: "stopping"; attemptCount: number } | null;
+  settlement: {
+    state: "stopping";
+    attemptCount: number;
+    interruptionPendingCount: number;
+    quiescencePendingCount: number;
+  } | null;
 };
 
 export type SessionCommandReceipt = {
@@ -1731,10 +2300,33 @@ export type ComposerDraft = {
   text: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /** False inherits the session policy; true preserves an explicit array. */
+  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
+  updatedAt: string | null;
+};
+
+export type NewSessionDraftOptions = {
+  sandboxBackend?: SandboxBackend | undefined;
+  targetSandboxId?: string | undefined;
+  workingDir?: string | undefined;
+  variableSetId?: string | undefined;
+  rigId?: string | undefined;
+  goal?: GoalSpec | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
+};
+
+export type NewSessionDraft = {
+  revision: number;
+  text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  options: NewSessionDraftOptions;
   updatedAt: string | null;
 };
 
@@ -1866,6 +2458,10 @@ export type SaveComposerDraftRequest = Omit<
   "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
 > & { expectedRevision: number };
 
+export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
+  expectedRevision: number;
+};
+
 // --- Scheduled tasks: requests + runs ----------------------------------------
 
 /** Input shape for agent config on create/update (server applies defaults). */
@@ -1878,6 +2474,7 @@ export type ScheduledTaskAgentConfigInput = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type CreateScheduledTaskRequest = {
@@ -2112,6 +2709,67 @@ export type FileAsset = {
   objectKey: string;
   createdAt: string;
   updatedAt: string;
+};
+
+/** Mirrors the closed, provider-neutral retained-output contract. */
+export const RETAINED_OUTPUT_DEFAULT_PAGE_BYTES = 256 * 1024;
+export const RETAINED_OUTPUT_MAX_PAGE_BYTES = 1024 * 1024;
+
+export type RetainedOutputKind =
+  | "tool_result"
+  | "assistant_completion"
+  | "internal_update"
+  | "event_media"
+  | "file";
+
+export type RetainedOutputUnavailableReason =
+  | "not_retained"
+  | "pending"
+  | "failed"
+  | "expired"
+  | "deleted"
+  | "missing_storage"
+  | "storage_write_failed"
+  | "unsupported";
+
+export type RetainedArtifactReference = {
+  available: true;
+  artifactId: string;
+  kind: RetainedOutputKind;
+  contentType: string;
+  originalBytes: number;
+  sha256: string;
+  retainedAt: string;
+  retention: { policy: "workspace_file"; expiresAt: null };
+  retrieval: {
+    method: "GET";
+    path: string;
+    acceptRanges: "bytes";
+    maxRangeBytes: number;
+  };
+};
+
+export type RetainedArtifactUnavailable = {
+  available: false;
+  artifactId: string;
+  reason: RetainedOutputUnavailableReason;
+};
+
+export type RetainedArtifactMetadata = RetainedArtifactReference | RetainedArtifactUnavailable;
+
+export type RetainedArtifactContentOptions = {
+  /** One RFC-style bytes range, for example `bytes=1048576-2097151`. */
+  range?: string | undefined;
+  signal?: AbortSignal | undefined;
+};
+
+export type RetainedArtifactContent = {
+  bytes: Uint8Array;
+  status: 200 | 206;
+  contentType: string;
+  contentLength: number;
+  contentRange: string | null;
+  acceptRanges: "bytes";
 };
 
 export type CreateFileUploadRequest = {
@@ -2528,6 +3186,7 @@ export type CapabilityKind = "pack" | "mcp" | "api" | "skill" | "plugin";
 
 export type CapabilitySource =
   | "built_in"
+  | "library"
   | "configured"
   | "public_registry"
   | "registry"
@@ -2544,6 +3203,17 @@ export type CapabilityRuntime = {
   mcpServerId?: string | undefined;
   transport?: string | undefined;
   notes: string | null;
+  /** Secret-safe server-derived registry exposure state. */
+  catalogTrust?:
+    | {
+        state: "trusted" | "legacy_active" | "unverified";
+        reason:
+          | "trusted_source"
+          | "verified_probe"
+          | "active_installation_compatibility"
+          | "missing_verification";
+      }
+    | undefined;
 };
 
 export type CapabilityCatalogItem = {
@@ -2678,9 +3348,9 @@ export type GitHubAppInfo = {
   appId: string | null;
   clientId: string | null;
   appSlug: string | null;
-  /** Ready-to-open GitHub install URL (carries the signed state), if configured. */
+  /** Reserved compatibility field; null while new installation binding is disabled. */
   installUrl: string | null;
-  /** Ready-to-open OAuth URL for linking an installation that already exists. */
+  /** Reserved compatibility field; null while new installation binding is disabled. */
   linkUrl: string | null;
   /** Installation bindings owned independently by this workspace. */
   installations: GitHubInstallationBinding[];
@@ -2793,6 +3463,7 @@ export type UserMessageEventInput = {
   clientEventId?: string | undefined;
   payload: {
     text: string;
+    turnInstructions?: string | undefined;
     resources?: ResourceRef[] | undefined;
     tools?: ToolRef[] | undefined;
     model?: string | undefined;
@@ -2811,8 +3482,20 @@ export type UserApprovalDecisionEventInput = {
   };
 };
 
+export type UserHumanInputResponseEventInput = {
+  type: "user.humanInputResponse";
+  clientEventId?: string | undefined;
+  payload: {
+    requestId: string;
+    response: SubmitHumanInputResponseRequest;
+  };
+};
+
 /** Control/user events a client may POST to a session's event log. */
-export type ClientSessionEventInput = UserMessageEventInput | UserApprovalDecisionEventInput;
+export type ClientSessionEventInput =
+  | UserMessageEventInput
+  | UserApprovalDecisionEventInput
+  | UserHumanInputResponseEventInput;
 
 // ── Bring-your-own-compute: Machines dashboard + per-machine metrics (M10) ────
 // Hand-written mirrors of the `@opengeni/contracts` MetricSample / MachineView /
@@ -2859,6 +3542,9 @@ export type MachineView = {
   state: MachineState;
   active: boolean;
   isSessionGroup: boolean;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   os: string;
   arch: string;
   hasDisplay: boolean;
@@ -2908,7 +3594,10 @@ export type SwapActiveSandboxResponse = {
     | "offline_enrollment"
     | "unsupported_backend_context"
     | "transient_establishment"
-    | "concurrent_swap";
+    | "concurrent_swap"
+    | "recovery_in_progress"
+    | "recovery_degraded"
+    | "recovery_unrecoverable";
 };
 
 // ── Self-hosted enrollment UX (design 11) ────────────────────────────────────

@@ -6,14 +6,17 @@ import {
   AttachViewerRequest as ContractAttachViewerRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
+  WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
+  CreateSessionResponse as ContractCreateSessionResponse,
   CreateKnowledgeMemoryRequest as ContractCreateKnowledgeMemoryRequest,
   KnowledgeMemory as ContractKnowledgeMemory,
   KnowledgeMemoryStatus as ContractKnowledgeMemoryStatus,
   UpdateKnowledgeMemoryRequest as ContractUpdateKnowledgeMemoryRequest,
   UpdateWorkspaceSettingsRequest as ContractUpdateWorkspaceSettingsRequest,
   Workspace as ContractWorkspace,
+  WorkspaceTranscriptionPolicy as ContractWorkspaceTranscriptionPolicy,
   WorkspaceMemorySearchRequest as ContractWorkspaceMemorySearchRequest,
   WorkspaceMemorySearchResponse as ContractWorkspaceMemorySearchResponse,
   DESKTOP_STREAM_PORT,
@@ -25,14 +28,23 @@ import {
   MachinesResponse as ContractMachinesResponse,
   MetricSample as ContractMetricSample,
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
+  NewSessionDraft as ContractNewSessionDraft,
+  SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
   SessionCapabilities as ContractSessionCapabilities,
   SessionEvent as ContractSessionEventSchema,
+  SessionMcpServerInput as ContractSessionMcpServerInput,
+  SessionMcpServerMetadata as ContractSessionMcpServerMetadata,
+  UpdateSessionMcpApprovalPolicyRequest as ContractUpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse as ContractUpdateSessionMcpApprovalPolicyResponse,
   SessionEventType as ContractSessionEventType,
+  TranscriptionEvent as ContractTranscriptionEvent,
+  SessionHumanInputRequest as ContractSessionHumanInputRequest,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
+  SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
   StreamUrlRotatedPayload as ContractStreamUrlRotatedPayload,
   ViewerHeartbeatRequest as ContractViewerHeartbeatRequest,
   ViewerHeartbeatResponse as ContractViewerHeartbeatResponse,
@@ -73,15 +85,20 @@ import type {
   Workspace,
   WorkspaceMemorySearchResponse,
   ClientConfig,
+  WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
+  CreateSessionResponse,
   ListWorkspaceMembersResponse,
   MachineState,
   MachineView,
   MachinesResponse,
   MetricSample,
   MachineMetricsSeriesResponse,
+  NewSessionDraft,
+  NewSessionDraftOptions,
   ReasoningEffort,
+  SaveNewSessionDraftRequest,
   SandboxBackend,
   SandboxOs,
   ScheduledTask,
@@ -99,10 +116,16 @@ import type {
   Session,
   SessionCapabilities,
   SessionEvent,
+  SessionHumanInputRequest,
+  SessionMcpServerInput,
+  SessionMcpServerMetadata,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
   SessionTurnStatus,
+  SubmitHumanInputResponseRequest,
+  UpdateSessionMcpApprovalPolicyRequest,
+  UpdateSessionMcpApprovalPolicyResponse,
   StreamUrlRotatedPayload,
   UpdateWorkspaceMemberRequest,
   ViewerHeartbeatRequest,
@@ -110,6 +133,7 @@ import type {
   ViewerHolder,
   WorkspaceMember,
 } from "../src/types";
+import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/transcription";
 
 // The SDK ships hand-written wire types so it carries zero runtime
 // dependencies. This suite pins them to `@opengeni/contracts`: if the public
@@ -162,7 +186,13 @@ describe("SDK / contracts parity", () => {
   test("contract-parsed payloads are assignable to SDK types (compile-time)", () => {
     // Server -> client shapes: anything the contracts produce, the SDK accepts.
     const acceptSession = (value: z.infer<typeof ContractSessionSchema>): Session => value;
+    const acceptCreateResponse = (
+      value: z.infer<typeof ContractCreateSessionResponse>,
+    ): CreateSessionResponse => value;
     const acceptEvent = (value: z.infer<typeof ContractSessionEventSchema>): SessionEvent => value;
+    const acceptHumanInputRequest = (
+      value: z.infer<typeof ContractSessionHumanInputRequest>,
+    ): SessionHumanInputRequest => value;
     const acceptTurn = (value: z.infer<typeof ContractSessionTurn>): SessionTurn => value;
     const acceptTurnStatus = (
       value: z.infer<typeof ContractSessionTurn>["status"],
@@ -180,16 +210,72 @@ describe("SDK / contracts parity", () => {
     const acceptClientEvent = (
       value: ClientSessionEventInput,
     ): z.input<typeof ClientSessionEvent> => value;
+    const acceptHumanInputResponse = (
+      value: SubmitHumanInputResponseRequest,
+    ): z.input<typeof ContractSubmitHumanInputResponseRequest> => value;
+    const acceptMcpServer = (
+      value: z.infer<typeof ContractSessionMcpServerInput>,
+    ): SessionMcpServerInput => value;
+    const acceptMcpMetadata = (
+      value: z.infer<typeof ContractSessionMcpServerMetadata>,
+    ): SessionMcpServerMetadata => value;
+    const acceptMcpPolicyResponse = (
+      value: z.infer<typeof ContractUpdateSessionMcpApprovalPolicyResponse>,
+    ): UpdateSessionMcpApprovalPolicyResponse => value;
+    const acceptMcpPolicyRequest = (
+      value: UpdateSessionMcpApprovalPolicyRequest,
+    ): z.input<typeof ContractUpdateSessionMcpApprovalPolicyRequest> => value;
+    const sdkMcpServer: SessionMcpServerInput = {
+      id: "host_tools",
+      url: "https://example.com/mcp",
+      requireApproval: ["write_record"],
+    };
     const checks = [
       acceptSession,
+      acceptCreateResponse,
       acceptEvent,
+      acceptHumanInputRequest,
       acceptTurn,
       acceptTurnStatus,
       acceptTurnSource,
       acceptCreateRequest,
       acceptClientEvent,
+      acceptHumanInputResponse,
+      acceptMcpServer,
+      acceptMcpMetadata,
+      acceptMcpPolicyResponse,
+      acceptMcpPolicyRequest,
     ];
     expect(checks.every((fn) => typeof fn === "function")).toBe(true);
+    expect(ContractSessionMcpServerInput.parse(sdkMcpServer)).toEqual(sdkMcpServer);
+  });
+
+  test("new-session draft response and save shapes stay in SDK/contracts parity", () => {
+    const acceptDraft = (value: z.infer<typeof ContractNewSessionDraft>): NewSessionDraft => value;
+    // Like CreateSessionRequest, the dependency-free SDK deliberately accepts
+    // forward-compatible permission strings and leaves their runtime check to
+    // the server contract.
+    const acceptSave = (
+      value: Omit<SaveNewSessionDraftRequest, "options"> & {
+        options: Omit<NewSessionDraftOptions, "firstPartyMcpPermissions">;
+      },
+    ): z.input<typeof ContractSaveNewSessionDraftRequest> => value;
+    expect([acceptDraft, acceptSave].every((fn) => typeof fn === "function")).toBe(true);
+
+    const save: SaveNewSessionDraftRequest = {
+      expectedRevision: 4,
+      text: "recover this",
+      resources: [],
+      tools: [],
+      model: "gpt-5.6-sol",
+      reasoningEffort: "high",
+      options: {
+        sandboxBackend: "modal",
+        goal: { text: "finish", maxAutoContinuations: 8 },
+        firstPartyMcpPermissions: ["workspace:read", "sessions:read"],
+      },
+    };
+    expect(ContractSaveNewSessionDraftRequest.safeParse(save).success).toBe(true);
   });
 
   test("scheduled task literals and shapes match the contracts", () => {
@@ -268,7 +354,18 @@ describe("SDK / contracts parity", () => {
       type: "user.approvalDecision",
       payload: { approvalId: "ap-1", decision: "approve" },
     };
-    for (const event of [message, approval]) {
+    const humanInput: ClientSessionEventInput = {
+      type: "user.humanInputResponse",
+      clientEventId: "ce-2",
+      payload: {
+        requestId: "00000000-0000-4000-8000-000000000001",
+        response: {
+          outcome: "answered",
+          answers: [{ questionId: "choice", values: ["staging"] }],
+        },
+      },
+    };
+    for (const event of [message, approval, humanInput]) {
       expect(ClientSessionEvent.safeParse(event).success).toBe(true);
     }
   });
@@ -323,11 +420,16 @@ describe("SDK / contracts parity", () => {
     // Server -> client: contract-produced shapes are assignable to the SDK mirrors.
     const acceptMemory = (value: z.infer<typeof ContractKnowledgeMemory>): KnowledgeMemory => value;
     const acceptWorkspace = (value: z.infer<typeof ContractWorkspace>): Workspace => value;
+    const acceptTranscriptionPolicy = (
+      value: z.infer<typeof ContractWorkspaceTranscriptionPolicy>,
+    ): WorkspaceTranscriptionPolicy => value;
     const acceptSearchResponse = (
       value: z.infer<typeof ContractWorkspaceMemorySearchResponse>,
     ): WorkspaceMemorySearchResponse => value;
     expect(
-      [acceptMemory, acceptWorkspace, acceptSearchResponse].every((fn) => typeof fn === "function"),
+      [acceptMemory, acceptWorkspace, acceptTranscriptionPolicy, acceptSearchResponse].every(
+        (fn) => typeof fn === "function",
+      ),
     ).toBe(true);
 
     // Client -> server: SDK-sent bodies parse under the contract schemas.
@@ -341,6 +443,53 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
     expect(ContractUpdateWorkspaceSettingsRequest.safeParse(settings).success).toBe(true);
+    const transcription: WorkspaceTranscriptionPolicy = {
+      enabled: true,
+      acceptanceId: "11111111-1111-4111-8111-111111111111",
+      primary: {
+        provider: "fixture-speech",
+        model: "fixture-v1",
+        credentialMode: "byok",
+        credentialConnectionId: "22222222-2222-4222-8222-222222222222",
+        region: "eu-test-1",
+      },
+      language: "en-US",
+      autoDetectLanguage: false,
+      diarization: { enabled: false, maxSpeakers: null },
+      retention: { mode: "none", maxDays: null },
+      privacy: { allowProviderLogging: false, allowProviderTraining: false },
+      fallback: { mode: "disabled", targets: [] },
+      cost: { currency: "USD", maxPerHour: 1, maxPerMonth: 10 },
+    };
+    expect(ContractUpdateWorkspaceSettingsRequest.safeParse({ transcription }).success).toBe(true);
+    const transcriptEvent: TranscriptionEvent = {
+      type: "transcript.final",
+      localSessionId: "local-session-1",
+      sequence: 3,
+      occurredAt: "2026-07-21T12:00:00.000Z",
+      segmentId: "segment-1",
+      text: "hello world",
+      providerAcceptanceId: "acceptance-1",
+      metadata: {
+        detectedLanguage: "en-US",
+        span: { startMilliseconds: 0, endMilliseconds: 800 },
+        confidence: 0.97,
+        speaker: { id: "speaker-1" },
+        words: [
+          {
+            text: "hello",
+            span: { startMilliseconds: 0, endMilliseconds: 350 },
+            confidence: 0.99,
+          },
+        ],
+      },
+    };
+    expect(ContractTranscriptionEvent.safeParse(transcriptEvent).success).toBe(true);
+    const contractToSdk = (value: z.infer<typeof ContractTranscriptionEvent>): TranscriptionEvent =>
+      value;
+    expect(contractToSdk(ContractTranscriptionEvent.parse(transcriptEvent))).toEqual(
+      transcriptEvent,
+    );
     // Default create status is `active` (memory lane through the write gate).
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.
@@ -401,6 +550,9 @@ describe("SDK / contracts parity", () => {
           state: "consent_required",
           active: false,
           isSessionGroup: false,
+          workspaceGeneration: 7,
+          archiveGeneration: 7,
+          archiveComplete: true,
           os: "linux",
           arch: "x86_64",
           hasDisplay: true,
@@ -423,6 +575,7 @@ describe("SDK / contracts parity", () => {
 
   test("SDK-built create-session requests parse under the contracts schema", () => {
     const request: CreateSessionRequest = {
+      requestedSessionId: "00000000-0000-4000-8000-000000000042",
       initialMessage: "Investigate the failing deploy",
       resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
       tools: [{ kind: "mcp", id: "documents" }],
@@ -487,6 +640,9 @@ describe("SDK / contracts parity", () => {
       v: z.infer<typeof ContractSessionCapabilities>,
     ): SessionCapabilities => v;
     const acceptClientConfig = (v: z.infer<typeof ContractClientConfig>): ClientConfig => v;
+    const acceptWorkspaceModelCatalog = (
+      v: z.infer<typeof ContractWorkspaceModelCatalogResponse>,
+    ): WorkspaceModelCatalogResponse => v;
     const acceptViewerHolder = (v: z.infer<typeof ContractViewerHolder>): ViewerHolder => v;
     const acceptHeartbeatResponse = (
       v: z.infer<typeof ContractViewerHeartbeatResponse>,
@@ -504,6 +660,7 @@ describe("SDK / contracts parity", () => {
     const serverToClient = [
       acceptCapabilities,
       acceptClientConfig,
+      acceptWorkspaceModelCatalog,
       acceptViewerHolder,
       acceptHeartbeatResponse,
       acceptAckResponse,

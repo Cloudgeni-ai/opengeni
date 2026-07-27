@@ -33,6 +33,7 @@ import {
   visualTreeDepth,
 } from "./lib/session-rail";
 import {
+  buildPinnedRailSections,
   buildRailForest,
   groupSessionsForRail,
   isRunningStatus,
@@ -40,6 +41,7 @@ import {
   recencyGroupFor,
   relativeTimeLabel,
   visibleForestRows,
+  visibleTreeRows,
 } from "./lib/sessions-group";
 import { organizationsForSubject, orgLabel, workspacesInOrg } from "./lib/org";
 import {
@@ -50,12 +52,14 @@ import {
 } from "./lib/session-create";
 import {
   buildTools,
+  buildResources,
   effortOptionsFor,
   enabledWorkspaceCapabilityMcpServers,
   gitHubRepositoryResource,
   initialReasoningEffort,
   labelEffort,
   mergeMcpServerOptions,
+  normalizeRepositoryUrl,
   reasoningEffortOrder,
   selectedAvailableCapabilityToolIds,
 } from "./lib/session-tools";
@@ -269,6 +273,38 @@ describe("rail session grouping", () => {
     expect(forest.running.map((node) => node.session.id)).toEqual(["manager-summary"]);
   });
 
+  test("breaks activity ties by descending session id in flat and forest orders", () => {
+    const flat = groupSessionsForRail(
+      [
+        railSession({ id: "session-a", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({ id: "session-z", updatedAt: "2026-06-19T10:00:00.000Z" }),
+      ],
+      NOW,
+    );
+    expect(flat.grouped[0]?.sessions.map((item) => item.id)).toEqual(["session-z", "session-a"]);
+
+    const forest = buildRailForest(
+      [
+        railSession({ id: "manager", updatedAt: "2026-06-19T10:00:00.000Z" }),
+        railSession({
+          id: "worker-a",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "worker-z",
+          parentSessionId: "manager",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+    expect(forest.grouped[0]?.sessions[0]?.children.map((node) => node.session.id)).toEqual([
+      "worker-z",
+      "worker-a",
+    ]);
+  });
+
   test("selected-session detail preserves the list-only hierarchy summary", () => {
     const listProjection = railSession({
       id: "selected-manager",
@@ -314,6 +350,99 @@ describe("rail session grouping", () => {
     const expanded = visibleForestRows(forest, new Set(["manager"]));
     expect(expanded.map((row) => row.node.session.id)).toEqual(["manager", "worker"]);
     expect(expanded[1]?.depth).toBe(1);
+  });
+
+  test("promotes every explicit pin globally while a parent pin owns only unpinned children", () => {
+    const sections = buildPinnedRailSections(
+      [
+        railSession({
+          id: "pinned-parent",
+          pinned: true,
+          pinnedAt: "2026-06-19T10:00:00.000Z",
+        }),
+        railSession({
+          id: "ordinary-child",
+          parentSessionId: "pinned-parent",
+          updatedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({
+          id: "nested-pin",
+          parentSessionId: "pinned-parent",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:30:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(sections.pinned.map((node) => node.session.id)).toEqual(["nested-pin", "pinned-parent"]);
+    expect(sections.pinned[1]?.children.map((node) => node.session.id)).toEqual(["ordinary-child"]);
+    const visible = visibleTreeRows(sections.pinned, new Set(["pinned-parent"]));
+    expect(visible.map((row) => row.node.session.id)).toEqual([
+      "nested-pin",
+      "pinned-parent",
+      "ordinary-child",
+    ]);
+    expect(new Set(visible.map((row) => row.node.session.id)).size).toBe(visible.length);
+  });
+
+  test("keeps an unpinned root ordinary while its pinned child owns its unpinned leaf", () => {
+    const sections = buildPinnedRailSections(
+      [
+        railSession({ id: "ordinary-root" }),
+        railSession({
+          id: "pinned-child",
+          parentSessionId: "ordinary-root",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:00:00.000Z",
+        }),
+        railSession({ id: "owned-leaf", parentSessionId: "pinned-child" }),
+      ],
+      NOW,
+    );
+
+    expect(sections.pinned.map((node) => node.session.id)).toEqual(["pinned-child"]);
+    expect(sections.pinned[0]?.children.map((node) => node.session.id)).toEqual(["owned-leaf"]);
+    const ordinaryRoots = [
+      ...sections.ordinary.running,
+      ...sections.ordinary.grouped.flatMap((bucket) => bucket.sessions),
+    ];
+    expect(ordinaryRoots.map((node) => node.session.id)).toEqual(["ordinary-root"]);
+    expect(ordinaryRoots[0]?.children).toEqual([]);
+  });
+
+  test("does not subtract an unloaded pinned intermediary from a manager's lazy summary", () => {
+    const manager = railSession({
+      id: "pinned-manager",
+      pinned: true,
+      pinnedAt: "2026-06-19T10:00:00.000Z",
+      treeStats: {
+        directChildren: 1,
+        totalDescendants: 3,
+        runningDescendants: 0,
+        queuedDescendants: 0,
+        attentionDescendants: 0,
+        pausedDescendants: 0,
+        failedDescendants: 0,
+        truncated: false,
+      },
+    });
+    const sections = buildPinnedRailSections(
+      [
+        manager,
+        railSession({
+          id: "pinned-descendant",
+          parentSessionId: "unloaded-intermediary",
+          pinned: true,
+          pinnedAt: "2026-06-19T11:00:00.000Z",
+        }),
+      ],
+      NOW,
+    );
+
+    expect(
+      sections.pinned.find((node) => node.session.id === manager.id)?.session.treeStats,
+    ).toEqual(manager.treeStats);
   });
 });
 
@@ -1113,7 +1242,7 @@ describe("composer reasoning-effort picker (full host enum)", () => {
   function clientConfig(patch: Partial<ClientConfig> = {}): ClientConfig {
     return {
       deploymentRevision: "rev-1",
-      apiContractRevision: "2026-07-session-control-v1",
+      apiContractRevision: "2026-07-turn-instructions-v1",
       defaultModel: "gpt-5.6-sol",
       allowedModels: ["gpt-5.6-sol"],
       models: [],
@@ -1459,12 +1588,44 @@ describe("scheduled task run summaries", () => {
 });
 
 describe("GitHub repository resources", () => {
+  test("uses host-aware defaults for same-name repositories across providers", () => {
+    const resources = buildResources(
+      [
+        { id: 1, url: "https://github.com/acme/app.git", ref: "main" },
+        { id: 2, url: "https://gitlab.com/acme/app.git", ref: "main" },
+        { id: 3, url: "https://dev.azure.com/acme/project/_git/app", ref: "main" },
+      ],
+      [],
+      new Set(),
+      {},
+    );
+    expect(resources.map((resource) => resource.mountPath)).toEqual([
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+      "repos/dev.azure.com/acme/project/_git/app",
+    ]);
+    expect(normalizeRepositoryUrl("https://git.example.com:8443/acme/app.git").host).toBe(
+      "git.example.com:8443",
+    );
+    expect(() =>
+      buildResources(
+        [
+          { id: 1, url: "https://github.com/Acme/App.git", ref: "main" },
+          { id: 2, url: "https://github.com/acme/app.git", ref: "main" },
+        ],
+        [],
+        new Set(),
+        {},
+      ),
+    ).toThrow("Duplicate repository mount path");
+  });
+
   test("uses normal git resources for public GitHub App repositories", () => {
     expect(gitHubRepositoryResource(githubRepository({ private: false }), "main")).toEqual({
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
-      mountPath: "repos/example/public",
+      mountPath: "repos/github.com/example/public",
     });
   });
 
@@ -1473,7 +1634,7 @@ describe("GitHub repository resources", () => {
       kind: "repository",
       uri: "https://github.com/example/public.git",
       ref: "main",
-      mountPath: "repos/example/public",
+      mountPath: "repos/github.com/example/public",
       githubInstallationId: 123,
       githubRepositoryId: 456,
     });
@@ -1551,6 +1712,8 @@ function session(patch: Partial<Session> = {}): Session {
     resources: [],
     tools: [],
     metadata: {},
+    createdBy: { kind: "subject", subjectId: "user:test" },
+    createdByContext: {},
     model: "scripted-model",
     sandboxBackend: "none",
     sandboxOs: "linux",
@@ -1564,6 +1727,12 @@ function session(patch: Partial<Session> = {}): Session {
     environmentId: null,
     firstPartyMcpPermissions: null,
     mcpServers: [],
+    rootSessionId: "session-1",
+    nestedAgentDepth: 0,
+    maxNestedAgentDepthOverride: null,
+    effectiveMaxNestedAgentDepth: 3,
+    nestedAgentDepthPolicySource: "default",
+    nestedAgentDepthPolicySessionId: null,
     createIdempotencyKey: null,
     temporalWorkflowId: null,
     activeTurnId: "turn-1",
@@ -1893,6 +2062,13 @@ function pausedControl(
         impactCopy: "This workstream can run.",
       },
     ],
-    settlement: stopping ? { state: "stopping", attemptCount: 1 } : null,
+    settlement: stopping
+      ? {
+          state: "stopping",
+          attemptCount: 1,
+          interruptionPendingCount: 1,
+          quiescencePendingCount: 0,
+        }
+      : null,
   };
 }

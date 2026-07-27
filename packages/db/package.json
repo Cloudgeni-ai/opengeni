@@ -1,6 +1,6 @@
 {
   "name": "@opengeni/db",
-  "version": "0.7.5",
+  "version": "0.12.2",
   "description": "OpenGeni persistence: Drizzle schema, RLS-scoped query layer, the SQL migration runner, and role provisioning.",
   "license": "Apache-2.0",
   "repository": {
@@ -44,6 +44,7 @@
     "generate": "drizzle-kit generate",
     "migrate": "bun src/migrate.ts",
     "provision-roles": "bun src/provision-roles.ts",
+    "assert-runtime-posture": "bun src/runtime-posture-cli.ts",
     "typecheck": "tsgo --noEmit",
     "build": "tsup",
     "prepublishOnly": "bash ../../scripts/prepublish-guard"
@@ -52,6 +53,7 @@
     "@opengeni/codex": "workspace:*",
     "@opengeni/config": "workspace:*",
     "@opengeni/contracts": "workspace:*",
+    "@opengeni/network": "workspace:*",
     "drizzle-orm": "^0.45.2",
     "postgres": "^3.4.7"
   },

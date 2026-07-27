@@ -204,7 +204,12 @@ function assertCommit(value, expectedSha, label) {
 
 function assertPullRequest(value, expected) {
   invariant(value?.number === expected.number, "pull-request number changed");
-  invariant(value?.state === "open", "pull request is not open");
+  invariant(
+    value?.state === (expected.state ?? "open"),
+    `pull request is not ${expected.state ?? "open"}`,
+  );
+  if (expected.merged !== undefined)
+    invariant(value?.merged === expected.merged, "pull-request merged state changed");
   invariant(value?.base?.ref === CONTRACT.defaultBranch, "pull-request base branch changed");
   invariant(
     value?.base?.repo?.full_name === CONTRACT.repository,
@@ -441,6 +446,77 @@ export async function verifySourceAdmission(options = {}) {
   return {
     baseSha,
     headSha: context.eventHeadSha,
+    baseTreeSha,
+    headTreeSha,
+    manifest,
+    manifestSha256,
+  };
+}
+
+export async function verifyHistoricalSourceAdmission(options = {}) {
+  const logger = options.logger ?? console;
+  const input = {
+    number: Number(options.number),
+    baseSha: assertSha(options.baseSha, "historical base SHA"),
+    headSha: assertSha(options.headSha, "historical head SHA"),
+    headRef: assertString(options.headRef, "historical head ref"),
+    headRepository: assertString(options.headRepository, "historical head repository"),
+    token: assertString(options.token, "historical admission token"),
+  };
+  invariant(
+    Number.isSafeInteger(input.number) && input.number > 0,
+    "historical pull-request number is invalid",
+  );
+  invariant(input.baseSha !== input.headSha, "historical base and head are identical");
+  const api = apiClient(options.fetchImpl ?? globalThis.fetch, input.token);
+  const [repository, initialPull] = await Promise.all([
+    api(`/repos/${CONTRACT.repository}`),
+    api(`/repos/${CONTRACT.repository}/pulls/${input.number}`),
+  ]);
+  assertRepository(repository);
+  const expectedPull = {
+    ...input,
+    state: "closed",
+    merged: true,
+  };
+  assertPullRequest(initialPull, expectedPull);
+
+  const [baseCommit, headCommit, comparison, files] = await Promise.all([
+    api(`/repos/${CONTRACT.repository}/git/commits/${input.baseSha}`),
+    api(`/repos/${CONTRACT.repository}/git/commits/${input.headSha}`),
+    api(`/repos/${CONTRACT.repository}/compare/${input.baseSha}...${input.headSha}`),
+    listPullRequestFiles(api, input.number),
+  ]);
+  const baseTreeSha = assertCommit(baseCommit, input.baseSha, "historical base commit");
+  const headTreeSha = assertCommit(headCommit, input.headSha, "historical head commit");
+  assertComparison(comparison, input.baseSha, input.headSha);
+
+  const [baseTree, headTree] = await Promise.all([
+    api(`/repos/${CONTRACT.repository}/git/trees/${baseTreeSha}?recursive=1`),
+    api(`/repos/${CONTRACT.repository}/git/trees/${headTreeSha}?recursive=1`),
+  ]);
+  const manifest = directTreeManifest(
+    canonicalLeafMap(baseTree, baseTreeSha, "historical base tree"),
+    canonicalLeafMap(headTree, headTreeSha, "historical head tree"),
+  );
+  invariant(manifest.length > 0, "historical head tree does not differ from its base");
+  assertFileProjection(files, manifest, initialPull.changed_files);
+
+  const terminalPull = await api(`/repos/${CONTRACT.repository}/pulls/${input.number}`);
+  assertPullRequest(terminalPull, expectedPull);
+  invariant(
+    terminalPull.changed_files === initialPull.changed_files,
+    "historical pull-request changed-file count drifted during admission",
+  );
+  const manifestText = `${manifest.map(({ line }) => line).join("\n")}\n`;
+  const manifestSha256 = createHash("sha256").update(manifestText).digest("hex");
+  logger.log(
+    `Historical source admission verified ${input.headSha} on base ${input.baseSha}: ` +
+      `${manifest.length} direct tree paths, manifest sha256 ${manifestSha256}.`,
+  );
+  return {
+    baseSha: input.baseSha,
+    headSha: input.headSha,
     baseTreeSha,
     headTreeSha,
     manifest,

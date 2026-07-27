@@ -15,6 +15,7 @@ import {
   requireSession,
   setTemporalWorkflowId,
   settleScheduledTaskRunInTransaction,
+  SessionSpawnDeniedDbError,
   sumUsageQuantity,
   updateScheduledTask,
   upsertSessionGoal,
@@ -77,6 +78,9 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         unit: "run",
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+        origin: "scheduled_task",
         idempotencyKey: `usage:scheduled_task.fired:${run.id}`,
       });
       if (run.status === "dispatched" && run.sessionId && run.triggerEventId) {
@@ -88,6 +92,10 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           unit: "run",
           sourceResourceType: "scheduled_task_run",
           sourceResourceId: run.id,
+          sessionId: run.sessionId,
+          initiator: { kind: "service", subjectId: "scheduler" },
+          initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+          origin: "scheduled_task",
           idempotencyKey:
             input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
         });
@@ -151,25 +159,48 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             frozenRigId = rig.id;
             frozenRigVersionId = rig.activeVersion.id;
           }
-          const session = await createSession(db, {
-            accountId: task.accountId,
-            workspaceId: task.workspaceId,
-            initialMessage: task.agentConfig.prompt,
-            resources: task.agentConfig.resources,
-            tools: taskTools,
-            metadata: {
-              ...task.agentConfig.metadata,
+          let session: Awaited<ReturnType<typeof createSession>>;
+          try {
+            session = await createSession(db, {
+              accountId: task.accountId,
+              workspaceId: task.workspaceId,
+              initialMessage: task.agentConfig.prompt,
+              resources: task.agentConfig.resources,
+              tools: taskTools,
+              metadata: {
+                ...task.agentConfig.metadata,
+                model,
+                reasoningEffort,
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+              },
+              createdBy: {
+                kind: "service",
+                subjectId: "scheduler",
+                label: "OpenGeni scheduler",
+              },
+              createdByContext: {
+                scheduledTaskId: task.id,
+                scheduledTaskRunId: run.id,
+              },
               model,
-              reasoningEffort,
-              scheduledTaskId: task.id,
-              scheduledTaskRunId: run.id,
-            },
-            model,
-            sandboxBackend,
-            variableSetId: task.variableSetId ?? null,
-            rigId: frozenRigId,
-            rigVersionId: frozenRigVersionId,
-          });
+              sandboxBackend,
+              variableSetId: task.variableSetId ?? null,
+              rigId: frozenRigId,
+              rigVersionId: frozenRigVersionId,
+              maxNestedAgentDepthOverride: task.agentConfig.maxNestedAgentDepth ?? null,
+              // The durable agent config was privilege-checked when the task
+              // was created/updated. Preserve that explicit policy if a broader
+              // workspace/deployment limit is narrowed before a later fire.
+              allowNestedAgentDepthIncrease: true,
+              subjectId: `scheduled_task:${task.id}`,
+            });
+          } catch (error) {
+            if (error instanceof SessionSpawnDeniedDbError) {
+              throw new Error(`${error.denial.code}: denial=${error.denial.id}`, { cause: error });
+            }
+            throw error;
+          }
           const goal = goalSpec
             ? await createSessionGoal(db, {
                 accountId: task.accountId,
@@ -193,6 +224,7 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               type: "session.created",
               payload: {
                 status: session.status,
+                createdBy: session.createdBy,
                 scheduledTaskId: task.id,
                 scheduledTaskRunId: run.id,
                 // Names/ids only; never values.
@@ -390,6 +422,10 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
         unit: "run",
         sourceResourceType: "scheduled_task_run",
         sourceResourceId: run.id,
+        sessionId: result.sessionId,
+        initiator: { kind: "service", subjectId: "scheduler" },
+        initiatorContext: { scheduledTaskId: task.id, scheduledTaskRunId: run.id },
+        origin: "scheduled_task",
         idempotencyKey:
           input.agentRunUsageIdempotencyKey ?? `usage:agent_run.created:scheduled:${run.id}`,
       });

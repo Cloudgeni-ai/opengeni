@@ -1,4 +1,5 @@
 import type { SessionEvent, SessionStatus } from "@opengeni/sdk";
+const { default: fleetDecisionItem } = await import("./fleet-decision-projection");
 import {
   CREDIT_EXHAUSTION_MESSAGE,
   humanizeFailureReason,
@@ -19,6 +20,12 @@ import type {
   ToolCallItem,
   WorkerItem,
 } from "./types";
+/** Readable label for a tool call, without leaking an MCP server prefix. */
+export function toolDisplayName(name: string): string {
+  const boundary = name.indexOf("__");
+  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
+  return toolPart.replace(/[_-]+/g, " ").trim();
+}
 
 /* ----------------------------------------------------------------------------
    Timeline projection
@@ -436,7 +443,8 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
-      case "tool.auth_needed": {
+      case "tool.auth_needed":
+      case "credential.auth_needed": {
         // Keep the whole structured payload — the renderer turns it into a clean
         // inline reconnect card, and the app starts the recovery flow off the
         // connectionId/resource. Losing it to a plain-text notice was the ugly
@@ -553,6 +561,15 @@ export function buildTimeline(events: SessionEvent[]): TimelineItem[] {
         break;
       }
 
+      case "codex.fleet.decision": {
+        const decision = fleetDecisionItem(event, payload);
+        if (decision) {
+          closeStreamingTail();
+          items.push(decision);
+        }
+        break;
+      }
+
       case "goal.set":
       case "goal.updated":
       case "goal.completed":
@@ -642,6 +659,7 @@ function isActivityItem(item: TimelineItem): item is ActivityItem {
     case "worker":
     case "sandbox":
     case "memory":
+    case "fleet-decision":
       return true;
     default:
       return false;
@@ -818,9 +836,11 @@ function isTurnExecutionEvidence(type: string): boolean {
     type === "turn.capacity_waiting" ||
     type === "session.requiresAction" ||
     type === "tool.auth_needed" ||
+    type === "credential.auth_needed" ||
     type.startsWith("rig.setup.") ||
     type === "codex.capacity.waiting" ||
-    type === "codex.capacity.resumed"
+    type === "codex.capacity.resumed" ||
+    type === "codex.fleet.decision"
   );
 }
 
@@ -1197,6 +1217,8 @@ const AUTH_NEEDED_REASONS: ReadonlySet<string> = new Set([
   "expired",
   "insufficient_scope",
   "refresh_failed",
+  "unsupported_auth",
+  "resource_scope_unavailable",
 ]);
 
 function authNeededReason(value: unknown): AuthNeededItem["reason"] {
@@ -1303,10 +1325,3 @@ function looksLikeId(value: string): boolean {
  * just the tool ("list organizations"). Names without the `__` boundary (plain
  * built-ins like "session_create") are unaffected.
  */
-export function toolDisplayName(name: string): string {
-  // The prefix is a single LEFT boundary (`registryId__toolName`), so split on
-  // the FIRST `__` — the tool name itself may contain `__` and must survive whole.
-  const boundary = name.indexOf("__");
-  const toolPart = boundary >= 0 ? name.slice(boundary + 2) : name;
-  return toolPart.replace(/[_-]+/g, " ").trim();
-}

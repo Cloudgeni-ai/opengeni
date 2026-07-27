@@ -1,5 +1,5 @@
 import type { Settings } from "@opengeni/config";
-import type { FileAsset } from "@opengeni/contracts";
+import { RETAINED_OUTPUT_MAX_PAGE_BYTES, type FileAsset } from "@opengeni/contracts";
 import {
   BlobSASPermissions,
   BlobServiceClient,
@@ -48,7 +48,17 @@ export type ObjectStorage = {
     expiresInSeconds?: number;
   }) => Promise<{ url: string; expiresAt: Date }>;
   headFile: (file: FileAsset) => Promise<ObjectHead>;
+  /** Check provider existence without downloading object bytes. */
+  fileExists: (file: FileAsset) => Promise<boolean>;
   getFileBytes: (file: FileAsset) => Promise<Uint8Array>;
+  /**
+   * Fetch exactly one inclusive byte range without materializing the complete
+   * object. Returns null when the provider reports that the object is missing.
+   */
+  getFileRange: (
+    file: FileAsset,
+    range: { start: number; end: number },
+  ) => Promise<Uint8Array | null>;
   /** Fetch an object by raw storage key (not a tracked FileAsset). Returns null on 404/missing. */
   getObjectBytes: (key: string) => Promise<{ bytes: Uint8Array; contentType?: string } | null>;
   /**
@@ -174,6 +184,20 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         metadata: head.Metadata,
       });
     },
+    async fileExists(file) {
+      try {
+        await client.send(
+          new HeadObjectCommand({
+            Bucket: file.bucket,
+            Key: file.objectKey,
+          }),
+        );
+        return true;
+      } catch (error) {
+        if (isS3NotFound(error)) return false;
+        throw error;
+      }
+    },
     async getFileBytes(file) {
       const result = await client.send(
         new GetObjectCommand({
@@ -182,6 +206,22 @@ function createS3CompatibleObjectStorage(settings: Settings): ObjectStorage | nu
         }),
       );
       return await s3BodyToBytes(result.Body, file.objectKey);
+    },
+    async getFileRange(file, range) {
+      const length = assertFileByteRange(file, range);
+      try {
+        const result = await client.send(
+          new GetObjectCommand({
+            Bucket: file.bucket,
+            Key: file.objectKey,
+            Range: `bytes=${range.start}-${range.end}`,
+          }),
+        );
+        return await s3BodyToBoundedBytes(result.Body, file.objectKey, length);
+      } catch (error) {
+        if (isS3NotFound(error)) return null;
+        throw error;
+      }
     },
     async getObjectBytes(key) {
       try {
@@ -225,6 +265,32 @@ async function s3BodyToBytes(body: unknown, objectKey: string): Promise<Uint8Arr
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
   return Buffer.concat(chunks);
+}
+
+async function s3BodyToBoundedBytes(
+  body: unknown,
+  objectKey: string,
+  expectedBytes: number,
+): Promise<Uint8Array> {
+  if (!body) {
+    throw new Error(`Object body is empty: ${objectKey}`);
+  }
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for await (const chunk of body as AsyncIterable<Uint8Array | Buffer | string>) {
+    const normalized = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    bytes += normalized.byteLength;
+    if (bytes > expectedBytes) {
+      throw new Error(`Object range exceeded requested length: ${objectKey}`);
+    }
+    chunks.push(normalized);
+  }
+  if (bytes !== expectedBytes) {
+    throw new Error(
+      `Object range length mismatch for ${objectKey}: expected ${expectedBytes}, received ${bytes}`,
+    );
+  }
+  return Buffer.concat(chunks, bytes);
 }
 
 function isS3NotFound(error: unknown): boolean {
@@ -296,9 +362,30 @@ function createGcsObjectStorage(settings: Settings): ObjectStorage {
         metadata: stringMetadata(metadata.metadata),
       });
     },
+    async fileExists(file) {
+      try {
+        await bucket.file(file.objectKey).getMetadata();
+        return true;
+      } catch (error) {
+        if (isGcsNotFound(error)) return false;
+        throw error;
+      }
+    },
     async getFileBytes(file) {
       const [bytes] = await bucket.file(file.objectKey).download();
       return bytes;
+    },
+    async getFileRange(file, range) {
+      const length = assertFileByteRange(file, range);
+      try {
+        const [bytes] = await bucket
+          .file(file.objectKey)
+          .download({ start: range.start, end: range.end });
+        return exactRangeBytes(bytes, file.objectKey, length);
+      } catch (error) {
+        if (isGcsNotFound(error)) return null;
+        throw error;
+      }
     },
     async getObjectBytes(key) {
       try {
@@ -389,10 +476,32 @@ function createAzureBlobObjectStorage(settings: Settings): ObjectStorage | null 
         await containerClient.getBlobClient(file.objectKey).getProperties(),
       );
     },
+    async fileExists(file) {
+      try {
+        await containerClient.getBlobClient(file.objectKey).getProperties();
+        return true;
+      } catch (error) {
+        if (isAzureNotFound(error)) return false;
+        throw error;
+      }
+    },
     async getFileBytes(file) {
       return await azureDownloadToBytes(
         await containerClient.getBlobClient(file.objectKey).download(),
       );
+    },
+    async getFileRange(file, range) {
+      const length = assertFileByteRange(file, range);
+      try {
+        return await azureDownloadToBoundedBytes(
+          await containerClient.getBlobClient(file.objectKey).download(range.start, length),
+          file.objectKey,
+          length,
+        );
+      } catch (error) {
+        if (isAzureNotFound(error)) return null;
+        throw error;
+      }
     },
     async getObjectBytes(key) {
       try {
@@ -532,6 +641,65 @@ async function azureDownloadToBytes(download: BlobDownloadResponseParsed): Promi
     chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
   }
   return Buffer.concat(chunks);
+}
+
+async function azureDownloadToBoundedBytes(
+  download: BlobDownloadResponseParsed,
+  objectKey: string,
+  expectedBytes: number,
+): Promise<Uint8Array> {
+  if (!download.readableStreamBody) {
+    throw new Error("Azure Blob download response did not include a readable body");
+  }
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  for await (const chunk of download.readableStreamBody as AsyncIterable<
+    Uint8Array | Buffer | string
+  >) {
+    const normalized = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+    bytes += normalized.byteLength;
+    if (bytes > expectedBytes) {
+      throw new Error(`Object range exceeded requested length: ${objectKey}`);
+    }
+    chunks.push(normalized);
+  }
+  if (bytes !== expectedBytes) {
+    throw new Error(
+      `Object range length mismatch for ${objectKey}: expected ${expectedBytes}, received ${bytes}`,
+    );
+  }
+  return Buffer.concat(chunks, bytes);
+}
+
+function assertFileByteRange(
+  file: Pick<FileAsset, "sizeBytes" | "objectKey">,
+  range: { start: number; end: number },
+): number {
+  if (
+    !Number.isSafeInteger(range.start) ||
+    !Number.isSafeInteger(range.end) ||
+    range.start < 0 ||
+    range.end < range.start ||
+    range.end >= file.sizeBytes
+  ) {
+    throw new RangeError(`Invalid object byte range for ${file.objectKey}`);
+  }
+  const length = range.end - range.start + 1;
+  if (length > RETAINED_OUTPUT_MAX_PAGE_BYTES) {
+    throw new RangeError(
+      `Object byte range exceeds ${RETAINED_OUTPUT_MAX_PAGE_BYTES} bytes for ${file.objectKey}`,
+    );
+  }
+  return length;
+}
+
+function exactRangeBytes(bytes: Uint8Array, objectKey: string, expectedBytes: number): Uint8Array {
+  if (bytes.byteLength !== expectedBytes) {
+    throw new Error(
+      `Object range length mismatch for ${objectKey}: expected ${expectedBytes}, received ${bytes.byteLength}`,
+    );
+  }
+  return bytes;
 }
 
 function objectHead(input: {

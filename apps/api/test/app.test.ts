@@ -12,6 +12,7 @@ import {
   replaySessionEvents,
   routeLabel,
   validateGitHubRepositorySelectionShape,
+  validateGitHubRepositorySelectionShapes,
   validateToolRefs,
   withDefaultEnabledCapabilityMcpTools,
   workflowIdForSession,
@@ -32,6 +33,7 @@ import {
 import { configuredAllowedModels, type Settings } from "@opengeni/config";
 import { encryptEnvironmentValue } from "@opengeni/db";
 import { testSettings } from "@opengeni/testing";
+import { McpPayloadTooLargeError } from "@opengeni/runtime/mcp-network";
 import {
   ClientConfig,
   OPENGENI_API_CONTRACT_HEADER,
@@ -66,8 +68,67 @@ describe("API helpers", () => {
       uri: "https://github.com/OpenAI/example.git",
       ref: "main",
       subpath: "infra",
-      mountPath: "repos/OpenAI/example",
+      mountPath: "repos/github.com/OpenAI/example",
     });
+  });
+
+  test("preserves custom Git HTTPS ports during normalization", () => {
+    expect(
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://git.example.com:8443/acme/repo.git",
+          ref: "main",
+          provider: "gitlab",
+        },
+      ])[0],
+    ).toMatchObject({
+      uri: "https://git.example.com:8443/acme/repo.git",
+      mountPath: "repos/git.example.com%3A8443/acme/repo",
+    });
+  });
+
+  test("keeps same-name repositories on different providers collision-free", () => {
+    expect(
+      normalizeResources([
+        { kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/app.git",
+          ref: "main",
+          provider: "gitlab",
+        },
+        {
+          kind: "repository",
+          uri: "https://dev.azure.com/acme/project/_git/app",
+          ref: "main",
+          provider: "azure_devops",
+        },
+      ]).map((resource) => resource.mountPath),
+    ).toEqual([
+      "repos/github.com/acme/app",
+      "repos/gitlab.com/acme/app",
+      "repos/dev.azure.com/acme/project/_git/app",
+    ]);
+  });
+
+  test("rejects explicit mount collisions under portable case folding", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          mountPath: "repos/Shared/App",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/two.git",
+          ref: "main",
+          mountPath: "repos/shared/app",
+        },
+      ]),
+    ).toThrow("duplicate resource mount path");
   });
 
   test("preserves provider-neutral repository credential metadata while normalizing", () => {
@@ -79,6 +140,8 @@ describe("API helpers", () => {
         provider: "gitlab",
         repositoryId: "gl-123",
         connectionId: "conn-1",
+        credentialBindingId: "host-binding-1",
+        access: "read",
       },
     ]);
 
@@ -89,8 +152,44 @@ describe("API helpers", () => {
       provider: "gitlab",
       repositoryId: "gl-123",
       connectionId: "conn-1",
-      mountPath: "repos/OpenAI/example",
+      credentialBindingId: "host-binding-1",
+      access: "read",
+      mountPath: "repos/gitlab.com/OpenAI/example",
     });
+  });
+
+  test("rejects one credential binding id assigned to multiple providers", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/one.git",
+          ref: "main",
+          provider: "github",
+          credentialBindingId: "shared-id",
+        },
+        {
+          kind: "repository",
+          uri: "https://gitlab.com/acme/two.git",
+          ref: "main",
+          provider: "gitlab",
+          credentialBindingId: "shared-id",
+        },
+      ]),
+    ).toThrow("multiple Git providers");
+  });
+
+  test("rejects a credential binding without an explicit or legacy-inferred provider", () => {
+    expect(() =>
+      normalizeResources([
+        {
+          kind: "repository",
+          uri: "https://example.com/acme/repo.git",
+          ref: "main",
+          credentialBindingId: "ambiguous-host-binding",
+        },
+      ]),
+    ).toThrow("require a Git provider");
   });
 
   test("normalizes file resources into sandbox mount paths", () => {
@@ -214,9 +313,9 @@ describe("API helpers", () => {
     expect(shouldCreateScheduleAfterUpdateError(new Error("network unavailable"))).toBe(false);
   });
 
-  test("rejects selected GitHub App repos from multiple installations", () => {
-    expect(() =>
-      validateGitHubRepositorySelectionShape([
+  test("accepts selected GitHub App repos from multiple installations", () => {
+    expect(
+      validateGitHubRepositorySelectionShapes([
         {
           kind: "repository",
           uri: "https://github.com/a/one.git",
@@ -232,7 +331,7 @@ describe("API helpers", () => {
           githubRepositoryId: 22,
         },
       ]),
-    ).toThrow("one installation");
+    ).toEqual([1, 2]);
   });
 
   test("rejects incomplete GitHub App repository metadata", () => {
@@ -285,6 +384,12 @@ describe("API helpers", () => {
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/files/uploads/upload-1/complete`)).toBe(
       "/v1/workspaces/:workspaceId/files/uploads/:id/complete",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/artifacts/artifact-1`)).toBe(
+      "/v1/workspaces/:workspaceId/artifacts/:id",
+    );
+    expect(routeLabel(`/v1/workspaces/${workspace}/artifacts/artifact-1/content`)).toBe(
+      "/v1/workspaces/:workspaceId/artifacts/:id/content",
     );
     expect(routeLabel(`/v1/workspaces/${workspace}/document-bases/base-1/documents`)).toBe(
       "/v1/workspaces/:workspaceId/document-bases/:id/documents",
@@ -348,6 +453,7 @@ describe("API helpers", () => {
 
   test("preserves HTTPException status codes in error metrics", () => {
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
+    expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
   });
 
@@ -905,6 +1011,81 @@ describe("catalog connectionRef exposure", () => {
   });
 });
 
+describe("curated skill catalog enablement", () => {
+  function installation(config: Record<string, unknown>): CapabilityInstallation {
+    return {
+      id: "00000000-0000-0000-0000-000000000001",
+      accountId: "00000000-0000-0000-0000-0000000000a1",
+      workspaceId: "00000000-0000-0000-0000-0000000000b1",
+      capabilityId: "skill:azure-verified-modules",
+      kind: "skill",
+      status: "active",
+      config,
+      metadata: { mcpConnectivity: { status: "ok", toolCount: 1 } },
+      enabledAt: "2026-07-06T00:00:00.000Z",
+      updatedAt: "2026-07-06T00:00:00.000Z",
+    };
+  }
+
+  const librarySkill = (): CapabilityCatalogItem =>
+    capabilityItem({
+      id: "skill:azure-verified-modules",
+      kind: "skill",
+      source: "library",
+      name: "azure-verified-modules",
+      runtime: { available: true, notes: "available" },
+      metadata: {
+        libraryId: "azure-verified-modules",
+        version: "1.0.0",
+        contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
+        sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+        provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+      },
+    });
+
+  test("is discoverable but disabled until an active installation exists", () => {
+    const item = applyCapabilityEnablement(librarySkill(), undefined, new Set());
+    expect(item.enabled).toBe(false);
+    expect(item.enabledReason).toBeNull();
+  });
+
+  test("an active installation enables it without exposing a connection", () => {
+    const item = applyCapabilityEnablement(
+      librarySkill(),
+      {
+        ...installation({ version: "1.0.0" }),
+        capabilityId: "skill:azure-verified-modules",
+        kind: "skill",
+        metadata: {
+          libraryId: "azure-verified-modules",
+          libraryVersion: "1.0.0",
+          contentSha256: "bbc029412fd4893c35cf2a4df6e052efa5583d57d3c26e35d62869dcf4625699",
+          sourceCommit: "de4323afdfbc30d1387f287b55062fa8d82b62e8",
+          provenance: "Vendored from hashicorp/agent-skills; reviewed OpenGeni curated entry.",
+        },
+      },
+      new Set(),
+    );
+    expect(item.enabled).toBe(true);
+    expect(item.enabledReason).toBe("explicitly selected");
+    expect(item.connectionRef).toBeNull();
+  });
+
+  test("a malformed active installation stays disabled", () => {
+    const item = applyCapabilityEnablement(
+      librarySkill(),
+      {
+        ...installation({ version: "1.0.0" }),
+        capabilityId: "skill:azure-verified-modules",
+        kind: "skill",
+      },
+      new Set(),
+    );
+    expect(item.enabled).toBe(false);
+    expect(item.enabledReason).toBeNull();
+  });
+});
+
 describe("GET /v1/config/client", () => {
   // The route only reads settings (+ the storage derived from them); db / bus /
   // workflowClient are never touched, so we stub them. managedAuth is forced to
@@ -980,14 +1161,25 @@ describe("GET /v1/config/client", () => {
 
     expect(config.models.map((model) => model.id)).toEqual(configuredAllowedModels(settings));
     const glm = config.models.find((model) => model.id === "accounts/fireworks/models/glm-5p2");
-    expect(glm).toEqual({
+    expect(glm).toMatchObject({
       id: "accounts/fireworks/models/glm-5p2",
       label: "GLM 5.2",
       provider: "fireworks",
       providerLabel: "Fireworks AI",
       api: "chat",
       contextWindowTokens: 1_048_576,
+      schemaVersion: 1,
+      aliases: [],
+      deployment: {
+        upstreamModelId: "accounts/fireworks/models/glm-5p2",
+        wireApi: "chat",
+      },
+      credentialSource: { kind: "deployment", mechanism: "api_key" },
+      billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     });
+    expect(glm?.definitionVersion).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(glm).not.toHaveProperty("availability");
+    expect(JSON.stringify(config)).not.toContain("fw_test");
   });
 });
 

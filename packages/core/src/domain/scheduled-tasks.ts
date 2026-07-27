@@ -9,19 +9,21 @@ import type {
 import {
   createScheduledTask,
   deleteScheduledTask,
+  getNestedAgentDepthDeploymentPolicy,
   getRig,
   getScheduledTask,
+  requireWorkspace,
   updateScheduledTask,
   type Database,
   type UpdateScheduledTaskInput,
 } from "@opengeni/db";
 import { HTTPException } from "hono/http-exception";
-import { requirePermission } from "../access";
+import { hasPermission, requirePermission } from "../access";
 import type { SessionWorkflowClient } from "../dependencies";
 import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
-import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "./sessions";
+import { assertWorkspaceModelPolicyAllows, canonicalConfiguredModel } from "./sessions";
 import {
   normalizeResources,
   validateFileResources,
@@ -199,6 +201,7 @@ export async function validatedScheduledTaskUpdate(input: {
       settings: input.settings,
       db: input.db,
       objectStorage: input.objectStorage,
+      grant: input.grant,
       workspaceId: input.existing.workspaceId,
       payload: { agentConfig: input.payload.agentConfig },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
@@ -318,6 +321,7 @@ async function validateScheduledTaskAgentConfig(input: {
   settings: Settings;
   db: Database;
   objectStorage: ObjectStorageDependency;
+  grant: AccessGrant;
   payload: { agentConfig: ScheduledTaskAgentConfig };
   workspaceId: string;
   toolsProvided?: boolean;
@@ -327,15 +331,10 @@ async function validateScheduledTaskAgentConfig(input: {
   // session choke points (a `scheduled_tasks:manage` holder could otherwise set
   // a model the host does not expose). An omitted model inherits the host
   // default downstream, which is always configured.
-  assertConfiguredModel(input.settings, input.payload.agentConfig.model);
+  const model = canonicalConfiguredModel(input.settings, input.payload.agentConfig.model);
   // Same policy vetting as the session choke points; an omitted model flows
   // through session creation later, where the effective default is vetted.
-  await assertWorkspaceModelPolicyAllows(
-    input.db,
-    input.settings,
-    input.workspaceId,
-    input.payload.agentConfig.model,
-  );
+  await assertWorkspaceModelPolicyAllows(input.db, input.settings, input.workspaceId, model);
   const resources = normalizeResources(input.payload.agentConfig.resources ?? []);
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     input.db,
@@ -361,8 +360,27 @@ async function validateScheduledTaskAgentConfig(input: {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(input.db, input.workspaceId, resources);
+  const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
+  if (requestedMaxDepth !== undefined) {
+    const workspace = await requireWorkspace(input.db, input.workspaceId);
+    const workspaceMaxDepth = workspace.settings.maxNestedAgentDepth;
+    const deploymentPolicy = await getNestedAgentDepthDeploymentPolicy(input.db);
+    const inheritedMaxDepth =
+      typeof workspaceMaxDepth === "number"
+        ? workspaceMaxDepth
+        : deploymentPolicy.maxNestedAgentDepth;
+    if (
+      requestedMaxDepth > inheritedMaxDepth &&
+      !hasPermission(input.grant.permissions, "workspace:admin")
+    ) {
+      throw new HTTPException(403, {
+        message: `scheduled task maxNestedAgentDepth ${requestedMaxDepth} exceeds inherited limit ${inheritedMaxDepth}; workspace:admin is required to increase it`,
+      });
+    }
+  }
   return {
     ...input.payload.agentConfig,
+    ...(model === undefined || model === null ? {} : { model }),
     prompt,
     resources,
     tools,

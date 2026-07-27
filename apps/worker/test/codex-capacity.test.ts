@@ -45,7 +45,7 @@ describe("Codex capacity availability diagnostics", () => {
       accounts: [
         account("healthy"),
         account("cooling", { exhaustedUntil: future }),
-        account("capped", { primaryUsedPercent: 95, primaryResetAt: future }),
+        account("capped", { primaryUsedPercent: 100, primaryResetAt: future }),
       ],
       activeCredentialId: null,
       rotationEnabled: true,
@@ -66,7 +66,6 @@ describe("Codex capacity availability diagnostics", () => {
         context,
         testSettings({
           codexCredentialLeasingEnabled: true,
-          codexRotationNearExhaustionPct: 90,
         }),
       ),
     ).toMatchObject({

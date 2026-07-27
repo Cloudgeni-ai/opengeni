@@ -54,6 +54,9 @@ function machine(
   return {
     enrollmentId: overrides.enrollmentId ?? "enr-" + overrides.sandboxId,
     kind: "selfhosted",
+    workspaceGeneration: null,
+    archiveGeneration: null,
+    archiveComplete: false,
     active: false,
     isSessionGroup: false,
     os: "linux",

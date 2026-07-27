@@ -1,17 +1,24 @@
 import {
   CreateScheduledTaskRequest,
+  defaultRepositoryMountPath,
   SESSION_EVENT_RAW_DELTA_TYPES,
+  SessionEventLatestClass,
   SessionEventPayloadMode,
   SessionEventReadDirection,
   SessionEventReadMode,
+  SessionEventResultMode,
   SessionEventSemanticClass,
   SessionEventType,
+  compactSessionEventResult,
+  sessionEventLatestClassToSemanticClass,
   SessionMcpCredentialUpdateInput,
   VariableSetVariableName,
   type AccessGrant,
   type GitHubRepository,
   type Permission,
   type ResourceRef,
+  type SessionAuthorizationOperation,
+  type Session,
   UpdateScheduledTaskRequest,
 } from "@opengeni/contracts";
 import {
@@ -32,6 +39,8 @@ import {
   listScheduledTasks,
   listSessionEventPage,
   listSessionDiscoverySummaries,
+  projectEffectiveControlForRelatedAccess,
+  projectSessionForRelatedAccess,
   type SessionDiscoveryCursor,
   type SessionDiscoveryOrderBy,
   listRigs,
@@ -48,28 +57,31 @@ import {
   requireSession,
   saveWorkspaceMemory,
   searchWorkspaceMemories,
-  setSessionGoalStatus,
+  serializeEffectiveSessionControl,
+  setSessionGoalStatusWithEvent,
   setVariableSetVariable,
   updateScheduledTask,
-  updateSessionGoal,
-  upsertSessionGoal,
+  updateSessionGoalWithEvent,
+  upsertSessionGoalWithEvent,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
-  createSignedState,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
-  stateMaxAgeSeconds,
 } from "@opengeni/github";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import * as z4 from "zod/v4";
-import { hasPermission } from "@opengeni/core";
+import {
+  hasPermission,
+  requireSessionAuthorization,
+  requireSessionAuthorizationListScope,
+  type ResolvedSessionAuthorization,
+} from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import { listWorkspaceGitHubRepositories } from "../github-access";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
@@ -97,9 +109,14 @@ import {
   controlAgentSessionWorkstream,
   controlHumanSessionWorkstream,
   createSessionForRequest,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
+  sessionWithEffectiveToolPolicy,
+  workspaceSessionToolPolicyDefaultServerIds,
+  workspaceSessionToolPolicyServerIds,
   type AgentSessionCommandContext,
 } from "@opengeni/core";
 import {
@@ -113,17 +130,19 @@ import {
   type RunOnOp,
 } from "@opengeni/core";
 import {
+  boundSessionEventCompactResult,
   boundSessionEventMcpPage,
   boundSessionDetailMcp,
   boundRigDetailMcp,
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
+import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 
 export type McpServerOptions = {
-  // Origin of the HTTP request that reached the MCP route; last-resort base
-  // for links the server mints (github_connect_link) when neither
-  // OPENGENI_PUBLIC_BASE_URL nor the manifest base URL is configured.
+  // Origin of the HTTP request that reached the MCP route. Retained in the
+  // options ABI for browser-oriented tools; github_connect_link does not use
+  // it or mint state while new installation binding is disabled.
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
   workspaceMemoryEnabled?: boolean | undefined;
@@ -162,7 +181,8 @@ export function buildOpenGeniMcpServer(
         inputSchema: { title: z4.string().min(1).max(200) },
       },
       async ({ title }) => {
-        const result = await updateSessionTitle(deps, grant.workspaceId, sessionId, title, "agent");
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.title.write");
+        const result = await updateSessionTitle(deps, grant, sessionId, title, "agent");
         return json({
           ok: true,
           updated: result.updated,
@@ -196,19 +216,20 @@ export function buildOpenGeniMcpServer(
     registerRigTools(server, deps, grant, can, sessionId, json);
   }
 
-  // Orchestration, variableSet, and GitHub-connect tools are permission-gated
+  // Orchestration, variableSet, and GitHub status/token tools are permission-gated
   // at registration: a grant without the permission does not see the tool.
   // Sandboxed workers reach this server with the first-party delegated
   // permission set (firstPartyMcpPermissions in @opengeni/runtime), which is
   // POWERFUL BY DEFAULT — it carries sessions:*, variable sets:*, and github:use,
-  // so agents can spawn/read sessions, manage variable set variables,
-  // and mint GitHub install links out of the box. A user DEMOTES a specific
+  // so agents can spawn/read sessions, manage variable set variables, inspect
+  // GitHub connection availability, and refresh scoped tokens for already-bound
+  // repositories out of the box. A user DEMOTES a specific
   // session by setting a narrower session.firstPartyMcpPermissions (capped to
   // the creator's own grant); operators still cap what any session can be given.
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, grant, options, json);
+    registerGitHubConnectTool(server, deps, json);
     // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
     // worker-signed sessionId claim so it mints for THIS session's repos), gated on
     // the same github:use capability as github_connect_link.
@@ -714,13 +735,14 @@ function registerGoalTools(
       },
     },
     async ({ text, successCriteria, maxAutoContinuations }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const callerTurnId =
         typeof grant.metadata?.["turnId"] === "string"
           ? (grant.metadata["turnId"] as string)
           : null;
       await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
-      const { goal, replaced } = await upsertSessionGoal(deps.db, {
+      const { goal, events } = await upsertSessionGoalWithEvent(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
@@ -728,20 +750,11 @@ function registerGoalTools(
         successCriteria: successCriteria ?? null,
         maxAutoContinuations: maxAutoContinuations ?? null,
         createdBy: "agent",
+        actor: "agent",
       });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "goal.set",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            version: goal.version,
-            actor: "agent",
-            replaced,
-          },
-        },
-      ]);
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
       return json(goal);
     },
   );
@@ -755,35 +768,36 @@ function registerGoalTools(
         text: z4.string().min(1).optional(),
         successCriteria: z4.string().min(1).optional(),
         progressNote: z4.string().min(1).optional(),
+        idempotencyKey: z4.string().uuid(),
       },
     },
-    async ({ text, successCriteria, progressNote }) => {
-      await requireSession(deps.db, grant.workspaceId, sessionId);
-      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (!existing) {
-        throw new Error("this session has no goal; use goal_set first");
-      }
-      if (existing.status === "completed") {
-        throw new Error("session goal is completed; use goal_set to start a new goal");
-      }
-      const goal = await updateSessionGoal(deps.db, grant.workspaceId, sessionId, {
-        ...(text !== undefined ? { text } : {}),
-        ...(successCriteria !== undefined ? { successCriteria } : {}),
-      });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+    async ({ text, successCriteria, progressNote, idempotencyKey }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
+      const context = exactAgentCommandContext(grant, sessionId);
+      const { goal, events, operationId, replay } = await updateSessionGoalWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
         {
-          type: "goal.updated",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            ...(progressNote ? { progressNote } : {}),
-            version: goal.version,
-            actor: "agent",
+          ...(text !== undefined ? { text } : {}),
+          ...(successCriteria !== undefined ? { successCriteria } : {}),
+          ...(progressNote !== undefined ? { progressNote } : {}),
+          actor: "agent",
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: context.callerAttemptId,
+              sessionId: context.callerSessionId,
+              turnId: context.callerTurnId,
+              executionGeneration: context.callerExecutionGeneration,
+            },
+            operationKey: idempotencyKey,
           },
         },
-      ]);
-      return json(goal);
+      );
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      return json({ ...goal, operationId, replay });
     },
   );
 
@@ -795,22 +809,24 @@ function registerGoalTools(
       inputSchema: { evidence: z4.string().min(1) },
     },
     async ({ evidence }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "completed",
-        evidence,
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "goal.completed",
-            payload: { goalId: goal.id, evidence, version: goal.version },
-          },
-        ]);
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "completed",
+          evidence,
+          event: { type: "goal.completed", evidence },
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },
@@ -824,30 +840,30 @@ function registerGoalTools(
       inputSchema: { rationale: z4.string().min(1) },
     },
     async ({ rationale }) => {
+      await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
       await requireSession(deps.db, grant.workspaceId, sessionId);
       const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "paused",
-        rationale,
-        pausedReason: "agent",
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "paused",
+          rationale,
+          pausedReason: "agent",
+          event: {
             type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "agent",
-              reason: "agent",
-              rationale,
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
+            actor: "agent",
+            reason: "agent",
+            rationale,
           },
-        ]);
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },
@@ -857,6 +873,19 @@ function registerGoalTools(
 type JsonResult = (value: unknown) => {
   content: Array<{ type: "text"; text: string }>;
 };
+
+async function authorizeFirstPartySession(
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string,
+  operation: SessionAuthorizationOperation,
+): Promise<ResolvedSessionAuthorization | null> {
+  return await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation,
+    surface: "first_party_mcp",
+  });
+}
 
 const MemoryKindSchema = z4.enum(["preference", "semantic", "procedural", "decision", "episodic"]);
 
@@ -1003,6 +1032,13 @@ function registerFleetTools(
     db: deps.db,
     settings: deps.settings,
     bus: deps.bus,
+    ensureSessionGroupReady: async (ctx) => {
+      const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
+      return await ensureViewerSessionGroupReady(
+        { db: deps.db, settings: deps.settings, bus: deps.bus },
+        { accountId: ctx.accountId, workspaceId: ctx.workspaceId, session },
+      );
+    },
   };
 
   // Resolve the session's group sandbox (the default/home fleet member) at
@@ -1020,7 +1056,7 @@ function registerFleetTools(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox (the Modal box) PLUS the workspace's enrolled selfhosted machines, each with liveness (online/reconnecting/offline) and an `active` marker for the currently-routed one. Use before sandbox_attach/sandbox_swap to pick a target. The `id` of any entry is the `target` for attach/swap/run_on.",
+        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `liveness` is conservative: online requires observed provider existence and verified workspace readiness. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch are also reported separately. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
     async () => json(await listFleet(services, await fleetContext())),
@@ -1030,7 +1066,7 @@ function registerFleetTools(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox (make it the active sandbox the agent\'s next tool calls run on). Heterogeneous: a Modal box or an enrolled selfhosted machine. Validates the target is owned by this workspace and online, then repoints under an epoch fence. Identical mechanic to sandbox_swap; use `target` = a sandboxes_list `id`, or "session"/"default" for this session\'s own box.',
+        'Attach this session to a sandbox for the next tool call. The target must be owned and verified ready. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -1040,7 +1076,7 @@ function registerFleetTools(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation (the next tool call runs on the new box). Heterogeneous Modal<->selfhosted<->selfhosted, single active at a time, flippable as many times as you like. Validates ownership + liveness, then bumps the active epoch (fencing any in-flight op, which retries against the new box). `target` = a sandboxes_list `id`, or "session"/"default" to swap back to this session\'s own box.',
+        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -1285,6 +1321,7 @@ function exactAgentCommandContext(
   return {
     accountId: grant.accountId,
     workspaceId: grant.workspaceId,
+    subjectId: grant.subjectId,
     callerSessionId,
     callerTurnId: turnId,
     callerAttemptId: attemptId,
@@ -1305,8 +1342,7 @@ function registerWorkspaceOrchestrationTools(
     server.registerTool(
       "sessions_list",
       {
-        description:
-          "List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.",
+        description: `List compact high-level session status in this workspace. Defaults to creation order; use orderBy=updatedAt with decimal activity-revision updatedAfter/updatedThrough tokens for gap-free indexed incremental monitoring independent of application clocks. Cursors are opaque revision-fenced keysets. includeLastMessage is opt-in; its rendered previews share a deterministic ${SESSION_DISCOVERY_PREVIEW_MAX_BYTES}-byte UTF-8 aggregate budget, and omitted previews include a bounded session_events drill-down input (exact message type, direction=before, limit=1, monitoring summary). Use session_get for exact known targets and detailed resources/tools/settings. The list never returns full session objects or history.`,
         inputSchema: {
           limit: z4.number().int().positive().max(100).optional(),
           cursor: z4.string().max(512).optional(),
@@ -1316,6 +1352,11 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ limit, cursor, includeLastMessage, orderBy: requestedOrderBy, updatedAfter }) => {
+        const authorizationScope = await requireSessionAuthorizationListScope(
+          deps,
+          grant,
+          "first_party_mcp",
+        );
         const decodedCursor = cursor ? decodeSessionDiscoveryCursor(cursor) : undefined;
         const orderBy: SessionDiscoveryOrderBy =
           requestedOrderBy ?? decodedCursor?.orderBy ?? "createdAt";
@@ -1338,6 +1379,7 @@ function registerWorkspaceOrchestrationTools(
           includeLastMessage: includeLastMessage === true,
           orderBy,
           ...(normalizedUpdatedAfter ? { updatedAfter: normalizedUpdatedAfter } : {}),
+          ...(authorizationScope ? { authorizationScope } : {}),
         });
         return json(capSessionDiscoveryPage(page, includeLastMessage === true));
       },
@@ -1351,12 +1393,32 @@ function registerWorkspaceOrchestrationTools(
         inputSchema: { sessionId: z4.string().uuid() },
       },
       async ({ sessionId }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.read",
+        );
         const session = await getSession(deps.db, grant.workspaceId, sessionId);
         if (!session) {
           throw new Error("session not found");
         }
         const queue = await getSessionQueueSnapshot(deps.db, grant.workspaceId, sessionId);
-        return json(boundSessionDetailMcp(session, queue?.effectiveControl ?? null));
+        const projected = projectSessionForRelatedAccess(
+          {
+            ...session,
+            effectiveControl: queue?.effectiveControl ?? session.effectiveControl,
+          },
+          authorization?.relatedSessionAccess ?? "root",
+        );
+        return json(
+          boundSessionDetailMcp(
+            await withMcpEffectivePolicy(deps, grant.workspaceId, {
+              ...projected,
+              effectiveControl: queue?.effectiveControl ?? projected.effectiveControl,
+            }),
+          ),
+        );
       },
     );
 
@@ -1364,7 +1426,7 @@ function registerWorkspaceOrchestrationTools(
       "session_events",
       {
         description:
-          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the newest event in exactly one semantic class; it cannot be combined with type or class filters. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
+          "Read a compact semantic tail only when session_get status is insufficient. With no cursor, this returns the newest matching events and excludes raw message/reasoning/command/PTY deltas. Use `latest` as an exclusive lookup for the authoritative newest durable sequence in exactly one semantic class; `receipt` is the concise alias for `tool_receipt`, and latest cannot be combined with type or class filters. Add `resultMode=compact` to latest for one bounded result-bearing completion/checkpoint/receipt without another inference. Use nextBefore to page older or explicit after/nextAfter to page forward. Type/class filters run in the RLS-scoped database query. payloadMode none|summary|full controls retained audit payload projection, but every model result is independently byte-capped with explicit truncation and exact covered sequence bounds. Exact retained forensic payloads require the access-controlled REST/SDK events API with mode=forensic&payloadMode=full; generic source bytes never retained by the audit boundary remain unavailable.",
         inputSchema: {
           sessionId: z4.string().uuid(),
           after: z4.number().int().nonnegative().optional(),
@@ -1373,6 +1435,7 @@ function registerWorkspaceOrchestrationTools(
           direction: z4.enum(SessionEventReadDirection.options).optional(),
           mode: z4.enum(SessionEventReadMode.options).optional(),
           payloadMode: z4.enum(SessionEventPayloadMode.options).optional(),
+          resultMode: z4.enum(SessionEventResultMode.options).optional(),
           includeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
           excludeTypes: z4.array(z4.enum(SessionEventType.options)).max(100).optional(),
           includeClasses: z4
@@ -1383,7 +1446,7 @@ function registerWorkspaceOrchestrationTools(
             .array(z4.enum(SessionEventSemanticClass.options))
             .max(SessionEventSemanticClass.options.length)
             .optional(),
-          latest: z4.enum(SessionEventSemanticClass.options).optional(),
+          latest: z4.enum(SessionEventLatestClass.options).optional(),
         },
       },
       async ({
@@ -1394,12 +1457,19 @@ function registerWorkspaceOrchestrationTools(
         direction: requestedDirection,
         mode: requestedMode,
         payloadMode: requestedPayloadMode,
+        resultMode: requestedResultMode,
         includeTypes,
         excludeTypes,
         includeClasses,
         excludeClasses,
         latest,
       }) => {
+        await authorizeFirstPartySession(deps, grant, sessionId, "session.events.read");
+        const latestClass =
+          latest === undefined ? undefined : sessionEventLatestClassToSemanticClass(latest);
+        if (requestedResultMode === "compact" && latestClass === undefined) {
+          throw new Error("resultMode=compact requires latest");
+        }
         await requireSession(deps.db, grant.workspaceId, sessionId);
         if (
           latest &&
@@ -1410,24 +1480,42 @@ function registerWorkspaceOrchestrationTools(
           throw new Error("latest cannot be combined with event filters");
         }
         const mode = requestedMode ?? (after !== undefined ? "forensic" : "monitoring");
-        const direction = latest
+        const direction = latestClass
           ? "before"
           : (requestedDirection ??
             (before !== undefined ? "before" : after !== undefined ? "after" : "before"));
-        const payloadMode = requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full");
+        const payloadMode =
+          requestedResultMode === "compact"
+            ? "full"
+            : (requestedPayloadMode ?? (mode === "monitoring" ? "summary" : "full"));
         const dbPage = await listSessionEventPage(deps.db, grant.workspaceId, sessionId, {
           after: after ?? 0,
           ...(before !== undefined ? { before } : {}),
           direction,
-          limit: latest ? 1 : boundedSessionEventMcpLimit(limit),
+          limit: latestClass ? 1 : boundedSessionEventMcpLimit(limit),
           payloadMode,
           includeTypes: includeTypes ?? [],
           excludeTypes: excludeTypes ?? [],
-          includeClasses: latest ? [latest] : (includeClasses ?? []),
+          includeClasses: latestClass ? [latestClass] : (includeClasses ?? []),
           excludeClasses: excludeClasses ?? [],
           ...(mode === "monitoring" ? { defaultExcludeTypes: SESSION_EVENT_RAW_DELTA_TYPES } : {}),
+          ...(latestClass ? { authoritativeLatest: true } : {}),
           maxBytes: SESSION_EVENT_MCP_MAX_BYTES * 4,
         });
+        if (requestedResultMode === "compact") {
+          const event = dbPage.events[0];
+          return json(
+            event
+              ? boundSessionEventCompactResult(
+                  compactSessionEventResult(
+                    event,
+                    latestClass!,
+                    dbPage.coveredSequence ?? { first: event.sequence, last: event.sequence },
+                  ),
+                )
+              : null,
+          );
+        }
         return json(
           boundSessionEventMcpPage({
             events: dbPage.events,
@@ -1488,9 +1576,19 @@ function registerWorkspaceOrchestrationTools(
           // Workspace-scoped CREATE idempotency key: a retried session_create with
           // the same key returns the already-spawned worker instead of a duplicate.
           idempotencyKey: z4.string().min(1).max(200).optional(),
+          // Per-session/agent descendant policy. Reductions need only create;
+          // increases are authorized server-side with workspace:admin.
+          maxNestedAgentDepth: z4.number().int().nonnegative().optional(),
           // First-party MCP token permissions for the spawned session; every
           // permission must be held by this grant (validated in the domain).
-          firstPartyMcpPermissions: z4.array(z4.string()).optional(),
+          // A goal requires goals:manage in the resulting set; it is never
+          // silently added beyond the inherited or explicit authority.
+          firstPartyMcpPermissions: z4
+            .array(z4.string())
+            .optional()
+            .describe(
+              "Optional first-party capability set for the child. Omit to inherit this session's effective permissions. An explicit set may only narrow capabilities held by this session. A goal-bearing child requires goals:manage in the resulting set; creation fails rather than adding it implicitly.",
+            ),
           // Shared-sandbox placement (addendum 05 §D). OMIT (default) to SHARE the
           // creator's box — one filesystem/repo/desktop, N independent conversations;
           // this is the SAFE DEFAULT. Pass "new" for a fresh isolated box (a different
@@ -1524,7 +1622,23 @@ function registerWorkspaceOrchestrationTools(
           // arbitrary session's wake channel without sessions:control on it.
         },
       },
-      async (args) => json(await createSessionForRequest(deps, grant, grant.workspaceId, args)),
+      async (args) => {
+        try {
+          if (callerSessionId !== null) {
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+          }
+          const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
+          return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
+        } catch (error) {
+          if (error instanceof SessionSpawnDeniedError) {
+            return {
+              ...json(sessionSpawnDenialEnvelope(error)),
+              isError: true,
+            };
+          }
+          throw error;
+        }
+      },
     );
   }
 
@@ -1544,6 +1658,7 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId: targetSessionId, text, idempotencyKey, mcpCredentialUpdates }) => {
+        await authorizeFirstPartySession(deps, grant, targetSessionId, "session.append");
         if (callerSessionId !== null) {
           if ((mcpCredentialUpdates?.length ?? 0) > 0) {
             throw new Error("internal session updates cannot change MCP credentials");
@@ -1594,6 +1709,12 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.control",
+        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
@@ -1607,27 +1728,37 @@ function registerWorkspaceOrchestrationTools(
           );
           return json({
             receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
+            effectiveControl: projectEffectiveControlForRelatedAccess(
+              serializeEffectiveSessionControl(controlled.control),
+              sessionId,
+              authorization?.relatedSessionAccess ?? "root",
+            ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
           });
         }
-        return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
-            },
-            {
-              action: "pause",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
-            },
-          ),
+        const controlled = await controlHumanSessionWorkstream(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "pause",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
         );
+        return json({
+          ...controlled,
+          effectiveControl: projectEffectiveControlForRelatedAccess(
+            controlled.effectiveControl,
+            sessionId,
+            authorization?.relatedSessionAccess ?? "root",
+          ),
+        });
       },
     );
 
@@ -1643,6 +1774,12 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ sessionId, idempotencyKey, reason }) => {
+        const authorization = await authorizeFirstPartySession(
+          deps,
+          grant,
+          sessionId,
+          "session.control",
+        );
         if (callerSessionId !== null) {
           const controlled = await controlAgentSessionWorkstream(
             deps,
@@ -1656,27 +1793,37 @@ function registerWorkspaceOrchestrationTools(
           );
           return json({
             receiptId: controlled.receipt.id,
-            effectiveControl: controlled.control,
+            effectiveControl: projectEffectiveControlForRelatedAccess(
+              serializeEffectiveSessionControl(controlled.control),
+              sessionId,
+              authorization?.relatedSessionAccess ?? "root",
+            ),
             interruptionCount: controlled.interruptionCount,
             replay: controlled.replay,
           });
         }
-        return json(
-          await controlHumanSessionWorkstream(
-            deps,
-            {
-              accountId: grant.accountId,
-              workspaceId: grant.workspaceId,
-              sessionId,
-              subjectId: grant.subjectId,
-            },
-            {
-              action: "resume",
-              clientEventId: idempotencyKey,
-              ...(reason ? { reason } : {}),
-            },
-          ),
+        const controlled = await controlHumanSessionWorkstream(
+          deps,
+          {
+            accountId: grant.accountId,
+            workspaceId: grant.workspaceId,
+            sessionId,
+            subjectId: grant.subjectId,
+          },
+          {
+            action: "resume",
+            clientEventId: idempotencyKey,
+            ...(reason ? { reason } : {}),
+          },
         );
+        return json({
+          ...controlled,
+          effectiveControl: projectEffectiveControlForRelatedAccess(
+            controlled.effectiveControl,
+            sessionId,
+            authorization?.relatedSessionAccess ?? "root",
+          ),
+        });
       },
     );
 
@@ -1693,6 +1840,7 @@ function registerWorkspaceOrchestrationTools(
           },
         },
         async ({ sessionId, instruction, idempotencyKey }) => {
+          await authorizeFirstPartySession(deps, grant, sessionId, "session.steer");
           const result = await steerAgentSession(
             deps,
             exactAgentCommandContext(grant, callerSessionId),
@@ -1720,14 +1868,9 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async ({ session_id, title }) => {
+        await authorizeFirstPartySession(deps, grant, session_id, "session.title.write");
         await requireSession(deps.db, grant.workspaceId, session_id);
-        const result = await updateSessionTitle(
-          deps,
-          grant.workspaceId,
-          session_id,
-          title,
-          "agent",
-        );
+        const result = await updateSessionTitle(deps, grant, session_id, title, "agent");
         return json({
           ok: true,
           updated: result.updated,
@@ -1888,22 +2031,15 @@ function registerVariableSetTools(
   }
 }
 
-// GitHub connect link for manager-style agents: mirrors GET .../github/app but
-// returns a browser entry URL (.../github/connect) that plants the CSRF state
-// cookie before forwarding to GitHub, because an MCP-issued link is opened in
-// a browser that never called the API directly.
-function registerGitHubConnectTool(
-  server: McpServer,
-  deps: ApiRouteDeps,
-  grant: AccessGrant,
-  options: McpServerOptions,
-  json: JsonResult,
-): void {
+// The tool remains registered for compatibility, but every new installation
+// binding entry point is fail-closed until a provider-supported authority
+// proof stronger than installation visibility is available.
+function registerGitHubConnectTool(server: McpServer, deps: ApiRouteDeps, json: JsonResult): void {
   server.registerTool(
     "github_connect_link",
     {
       description:
-        "Create workspace-bound links for connecting GitHub. linkUrl authorizes and links an existing installation; installUrl installs the app on another GitHub account. Completion requires github:manage through a signed-in browser or configured-token handoff. The links expire.",
+        "Report GitHub App connection availability. New installation binding is disabled until GitHub installation authority can be proven, so installUrl and linkUrl are null.",
       inputSchema: {},
     },
     async () => {
@@ -1919,30 +2055,11 @@ function registerGitHubConnectTool(
           missing,
         });
       }
-      const base = githubBrowserBaseUrl(settings, options.requestOrigin);
-      if (!base) {
-        throw new Error(
-          "github_connect_link requires OPENGENI_PUBLIC_BASE_URL (or OPENGENI_GITHUB_APP_MANIFEST_BASE_URL) so the install link can route through this deployment",
-        );
-      }
-      const installState = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        intent: "install",
-        ...githubBrowserGrantClaims(settings, grant),
-      });
-      const linkState = createSignedState(deps.githubStateSecret, {
-        accountId: grant.accountId,
-        workspaceId: grant.workspaceId,
-        intent: "link_existing",
-        ...githubBrowserGrantClaims(settings, grant),
-      });
       return json({
         configured: true,
         appSlug: slug,
-        installUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(installState)}`,
-        linkUrl: `${base}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(linkState)}`,
-        expiresInSeconds: stateMaxAgeSeconds,
+        installUrl: null,
+        linkUrl: null,
         missing: [],
       });
     },
@@ -2040,7 +2157,7 @@ function repositoryWithScheduledTaskResource(
       kind: "repository",
       uri,
       ref: repository.defaultBranch,
-      mountPath: repositoryMountPath(uri),
+      mountPath: defaultRepositoryMountPath(uri),
       ...(repository.private
         ? {
             githubInstallationId: repository.installationId,
@@ -2054,12 +2171,7 @@ function repositoryWithScheduledTaskResource(
 function normalizedRepositoryUri(value: string): string {
   const url = new URL(value);
   const path = url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-  return `https://${url.hostname.toLowerCase()}/${path}.git`;
-}
-
-function repositoryMountPath(uri: string): string {
-  const url = new URL(uri);
-  return `repos/${url.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "")}`;
+  return `https://${url.host.toLowerCase()}/${path}.git`;
 }
 
 function boundedMcpLimit(limit: number | undefined): number {
@@ -2082,7 +2194,24 @@ function boundedSessionEventMcpLimit(limit: number | undefined): number {
 const SESSION_DISCOVERY_DEFAULT_LIMIT = 20;
 const SESSION_DISCOVERY_MAX_LIMIT = 100;
 const SESSION_DISCOVERY_TEXT_CHARS = 600;
+const SESSION_DISCOVERY_PREVIEW_MAX_BYTES = 16_384;
+const SESSION_DISCOVERY_PREVIEW_OMISSION_REASON = "aggregatePreviewBudget" as const;
 const SESSION_DISCOVERY_PAGE_MAX_BYTES = 128_000;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL = "session_events" as const;
+const SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT = {
+  direction: "before",
+  limit: 1,
+  mode: "monitoring",
+  payloadMode: "summary",
+} as const;
+
+function sessionDiscoveryPreviewDrillDownInput(sessionId: string, type: SessionEventType) {
+  return {
+    sessionId,
+    includeTypes: [type],
+    ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+  };
+}
 
 function boundedSessionDiscoveryLimit(limit: number | undefined): number {
   if (!limit || !Number.isFinite(limit)) return SESSION_DISCOVERY_DEFAULT_LIMIT;
@@ -2333,8 +2462,58 @@ export function capSessionDiscoveryPage(
     };
   });
 
-  let kept = projected;
+  // The database order is already the useful discovery order. Spend the
+  // separate preview budget in that order so the first page retains previews
+  // for the most relevant rows and later rows remain discoverable by status.
+  let budgetBytes = 0;
+  const budgeted = includeLastMessage
+    ? projected.map((session) => {
+        const latestMessage = session.latestMessage;
+        if (!latestMessage || latestMessage.preview === null) return session;
+        const candidateBytes = Buffer.byteLength(latestMessage.preview, "utf8");
+        if (budgetBytes + candidateBytes <= SESSION_DISCOVERY_PREVIEW_MAX_BYTES) {
+          budgetBytes += candidateBytes;
+          return session;
+        }
+        return {
+          ...session,
+          latestMessage: {
+            ...latestMessage,
+            preview: null,
+            previewOmitted: true,
+            previewOmissionReason: SESSION_DISCOVERY_PREVIEW_OMISSION_REASON,
+            previewDrillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+            previewDrillDownInput: sessionDiscoveryPreviewDrillDownInput(
+              session.id,
+              latestMessage.type,
+            ),
+          },
+        };
+      })
+    : projected;
+
+  let kept = budgeted;
   const build = () => {
+    const previewBytes = includeLastMessage
+      ? kept.reduce(
+          (total, session) =>
+            total +
+            (session.latestMessage?.preview === null || !session.latestMessage
+              ? 0
+              : Buffer.byteLength(session.latestMessage.preview, "utf8")),
+          0,
+        )
+      : 0;
+    const previewOmittedCount = includeLastMessage
+      ? kept.filter((session) => {
+          const latestMessage = session.latestMessage;
+          return (
+            latestMessage != null &&
+            "previewOmitted" in latestMessage &&
+            latestMessage.previewOmitted === true
+          );
+        }).length
+      : 0;
     const lastKept = kept.at(-1);
     const droppedForByteCap = kept.length < projected.length;
     const sourceLast = lastKept
@@ -2365,6 +2544,23 @@ export function capSessionDiscoveryPage(
       snapshotRevision: page.snapshotRevision,
       updatedAfter: page.updatedAfter,
       updatedThrough: page.updatedThrough,
+      ...(includeLastMessage
+        ? {
+            latestMessagePreviewBudget: {
+              bytes: previewBytes,
+              maxBytes: SESSION_DISCOVERY_PREVIEW_MAX_BYTES,
+              omittedCount: previewOmittedCount,
+              truncated: previewOmittedCount > 0,
+              omissionReason:
+                previewOmittedCount > 0 ? SESSION_DISCOVERY_PREVIEW_OMISSION_REASON : null,
+              drillDownTool: SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_TOOL,
+              drillDownInput: {
+                includeTypes: ["user.message", "agent.message.completed"] as const,
+                ...SESSION_DISCOVERY_PREVIEW_DRILL_DOWN_BASE_INPUT,
+              },
+            },
+          }
+        : {}),
       responseTruncated: droppedForByteCap,
       ...(droppedForByteCap
         ? {
@@ -2401,4 +2597,16 @@ function parseMcpDate(raw: string, label: string): Date {
     throw new Error(`${label} must be an ISO date-time`);
   }
   return date;
+}
+
+async function withMcpEffectivePolicy(
+  deps: ApiRouteDeps,
+  workspaceId: string,
+  session: Session,
+): Promise<Session> {
+  const [workspaceServerIds, workspaceDefaultServerIds] = await Promise.all([
+    workspaceSessionToolPolicyServerIds(deps.db, workspaceId, deps.settings),
+    workspaceSessionToolPolicyDefaultServerIds(deps.db, workspaceId, deps.settings),
+  ]);
+  return sessionWithEffectiveToolPolicy(session, workspaceServerIds, workspaceDefaultServerIds);
 }

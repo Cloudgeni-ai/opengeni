@@ -28,7 +28,11 @@ import {
   runAgentStream,
   createSandboxClientForBackend,
   establishSandboxSessionFromEnvelope,
+  isProviderSandboxGoneDuringRoutedOperation,
   isProviderSandboxNotFoundError,
+  materializeRunCredentials,
+  clearRunCredentials,
+  toolspaceTokenFileForSession,
 } from "../src/index";
 
 // local backend, web search OFF (the hosted web_search tool would try the
@@ -107,6 +111,214 @@ describe("P1.2 ownership inversion — runAgentStream owned branch (unix_local, 
       () => "<missing>",
     );
     expect(marker).toBe("KEYSTONE_P12"); // the tool hit OUR box
+  });
+
+  test("host run credentials are seeded before the first agent command and remain off-manifest", async () => {
+    const settings = localSettings();
+    const client = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (m?: unknown) => Promise<LiveLocalSession>;
+    };
+    const liveSession = await client.create({});
+    liveSessions.push(liveSession);
+    const sessionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    const model = new ScriptedModel([
+      {
+        output: [
+          functionCall("exec_command", {
+            cmd: `printf '%s' "$HOST_CLOUD_TOKEN" > /workspace/credential-proof.txt`,
+          }),
+        ],
+      },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model });
+
+    const result = await runAgentStream(agent, "use the connected account", settings, {
+      ownedSandbox: { client, session: liveSession },
+      runCredentialSessionId: sessionId,
+      onRunCredentialSessionReady: async (session) => {
+        await materializeRunCredentials(
+          session,
+          {
+            environment: { HOST_CLOUD_TOKEN: "host-secret-value" },
+            files: [],
+            fileEnvironment: {},
+            expiresAt: null,
+            authNeeded: [],
+            redactions: [{ name: "HOST_CLOUD_TOKEN", value: "host-secret-value" }],
+          },
+          { sessionId, attemptId, executionGeneration: 1 },
+        );
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    const proof = await liveSession.readFile({ path: "/workspace/credential-proof.txt" });
+    expect(Buffer.from(proof).toString()).toBe("host-secret-value");
+    expect(JSON.stringify((liveSession as any).state.manifest)).not.toContain("host-secret-value");
+    await clearRunCredentials(liveSession, sessionId);
+  });
+
+  test("owned setup registers Toolspace renewal only after the initial token file is seeded", async () => {
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      toolspaceEnabled: true,
+      delegationSecret: "toolspace-secret",
+    });
+    const client = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (manifest?: unknown) => Promise<LiveLocalSession>;
+    };
+    const liveSession = await client.create({});
+    liveSessions.push(liveSession);
+    const toolspaceSessionId = crypto.randomUUID();
+    const tokenFile = toolspaceTokenFileForSession(
+      "/workspace/.opengeni/toolspace-token",
+      toolspaceSessionId,
+    );
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
+      toolspaceTokenSeed: "ogd_initial_owned",
+      toolspaceTokenSessionId: toolspaceSessionId,
+    });
+    let observedToken: string | null = null;
+
+    const result = await runAgentStream(agent, "answer", settings, {
+      ownedSandbox: { client, session: liveSession },
+      onToolspaceTokenSessionReady: async (session) => {
+        const bytes = await session.readFile?.({
+          path: tokenFile,
+        });
+        observedToken = bytes ? Buffer.from(bytes).toString() : null;
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    expect(observedToken).toBe("ogd_initial_owned");
+  });
+
+  test("legacy SDK-owned creation seeds host run credentials before the first command", async () => {
+    const settings = localSettings();
+    const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (manifest?: unknown) => Promise<LiveLocalSession>;
+    };
+    let liveSession: LiveLocalSession | null = null;
+    let credentialProof: string | null = null;
+    let manifestSnapshot = "";
+    const retainingClient = {
+      backendId: rawClient.backendId,
+      create: async (manifest?: unknown) => {
+        const created = await rawClient.create(manifest);
+        liveSession = created;
+        liveSessions.push(created);
+        manifestSnapshot = JSON.stringify((created as any).state.manifest);
+        return new Proxy(created, {
+          get(target, property, receiver) {
+            if (property === "exec" || property === "execCommand") {
+              const command = Reflect.get(target, property, target) as (
+                args: unknown,
+              ) => Promise<unknown>;
+              return async (args: unknown) => {
+                const result = await command.call(target, args);
+                credentialProof = await target
+                  .readFile({ path: "/workspace/credential-proof.txt" })
+                  .then((content) => Buffer.from(content).toString())
+                  .catch(() => credentialProof);
+                return result;
+              };
+            }
+            const value = Reflect.get(target, property, receiver) as unknown;
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      },
+    };
+    const sessionId = crypto.randomUUID();
+    const attemptId = crypto.randomUUID();
+    let setupCalls = 0;
+    const model = new ScriptedModel([
+      {
+        output: [
+          functionCall("exec_command", {
+            cmd: `printf '%s' "$HOST_CLOUD_TOKEN" > /workspace/credential-proof.txt`,
+          }),
+        ],
+      },
+      { output: [assistantMessage("done")] },
+    ]);
+    const agent = buildOpenGeniAgent(settings, [], { model });
+
+    const result = await runAgentStream(agent, "use the connected account", settings, {
+      sandboxClient: retainingClient as never,
+      runCredentialSessionId: sessionId,
+      onRunCredentialSessionReady: async (session) => {
+        setupCalls += 1;
+        await materializeRunCredentials(
+          session,
+          {
+            environment: { HOST_CLOUD_TOKEN: "legacy-host-secret" },
+            files: [],
+            fileEnvironment: {},
+            expiresAt: null,
+            authNeeded: [],
+            redactions: [{ name: "HOST_CLOUD_TOKEN", value: "legacy-host-secret" }],
+          },
+          { sessionId, attemptId, executionGeneration: 1 },
+        );
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    expect(setupCalls).toBe(1);
+    expect(liveSession).not.toBeNull();
+    expect(credentialProof).toBe("legacy-host-secret");
+    expect(manifestSnapshot).not.toContain("legacy-host-secret");
+    expect(liveSession!.closed).toBe(true);
+  });
+
+  test("legacy SDK-owned creation registers Toolspace renewal after seeding", async () => {
+    const settings = testSettings({
+      sandboxBackend: "local",
+      webSearchEnabled: false,
+      toolspaceEnabled: true,
+      delegationSecret: "toolspace-secret",
+    });
+    const rawClient = createSandboxClientForBackend("local", settings) as unknown as {
+      backendId: string;
+      create: (manifest?: unknown) => Promise<LiveLocalSession>;
+    };
+    const toolspaceSessionId = crypto.randomUUID();
+    const tokenFile = toolspaceTokenFileForSession(
+      "/workspace/.opengeni/toolspace-token",
+      toolspaceSessionId,
+    );
+    const agent = buildOpenGeniAgent(settings, [], {
+      model: new ScriptedModel([{ output: [assistantMessage("done")] }]),
+      toolspaceTokenSeed: "ogd_initial_legacy",
+      toolspaceTokenSessionId: toolspaceSessionId,
+    });
+    let observedToken: string | null = null;
+
+    const result = await runAgentStream(agent, "answer", settings, {
+      sandboxClient: rawClient,
+      onToolspaceTokenSessionReady: async (session) => {
+        const bytes = await session.readFile?.({
+          path: tokenFile,
+        });
+        observedToken = bytes ? Buffer.from(bytes).toString() : null;
+      },
+    });
+    for await (const _ of result.toStream()) void _;
+    await result.completed;
+
+    expect(observedToken).toBe("ogd_initial_legacy");
   });
 
   test("CONTROL: an OWNED (sessionState-resumed) session IS reaped on a normal finish", async () => {
@@ -239,19 +451,44 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("e2b", { statusCode: 404 })).toBe(true);
   });
 
-  test("box-gone phrasing -> NotFound", () => {
+  test("generic numeric gRPC status 5 is not provider NotFound evidence", () => {
+    expect(isProviderSandboxNotFoundError("modal", { code: 5 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { status: 5 })).toBe(false);
+    expect(isProviderSandboxNotFoundError("modal", { statusCode: 5 })).toBe(false);
+  });
+
+  test("only typed codes and Modal's exact terminal grammar are NotFound", () => {
+    expect(
+      isProviderSandboxNotFoundError(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
+    ).toBe(true);
     expect(isProviderSandboxNotFoundError("modal", new Error("Sandbox sb-123 not found"))).toBe(
-      true,
+      false,
     );
     expect(
       isProviderSandboxNotFoundError("e2b", new Error("the sandbox is no longer running")),
-    ).toBe(true);
-    expect(isProviderSandboxNotFoundError("runloop", new Error("devbox has been terminated"))).toBe(
-      true,
-    );
+    ).toBe(false);
     expect(
       isProviderSandboxNotFoundError("daytona", { code: "SANDBOX_NOT_FOUND", message: "gone" }),
     ).toBe(true);
+  });
+
+  test("transient typed evidence dominates nested NotFound prose", () => {
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "UNAVAILABLE",
+        status: 14,
+        cause: { code: "NOT_FOUND", message: "Modal sandbox sb-old not found" },
+      }),
+    ).toBe(false);
+    expect(
+      isProviderSandboxNotFoundError("modal", {
+        code: "ENOTFOUND",
+        message: "Name resolution failed: sandbox not found",
+      }),
+    ).toBe(false);
   });
 
   test("a resume-conflict / still-running / generic error is NOT NotFound (never recreate -> never double-spawn)", () => {
@@ -268,6 +505,56 @@ describe("P1.2 isProviderSandboxNotFoundError (per-backend NotFound discriminato
     expect(isProviderSandboxNotFoundError("modal", { status: 500 })).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", null)).toBe(false);
     expect(isProviderSandboxNotFoundError("modal", undefined)).toBe(false);
+  });
+});
+
+describe("routed-operation sandbox disappearance discriminator", () => {
+  test("generic 404 and NOT_FOUND subresource errors do not retire the provider sandbox", () => {
+    expect(isProviderSandboxGoneDuringRoutedOperation("modal", { status: 404 })).toBe(false);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "NOT_FOUND",
+        status: 404,
+        message: "/workspace/missing.txt not found",
+      }),
+    ).toBe(false);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "RESOURCE_NOT_FOUND",
+        message: "exposed port not found",
+      }),
+    ).toBe(false);
+  });
+
+  test("sandbox-scoped typed evidence and Modal terminal grammar retire the exact sandbox", () => {
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("daytona", {
+        code: "SANDBOX_NOT_FOUND",
+        message: "sandbox is gone",
+      }),
+    ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation(
+        "modal",
+        new Error("Modal sandbox sb-123 not found (has been terminated)"),
+      ),
+    ).toBe(true);
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation(
+        "modal",
+        new Error("Modal sandbox sb-123 is no longer running."),
+      ),
+    ).toBe(true);
+  });
+
+  test("transient transport evidence dominates nested sandbox disappearance", () => {
+    expect(
+      isProviderSandboxGoneDuringRoutedOperation("modal", {
+        code: "UNAVAILABLE",
+        status: 14,
+        cause: { code: "SANDBOX_NOT_FOUND" },
+      }),
+    ).toBe(false);
   });
 });
 

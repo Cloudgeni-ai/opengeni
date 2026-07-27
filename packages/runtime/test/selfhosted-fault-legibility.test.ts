@@ -14,6 +14,7 @@ import {
   type RoutableBackendSession,
   type SelfhostedRetryClock,
   NatsControlRpc,
+  RoutingMutationOutcomeUnknownError,
   RoutingSandboxSession,
   RoutingUnsupportedError,
   SelfhostedControlError,
@@ -373,7 +374,7 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
     expect(out).not.toContain("Please try again");
   });
 
-  test("a fence error is re-thrown (routing retries it), NOT rendered", async () => {
+  test("a fence after mutation admission becomes a non-replayable unknown outcome", async () => {
     const backend: RoutableBackendSession = {
       execCommand: async () => {
         throw mapped(ErrorCode.ERROR_CODE_FENCED);
@@ -384,8 +385,15 @@ describe("G2 — RoutingSandboxSession.execCommand renders a terminal fault as i
       await proxyOverBackend(backend).execCommand({ cmd: "ls" });
     } catch (e) {
       threw = true;
-      expect(e).toBeInstanceOf(SelfhostedControlError);
-      expect((e as SelfhostedControlError).fenced).toBe(true);
+      expect(e).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+      expect((e as RoutingMutationOutcomeUnknownError).op).toBe("execCommand");
+      expect((e as RoutingMutationOutcomeUnknownError).retryable).toBe(false);
+      expect((e as RoutingMutationOutcomeUnknownError).cause).toBeInstanceOf(
+        SelfhostedControlError,
+      );
+      expect(
+        ((e as RoutingMutationOutcomeUnknownError).cause as SelfhostedControlError).fenced,
+      ).toBe(true);
     }
     expect(threw).toBe(true);
   });

@@ -1,5 +1,5 @@
 -- deployment-mode: rolling
--- OPE-64: finish the 0067 expand/contract sequence. The trigger has bounded
+-- tracking-64: finish the 0067 expand/contract sequence. The trigger has bounded
 -- every new/updated row since 0067; now rewrite only legacy violations through
 -- that trigger and validate the durable storage invariant.
 

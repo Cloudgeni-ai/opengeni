@@ -61,7 +61,9 @@ describe("responsive knowledge surfaces (real API + PostgreSQL)", () => {
   beforeAll(async () => {
     const acquired = await acquireSharedTestDatabase("knowledge-surfaces-browser");
     if (!acquired) {
-      throw new Error("Knowledge-surface browser acceptance requires real PostgreSQL; no skip is allowed");
+      throw new Error(
+        "Knowledge-surface browser acceptance requires real PostgreSQL; no skip is allowed",
+      );
     }
     shared = acquired;
     dbClient = createDb(shared.appUrl);

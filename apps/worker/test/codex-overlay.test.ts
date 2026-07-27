@@ -32,6 +32,9 @@ describe("withCodexProvider", () => {
     expect(codex?.baseUrl).toBe("https://chatgpt.com/backend-api");
     expect(codex?.models.every((m) => m.id.startsWith("codex/"))).toBe(true);
     expect(codex?.models.some((m) => m.id === "codex/gpt-5.6-sol")).toBe(true);
+    expect(codex?.models.every((m) => m.upstreamModelId === m.id.slice("codex/".length))).toBe(
+      true,
+    );
   });
 
   test("declares Codex CLI's raw, effective, and auto-compact token limits", () => {
@@ -44,11 +47,14 @@ describe("withCodexProvider", () => {
     ).toBe(true);
     // It flows through to the resolved model catalog.
     const sol = configuredModels(settings).find((m) => m.id === "codex/gpt-5.6-sol");
+    expect(sol?.id).toBe("codex/gpt-5.6-sol");
+    expect(sol?.upstreamModelId).toBe("gpt-5.6-sol");
     expect(sol?.contextWindowTokens).toBe(CODEX_MODEL_CONTEXT_WINDOW_TOKENS);
     expect(sol?.effectiveContextWindowTokens).toBe(CODEX_MODEL_EFFECTIVE_CONTEXT_WINDOW_TOKENS);
     expect(sol?.autoCompactTokenLimit).toBe(CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT);
 
     const resolved = resolveModelProvider(settings, "codex/gpt-5.6-sol")!;
+    expect(resolved.model.upstreamModelId).toBe("gpt-5.6-sol");
     const turnSettings = settingsWithResolvedModelContext(settings, resolved.model);
     expect(contextInputBudgetTokens(turnSettings)).toBe(258_400);
     const trigger = compactionThresholdTokens(turnSettings);
@@ -132,7 +138,7 @@ describe("settingsWithCodexCredential", () => {
     expect(result).toBe(settings); // same reference, no db access
   });
 
-  test("active credential WITHOUT connector scopes => provider AND codex_apps server (scopes do not gate)", async () => {
+  test("active credential keeps Codex routing but omits connected apps by default", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
       modelProvidersJson: "[]",
@@ -147,13 +153,13 @@ describe("settingsWithCodexCredential", () => {
     expect(
       parseModelProvidersJson(result.modelProvidersJson).some((p) => p.id === "codex-subscription"),
     ).toBe(true);
-    // Connectors are account-gated server-side; a scope-less pro token still lists tools.
-    expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(true);
+    expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(false);
   });
 
-  test("active credential WITH connector scopes => both provider and codex_apps server", async () => {
+  test("active credential exposes connected apps only when explicitly enabled", async () => {
     const settings = testSettings({
       codexSubscriptionEnabled: true,
+      codexConnectedAppsEnabled: true,
       modelProvidersJson: "[]",
       mcpServers: [],
     });
@@ -166,6 +172,8 @@ describe("settingsWithCodexCredential", () => {
     expect(
       parseModelProvidersJson(result.modelProvidersJson).some((p) => p.id === "codex-subscription"),
     ).toBe(true);
+    // Connector access is account-gated server-side; the explicit deployment
+    // switch controls whether OpenGeni exposes that surface at all.
     expect(result.mcpServers.some((s) => s.id === "codex_apps")).toBe(true);
   });
 

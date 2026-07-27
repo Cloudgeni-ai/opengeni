@@ -42,6 +42,7 @@ import {
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
   persistDrainSnapshot,
+  readWorkspaceArchiveCapturePreflight,
   readLease,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
@@ -57,12 +58,15 @@ import {
   // builds the client + resumes the envelope DIRECTLY: a live box resumes, gets
   // its /workspace PERSISTED (snapshot/tar), then is terminated; a gone box
   // (NotFound on resume) is already down, a clean no-op.
+  captureVerifiedWorkspaceArchive,
   createSandboxClientForBackend,
   deletePriorPersistedSnapshot,
   deserializeSandboxSessionStateEnvelope,
   isProviderSandboxNotFoundError,
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
+  type ModalOrphanSweepTermination,
+  type WorkspaceArchiveDescriptor,
 } from "@opengeni/runtime";
 import type { ActivityServices } from "./types";
 import { reconcilePendingParentSystemUpdates } from "./parent-wake";
@@ -123,29 +127,44 @@ type CreateSandboxClientForBackendFn = typeof createSandboxClientForBackend;
  * db/accountId/row and delegates to persistDrainSnapshot. Returns:
  *   - wrote:false  -> the CAS missed (re-armed / newer epoch / vanished). The box
  *                     is wanted again; the seam MUST NOT terminate it.
- *   - priorArchive / priorArchivePrev -> superseded archives to GC at drain.
+ *   - priorArchiveForGc -> the one archive made unreachable by rotation.
  *
  * Pass null for archiveBase64 to CAS-check WITHOUT writing (re-arm guard for
  * backends with no persistWorkspace — ensures a re-arm during the snapshot window
- * aborts the terminate before client.delete()). priorArchive values are always
+ * aborts the terminate before client.delete()). The GC candidate is always
  * null in this case.
  */
 export type PersistArchiveFn = (
   archiveBase64: string | null,
-) => Promise<{ wrote: boolean; priorArchive: string | null; priorArchivePrev: string | null }>;
+  archiveMetadata?: WorkspaceArchiveDescriptor,
+) => Promise<{
+  wrote: boolean;
+  priorArchiveForGc: string | null;
+  archiveRevision?: string | null;
+}>;
+
+export type ProviderTerminationOutcome = {
+  /** false means an epoch/refcount CAS proved the box was re-armed, so it was
+   *  deliberately left running and the cold commit must not execute. */
+  terminated: boolean;
+  /** True only when a definitive provider NotFound proved the cloud box had
+   *  already vanished before this drain could capture its workspace. */
+  providerMissingBeforeCapture: boolean;
+};
 
 /** The provider-terminate seam. Production wires the real resume-by-id ->
  *  persistWorkspace -> persist-onto-lease (epoch-fenced) -> snapshot-GC ->
  *  provider stop() (`terminateProviderBox`); a unit test injects a spy so the
  *  drain/CAS logic is exercised against a real DB without a live provider box.
- *  Returns true when the box was terminated (or already gone), false when persist
- *  found the lease re-armed and the box was deliberately LEFT RUNNING. */
+ *  Test seams may return the legacy boolean shorthand. Production returns the
+ *  typed outcome so the cold commit can distinguish a clean stop from definitive
+ *  provider disappearance before capture. */
 export type TerminateBoxFn = (
   settings: ActivityServices["settings"],
   lease: NonNullable<Awaited<ReturnType<typeof readLease>>>,
   observability: ActivityServices["observability"],
   persistArchive: PersistArchiveFn,
-) => Promise<boolean>;
+) => Promise<boolean | ProviderTerminationOutcome>;
 
 export type SweepModalOrphansFn = (
   settings: ActivityServices["settings"],
@@ -447,6 +466,31 @@ async function forceDrainOverLimitWorkspaces(
   return forceDrained;
 }
 
+export function modalOrphanTerminationStillEligible(
+  latest: Awaited<ReturnType<typeof listLiveModalSandboxLeaseAttributions>>,
+  candidate: ModalOrphanSweepTermination,
+): boolean {
+  if (latest.some((lease) => lease.instanceId === candidate.sandboxId)) {
+    return false;
+  }
+  const leaseId = candidate.tags.opengeni_lease_id;
+  const workspaceId = candidate.tags.opengeni_workspace_id;
+  const sandboxGroupId = candidate.tags.opengeni_sandbox_group_id;
+  if (!leaseId || !workspaceId || !sandboxGroupId) {
+    return true;
+  }
+  const activeAttribution = latest.find(
+    (lease) =>
+      lease.leaseId === leaseId &&
+      lease.workspaceId === workspaceId &&
+      lease.sandboxGroupId === sandboxGroupId,
+  );
+  return Boolean(
+    !activeAttribution ||
+    (activeAttribution.instanceId !== null && activeAttribution.instanceId !== candidate.sandboxId),
+  );
+}
+
 async function sweepModalOrphansForConfiguredBackend(
   settings: ActivityServices["settings"],
   db: ActivityServices["db"],
@@ -468,7 +512,12 @@ async function sweepModalOrphansForConfiguredBackend(
     return 0;
   }
 
-  const result = await sweepModalOrphanSandboxes(settings, liveLeases);
+  const result = await sweepModalOrphanSandboxes(settings, liveLeases, {
+    revalidateTermination: async (candidate) => {
+      const latest = await listLiveModalSandboxLeaseAttributions(db);
+      return modalOrphanTerminationStillEligible(latest, candidate);
+    },
+  });
   for (const terminated of result.terminated) {
     observability.warn("sandbox reaper: terminated Modal orphan sandbox", {
       sandboxId: terminated.sandboxId,
@@ -532,6 +581,17 @@ async function terminateDrainableBox(
     return false;
   }
 
+  const capturePreflight = lease.instanceId
+    ? await readWorkspaceArchiveCapturePreflight(db, {
+        accountId,
+        workspaceId: row.workspaceId,
+        sandboxGroupId: row.sandboxGroupId,
+        expectedEpoch: row.leaseEpoch,
+        expectedInstanceId: lease.instanceId,
+        liveness: "draining",
+      })
+    : null;
+
   // The epoch-fenced PERSIST-onto-lease CAS the terminate seam calls AFTER it has
   // snapshotted the live box and BEFORE it terminates (sandbox-file-persistence).
   // Same guard as confirmDrainCold (draining AND refcount=0 AND lease_epoch=
@@ -541,28 +601,43 @@ async function terminateDrainableBox(
   // the durable sandbox.box.terminated event below carries it, so a "terminated
   // with NOTHING persisted" (box already dead at drain) is visible in the DB.
   let persisted = false;
-  const persistArchive: PersistArchiveFn = async (archiveBase64: string | null) => {
+  let archiveRevision: string | null = null;
+  const persistArchive: PersistArchiveFn = async (
+    archiveBase64: string | null,
+    archiveMetadata?: WorkspaceArchiveDescriptor,
+  ) => {
+    // A live persistable provider must have passed an exact instance/generation
+    // preflight before capture. Without it we cannot prove that these bytes came
+    // from the lease row we are about to fold, so fail closed and leave it live.
+    if (!lease.instanceId || !capturePreflight) {
+      return { wrote: false, priorArchiveForGc: null, archiveRevision: null };
+    }
     const result = await persistDrainSnapshot(db, {
       accountId,
       workspaceId: row.workspaceId,
       sandboxGroupId: row.sandboxGroupId,
       expectedEpoch: row.leaseEpoch,
+      expectedInstanceId: lease.instanceId,
+      expectedWorkspaceGeneration: capturePreflight.workspaceGeneration,
       workspaceArchive: archiveBase64,
+      ...(archiveMetadata ? { workspaceArchiveMeta: archiveMetadata } : {}),
     });
     if (result.wrote && archiveBase64 !== null) {
       persisted = true;
+      archiveRevision = result.archiveRevision;
     }
     return result;
   };
 
-  // Resume-by-id -> persistWorkspace -> persist-onto-lease -> GC prior snapshot ->
-  // provider terminate. A box that is already gone (NotFound) is success (the goal
-  // is "box is not running"). A genuine PERSIST failure (could not snapshot) or a
-  // resume failure on a box that IS alive re-throws -> the lease stays draining for
-  // the next sweep (NEVER terminate a box whose files we could not capture). A
-  // persist CAS-miss (re-armed) returns false -> the box was left running; skip the
-  // cold-commit so the re-armed box is not cold-leaked.
-  const terminated = await terminateBox(settings, lease, observability, persistArchive);
+  // Resume-by-id -> verified capture -> persist-onto-lease -> GC prior snapshot
+  // -> provider terminate. Definitive NotFound before capture is a typed loss,
+  // not ordinary teardown success: confirmDrainCold preserves any prior archive
+  // or marks recovery unrecoverable when none exists. A genuine capture/resume
+  // failure leaves the lease draining for a later sweep (NEVER terminate a box
+  // whose files we could not capture). A persist CAS miss means the box was
+  // re-armed and left running, so the cold commit is skipped.
+  const termination = await terminateBox(settings, lease, observability, persistArchive);
+  const terminated = typeof termination === "boolean" ? termination : termination.terminated;
   if (!terminated) {
     return false;
   }
@@ -575,6 +650,8 @@ async function terminateDrainableBox(
     workspaceId: row.workspaceId,
     sandboxGroupId: row.sandboxGroupId,
     expectedEpoch: row.leaseEpoch,
+    providerMissingBeforeCapture:
+      typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture,
   });
   if (wentCold) {
     // Durable termination record (sandbox-file-persistence observability): who
@@ -584,7 +661,14 @@ async function terminateDrainableBox(
     try {
       await appendSessionEventToSandboxGroup(db, row.workspaceId, row.sandboxGroupId, {
         type: "sandbox.box.terminated",
-        payload: { actor: "reaper", persisted, instanceId: lease.instanceId },
+        payload: {
+          actor: "reaper",
+          persisted,
+          archiveRevision,
+          instanceId: lease.instanceId,
+          providerMissingBeforeCapture:
+            typeof termination === "boolean" ? false : termination.providerMissingBeforeCapture,
+        },
       });
     } catch (eventError) {
       observability.warn(
@@ -640,11 +724,11 @@ export async function terminateProviderBox(
   observability: ActivityServices["observability"],
   persistArchive: PersistArchiveFn,
   createClientForBackend: CreateSandboxClientForBackendFn = createSandboxClientForBackend,
-): Promise<boolean> {
+): Promise<ProviderTerminationOutcome> {
   const backend = (lease.resumeBackendId ?? lease.backend) as string;
   // 'none' / no backend -> nothing to terminate.
   if (!backend || backend === "none") {
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // CRITICAL SAFETY (bring-your-own-compute): NEVER provider-stop
@@ -668,7 +752,7 @@ export async function terminateProviderBox(
         backend,
       },
     );
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // A warming-death row can have a provider instance id recorded immediately
@@ -686,7 +770,7 @@ export async function terminateProviderBox(
           instanceId: lease.instanceId,
         },
       );
-      return false;
+      return { terminated: false, providerMissingBeforeCapture: false };
     }
     try {
       await terminateModalSandboxById(settings, lease.instanceId);
@@ -700,19 +784,22 @@ export async function terminateProviderBox(
         instanceId: lease.instanceId,
       });
     }
-    return true;
+    // This branch is a warming-death box recorded before any resumable envelope
+    // was published. It was never a ready workspace, so a missing instance does
+    // not imply loss of a previously exposed workspace revision.
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // resume_state is the folded group box-envelope (the provider sessionState the
   // box was last persisted as). No envelope -> no live box to stop.
   if (!lease.resumeState) {
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   const client = createClientForBackend(backend as never, settings) as TerminableClient | undefined;
   if (!client) {
     // 'none' backend resolved to no client.
-    return true;
+    return { terminated: true, providerMissingBeforeCapture: false };
   }
 
   // Resume by id (warm reattach) — NO cold-restore. A NotFound here = the box is
@@ -721,9 +808,10 @@ export async function terminateProviderBox(
   let sessionState: unknown;
   try {
     if (!client.resume || !client.deserializeSessionState) {
-      // A backend that cannot resume cannot be attached-to for terminate; the
-      // provider idle-timeout is the backstop. No-op.
-      return true;
+      // A cloud backend that cannot prove provider state is not safely
+      // terminable: treating this as success would cold the lease while the
+      // provider may still be live. Leave it draining for a later retry.
+      throw new Error(`sandbox backend ${backend} cannot resume a drainable provider box`);
     }
     // resume_state is the lease ENVELOPE: `{ backendId, sessionState: {
     // providerState: { sandboxId, ... }, manifest, ... } }` (the shape
@@ -743,20 +831,17 @@ export async function terminateProviderBox(
       envelopeSessionState,
     );
     if (resumedState === undefined) {
-      return true;
+      throw new Error(`sandbox backend ${backend} returned no resumable provider state`);
     }
     session = (await client.resume(resumedState)) as PersistableSession;
     sessionState = resumedState;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info(
-        "sandbox reaper: drainable box already gone (NotFound on resume) — proceeding to cold",
-        {
-          sandboxGroupId: lease.sandboxGroupId,
-          backend,
-        },
-      );
-      return true;
+      observability.info("sandbox reaper: drainable box already gone before workspace capture", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      return { terminated: true, providerMissingBeforeCapture: true };
     }
     // Re-throw a non-NotFound resume failure so the caller SKIPS (the lease stays
     // draining for the next sweep) — never cold a box we could not prove is gone.
@@ -767,19 +852,18 @@ export async function terminateProviderBox(
   // snapshot must re-throw BEFORE any terminate so files are never lost — the next
   // sweep retries, the provider idle-timeout is the backstop. A NotFound here (the
   // box raced gone between resume and persist) is success: nothing to persist.
-  let archiveBytes: Uint8Array | undefined;
+  let verifiedArchive: Awaited<ReturnType<typeof captureVerifiedWorkspaceArchive>> | undefined;
   try {
-    archiveBytes = session?.persistWorkspace ? await session.persistWorkspace() : undefined;
+    verifiedArchive = session?.persistWorkspace
+      ? await captureVerifiedWorkspaceArchive(session)
+      : undefined;
   } catch (error) {
     if (isProviderSandboxNotFoundError(client.backendId, error)) {
-      observability.info(
-        "sandbox reaper: box gone during persist (NotFound) — nothing to snapshot, proceeding to cold",
-        {
-          sandboxGroupId: lease.sandboxGroupId,
-          backend,
-        },
-      );
-      return true;
+      observability.info("sandbox reaper: box gone during workspace capture", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      return { terminated: true, providerMissingBeforeCapture: true };
     }
     observability.warn(
       "sandbox reaper: persistWorkspace failed — leaving box draining (files NOT lost)",
@@ -805,9 +889,11 @@ export async function terminateProviderBox(
   // so without this check we would delete a box the lease now treats as live. The
   // null-archive path of persistArchive does exactly this: FOR UPDATE + liveness/
   // refcount/epoch guard, no write. wrote:false → abort the terminate.
-  if (archiveBytes && archiveBytes.length > 0) {
-    const archiveBase64 = Buffer.from(archiveBytes).toString("base64");
-    const { wrote, priorArchive, priorArchivePrev } = await persistArchive(archiveBase64);
+  if (verifiedArchive) {
+    const { wrote, priorArchiveForGc } = await persistArchive(
+      verifiedArchive.base64,
+      verifiedArchive.descriptor,
+    );
     if (!wrote) {
       observability.info(
         "sandbox reaper: lease re-armed during persist — leaving box RUNNING (no terminate)",
@@ -816,11 +902,11 @@ export async function terminateProviderBox(
           backend,
         },
       );
-      return false;
+      return { terminated: false, providerMissingBeforeCapture: false };
     }
     // Keep-latest-per-lease GC: best-effort delete the prior snapshot image now,
     // while the session (and its Modal client) is still live. Never throws.
-    const deleted = await deletePriorPersistedSnapshot(session, priorArchive);
+    const deleted = await deletePriorPersistedSnapshot(session, priorArchiveForGc);
     if (deleted) {
       observability.info("sandbox reaper: GC'd superseded workspace snapshot", {
         sandboxGroupId: lease.sandboxGroupId,
@@ -828,29 +914,13 @@ export async function terminateProviderBox(
         snapshotId: deleted,
       });
     }
-    const deletedPrev = await deletePriorPersistedSnapshot(session, priorArchivePrev);
-    if (deletedPrev) {
-      observability.info("sandbox reaper: GC'd superseded previous workspace snapshot", {
-        sandboxGroupId: lease.sandboxGroupId,
-        backend,
-        snapshotId: deletedPrev,
-      });
-    }
   } else {
-    // No archive produced (backend has no persistWorkspace or returned empty).
-    // CAS-check via persistArchive(null): if the lease was re-armed during the
-    // snapshot window, wrote:false → leave the box RUNNING (abort terminate).
-    const { wrote } = await persistArchive(null);
-    if (!wrote) {
-      observability.info(
-        "sandbox reaper: lease re-armed during snapshot window (no-archive path) — leaving box RUNNING (no terminate)",
-        {
-          sandboxGroupId: lease.sandboxGroupId,
-          backend,
-        },
-      );
-      return false;
-    }
+    // A resumable cloud box that produces no verified archive cannot be safely
+    // deleted: it may contain work newer than the lease's last durable revision.
+    // Keep the lease draining and retry instead of knowingly discarding bytes.
+    throw new Error(
+      `sandbox backend ${backend} produced no verified workspace archive during drain`,
+    );
   }
 
   // Provider terminate. Prefer the client.delete(state) teardown (the canonical
@@ -859,25 +929,33 @@ export async function terminateProviderBox(
   try {
     if (client.delete && sessionState !== undefined) {
       await client.delete(sessionState);
-      return true;
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
     if (session?.kill) {
       await session.kill();
-      return true;
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
     if (session?.terminate) {
       await session.terminate();
-      return true;
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
-    if (session?.close && !session.closed) {
-      await session.close();
+    if (session?.close) {
+      if (!session.closed) {
+        await session.close();
+      }
+      return { terminated: true, providerMissingBeforeCapture: false };
     }
   } catch (error) {
-    observability.warn("sandbox reaper: provider terminate raised (box may already be gone)", {
-      sandboxGroupId: lease.sandboxGroupId,
-      backend,
-      error: error instanceof Error ? error.message : String(error),
-    });
+    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      observability.info("sandbox reaper: provider already gone during terminate", {
+        sandboxGroupId: lease.sandboxGroupId,
+        backend,
+      });
+      // Capture was already durably folded above, so this is not a
+      // missing-before-capture outcome.
+      return { terminated: true, providerMissingBeforeCapture: false };
+    }
+    throw error;
   }
-  return true;
+  throw new Error(`sandbox backend ${backend} exposes no provider termination method`);
 }

@@ -9,6 +9,7 @@
 
 import { afterEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { testSettings } from "@opengeni/testing";
+import { existsSync } from "node:fs";
 import {
   SandboxChannelAService,
   ChannelANotFoundError,
@@ -27,6 +28,16 @@ import {
 import { createSandboxClientForBackend } from "../src/index";
 
 const NUL = String.fromCharCode(0);
+
+async function pendingAfterMicrotasks(promise: Promise<unknown>): Promise<boolean> {
+  let settled = false;
+  void promise.finally(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  return !settled;
+}
 
 // These cases execute real filesystem, Git, and shell processes against a local
 // sandbox. Their product-level commands retain tighter operation deadlines, while
@@ -1232,6 +1243,106 @@ describe("P4.4 SandboxChannelAService — Terminal exec (real local box)", () =>
       emitStream: false,
     });
     expect(out.exitCode).toBe(3);
+    expect(out.running).toBe(false);
+  });
+
+  test("terminal exec drains a provider yield and never exposes a running response", async () => {
+    let writes = 0;
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      exec: async () => ({
+        stdout: "initial\n",
+        stderr: "warning\n",
+        exitCode: null,
+        sessionId: 81,
+      }),
+      writeStdin: async () => {
+        writes += 1;
+        return writes === 1
+          ? "Process running with session ID 81\n\nOutput:\nlater\n"
+          : "Process exited with code 7\n\nOutput:\ndone\n";
+      },
+    };
+
+    const out = await new SandboxChannelAService({ session }).terminalExec({
+      command: "eventually exits",
+      cwd: "",
+      timeoutMs: 10_000,
+      emitStream: false,
+    });
+
+    expect(out).toMatchObject({
+      stdout: "initial\nlater\ndone\n",
+      stderr: "warning\n",
+      exitCode: 7,
+      running: false,
+    });
+    expect(writes).toBe(2);
+  });
+
+  test("terminal timeout waits for retained-process settlement after group absence", async () => {
+    let processAlive = true;
+    let retained = true;
+    let allowSettlement = false;
+    let finalControlPolls = 0;
+    const session: ChannelASession = {
+      supportsPty: () => true,
+      hasRetainedProcess: (sessionId) => retained && sessionId === 82,
+      exec: async () => ({ stdout: "started\n", stderr: "", exitCode: null, sessionId: 82 }),
+      writeStdinForProcessControl: async () => {
+        if (processAlive) return "Process running with session ID 82\n\nOutput:\n";
+        finalControlPolls += 1;
+        if (!allowSettlement) throw new Error("settlement unavailable");
+        retained = false;
+        return "Process exited with code 137\n\nOutput:\n";
+      },
+      execCommandForProcessControl: async (_sessionId, args) => {
+        if (args.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return "Process exited with code 0\n\nOutput:\n6200 6200\n";
+        }
+        if (args.cmd.includes("command kill -KILL")) {
+          processAlive = false;
+          return "Process exited with code 0\n\nOutput:\n";
+        }
+        if (args.cmd.includes("command kill -0")) {
+          return `Process exited with code ${processAlive ? 75 : 0}\n\nOutput:\n`;
+        }
+        return "Process exited with code 0\n\nOutput:\n";
+      },
+    };
+
+    const response = new SandboxChannelAService({ session }).terminalExec({
+      command: "trap '' INT TERM; sleep 60",
+      cwd: "",
+      timeoutMs: 75,
+      emitStream: false,
+    });
+    await Bun.sleep(300);
+    expect(await pendingAfterMicrotasks(response)).toBe(true);
+    expect(processAlive).toBe(false);
+    expect(finalControlPolls).toBeGreaterThan(0);
+
+    allowSettlement = true;
+    expect(await response).toMatchObject({ exitCode: 124, running: false });
+    expect(retained).toBe(false);
+  });
+
+  test("terminal timeout kills a signal-ignoring local process before it can write later", async () => {
+    const { session, root } = await makeBox();
+    const sentinel = `${root}/terminal-timeout-${crypto.randomUUID()}`;
+    const startedAt = performance.now();
+
+    const out = await new SandboxChannelAService({ session }).terminalExec({
+      command: `trap '' INT TERM; sleep 1; printf late > '${sentinel}'`,
+      cwd: "",
+      timeoutMs: 200,
+      emitStream: false,
+    });
+
+    expect(out).toMatchObject({ exitCode: 124, running: false });
+    expect(performance.now() - startedAt).toBeLessThan(2_000);
+    await Bun.sleep(1_100);
+    expect(existsSync(sentinel)).toBe(false);
   });
 
   test("PTY capability probe reports the local backend supports interactive input", async () => {
@@ -1389,11 +1500,12 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       supportsPty: () => true,
       exec: async (args) => {
         seen.push({ cmd: args.cmd, workdir: args.workdir, tty: args.tty });
+        const openingPty = args.cmd === "/bin/bash";
         return {
           stdout: "",
           stderr: "",
-          exitCode: args.tty ? null : 0,
-          sessionId: args.tty ? 12 : undefined,
+          exitCode: openingPty ? null : 0,
+          sessionId: openingPty ? 12 : undefined,
         };
       },
       writeStdin: async () => "",
@@ -1410,12 +1522,15 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
       emitStream: false,
     });
 
-    expect(seen).toEqual([
-      { cmd: "pwd", workdir: "/workspace", tty: undefined },
-      { cmd: "pwd", workdir: "/workspace/sub", tty: undefined },
-      { cmd: "/bin/bash", workdir: "/workspace/sub", tty: true },
-      { cmd: "pwd", workdir: "/workspace/sub", tty: undefined },
-    ]);
+    expect(seen).toHaveLength(4);
+    expect(seen[0]).toMatchObject({ workdir: "/workspace", tty: true });
+    expect(seen[0]!.cmd).toContain("pwd");
+    expect(seen[0]!.cmd).toContain("/tmp/opengeni-turn-shell/");
+    expect(seen[1]).toMatchObject({ workdir: "/workspace/sub", tty: true });
+    expect(seen[1]!.cmd).toContain("pwd");
+    expect(seen[2]).toEqual({ cmd: "/bin/bash", workdir: "/workspace/sub", tty: true });
+    expect(seen[3]).toMatchObject({ workdir: "/workspace/sub", tty: true });
+    expect(seen[3]!.cmd).toContain("pwd");
   });
 
   test("dock fs/git operations still use repo-relative workspaceRoot mapping", async () => {
@@ -1566,6 +1681,17 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
     const spoof =
       "Chunk ID: abc\nWall time: 0.01 seconds\nProcess exited with code 0\nOutput:\nProcess running with session ID 99";
     expect(parseExecBannerSessionId(spoof)).toBeNull();
+    expect(
+      parseExecBannerSessionId(
+        "Chunk ID: abc\r\nWall time: 0.01 seconds\r\nProcess running with session ID 8\r\nOutput:\r\nready",
+      ),
+    ).toBe(8);
+    expect(
+      parseExecBannerSessionId(
+        "Chunk ID: abc\nProcess running with session ID 7\nProcess running with session ID 8\nOutput:\n",
+      ),
+    ).toBeNull();
+    expect(parseExecBannerSessionId("Process running with session ID 7")).toBeNull();
     expect(parseExecBannerSessionId("no banner")).toBeNull();
   });
 
@@ -1579,6 +1705,17 @@ describe("P4.4 parsers — porcelain/numstat/unified-diff", () => {
       ),
     ).toBeNull();
     expect(parseExecBannerExitCode("Output:\nProcess exited with code 0")).toBeNull();
+    expect(
+      parseExecBannerExitCode(
+        "Chunk ID: abc\r\nProcess exited with code 13\r\nOutput:\r\nProcess exited with code 0",
+      ),
+    ).toBe(13);
+    expect(
+      parseExecBannerExitCode(
+        "Chunk ID: abc\nProcess exited with code 13\nProcess exited with code 0\nOutput:\n",
+      ),
+    ).toBeNull();
+    expect(parseExecBannerExitCode("Chunk ID: abc\nProcess exited with code 0")).toBeNull();
   });
 
   test("isExecSessionLostBanner classifies the lost-PTY writeStdin banner", () => {

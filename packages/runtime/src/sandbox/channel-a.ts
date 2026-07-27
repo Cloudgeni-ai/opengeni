@@ -58,6 +58,21 @@ import type {
   TerminalExecRequest,
   TerminalExecResponse,
 } from "@opengeni/contracts";
+import {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
+import {
+  createTurnToolCancellationController,
+  TurnSandboxCommandCancelledError,
+} from "./turn-tool-cancellation";
+
+export {
+  isExecSessionLostBanner,
+  parseExecBannerExitCode,
+  parseExecBannerSessionId,
+} from "./exec-banner";
 
 // ── The minimal session surface Channel A consumes (a structural subset of the
 // SDK's SandboxSession, all optional — capability-probed before use). ─────────
@@ -98,6 +113,21 @@ export type ChannelASession = {
     yieldTimeMs?: number;
     maxOutputTokens?: number;
   }): Promise<string>;
+  writeStdinForProcessMutation?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  writeStdinForProcessControl?(args: {
+    sessionId: number;
+    chars?: string;
+    yieldTimeMs?: number;
+    maxOutputTokens?: number;
+  }): Promise<string>;
+  cancelExecCommand?(opId: string): Promise<boolean>;
+  hasRetainedProcess?(providerSessionId: number): boolean;
+  execCommandForProcessControl?(providerSessionId: number, args: ChannelAExecArgs): Promise<string>;
   createEditor?(runAs?: string): ChannelAEditor;
   supportsPty?(): boolean;
 };
@@ -1017,9 +1047,10 @@ export class SandboxChannelAService {
   /**
    * Detect repo roots within every supported workspace layout.
    *
-   * The platform seeds GitHub repositories at
-   * `repos/<owner>/<repo>`, which puts the `.git` marker at depth four from the
-   * workspace root. Do not reintroduce a fixed maxdepth here. Traversal is
+   * The platform normally seeds repositories at
+   * `repos/<encoded-host>/<owner>/<repo>`, while explicit mount paths and
+   * connected-machine layouts can be deeper. Do not reintroduce a fixed
+   * maxdepth here. Traversal is
    * bounded instead by pruning known machine/build residue, a wall-clock
    * timeout, and a result limit. `.git` may be either a directory (ordinary
    * clone/submodule) or a file (linked worktree).
@@ -1129,17 +1160,49 @@ export class SandboxChannelAService {
 
   // ════════════════════════ Terminal exec + PTY (A2) ════════════════════════
 
-  /** Run a bounded command, return buffered stdout/stderr + exit code inline. The
-   *  long-running tail (when the process hasn't exited within timeoutMs) keeps
-   *  running in-box; if emitStream is set the buffered output is also published as
-   *  the agent firehose so other viewers see it. */
+  /** Run a bounded command to physical completion and return buffered output.
+   *  A deadline cancels the exact provider operation, proves its process group
+   *  absent, and settles any retained-process admission before returning 124. */
   async terminalExec(req: TerminalExecRequest): Promise<TerminalExecResponse> {
-    const r = await this.run({
-      cmd: req.command,
-      workdir: this.terminalWorkdir(req.cwd),
-      yieldTimeMs: req.timeoutMs,
-    });
-    const running = r.exitCode === null && typeof r.sessionId === "number";
+    const abort = new AbortController();
+    const controller = createTurnToolCancellationController(abort.signal);
+    const timeoutReason = new Error(`Terminal command exceeded ${req.timeoutMs}ms`);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abort.abort(timeoutReason);
+    }, req.timeoutMs);
+    const terminalWorkdir = this.terminalWorkdir(req.cwd);
+    let r: Awaited<ReturnType<typeof controller.runSandboxCommandStructured>>;
+    try {
+      r = await controller.runSandboxCommandStructured(this.session, {
+        cmd: req.command,
+        ...(terminalWorkdir ? { workdir: terminalWorkdir } : {}),
+        ...(this.runAs ? { runAs: this.runAs } : {}),
+        yieldTimeMs: req.timeoutMs,
+      });
+      if (timedOut) {
+        await controller.waitForQuiescence();
+        r = {
+          stdout: "",
+          stderr: timeoutReason.message,
+          exitCode: 124,
+          wallTimeSeconds: req.timeoutMs / 1_000,
+        };
+      }
+    } catch (error) {
+      controller.cancel(error);
+      await controller.waitForQuiescence();
+      if (!timedOut && !(error instanceof TurnSandboxCommandCancelledError)) throw error;
+      r = {
+        stdout: "",
+        stderr: timeoutReason.message,
+        exitCode: 124,
+        wallTimeSeconds: req.timeoutMs / 1_000,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
     if (req.emitStream && (r.stdout || r.stderr)) {
       const events: { type: SessionEventType; payload: unknown }[] = [];
       const commandId = crypto.randomUUID();
@@ -1159,7 +1222,7 @@ export class SandboxChannelAService {
       stdout: r.stdout,
       stderr: r.stderr,
       exitCode: r.exitCode,
-      running,
+      running: false,
       wallTimeSeconds: r.wallTimeSeconds,
     };
   }
@@ -1199,10 +1262,13 @@ export class SandboxChannelAService {
    *  it as terminal.pty.output.delta). Throws ChannelAUnsupportedError when the
    *  backend has no writeStdin. */
   async ptyWrite(_req: PtyWriteRequest, execSessionId: number, data: string): Promise<string> {
-    if (!this.session.writeStdin) {
+    const write =
+      this.session.writeStdinForProcessMutation?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) {
       throw new ChannelAUnsupportedError("interactive terminal unsupported on this backend");
     }
-    const out = await this.session.writeStdin({
+    const out = await write({
       sessionId: execSessionId,
       chars: data,
       yieldTimeMs: 250,
@@ -1224,25 +1290,27 @@ export class SandboxChannelAService {
   /** Resize an open PTY (SIGWINCH via stty against the exec-session). The SDK has
    *  no resize method; stty in the same tty session updates the geometry. */
   async ptyResize(req: PtyResizeRequest, execSessionId: number): Promise<void> {
-    if (!this.session.writeStdin) return;
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (!write) return;
     // Send a stty in-band on the same pty session.
-    await this.session.writeStdin({
+    await write({
       sessionId: execSessionId,
       chars: `stty cols ${req.cols} rows ${req.rows}\n`,
       yieldTimeMs: 50,
     });
   }
 
-  /** Close an open PTY: write exit/EOF. The caller marks the row closed + emits
-   *  terminal.pty.exited. */
-  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<void> {
-    if (execSessionId !== null && this.session.writeStdin) {
-      try {
-        await this.session.writeStdin({ sessionId: execSessionId, chars: "", yieldTimeMs: 50 }); // EOF
-      } catch {
-        // best-effort; the row is marked closed regardless.
-      }
-    }
+  /** Ask an open PTY to exit and return the exact provider banner. The routing
+   * session settles durable process authority only when that banner proves this
+   * locator exited or was lost; callers must keep metadata open otherwise. */
+  async ptyClose(_req: PtyCloseRequest, execSessionId: number | null): Promise<string> {
+    const write =
+      this.session.writeStdinForProcessControl?.bind(this.session) ??
+      this.session.writeStdin?.bind(this.session);
+    if (execSessionId === null || !write) return "";
+    return await write({ sessionId: execSessionId, chars: "", yieldTimeMs: 250 }); // EOF
   }
 
   // ──────────────────────────── helpers ──────────────────────────────────────
@@ -1429,52 +1497,6 @@ function isDefinitePathNotFoundError(error: unknown): boolean {
     candidate.errno === "ENOENT" ||
     candidate.errno === -2
   );
-}
-
-// Detect the Modal "the exec-session you're writing to no longer exists" banner.
-// writeStdin reports a vanished session as a non-throwing string of the shape
-// `write_stdin failed: session not found: <N>` (it does NOT raise). This is a
-// hard cancellation-fence fact, so classify only the complete known banner (or
-// its bare provider fact) carrying the exact tracked numeric id. ID-less,
-// malformed, mismatched, or embellished/ambiguous text must remain fail-closed.
-export function isExecSessionLostBanner(out: string, execSessionId: number): boolean {
-  if (!out || !Number.isSafeInteger(execSessionId) || execSessionId < 0) return false;
-  const match = out.match(/^(?:write_stdin failed: )?session not found: (\d+)$/);
-  // JavaScript's `$` also matches immediately before one final line terminator.
-  // Requiring the regex match to consume the entire string keeps even that
-  // otherwise-special case fail-closed.
-  if (!match || match[0] !== out) return false;
-  // String equality is intentional: parseInt would normalize malformed facts
-  // such as `01` and can round an out-of-range integer into another identity.
-  return match[1] === String(execSessionId);
-}
-
-// Recover the numeric exec-session id the SDK embeds in a formatExecResponse
-// banner for a STILL-RUNNING process (`Process running with session ID <N>`).
-// A finished command emits `Process exited with code <N>` instead (no session
-// id) — that yields null. Only the banner region (before the `Output:` marker)
-// is scanned so a session-id-looking line in the command's own output can't
-// spoof it. This is what makes the interactive PTY work on backends whose only
-// exec surface is execCommand (Modal): without it ptyOpen reports execSessionId
-// = null and every pty/write 409s ("interactive terminal unsupported").
-export function parseExecBannerSessionId(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process running with session ID (\d+)/);
-  if (!match) return null;
-  const n = Number.parseInt(match[1]!, 10);
-  return Number.isFinite(n) ? n : null;
-}
-
-/** Recover a completed execCommand fallback's exit status from its banner.
- * Only the banner region is inspected, so command output cannot spoof success. */
-export function parseExecBannerExitCode(raw: string): number | null {
-  const outputIdx = raw.indexOf("\nOutput:\n");
-  const banner = outputIdx >= 0 ? raw.slice(0, outputIdx) : raw.startsWith("Output:\n") ? "" : raw;
-  const match = banner.match(/Process exited with code (-?\d+)/);
-  if (!match) return null;
-  const exitCode = Number.parseInt(match[1]!, 10);
-  return Number.isSafeInteger(exitCode) ? exitCode : null;
 }
 
 function sniffBinary(bytes: Buffer): boolean {
