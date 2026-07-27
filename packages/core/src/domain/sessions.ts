@@ -1862,8 +1862,11 @@ export async function updateSessionMcpApprovalPolicy(
   };
 }
 
-function toolPolicyAuditSnapshot(session: Session, tools: ToolRef[]) {
-  const policy = session.toolPolicy ?? { mode: "legacy" as const, inheritedFromSessionId: null };
+function toolPolicyAuditSnapshot(
+  session: Session,
+  tools: ToolRef[],
+  policy = session.toolPolicy ?? { mode: "legacy" as const, inheritedFromSessionId: null },
+) {
   // Tool policy refs contain only public server ids and the optional/strict
   // execution mode; they never carry URLs, names, headers, credentials,
   // schemas, or arguments. The request is capped at 64 refs and the mandatory
@@ -2000,8 +2003,8 @@ export async function updateSessionToolPolicy(
           {
             type: "session.tool_policy.updated" as const,
             payload: {
-              before: toolPolicyAuditSnapshot(session, session.tools),
-              after: toolPolicyAuditSnapshot(session, nextTools),
+              before: toolPolicyAuditSnapshot(session, session.tools, currentPolicy),
+              after: toolPolicyAuditSnapshot(session, nextTools, nextPolicy),
               version: nextVersion,
               effectiveFrom: "next_attempt",
             },

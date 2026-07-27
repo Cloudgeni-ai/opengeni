@@ -209,6 +209,73 @@ describe("durable session tool-policy updates", () => {
     expect(payload.after.truncated).toBe(false);
   }, 180_000);
 
+  test("records the workspace-default to explicit policy transition in the audit snapshot", async () => {
+    if (!available) return;
+    const owner = await workspace("audit-workspace-default-transition");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+    });
+    const bus = new MemoryEventBus();
+
+    await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+    );
+
+    const payload = bus.published[0]![0]!.payload as {
+      before: { mode: string; inheritedFromSessionId: string | null };
+      after: { mode: string; inheritedFromSessionId: string | null };
+    };
+    expect(payload.before).toMatchObject({
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+    });
+    expect(payload.after).toMatchObject({
+      mode: "explicit",
+      inheritedFromSessionId: null,
+    });
+  }, 180_000);
+
+  test("records the inherited to explicit policy transition in the audit snapshot", async () => {
+    if (!available) return;
+    const owner = await workspace("audit-inherited-transition");
+    const parent = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI, DOCS],
+    });
+    const child = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      parentSessionId: parent.id,
+      toolPolicy: { mode: "inherited", inheritedFromSessionId: parent.id },
+    });
+    const bus = new MemoryEventBus();
+
+    await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      grant(owner.workspaceId, owner.accountId),
+      child.id,
+      { tools: [OPENGENI, DOCS], expectedVersion: 1 },
+    );
+
+    const payload = bus.published[0]![0]!.payload as {
+      before: { mode: string; inheritedFromSessionId: string | null };
+      after: { mode: string; inheritedFromSessionId: string | null };
+    };
+    expect(payload.before).toMatchObject({
+      mode: "inherited",
+      inheritedFromSessionId: parent.id,
+    });
+    expect(payload.after).toMatchObject({
+      mode: "explicit",
+      inheritedFromSessionId: parent.id,
+    });
+  }, 180_000);
+
   test("records the mandatory first-party ref beyond the 64-ref request cap", async () => {
     if (!available) return;
     const extraServers = Array.from({ length: 64 }, (_, index) => ({
