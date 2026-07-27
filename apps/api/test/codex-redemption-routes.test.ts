@@ -368,7 +368,16 @@ describe("Codex quota managed-cookie-only reset redemption API", () => {
       },
     );
     expect(response.status).toBe(503);
-    expect(await response.text()).toContain("managed browser origin is not configured");
+    const body = await response.json();
+    expect(body).toMatchObject({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni is temporarily unavailable — retry.",
+        retryable: true,
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("managed browser origin is not configured");
     expect(provider.calls).toBe(callsBefore);
   });
 

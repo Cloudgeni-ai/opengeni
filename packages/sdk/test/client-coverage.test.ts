@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { OpenGeniClient } from "../src/client";
 import { OpenGeniApiError } from "../src/errors";
 import {
+  OPENGENI_CORRELATION_HEADER,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
   type ConnectionMetadata,
   type SessionTurn,
@@ -536,6 +537,52 @@ describe("OpenGeniClient files", () => {
     expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
   });
 
+  test("uploadFile discards raw HTML gateway PUT failures and never completes", async () => {
+    const correlationId = "storage-edge-503";
+    const { client, requests } = makeClient((request) => {
+      if (request.url.endsWith("/files/uploads")) {
+        return jsonResponse(
+          {
+            fileId: FILE_ID,
+            uploadId: UPLOAD_ID,
+            putUrl: "https://storage.example.test/put/gateway",
+            requiredHeaders: {},
+            expiresAt: "",
+            maxSizeBytes: 1,
+          },
+          201,
+        );
+      }
+      return new Response("<html><body>proxy detail must not escape</body></html>", {
+        status: 503,
+        headers: {
+          "content-type": "text/html",
+          [OPENGENI_CORRELATION_HEADER]: correlationId,
+        },
+      });
+    });
+
+    const error = await client
+      .uploadFile(WORKSPACE_ID, { filename: "a", contentType: "text/plain", data: "x" })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(OpenGeniApiError);
+    expect(error).toMatchObject({
+      status: 503,
+      code: "upstream_unavailable",
+      retryable: true,
+      correlationId,
+      outcomeUnknown: true,
+      body: "",
+      message: `OpenGeni is temporarily unavailable — retry. Reference: ${correlationId}.`,
+    });
+    expect(requests).toHaveLength(2);
+    expect(requests.some((request) => request.url.includes("/complete"))).toBe(false);
+  });
+
   test("getFile and createFileDownloadUrl hit the expected endpoints", async () => {
     const { client, requests } = makeClient(() =>
       jsonResponse({ url: "https://storage.example.test/get/x", expiresAt: "" }),
@@ -981,6 +1028,6 @@ describe("OpenGeniClient error handling for new endpoints", () => {
     );
     expect(error).toBeInstanceOf(OpenGeniApiError);
     expect((error as OpenGeniApiError).status).toBe(404);
-    expect((error as OpenGeniApiError).body).toBe("goal not found");
+    expect((error as OpenGeniApiError).body).toBe("");
   });
 });
