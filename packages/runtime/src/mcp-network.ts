@@ -212,16 +212,28 @@ export function guardedMcpFetch<TInput extends string | URL | Request>(
   options: {
     maxResponseBytes?: number;
     dnsLookup?: DnsLookup;
+    pinResolvedDestination?: boolean;
     requireHttpsOutsideLocalTest?: boolean;
   } = {},
 ): (input: TInput, init?: RequestInit) => Promise<Response> {
   return async (input: TInput, init?: RequestInit) => {
-    const response = await pinnedFetch(input, init, settings, {
-      fetchImpl: fetchImpl as FetchLike,
+    const destinationOptions = {
       ...(options.dnsLookup ? { dnsLookup: options.dnsLookup } : {}),
       label: "MCP endpoint",
       requireHttpsOutsideLocalTest: options.requireHttpsOutsideLocalTest ?? true,
-    });
+    };
+    let response: Response;
+    if (options.pinResolvedDestination === false) {
+      await resolvePinnedDestination(input instanceof Request ? input.url : input, settings, {
+        ...destinationOptions,
+      });
+      response = await fetchImpl(input, { ...init, redirect: "manual" });
+    } else {
+      response = await pinnedFetch(input, init, settings, {
+        fetchImpl: fetchImpl as FetchLike,
+        ...destinationOptions,
+      });
+    }
     return boundMcpResponseBody(response, options.maxResponseBytes ?? MCP_MAX_RESPONSE_BYTES);
   };
 }
