@@ -49,6 +49,30 @@ describe("MCP network and payload boundary", () => {
     expect(redirect).toBe("manual");
   });
 
+  test("validates before the Bun-native transport without passing an Undici dispatcher", async () => {
+    let seenInit: RequestInit | undefined;
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async (_input, init) => {
+        seenInit = init;
+        return Response.json({ ok: true });
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    const response = await guarded("https://example.test/mcp", {
+      method: "POST",
+      headers: { authorization: "Bearer test" },
+    });
+    expect(await response.json()).toEqual({ ok: true });
+    expect(seenInit?.redirect).toBe("manual");
+    expect(seenInit?.method).toBe("POST");
+    expect("dispatcher" in (seenInit ?? {})).toBe(false);
+  });
+
   test("errors on the first streamed byte past the response ceiling", async () => {
     const response = boundMcpResponseBody(
       new Response(

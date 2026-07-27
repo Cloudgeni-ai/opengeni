@@ -2408,7 +2408,13 @@ export async function prepareAgentTools(
   }
   const registry = new Map(settings.mcpServers.map((server) => [server.id, server]));
   const aggregateToolBudget = new McpAggregateToolListBudget();
-  const mcpFetchImpl = options.mcpFetchImpl ?? undiciFetch;
+  // npm Undici's dispatcher transport can hang indefinitely under Bun even
+  // after an AbortSignal fires. Bun's native fetch is the supported runtime
+  // transport there; destination policy validation still runs before every
+  // credential-bearing MCP request.
+  const useBunNativeFetch = options.mcpFetchImpl === undefined && !!process.versions.bun;
+  const mcpFetchImpl =
+    options.mcpFetchImpl ?? (useBunNativeFetch ? globalThis.fetch.bind(globalThis) : undiciFetch);
   const servers = await boundedParallelMap(
     tools,
     MCP_MAX_CONCURRENT_SERVER_OPERATIONS,
@@ -2425,7 +2431,10 @@ export async function prepareAgentTools(
       const guardedFetch = guardedMcpFetch(
         firstParty ? { ...settings, integrationsAllowPrivateNetworkTargets: true } : settings,
         baseFetch,
-        firstParty ? { requireHttpsOutsideLocalTest: false } : {},
+        {
+          ...(firstParty ? { requireHttpsOutsideLocalTest: false } : {}),
+          ...(useBunNativeFetch ? { pinResolvedDestination: false } : {}),
+        },
       );
       const fetchImpl = config.connectionRef
         ? connectionBrokerFetch(guardedFetch, config, options)
