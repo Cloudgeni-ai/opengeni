@@ -42,6 +42,7 @@ import {
   UpdateSessionGoalRequest,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionRequest,
+  UpdateSessionToolPolicyRequest,
   ViewerHeartbeatRequest,
   WORKSPACE_CONTROL_ACTOR_MAX_BYTES,
   workspaceControlUtf8Bytes,
@@ -97,6 +98,7 @@ import {
   NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
+  SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
@@ -156,6 +158,7 @@ import {
   sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
   updateSessionMcpApprovalPolicy,
+  updateSessionToolPolicy,
   updateSessionTitle,
   workflowIdForSession,
   sessionWithEffectiveToolPolicy,
@@ -670,6 +673,29 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       );
     },
   );
+
+  app.put("/v1/workspaces/:workspaceId/sessions/:sessionId/tool-policy", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const sessionId = c.req.param("sessionId");
+    const payload = UpdateSessionToolPolicyRequest.parse(await c.req.json().catch(() => null));
+    try {
+      const session = await updateSessionToolPolicy(deps, grant, sessionId, payload);
+      return c.json(await withEffectivePolicy(deps, workspaceId, session));
+    } catch (error) {
+      if (error instanceof SessionToolPolicyVersionConflictError) {
+        return c.json(
+          {
+            code: error.code,
+            message: error.message,
+            currentVersion: error.currentVersion,
+          },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
 
   app.get("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -2406,6 +2432,7 @@ export function sessionAuthorizationOperationForHttp(
     return null;
   }
   if (suffix === "/pin" && verb === "PUT") return "session.pin.write";
+  if (suffix === "/tool-policy" && verb === "PUT") return "session.tool_policy.write";
   if (/^\/mcp-servers\/[^/]+\/approval-policy$/.test(suffix) && verb === "PATCH") {
     return "session.mcp.approval_policy.write";
   }

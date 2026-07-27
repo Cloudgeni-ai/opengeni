@@ -170,6 +170,7 @@ import type {
   UpdateScheduledTaskRequest,
   UpdateSessionGoalRequest,
   UpdateSessionRequest,
+  UpdateSessionToolPolicyRequest,
   UpdateVariableSetRequest,
   UpdateRigRequest,
   UpdateWorkspaceMemberRequest,
@@ -319,6 +320,19 @@ export class OpenGeniClient {
     return await this.requestJson<Session>(
       "PATCH",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}`,
+      request,
+    );
+  }
+
+  /** Replace the durable session MCP tool policy with an optimistic version fence. */
+  async updateSessionToolPolicy(
+    workspaceId: string,
+    sessionId: string,
+    request: UpdateSessionToolPolicyRequest,
+  ): Promise<Session> {
+    return await this.requestJson<Session>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/tool-policy`,
       request,
     );
   }

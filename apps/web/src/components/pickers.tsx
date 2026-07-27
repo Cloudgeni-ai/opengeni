@@ -173,6 +173,7 @@ export function EnabledMcpToolPicker(props: {
   servers: McpServerOption[];
   selectedIds: Set<string>;
   disabled?: boolean;
+  label?: string;
   onChange: (ids: Set<string>) => void;
 }) {
   if (props.servers.length === 0) {
@@ -196,12 +197,14 @@ export function EnabledMcpToolPicker(props: {
           variant={selectedCount > 0 ? "secondary" : "ghost"}
           size="sm"
           disabled={props.disabled}
-          aria-label="Enabled MCP tools"
+          aria-label={props.label ?? "Enabled MCP tools"}
           className={pillClass(selectedCount > 0)}
         >
           <PlugIcon className="size-3.5" />
           <span className="truncate">
-            {selectedCount > 0 ? `${selectedCount} tool${selectedCount === 1 ? "" : "s"}` : "Tools"}
+            {selectedCount > 0
+              ? `${props.label ?? "Tools"} (${selectedCount})`
+              : (props.label ?? "Tools")}
           </span>
           <ChevronDownIcon className="size-3 shrink-0" />
         </Button>

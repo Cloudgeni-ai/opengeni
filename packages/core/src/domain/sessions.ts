@@ -14,6 +14,7 @@ import {
   ServiceTurnInitiatorContext,
   evaluateWorkspaceModelPolicy,
   reasoningEffortForMetadata,
+  stableJson,
   type AccessGrant,
   type CreateSessionResponse,
   type GoalSpec,
@@ -27,6 +28,7 @@ import {
   type SessionMcpServerInput,
   type SessionMcpServerMetadata,
   type UpdateSessionMcpApprovalPolicyResponse,
+  type UpdateSessionToolPolicyRequest,
   type SessionAuthorizationPort,
   type SessionToolPolicy,
   type SessionTurn,
@@ -69,6 +71,7 @@ import {
   AgentCommandAuthorityError,
   SessionSpawnDeniedDbError,
   SessionControlConflictError,
+  SessionToolPolicyVersionConflictError,
   type SessionCommandActor,
 } from "@opengeni/db";
 import {
@@ -104,6 +107,9 @@ import {
 const reservedSessionMcpServerIds = new Set(["opengeni", "files", "docs", "codex_apps"]);
 const maxSessionMcpCredentialHeaders = 16;
 const maxSessionMcpCredentialHeaderValueLength = 4096;
+// Keep the durable snapshot below the shared event-preview array boundary so
+// the generic lossy projection cannot silently rewrite this audit fact.
+const maxToolPolicyAuditRefs = 40;
 // RFC 9110 field-name token characters.
 const sessionMcpCredentialHeaderName = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -1854,6 +1860,170 @@ export async function updateSessionMcpApprovalPolicy(
     server: updatedServer,
     effectiveFrom: "next_attempt",
   };
+}
+
+function toolPolicyAuditSnapshot(
+  session: Session,
+  tools: ToolRef[],
+  policy = session.toolPolicy ?? { mode: "legacy" as const, inheritedFromSessionId: null },
+) {
+  // Tool policy refs contain only public server ids and the optional/strict
+  // execution mode; they never carry URLs, names, headers, credentials,
+  // schemas, or arguments. The request is capped at 64 refs and the mandatory
+  // first-party server can add one more, so the complete snapshot remains a
+  // small bounded payload rather than silently dropping security-relevant
+  // optional/strict changes.
+  const allToolRefs = mergeToolRefs([], tools)
+    .sort((left, right) => {
+      // Keep the mandatory first-party authority visible even when the
+      // bounded audit preview has to omit the middle of a large selection.
+      const leftMandatory = left.kind === "mcp" && left.id === "opengeni";
+      const rightMandatory = right.kind === "mcp" && right.id === "opengeni";
+      if (leftMandatory !== rightMandatory) return leftMandatory ? -1 : 1;
+      return `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`);
+    })
+    .map((tool) => ({
+      kind: tool.kind,
+      id: tool.id,
+      ...(tool.optional === undefined ? {} : { optional: tool.optional }),
+    }));
+  const toolRefs = allToolRefs.slice(0, maxToolPolicyAuditRefs);
+  return {
+    mode: policy.mode,
+    inheritedFromSessionId: policy.inheritedFromSessionId,
+    // IDs only: no MCP URLs, names, headers, credentials, schemas, or args.
+    toolIds: [...toolRefs]
+      .sort((left, right) => `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`))
+      .map((tool) => tool.id),
+    toolRefs,
+    toolCount: allToolRefs.length,
+    truncated: allToolRefs.length > toolRefs.length,
+  };
+}
+
+/**
+ * Replace the durable session tool policy. The target and its parent (when
+ * present) are locked by the DB event-writer helper, and the update/event are
+ * committed under one version-fenced transaction. An already claimed turn
+ * keeps its immutable snapshot; the next attempt observes this policy.
+ */
+export async function updateSessionToolPolicy(
+  deps: {
+    db: Database;
+    bus: EventBus;
+    settings: Settings;
+    sessionAuthorization?: SessionAuthorizationPort | null;
+  },
+  grant: AccessGrant,
+  sessionId: string,
+  request: UpdateSessionToolPolicyRequest,
+): Promise<Session> {
+  await requireSessionAuthorization(deps, grant, {
+    sessionId,
+    operation: "session.tool_policy.write",
+    surface: "core",
+  });
+  requirePermission(grant, "sessions:control");
+
+  const existingSession = await requireSession(deps.db, grant.workspaceId, sessionId);
+  const capabilityRuntimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    deps.db,
+    grant.workspaceId,
+    deps.settings,
+  );
+  const runtimeSettings = settingsWithSessionMcpServerMetadata(
+    capabilityRuntimeSettings,
+    existingSession.mcpServers,
+  );
+  const validatedTools = validateToolRefs(request.tools, runtimeSettings);
+  const validatedIds = new Set(validatedTools.map((tool) => `${tool.kind}:${tool.id}`));
+  const unknown = request.tools.find((tool) => !validatedIds.has(`${tool.kind}:${tool.id}`));
+  if (unknown) {
+    throw new HTTPException(422, { message: `unknown MCP server id: ${unknown.id}` });
+  }
+  const requestedTools = withFirstPartyTools(validatedTools, runtimeSettings);
+  const events = await appendSessionEventsWithLockedSessionUpdate(
+    deps.db,
+    grant.workspaceId,
+    sessionId,
+    async (session, context) => {
+      const currentVersion = session.toolPolicyVersion ?? 1;
+      if (request.expectedVersion !== currentVersion) {
+        throw new SessionToolPolicyVersionConflictError(currentVersion);
+      }
+
+      const nextTools = requestedTools;
+      let nextPolicy: SessionToolPolicy = {
+        mode: "explicit",
+        inheritedFromSessionId: session.parentSessionId,
+      };
+      if (session.parentSessionId) {
+        const parent = await context.getLockedSession(session.parentSessionId);
+        if (!parent) {
+          throw new HTTPException(409, { message: "parent session is no longer available" });
+        }
+        const parentTracksWorkspaceDefaults = parent.toolPolicy?.mode === "workspace_default";
+        const parentEffective = withFirstPartyTools(
+          parentTracksWorkspaceDefaults
+            ? withDefaultEnabledCapabilityMcpTools(
+                availableToolRefs(parent.tools, runtimeSettings),
+                deps.settings,
+                runtimeSettings,
+              )
+            : parent.tools,
+          runtimeSettings,
+        );
+        assertToolRefsSubset(
+          nextTools,
+          parentEffective,
+          "session tools may only narrow the parent session tool policy",
+        );
+      } else {
+        nextPolicy = { mode: "explicit", inheritedFromSessionId: null };
+      }
+
+      const currentPolicy = session.toolPolicy ?? {
+        mode: "legacy" as const,
+        inheritedFromSessionId: null,
+      };
+      // JSONB normalizes object-key order on the round trip, so plain
+      // JSON.stringify would turn an identical retry into a second mutation
+      // (and version bump) merely because the persisted key order differs from
+      // the request object. Compare canonical JSON instead.
+      const unchanged =
+        stableJson({ tools: session.tools, policy: currentPolicy }) ===
+        stableJson({ tools: nextTools, policy: nextPolicy });
+      if (unchanged) {
+        return { events: [] };
+      }
+
+      const nextVersion = currentVersion + 1;
+      return {
+        events: [
+          {
+            type: "session.tool_policy.updated" as const,
+            payload: {
+              before: toolPolicyAuditSnapshot(session, session.tools, currentPolicy),
+              after: toolPolicyAuditSnapshot(session, nextTools, nextPolicy),
+              version: nextVersion,
+              effectiveFrom: "next_attempt",
+            },
+          },
+        ],
+        update: {
+          tools: nextTools,
+          toolPolicy: nextPolicy,
+          toolPolicyVersion: nextVersion,
+          expectedToolPolicyVersion: request.expectedVersion,
+        },
+      };
+    },
+    { lockParentSession: true },
+  );
+  if (events.length > 0) {
+    await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+  }
+  return await requireSession(deps.db, grant.workspaceId, sessionId);
 }
 
 export async function readSessionLineage(

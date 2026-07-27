@@ -282,6 +282,57 @@ describe("embedding host session authorization routes", () => {
     });
   });
 
+  test("updates the durable session tool policy and returns a version conflict", async () => {
+    if (!available) return;
+    const value = await fixture();
+    const decisions: Array<{ operation: string; surface: string }> = [];
+    const app = appWith({
+      authorizeSession: async ({ operation, surface }) => {
+        decisions.push({ operation, surface });
+        return { allowed: true, relatedSessionAccess: "root" };
+      },
+      resolveListScope: async () => ({ kind: "all" }),
+    });
+    const path = `/v1/workspaces/${value.grant.workspaceId}/sessions/${value.child.id}/tool-policy`;
+    const request = (expectedVersion: number) =>
+      app.request(path, {
+        method: "PUT",
+        headers: {
+          authorization: value.authorization,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ tools: [], expectedVersion }),
+      });
+
+    const response = await request(1);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: value.child.id,
+      tools: [],
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: value.root.id },
+      toolPolicyVersion: 2,
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.tool_policy.write",
+      surface: "http",
+    });
+    expect(decisions).toContainEqual({
+      operation: "session.tool_policy.write",
+      surface: "core",
+    });
+
+    const conflict = await request(1);
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({
+      code: "SESSION_TOOL_POLICY_CONFLICT",
+      currentVersion: 2,
+    });
+    const policyEvents = (
+      await listSessionEvents(client.db, value.grant.workspaceId, value.child.id)
+    ).filter((event) => event.type === "session.tool_policy.updated");
+    expect(policyEvents).toHaveLength(1);
+  });
+
   test("classifies approval-policy requests before returning precise 400 and 404 responses", async () => {
     if (!available) return;
     const value = await fixture();

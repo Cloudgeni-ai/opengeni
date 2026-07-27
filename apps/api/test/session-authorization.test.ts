@@ -9,6 +9,7 @@ const cases: Array<[string, string, SessionAuthorizationOperation]> = [
   ["GET", "", "session.read"],
   ["PATCH", "", "session.title.write"],
   ["PUT", "/pin", "session.pin.write"],
+  ["PUT", "/tool-policy", "session.tool_policy.write"],
   ["GET", "/lineage", "session.lineage.read"],
   ["POST", "/codex-account", "session.codex_account.write"],
   ["GET", "/goal", "session.goal.read"],
