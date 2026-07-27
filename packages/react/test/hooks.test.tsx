@@ -2234,6 +2234,80 @@ describe("session hook concurrent target ownership", () => {
       globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
     }
   });
+
+  test("a suspended target render cannot retarget a committed draft callback", async () => {
+    const sessionA: string = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const sessionB: string = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
+    const draftA: ComposerDraft = {
+      revision: 1,
+      text: "A draft",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-a",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: new Date().toISOString(),
+    };
+    let resolveA!: (draft: ComposerDraft) => void;
+    const client = fakeClient({
+      getComposerDraft: async (_workspaceId, sessionId) => {
+        if (sessionId !== sessionA) throw new Error("uncommitted B must not read");
+        return await new Promise<ComposerDraft>((resolve) => {
+          resolveA = resolve;
+        });
+      },
+    });
+    const applied: string[] = [];
+    let setTarget!: (target: string) => void;
+    let renderedB = false;
+    const suspended = new Promise<never>(() => {});
+
+    function Harness() {
+      const [target, setTargetState] = useState(sessionA);
+      setTarget = setTargetState;
+      useComposer(target, {
+        client,
+        workspaceId: WORKSPACE_ID,
+        events: noEvents,
+        onDraftApplied: (draft) => applied.push(`${target}:${draft.text}`),
+      });
+      if (target === sessionB) {
+        renderedB = true;
+        throw suspended;
+      }
+      return null;
+    }
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const previousActEnvironment = globalThis.IS_REACT_ACT_ENVIRONMENT;
+    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    try {
+      flushSync(() => {
+        root.render(
+          <Suspense fallback={null}>
+            <Harness />
+          </Suspense>,
+        );
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      startTransition(() => setTarget(sessionB));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(renderedB).toBe(true);
+
+      resolveA(draftA);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(applied).toEqual([`${sessionA}:A draft`]);
+    } finally {
+      flushSync(() => root.unmount());
+      container.remove();
+      globalThis.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  });
 });
 
 describe("useComposer file-only send", () => {

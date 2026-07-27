@@ -107,11 +107,15 @@ export function useComposer(
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
+  const onDraftApplied = options.onDraftApplied;
   // Read through a ref so live session/policy projections can replace their
   // apply callback without invalidating the draft loader and re-running its
-  // initial-load effect.
-  const onDraftAppliedRef = useRef(options.onDraftApplied);
-  onDraftAppliedRef.current = options.onDraftApplied;
+  // initial-load effect. Publish only committed callbacks: a suspended target
+  // render must not retarget an in-flight read owned by the committed session.
+  const onDraftAppliedRef = useRef(onDraftApplied);
+  useLayoutEffect(() => {
+    onDraftAppliedRef.current = onDraftApplied;
+  }, [onDraftApplied]);
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
