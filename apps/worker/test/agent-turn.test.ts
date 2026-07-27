@@ -2618,6 +2618,14 @@ describe("transient provider error classifier", () => {
     const rejectedRequest = Object.assign(new Error(observed.message), { status: 400 });
     expect(isTransientProviderError(rejectedRequest)).toBe(false);
     expect(agentRunFailurePayload(rejectedRequest)).toEqual({ error: observed.message });
+
+    for (const nearMatch of [
+      `Authentication failed: ${observed.message}`,
+      `${observed.message} Unexpected suffix`,
+    ]) {
+      expect(isTransientProviderError(new Error(nearMatch))).toBe(false);
+      expect(agentRunFailurePayload(new Error(nearMatch))).toEqual({ error: nearMatch });
+    }
   });
 
   test("classifies node/undici network fault codes as transient", () => {
