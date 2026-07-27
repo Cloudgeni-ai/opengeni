@@ -53,6 +53,7 @@ import {
   recordCompletedModelCallBeforeOwnershipFences,
   modelUsageSourceKey,
   modelResponseUsageContextSignal,
+  managedSandboxOwnershipForTurn,
   pointerReconcileReason,
   processCompactionModelUsageEvent,
   processModelResponseUsageEvent,
@@ -1772,6 +1773,19 @@ describe("active sandbox backend resolution (Case B: clone-onto-real-disk gate)"
     expect(backend).toBe("selfhosted");
     expect(pointerReads).toBe(1);
     expect(kindReads).toBe(1);
+  });
+});
+
+describe("machine-primary sandbox ownership isolation", () => {
+  test("does not acquire the managed-home lease for a Connected Machine turn", () => {
+    expect(managedSandboxOwnershipForTurn(true, "attempt-1", "cloud-home-group")).toBeNull();
+  });
+
+  test("keeps managed sandbox turns on their exact attempt-derived holder", () => {
+    expect(managedSandboxOwnershipForTurn(false, "attempt-1", "cloud-home-group")).toEqual({
+      holderId: sandboxLeaseHolderIdForAttempt("attempt-1"),
+      sandboxGroupId: "cloud-home-group",
+    });
   });
 });
 
