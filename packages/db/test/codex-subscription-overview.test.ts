@@ -149,11 +149,11 @@ async function seedCapacityWaiter(ws: Workspace): Promise<{
   const [waiter] = await admin<{ id: string; wake_revision: number }[]>`
     insert into codex_capacity_waiters (
       account_id, workspace_id, session_id, goal_id, blocked_turn_id,
-      workflow_id, goal_version, next_check_at, reset_kind,
+      blocked_turn_generation, workflow_id, goal_version, next_check_at, reset_kind,
       wake_revision, observed_wake_revision
     ) values (
       ${ws.accountId}, ${ws.workspaceId}, ${sessionId}, ${goalId}, ${turnId},
-      ${workflowId}, 1, now() + interval '5 minutes', 'bounded_refresh', 1, 1
+      1, ${workflowId}, 1, now() + interval '5 minutes', 'bounded_refresh', 1, 1
     ) returning id, wake_revision`;
   if (!waiter) throw new Error("failed to seed Codex quota capacity waiter");
   return {

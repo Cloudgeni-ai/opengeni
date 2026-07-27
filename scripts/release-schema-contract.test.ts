@@ -129,12 +129,17 @@ describe("release schema contract", () => {
         (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
         (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
         (migrations.has("0120_durable_goal_wake.sql") ? 1 : 0) +
-        (migrations.has("0121_goal_update_idempotency.sql") ? 1 : 0),
+        (migrations.has("0121_goal_update_idempotency.sql") ? 1 : 0) +
+        (migrations.has("0122_codex_capacity_same_turn.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "be5629351d5133d499582c0f5a6d962447212b583bab0a2144285ac3f5a926b2",
+      "2e64c61719e544e2a154b25cfa5c17481e22b30f36af4de9ec0ca61d7fe97f0c",
     );
-    expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
+    expect(contract.latestMigration).toBe("0122_codex_capacity_same_turn.sql");
+    expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
+      sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
+      deploymentMode: "maintenance",
+    });
 
     const boundarySql = await readFile(
       join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
@@ -156,7 +161,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[01])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-2])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -167,6 +172,7 @@ describe("release schema contract", () => {
       "0119_pending_tool_output_policy.sql",
       "0120_durable_goal_wake.sql",
       "0121_goal_update_idempotency.sql",
+      "0122_codex_capacity_same_turn.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

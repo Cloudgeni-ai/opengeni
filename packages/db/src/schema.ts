@@ -1485,7 +1485,8 @@ export const sessionTurnAttempts = pgTable(
       "session_turn_attempts_outcome_check",
       sql`${table.outcome} is null or ${table.outcome} in (
         'completed', 'failed', 'cancelled', 'superseded', 'requires_action',
-        'interrupted_recoverable', 'lease_lost_recoverable', 'pre_cutover_closed'
+        'waiting_capacity', 'interrupted_recoverable', 'lease_lost_recoverable',
+        'pre_cutover_closed'
       )`,
     ),
     closedConsistent: check(
@@ -2014,12 +2015,13 @@ export const codexCapacityWaiters = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     sessionId: uuid("session_id").notNull(),
-    goalId: uuid("goal_id").notNull(),
+    goalId: uuid("goal_id"),
     blockedTurnId: uuid("blocked_turn_id").notNull(),
+    blockedTurnGeneration: integer("blocked_turn_generation").notNull(),
     workflowId: text("workflow_id").notNull(),
     generation: integer("generation").notNull().default(1),
     status: text("status").notNull().default("waiting"), // waiting | resumed | superseded
-    goalVersion: integer("goal_version").notNull(),
+    goalVersion: integer("goal_version"),
     policyHash: text("policy_hash"),
     earliestResetAt: timestamp("earliest_reset_at", { withTimezone: true }),
     nextCheckAt: timestamp("next_check_at", { withTimezone: true }).notNull(),
