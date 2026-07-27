@@ -11,7 +11,7 @@ const images = [
   { name: "ghcr.io/cloudgeni-ai/opengeni-worker", digest: `sha256:${"5".repeat(64)}` },
 ];
 const chart = {
-  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni" as const,
+  reference: "oci://ghcr.io/cloudgeni-ai/charts/opengeni/opengeni" as const,
   version: "0.16.0",
   manifestDigest: `sha256:${"6".repeat(64)}`,
   bytesSha256: "7".repeat(64),
@@ -80,7 +80,7 @@ describe("release BOM", () => {
     }));
     const portableChart = {
       ...chart,
-      reference: `oci://${prefix}/charts/opengeni`,
+      reference: `oci://${prefix}/charts/opengeni/opengeni`,
     };
 
     const bom = buildReleaseBom({
@@ -132,7 +132,7 @@ describe("release BOM", () => {
     expect(() =>
       buildReleaseBom({
         ...valid,
-        chart: { ...chart, reference: "oci://registry.example/charts/opengeni" },
+        chart: { ...chart, reference: "oci://registry.example/charts/opengeni/opengeni" },
       }),
     ).toThrow("official OCI chart");
   });

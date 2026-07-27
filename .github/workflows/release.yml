@@ -644,7 +644,7 @@ jobs:
             --arg manifestDigest "$resolved_manifest" \
             --arg bytesSha256 "$expected_bytes" \
             --arg artifact "opengeni-${RELEASE_VERSION}.tgz" \
-            --arg reference "$chart_oci" \
+            --arg reference "$chart_pull_oci" \
             '{reference:$reference,version:$version,manifestDigest:$manifestDigest,bytesSha256:$bytesSha256,artifact:$artifact}')"
           echo "manifest_digest=$resolved_manifest" >> "$GITHUB_OUTPUT"
           {

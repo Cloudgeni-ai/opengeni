@@ -4,6 +4,7 @@ import {
   DEFAULT_RELEASE_OCI_PREFIX,
   isExactSha256Digest,
   normalizeReleaseOciPrefix,
+  releaseChartPushTarget,
   releaseChartReference,
   releaseImageName,
   releaseRegistryHost,
@@ -17,6 +18,9 @@ describe("release registry identity", () => {
       "ghcr.io/cloudgeni-ai/opengeni-api",
     );
     expect(releaseChartReference(DEFAULT_RELEASE_OCI_PREFIX)).toBe(
+      "oci://ghcr.io/cloudgeni-ai/charts/opengeni/opengeni",
+    );
+    expect(releaseChartPushTarget(DEFAULT_RELEASE_OCI_PREFIX)).toBe(
       "oci://ghcr.io/cloudgeni-ai/charts/opengeni",
     );
   });
