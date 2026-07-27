@@ -1,5 +1,12 @@
 # @opengeni/runtime
 
+## 0.13.7
+
+### Patch Changes
+
+- Updated dependencies [fdc0c98]
+  - @opengeni/config@0.7.3
+
 ## 0.13.6
 
 ### Patch Changes

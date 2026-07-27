@@ -1,5 +1,14 @@
 # @opengeni/documents
 
+## 0.2.33
+
+### Patch Changes
+
+- Updated dependencies [fdc0c98]
+  - @opengeni/db@0.12.3
+  - @opengeni/config@0.7.3
+  - @opengeni/storage@0.2.27
+
 ## 0.2.32
 
 ### Patch Changes
