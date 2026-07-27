@@ -1,5 +1,12 @@
 # @opengeni/sdk
 
+## 0.25.2
+
+### Patch Changes
+
+- 85cb323: Restore provider-native web search for workspace-default Codex sessions while preserving explicit
+  tool narrowing, child policy ceilings, version-fenced policy adoption, and structured URL citations.
+
 ## 0.25.0
 
 ### Minor Changes
