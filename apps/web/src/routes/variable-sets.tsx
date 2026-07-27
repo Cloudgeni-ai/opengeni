@@ -6,6 +6,7 @@ import { Link } from "@tanstack/react-router";
 import {
   BoxIcon,
   CheckIcon,
+  ChevronDownIcon,
   KeyRoundIcon,
   Loader2Icon,
   PencilIcon,
@@ -18,7 +19,9 @@ import { toast } from "sonner";
 
 import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ContentPage } from "@/components/ui/content-layout";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -80,7 +83,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-1 flex-col px-4 py-5 sm:px-6 lg:px-8">
+    <ContentPage width="standard">
       <PageHeader
         icon={<BoxIcon className="size-4" />}
         title="Variable sets"
@@ -93,7 +96,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               size="sm"
               onClick={() => void variableSets.refresh()}
               disabled={variableSets.loading}
-              className="h-9"
+              className="h-9 pointer-coarse:min-h-10"
             >
               <RefreshCwIcon
                 className={variableSets.loading ? "size-3.5 animate-spin" : "size-3.5"}
@@ -104,7 +107,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               type="button"
               size="sm"
               onClick={() => setCreateOpen((open) => !open)}
-              className="h-9"
+              className="h-9 pointer-coarse:min-h-10"
             >
               <PlusIcon className="size-3.5" />
               New variable set
@@ -122,7 +125,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               value={createName}
               onChange={(event) => setCreateName(event.target.value)}
               placeholder="staging-aws"
-              className="h-9"
+              className="h-9 pointer-coarse:min-h-10"
               autoFocus
             />
           </div>
@@ -133,7 +136,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               value={createDescription}
               onChange={(event) => setCreateDescription(event.target.value)}
               placeholder="What these credentials reach"
-              className="h-9"
+              className="h-9 pointer-coarse:min-h-10"
             />
           </div>
           <div className="flex items-end">
@@ -141,7 +144,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
               type="button"
               disabled={variableSets.mutating || !createName.trim()}
               onClick={() => void createVariableSet()}
-              className="h-9"
+              className="h-9 pointer-coarse:min-h-10"
             >
               {variableSets.mutating ? (
                 <Loader2Icon className="size-3.5 animate-spin" />
@@ -231,7 +234,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
           </Notice>
         ) : null}
       </div>
-    </div>
+    </ContentPage>
   );
 }
 
@@ -252,6 +255,7 @@ function VariableSetCard(props: {
 }) {
   const { variableSet } = props;
   const [editing, setEditing] = useState(false);
+  const [expanded, setExpanded] = useState(false);
   const [nameDraft, setNameDraft] = useState(variableSet.name);
   const [descriptionDraft, setDescriptionDraft] = useState(variableSet.description ?? "");
   const [variableName, setVariableName] = useState("");
@@ -309,253 +313,292 @@ function VariableSetCard(props: {
   }
 
   return (
-    <article className="rounded-lg border border-border bg-surface/45 p-3">
-      <div className="flex min-w-0 items-start justify-between gap-3">
-        {editing ? (
-          <div className="grid min-w-0 flex-1 gap-2 sm:grid-cols-2">
-            <Input
-              value={nameDraft}
-              onChange={(event) => setNameDraft(event.target.value)}
-              aria-label="Variable set name"
-              className="h-8 text-sm"
-            />
-            <Input
-              value={descriptionDraft}
-              onChange={(event) => setDescriptionDraft(event.target.value)}
-              placeholder="Description"
-              aria-label="Variable set description"
-              className="h-8 text-sm"
-            />
-          </div>
-        ) : (
-          <div className="min-w-0">
-            <div className="truncate text-sm font-medium">{variableSet.name}</div>
-            <div className="mt-0.5 text-xs text-fg-muted">
-              {variableSet.description ?? "No description"}
-            </div>
-            <div className="mt-1 text-2xs text-fg-subtle">
-              {variableSet.variables.length} variable{variableSet.variables.length === 1 ? "" : "s"}{" "}
-              · updated {formatTimestamp(variableSet.updatedAt)}
-            </div>
-          </div>
-        )}
-        <div className="flex shrink-0 items-center gap-1.5">
+    <Collapsible open={expanded} onOpenChange={setExpanded} asChild>
+      <article className="min-w-0 rounded-xl border border-border bg-surface/45 p-3 sm:p-4">
+        <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]">
           {editing ? (
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8"
-                onClick={() => setEditing(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                className="h-8"
-                disabled={props.mutating}
-                onClick={() => void saveDetails()}
-              >
-                <CheckIcon className="size-3.5" />
-                Save
-              </Button>
-            </>
+            <div className="grid min-w-0 gap-2 md:grid-cols-2">
+              <Input
+                value={nameDraft}
+                onChange={(event) => setNameDraft(event.target.value)}
+                aria-label="Variable set name"
+                className="h-8 text-sm"
+              />
+              <Input
+                value={descriptionDraft}
+                onChange={(event) => setDescriptionDraft(event.target.value)}
+                placeholder="Description"
+                aria-label="Variable set description"
+                className="h-8 text-sm"
+              />
+            </div>
           ) : (
-            <>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Edit variable set"
-                onClick={() => {
-                  setNameDraft(variableSet.name);
-                  setDescriptionDraft(variableSet.description ?? "");
-                  setEditing(true);
-                }}
+            <div className="min-w-0">
+              <div
+                className="break-words text-sm font-medium [overflow-wrap:anywhere]"
+                title={variableSet.name}
               >
-                <PencilIcon className="size-3.5" />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label="Delete variable set"
-                className="hover:text-status-failed"
-                disabled={props.mutating || deleteBlocked}
-                title={deleteBlockedReason ?? "Delete variable set"}
-                onClick={() => setConfirmDelete(true)}
-              >
-                <Trash2Icon className="size-3.5" />
-              </Button>
-            </>
+                {variableSet.name}
+              </div>
+              <div className="mt-0.5 break-words text-xs text-fg-muted [overflow-wrap:anywhere]">
+                {variableSet.description ?? "No description"}
+              </div>
+              <div className="mt-1 text-2xs text-fg-subtle">
+                {variableSet.variables.length} variable
+                {variableSet.variables.length === 1 ? "" : "s"} · updated{" "}
+                {formatTimestamp(variableSet.updatedAt)}
+                {attachmentCount > 0
+                  ? ` · ${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}`
+                  : ""}
+              </div>
+            </div>
           )}
-        </div>
-      </div>
-
-      <div className="mt-3 space-y-1.5">
-        {variableSet.variables.length === 0 ? (
-          <p className="text-xs text-fg-subtle">
-            No variables yet — add one below to inject it into the sandbox.
-          </p>
-        ) : (
-          variableSet.variables.map((variable) => (
-            <div
-              key={variable.name}
-              className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
-            >
-              <div className="flex min-w-0 items-center gap-2">
-                <KeyRoundIcon className="size-3 shrink-0 text-fg-subtle" />
-                <span className="min-w-0 flex-1 truncate font-mono text-xs">{variable.name}</span>
-                <span className="shrink-0 text-2xs text-fg-subtle">
-                  v{variable.version} · {formatTimestamp(variable.updatedAt)}
-                </span>
-                <span
-                  className="shrink-0 rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
-                  title="Values are write-only and never returned by the API"
-                >
-                  ••••••
-                </span>
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-1.5 sm:shrink-0">
+            {editing ? (
+              <>
                 <Button
                   type="button"
                   variant="ghost"
-                  size="xs"
-                  className="h-6 shrink-0 text-2xs"
+                  size="sm"
+                  className="h-8 pointer-coarse:min-h-10"
+                  onClick={() => setEditing(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  className="h-8 pointer-coarse:min-h-10"
                   disabled={props.mutating}
+                  onClick={() => void saveDetails()}
+                >
+                  <CheckIcon className="size-3.5" />
+                  Save
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="pointer-coarse:size-10"
+                  aria-label="Edit variable set"
                   onClick={() => {
-                    setRotatingName((current) =>
-                      current === variable.name ? null : variable.name,
-                    );
-                    setRotateValue("");
+                    setNameDraft(variableSet.name);
+                    setDescriptionDraft(variableSet.description ?? "");
+                    setEditing(true);
                   }}
                 >
-                  Rotate
+                  <PencilIcon className="size-3.5" />
                 </Button>
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon-xs"
-                  aria-label={`Delete variable ${variable.name}`}
-                  className="shrink-0 hover:text-status-failed"
-                  disabled={props.mutating}
-                  onClick={() => setConfirmDeleteVariable(variable.name)}
+                  size="icon-sm"
+                  aria-label="Delete variable set"
+                  className="hover:text-status-failed pointer-coarse:size-10"
+                  disabled={props.mutating || deleteBlocked}
+                  title={deleteBlockedReason ?? "Delete variable set"}
+                  onClick={() => setConfirmDelete(true)}
                 >
-                  <Trash2Icon className="size-3" />
+                  <Trash2Icon className="size-3.5" />
                 </Button>
-              </div>
-              {rotatingName === variable.name ? (
-                <div className="mt-2 flex items-center gap-2">
-                  <Input
-                    type="password"
-                    value={rotateValue}
-                    onChange={(event) => setRotateValue(event.target.value)}
-                    placeholder="New value (write-only)"
-                    aria-label={`New value for ${variable.name}`}
-                    className="h-8 flex-1 text-xs"
-                    autoFocus
-                  />
+                <CollapsibleTrigger asChild>
                   <Button
                     type="button"
+                    variant="ghost"
                     size="sm"
-                    className="h-8"
-                    disabled={props.mutating || !rotateValue}
-                    onClick={() => void rotateVariable(variable.name)}
+                    className="h-8 pointer-coarse:min-h-10"
+                    aria-label={`${expanded ? "Hide" : "Show"} variables for ${variableSet.name}`}
                   >
-                    <CheckIcon className="size-3.5" />
-                    Set
+                    {expanded ? "Hide" : "Show"}
+                    <ChevronDownIcon
+                      className={`size-3.5 transition-transform ${expanded ? "rotate-180" : ""}`}
+                    />
                   </Button>
-                </div>
-              ) : null}
-            </div>
-          ))
-        )}
-      </div>
-
-      <div className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]">
-        <Input
-          value={variableName}
-          onChange={(event) => setVariableName(event.target.value)}
-          placeholder="VARIABLE_NAME"
-          aria-label="New variable name"
-          className="h-8 font-mono text-xs"
-        />
-        <Input
-          type="password"
-          value={variableValue}
-          onChange={(event) => setVariableValue(event.target.value)}
-          placeholder="Value (write-only)"
-          aria-label="New variable value"
-          className="h-8 text-xs"
-        />
-        <Button
-          type="button"
-          variant="secondary"
-          size="sm"
-          className="h-8"
-          disabled={props.mutating || !variableName.trim() || !variableValue}
-          onClick={() => void addVariable()}
-        >
-          <PlusIcon className="size-3.5" />
-          Set variable
-        </Button>
-      </div>
-
-      {attachmentCount > 0 ? (
-        <div className="mt-3 border-t border-border/70 pt-2">
-          <span className="text-2xs font-medium text-fg-muted">Attached to</span>
-          <div className="mt-1.5 flex flex-wrap gap-1.5">
-            {props.attachedSessions.slice(0, 4).map((session) => (
-              <Link
-                key={session.id}
-                to="/workspaces/$workspaceId/sessions/$sessionId"
-                params={{ workspaceId: props.workspaceId, sessionId: session.id }}
-                className="min-w-0 max-w-full rounded-md hover:text-fg"
-                title={session.initialMessage}
-              >
-                <MetaChip className="hover:border-border-strong">
-                  session · {session.initialMessage}
-                </MetaChip>
-              </Link>
-            ))}
-            {props.attachedSessions.length > 4 ? (
-              <MetaChip>+{props.attachedSessions.length - 4} more sessions</MetaChip>
-            ) : null}
-            {props.attachedTasks.map((task) => (
-              <MetaChip key={task.id} title={task.name}>
-                task · {task.name}
-              </MetaChip>
-            ))}
+                </CollapsibleTrigger>
+              </>
+            )}
           </div>
         </div>
-      ) : null}
 
-      <ConfirmDialog
-        open={confirmDelete}
-        onOpenChange={setConfirmDelete}
-        title={`Delete variable set “${variableSet.name}”?`}
-        description="Its variables are removed and sessions can no longer use them. This can't be undone."
-        confirmLabel="Delete variable set"
-        onConfirm={() => props.onDelete()}
-      />
-      <ConfirmDialog
-        open={confirmDeleteVariable !== null}
-        onOpenChange={(next) => setConfirmDeleteVariable(next ? confirmDeleteVariable : null)}
-        title={`Delete variable “${confirmDeleteVariable ?? ""}”?`}
-        description="Sessions using this variable set can no longer read it. This can't be undone."
-        confirmLabel="Delete variable"
-        onConfirm={async () => {
-          const name = confirmDeleteVariable;
-          if (!name) {
-            return;
-          }
-          const removed = await props.onDeleteVariable(name);
-          if (removed) {
-            toast.success(`Variable ${name} deleted`);
-          }
-          return removed;
-        }}
-      />
-    </article>
+        <CollapsibleContent>
+          <div className="mt-3 space-y-1.5">
+            {variableSet.variables.length === 0 ? (
+              <p className="text-xs text-fg-subtle">
+                No variables yet — add one below to inject it into the sandbox.
+              </p>
+            ) : (
+              variableSet.variables.map((variable) => (
+                <div
+                  key={variable.name}
+                  className="rounded-md border border-border/70 bg-bg/25 px-2.5 py-1.5"
+                >
+                  <div className="grid min-w-0 gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                    <div className="flex min-w-0 items-start gap-2">
+                      <KeyRoundIcon className="mt-0.5 size-3 shrink-0 text-fg-subtle" />
+                      <span
+                        className="min-w-0 break-words font-mono text-xs [overflow-wrap:anywhere]"
+                        title={variable.name}
+                      >
+                        {variable.name}
+                      </span>
+                    </div>
+                    <div className="flex min-w-0 flex-wrap items-center gap-1.5 sm:justify-end">
+                      <span className="text-2xs text-fg-subtle">
+                        v{variable.version} · {formatTimestamp(variable.updatedAt)}
+                      </span>
+                      <span
+                        className="rounded border border-border px-1.5 py-0.5 font-mono text-2xs text-fg-subtle"
+                        title="Values are write-only and never returned by the API"
+                        aria-label="Value is write-only"
+                      >
+                        ••••••
+                      </span>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="xs"
+                        className="h-7 text-2xs pointer-coarse:min-h-10"
+                        disabled={props.mutating}
+                        aria-expanded={rotatingName === variable.name}
+                        onClick={() => {
+                          setRotatingName((current) =>
+                            current === variable.name ? null : variable.name,
+                          );
+                          setRotateValue("");
+                        }}
+                      >
+                        Rotate
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        aria-label={`Delete variable ${variable.name}`}
+                        className="hover:text-status-failed pointer-coarse:size-10"
+                        disabled={props.mutating}
+                        onClick={() => setConfirmDeleteVariable(variable.name)}
+                      >
+                        <Trash2Icon className="size-3" />
+                      </Button>
+                    </div>
+                  </div>
+                  {rotatingName === variable.name ? (
+                    <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                      <Input
+                        type="password"
+                        value={rotateValue}
+                        onChange={(event) => setRotateValue(event.target.value)}
+                        placeholder="New value (write-only)"
+                        aria-label={`New value for ${variable.name}`}
+                        className="h-8 flex-1 text-xs pointer-coarse:min-h-10"
+                        autoFocus
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-8 pointer-coarse:min-h-10"
+                        disabled={props.mutating || !rotateValue}
+                        onClick={() => void rotateVariable(variable.name)}
+                      >
+                        <CheckIcon className="size-3.5" />
+                        Set
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+
+          <div className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]">
+            <Input
+              value={variableName}
+              onChange={(event) => setVariableName(event.target.value)}
+              placeholder="VARIABLE_NAME"
+              aria-label="New variable name"
+              className="h-8 font-mono text-xs pointer-coarse:min-h-10"
+            />
+            <Input
+              type="password"
+              value={variableValue}
+              onChange={(event) => setVariableValue(event.target.value)}
+              placeholder="Value (write-only)"
+              aria-label="New variable value"
+              className="h-8 text-xs pointer-coarse:min-h-10"
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              className="h-8 pointer-coarse:min-h-10"
+              disabled={props.mutating || !variableName.trim() || !variableValue}
+              onClick={() => void addVariable()}
+            >
+              <PlusIcon className="size-3.5" />
+              Set variable
+            </Button>
+          </div>
+
+          {attachmentCount > 0 ? (
+            <div className="mt-3 border-t border-border/70 pt-2">
+              <span className="text-2xs font-medium text-fg-muted">Attached to</span>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {props.attachedSessions.slice(0, 4).map((session) => (
+                  <Link
+                    key={session.id}
+                    to="/workspaces/$workspaceId/sessions/$sessionId"
+                    params={{ workspaceId: props.workspaceId, sessionId: session.id }}
+                    className="min-w-0 max-w-full rounded-md hover:text-fg"
+                    title={session.initialMessage}
+                  >
+                    <MetaChip className="hover:border-border-strong">
+                      session · {session.initialMessage}
+                    </MetaChip>
+                  </Link>
+                ))}
+                {props.attachedSessions.length > 4 ? (
+                  <MetaChip>+{props.attachedSessions.length - 4} more sessions</MetaChip>
+                ) : null}
+                {props.attachedTasks.map((task) => (
+                  <MetaChip key={task.id} title={task.name}>
+                    task · {task.name}
+                  </MetaChip>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </CollapsibleContent>
+
+        <ConfirmDialog
+          open={confirmDelete}
+          onOpenChange={setConfirmDelete}
+          title={`Delete variable set “${variableSet.name}”?`}
+          description="Its variables are removed and sessions can no longer use them. This can't be undone."
+          confirmLabel="Delete variable set"
+          onConfirm={() => props.onDelete()}
+        />
+        <ConfirmDialog
+          open={confirmDeleteVariable !== null}
+          onOpenChange={(next) => setConfirmDeleteVariable(next ? confirmDeleteVariable : null)}
+          title={`Delete variable “${confirmDeleteVariable ?? ""}”?`}
+          description="Sessions using this variable set can no longer read it. This can't be undone."
+          confirmLabel="Delete variable"
+          onConfirm={async () => {
+            const name = confirmDeleteVariable;
+            if (!name) {
+              return;
+            }
+            const removed = await props.onDeleteVariable(name);
+            if (removed) {
+              toast.success(`Variable ${name} deleted`);
+            }
+            return removed;
+          }}
+        />
+      </article>
+    </Collapsible>
   );
 }
