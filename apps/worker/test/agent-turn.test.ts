@@ -294,6 +294,34 @@ describe("turn secret-redaction boundaries", () => {
       { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
     ]);
   });
+
+  test("registers explicit custom static MCP credential headers by provenance", () => {
+    expect(
+      headerSecretRedactions(
+        "MCP_CRM_STATIC",
+        { "Private-Token": "synthetic-static-private-token-123456" },
+        ["Private-Token"],
+      ),
+    ).toEqual([
+      {
+        name: "MCP_CRM_STATIC_PRIVATE_TOKEN",
+        value: "synthetic-static-private-token-123456",
+      },
+    ]);
+  });
+
+  test("registers every renewed MCP header returned by the credential broker", () => {
+    expect(
+      headerSecretRedactions("MCP", { "Private-Token": "synthetic-renewed-private-token-123456" }, [
+        "Private-Token",
+      ]),
+    ).toEqual([
+      {
+        name: "MCP_PRIVATE_TOKEN",
+        value: "synthetic-renewed-private-token-123456",
+      },
+    ]);
+  });
 });
 
 describe("accepted turn execution identity", () => {

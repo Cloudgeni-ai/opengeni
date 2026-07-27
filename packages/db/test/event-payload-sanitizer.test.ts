@@ -221,6 +221,48 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect((cleaned.nested as Record<string, unknown>).credentialEncrypted).toBe("[redacted]");
   });
 
+  test("redacts known secrets from nested keys and values with stable collisions", () => {
+    const secret = "synthetic-db-key-secret-123456";
+    const knownSecrets = [{ name: "DB_KEY_SECRET", value: secret }];
+    const payload = {
+      [secret]: { nested: secret },
+      "[redacted:DB_KEY_SECRET]": "public marker-shaped key",
+      headers: {
+        "Private-Token": `prefix-${secret}`,
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    };
+
+    const cleaned = sanitizeEventPayload(payload, { knownSecrets }) as Record<string, unknown>;
+    const serialized = JSON.stringify(cleaned);
+    expect(serialized).not.toContain(secret);
+    expect(cleaned).toMatchObject({
+      "[redacted:DB_KEY_SECRET]": { nested: "[redacted:DB_KEY_SECRET]" },
+      "[redacted:DB_KEY_SECRET]#2": "public marker-shaped key",
+      headers: {
+        "Private-Token": "prefix-[redacted:DB_KEY_SECRET]",
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
+
+    const modelCleaned = sanitizeModelPayload(payload, knownSecrets) as Record<string, unknown>;
+    expect(JSON.stringify(modelCleaned)).not.toContain(secret);
+    expect(modelCleaned).toMatchObject({
+      "[redacted:DB_KEY_SECRET]": { nested: "[redacted:DB_KEY_SECRET]" },
+      "[redacted:DB_KEY_SECRET]#2": "public marker-shaped key",
+      headers: {
+        "Private-Token": "prefix-[redacted:DB_KEY_SECRET]",
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
+  });
+
   test("bounds cyclic and multi-megabyte payloads before deep sanitation", () => {
     const payload: Record<string, unknown> = {
       id: "cycle-output",

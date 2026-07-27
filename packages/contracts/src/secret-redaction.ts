@@ -106,6 +106,18 @@ export function isCredentialHeaderName(name: string): boolean {
 }
 
 /**
+ * Redact only exact known-secret provenance from a structured object key.
+ * Generic field/header heuristics intentionally do not run here: a key is
+ * metadata unless the caller has proved that its bytes are secret material.
+ */
+export function redactSensitiveKey(
+  key: string,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): string {
+  return replacePreparedSecrets(key, prepareSecrets(knownSecrets));
+}
+
+/**
  * Redact known secret provenance and common credential-bearing text shapes.
  * This is deliberately a conservative safety boundary, not a promise of
  * general-purpose DLP. It never includes a matched value in a marker or error.
@@ -114,12 +126,7 @@ export function redactSensitiveText(
   text: string,
   knownSecrets: readonly SecretForRedaction[] = [],
 ): string {
-  let redacted = text;
-  for (const secret of prepareSecrets(knownSecrets)) {
-    if (redacted.includes(secret.value)) {
-      redacted = redacted.split(secret.value).join(secret.marker);
-    }
-  }
+  let redacted = replacePreparedSecrets(text, prepareSecrets(knownSecrets));
 
   redacted = redacted.replace(
     AUTHORIZATION_HEADER_PATTERN,
@@ -241,15 +248,17 @@ function redactSensitiveDataDeep<T>(
     if (!isPlainObject(value)) {
       return value;
     }
+    const usedKeys = new Set<string>();
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => {
+        const safeKey = nextUniqueKey(redactSensitiveKey(key, knownSecrets), usedKeys);
         if (isSensitiveFieldName(key)) {
-          return [key, REDACTED] as const;
+          return [safeKey, REDACTED] as const;
         }
         if (normalizeFieldName(key) === "headers") {
-          return [key, redactHeaderMap(child, knownSecrets, seen, depth + 1)] as const;
+          return [safeKey, redactHeaderMap(child, knownSecrets, seen, depth + 1)] as const;
         }
-        return [key, redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1)] as const;
+        return [safeKey, redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1)] as const;
       }),
     ) as T;
   } finally {
@@ -270,13 +279,17 @@ function redactHeaderMap(
   if (seen.has(value)) return CYCLE_MARKER;
   seen.add(value);
   try {
+    const usedKeys = new Set<string>();
     return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [
-        key,
-        isCredentialHeaderName(key)
-          ? REDACTED
-          : redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1),
-      ]),
+      Object.entries(value).map(([key, child]) => {
+        const safeKey = nextUniqueKey(redactSensitiveKey(key, knownSecrets), usedKeys);
+        return [
+          safeKey,
+          isCredentialHeaderName(key)
+            ? REDACTED
+            : redactSensitiveDataDeep(child, knownSecrets, seen, depth + 1),
+        ];
+      }),
     );
   } finally {
     seen.delete(value);
@@ -296,6 +309,27 @@ function prepareSecrets(knownSecrets: readonly SecretForRedaction[]): PreparedSe
     .sort((a, b) => b.value.length - a.value.length || a.marker.localeCompare(b.marker));
 }
 
+function replacePreparedSecrets(text: string, prepared: readonly PreparedSecret[]): string {
+  let redacted = text;
+  for (const secret of prepared) {
+    if (redacted.includes(secret.value)) {
+      redacted = redacted.split(secret.value).join(secret.marker);
+    }
+  }
+  return redacted;
+}
+
+function nextUniqueKey(base: string, usedKeys: Set<string>): string {
+  let candidate = base;
+  let suffix = 2;
+  while (usedKeys.has(candidate)) {
+    candidate = `${base}#${suffix}`;
+    suffix += 1;
+  }
+  usedKeys.add(candidate);
+  return candidate;
+}
+
 function safeSecretName(name: string): string {
   const safe = name
     .toUpperCase()
@@ -308,7 +342,8 @@ function normalizeFieldName(name: string): string {
   return name.toLowerCase().replace(/[-_\s]/g, "");
 }
 
-function isPlainObject(value: object): value is Record<string, unknown> {
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object") return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }

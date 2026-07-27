@@ -669,10 +669,19 @@ function safeErrorForTelemetry(error: unknown, redactText: (value: string) => st
 export function headerSecretRedactions(
   prefix: string,
   headers: Readonly<Record<string, string>> | undefined,
+  credentialHeaderNames?: Iterable<string>,
 ): SecretForRedaction[] {
   const discovered: SecretForRedaction[] = [];
+  const explicitCredentialHeaders = credentialHeaderNames
+    ? new Set([...credentialHeaderNames].map((name) => name.toLowerCase()))
+    : null;
   for (const [headerName, value] of Object.entries(headers ?? {})) {
-    if (!isCredentialHeaderName(headerName)) continue;
+    if (
+      !explicitCredentialHeaders?.has(headerName.toLowerCase()) &&
+      !isCredentialHeaderName(headerName)
+    ) {
+      continue;
+    }
     const safeHeaderName = headerName.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
     discovered.push({ name: `${prefix}_${safeHeaderName || "HEADER"}`, value });
     if (/^(?:proxy-)?authorization$/i.test(headerName)) {
@@ -3659,9 +3668,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         ...(runSettings.accessKey
           ? [{ name: "OPENGENI_ACCESS_KEY", value: runSettings.accessKey }]
           : []),
-        ...runSettings.mcpServers.flatMap((server) =>
-          headerSecretRedactions(`MCP_${server.id.toUpperCase()}_STATIC`, server.headers),
-        ),
+        ...runSettings.mcpServers.flatMap((server) => {
+          const sessionServer = session.mcpServers.find((candidate) => candidate.id === server.id);
+          return headerSecretRedactions(
+            `MCP_${server.id.toUpperCase()}_STATIC`,
+            server.headers,
+            sessionServer?.headerNames,
+          );
+        }),
       ]);
       // Multi-provider per-turn routing → the provider gating (compaction mode,
       // hosted web search, encrypted reasoning, context window) the agent and
@@ -4907,7 +4921,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const resolveCredential: typeof rawResolveCredential = async (request) => {
         const result = await rawResolveCredential(request);
         if (result.status === "ok") {
-          registerSecretRedactions(headerSecretRedactions("MCP", result.headers));
+          registerSecretRedactions(
+            headerSecretRedactions("MCP", result.headers, Object.keys(result.headers)),
+          );
         }
         return result;
       };

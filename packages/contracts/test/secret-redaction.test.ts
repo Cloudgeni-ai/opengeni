@@ -97,6 +97,21 @@ describe("secret redaction boundary", () => {
     });
   });
 
+  test("redacts exact secrets in nested keys with deterministic collision suffixes", () => {
+    const secret = "synthetic-key-secret-123456";
+    const value: Record<string, unknown> = {
+      [secret]: { nested: secret },
+      "[redacted:KEY_SECRET]": "public marker-shaped key",
+    };
+    const cleaned = redactSensitiveData(value, [{ name: "KEY_SECRET", value: secret }]);
+
+    expect(cleaned).toEqual({
+      "[redacted:KEY_SECRET]": { nested: "[redacted:KEY_SECRET]" },
+      "[redacted:KEY_SECRET]#2": "public marker-shaped key",
+    });
+    expect(JSON.stringify(cleaned)).not.toContain(secret);
+  });
+
   test("redacts authorization, cookies, curl credentials, and URL userinfo in traces", () => {
     const trace = [
       "> Authorization: Bearer synthetic-bearer-value-123456",
