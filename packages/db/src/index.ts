@@ -14513,21 +14513,24 @@ export async function listSessionsForSubject(
           if (ordinaryIds.length > limit) {
             let snapshot = reusableSnapshot;
             if (!snapshot) {
-              const activeSnapshots = await tx
-                .select({ id: schema.sessionListSnapshots.id })
-                .from(schema.sessionListSnapshots)
-                .where(
-                  and(
-                    eq(schema.sessionListSnapshots.workspaceId, workspaceId),
-                    eq(schema.sessionListSnapshots.subjectId, options.subjectId),
-                  ),
-                )
-                .limit(SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT);
-              if (activeSnapshots.length >= SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT) {
-                throw new SessionListSnapshotLimitError(
-                  "too many active session list snapshots; retry after an existing cursor expires",
-                );
-              }
+              // Creation is serialized by the subject advisory lock above.
+              // Retain only the newest N-1 before inserting so polling and
+              // search identity churn cannot turn this bounded cache into a
+              // user-visible 429. A continuation for an evicted row retains
+              // the existing typed expiry/410 + client rebase contract.
+              await tx.execute(sql`
+                delete from ${schema.sessionListSnapshots} snapshot
+                where snapshot.workspace_id = ${workspaceId}
+                  and snapshot.subject_id = ${options.subjectId}
+                  and snapshot.id in (
+                    select evicted.id
+                    from ${schema.sessionListSnapshots} evicted
+                    where evicted.workspace_id = ${workspaceId}
+                      and evicted.subject_id = ${options.subjectId}
+                    order by evicted.created_at desc, evicted.id desc
+                    offset ${SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT - 1}
+                  )
+              `);
               const [workspace] = await tx
                 .select({ accountId: schema.workspaces.accountId })
                 .from(schema.workspaces)

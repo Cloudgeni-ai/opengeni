@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  cancelSessionRowRevealIntent,
+  consumeSessionRowRevealIntent,
   shouldMoveSessionRowFocus,
   shouldRecordSessionRowFocusIntent,
   shouldRestoreSessionFocus,
@@ -25,6 +27,56 @@ function fakeElement(
 }
 
 describe("session pin focus restoration", () => {
+  test("consumes one explicit row reveal without turning repeated data churn into scrolling", () => {
+    let scrollCalls = 0;
+    const rows = Array.from({ length: 3_800 }, (_, index) => ({
+      dataset: { sessionRow: `session-${index}` },
+      scrollIntoView: () => {
+        scrollCalls += 1;
+      },
+    })) as unknown as HTMLElement[];
+    const root = {
+      querySelectorAll: () => rows,
+    } as unknown as HTMLElement;
+    const intent = { current: "session-2_400" };
+
+    // A target that is not mounted remains pending without moving the rail.
+    expect(consumeSessionRowRevealIntent(root, intent)).toBeNull();
+    expect(scrollCalls).toBe(0);
+
+    intent.current = "session-2400";
+    expect(consumeSessionRowRevealIntent(root, intent)).toBe(rows[2400]!);
+    expect(intent.current).toBeNull();
+    expect(scrollCalls).toBe(1);
+
+    // Polls, title/status churn, pin reconciliation, and page merges may all
+    // rerun the effect; no new explicit intent means the offset stays owned by
+    // the reader.
+    for (let update = 0; update < 1_000; update += 1) {
+      expect(consumeSessionRowRevealIntent(root, intent)).toBeNull();
+    }
+    expect(scrollCalls).toBe(1);
+  });
+
+  test("lets manual scrolling cancel a reveal before its row mounts", () => {
+    let scrollCalls = 0;
+    const root = {
+      querySelectorAll: () => [
+        {
+          dataset: { sessionRow: "session-late" },
+          scrollIntoView: () => {
+            scrollCalls += 1;
+          },
+        },
+      ],
+    } as unknown as HTMLElement;
+    const intent = { current: "session-late" as string | null };
+
+    cancelSessionRowRevealIntent(intent);
+    expect(consumeSessionRowRevealIntent(root, intent)).toBeNull();
+    expect(scrollCalls).toBe(0);
+  });
+
   test("does not retain intent for boundary navigation that is already current", () => {
     expect(shouldRecordSessionRowFocusIntent(0, 0)).toBe(false);
     expect(shouldRecordSessionRowFocusIntent(2, 2)).toBe(false);

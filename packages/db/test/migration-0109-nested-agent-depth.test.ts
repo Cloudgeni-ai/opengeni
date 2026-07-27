@@ -259,6 +259,15 @@ describe("0109-0116 nested-agent depth rolling upgrade (real PostgreSQL)", () =>
         onnotice: () => undefined,
       });
       try {
+        const [deploymentDepth] = await app<
+          { max_nested_agent_depth: number; policy_source: string }[]
+        >`
+          select max_nested_agent_depth, policy_source
+          from lock_nested_agent_depth_configuration()
+        `;
+        expect(deploymentDepth?.max_nested_agent_depth).toBeGreaterThanOrEqual(0);
+        expect(deploymentDepth?.policy_source).toBeTruthy();
+
         const [rls] = await sql<{ forced: boolean }[]>`
           select relforcerowsecurity as forced
           from pg_class

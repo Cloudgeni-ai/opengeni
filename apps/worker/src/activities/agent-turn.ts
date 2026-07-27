@@ -248,7 +248,6 @@ import type {
 } from "./types";
 import {
   resumeBoxForTurn,
-  acquireSelfhostedLeaseForTurn,
   sandboxLeaseHolderIdForAttempt,
   maybePersistWarmWorkspaceSnapshot,
   waitForWarmSnapshot,
@@ -1421,6 +1420,23 @@ export async function resolveActiveSandboxBackend(
     );
     return undefined;
   }
+}
+
+/**
+ * Managed-sandbox ownership exists only when this turn actually uses the
+ * managed home. A Connected Machine is fenced by its active-route epoch and
+ * must remain independent from cloud recovery state for the same session.
+ */
+export function managedSandboxOwnershipForTurn(
+  machinePrimary: boolean,
+  attemptId: string,
+  sandboxGroupId: string,
+): { holderId: TurnSandboxLeaseHolderId; sandboxGroupId: string } | null {
+  if (machinePrimary) return null;
+  return {
+    holderId: sandboxLeaseHolderIdForAttempt(attemptId),
+    sandboxGroupId,
+  };
 }
 
 /**
@@ -4675,8 +4691,13 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       // variableSet delta (validateNoEnvironmentDelta). Passing sandboxEnvironment
       // here makes current==target so the delta is empty.
       if (settings.sandboxOwnershipEnabled && turn.sandboxBackend !== "none") {
-        sandboxHolderId = sandboxLeaseHolderIdForAttempt(input.attemptId);
-        sandboxGroupId = session.sandboxGroupId;
+        const managedOwnership = managedSandboxOwnershipForTurn(
+          machinePrimary,
+          input.attemptId,
+          session.sandboxGroupId,
+        );
+        sandboxHolderId = managedOwnership?.holderId ?? null;
+        sandboxGroupId = managedOwnership?.sandboxGroupId ?? null;
         // STAGE D honest-label guard: a machine-home session carries
         // turn.sandboxBackend "selfhosted", but a turn is only machine-PRIMARY
         // when a live machine pointer resolves (activeSandboxBackend==='selfhosted'
@@ -4689,13 +4710,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         // degrade to a genuine cloud box exactly like today (home=modal did).
         if (machinePrimary) {
           // STAGE D D1-lite: the active sandbox is a connected machine, so DO NOT
-          // establish or lease a phantom Modal home box (today's path leased + BILLED
-          // a cloud box the turn never touched). Build the SelfhostedSession DIRECTLY
-          // (no Modal box created) and take the group lease with backend "selfhosted"
-          // (refcount/idle bookkeeping; the reaper drains it cold with NO provider
-          // stop, and bills ZERO warm-seconds). The session is a harmless in-memory
-          // bind (no NATS round-trip), so build it FIRST; if the lease then fences,
-          // there is nothing to clean up.
+          // establish OR lease the managed home box. The active-sandbox pointer is
+          // the machine route's own epoch fence; the managed-home lease separately
+          // owns cloud recovery, snapshots, billing, and reaping. Mixing those two
+          // ownership domains lets an unrelated degraded cloud archive block a
+          // healthy explicitly selected machine.
           // Whether the machine's latest Hello advertised the op-stream engine
           // (refreshed on every connect). Read only when the server flag is on —
           // one indexed lookup, and the flag off keeps this path byte-identical.
@@ -4725,21 +4744,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // (buildSelfhostedBackendSession); EstablishedSandboxSession widens it.
           machinePrimarySession =
             established.session as import("@opengeni/runtime").SelfhostedSession;
-          const lease = await waitForTurnOperation(
-            acquireSelfhostedLeaseForTurn(
-              { db, settings },
-              {
-                accountId: input.accountId,
-                workspaceId: input.workspaceId,
-                sandboxGroupId: session.sandboxGroupId,
-                sessionId: input.sessionId,
-              },
-              "turn",
-              sandboxHolderId,
-            ),
-            cancellationSignal,
-            async (lateLease) => await lateLease.release(),
-          );
           setupBoxSession = established.session;
           resolvedSandbox = {
             // Wrap in the SAME routing proxy so a mid-turn swap (to another machine
@@ -4781,8 +4785,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
               established,
             ),
-            leaseEpoch: lease.leaseEpoch,
-            release: lease.release,
+            // For a machine route this is the active-pointer epoch, not a cloud
+            // lease epoch. Cloud-only heartbeat/snapshot/capture paths require
+            // sandboxGroupId and remain disabled for this branch.
+            leaseEpoch: activeSandboxPointer!.activeEpoch,
+            release: async () => undefined,
           };
         } else if (establishPolicy === "on-demand") {
           // Lazy sandbox provisioning: holder/group ids are fixed at turn start,
@@ -4815,7 +4822,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 // running a DIFFERENT image (solo → recreate on the new image; N-holders →
                 // SandboxImageConflictError surfaced as an actionable turn error). Prefer the
                 // explicit Modal image ref, else the docker image. The selfhosted branch
-                // (establishSelfhostedTurnSession/acquireSelfhostedLeaseForTurn) NEVER passes
+                // (establishSelfhostedTurnSession) NEVER passes
                 // an image — B3 lives only on this Modal else-branch.
                 ...((runSettings.modalImageRef ?? runSettings.dockerImage)
                   ? {
@@ -4829,7 +4836,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 ...(rigVersion ? { rigVersionId: rigVersion.id } : {}),
               },
               "turn",
-              sandboxHolderId,
+              managedOwnership!.holderId,
             ),
             cancellationSignal,
             async (lateSandbox) => await lateSandbox.release(),

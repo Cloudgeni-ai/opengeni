@@ -420,9 +420,11 @@ describe("migration 0120 (durable goal wake)", () => {
         await admin.unsafe(
           `grant usage, create on schema public to ${quoteIdentifier(migrationRole)}`,
         );
-        await admin<never[]>`
-          insert into schema_migrations (name) values ('0121_goal_update_idempotency.sql')
-          on conflict do nothing`;
+        for (const file of files.filter((candidate) => candidate > "0120_durable_goal_wake.sql")) {
+          await admin<never[]>`
+            insert into schema_migrations (name) values (${file})
+            on conflict do nothing`;
+        }
         for (const table of ownedTables) {
           await admin.unsafe(
             `alter table ${quoteIdentifier(table)} owner to ${quoteIdentifier(migrationRole)}`,
