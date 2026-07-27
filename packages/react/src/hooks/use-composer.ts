@@ -107,7 +107,11 @@ export function useComposer(
   const lastSavedSignature = useRef<string | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const onSent = options.onSent;
-  const onDraftApplied = options.onDraftApplied;
+  // Read through a ref so live session/policy projections can replace their
+  // apply callback without invalidating the draft loader and re-running its
+  // initial-load effect.
+  const onDraftAppliedRef = useRef(options.onDraftApplied);
+  onDraftAppliedRef.current = options.onDraftApplied;
   // Read through a ref so a new extras closure (created every render by
   // callers passing inline functions) does not invalidate `send`.
   const sendExtrasRef = useRef(options.sendExtras);
@@ -172,9 +176,9 @@ export function useComposer(
       setValue(next.text);
       setRestoredResources(next.resources);
       setDraftConflict(null);
-      onDraftApplied?.(next);
+      onDraftAppliedRef.current?.(next);
     },
-    [durableDrafts, onDraftApplied, targetKey],
+    [durableDrafts, targetKey],
   );
 
   const loadDraft = useCallback(
@@ -227,7 +231,7 @@ export function useComposer(
             lastSavedSignature.current = draftSignature(draftPayload(fetched));
             setValue(fetched.text);
             setRestoredResources(fetched.resources);
-            onDraftApplied?.(fetched);
+            onDraftAppliedRef.current?.(fetched);
           }
         }
       } catch (cause) {
@@ -248,7 +252,7 @@ export function useComposer(
         }
       }
     },
-    [client, durableDrafts, onDraftApplied, sessionId, targetKey, workspaceId],
+    [client, durableDrafts, sessionId, targetKey, workspaceId],
   );
 
   useEffect(() => {
