@@ -226,8 +226,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
     }
   }
 
-  // A drop can create the Inbox base or auto-file into any base — re-pull the
-  // base list and land the user where the document actually went.
+  // A drop can create the Default base or auto-file into any base — re-pull
+  // the base list and land the user where the document actually went.
   async function finishDrop(document: IndexedDocument) {
     try {
       const nextBases = await client.listDocumentBases(workspaceId);

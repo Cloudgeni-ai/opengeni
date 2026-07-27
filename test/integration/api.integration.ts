@@ -5608,7 +5608,7 @@ describe("API component integration", () => {
     expect(enabled.settings.someFutureKey).toBe("keep-me");
   });
 
-  test("drops raw text into the Inbox, auto-curates it, and enforces visibility + agent access", async () => {
+  test("drops raw text into the Default base, auto-curates it, and enforces visibility + agent access", async () => {
     const app = createApp({
       settings: objectStorageSettings(services.databaseUrl, services.objectStorageEndpoint!),
       db: dbClient.db,
@@ -5618,7 +5618,7 @@ describe("API component integration", () => {
     const workspaceId = await defaultWorkspaceId(app);
 
     // Private, agent-blocked text drop: no base, no metadata — the server
-    // creates the Inbox, and heuristic curation names + summarizes it.
+    // creates the Default base, and heuristic curation names + summarizes it.
     const dropResponse = await app.request(workspacePath(workspaceId, "/knowledge/drops"), {
       method: "POST",
       body: JSON.stringify({
@@ -5653,15 +5653,15 @@ describe("API component integration", () => {
 
     const basesResponse = await app.request(workspacePath(workspaceId, "/document-bases"));
     const bases = (await basesResponse.json()) as Array<{ id: string; name: string }>;
-    const inbox = bases.find((base) => base.name === "Inbox");
-    expect(inbox).toBeDefined();
-    expect(drop.baseId).toBe(inbox!.id);
+    const defaultBase = bases.find((base) => base.name === "Default");
+    expect(defaultBase).toBeDefined();
+    expect(drop.baseId).toBe(defaultBase!.id);
 
     // The creating subject still sees their private drop in list + search.
-    const inboxDocs = (await (
-      await app.request(workspacePath(workspaceId, `/document-bases/${inbox!.id}/documents`))
+    const defaultBaseDocs = (await (
+      await app.request(workspacePath(workspaceId, `/document-bases/${defaultBase!.id}/documents`))
     ).json()) as Array<{ id: string }>;
-    expect(inboxDocs.map((document) => document.id)).toContain(drop.id);
+    expect(defaultBaseDocs.map((document) => document.id)).toContain(drop.id);
     const ownerSearch = (await (
       await app.request(workspacePath(workspaceId, "/knowledge/search"), {
         method: "POST",
@@ -5704,7 +5704,7 @@ describe("API component integration", () => {
     });
     expect(agentVisible.map((result) => result.documentId)).toContain(publicDrop.id);
 
-    // Filing out of the Inbox: explicit move lands the document (and its
+    // Filing out of the Default base: explicit move lands the document (and its
     // chunks) in the target base and marks it filed.
     const contractsBase = (await (
       await app.request(workspacePath(workspaceId, "/document-bases"), {

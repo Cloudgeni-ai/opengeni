@@ -23,6 +23,6 @@ ALTER TABLE "documents" ADD COLUMN IF NOT EXISTS "topics" jsonb NOT NULL DEFAULT
 ALTER TABLE "documents" ADD COLUMN IF NOT EXISTS "curation_status" text NOT NULL DEFAULT 'none';
 ALTER TABLE "documents" ADD COLUMN IF NOT EXISTS "curation" jsonb;
 
--- Inbox review surface: list pending/suggested drops per workspace cheaply.
+-- Drop review surface: list pending/suggested drops per workspace cheaply.
 CREATE INDEX IF NOT EXISTS "documents_workspace_curation_status_idx"
   ON "documents" ("workspace_id", "curation_status");

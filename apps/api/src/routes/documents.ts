@@ -28,7 +28,7 @@ import {
   canViewDocument,
   createDocumentBase,
   deleteDocumentFromBase,
-  ensureInboxBase,
+  ensureDefaultBase,
   getDocument,
   getDocumentBase,
   listDocumentBases,
@@ -273,7 +273,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 
   // Knowledge drop: raw text or an uploaded file, no metadata required. Lands
-  // in the workspace Inbox base with curationStatus 'pending'; indexing then
+  // in the workspace Default base with curationStatus 'pending'; indexing then
   // names, summarizes, categorizes, and (confidence permitting) auto-files it.
   app.post("/v1/workspaces/:workspaceId/knowledge/drops", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -341,7 +341,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
       } else {
         fileId = payload.fileId as string;
       }
-      const inbox = await ensureInboxBase(db, {
+      const defaultBase = await ensureDefaultBase(db, {
         accountId: grant.accountId,
         workspaceId,
       });
@@ -352,7 +352,7 @@ export function registerDocumentRoutes(app: Hono, deps: ApiRouteDeps): void {
         ...(payload.agentAccess !== undefined ? { agentAccess: payload.agentAccess } : {}),
         accountId: grant.accountId,
         workspaceId,
-        baseId: inbox.id,
+        baseId: defaultBase.id,
         createdBy: grant.subjectId,
         curationStatus: "pending",
       });

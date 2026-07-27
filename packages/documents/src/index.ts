@@ -31,10 +31,11 @@ export const DOCUMENT_CURATION_MAX_INPUT_CHARS = 24_000;
 // A base move is applied automatically only at or above this curator
 // confidence; below it the suggestion is surfaced for human review instead.
 export const DOCUMENT_CURATION_AUTO_FILE_CONFIDENCE = 0.75;
-// The per-workspace landing base for knowledge drops, created on first drop.
-export const INBOX_BASE_NAME = "Inbox";
-export const INBOX_BASE_DESCRIPTION =
-  "Landing base for dropped files and notes awaiting auto-curation review.";
+// The per-workspace default base: where knowledge drops land (created on
+// first drop) and stay unless auto-curation files them into a topical base.
+export const DEFAULT_BASE_NAME = "Default";
+export const DEFAULT_BASE_DESCRIPTION =
+  "Default base for dropped files and notes; auto-curation files them into topical bases from here.";
 
 export type ParsedDocument = {
   text: string;
@@ -74,7 +75,7 @@ export type DocumentCurationInput = {
   filename: string;
   /** Current (usually filename-derived) title. */
   title: string;
-  /** Candidate bases the document could be filed into (never the inbox itself). */
+  /** Candidate bases the document could be filed into (never its current base). */
   bases: DocumentCurationCandidateBase[];
 };
 
@@ -593,24 +594,25 @@ export async function getDocumentBase(
 }
 
 /**
- * Find-or-create the workspace's Inbox base — the landing spot for knowledge
- * drops before auto-curation files them. Matched by name (case-insensitive) so
- * a user-created "Inbox" is adopted rather than duplicated.
+ * Find-or-create the workspace's Default base — where knowledge drops land
+ * before auto-curation files them elsewhere. Matched by name
+ * (case-insensitive) so a user-created "Default" is adopted rather than
+ * duplicated.
  */
-export async function ensureInboxBase(
+export async function ensureDefaultBase(
   db: Database,
   input: { accountId: string; workspaceId: string },
 ): Promise<DocumentBase> {
   const bases = await listDocumentBases(db, input.workspaceId);
   const existing = bases.find(
-    (base) => base.name.trim().toLowerCase() === INBOX_BASE_NAME.toLowerCase(),
+    (base) => base.name.trim().toLowerCase() === DEFAULT_BASE_NAME.toLowerCase(),
   );
   if (existing) return existing;
   return await createDocumentBase(db, {
     accountId: input.accountId,
     workspaceId: input.workspaceId,
-    name: INBOX_BASE_NAME,
-    description: INBOX_BASE_DESCRIPTION,
+    name: DEFAULT_BASE_NAME,
+    description: DEFAULT_BASE_DESCRIPTION,
   });
 }
 

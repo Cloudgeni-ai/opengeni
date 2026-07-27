@@ -2613,8 +2613,9 @@ export const AddDocumentRequest = z.object({
 export type AddDocumentRequest = z.infer<typeof AddDocumentRequest>;
 
 // A knowledge drop: raw text or an already-uploaded file, with no required
-// metadata. The server files it into the workspace Inbox base and auto-curation
-// names, summarizes, categorizes, and (confidence permitting) moves it.
+// metadata. The server files it into the workspace Default base and
+// auto-curation names, summarizes, categorizes, and (confidence permitting)
+// moves it.
 export const CreateKnowledgeDropRequest = z
   .object({
     text: z.string().min(1).max(2_000_000).optional(),
