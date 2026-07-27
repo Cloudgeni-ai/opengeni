@@ -359,6 +359,19 @@ BEGIN
         );
       END IF;
     END LOOP;
+    -- Migration 0110 creates this target-schema-local SECURITY DEFINER
+    -- capability before opengeni_app may exist. Re-converge its exact EXECUTE
+    -- grant here so the supported migrate-then-provision order is equivalent to
+    -- provisioning the role before that migration.
+    IF to_regprocedure(
+      format('%I.lock_nested_agent_depth_configuration()', ${literal(schema)})
+    ) IS NOT NULL THEN
+      EXECUTE format(
+        'GRANT EXECUTE ON FUNCTION %I.lock_nested_agent_depth_configuration() TO %I',
+        ${literal(schema)},
+        ${literal(role)}
+      );
+    END IF;
     EXECUTE format('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA %I TO %I', ${literal(schema)}, ${literal(role)});
     EXECUTE format(
       'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA %I REVOKE ALL PRIVILEGES ON TABLES FROM %I',
