@@ -75,6 +75,28 @@ describe("session continuation pagination", () => {
     });
   });
 
+  test("retains thousands of rows across repeated pages, overlaps, and cursor rebases", () => {
+    let state = emptySessionContinuation(12);
+    const expected = new Set<string>();
+    for (let page = 0; page < 80; page += 1) {
+      const start = page === 0 ? 0 : page * 50 - 1;
+      const sessions = Array.from({ length: 51 }, (_, index) => row(`session-${start + index}`));
+      for (const session of sessions) expected.add(session.id);
+      state = mergeSessionContinuation(state, 12, 12, {
+        sessions,
+        nextCursor: page === 79 ? null : `cursor-${page + 1}`,
+      });
+      if (page > 0 && page % 10 === 0) {
+        state = rebaseSessionContinuation(state, 12, 12, `rebased-${page}`);
+      }
+    }
+
+    expect(state.sessions).toHaveLength(expected.size);
+    expect(state.sessions.map((session) => session.id)).toEqual([...expected]);
+    expect(state.nextCursor).toBeNull();
+    expect(state.failed).toBe(false);
+  });
+
   test("rejects a delayed cursor rebase after the query generation changes", () => {
     const current = {
       generation: 9,

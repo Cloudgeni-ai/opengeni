@@ -1,4 +1,30 @@
 export type SessionFocusTarget = "row" | "actions";
+export type SessionRowRevealIntent = { current: string | null };
+
+/** Reader-owned rail movement supersedes an unfulfilled programmatic reveal. */
+export function cancelSessionRowRevealIntent(intent: SessionRowRevealIntent): void {
+  intent.current = null;
+}
+
+/**
+ * Reveal one explicitly requested row and consume the request. Re-running this
+ * during polling, pagination, or title/status churn is a no-op until a caller
+ * records a new route/"Show path" intent.
+ */
+export function consumeSessionRowRevealIntent(
+  root: HTMLElement,
+  intent: SessionRowRevealIntent,
+): HTMLElement | null {
+  const sessionId = intent.current;
+  if (!sessionId) return null;
+  const row = [...root.querySelectorAll<HTMLElement>("[data-session-row]")].find(
+    (candidate) => candidate.dataset.sessionRow === sessionId,
+  );
+  if (!row) return null;
+  intent.current = null;
+  row.scrollIntoView({ block: "nearest" });
+  return row;
+}
 
 /**
  * Boundary navigation is a visual no-op when the requested index is already

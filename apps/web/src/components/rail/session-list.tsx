@@ -56,6 +56,8 @@ import {
   visualTreeDepth,
 } from "@/lib/session-rail";
 import {
+  cancelSessionRowRevealIntent,
+  consumeSessionRowRevealIntent,
   sessionFocusAttribute,
   shouldRecordSessionRowFocusIntent,
   shouldMoveSessionRowFocus,
@@ -76,6 +78,7 @@ import {
   visibleTreeRows,
   type SessionTreeNode,
 } from "@/lib/sessions-group";
+import { sessionDescendantCountAria, sessionDescendantCountText } from "@/lib/session-tree-count";
 import { cn } from "@/lib/utils";
 import type { Session } from "@/types";
 
@@ -397,6 +400,10 @@ export function SessionList() {
       return match?.[1] ?? null;
     },
   });
+  // Only a route transition, keyboard navigation, or the explicit "Show path"
+  // action may reveal a row. Polls and pagination replace `flat` too, so a
+  // derived focus index is not itself permission to move this scroll container.
+  const rowRevealIntent = useRef<string | null>(activeSessionId);
 
   // Search results are deliberately flat: a partial match set is not a tree.
   // Normal navigation contains only true roots, lazily loaded children, and
@@ -533,13 +540,14 @@ export function SessionList() {
     [childPages, expanded, hierarchyMode, loadChildPage, nodesById],
   );
   const revealActivePath = useCallback(() => {
+    rowRevealIntent.current = activeSessionId;
     setManualExpanded((current) => new Set([...current, ...activeAncestorIds]));
     setManualCollapsed((current) => {
       const next = new Set(current);
       for (const sessionId of activeAncestorIds) next.delete(sessionId);
       return next;
     });
-  }, [activeAncestorIds]);
+  }, [activeAncestorIds, activeSessionId]);
 
   const visibleRows = useMemo(() => {
     const seen = new Set<string>();
@@ -800,6 +808,9 @@ export function SessionList() {
   useEffect(() => {
     const routeChanged = previousActiveSessionId.current !== activeSessionId;
     previousActiveSessionId.current = activeSessionId;
+    if (routeChanged) {
+      rowRevealIntent.current = activeSessionId;
+    }
     setFocusedSessionId((current) => {
       if (!routeChanged && current && flat.some((session) => session.id === current)) {
         return current;
@@ -848,30 +859,44 @@ export function SessionList() {
     [flat, focusIndex],
   );
 
-  // Scroll the keyboard-focused row into view.
+  // Consume an explicit reveal/focus intent once. Data churn can rerun this
+  // effect, but with no intent it owns neither DOM focus nor rail scroll.
   useEffect(() => {
-    if (focusIndex < 0 || !listRef.current) {
+    const root = listRef.current;
+    if (focusIndex < 0 || !root) {
       return;
     }
-    const row = listRef.current.querySelector<HTMLElement>(
-      `[data-session-index="${focusIndex}"][data-session-focus]`,
+    const requestedFocusId = rowFocusIntent.current;
+    const requestedRevealId = rowRevealIntent.current;
+    const requestedSessionId = requestedFocusId ?? requestedRevealId;
+    if (!requestedSessionId) {
+      return;
+    }
+    const row = [...root.querySelectorAll<HTMLElement>("[data-session-row]")].find(
+      (candidate) => candidate.dataset.sessionRow === requestedSessionId,
     );
-    row?.scrollIntoView({ block: "nearest" });
+    if (!row) {
+      return;
+    }
     // Arrow/Home/End navigation must move real DOM focus, not just paint a
     // visual highlight. A route/poll/pin reorder has no such intent and must
     // never steal focus from an actions trigger or another active control.
-    const requestedSessionId = rowFocusIntent.current;
-    const renderedSessionId = flat[focusIndex]?.id ?? null;
-    if (
-      pendingPinFocus.current ||
-      !listRef.current.contains(document.activeElement) ||
-      !shouldMoveSessionRowFocus(requestedSessionId, renderedSessionId)
-    ) {
+    if (requestedFocusId) {
+      const renderedSessionId = flat[focusIndex]?.id ?? null;
+      if (
+        pendingPinFocus.current ||
+        !root.contains(document.activeElement) ||
+        !shouldMoveSessionRowFocus(requestedFocusId, renderedSessionId)
+      ) {
+        rowFocusIntent.current = null;
+        return;
+      }
       rowFocusIntent.current = null;
-      return;
+      row.scrollIntoView({ block: "nearest" });
+      row.focus();
+    } else {
+      consumeSessionRowRevealIntent(root, rowRevealIntent);
     }
-    row?.focus();
-    rowFocusIntent.current = null;
   }, [flat, focusIndex]);
 
   useEffect(() => {
@@ -932,6 +957,18 @@ export function SessionList() {
         aria-label={hierarchyMode ? "Workstreams" : "Session search results"}
         data-sessionpin-session-list
         onKeyDown={onKeyDown}
+        onPointerDown={() => {
+          // Direct reader input cancels a reveal whose target has not mounted
+          // yet. A generic scroll handler cannot distinguish that input from
+          // browser anchoring caused by page merges and other DOM reflow.
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        onTouchStart={() => {
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
+        onWheel={() => {
+          cancelSessionRowRevealIntent(rowRevealIntent);
+        }}
         className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-2 pb-2"
       >
         <p className="sr-only" aria-live="polite" aria-atomic="true">
@@ -1140,6 +1177,7 @@ function SessionTreeRow(props: {
   const index = props.flat.indexOf(node.session);
   const directChildCount = node.session.treeStats?.directChildren ?? node.children.length;
   const childCount = node.session.treeStats?.totalDescendants ?? node.children.length;
+  const childCountTruncated = node.session.treeStats?.truncated ?? false;
   const hasChildren = directChildCount > 0 || node.children.length > 0;
   const treeHasActiveDescendant = Boolean(
     node.session.treeStats &&
@@ -1167,6 +1205,7 @@ function SessionTreeRow(props: {
         index={index}
         depth={props.depth}
         childCount={childCount}
+        childCountTruncated={childCountTruncated}
         hasChildren={hasChildren}
         expanded={isExpanded}
         hasActiveDescendant={node.hasActiveDescendant || treeHasActiveDescendant}
@@ -1312,6 +1351,8 @@ function SessionRow(props: {
   depth: number;
   /** Spawned-child count; a chevron + badge appear when > 0. */
   childCount: number;
+  /** True when childCount is a server traversal lower bound. */
+  childCountTruncated: boolean;
   hasChildren: boolean;
   expanded: boolean;
   /** A descendant is live — a collapsed parent shows a quiet activity dot. */
@@ -1332,6 +1373,8 @@ function SessionRow(props: {
   const hasChildren = props.hasChildren;
   const stateLabel = sessionStateLabel(props.session);
   const descendantLabel = sessionDescendantLabel(props.session);
+  const childCountText = sessionDescendantCountText(props.childCount, props.childCountTruncated);
+  const childCountAria = sessionDescendantCountAria(props.childCount, props.childCountTruncated);
   const depthLabel = props.depth > MAX_VISUAL_TREE_DEPTH ? `Level ${props.depth + 1}` : null;
   const relativeTime = relativeTimeLabel(props.session.updatedAt);
   // Indent nested rows; the leading affordance is a chevron for parents, else a
@@ -1424,7 +1467,7 @@ function SessionRow(props: {
             aria-current={props.active ? "page" : undefined}
             aria-label={`Open ${title}. ${stateLabel}${
               props.session.pinned ? ". Pinned" : ""
-            }${hasChildren ? `. ${props.childCount} spawned sessions` : ""}`}
+            }${hasChildren ? `. ${childCountAria.replace("descendant", "spawned")}` : ""}`}
             onFocus={props.onFocus}
             onClick={() => props.onSelect(props.session.id)}
             className="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:ring-offset-1 focus-visible:ring-offset-surface"
@@ -1453,9 +1496,7 @@ function SessionRow(props: {
                     <span className="absolute inset-0 animate-og-pulse rounded-full bg-status-running" />
                   </span>
                 ) : null}
-                <span aria-label={`${props.childCount} descendant sessions`}>
-                  {props.childCount}
-                </span>
+                <span aria-label={childCountAria}>{childCountText}</span>
               </span>
             ) : null}
             {/* Relative time is visible at rest (the list is grouped by recency),
@@ -1508,7 +1549,7 @@ function sessionDescendantLabel(session: Session): string | null {
   const stats = session.treeStats;
   if (!stats || stats.totalDescendants === 0) return null;
   const live = stats.runningDescendants + stats.queuedDescendants;
-  const total = `${stats.totalDescendants}${stats.truncated ? "+" : ""}`;
+  const total = sessionDescendantCountText(stats.totalDescendants, stats.truncated);
   if (stats.attentionDescendants > 0) {
     return `${stats.attentionDescendants} need you · ${total} total`;
   }

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Timeline scroll regression</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body,
+      #root {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: #f4f6f8;
+        color: #18212f;
+        font: 14px sans-serif;
+      }
+      .timeline-test-shell {
+        display: flex;
+        height: 680px;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .timeline-test-shell > div {
+        min-height: 0;
+        flex: 1;
+        overflow-y: auto;
+      }
+      [data-timeline-row] {
+        border: 1px solid #d7dde5;
+        border-radius: 12px;
+        padding: 8px;
+      }
+      button {
+        font: inherit;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/timeline-scroll-test-harness.tsx"></script>
+  </body>
+</html>
