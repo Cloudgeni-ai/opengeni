@@ -150,19 +150,16 @@ export function MessageTimeline({
   // structurally impossible — the reader only ever sees it already at the
   // bottom. An empty timeline reveals immediately (there is nothing to anchor).
   const [revealed, setRevealed] = useState(false);
-  // Our own scrollTop assignments echo back as scroll events; those must never
-  // UNPIN the reader (they are not reader intent). Marked around every
-  // programmatic assignment and consumed by onScroll. When an assignment is a
-  // NO-OP (already at the target) no scroll event will fire, so the mark must
-  // self-clear — a stale mark would eat the reader's next real scroll-up.
-  const programmaticScrollRef = useRef(false);
+  // Our own scrollTop assignments echo back as delayed scroll events. Track the
+  // actual clamped target rather than a boolean: if reader input lands before
+  // the echo, its different position must win and unpin bottom-follow. A true
+  // echo also must not recapture the visual anchor — during progressive prepend
+  // the next older row may already have mounted by the time that echo arrives.
+  const programmaticScrollTargetRef = useRef<number | null>(null);
   const assignScrollTop = useCallback((node: HTMLElement, value: number) => {
     const previous = node.scrollTop;
-    programmaticScrollRef.current = true;
     node.scrollTop = value;
-    if (node.scrollTop === previous) {
-      programmaticScrollRef.current = false;
-    }
+    programmaticScrollTargetRef.current = node.scrollTop === previous ? null : node.scrollTop;
   }, []);
   // Mirror `pinned` into a ref so the ResizeObserver callback (a stable closure)
   // always reads the live value without re-subscribing on every scroll.
@@ -321,8 +318,10 @@ export function MessageTimeline({
     if (!node) {
       return;
     }
-    const programmatic = programmaticScrollRef.current;
-    programmaticScrollRef.current = false;
+    const programmaticTarget = programmaticScrollTargetRef.current;
+    const programmatic =
+      programmaticTarget !== null && Math.abs(node.scrollTop - programmaticTarget) <= 1;
+    programmaticScrollTargetRef.current = null;
     const nextPinned = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
     // Echoes of our own assignments may PIN but never UNPIN — only the reader
     // scrolling away releases the bottom-follow.
@@ -330,7 +329,12 @@ export function MessageTimeline({
       pinnedRef.current = nextPinned;
       setPinned(nextPinned);
     }
-    captureAnchor();
+    // The assignment site already captured the corrected anchor. Recapturing
+    // it from a delayed echo can observe the next prepended row before that
+    // row's ResizeObserver correction and make the viewport walk up the page.
+    if (!programmatic) {
+      captureAnchor();
+    }
   };
 
   return (

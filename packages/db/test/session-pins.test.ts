@@ -1468,7 +1468,7 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
     expect(count).toEqual({ count: 1, maxIds: 128 });
   }, 60_000);
 
-  test("rejects oversized and over-quota subject snapshots before unbounded storage", async () => {
+  test("rejects oversized subject snapshots before unbounded storage", async () => {
     if (!available) return;
     const oversized = await freshWorkspace();
     const oversizedSubject = "user:oversized-list";
@@ -1494,35 +1494,95 @@ describe("session pins (real PostgreSQL + FORCE RLS)", () => {
       select count(*)::int as count from session_list_snapshots
       where workspace_id = ${oversized.workspaceId} and subject_id = ${oversizedSubject}`;
     expect(oversizedCount?.count).toBe(0);
+  }, 60_000);
 
+  test("evicts oldest same-subject snapshots across more than 32 searches and clear", async () => {
+    if (!available) return;
     const quota = await freshWorkspace();
     const quotaSubject = "user:snapshot-quota";
+    const retainedSubject = "user:snapshot-quota-retained";
     await grantMember(quota, quotaSubject);
-    const first = await session({ ...quota, message: "snapshot quota first" });
-    const second = await session({
-      ...quota,
-      message: "snapshot quota second",
-    });
+    await grantMember(quota, retainedSubject);
     await admin`
-      insert into session_list_snapshots (
-        account_id, workspace_id, subject_id, parent_session_filter,
-        search, ordinary_session_ids, expires_at, created_at
+      insert into sessions (
+        id, account_id, workspace_id, initial_message, model, sandbox_backend, sandbox_group_id
       )
-      select ${quota.accountId}, ${quota.workspaceId}, ${quotaSubject}, 'all',
-        'occupied-' || series, array[${first.id}::uuid, ${second.id}::uuid],
-        now() + interval '10 minutes', now() - interval '1 minute'
-      from generate_series(1, ${SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT}) series`;
+      select generated.id, ${quota.accountId}, ${quota.workspaceId},
+        'snapshot query-' || lpad(((generated.ordinality - 1) / 2)::text, 2, '0'),
+        'test-model', 'none', generated.id
+      from (
+        select gen_random_uuid() as id, ordinality
+        from generate_series(1, 68) with ordinality
+      ) generated`;
+
+    const retainedPage = await listSessionsForSubject(db, quota.workspaceId, {
+      subjectId: retainedSubject,
+      search: "snapshot query-00",
+      limit: 1,
+    });
+    const retainedCursor = decodeSessionListCursor(retainedPage.nextCursor!);
+    expect(retainedCursor).not.toBeNull();
+
+    const searchCursors = [];
+    for (let index = 0; index < SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT + 2; index += 1) {
+      const search = `snapshot query-${String(index).padStart(2, "0")}`;
+      const page = await listSessionsForSubject(db, quota.workspaceId, {
+        subjectId: quotaSubject,
+        search,
+        limit: 1,
+      });
+      expect(page.sessions).toHaveLength(1);
+      const cursor = decodeSessionListCursor(page.nextCursor!);
+      expect(cursor).not.toBeNull();
+      searchCursors.push(cursor!);
+    }
+
+    // Clearing search creates another first page instead of reproducing the
+    // production 429/empty-state trap.
+    const cleared = await listSessionsForSubject(db, quota.workspaceId, {
+      subjectId: quotaSubject,
+      limit: 1,
+    });
+    const clearedCursor = decodeSessionListCursor(cleared.nextCursor!);
+    expect(cleared.sessions).toHaveLength(1);
+    expect(clearedCursor).not.toBeNull();
+    const clearedContinuation = await listSessionsForSubject(db, quota.workspaceId, {
+      subjectId: quotaSubject,
+      cursor: clearedCursor!,
+      limit: 1,
+    });
+    expect(clearedContinuation.sessions).toHaveLength(1);
+    expect(clearedContinuation.sessions[0]!.id).not.toBe(cleared.sessions[0]!.id);
+
+    const [counts] = await admin<{ quota: number; retained: number }[]>`
+      select
+        count(*) filter (where subject_id = ${quotaSubject})::int as quota,
+        count(*) filter (where subject_id = ${retainedSubject})::int as retained
+      from session_list_snapshots
+      where workspace_id = ${quota.workspaceId}`;
+    expect(counts).toEqual({
+      quota: SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT,
+      retained: 1,
+    });
+
+    // The oldest same-subject cursor was evicted into the existing typed
+    // expiry path; another subject's snapshot is isolated and remains usable.
     await expect(
       listSessionsForSubject(db, quota.workspaceId, {
         subjectId: quotaSubject,
-        search: "snapshot quota",
+        search: "snapshot query-00",
+        cursor: searchCursors[0]!,
         limit: 1,
       }),
-    ).rejects.toBeInstanceOf(SessionListSnapshotLimitError);
-    const [quotaCount] = await admin<{ count: number }[]>`
-      select count(*)::int as count from session_list_snapshots
-      where workspace_id = ${quota.workspaceId} and subject_id = ${quotaSubject}`;
-    expect(quotaCount?.count).toBe(SESSION_LIST_SNAPSHOT_MAX_ACTIVE_PER_SUBJECT);
+    ).rejects.toBeInstanceOf(SessionListCursorExpiredError);
+    await expect(
+      listSessionsForSubject(db, quota.workspaceId, {
+        subjectId: retainedSubject,
+        search: "snapshot query-00",
+        cursor: retainedCursor!,
+        limit: 1,
+      }),
+    ).resolves.toMatchObject({ sessions: [{ initialMessage: "snapshot query-00" }] });
   }, 60_000);
 
   test("rejects a stale pin mutation after removal wins the personal-state fence", async () => {
