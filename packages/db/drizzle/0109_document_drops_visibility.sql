@@ -1,3 +1,4 @@
+-- deployment-mode: rolling
 -- Knowledge drops: auto-curation + per-document visibility.
 -- Follows 0041_knowledge_layer.sql conventions: IF NOT EXISTS column adds only.
 -- NO policy changes (documents already has FORCE RLS + workspace_isolation from 0041).
