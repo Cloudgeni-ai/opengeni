@@ -1935,13 +1935,25 @@ export async function updateSessionToolPolicy(
     capabilityRuntimeSettings,
     existingSession.mcpServers,
   );
-  const validatedTools = validateToolRefs(request.tools, runtimeSettings);
-  const validatedIds = new Set(validatedTools.map((tool) => `${tool.kind}:${tool.id}`));
-  const unknown = request.tools.find((tool) => !validatedIds.has(`${tool.kind}:${tool.id}`));
-  if (unknown) {
-    throw new HTTPException(422, { message: `unknown MCP server id: ${unknown.id}` });
-  }
-  const requestedTools = withFirstPartyTools(validatedTools, runtimeSettings);
+  const explicitRequest = request.mode === "workspace_default" ? null : request;
+  const requestedMode = explicitRequest ? "explicit" : "workspace_default";
+  const explicitRequestedTools = explicitRequest
+    ? (() => {
+        const validatedTools = validateToolRefs(explicitRequest.tools, runtimeSettings);
+        const validatedIds = new Set(validatedTools.map((tool) => `${tool.kind}:${tool.id}`));
+        const unknown = explicitRequest.tools.find(
+          (tool) => !validatedIds.has(`${tool.kind}:${tool.id}`),
+        );
+        if (unknown) {
+          throw new HTTPException(422, { message: `unknown MCP server id: ${unknown.id}` });
+        }
+        return withFirstPartyTools(validatedTools, runtimeSettings);
+      })()
+    : null;
+  const workspaceDefaultTools = withFirstPartyTools(
+    withDefaultEnabledCapabilityMcpTools([], deps.settings, capabilityRuntimeSettings),
+    runtimeSettings,
+  );
   const events = await appendSessionEventsWithLockedSessionUpdate(
     deps.db,
     grant.workspaceId,
@@ -1952,11 +1964,8 @@ export async function updateSessionToolPolicy(
         throw new SessionToolPolicyVersionConflictError(currentVersion);
       }
 
-      const nextTools = requestedTools;
-      let nextPolicy: SessionToolPolicy = {
-        mode: "explicit",
-        inheritedFromSessionId: session.parentSessionId,
-      };
+      let nextTools: ToolRef[];
+      let nextPolicy: SessionToolPolicy;
       if (session.parentSessionId) {
         const parent = await context.getLockedSession(session.parentSessionId);
         if (!parent) {
@@ -1973,13 +1982,34 @@ export async function updateSessionToolPolicy(
             : parent.tools,
           runtimeSettings,
         );
-        assertToolRefsSubset(
-          nextTools,
-          parentEffective,
-          "session tools may only narrow the parent session tool policy",
-        );
+        if (requestedMode === "workspace_default") {
+          if (!parentTracksWorkspaceDefaults) {
+            throw new HTTPException(403, {
+              message:
+                "a child may adopt workspace defaults only while its parent tracks workspace defaults",
+            });
+          }
+          nextTools = parentEffective;
+          nextPolicy = {
+            mode: "workspace_default",
+            inheritedFromSessionId: parent.id,
+          };
+        } else {
+          nextTools = explicitRequestedTools!;
+          assertToolRefsSubset(
+            nextTools,
+            parentEffective,
+            "session tools may only narrow the parent session tool policy",
+          );
+          nextPolicy = {
+            mode: "explicit",
+            inheritedFromSessionId: parent.id,
+          };
+        }
       } else {
-        nextPolicy = { mode: "explicit", inheritedFromSessionId: null };
+        nextTools =
+          requestedMode === "workspace_default" ? workspaceDefaultTools : explicitRequestedTools!;
+        nextPolicy = { mode: requestedMode, inheritedFromSessionId: null };
       }
 
       const currentPolicy = session.toolPolicy ?? {

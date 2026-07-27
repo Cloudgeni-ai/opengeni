@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   resolveSessionToolPolicy,
+  sessionToolPolicyAllowsDefaultNativeTools,
   type SessionToolPolicyInput,
 } from "../src/domain/session-tool-policy";
 import type { ToolRef } from "@opengeni/contracts";
@@ -86,6 +87,18 @@ describe("session tool policy resolution", () => {
       state: "disabled",
       deferredIds: [],
     });
+    expect(sessionToolPolicyAllowsDefaultNativeTools(omitted.effectivePolicy)).toBe(true);
+    expect(sessionToolPolicyAllowsDefaultNativeTools(explicitEmpty.effectivePolicy)).toBe(false);
+  });
+
+  test("fixed historical policies exclude workspace-default native tools", () => {
+    for (const mode of ["explicit", "inherited", "legacy"] as const) {
+      const result = resolve({
+        toolPolicy: { mode, inheritedFromSessionId: null },
+        sessionTools: [mcp("cap-docs")],
+      });
+      expect(sessionToolPolicyAllowsDefaultNativeTools(result.effectivePolicy)).toBe(false);
+    }
   });
 
   test("an explicit follow-up replaces rather than merges the session selection", () => {

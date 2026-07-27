@@ -17,6 +17,22 @@ describe("session tool policy contracts", () => {
     expect(() => UpdateSessionToolPolicyRequest.parse({ tools: [], expectedVersion: 0 })).toThrow();
   });
 
+  test("supports an explicit, version-fenced return to workspace defaults", () => {
+    expect(
+      UpdateSessionToolPolicyRequest.parse({
+        mode: "workspace_default",
+        expectedVersion: 3,
+      }),
+    ).toEqual({ mode: "workspace_default", expectedVersion: 3 });
+    expect(() =>
+      UpdateSessionToolPolicyRequest.parse({
+        mode: "workspace_default",
+        tools: [],
+        expectedVersion: 3,
+      }),
+    ).toThrow();
+  });
+
   test("accepts the durable policy modes and rejects invalid inheritance", () => {
     expect(SessionToolPolicy.parse({ mode: "legacy", inheritedFromSessionId: null })).toEqual({
       mode: "legacy",

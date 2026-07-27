@@ -324,7 +324,7 @@ export class OpenGeniClient {
     );
   }
 
-  /** Replace the durable session MCP tool policy with an optimistic version fence. */
+  /** Replace the durable tool policy or explicitly adopt workspace defaults. */
   async updateSessionToolPolicy(
     workspaceId: string,
     sessionId: string,

@@ -174,6 +174,45 @@ until OpenGeni has the request, recovery, and billing contracts to use it
 safely. Capability metadata also never authorizes an OpenGeni tool; tool
 discovery and authorization remain independent.
 
+### Native web search follows the durable session tool policy
+
+Provider-native `web_search` is part of the workspace-default capability set,
+not an MCP catalog entry. A fresh session whose `tools` field is omitted gets
+native search when its resolved Responses provider declares hosted web search
+runnable. An ordinary child that omits `tools` continues to track a
+workspace-default parent. Explicit, inherited-fixed, and legacy session
+policies remain narrowed, and an explicit per-turn tool replacement disables
+default native search for that turn.
+
+`tool_search` is a different capability: it searches bounded deferred tool
+schemas so the model can discover MCP tools without preloading every schema. It
+does not search the public web and must not be presented as a fallback for
+native `web_search`.
+
+The native tool uses the Agents SDK's bounded `medium` search-context setting
+and preserves provider URL-citation annotations in structured conversation
+history. It does not need a sandbox. If the resolved provider does not support
+hosted search, or the provider search call fails, OpenGeni does not switch
+providers, invoke an MCP connector, or run `curl` in a sandbox as a silent
+fallback.
+
+Existing explicit sessions are never widened automatically. An authorized
+client can explicitly adopt the current workspace defaults through the
+version-fenced session tool-policy endpoint; the change is audited and applies
+from the next attempt:
+
+```ts
+const session = await client.getSession(workspaceId, sessionId);
+await client.updateSessionToolPolicy(workspaceId, sessionId, {
+  mode: "workspace_default",
+  expectedVersion: session.toolPolicyVersion ?? 1,
+});
+```
+
+A child may make this transition only while its immediate parent still tracks
+workspace defaults. Use the original `{ tools, expectedVersion }` request when
+the intent is an explicit fixed allow-list instead.
+
 ## Static catalog and workspace availability
 
 `GET /v1/config/client` is public deployment bootstrap configuration. Its

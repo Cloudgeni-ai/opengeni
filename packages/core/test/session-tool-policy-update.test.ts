@@ -240,6 +240,82 @@ describe("durable session tool-policy updates", () => {
     });
   }, 180_000);
 
+  test("lets an existing top-level explicit session explicitly adopt workspace defaults", async () => {
+    if (!available) return;
+    const owner = await workspace("adopt-workspace-defaults");
+    const created = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI, DOCS],
+    });
+    const bus = new MemoryEventBus();
+
+    const updated = await updateSessionToolPolicy(
+      deps(firstDb, bus),
+      grant(owner.workspaceId, owner.accountId),
+      created.id,
+      { mode: "workspace_default", expectedVersion: 1 },
+    );
+
+    expect(updated.tools).toEqual([OPENGENI]);
+    expect(updated.toolPolicy).toEqual({
+      mode: "workspace_default",
+      inheritedFromSessionId: null,
+    });
+    expect(updated.toolPolicyVersion).toBe(2);
+    expect(bus.published[0]![0]).toMatchObject({
+      type: "session.tool_policy.updated",
+      payload: {
+        before: { mode: "explicit", toolIds: ["docs", "opengeni"] },
+        after: { mode: "workspace_default", toolIds: ["opengeni"] },
+        version: 2,
+        effectiveFrom: "next_attempt",
+      },
+    });
+  }, 180_000);
+
+  test("allows default adoption only through a workspace-default parent ceiling", async () => {
+    if (!available) return;
+    const owner = await workspace("child-adopt-workspace-defaults");
+    const defaultParent = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      toolPolicy: { mode: "workspace_default", inheritedFromSessionId: null },
+    });
+    const defaultChild = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      parentSessionId: defaultParent.id,
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: defaultParent.id },
+    });
+
+    const adopted = await updateSessionToolPolicy(
+      deps(firstDb, new MemoryEventBus()),
+      grant(owner.workspaceId, owner.accountId),
+      defaultChild.id,
+      { mode: "workspace_default", expectedVersion: 1 },
+    );
+    expect(adopted.toolPolicy).toEqual({
+      mode: "workspace_default",
+      inheritedFromSessionId: defaultParent.id,
+    });
+
+    const explicitParent = await session(firstDb, { ...owner, tools: [OPENGENI] });
+    const explicitChild = await session(firstDb, {
+      ...owner,
+      tools: [OPENGENI],
+      parentSessionId: explicitParent.id,
+      toolPolicy: { mode: "inherited", inheritedFromSessionId: explicitParent.id },
+    });
+    await expect(
+      updateSessionToolPolicy(
+        deps(firstDb, new MemoryEventBus()),
+        grant(owner.workspaceId, owner.accountId),
+        explicitChild.id,
+        { mode: "workspace_default", expectedVersion: 1 },
+      ),
+    ).rejects.toMatchObject({ status: 403 });
+  }, 180_000);
+
   test("records the inherited to explicit policy transition in the audit snapshot", async () => {
     if (!available) return;
     const owner = await workspace("audit-inherited-transition");
