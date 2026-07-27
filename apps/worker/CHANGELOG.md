@@ -1,5 +1,23 @@
 # @opengeni/worker-bundle
 
+## 0.11.5
+
+### Patch Changes
+
+- 1386679: Make context compaction provider-portable with Codex-compatible plaintext checkpoints, drop
+  foreign account-bound reasoning during subscription rotation, and preserve the exact logical turn
+  through durable all-subscriptions-exhausted capacity waits.
+- Updated dependencies [1386679]
+- Updated dependencies [fdc0c98]
+  - @opengeni/db@0.12.3
+  - @opengeni/runtime@0.13.7
+  - @opengeni/config@0.7.3
+  - @opengeni/core@0.11.5
+  - @opengeni/documents@0.2.33
+  - @opengeni/events@0.3.24
+  - @opengeni/github@0.3.15
+  - @opengeni/storage@0.2.27
+
 ## 0.11.4
 
 ### Patch Changes

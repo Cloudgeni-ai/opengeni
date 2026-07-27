@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 0.13.7
+
+### Patch Changes
+
+- 1386679: Make context compaction provider-portable with Codex-compatible plaintext checkpoints, drop
+  foreign account-bound reasoning during subscription rotation, and preserve the exact logical turn
+  through durable all-subscriptions-exhausted capacity waits.
+- Updated dependencies [fdc0c98]
+  - @opengeni/config@0.7.3
+
 ## 0.13.6
 
 ### Patch Changes
