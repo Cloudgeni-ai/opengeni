@@ -190,7 +190,13 @@ describe("sanitizeEventPayload (deep walk)", () => {
       access_token: "raw-access-token",
       refreshToken: "raw-refresh-token",
       encryptedPkceVerifier: "v1:secret-verifier",
-      headers: { authorization: "Bearer raw-token" },
+      headers: {
+        authorization: "Bearer raw-token",
+        "content-type": "application/json",
+        accept: "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
       nested: { credentialEncrypted: "v1:secret-bundle" },
     }) as Record<string, unknown>;
 
@@ -205,14 +211,62 @@ describe("sanitizeEventPayload (deep walk)", () => {
     expect(cleaned.access_token).toBe("[redacted]");
     expect(cleaned.refreshToken).toBe("[redacted]");
     expect(cleaned.encryptedPkceVerifier).toBe("[redacted]");
-    expect(cleaned.headers).toBe("[redacted]");
+    expect(cleaned.headers).toEqual({
+      authorization: "[redacted]",
+      "content-type": "application/json",
+      accept: "application/json",
+      "x-page-token": "page-2",
+      "x-signature": "sha256=public-digest",
+    });
     expect((cleaned.nested as Record<string, unknown>).credentialEncrypted).toBe("[redacted]");
+  });
+
+  test("redacts known secrets from nested keys and values with stable collisions", () => {
+    const secret = "synthetic-db-key-secret-123456";
+    const knownSecrets = [{ name: "DB_KEY_SECRET", value: secret }];
+    const payload = {
+      [secret]: { nested: secret },
+      "[redacted:DB_KEY_SECRET]": "public marker-shaped key",
+      headers: {
+        "Private-Token": `prefix-${secret}`,
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    };
+
+    const cleaned = sanitizeEventPayload(payload, { knownSecrets }) as Record<string, unknown>;
+    const serialized = JSON.stringify(cleaned);
+    expect(serialized).not.toContain(secret);
+    expect(cleaned).toMatchObject({
+      "[redacted:DB_KEY_SECRET]": { nested: "[redacted:DB_KEY_SECRET]" },
+      "[redacted:DB_KEY_SECRET]#2": "public marker-shaped key",
+      headers: {
+        "Private-Token": "prefix-[redacted:DB_KEY_SECRET]",
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
+
+    const modelCleaned = sanitizeModelPayload(payload, knownSecrets) as Record<string, unknown>;
+    expect(JSON.stringify(modelCleaned)).not.toContain(secret);
+    expect(modelCleaned).toMatchObject({
+      "[redacted:DB_KEY_SECRET]": { nested: "[redacted:DB_KEY_SECRET]" },
+      "[redacted:DB_KEY_SECRET]#2": "public marker-shaped key",
+      headers: {
+        "Private-Token": "prefix-[redacted:DB_KEY_SECRET]",
+        "content-type": "application/json",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      },
+    });
   });
 
   test("bounds cyclic and multi-megabyte payloads before deep sanitation", () => {
     const payload: Record<string, unknown> = {
       id: "cycle-output",
-      token: "must-not-survive",
+      refreshToken: "must-not-survive",
       output: "界😀".repeat(500_000),
     };
     payload.self = payload;
@@ -325,7 +379,7 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
     expect(reparsed.type).toBe("function_call_result");
   });
 
-  test("repairs invalid text without redacting model-visible tool arguments", () => {
+  test("repairs invalid text and redacts model-visible tool arguments", () => {
     const item = {
       type: "function_call",
       callId: "call_secret_arg",
@@ -339,12 +393,27 @@ describe("session_history_items jsonb safety (durable SDK item)", () => {
       ...item,
       arguments: {
         token: "actualvalue",
-        headers: { authorization: "Bearer model-visible" },
+        headers: { authorization: "[redacted]" },
       },
     });
     expect(sanitizeEventPayload(item)).toMatchObject({
-      arguments: { token: "[redacted]", headers: "[redacted]" },
+      arguments: { token: "actualvalue", headers: { authorization: "[redacted]" } },
     });
+  });
+
+  test("preserves public pagination and signature fields in model and event payloads", () => {
+    const item = {
+      type: "function_call",
+      arguments: {
+        token: "page-2",
+        signature: "sha256=public-digest",
+        mediaType: "application/json",
+        serialized: '{"token":"page-2","signature":"sha256=public-digest"}',
+      },
+    };
+
+    expect(sanitizeModelPayload(item)).toEqual(item);
+    expect(sanitizeEventPayload(item)).toEqual(item);
   });
 
   test("makes cyclic and over-depth model payloads explicit and JSON-safe", () => {

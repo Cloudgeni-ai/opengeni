@@ -23,6 +23,7 @@ import {
   normalizeResourceMountPath,
   prefixedMcpToolName as sharedPrefixedMcpToolName,
   resourceMountPath,
+  redactSensitiveText,
   sessionEventMediaPreview,
   sessionEventMediaPreviewFromDataUrl,
   signDelegatedAccessToken,
@@ -186,6 +187,14 @@ import {
 } from "./sandbox/turn-tool-cancellation";
 import { computerUse, type ComputerToolMode } from "./sandbox-computer";
 import type { RuntimeMetricsHooks } from "./metrics";
+
+// The Agents SDK's debug namespaces can otherwise serialize complete model
+// inputs/outputs and tool arguments/results. These getters read process.env on
+// every log call, so keep the process-global guard permanently enabled rather
+// than toggling it around concurrent turns.
+process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA = "1";
+process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA = "1";
+
 export {
   getSkillLibraryEntry,
   isSkillLibraryEntryId,
@@ -1687,7 +1696,7 @@ export function mcpToolErrorOutput(error: unknown): {
   isError: true;
   content: [{ type: "text"; text: string }];
 } {
-  const details = error instanceof Error ? error.message : String(error);
+  const details = redactSensitiveText(error instanceof Error ? error.message : String(error));
   return {
     isError: true,
     content: [
@@ -2468,6 +2477,10 @@ export async function prepareAgentTools(
           url,
           name: config.name ?? config.id,
           cacheToolsList: config.cacheToolsList,
+          // The upstream transport logger receives raw thrown errors, whose
+          // messages may contain response bodies, URLs, headers, or echoed
+          // credentials. Keep its diagnostic surface structural only.
+          logger: safeMcpTransportLogger(config.id),
           // codex_apps returns connector tools with empty `outputSchema: {}` that the
           // MCP SDK's strict Tool schema rejects (fails the turn during tools/list);
           // sanitize the response on the wire before validation. The namespace Set
@@ -2534,7 +2547,7 @@ export async function prepareAgentTools(
       const error = connectedBestEffort.errors.get(failed);
       console.warn(
         `[mcp] optional server "${failed.name}" failed to connect/list tools; skipping it for this turn`,
-        error instanceof Error ? error.message : error,
+        safeMcpErrorFields(error),
       );
     }
   }
@@ -2948,6 +2961,46 @@ function safeMcpErrorFields(error: unknown): {
   return { errorClass, status };
 }
 
+function safeMcpTransportError(error: unknown): Error & { status?: number; code?: number } {
+  const fields = safeMcpErrorFields(error);
+  const safeError = new Error(
+    `MCP transport operation failed (${mcpErrorReason(fields)})`,
+  ) as Error & {
+    status?: number;
+    code?: number;
+  };
+  safeError.name = "McpTransportError";
+  if (fields.status !== undefined) {
+    safeError.status = fields.status;
+    safeError.code = fields.status;
+  }
+  return safeError;
+}
+
+function safeMcpTransportLogger(serverId: string) {
+  const logFailure = (_message: string, ...args: unknown[]) => {
+    let error: unknown;
+    for (let index = args.length - 1; index >= 0; index -= 1) {
+      if (args[index] instanceof Error) {
+        error = args[index];
+        break;
+      }
+    }
+    console.warn("[mcp] transport operation failed", {
+      serverId,
+      ...safeMcpErrorFields(error),
+    });
+  };
+  return {
+    namespace: "opengeni:mcp-transport",
+    debug: () => undefined,
+    error: logFailure,
+    warn: logFailure,
+    dontLogModelData: true,
+    dontLogToolData: true,
+  };
+}
+
 // Compose the safe model/log reason string ("StreamableHTTPError 401", or just
 // the class when no numeric status is available). Never carries the raw body.
 function mcpErrorReason(fields: { errorClass: string; status?: number }): string {
@@ -3223,7 +3276,11 @@ class PrefixedMcpServer implements MCPServer {
   }
 
   connect(): Promise<void> {
-    return this.inner.connect();
+    return this.inner.connect().catch((error: unknown) => {
+      // connectMcpServers has its own global logger and logs the thrown Error.
+      // Never let a raw transport response body cross that logging boundary.
+      throw safeMcpTransportError(error);
+    });
   }
 
   close(): Promise<void> {
@@ -5346,6 +5403,7 @@ function sandboxFileDownloadCommand(download: SandboxFileDownload, targetPath: s
   const targetDir = posixPath.dirname(targetPath);
   const tmpPath = `${targetPath}.opengeni-download-$$`;
   return [
+    "set +x",
     "set -eu",
     `mkdir -p -- ${shellQuote(targetDir)}`,
     `if [ ! -f ${shellQuote(targetPath)} ]; then`,
@@ -6391,6 +6449,7 @@ export function gitProviderTokenRefreshCommand(seeds: GitTokenSeeds): string {
     return "";
   }
   return [
+    "set +x",
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
@@ -6404,6 +6463,7 @@ export function gitCredentialBindingTokenRefreshCommand(
   const seedPrefix = gitCredentialBindingSeedExportPrefix(bindings);
   if (!seedPrefix) return "";
   return [
+    "set +x",
     seedPrefix,
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
@@ -6459,6 +6519,7 @@ export function repositoryCloneCommand(
 ): string {
   assertUniqueResourceMountPaths(resources);
   const commands = [
+    "set +x",
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'export GIT_TERMINAL_PROMPT="${GIT_TERMINAL_PROMPT:-0}"',
@@ -6568,6 +6629,7 @@ export function toolspaceTokenSeedCommand(
   options: { tokenFile?: string; legacyTokenFile?: string } = {},
 ): string {
   return [
+    "set +x",
     "set -eu",
     'export HOME="${HOME:-/workspace}"',
     'if [ -n "${OPENGENI_TOOLSPACE_TOKEN_SEED:-}" ]; then',
@@ -6597,7 +6659,7 @@ export async function runToolspaceTokenSeedHook(
   if (!context.toolspaceTokenSeed) {
     return;
   }
-  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand(
+  const command = `set +x\nexport OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(context.toolspaceTokenSeed)}\n${toolspaceTokenSeedCommand(
     {
       ...(context.toolspaceTokenFile ? { tokenFile: context.toolspaceTokenFile } : {}),
       ...(context.toolspaceTokenFile && context.environment.OPENGENI_TOOLSPACE_TOKEN_FILE
@@ -6629,7 +6691,7 @@ export async function refreshToolspaceTokenFile(
     legacyTokenFile?: string;
   } = {},
 ): Promise<void> {
-  const command = `export OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand(
+  const command = `set +x\nexport OPENGENI_TOOLSPACE_TOKEN_SEED=${shellQuote(token)}\n${toolspaceTokenSeedCommand(
     {
       ...(options.tokenFile ? { tokenFile: options.tokenFile } : {}),
       ...(options.legacyTokenFile ? { legacyTokenFile: options.legacyTokenFile } : {}),
@@ -6842,7 +6904,7 @@ export async function runRepositoryCloneHook(
       .filter(Boolean)
       .join("\n");
     const cloneCommand = repositoryCloneCommand(resources, gitCredentialBindings);
-    const command = seedPrefix ? `${seedPrefix}\n${cloneCommand}` : cloneCommand;
+    const command = seedPrefix ? `set +x\n${seedPrefix}\n${cloneCommand}` : cloneCommand;
     const result = await runSandboxLifecycleCommand(
       session,
       {
@@ -6873,6 +6935,7 @@ export async function runRepositoryCloneHook(
 
 export function azureCliLoginCommand(): string {
   return [
+    "set +x",
     'export HOME="${HOME:-/workspace}"',
     'mkdir -p "$HOME/.azure"',
     'CLIENT_ID="${AZURE_CLIENT_ID:-${ARM_CLIENT_ID:-}}"',

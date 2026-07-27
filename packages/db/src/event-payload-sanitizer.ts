@@ -1,4 +1,11 @@
-import { boundSessionEventPayload } from "@opengeni/contracts";
+import {
+  boundSessionEventPayload,
+  isCredentialHeaderName,
+  isSensitiveFieldName,
+  redactSensitiveKey,
+  redactSensitiveText,
+  type SecretForRedaction,
+} from "@opengeni/contracts";
 
 /**
  * Last line of defense against a session event crashing a whole turn.
@@ -18,21 +25,6 @@ import { boundSessionEventPayload } from "@opengeni/contracts";
 
 const REPLACEMENT = "�";
 const REDACTED = "[redacted]";
-const SENSITIVE_FIELD_NAMES = new Set([
-  "authorization",
-  "headers",
-  "accesstoken",
-  "refreshtoken",
-  "idtoken",
-  "token",
-  "apikey",
-  "secret",
-  "clientsecret",
-  "credential",
-  "credentialencrypted",
-  "encryptedpkceverifier",
-  "codeverifier",
-]);
 
 /**
  * Strip NUL and repair invalid/lone UTF-16 surrogates in a single string.
@@ -94,6 +86,8 @@ export type SanitizeEventPayloadOptions = {
    * this from a producer-controlled payload field.
    */
   fullEvidence?: unknown;
+  /** Exact runtime credential provenance to remove from keys and values. */
+  knownSecrets?: readonly SecretForRedaction[];
 };
 
 export function sanitizeEventPayload<T>(payload: T, options: SanitizeEventPayloadOptions = {}): T {
@@ -106,6 +100,7 @@ export function sanitizeEventPayload<T>(payload: T, options: SanitizeEventPayloa
   });
   return sanitizeEventPayloadDeep(
     bounded === payload ? removeProducerTruncationMetadata(bounded) : bounded,
+    options.knownSecrets ?? [],
   );
 }
 
@@ -126,46 +121,60 @@ function removeProducerTruncationMetadata<T>(payload: T): T {
   return cleaned as T;
 }
 
-function sanitizeEventPayloadDeep<T>(payload: T): T {
+function sanitizeEventPayloadDeep<T>(
+  payload: T,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): T {
   if (typeof payload === "string") {
-    return sanitizeEventString(payload) as unknown as T;
+    return sanitizeEventString(redactSensitiveText(payload, knownSecrets)) as unknown as T;
   }
   if (Array.isArray(payload)) {
-    return payload.map((item) => sanitizeEventPayloadDeep(item)) as unknown as T;
+    return payload.map((item) => sanitizeEventPayloadDeep(item, knownSecrets)) as unknown as T;
   }
   if (payload instanceof Date) {
     return safeDateIso(payload) as unknown as T;
   }
   if (payload && typeof payload === "object") {
-    const entries = Object.entries(payload as Record<string, unknown>).map(
-      ([key, value]) =>
-        [sanitizeEventString(key), sanitizeSensitiveEventField(key, value)] as const,
-    );
+    const usedKeys = new Set<string>();
+    const entries = Object.entries(payload as Record<string, unknown>).map(([key, value]) => {
+      const safeKey = nextUniqueKey(
+        sanitizeEventString(redactSensitiveKey(key, knownSecrets)),
+        usedKeys,
+      );
+      return [safeKey, sanitizeSensitiveEventField(key, value, knownSecrets)] as const;
+    });
     return Object.fromEntries(entries) as unknown as T;
   }
   return payload;
 }
 
 /**
- * Make model-facing conversation data safe for Postgres without redacting it.
+ * Make model-facing conversation data safe for Postgres and secret-redacted.
  *
- * Session events are an audit/UI projection and deliberately redact fields such
- * as `token` and `authorization`. Conversation history is the replay source for
- * the model, so applying event redaction there silently changes tool arguments
- * and can make recovery diverge from the call that actually ran. This walker
- * performs only the database-safety repair (NUL removal and UTF-16 repair).
+ * Conversation history is the replay source for the model, so this boundary
+ * retains protocol structure and non-sensitive diagnostics while removing
+ * credential-bearing fields and text before durable storage. It also performs
+ * the database-safety repair (NUL removal and UTF-16 repair).
  */
-export function sanitizeModelPayload<T>(payload: T): T {
-  return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0);
+export function sanitizeModelPayload<T>(
+  payload: T,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): T {
+  return sanitizeModelPayloadDeep(payload, new WeakSet<object>(), 0, knownSecrets);
 }
 
 const MODEL_PAYLOAD_SANITIZE_MAX_DEPTH = 64;
 const MODEL_PAYLOAD_CYCLE_MARKER = "[OpenGeni omitted cyclic model payload]";
 const MODEL_PAYLOAD_DEPTH_MARKER = "[OpenGeni omitted model payload beyond database-safety depth]";
 
-function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: number): T {
+function sanitizeModelPayloadDeep<T>(
+  payload: T,
+  seen: WeakSet<object>,
+  depth: number,
+  knownSecrets: readonly SecretForRedaction[] = [],
+): T {
   if (typeof payload === "string") {
-    return sanitizeEventString(payload) as unknown as T;
+    return sanitizeEventString(redactSensitiveText(payload, knownSecrets)) as unknown as T;
   }
   if (!payload || typeof payload !== "object") return payload;
   if (payload instanceof Date) {
@@ -178,13 +187,25 @@ function sanitizeModelPayloadDeep<T>(payload: T, seen: WeakSet<object>, depth: n
   seen.add(payload);
   try {
     if (Array.isArray(payload)) {
-      return payload.map((item) => sanitizeModelPayloadDeep(item, seen, depth + 1)) as unknown as T;
+      return payload.map((item) =>
+        sanitizeModelPayloadDeep(item, seen, depth + 1, knownSecrets),
+      ) as unknown as T;
     }
+    const usedKeys = new Set<string>();
     return Object.fromEntries(
-      Object.entries(payload as Record<string, unknown>).map(([key, value]) => [
-        sanitizeEventString(key),
-        sanitizeModelPayloadDeep(value, seen, depth + 1),
-      ]),
+      Object.entries(payload as Record<string, unknown>).map(([key, value]) => {
+        const safeKey = nextUniqueKey(
+          sanitizeEventString(redactSensitiveKey(key, knownSecrets)),
+          usedKeys,
+        );
+        if (isSensitiveFieldName(key)) {
+          return [safeKey, REDACTED] as const;
+        }
+        if (normalizeFieldName(key) === "headers") {
+          return [safeKey, sanitizeModelHeaders(value, seen, depth + 1, knownSecrets)] as const;
+        }
+        return [safeKey, sanitizeModelPayloadDeep(value, seen, depth + 1, knownSecrets)] as const;
+      }),
     ) as unknown as T;
   } finally {
     seen.delete(payload);
@@ -200,30 +221,98 @@ function safeDateIso(value: Date): string | null {
   }
 }
 
-function sanitizeSensitiveEventField(key: string, value: unknown): unknown {
+function sanitizeSensitiveEventField(
+  key: string,
+  value: unknown,
+  knownSecrets: readonly SecretForRedaction[],
+): unknown {
   if (key === "mcpServers") {
-    return sanitizeSessionMcpServerList(value);
+    return sanitizeSessionMcpServerList(value, knownSecrets);
   }
   if (key === "mcpCredentialUpdates") {
-    return sanitizeMcpCredentialUpdateList(value);
+    return sanitizeMcpCredentialUpdateList(value, knownSecrets);
   }
-  if (SENSITIVE_FIELD_NAMES.has(normalizeFieldName(key))) {
+  if (normalizeFieldName(key) === "headers") {
+    return sanitizeEventHeaders(value, knownSecrets);
+  }
+  if (isSensitiveFieldName(key)) {
     return REDACTED;
   }
-  return sanitizeEventPayloadDeep(value);
+  return sanitizeEventPayloadDeep(value, knownSecrets);
 }
 
-function sanitizeSessionMcpServerList(value: unknown): unknown {
+function sanitizeEventHeaders(
+  value: unknown,
+  knownSecrets: readonly SecretForRedaction[],
+): unknown {
+  if (!isPlainObject(value)) {
+    return sanitizeEventPayloadDeep(value, knownSecrets);
+  }
+  const usedKeys = new Set<string>();
+  return Object.fromEntries(
+    Object.entries(value).map(([key, child]) => {
+      const safeKey = nextUniqueKey(
+        sanitizeEventString(redactSensitiveKey(key, knownSecrets)),
+        usedKeys,
+      );
+      return [
+        safeKey,
+        isCredentialHeaderName(key) ? REDACTED : sanitizeEventPayloadDeep(child, knownSecrets),
+      ];
+    }),
+  );
+}
+
+function sanitizeModelHeaders(
+  value: unknown,
+  seen: WeakSet<object>,
+  depth: number,
+  knownSecrets: readonly SecretForRedaction[],
+): unknown {
+  if (!isPlainObject(value)) {
+    return sanitizeModelPayloadDeep(value, seen, depth, knownSecrets);
+  }
+  if (depth >= MODEL_PAYLOAD_SANITIZE_MAX_DEPTH) {
+    return MODEL_PAYLOAD_DEPTH_MARKER;
+  }
+  if (seen.has(value)) return MODEL_PAYLOAD_CYCLE_MARKER;
+  seen.add(value);
+  try {
+    const usedKeys = new Set<string>();
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => {
+        const safeKey = nextUniqueKey(
+          sanitizeEventString(redactSensitiveKey(key, knownSecrets)),
+          usedKeys,
+        );
+        return [
+          safeKey,
+          isCredentialHeaderName(key)
+            ? REDACTED
+            : sanitizeModelPayloadDeep(child, seen, depth + 1, knownSecrets),
+        ];
+      }),
+    );
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function sanitizeSessionMcpServerList(
+  value: unknown,
+  knownSecrets: readonly SecretForRedaction[],
+): unknown {
   if (!Array.isArray(value)) {
-    return sanitizeEventPayloadDeep(value);
+    return sanitizeEventPayloadDeep(value, knownSecrets);
   }
   return value.map((item) => {
     if (!isPlainObject(item)) {
-      return sanitizeEventPayloadDeep(item);
+      return sanitizeEventPayloadDeep(item, knownSecrets);
     }
     const { headers, headersEncrypted, ...rest } = item;
-    const cleaned = sanitizeEventPayloadDeep(rest) as Record<string, unknown>;
-    const headerNames = safeHeaderNames(headers) ?? safeHeaderNames(headersEncrypted);
+    const cleaned = sanitizeEventPayloadDeep(rest, knownSecrets) as Record<string, unknown>;
+    const headerNames =
+      safeHeaderNames(headers, knownSecrets) ?? safeHeaderNames(headersEncrypted, knownSecrets);
     if (headerNames) {
       cleaned.headerNames = headerNames;
     }
@@ -231,17 +320,21 @@ function sanitizeSessionMcpServerList(value: unknown): unknown {
   });
 }
 
-function sanitizeMcpCredentialUpdateList(value: unknown): unknown {
+function sanitizeMcpCredentialUpdateList(
+  value: unknown,
+  knownSecrets: readonly SecretForRedaction[],
+): unknown {
   if (!Array.isArray(value)) {
-    return sanitizeEventPayloadDeep(value);
+    return sanitizeEventPayloadDeep(value, knownSecrets);
   }
   return value.map((item) => {
     if (!isPlainObject(item)) {
-      return sanitizeEventPayloadDeep(item);
+      return sanitizeEventPayloadDeep(item, knownSecrets);
     }
     const { headers, headersEncrypted, ...rest } = item;
-    const cleaned = sanitizeEventPayloadDeep(rest) as Record<string, unknown>;
-    const headerNames = safeHeaderNames(headers) ?? safeHeaderNames(headersEncrypted);
+    const cleaned = sanitizeEventPayloadDeep(rest, knownSecrets) as Record<string, unknown>;
+    const headerNames =
+      safeHeaderNames(headers, knownSecrets) ?? safeHeaderNames(headersEncrypted, knownSecrets);
     if (headerNames) {
       cleaned.headerNames = headerNames;
     }
@@ -249,11 +342,30 @@ function sanitizeMcpCredentialUpdateList(value: unknown): unknown {
   });
 }
 
-function safeHeaderNames(value: unknown): string[] | null {
+function safeHeaderNames(
+  value: unknown,
+  knownSecrets: readonly SecretForRedaction[],
+): string[] | null {
   if (!isPlainObject(value)) {
     return null;
   }
-  return Object.keys(value).map(sanitizeEventString).sort();
+  const usedKeys = new Set<string>();
+  return Object.keys(value)
+    .map((key) =>
+      nextUniqueKey(sanitizeEventString(redactSensitiveKey(key, knownSecrets)), usedKeys),
+    )
+    .sort();
+}
+
+function nextUniqueKey(base: string, usedKeys: Set<string>): string {
+  let candidate = base;
+  let suffix = 2;
+  while (usedKeys.has(candidate)) {
+    candidate = `${base}#${suffix}`;
+    suffix += 1;
+  }
+  usedKeys.add(candidate);
+  return candidate;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

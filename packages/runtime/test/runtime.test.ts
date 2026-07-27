@@ -16,6 +16,7 @@ import {
   RunContext,
   RunRawModelStreamEvent,
   getAllMcpTools,
+  getLogger,
   invalidateServerToolsCache,
 } from "@openai/agents";
 import { Usage } from "@openai/agents-core";
@@ -119,6 +120,15 @@ const CODEX_APPS_ENTRY = (url: string) => ({
   name: "codex_apps",
   url,
   cacheToolsList: false,
+});
+
+test("Agents SDK debug logging omits model and tool payload data", () => {
+  const logger = getLogger("opengeni:test-sensitive-logging");
+
+  expect(process.env.OPENAI_AGENTS_DONT_LOG_MODEL_DATA).toBe("1");
+  expect(process.env.OPENAI_AGENTS_DONT_LOG_TOOL_DATA).toBe("1");
+  expect(logger.dontLogModelData).toBe(true);
+  expect(logger.dontLogToolData).toBe(true);
 });
 
 test("forwards an explicit outer MCP connect timeout to the Agents SDK lifecycle", async () => {
@@ -938,6 +948,21 @@ describe("runtime event normalization", () => {
       expect(mcpToolErrorOutput("boom").content[0]?.text).toContain("boom");
     });
 
+    test("mcpToolErrorOutput redacts credential-bearing error details", () => {
+      const out = mcpToolErrorOutput(
+        new Error(
+          "upstream 401\nAuthorization: Bearer synthetic-bearer-value-123456\n" +
+            "Cookie: session=synthetic-cookie-value-123456",
+        ),
+      );
+      const text = out.content[0]?.text ?? "";
+      expect(text).toContain("upstream 401");
+      expect(text).toContain("Authorization: Bearer [redacted]");
+      expect(text).toContain("Cookie: [redacted]");
+      expect(text).not.toContain("synthetic-bearer-value");
+      expect(text).not.toContain("synthetic-cookie-value");
+    });
+
     test("every agent gets an mcpConfig.errorFunction that produces isError output", () => {
       // Both agent paths share baseConfig, so both carry the errorFunction.
       for (const backend of ["none", "docker"] as const) {
@@ -1158,6 +1183,9 @@ describe("runtime event normalization", () => {
 
   test("uses normal Azure CLI service principal login hook", () => {
     const command = azureCliLoginCommand();
+    expect(command.startsWith("set +x\n")).toBe(true);
+    expect(command.indexOf("set +x")).toBeLessThan(command.indexOf("CLIENT_SECRET="));
+    expect(command.indexOf("set +x")).toBeLessThan(command.indexOf("az login"));
     expect(command).toContain("export HOME=");
     expect(command).toContain('mkdir -p "$HOME/.azure"');
     expect(command).toContain("command -v az");
@@ -2058,6 +2086,10 @@ describe("runtime event normalization", () => {
     );
 
     expect(commands).toHaveLength(1);
+    expect(commands[0]?.startsWith("set +x\n")).toBe(true);
+    expect(commands[0]?.indexOf("set +x")).toBeLessThan(
+      commands[0]?.indexOf("https://storage.example/input.txt?sig=secret") ?? -1,
+    );
     expect(commands[0]).toContain("set -eu");
     expect(commands[0]).not.toContain("pipefail");
     expect(commands[0]).toContain("curl --fail");
@@ -2617,6 +2649,10 @@ describe("runtime event normalization", () => {
     // askpass into $GIT_ASKPASS whose Password branch reads the token file — so a warm
     // box on ANY image gets a correct askpass at setup, no baked script required.
     const cmd = String(calls[0]?.cmd);
+    expect(cmd.startsWith("set +x\n")).toBe(true);
+    expect(cmd.indexOf("set +x")).toBeLessThan(
+      cmd.indexOf("export OPENGENI_GIT_GITHUB_TOKEN_SEED="),
+    );
     expect(cmd).toContain("cat > \"$git_askpass.tmp.$$\" <<'ASKPASS_EOF'");
     expect(cmd).toContain('chmod 0755 "$git_askpass.tmp.$$"');
     expect(cmd).toContain('mv -f "$git_askpass.tmp.$$" "$git_askpass"');
@@ -2660,6 +2696,7 @@ describe("runtime event normalization", () => {
 
     const cmd = String(calls[0]?.cmd);
     expect(calls[0]?.environment).toBeUndefined();
+    expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd).toContain("export OPENGENI_GIT_GITLAB_TOKEN_SEED='glpat_liveToken123'");
     expect(cmd).toContain("export OPENGENI_GIT_AZURE_DEVOPS_TOKEN_SEED='azdo_liveToken456'");
     expect(cmd).not.toContain("GITLAB_TOKEN='glpat_liveToken123'");
@@ -2697,7 +2734,7 @@ describe("runtime event normalization", () => {
 
     expect(calls).toHaveLength(1);
     expect(String(calls[0]?.cmd)).not.toContain("export OPENGENI_GIT_TOKEN_SEED=");
-    expect(String(calls[0]?.cmd).startsWith("set -eu")).toBe(true);
+    expect(String(calls[0]?.cmd).startsWith("set +x\nset -eu")).toBe(true);
   });
 
   test("TOOLSPACE-BROKER: seed hook writes the delegated token file from a per-exec prefix only", async () => {
@@ -2741,7 +2778,11 @@ describe("runtime event normalization", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.environment).toBeUndefined();
     const cmd = String(calls[0]?.cmd);
+    expect(cmd.startsWith("set +x\n")).toBe(true);
     expect(cmd).toContain("export OPENGENI_TOOLSPACE_TOKEN_SEED='ogd_toolspace_live'");
+    expect(cmd.indexOf("set +x")).toBeLessThan(
+      cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED="),
+    );
     expect(cmd.indexOf("export OPENGENI_TOOLSPACE_TOKEN_SEED=")).toBeLessThan(
       cmd.indexOf("printf '%s' \"$OPENGENI_TOOLSPACE_TOKEN_SEED\""),
     );
@@ -3885,6 +3926,60 @@ describe("runtime event normalization", () => {
     } finally {
       console.warn = originalWarn;
       broken.close();
+    }
+  });
+
+  test("MCP connect logging never emits raw response bodies or credential material", async () => {
+    const syntheticCredential = "synthetic-mcp-log-secret-123456";
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: () =>
+        new Response(
+          JSON.stringify({
+            error: "unauthorized",
+            echoed: `Authorization: Bearer ${syntheticCredential}`,
+            retry: `https://objects.example/file?X-Amz-Signature=${syntheticCredential}`,
+          }),
+          { status: 401, headers: { "content-type": "application/json" } },
+        ),
+    });
+    const warnings: unknown[][] = [];
+    const errors: unknown[][] = [];
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    console.warn = (...args: unknown[]) => warnings.push(args);
+    console.error = (...args: unknown[]) => errors.push(args);
+    try {
+      const prepared = await prepareAgentTools(
+        testSettings({
+          mcpServers: [
+            {
+              id: "synthetic-optional",
+              name: "Synthetic optional MCP",
+              url: `http://127.0.0.1:${server.port}/mcp`,
+              cacheToolsList: false,
+            },
+          ],
+        }),
+        [{ kind: "mcp", id: "synthetic-optional", optional: true }],
+      );
+      await prepared.close();
+
+      const renderedLogs = [...warnings, ...errors]
+        .flat()
+        .map((value) => (value instanceof Error ? `${value.name}: ${value.message}` : value))
+        .map((value) => JSON.stringify(value))
+        .join("\n");
+      expect(renderedLogs).toContain("synthetic-optional");
+      expect(renderedLogs).toContain("401");
+      expect(renderedLogs).not.toContain(syntheticCredential);
+      expect(renderedLogs).not.toContain("Authorization: Bearer");
+      expect(renderedLogs).not.toContain("X-Amz-Signature");
+    } finally {
+      console.warn = originalWarn;
+      console.error = originalError;
+      server.stop(true);
     }
   });
 

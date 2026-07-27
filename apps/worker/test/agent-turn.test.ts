@@ -43,6 +43,7 @@ import {
   emitModelCallUsage,
   ensureTurnModalRegistryImage,
   filterUnmaterializedSandboxFileDownloads,
+  headerSecretRedactions,
   historyRowsToAppend,
   isLazySandboxProvisionRetryable,
   isTransientProviderError,
@@ -59,6 +60,8 @@ import {
   PROVIDER_BACKPRESSURE_DELAY_MS,
   providerRecoveryResult,
   resolveActiveSandboxBackend,
+  safeErrorDiagnostic,
+  secretRedactionModelInputFilter,
   shouldRecoverCompactionProviderFailure,
   shouldStartOnTurnRecording,
   shouldRunTurnEndWorkspacePersistence,
@@ -70,6 +73,7 @@ import {
   waitForTurnStreamCleanup,
   TurnOperationCancelledError,
 } from "../src/activities/agent-turn";
+import { createSecretRedactor } from "../src/activities/redaction";
 import { sandboxLeaseHolderIdForAttempt } from "../src/sandbox-resume";
 import { settingsWithPackSandboxImage } from "../src/activities/packs";
 import { startGitCredentialRenewalLoop } from "../src/activities/git-credential-renewal";
@@ -212,6 +216,150 @@ function persistAcrossReconciles(snapshots: Array<Array<Record<string, unknown>>
   }
   return [...persistedByPosition.entries()].sort((a, b) => a[0] - b[0]).map(([, item]) => item);
 }
+
+describe("turn secret-redaction boundaries", () => {
+  const syntheticSecret = "synthetic-turn-secret-value-123456";
+  const redact = createSecretRedactor([{ name: "TURN_SECRET", value: syntheticSecret }]);
+
+  test("redacts current history before durable append", () => {
+    const result = historyRowsToAppend(
+      [userMessage(`tool output ${syntheticSecret}`)],
+      0,
+      0,
+      undefined,
+      redact,
+    );
+
+    expect(JSON.stringify(result.rows)).not.toContain(syntheticSecret);
+    expect(JSON.stringify(result.rows)).toContain("[redacted:TURN_SECRET]");
+  });
+
+  test("redacts replayed and current items at the literal model-call seam", async () => {
+    const filter = secretRedactionModelInputFilter(redact);
+    const output = await filter({
+      modelData: {
+        input: [
+          userMessage(`legacy ${syntheticSecret}`),
+          {
+            type: "function_call_result",
+            callId: "call_safe",
+            output: "Authorization: Bearer synthetic-bearer-value-123456",
+          },
+        ],
+      },
+    } as never);
+
+    const serialized = JSON.stringify(output);
+    expect(serialized).not.toContain(syntheticSecret);
+    expect(serialized).not.toContain("synthetic-bearer-value");
+    expect(serialized).toContain("[redacted:TURN_SECRET]");
+    expect(serialized).toContain("Authorization: Bearer [redacted]");
+  });
+
+  test("safe logging diagnostics exclude stack, cause, and synthetic credentials", () => {
+    const error = Object.assign(new Error(`request rejected; token=${syntheticSecret}`), {
+      status: 401,
+      code: "AUTH_REJECTED",
+      cause: { responseBody: syntheticSecret },
+    });
+    const diagnostic = safeErrorDiagnostic(error, (value) => String(redact(value)));
+
+    expect(diagnostic).toEqual({
+      name: "Error",
+      message: "request rejected; token=[redacted:TURN_SECRET]",
+      status: 401,
+      code: "AUTH_REJECTED",
+    });
+    expect(diagnostic).not.toHaveProperty("stack");
+    expect(diagnostic).not.toHaveProperty("cause");
+    expect(JSON.stringify(diagnostic)).not.toContain(syntheticSecret);
+  });
+
+  test("registers only credential-bearing MCP headers", () => {
+    expect(
+      headerSecretRedactions("MCP", {
+        authorization: "Bearer synthetic-mcp-auth-value-123456",
+        cookie: "session=synthetic-mcp-cookie-value-123456",
+        "x-api-key": "synthetic-mcp-api-key-value-123456",
+        "content-type": "application/json",
+        accept: "application/json",
+        "user-agent": "mcp-client/1.0",
+        "x-page-token": "page-2",
+        "x-signature": "sha256=public-digest",
+      }),
+    ).toEqual([
+      { name: "MCP_AUTHORIZATION", value: "Bearer synthetic-mcp-auth-value-123456" },
+      { name: "MCP_AUTHORIZATION_CREDENTIAL", value: "synthetic-mcp-auth-value-123456" },
+      { name: "MCP_COOKIE", value: "session=synthetic-mcp-cookie-value-123456" },
+      { name: "MCP_X_API_KEY", value: "synthetic-mcp-api-key-value-123456" },
+    ]);
+  });
+
+  test("registers explicit custom static MCP credential headers by provenance", () => {
+    expect(
+      headerSecretRedactions(
+        "MCP_CRM_STATIC",
+        { "Private-Token": "synthetic-static-private-token-123456" },
+        ["Private-Token"],
+      ),
+    ).toEqual([
+      {
+        name: "MCP_CRM_STATIC_PRIVATE_TOKEN",
+        value: "synthetic-static-private-token-123456",
+      },
+    ]);
+  });
+
+  test("registers every renewed MCP header returned by the credential broker", () => {
+    expect(
+      headerSecretRedactions("MCP", { "Private-Token": "synthetic-renewed-private-token-123456" }, [
+        "Private-Token",
+      ]),
+    ).toEqual([
+      {
+        name: "MCP_PRIVATE_TOKEN",
+        value: "synthetic-renewed-private-token-123456",
+      },
+    ]);
+  });
+
+  test("pairs renewed custom MCP values with current names, not stale session metadata", () => {
+    const currentValue = "synthetic-current-private-token-123456";
+    const currentResolvedServer = {
+      id: "crm",
+      headers: { "Private-Token": currentValue, "X-Page-Token": "page-2" },
+      headerNames: ["Private-Token"],
+    };
+    const staleSessionProjection = {
+      id: currentResolvedServer.id,
+      headerNames: ["Old-Private-Token"],
+    };
+    const staleRegistration = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentResolvedServer.headers,
+      staleSessionProjection.headerNames,
+    );
+    const currentHeaderNamesById = new Map([
+      [currentResolvedServer.id, currentResolvedServer.headerNames],
+    ]);
+    const currentRegistration = headerSecretRedactions(
+      "MCP_CRM_STATIC",
+      currentResolvedServer.headers,
+      currentHeaderNamesById.get(currentResolvedServer.id),
+    );
+    const redacted = createSecretRedactor(currentRegistration)(currentResolvedServer.headers);
+
+    expect(staleRegistration).toHaveLength(0);
+    expect(currentRegistration).toEqual([
+      { name: "MCP_CRM_STATIC_PRIVATE_TOKEN", value: currentValue },
+    ]);
+    expect(redacted).toMatchObject({
+      "Private-Token": "[redacted:MCP_CRM_STATIC_PRIVATE_TOKEN]",
+      "X-Page-Token": "page-2",
+    });
+    expect(JSON.stringify(redacted)).not.toContain(currentValue);
+  });
+});
 
 describe("accepted turn execution identity", () => {
   test("separates external billing from the exact Codex allocator identity", () => {
