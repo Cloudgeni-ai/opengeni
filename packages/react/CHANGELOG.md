@@ -1,5 +1,12 @@
 # @opengeni/react
 
+## 0.25.1
+
+### Patch Changes
+
+- 9db6c17: Prevent live session and policy rerenders from repeatedly fetching the same composer draft while preserving target, explicit, and event-driven reloads.
+  - @opengeni/sdk@0.25.0
+
 ## 0.25.0
 
 ### Patch Changes
