@@ -15,6 +15,7 @@ describe("document access migrations", () => {
     expect(sql).toContain("SET \"curation_status\" = 'none'");
     expect(sql).toContain('VALIDATE CONSTRAINT "documents_visibility_chk"');
     expect(sql).toContain("NULLIF(btrim(\"created_by\"), '') IS NOT NULL");
+    expect(sql).toContain("min(id::text)::uuid");
   });
 
   test("builds the Default-base uniqueness guard online", async () => {

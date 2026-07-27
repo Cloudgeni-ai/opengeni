@@ -11,7 +11,7 @@ DECLARE
   duplicate RECORD;
 BEGIN
   FOR duplicate IN
-    SELECT workspace_id, min(id) AS keep_id
+    SELECT workspace_id, min(id::text)::uuid AS keep_id
     FROM document_bases
     WHERE lower(btrim(name)) = 'default'
     GROUP BY workspace_id

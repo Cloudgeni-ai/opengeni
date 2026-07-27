@@ -138,7 +138,7 @@ describe("release schema contract", () => {
         (migrations.has("0127_document_default_base_index.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "f14e5d652f029ef8632177e1fa5805f038244bca127df2c75780139a4ee3917a",
+      "988125394d6a6a96cecfa2a2f97c4d290daa802a749bf8e6fca6193848e3ae3f",
     );
     expect(contract.latestMigration).toBe("0127_document_default_base_index.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
@@ -244,7 +244,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0126_document_access_constraints.sql")).toMatchObject({
-      sha256: "f30583402188a7656fc48d85a5d776b57d5a232e531a5ee8ce7709689398606b",
+      sha256: "0519e1050c51af5b2f1a02def53f20e5e1e116277d85811d0bfef9c567302dba",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0127_document_default_base_index.sql")).toMatchObject({
