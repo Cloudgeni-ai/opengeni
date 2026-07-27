@@ -438,7 +438,7 @@ component "vpc" {
 
 # Incorrect (absolute paths don't work)
 component "vpc" {
-  source = "/Users/username/project/modules/vpc"
+  source = "/path/to/project/modules/vpc"
 }
 ```
 
