@@ -1,5 +1,13 @@
 # @opengeni/runtime
 
+## 0.13.4
+
+### Patch Changes
+
+- ac20b93: Use Bun's native fetch transport for MCP requests so external servers do not hang in the Undici compatibility path.
+- Updated dependencies [55c6559]
+  - @opengeni/config@0.7.1
+
 ## 0.13.3
 
 ### Patch Changes

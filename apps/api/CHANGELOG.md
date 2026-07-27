@@ -1,5 +1,23 @@
 # @opengeni/api-router
 
+## 0.11.2
+
+### Patch Changes
+
+- 55c6559: Retain release-capable source heads with immutable GitHub prereleases and make
+  the unbaked agent installer resolve through an explicitly configured stable
+  version instead of a mutable release alias.
+- Updated dependencies [55c6559]
+- Updated dependencies [ac20b93]
+  - @opengeni/config@0.7.1
+  - @opengeni/runtime@0.13.4
+  - @opengeni/core@0.11.2
+  - @opengeni/db@0.12.1
+  - @opengeni/documents@0.2.31
+  - @opengeni/github@0.3.13
+  - @opengeni/storage@0.2.25
+  - @opengeni/events@0.3.22
+
 ## 0.11.1
 
 ### Patch Changes

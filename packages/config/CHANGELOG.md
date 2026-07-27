@@ -1,5 +1,13 @@
 # @opengeni/config
 
+## 0.7.1
+
+### Patch Changes
+
+- 55c6559: Retain release-capable source heads with immutable GitHub prereleases and make
+  the unbaked agent installer resolve through an explicitly configured stable
+  version instead of a mutable release alias.
+
 ## 0.7.0
 
 ### Minor Changes
