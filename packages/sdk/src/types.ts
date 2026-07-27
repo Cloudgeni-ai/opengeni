@@ -65,6 +65,9 @@ export type SessionCapabilities = {
   os: SandboxOs;
   liveness: "cold" | "warming" | "warm" | "draining";
   leaseEpoch: number;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   FileSystem: {
     available: boolean;
@@ -182,6 +185,9 @@ export type ViewerHolder = {
   sandboxGroupId: string;
   liveness: "cold" | "warming" | "warm" | "draining";
   leaseEpoch: number;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   viewerHeartbeatIntervalMs: number;
   dataPlaneUrl: string | null;
 };
@@ -487,6 +493,13 @@ export type Session = {
   firstPartyMcpPermissions: string[] | null;
   mcpServers: SessionMcpServerMetadata[];
   parentSessionId: string | null;
+  /** Immutable server-authored nested-agent lineage and policy snapshot. */
+  rootSessionId: string;
+  nestedAgentDepth: number;
+  maxNestedAgentDepthOverride: number | null;
+  effectiveMaxNestedAgentDepth: number;
+  nestedAgentDepthPolicySource: "session" | "workspace" | "deployment" | "default";
+  nestedAgentDepthPolicySessionId: string | null;
   createIdempotencyKey: string | null;
   temporalWorkflowId: string | null;
   activeTurnId: string | null;
@@ -1131,7 +1144,7 @@ export type TerminalPtyOutputDeltaPayload = {
 export type TerminalPtyExitedPayload = {
   ptyId: string;
   exitCode: number | null;
-  reason: "exit" | "killed" | "owner_gone" | "timeout";
+  reason: "exit" | "killed" | "owner_gone" | "timeout" | "lost";
 };
 
 // A2 FileSystem request/response.
@@ -1418,8 +1431,8 @@ export type TerminalExecRequest = {
 export type TerminalExecResponse = {
   stdout: string;
   stderr: string;
-  exitCode: number | null;
-  running: boolean;
+  exitCode: number;
+  running: false;
   wallTimeSeconds: number;
 };
 export type PtyOpenRequest = {
@@ -1483,6 +1496,7 @@ export type ScheduledTaskAgentConfig = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type ScheduledTask = {
@@ -1544,6 +1558,10 @@ export type CreateSessionRequest = {
   // double-submit/retry of the same logical create collapse to one session.
   // Distinct from the per-call clientEventId.
   idempotencyKey?: string | undefined;
+  // Exact actor-private pre-session draft revision represented by this create.
+  // The server consumes only this revision after durable initialization.
+  expectedNewSessionDraftRevision?: number | undefined;
+  maxNestedAgentDepth?: number | undefined;
   firstPartyMcpPermissions?: string[] | undefined;
   mcpServers?: SessionMcpServerInput[] | undefined;
   // Shared-sandbox placement (mirror of `@opengeni/contracts` CreateSessionRequest.sandbox,
@@ -2063,12 +2081,14 @@ export type Workspace = {
 export type WorkspaceSettings = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
 export type UpdateWorkspaceSettingsRequest = {
   memoryEnabled?: boolean | undefined;
   transcription?: WorkspaceTranscriptionPolicy | undefined;
+  maxNestedAgentDepth?: number | null | undefined;
   [key: string]: unknown;
 };
 
@@ -2153,6 +2173,36 @@ export type SessionGoalStatus = "active" | "paused" | "completed";
 
 export type SessionGoalCreatedBy = "api" | "agent" | "scheduled_task";
 
+export type SessionGoalContinuationState =
+  | "inactive"
+  | "scheduled"
+  | "running"
+  | "blocked"
+  | "invariant_broken";
+
+export type SessionGoalContinuationReason =
+  | "goal_inactive"
+  | "wake_pending"
+  | "continuation_pending"
+  | "human_work_pending"
+  | "goal_turn_running"
+  | "human_turn_running"
+  | "workstream_paused"
+  | "approval_required"
+  | "provider_backpressure"
+  | "session_cancelled"
+  | "system_work_pending"
+  | "missing_obligation";
+
+export type SessionGoalContinuation = {
+  state: SessionGoalContinuationState;
+  reason: SessionGoalContinuationReason;
+  wakeRevision: number;
+  observedRevision: number;
+  nextAttemptAt: string | null;
+  lastError: string | null;
+};
+
 export type SessionGoal = {
   id: string;
   accountId: string;
@@ -2170,6 +2220,8 @@ export type SessionGoal = {
   noProgressStreak: number;
   maxAutoContinuations: number | null;
   metadata: Record<string, unknown>;
+  /** Optional for source compatibility; the API always supplies this projection. */
+  continuation?: SessionGoalContinuation | undefined;
   createdAt: string;
   updatedAt: string;
 };
@@ -2254,6 +2306,27 @@ export type ComposerDraft = {
   reasoningEffort: ReasoningEffort;
   sourceTurnId: string | null;
   sourceTurnVersion: number | null;
+  updatedAt: string | null;
+};
+
+export type NewSessionDraftOptions = {
+  sandboxBackend?: SandboxBackend | undefined;
+  targetSandboxId?: string | undefined;
+  workingDir?: string | undefined;
+  variableSetId?: string | undefined;
+  rigId?: string | undefined;
+  goal?: GoalSpec | undefined;
+  firstPartyMcpPermissions?: Permission[] | undefined;
+};
+
+export type NewSessionDraft = {
+  revision: number;
+  text: string;
+  resources: ResourceRef[];
+  tools: ToolRef[];
+  model: string;
+  reasoningEffort: ReasoningEffort;
+  options: NewSessionDraftOptions;
   updatedAt: string | null;
 };
 
@@ -2385,6 +2458,10 @@ export type SaveComposerDraftRequest = Omit<
   "revision" | "sourceTurnId" | "sourceTurnVersion" | "updatedAt"
 > & { expectedRevision: number };
 
+export type SaveNewSessionDraftRequest = Omit<NewSessionDraft, "revision" | "updatedAt"> & {
+  expectedRevision: number;
+};
+
 // --- Scheduled tasks: requests + runs ----------------------------------------
 
 /** Input shape for agent config on create/update (server applies defaults). */
@@ -2397,6 +2474,7 @@ export type ScheduledTaskAgentConfigInput = {
   reasoningEffort?: ReasoningEffort | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   goal?: GoalSpec | undefined;
+  maxNestedAgentDepth?: number | undefined;
 };
 
 export type CreateScheduledTaskRequest = {
@@ -3464,6 +3542,9 @@ export type MachineView = {
   state: MachineState;
   active: boolean;
   isSessionGroup: boolean;
+  workspaceGeneration: number | null;
+  archiveGeneration: number | null;
+  archiveComplete: boolean;
   os: string;
   arch: string;
   hasDisplay: boolean;
@@ -3513,7 +3594,10 @@ export type SwapActiveSandboxResponse = {
     | "offline_enrollment"
     | "unsupported_backend_context"
     | "transient_establishment"
-    | "concurrent_swap";
+    | "concurrent_swap"
+    | "recovery_in_progress"
+    | "recovery_degraded"
+    | "recovery_unrecoverable";
 };
 
 // ── Self-hosted enrollment UX (design 11) ────────────────────────────────────

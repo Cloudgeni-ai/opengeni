@@ -468,6 +468,8 @@ export const ErrorCode = z.enum([
   "conflict",
   "idempotency_conflict",
   "limit_exceeded",
+  "nested_agent_depth_exceeded",
+  "nested_agent_depth_override_forbidden",
   "provider_verification_failed",
   "upstream_unavailable",
   "internal_error",
@@ -483,6 +485,45 @@ export const ErrorEnvelope = z.object({
   }),
 });
 export type ErrorEnvelope = z.infer<typeof ErrorEnvelope>;
+
+/** Physical ceiling of the PostgreSQL integer columns that persist depth policy. */
+export const MAX_NESTED_AGENT_DEPTH = 2_147_483_647;
+export const NestedAgentDepthValue = z.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH);
+export type NestedAgentDepthValue = z.infer<typeof NestedAgentDepthValue>;
+/** A denied child can be one greater than the persisted PostgreSQL int ceiling. */
+export const NestedAgentDepthAttemptValue = z
+  .number()
+  .int()
+  .nonnegative()
+  .max(MAX_NESTED_AGENT_DEPTH + 1);
+
+export const NestedAgentDepthPolicySource = z.enum([
+  "session",
+  "workspace",
+  "deployment",
+  "default",
+]);
+export type NestedAgentDepthPolicySource = z.infer<typeof NestedAgentDepthPolicySource>;
+
+/** Durable evidence for a session-create denial at the database admission boundary. */
+export const SessionSpawnDenial = z.object({
+  id: z.string().uuid(),
+  accountId: z.string().uuid(),
+  workspaceId: z.string().uuid(),
+  parentSessionId: z.string().uuid().nullable(),
+  rootSessionId: z.string().uuid().nullable(),
+  currentDepth: NestedAgentDepthValue,
+  attemptedDepth: NestedAgentDepthAttemptValue,
+  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+  requestedMaxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+  policySource: NestedAgentDepthPolicySource,
+  policySessionId: z.string().uuid().nullable(),
+  subjectId: z.string().nullable(),
+  code: z.enum(["nested_agent_depth_exceeded", "nested_agent_depth_override_forbidden"]),
+  idempotencyKey: z.string().nullable(),
+  createdAt: z.string(),
+});
+export type SessionSpawnDenial = z.infer<typeof SessionSpawnDenial>;
 
 export const Permission = z.enum([
   "account:read",
@@ -934,6 +975,9 @@ export const WorkspaceSettingsSchema = z
   .object({
     memoryEnabled: z.boolean().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
+    // null clears the workspace override and falls back to the persisted
+    // deployment policy. The database boundary validates the same range.
+    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
   .passthrough();
 export type WorkspaceSettings = z.infer<typeof WorkspaceSettingsSchema>;
@@ -951,6 +995,7 @@ export const UpdateWorkspaceSettingsRequest = z
   .object({
     memoryEnabled: z.boolean().optional(),
     transcription: WorkspaceTranscriptionPolicy.optional(),
+    maxNestedAgentDepth: NestedAgentDepthValue.nullable().optional(),
   })
   .passthrough();
 export type UpdateWorkspaceSettingsRequest = z.infer<typeof UpdateWorkspaceSettingsRequest>;
@@ -3011,6 +3056,41 @@ export const SessionGoalPausedReason = z.enum([
 ]);
 export type SessionGoalPausedReason = z.infer<typeof SessionGoalPausedReason>;
 
+export const SessionGoalContinuationState = z.enum([
+  "inactive",
+  "scheduled",
+  "running",
+  "blocked",
+  "invariant_broken",
+]);
+export type SessionGoalContinuationState = z.infer<typeof SessionGoalContinuationState>;
+
+export const SessionGoalContinuationReason = z.enum([
+  "goal_inactive",
+  "wake_pending",
+  "continuation_pending",
+  "human_work_pending",
+  "goal_turn_running",
+  "human_turn_running",
+  "workstream_paused",
+  "approval_required",
+  "provider_backpressure",
+  "session_cancelled",
+  "system_work_pending",
+  "missing_obligation",
+]);
+export type SessionGoalContinuationReason = z.infer<typeof SessionGoalContinuationReason>;
+
+export const SessionGoalContinuation = z.object({
+  state: SessionGoalContinuationState,
+  reason: SessionGoalContinuationReason,
+  wakeRevision: z.number().int().nonnegative(),
+  observedRevision: z.number().int().nonnegative(),
+  nextAttemptAt: z.string().datetime({ offset: true }).nullable(),
+  lastError: z.string().nullable(),
+});
+export type SessionGoalContinuation = z.infer<typeof SessionGoalContinuation>;
+
 export const SessionGoal = z.object({
   id: z.string().uuid(),
   accountId: z.string().uuid(),
@@ -3028,6 +3108,9 @@ export const SessionGoal = z.object({
   noProgressStreak: z.number().int().nonnegative(),
   maxAutoContinuations: z.number().int().positive().nullable(),
   metadata: z.record(z.string(), z.unknown()),
+  // Optional for source compatibility with older clients; the API always
+  // supplies this authoritative continuation projection.
+  continuation: SessionGoalContinuation.optional(),
   createdAt: z.string(),
   updatedAt: z.string(),
 });
@@ -3463,6 +3546,45 @@ export const SaveComposerDraftRequest = ComposerDraft.pick({
   reasoningEffort: true,
 }).extend({ expectedRevision: z.number().int().nonnegative() });
 export type SaveComposerDraftRequest = z.infer<typeof SaveComposerDraftRequest>;
+
+/**
+ * Create-only options saved with an actor's private pre-session draft. This is
+ * deliberately narrower than CreateSessionRequest: idempotency/event keys and
+ * credential-bearing MCP server inputs are per-attempt data, never draft state.
+ */
+export const NewSessionDraftOptions = z.object({
+  sandboxBackend: SandboxBackend.optional(),
+  targetSandboxId: z.string().uuid().optional(),
+  workingDir: z.string().min(1).optional(),
+  variableSetId: z.string().uuid().optional(),
+  rigId: z.string().uuid().optional(),
+  goal: GoalSpec.optional(),
+  firstPartyMcpPermissions: z.array(Permission).optional(),
+});
+export type NewSessionDraftOptions = z.infer<typeof NewSessionDraftOptions>;
+
+/** Actor-private, server-authoritative composer state before a session exists. */
+export const NewSessionDraft = z.object({
+  revision: z.number().int().nonnegative(),
+  text: z.string(),
+  resources: z.array(ResourceRef),
+  tools: z.array(ToolRef),
+  model: z.string().min(1),
+  reasoningEffort: ReasoningEffort,
+  options: NewSessionDraftOptions,
+  updatedAt: z.string().nullable(),
+});
+export type NewSessionDraft = z.infer<typeof NewSessionDraft>;
+
+export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
+  text: true,
+  resources: true,
+  tools: true,
+  model: true,
+  reasoningEffort: true,
+  options: true,
+}).extend({ expectedRevision: z.number().int().nonnegative() });
+export type SaveNewSessionDraftRequest = z.infer<typeof SaveNewSessionDraftRequest>;
 
 export const WORKSPACE_CONTROL_REASON_MAX_BYTES = 8 * 1024;
 export const WORKSPACE_CONTROL_ACTOR_MAX_BYTES = 1024;
@@ -4037,6 +4159,9 @@ export const ScheduledTaskAgentConfig = z.object({
   reasoningEffort: ReasoningEffort.optional(),
   sandboxBackend: SandboxBackend.optional(),
   goal: GoalSpec.optional(),
+  // Durable task override. Scheduled dispatch is trusted to preserve this
+  // snapshot even if the workspace/deployment policy narrows later.
+  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
 });
 export type ScheduledTaskAgentConfig = z.infer<typeof ScheduledTaskAgentConfig>;
 
@@ -4772,6 +4897,14 @@ export const Session = z.object({
   // direct API creates and scheduled-task runs. When set, this session's
   // terminal-for-now transitions wake the parent.
   parentSessionId: z.string().uuid().nullable(),
+  // Server-authored nested-agent lineage/policy. Root sessions are depth 0;
+  // snapshots are immutable and govern only future descendant creation.
+  rootSessionId: z.string().uuid(),
+  nestedAgentDepth: NestedAgentDepthValue,
+  maxNestedAgentDepthOverride: NestedAgentDepthValue.nullable(),
+  effectiveMaxNestedAgentDepth: NestedAgentDepthValue,
+  nestedAgentDepthPolicySource: NestedAgentDepthPolicySource,
+  nestedAgentDepthPolicySessionId: z.string().uuid().nullable(),
   // Workspace-scoped CREATE idempotency key the session was created under (the
   // dedup target collapsing double-submit/retry races to one session); null
   // when the create carried no key.
@@ -5450,7 +5583,7 @@ export type TerminalPtyOutputDeltaPayload = z.infer<typeof TerminalPtyOutputDelt
 export const TerminalPtyExitedPayload = z.object({
   ptyId: z.string().uuid(),
   exitCode: z.number().int().nullable(),
-  reason: z.enum(["exit", "killed", "owner_gone", "timeout"]),
+  reason: z.enum(["exit", "killed", "owner_gone", "timeout", "lost"]),
 });
 export type TerminalPtyExitedPayload = z.infer<typeof TerminalPtyExitedPayload>;
 
@@ -5909,7 +6042,8 @@ export type GitShowResponse = z.infer<typeof GitShowResponse>;
 export const TerminalExecRequest = z.object({
   command: z.string().min(1),
   cwd: z.string().default(""), // workspace-relative
-  // Soft per-call wall-clock bound (the box yields output back when reached).
+  // Hard wall-clock bound. A timeout response is returned only after the exact
+  // provider process is physically absent and any retained admission settles.
   timeoutMs: z.number().int().positive().max(120_000).default(30_000),
   // Stream the deltas onto A1 as the agent firehose (so other viewers see it),
   // in addition to returning the buffered result inline.
@@ -5919,10 +6053,10 @@ export type TerminalExecRequest = z.infer<typeof TerminalExecRequest>;
 export const TerminalExecResponse = z.object({
   stdout: z.string(),
   stderr: z.string(),
-  exitCode: z.number().int().nullable(),
-  // True when the process was still running when the call yielded (a long
-  // command); the remaining output drains onto A1 if emitStream was set.
-  running: z.boolean(),
+  exitCode: z.number().int(),
+  // Retained for wire compatibility; synchronous exec never exposes a live
+  // provider process. Interactive work uses the PTY API.
+  running: z.literal(false),
   wallTimeSeconds: z.number().nonnegative(),
 });
 export type TerminalExecResponse = z.infer<typeof TerminalExecResponse>;
@@ -7019,6 +7153,14 @@ export const CreateSessionRequest = withVariableSetIdAlias({
   // creation of a brand-new session. Absent means no create-dedup (each call
   // is an independent create).
   idempotencyKey: z.string().min(1).max(200).optional(),
+  // The exact actor-private pre-session draft revision represented by this
+  // create. The durable initializer consumes only this revision. A newer draft
+  // written by a sibling tab survives, while every failed pre-initialization
+  // create leaves the submitted draft intact.
+  expectedNewSessionDraftRevision: z.number().int().nonnegative().optional(),
+  // A child may lower its inherited limit freely; an increase requires
+  // workspace:admin and is checked again at the DB transaction boundary.
+  maxNestedAgentDepth: NestedAgentDepthValue.optional(),
   // Permissions the session's first-party MCP token should carry. A top-level
   // omission uses the deployment's worker default; a child omission inherits
   // the creating session's effective grant. An explicit set is capped at
@@ -7401,6 +7543,9 @@ export const SessionCapabilities = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // Echoed on viewer heartbeats (the split-brain fence).
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveGeneration: z.number().int().nonnegative().nullable().default(null),
+  archiveComplete: z.boolean().default(false),
   viewerHeartbeatIntervalMs: z.number().int().positive().default(30_000),
   FileSystem: z.object({
     available: z.boolean(),
@@ -7505,6 +7650,9 @@ export const ViewerHolder = z.object({
   liveness: z.enum(["cold", "warming", "warm", "draining"]),
   // The epoch the viewer is fenced on; echoed back on heartbeats.
   leaseEpoch: z.number().int().nonnegative(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   viewerHeartbeatIntervalMs: z.number().int().positive(),
   // The desktop pixel tunnel URL the viewer connects to directly; null until
   // a viewer grant is minted (gated until then).
@@ -7868,6 +8016,9 @@ export const MachineView = z.object({
   state: MachineState,
   active: z.boolean(),
   isSessionGroup: z.boolean(),
+  workspaceGeneration: z.number().int().nonnegative().nullable(),
+  archiveGeneration: z.number().int().nonnegative().nullable(),
+  archiveComplete: z.boolean(),
   os: z.string(),
   arch: z.string(),
   hasDisplay: z.boolean(),
@@ -7927,6 +8078,9 @@ export const SwapActiveSandboxResponse = z.object({
       "unsupported_backend_context",
       "transient_establishment",
       "concurrent_swap",
+      "recovery_in_progress",
+      "recovery_degraded",
+      "recovery_unrecoverable",
     ])
     .optional(),
 });

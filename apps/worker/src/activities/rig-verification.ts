@@ -342,7 +342,7 @@ export class RigVerificationLeaseUnavailableError extends Error {
 
   constructor(
     readonly sandboxGroupId: string,
-    readonly role: "attached" | "rearmed" | "fenced",
+    readonly role: "attached" | "blocked" | "rearmed" | "fenced",
   ) {
     super(`Rig verification requires a new clean sandbox, but lease ${sandboxGroupId} was ${role}`);
   }

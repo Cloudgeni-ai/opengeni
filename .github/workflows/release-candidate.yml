@@ -155,7 +155,7 @@ jobs:
               exit 1
             fi
           done
-          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni:${RELEASE_VERSION}"
+          chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"
           chart_digest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"
           if [[ "$chart_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
             echo "product release version ${RELEASE_VERSION} is already occupied by ${chart_ref}" >&2

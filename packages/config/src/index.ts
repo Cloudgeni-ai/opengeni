@@ -3,6 +3,7 @@ import {
   CAPABILITY_DESCRIPTORS,
   Entitlements,
   EntitlementsMode,
+  MAX_NESTED_AGENT_DEPTH,
   ProductAccessMode,
   ReasoningEffort,
   SandboxBackend,
@@ -210,11 +211,18 @@ const SettingsSchema = z.object({
   publicBaseUrl: z.string().url().optional(),
   // Base URL for the bring-your-own-compute agent release assets the get.<domain>
   // install routes redirect to. Defaults to this repo's GitHub Releases. The route
-  // appends `/download/agent-v<ver>/<asset>` (or `/latest/download/<asset>`).
+  // appends `/download/agent-v<ver>/<asset>`.
   agentReleasesBaseUrl: z
     .string()
     .url()
     .default("https://github.com/Cloudgeni-ai/opengeni/releases"),
+  // Explicit operator-controlled promotion pointer for `/agent/latest/*`.
+  // Versioned agent releases are immutable; changing this setting promotes or
+  // rolls back the stable channel without moving or deleting a provider tag.
+  agentStableVersion: z
+    .string()
+    .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u)
+    .default("0.1.8"),
   productAccessMode: ProductAccessMode.default("local"),
   billingMode: BillingMode.default("disabled"),
   entitlementsMode: EntitlementsMode.default("none"),
@@ -249,6 +257,9 @@ const SettingsSchema = z.object({
   integrationsStateSecret: z.string().optional(),
   integrationsAllowPrivateNetworkTargets: EnvBoolean.default(false),
   integrationsOauthClientsJson: z.string().default("{}"),
+  // Undefined is meaningful: the migration boundary persists the product
+  // default of 3 when no deployment override is supplied.
+  maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -1315,6 +1326,7 @@ export function getSettings(): Settings {
       optional("OPENGENI_OTEL_EXPORTER_OTLP_HEADERS") ?? optional("OTEL_EXPORTER_OTLP_HEADERS"),
     publicBaseUrl: optional("OPENGENI_PUBLIC_BASE_URL"),
     agentReleasesBaseUrl: optional("OPENGENI_AGENT_RELEASES_BASE_URL"),
+    agentStableVersion: optional("OPENGENI_AGENT_STABLE_VERSION"),
     productAccessMode: optional("OPENGENI_PRODUCT_ACCESS_MODE"),
     billingMode: optional("OPENGENI_BILLING_MODE"),
     entitlementsMode: optional("OPENGENI_ENTITLEMENTS_MODE"),
@@ -1335,6 +1347,7 @@ export function getSettings(): Settings {
       "OPENGENI_INTEGRATIONS_ALLOW_PRIVATE_NETWORK_TARGETS",
     ),
     integrationsOauthClientsJson: optional("OPENGENI_INTEGRATIONS_OAUTH_CLIENTS_JSON"),
+    maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),

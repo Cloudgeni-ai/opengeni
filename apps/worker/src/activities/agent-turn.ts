@@ -1,4 +1,6 @@
 import {
+  advanceWorkspaceGeneration,
+  verifyWorkspaceMutationSettlement,
   applySessionTurnSettlement,
   requestSessionTurnRecovery,
   claimSessionWorkForAttempt,
@@ -101,6 +103,7 @@ import {
   sandboxFileDownloadFailureNote,
   SUMMARY_BUFFER_TOKENS,
   runOwnedSandboxSetup,
+  RoutingMutationOutcomeUnknownError,
   swapTargetEstablishability,
   type SandboxFileDownload,
   type SandboxFileDownloadFailure,
@@ -531,6 +534,7 @@ export async function persistOrSignalSessionAttemptQuiescence(input: {
 export async function drainAttemptOwnedSandboxWriters(input: {
   toolCancellationFence: Pick<TurnToolCancellationFence, "cancel" | "waitForQuiescence"> | null;
   cancellationReason?: unknown;
+  gitCredentialRenewals: readonly Pick<GitCredentialRenewalController, "stop">[];
   toolspaceTokenRenewal: Pick<ToolspaceTokenRenewalController, "stop"> | null;
   runCredentialRenewal: Pick<RunCredentialRenewalController, "stop"> | null;
 }): Promise<void> {
@@ -540,6 +544,7 @@ export async function drainAttemptOwnedSandboxWriters(input: {
     );
     await input.toolCancellationFence.waitForQuiescence();
   }
+  await Promise.all(input.gitCredentialRenewals.map(async (renewal) => await renewal.stop()));
   await input.toolspaceTokenRenewal?.stop();
   await input.runCredentialRenewal?.stop();
 }
@@ -1538,6 +1543,19 @@ export function computerToolModeForTurn(
   return "hosted";
 }
 
+/**
+ * Decide whether this turn's provider accepts typed file/image content in a
+ * user message. The legacy built-in client and registry Responses clients use
+ * the Agents SDK Responses converter, which supports `input_image` and
+ * `input_file`. Chat-completions providers retain the sandbox-path projection
+ * until that transport declares and proves an equivalent capability.
+ */
+export function modelAcceptsTypedAttachmentContentForTurn(
+  resolvedModel: { provider: { api: ModelProviderApi } } | null,
+): boolean {
+  return resolvedModel === null || resolvedModel.provider.api === "responses";
+}
+
 export type TurnSandboxProvisioner<T> = {
   get(): Promise<T>;
   hasStarted(): boolean;
@@ -2028,6 +2046,10 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // run. null when the flag is off (byte-for-byte the legacy build-and-discard
     // path) OR when the backend is "none". Released + dropped in `finally`.
     let resolvedSandbox: ResumedTurnSandbox | null = null;
+    const requireResolvedSandboxForMutation = (message: string): ResumedTurnSandbox => {
+      if (!resolvedSandbox) throw new Error(message);
+      return resolvedSandbox;
+    };
     // The machine-primary SelfhostedSession (the UNWRAPPED backend, not the
     // routing proxy): held so the turn's completion can final-ack this turn's
     // settled op-stream ops AFTER the results are durably persisted.
@@ -2039,11 +2061,102 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
     // THIS handle so a mid-turn sandbox_swap can never re-route those execs onto a
     // connected machine (the user's real computer).
     let setupBoxSession: unknown = null;
+    // A same-target API repair can replace the home provider while this turn is
+    // alive. Keep setup/snapshot persistence on the rebound raw session while
+    // preserving the SDK-owned routing proxy for eager turns. Lazy turns hold the
+    // proxy separately, so their worker-side handle may replace its raw session.
+    const onHomeSandboxRebound = (rebound: {
+      established: EstablishedSandboxSession;
+      leaseEpoch: number;
+    }): void => {
+      const current = resolvedSandbox;
+      const previousSession = current?.established.session;
+      const preserveRoutingProxy = current !== null && previousSession !== setupBoxSession;
+      setupBoxSession = rebound.established.session;
+      if (!current) return;
+      current.leaseEpoch = rebound.leaseEpoch;
+      current.established = preserveRoutingProxy
+        ? {
+            ...current.established,
+            client: rebound.established.client,
+            // Keep the stable SDK-facing proxy; only its resolver changes the
+            // underlying backend. The worker's setupBoxSession above is raw.
+            session: previousSession,
+            sessionState: rebound.established.sessionState,
+            instanceId: rebound.established.instanceId,
+            backendId: rebound.established.backendId,
+            ...(rebound.established.origin ? { origin: rebound.established.origin } : {}),
+            ...(rebound.established.restoredArchive
+              ? { restoredArchive: rebound.established.restoredArchive }
+              : {}),
+          }
+        : rebound.established;
+    };
     // The globally unique durable turn-attempt holder id + the group id,
     // captured so the lease heartbeat can refresh the lease TTL epoch-fenced
     // (a superseded owner self-evicts) and finally can release.
     let sandboxHolderId: TurnSandboxLeaseHolderId | null = null;
     let sandboxGroupId: string | null = null;
+    const runWorkspaceMutationForSandbox = async <T>(
+      sandbox: ResumedTurnSandbox,
+      operation: string,
+      mutation: () => Promise<T>,
+    ): Promise<T> => {
+      // Connected machines are the user's own persistence and never dirty the
+      // cloud home archive. Every persistable raw-session write batch is fenced
+      // against the exact current lease/provider before the provider sees it.
+      if (sandbox.established.backendId === "selfhosted") return await mutation();
+      if (!sandboxGroupId || !sandboxHolderId || !turnId || executionGeneration <= 0) {
+        throw new Error("Workspace mutation attempted before exact turn sandbox admission");
+      }
+      const identity = {
+        accountId: input.accountId,
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        turnId,
+        executionGeneration,
+        attemptId: input.attemptId,
+        holderId: sandboxHolderId,
+        sandboxGroupId,
+        expectedEpoch: sandbox.leaseEpoch,
+        expectedInstanceId: sandbox.established.instanceId,
+        operation,
+      };
+      const admission = await advanceWorkspaceGeneration(db, identity);
+      let result: T;
+      try {
+        result = await mutation();
+      } catch (providerError) {
+        try {
+          await verifyWorkspaceMutationSettlement(db, {
+            ...identity,
+            admission,
+            outcome: "rejected",
+          });
+        } catch (settlementError) {
+          throw new RoutingMutationOutcomeUnknownError(
+            operation,
+            `Platform workspace mutation "${operation}" rejected at the provider but lost its durable physical settlement; its outcome is unknown and it was not replayed`,
+            { cause: settlementError },
+          );
+        }
+        throw providerError;
+      }
+      try {
+        await verifyWorkspaceMutationSettlement(db, {
+          ...identity,
+          admission,
+          outcome: "resolved",
+        });
+      } catch (settlementError) {
+        throw new RoutingMutationOutcomeUnknownError(
+          operation,
+          `Platform workspace mutation "${operation}" returned from the provider but lost its durable settlement fence; its outcome is unknown and it was not replayed`,
+          { cause: settlementError },
+        );
+      }
+      return result;
+    };
     // Lease-TTL refresh timer (parallels the activity heartbeat): while the turn
     // runs it refreshes expires_at epoch-fenced so a legit multi-day turn is
     // never TTL-reaped. Cleared in finally. Only set when the flag resolved a box.
@@ -4043,6 +4156,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const attachGitCredentialRenewal = async (
         tokenSession: GitCredentialTokenWriterSession,
         initial: MintedRunGitCredentials | undefined,
+        initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!initial || initial.bindings.length === 0) return;
         const previous = gitCredentialRenewals;
@@ -4087,16 +4201,25 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 throw new Error("credential renewal produced no binding token");
               }
               const runAs = sandboxRunAs(runSettings);
-              await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding], {
-                ...(runAs ? { runAs } : {}),
-                ...(toolCancellationFenceRef.current
-                  ? {
-                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                        toolCancellationFenceRef.current,
-                      ),
-                    }
-                  : {}),
-              });
+              const targetSandbox = resolvedSandbox ?? initialSandbox;
+              if (!targetSandbox) {
+                throw new Error("Git credential renewal has no exact sandbox lease target");
+              }
+              await runWorkspaceMutationForSandbox(
+                targetSandbox,
+                "gitCredentialRenewal",
+                async () =>
+                  await refreshGitCredentialBindingTokenFiles(tokenSession, [pendingBinding!], {
+                    ...(runAs ? { runAs } : {}),
+                    ...(toolCancellationFenceRef.current
+                      ? {
+                          commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                            toolCancellationFenceRef.current,
+                          ),
+                        }
+                      : {}),
+                  }),
+              );
             },
             onSuccess: ({ providers: renewedProviders }) => {
               for (const provider of renewedProviders) {
@@ -4135,6 +4258,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const attachToolspaceTokenRenewal = async (
         tokenSession: ToolspaceTokenWriterSession,
         initialExpiresAt = sandboxToolspaceTokenExpiresAt,
+        initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!sandboxToolspaceToken || !initialExpiresAt) return;
         const previous = toolspaceTokenRenewal;
@@ -4146,22 +4270,31 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           await mintSandboxToolspaceToken(runSettings, connectionScope, toolspaceAuthority);
         const write = async (material: NonNullable<Awaited<ReturnType<typeof mint>>>) => {
           const runAs = sandboxRunAs(runSettings);
-          await refreshToolspaceTokenFile(tokenSession, material.token, {
-            ...(runAs ? { runAs } : {}),
-            ...(sandboxToolspaceTokenFile
-              ? {
-                  tokenFile: sandboxToolspaceTokenFile,
-                  legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
-                }
-              : {}),
-            ...(toolCancellationFenceRef.current
-              ? {
-                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                    toolCancellationFenceRef.current,
-                  ),
-                }
-              : {}),
-          });
+          const targetSandbox = resolvedSandbox ?? initialSandbox;
+          if (!targetSandbox) {
+            throw new Error("Toolspace token renewal has no exact sandbox lease target");
+          }
+          await runWorkspaceMutationForSandbox(
+            targetSandbox,
+            "toolspaceTokenRenewal",
+            async () =>
+              await refreshToolspaceTokenFile(tokenSession, material.token, {
+                ...(runAs ? { runAs } : {}),
+                ...(sandboxToolspaceTokenFile
+                  ? {
+                      tokenFile: sandboxToolspaceTokenFile,
+                      legacyTokenFile: sandboxEnvironment.OPENGENI_TOOLSPACE_TOKEN_FILE!,
+                    }
+                  : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
+              }),
+          );
         };
         let renewalExpiresAt = initialExpiresAt;
         if (renewalExpiresAt.getTime() <= Date.now() + TOOLSPACE_TOKEN_EXPIRY_LEAD_MS) {
@@ -4206,6 +4339,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
 
       const attachRunCredentialRenewal = async (
         credentialSession: RunCredentialCommandSession,
+        initialSandbox?: ResumedTurnSandbox,
       ): Promise<void> => {
         if (!runCredentialResolver) return;
         const previous = runCredentialRenewal;
@@ -4214,15 +4348,28 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         if (runCredentialRenewalClosed) return;
         runCredentialSession = credentialSession;
 
+        const requireTargetSandbox = (): ResumedTurnSandbox => {
+          const targetSandbox = resolvedSandbox ?? initialSandbox;
+          if (!targetSandbox) {
+            throw new Error("Run credential mutation has no exact sandbox lease target");
+          }
+          return targetSandbox;
+        };
+
         if (!initialRunCredentialMaterial) {
-          await clearRunCredentials(
-            credentialSession,
-            input.sessionId,
-            toolCancellationFenceRef.current
-              ? toolCancellationFenceRef.current.runSandboxCommand.bind(
-                  toolCancellationFenceRef.current,
-                )
-              : undefined,
+          await runWorkspaceMutationForSandbox(
+            requireTargetSandbox(),
+            "runCredentialClear",
+            async () =>
+              await clearRunCredentials(
+                credentialSession,
+                input.sessionId,
+                toolCancellationFenceRef.current
+                  ? toolCancellationFenceRef.current.runSandboxCommand.bind(
+                      toolCancellationFenceRef.current,
+                    )
+                  : undefined,
+              ),
           );
           return;
         }
@@ -4232,33 +4379,43 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           pruneOtherAttempts = false,
         ): Promise<void> => {
           if (!material) {
-            await clearRunCredentialsForAttempt(credentialSession, {
-              sessionId: input.sessionId,
-              attemptId: input.attemptId,
-              executionGeneration,
-            });
+            await runWorkspaceMutationForSandbox(
+              requireTargetSandbox(),
+              "runCredentialAttemptClear",
+              async () =>
+                await clearRunCredentialsForAttempt(credentialSession, {
+                  sessionId: input.sessionId,
+                  attemptId: input.attemptId,
+                  executionGeneration,
+                }),
+            );
             return;
           }
           registerSecretRedactions(material.redactions);
-          await materializeRunCredentials(credentialSession, material, {
-            sessionId: input.sessionId,
-            attemptId: input.attemptId,
-            executionGeneration,
-            ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
-            ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
-            ...(material.authNeeded.length > 0 &&
-            Object.keys(material.environment).length === 0 &&
-            material.files.length === 0
-              ? { prunePreviousGenerations: true }
-              : {}),
-            ...(toolCancellationFenceRef.current
-              ? {
-                  commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                    toolCancellationFenceRef.current,
-                  ),
-                }
-              : {}),
-          });
+          await runWorkspaceMutationForSandbox(
+            requireTargetSandbox(),
+            "runCredentialMaterialization",
+            async () =>
+              await materializeRunCredentials(credentialSession, material, {
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                executionGeneration,
+                ...(pruneOtherAttempts ? { pruneOtherAttempts: true } : {}),
+                ...(!pruneOtherAttempts ? { pruneSupersededGenerations: true } : {}),
+                ...(material.authNeeded.length > 0 &&
+                Object.keys(material.environment).length === 0 &&
+                material.files.length === 0
+                  ? { prunePreviousGenerations: true }
+                  : {}),
+                ...(toolCancellationFenceRef.current
+                  ? {
+                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                        toolCancellationFenceRef.current,
+                      ),
+                    }
+                  : {}),
+              }),
+          );
           for (const payload of runCredentialAuthNeededPayloads(material)) {
             const key = JSON.stringify(payload);
             if (publishedRunCredentialNotices.has(key)) continue;
@@ -4404,11 +4561,18 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                 settings,
                 bus,
                 onOp: machineOpObserver.observer,
+                onHomeSandboxRebound,
               },
               {
                 workspaceId: input.workspaceId,
                 sessionId: input.sessionId,
                 environment: sandboxEnvironment,
+                workspaceMutationFence: {
+                  accountId: input.accountId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
+                },
                 pinnedSelfhosted: {
                   sandboxId: activeSandboxPointer!.activeSandboxId!,
                   epoch: activeSandboxPointer!.activeEpoch,
@@ -4493,24 +4657,41 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
           // the flag off the established group box is injected unchanged (today's
           // path). The lease still owns the group box lifecycle — the proxy is a
           // routing veneer, not an owner.
-          if (routingEnabled(settings)) {
-            resolvedSandbox = {
-              ...resolvedSandbox,
-              established: wrapTurnBoxWithRouting(
-                { db, settings, bus },
-                // Thread the SAME declared environment the group box was created with
-                // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
-                // carries it too — the SDK's per-turn manifest-env delta stays empty
-                // (no "cannot change manifest environment variables" throw).
-                {
-                  workspaceId: input.workspaceId,
-                  sessionId: input.sessionId,
-                  environment: sandboxEnvironment,
+          resolvedSandbox = {
+            ...resolvedSandbox,
+            established: wrapTurnBoxWithRouting(
+              {
+                db,
+                settings,
+                bus,
+                onHomeSandboxLost: publishSandboxLost,
+                onHomeSandboxRebound,
+              },
+              // Thread the SAME declared environment the group box was created with
+              // (resumeBoxForTurn, above) so a selfhosted swap target's manifest
+              // carries it too — the SDK's per-turn manifest-env delta stays empty
+              // (no "cannot change manifest environment variables" throw).
+              {
+                workspaceId: input.workspaceId,
+                sessionId: input.sessionId,
+                environment: sandboxEnvironment,
+                workspaceMutationFence: {
+                  accountId: input.accountId,
+                  turnId: turn.id,
+                  executionGeneration,
+                  attemptId: input.attemptId,
                 },
-                resolvedSandbox.established,
-              ),
-            };
-          }
+                homeLease: {
+                  accountId: input.accountId,
+                  sandboxGroupId: session.sandboxGroupId,
+                  leaseEpoch: resolvedSandbox.leaseEpoch,
+                  instanceId: resolvedSandbox.established.instanceId,
+                  backend: groupBoxBackend,
+                },
+              },
+              resolvedSandbox.established,
+            ),
+          };
         }
         if (resolvedSandbox) {
           startLeaseHeartbeat(resolvedSandbox, activeSandboxBackend ?? groupBoxBackend);
@@ -4820,6 +5001,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             await publishSandboxLifecycleEvents(provisioned);
             await attachRunCredentialRenewal(
               provisioned.established.session as RunCredentialCommandSession,
+              provisioned,
             );
             const provisionedSetupSession = initialRunCredentialMaterial
               ? withRunCredentialsSession(
@@ -4827,39 +5009,46 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                   input.sessionId,
                 )
               : provisioned.established.session;
-            await runOwnedSandboxSetup(
-              agent,
-              provisioned.established.session as never,
-              provisionedSetupSession as never,
-              {
-                settings: runSettings,
-                environment: sandboxEnvironment,
-                onRuntimeEvent: async (event) => {
-                  await publish?.([{ type: event.type, payload: event.payload }], true);
-                },
-                ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
-                ...(lazyGitCredentials?.bindings
-                  ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
-                  : {}),
-                ...(lazyToolspaceToken
-                  ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
-                  : {}),
-                ...(toolCancellationFenceRef.current
-                  ? {
-                      commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                        toolCancellationFenceRef.current,
-                      ),
-                    }
-                  : {}),
-              },
+            await runWorkspaceMutationForSandbox(
+              provisioned,
+              "lazyOwnedSandboxSetup",
+              async () =>
+                await runOwnedSandboxSetup(
+                  agent,
+                  provisioned.established.session as never,
+                  provisionedSetupSession as never,
+                  {
+                    settings: runSettings,
+                    environment: sandboxEnvironment,
+                    onRuntimeEvent: async (event) => {
+                      await publish?.([{ type: event.type, payload: event.payload }], true);
+                    },
+                    ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
+                    ...(lazyGitCredentials?.bindings
+                      ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
+                      : {}),
+                    ...(lazyToolspaceToken
+                      ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
+                      : {}),
+                    ...(toolCancellationFenceRef.current
+                      ? {
+                          commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                            toolCancellationFenceRef.current,
+                          ),
+                        }
+                      : {}),
+                  },
+                ),
             );
             await attachToolspaceTokenRenewal(
               provisioned.established.session as ToolspaceTokenWriterSession,
               lazyToolspaceToken?.expiresAt,
+              provisioned,
             );
             await attachGitCredentialRenewal(
               provisioned.established.session as GitCredentialTokenWriterSession,
               lazyGitCredentials,
+              provisioned,
             );
             // Return the REAL established box (NOT a copy whose session is the routing
             // proxy). resolveActiveBackend dispatches ops to `provisioned.established.session`;
@@ -4929,17 +5118,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             settings,
             bus,
             onOp: machineOpObserver.observer,
+            onHomeSandboxLost: publishSandboxLost,
+            onHomeSandboxRebound,
           },
           {
             workspaceId: input.workspaceId,
             sessionId: input.sessionId,
             environment: sandboxEnvironment,
+            workspaceMutationFence: {
+              accountId: input.accountId,
+              turnId: turn.id,
+              executionGeneration,
+              attemptId: input.attemptId,
+            },
           },
           {
             client: lazyClient,
             backendId: sdkBackendIdForSandboxBackend(groupBoxBackend),
             agentDefaultManifest,
             provisioner: turnSandboxProvisioner,
+            homeLeaseIdentity: {
+              accountId: input.accountId,
+              sandboxGroupId: session.sandboxGroupId,
+              backend: groupBoxBackend,
+            },
           },
         );
       }
@@ -5061,22 +5263,27 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         );
         const runAs = sandboxRunAs(runSettings);
         if (downloadsToMaterialize.length > 0) {
-          const materialized = await materializeSandboxFileDownloads(
-            setupBoxSession as any,
-            downloadsToMaterialize,
-            {
-              onRuntimeEvent: async (event) => {
-                await publish!([{ type: event.type, payload: event.payload }], true);
-              },
-              ...(runAs ? { runAs } : {}),
-              ...(toolCancellationFenceRef.current
-                ? {
-                    commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
-                      toolCancellationFenceRef.current,
-                    ),
-                  }
-                : {}),
-            },
+          const materialized = await runWorkspaceMutationForSandbox(
+            resolvedSandbox,
+            "fileMaterialization",
+            async () =>
+              await materializeSandboxFileDownloads(
+                setupBoxSession as any,
+                downloadsToMaterialize,
+                {
+                  onRuntimeEvent: async (event) => {
+                    await publish!([{ type: event.type, payload: event.payload }], true);
+                  },
+                  ...(runAs ? { runAs } : {}),
+                  ...(toolCancellationFenceRef.current
+                    ? {
+                        commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                          toolCancellationFenceRef.current,
+                        ),
+                      }
+                    : {}),
+                },
+              ),
           );
           fileMaterializationFailures = materialized.failures;
           const failedFileIds = new Set(materialized.failures.map((failure) => failure.fileId));
@@ -5124,6 +5331,11 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
             recovering: turn.executionGeneration > 1,
             ...(unavailableSandboxFilesNote ? { unavailableSandboxFilesNote } : {}),
             ...(runCredentialsNote ? { runCredentialsNote } : {}),
+            ...(modelAcceptsTypedAttachmentContentForTurn(resolvedModel) && objectStorage
+              ? {
+                  readFileBytesForModel: (file) => objectStorage.getFileBytes(file),
+                }
+              : {}),
           },
         );
         runInput = prepared.input;
@@ -5238,8 +5450,50 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         throwIfWorkerShuttingDown();
         throwIfTurnCancelled();
         const ownedEstablished = resolvedSandbox?.established ?? lazyOwnedSandbox;
-        const runStreamOnce = (): ReturnType<OpenGeniRuntime["runStream"]> =>
-          runtime.runStream(agent, runInput!, modelRunSettings, {
+        const runStreamOnce = async (): ReturnType<OpenGeniRuntime["runStream"]> => {
+          // Eager owned sessions must settle the exact platform-setup provider
+          // promise before the long model stream starts; otherwise one admission
+          // would remain in flight for the entire turn and suppress every
+          // heartbeat capture. Lazy setup already runs under the same wrapper in
+          // its first-operation provisioner above.
+          if (resolvedSandbox && !lazyOwnedSandbox && ownedEstablished) {
+            const eagerSetupSession = setupBoxSession ?? ownedEstablished.session;
+            await runWorkspaceMutationForSandbox(
+              resolvedSandbox,
+              "eagerOwnedSandboxSetup",
+              async () =>
+                await runOwnedSandboxSetup(
+                  agent,
+                  ownedEstablished.session as never,
+                  eagerSetupSession as never,
+                  {
+                    settings: runSettings,
+                    environment: sandboxEnvironment,
+                    preparedInput: runInput!,
+                    ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
+                    onRuntimeEvent: async (event) => {
+                      await renewCodexLease("runtime_event");
+                      if (codexLeaseLost) {
+                        throw new Error("Codex credential lease expired during sandbox setup");
+                      }
+                      await publish!([{ type: event.type, payload: event.payload }], true);
+                    },
+                    ...(toolCancellationFenceRef.current
+                      ? {
+                          commandRunner: toolCancellationFenceRef.current.runSandboxCommand.bind(
+                            toolCancellationFenceRef.current,
+                          ),
+                        }
+                      : {}),
+                  },
+                ),
+            );
+            await attachGitCredentialRenewal(
+              eagerSetupSession as GitCredentialTokenWriterSession,
+              initialGitCredentials,
+            );
+          }
+          return await runtime.runStream(agent, runInput!, modelRunSettings, {
             ...(activityContext ? { signal: activityContext.cancellationSignal } : {}),
             sandboxEnvironment,
             onRuntimeEvent: async (event) => {
@@ -5266,16 +5520,9 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     // re-route those execs onto a machine swapped in mid-turn.
                     ...(setupBoxSession ? { setupSession: setupBoxSession } : {}),
                     ...(fileDownloadsMaterializedForRun ? { fileDownloadsMaterialized: true } : {}),
-                    ...(lazyOwnedSandbox ? { deferredSetup: true } : {}),
-                  },
-                }
-              : {}),
-            ...(initialGitCredentials
-              ? {
-                  onGitCredentialSessionReady: async (
-                    tokenSession: GitCredentialTokenWriterSession,
-                  ) => {
-                    await attachGitCredentialRenewal(tokenSession, initialGitCredentials);
+                    // Both owned paths execute setup outside runStream: eager just
+                    // above under its exact admission, lazy in the provisioner.
+                    deferredSetup: true,
                   },
                 }
               : {}),
@@ -5316,6 +5563,7 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               ? { turnToolCancellationFence: toolCancellationFenceRef.current }
               : {}),
           });
+        };
         if (codexLeaseLost) {
           throw new Error("Codex credential lease expired before the model run");
         }
@@ -6749,10 +6997,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
       const finalizerSignal = turnFinalizerCancellationSignal(cancellationSignal, activityStatus);
       try {
         const toolCancellationFence = toolCancellationFenceRef.current;
-        // Toolspace and run-credential renewals are attempt-owned sandbox
-        // writers. Capture and close them before crossing the same authoritative
-        // boundary as tool calls; none of these drains may race the already-
-        // aborted Temporal signal.
+        // Every renewal controller is an attempt-owned sandbox writer. Capture
+        // and close all of them before the tool/run-writer drain and before the
+        // quiescence receipt; none may start another admitted write afterward.
+        gitCredentialRenewalClosed = true;
+        const gitRenewalsToStop = gitCredentialRenewals;
+        gitCredentialRenewals = [];
         toolspaceTokenRenewalClosed = true;
         const toolspaceRenewalToStop =
           toolspaceTokenRenewal as ToolspaceTokenRenewalController | null;
@@ -6760,9 +7010,30 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
         runCredentialRenewalClosed = true;
         const runRenewalToStop = runCredentialRenewal as RunCredentialRenewalController | null;
         runCredentialRenewal = null;
+
+        // Attempt-qualified credential deletion is also a real workspace write.
+        // Perform it under the same admission fence before publishing physical
+        // quiescence; a failure deliberately keeps the receipt closed.
+        const credentialSessionToClear = runCredentialSession;
+        runCredentialSession = null;
+        if (credentialSessionToClear) {
+          await runWorkspaceMutationForSandbox(
+            requireResolvedSandboxForMutation(
+              "Run credential cleanup has no exact sandbox lease target",
+            ),
+            "runCredentialAttemptClear",
+            async () =>
+              await clearRunCredentialsForAttempt(credentialSessionToClear, {
+                sessionId: input.sessionId,
+                attemptId: input.attemptId,
+                executionGeneration,
+              }),
+          );
+        }
         await drainAttemptOwnedSandboxWriters({
           toolCancellationFence: acknowledgeQuiescence ? toolCancellationFence : null,
           cancellationReason: cancellationSignal?.reason,
+          gitCredentialRenewals: gitRenewalsToStop,
           toolspaceTokenRenewal: toolspaceRenewalToStop,
           runCredentialRenewal: runRenewalToStop,
         });
@@ -6841,43 +7112,6 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               "opengeni.activity_id": dispatchId,
             });
           }
-        }
-        // Deleting this attempt's credential generation is post-receipt
-        // housekeeping: pointer mutation is serialized with successor
-        // activation and the attempt-qualified check cannot erase a successor.
-        // It may therefore detach on cancellation without weakening the writer
-        // drain that gates the receipt above.
-        const credentialSessionToClear = runCredentialSession;
-        runCredentialSession = null;
-        if (credentialSessionToClear) {
-          const cleanup = clearRunCredentialsForAttempt(credentialSessionToClear, {
-            sessionId: input.sessionId,
-            attemptId: input.attemptId,
-            executionGeneration,
-          }).catch((error: unknown) => {
-            try {
-              observability.incrementCounter({
-                name: "opengeni_run_credential_cleanup_total",
-                help: "Attempt-owned run credential cleanup outcomes.",
-                labels: { outcome: "error" },
-              });
-              observability.warn("Attempt-owned run credential cleanup failed", {
-                sessionId: input.sessionId,
-                turnId,
-                attemptId: input.attemptId,
-                errorClass: error instanceof Error ? error.name : "UnknownError",
-              });
-            } catch {
-              // Cleanup observability must not own finalizer liveness.
-            }
-          });
-          await waitForTurnFinalizerStep(cleanup, finalizerSignal);
-        }
-        gitCredentialRenewalClosed = true;
-        const renewalsToStop = gitCredentialRenewals;
-        gitCredentialRenewals = [];
-        for (const renewal of renewalsToStop) {
-          await waitForTurnFinalizerStep(renewal.stop(), finalizerSignal);
         }
         // Drain the buffered Connected Machine op events (infra failures + healed
         // recoveries) to durable session events — awaited, best-effort, never blocking

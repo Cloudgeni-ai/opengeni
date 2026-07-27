@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Buffer } from "node:buffer";
 import {
+  MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS,
   MCP_MAX_INBOUND_REQUEST_BYTES,
   MCP_MAX_SELECTED_SERVERS,
   MCP_MAX_TOOL_RESULT_BYTES,
@@ -13,6 +14,7 @@ import {
   boundedParallelMap,
   boundMcpResponseBody,
   guardedMcpFetch,
+  mcpOuterConnectTimeoutMs,
 } from "../src/mcp-network";
 
 const testSettings = {
@@ -21,6 +23,12 @@ const testSettings = {
 };
 
 describe("MCP network and payload boundary", () => {
+  test("keeps the outer Agents SDK connect fence at least as large as configured transports", () => {
+    expect(mcpOuterConnectTimeoutMs([])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
+    expect(mcpOuterConnectTimeoutMs([5_000, undefined])).toBe(MCP_DEFAULT_OUTER_CONNECT_TIMEOUT_MS);
+    expect(mcpOuterConnectTimeoutMs([30_000, 15_000, undefined])).toBe(30_000);
+  });
+
   test("pins the final transport, forces manual redirects, and rejects declared oversize", async () => {
     let redirect: RequestRedirect | undefined;
     const guarded = guardedMcpFetch(
@@ -39,6 +47,30 @@ describe("MCP network and payload boundary", () => {
       McpPayloadTooLargeError,
     );
     expect(redirect).toBe("manual");
+  });
+
+  test("validates before the Bun-native transport without passing an Undici dispatcher", async () => {
+    let seenInit: RequestInit | undefined;
+    const guarded = guardedMcpFetch(
+      testSettings,
+      async (_input, init) => {
+        seenInit = init;
+        return Response.json({ ok: true });
+      },
+      {
+        dnsLookup: async () => [{ address: "1.1.1.1", family: 4 }],
+        pinResolvedDestination: false,
+      },
+    );
+
+    const response = await guarded("https://example.test/mcp", {
+      method: "POST",
+      headers: { authorization: "Bearer test" },
+    });
+    expect(await response.json()).toEqual({ ok: true });
+    expect(seenInit?.redirect).toBe("manual");
+    expect(seenInit?.method).toBe("POST");
+    expect("dispatcher" in (seenInit ?? {})).toBe(false);
   });
 
   test("errors on the first streamed byte past the response ceiling", async () => {

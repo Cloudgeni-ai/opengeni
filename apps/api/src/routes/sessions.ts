@@ -60,13 +60,14 @@ import {
   acceptSessionHumanInputResponse,
   clearSessionGoal,
   clearSessionContext,
-  closePtySession,
   getOpenPtySession,
+  getRetainedProcess,
   getSandbox,
   getSession,
   getSessionForSubject,
   getSessionGoal,
   getSessionHumanInputRequest,
+  getSessionGoalWithContinuation,
   getSessionQueueSnapshot,
   getStreamAcknowledgment,
   insertPtySession,
@@ -90,9 +91,10 @@ import {
   SessionListSnapshotLimitError,
   decodeSessionListCursor,
   revokeViewer,
-  setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
   SessionContextBusyError,
@@ -100,6 +102,9 @@ import {
   latestWorkspaceCapture,
   workspaceCaptureAtRevision,
   type AppendEventInput,
+  type SandboxOpenPtySessionRow,
+  type SandboxPtyProcessIdentity,
+  type SandboxRetainedProcess,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -107,8 +112,8 @@ import {
   coalesceSessionEventDeltas,
   publishDurableSessionEvents,
 } from "@opengeni/events";
-import { z } from "zod";
-import { withChannelA } from "../sandbox/channel-a";
+import { z, ZodError } from "zod";
+import { withChannelA, type ChannelAContext, type ChannelAHandle } from "../sandbox/channel-a";
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
@@ -133,6 +138,7 @@ import {
   viewerHeartbeatIntervalMs,
   type DesktopStreamMint,
   type TerminalStreamMint,
+  type ViewerServices,
 } from "../sandbox/viewer";
 import {
   acceptSessionUserMessage,
@@ -140,10 +146,14 @@ import {
   createSessionForRequest,
   deleteHumanQueuePrompt,
   editHumanQueuePrompt,
+  getActorNewSessionDraft,
   getHumanComposerDraft,
   moveHumanQueuePrompt,
   readSessionLineage,
   saveHumanComposerDraft,
+  saveActorNewSessionDraft,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   steerHumanQueuePrompt,
   updateSessionMcpApprovalPolicy,
   updateSessionTitle,
@@ -156,8 +166,105 @@ import { assertSessionExists, boundedLimit } from "../http/common";
 import { sseSessionStream } from "../http/sse";
 import { serveWorkspaceCapture, serveWorkspaceCaptureFile } from "./workspace-capture";
 
-export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
+type SessionRouteDeps = ApiRouteDeps & Pick<ViewerServices, "establishSandboxSession">;
+
+export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
   const { settings, db, bus, workflowClient, objectStorage } = deps;
+  const ptyIdentity = (pty: SandboxOpenPtySessionRow): SandboxPtyProcessIdentity => ({
+    leaseId: pty.leaseId,
+    sandboxGroupId: pty.sandboxGroupId,
+    retainedProcessId: pty.retainedProcessId,
+    openAdmissionId: pty.openAdmissionId,
+    execSessionId: pty.execSessionId,
+    leaseEpoch: pty.leaseEpoch,
+    providerBackend: pty.providerBackend,
+    providerInstanceId: pty.providerInstanceId,
+    routeKind: pty.routeKind,
+    routeTargetId: pty.routeTargetId,
+    routeEpoch: pty.routeEpoch,
+  });
+  const adoptPtyProcess = async (
+    ctx: ChannelAContext,
+    handle: ChannelAHandle,
+    pty: SandboxOpenPtySessionRow,
+  ): Promise<SandboxRetainedProcess> => {
+    const process = await getRetainedProcess(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      processId: pty.retainedProcessId,
+    });
+    if (
+      !process ||
+      process.state !== "active" ||
+      process.ownerActorKind !== "direct" ||
+      process.accountId !== ctx.accountId ||
+      process.leaseId !== pty.leaseId ||
+      process.sandboxGroupId !== pty.sandboxGroupId ||
+      process.parentAdmissionId !== pty.openAdmissionId ||
+      process.leaseEpoch !== pty.leaseEpoch ||
+      process.providerBackend !== pty.providerBackend ||
+      process.providerInstanceId !== pty.providerInstanceId ||
+      process.routeKind !== pty.routeKind ||
+      process.routeTargetId !== pty.routeTargetId ||
+      process.routeEpoch !== pty.routeEpoch ||
+      process.providerSessionId !== pty.execSessionId ||
+      // Only a persistable home backend can currently be reconstructed by an
+      // API request without consulting the mutable active pointer.
+      process.routeTargetId !== null ||
+      handle.lease.id !== process.leaseId ||
+      handle.lease.sandboxGroupId !== process.sandboxGroupId ||
+      handle.lease.leaseEpoch !== process.leaseEpoch ||
+      handle.lease.backend !== process.providerBackend ||
+      handle.lease.instanceId !== process.providerInstanceId
+    ) {
+      throw new HTTPException(409, {
+        message: "pty retained-process identity is stale; reopen the terminal",
+      });
+    }
+    handle.routingSession.adoptRetainedProcess({
+      process: { id: process.id, providerSessionId: process.providerSessionId },
+      backend: {
+        sandboxId: null,
+        leaseEpoch: process.leaseEpoch,
+        providerInstanceId: process.providerInstanceId,
+        activeEpoch: process.routeEpoch,
+      },
+    });
+    return process;
+  };
+  const emitPtyExited = async (
+    ctx: ChannelAContext,
+    ptyId: string,
+    process: SandboxRetainedProcess,
+  ): Promise<void> => {
+    const exited: TerminalPtyExitedPayload = {
+      ptyId,
+      exitCode: process.exitCode,
+      reason: process.state === "exited" ? "exit" : "lost",
+    };
+    await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
+      { type: "terminal.pty.exited", payload: exited },
+    ]);
+  };
+  const drainOpenedPty = async (handle: ChannelAHandle, execSessionId: number): Promise<void> => {
+    let chars = "\u0004";
+    while (handle.routingSession.hasRetainedProcess(execSessionId)) {
+      await handle.routingSession.writeStdinForProcessControl({
+        sessionId: execSessionId,
+        chars,
+        yieldTimeMs: 250,
+        maxOutputTokens: 128,
+      });
+      chars = "";
+    }
+  };
+  const failPtyPersistenceAndDrain = (persistenceError: unknown, drainError: unknown): never => {
+    throw new AggregateError(
+      [persistenceError, drainError],
+      "PTY persistence failed and the exact opened process could not be drained",
+      { cause: drainError },
+    );
+  };
   const requestSessionAuthorization = new WeakMap<Request, ResolvedSessionAuthorization>();
   const relatedSessionAccessFor = (c: Context): "target" | "root" =>
     requestSessionAuthorization.get(c.req.raw)?.relatedSessionAccess ?? "root";
@@ -213,11 +320,94 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   };
   app.use("/v1/workspaces/:workspaceId/sessions/:sessionId/*", authorizeSessionHttp);
 
+  const viewerServices: ViewerServices = {
+    db,
+    settings,
+    bus,
+    ...(deps.establishSandboxSession
+      ? { establishSandboxSession: deps.establishSandboxSession }
+      : {}),
+  };
+
   app.post("/v1/workspaces/:workspaceId/sessions", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
-    const session = await createSessionForRequest(deps, grant, workspaceId, await c.req.json());
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json(
+        {
+          code: "INVALID_SESSION_CREATE_REQUEST",
+          message: "Invalid session create request: request body must contain valid JSON",
+        },
+        422,
+      );
+    }
+    let session: Session;
+    try {
+      session = await createSessionForRequest(deps, grant, workspaceId, payload);
+    } catch (error) {
+      return sessionCreateErrorResponse(c, error);
+    }
+    // Creation has committed by this point. Keep response projection outside
+    // the create-rejection boundary so a post-commit policy read cannot be
+    // misreported as though the session itself was rejected.
     return c.json(await withEffectivePolicy(deps, workspaceId, session), 202);
+  });
+
+  app.get("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:read");
+    return c.json(await getActorNewSessionDraft({ settings, db }, grant, workspaceId));
+  });
+
+  app.put("/v1/workspaces/:workspaceId/new-session-draft", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:create");
+    let payload: unknown;
+    try {
+      payload = await c.req.json();
+    } catch {
+      return c.json(
+        {
+          code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
+          message: "Invalid new-session draft request: request body must contain valid JSON",
+        },
+        422,
+      );
+    }
+    try {
+      return c.json(
+        await saveActorNewSessionDraft(
+          { settings, db, objectStorage },
+          grant,
+          workspaceId,
+          payload,
+        ),
+      );
+    } catch (error) {
+      if (error instanceof NewSessionDraftConflictError) {
+        return c.json(
+          {
+            code: "NEW_SESSION_DRAFT_CONFLICT",
+            message: error.message,
+            currentRevision: error.currentRevision,
+          },
+          409,
+        );
+      }
+      if (error instanceof ZodError) {
+        return c.json(
+          {
+            code: "INVALID_NEW_SESSION_DRAFT_REQUEST",
+            message: `Invalid new-session draft request: ${zodErrorFields(error)} failed schema validation`,
+          },
+          422,
+        );
+      }
+      throw error;
+    }
   });
 
   app.get("/v1/workspaces/:workspaceId/sessions", async (c) => {
@@ -486,7 +676,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
     await requireAccessGrant(c, deps, workspaceId, "sessions:read");
     const sessionId = c.req.param("sessionId");
     await assertSessionExists(db, workspaceId, sessionId);
-    const goal = await getSessionGoal(db, workspaceId, sessionId);
+    const goal = await getSessionGoalWithContinuation(db, workspaceId, sessionId);
     if (!goal) {
       throw new HTTPException(404, { message: "session goal not found" });
     }
@@ -509,27 +699,21 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       });
     }
     if (payload.status === "paused") {
-      const { goal, changed } = await setSessionGoalStatus(db, workspaceId, sessionId, {
+      const { goal, events } = await setSessionGoalStatusWithEvent(db, workspaceId, sessionId, {
         status: "paused",
         ...(payload.rationale ? { rationale: payload.rationale } : {}),
         pausedReason: "api",
+        event: {
+          type: "goal.paused",
+          actor: "api",
+          reason: "api",
+          ...(payload.rationale ? { rationale: payload.rationale } : {}),
+        },
       });
-      if (changed) {
-        await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-          {
-            type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "api",
-              reason: "api",
-              ...(payload.rationale ? { rationale: payload.rationale } : {}),
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
-          },
-        ]);
+      if (events.length > 0) {
+        await bus.publish(workspaceId, sessionId, events);
       }
-      return c.json(goal);
+      return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
     }
     // Resume: only valid from paused; resets counters and re-arms the loop.
     if (existing.status !== "paused") {
@@ -537,32 +721,24 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         message: `session goal is ${existing.status}; only paused goals can be resumed`,
       });
     }
-    const { goal, changed, workflowWakeRevision } = await setSessionGoalStatus(
+    const { goal, changed, workflowWakeRevision, events } = await setSessionGoalStatusWithEvent(
       db,
       workspaceId,
       sessionId,
       {
         status: "active",
+        event: { type: "goal.resumed", actor: "api" },
       },
     );
     // `changed` guards the racing-PATCH case: both requests can pass the
     // status pre-check, but only the transition winner emits and wakes.
     if (changed) {
-      await appendAndPublishEvents(db, bus, workspaceId, sessionId, [
-        {
-          type: "goal.resumed",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            version: goal.version,
-            actor: "api",
-          },
-        },
-      ]);
-      // signalWithStart restarts an eligible idle workflow so maybeContinueGoal
-      // fires. A closed workspace/session gate keeps the resumed goal durable
-      // and inert until that gate's own Resume mutation commits its wake.
+      if (events.length > 0) {
+        await bus.publish(workspaceId, sessionId, events);
+      }
+      // signalWithStart restarts an eligible idle workflow so the durable goal
+      // revision is evaluated. A closed workspace/session gate keeps the
+      // revision inert until that gate's own Resume mutation commits its wake.
       if (workflowWakeRevision !== null) {
         await workflowClient.wakeSessionWorkflow({
           accountId: grant.accountId,
@@ -573,7 +749,7 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         });
       }
     }
-    return c.json(goal);
+    return c.json((await getSessionGoalWithContinuation(db, workspaceId, sessionId)) ?? goal);
   });
 
   app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/goal", async (c) => {
@@ -1366,6 +1542,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
       os: session.sandboxOs,
       liveness: lease?.liveness ?? "cold",
       leaseEpoch: lease?.leaseEpoch ?? 0,
+      workspaceGeneration: lease?.workspaceGeneration ?? null,
+      archiveGeneration: lease?.archiveGeneration ?? null,
+      archiveComplete: lease?.archiveComplete ?? false,
       desktopEnabled: settings.sandboxDesktopEnabled,
       // Human take-control: when the desktop is available + this policy is on
       // (default), the cell is mode "interactive" — the noVNC viewer drives :0
@@ -1553,6 +1732,9 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         viewerId,
         liveness: "warm",
         leaseEpoch: session.activeEpoch,
+        workspaceGeneration: null,
+        archiveGeneration: null,
+        archiveComplete: false,
         sandboxGroupId: session.sandboxGroupId,
         viewerHeartbeatIntervalMs: viewerHeartbeatIntervalMs(settings),
         dataPlaneUrl: null,
@@ -1562,40 +1744,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
         !streamTokenDegraded(settings)
       ) {
         if (wantDesktop && settings.sandboxDesktopEnabled) {
-          stream = await mintDesktopStream(
-            { db, settings, bus },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId,
-              // No Modal lease for selfhosted-active; the mint routes to the relay.
-            },
-          );
+          stream = await mintDesktopStream(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
+          });
         }
         if (settings.sandboxTerminalEnabled) {
-          terminal = await mintTerminalStream(
-            { db, settings, bus },
-            {
-              accountId: grant.accountId,
-              workspaceId,
-              session,
-              viewerId,
-              // No Modal lease for selfhosted-active; the mint routes to the relay.
-            },
-          );
+          terminal = await mintTerminalStream(viewerServices, {
+            accountId: grant.accountId,
+            workspaceId,
+            session,
+            viewerId,
+            // No Modal lease for selfhosted-active; the mint routes to the relay.
+          });
         }
       }
     } else {
-      result = await attachViewer(
-        { db, settings },
-        {
-          accountId: grant.accountId,
-          workspaceId,
-          session,
-          ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
-        },
-      );
+      result = await attachViewer(viewerServices, {
+        accountId: grant.accountId,
+        workspaceId,
+        session,
+        ...(parsed.data.viewerId ? { viewerId: parsed.data.viewerId } : {}),
+      });
 
       // P4.2 — the viewer now holds a WARM box; mint the real pixel cell IN-PROCESS
       // (resume by id → ensureDisplayStack → exposeStreamPort) scoped to THIS
@@ -1617,31 +1790,25 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
           // (and consented above). A terminal-only attach skips it — the box is warm,
           // the terminal mint below still runs.
           if (wantDesktop && settings.sandboxDesktopEnabled) {
-            stream = await mintDesktopStream(
-              { db, settings, bus },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                session,
-                viewerId: result.viewerId,
-                lease,
-              },
-            );
+            stream = await mintDesktopStream(viewerServices, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
           }
           // P5.t — the same warm-box viewer attach also mints the REAL PTY terminal
           // address (independent of the desktop toggle). A degraded mint leaves the
           // terminal fields null → the client falls back to the sse-events firehose.
           if (settings.sandboxTerminalEnabled) {
-            terminal = await mintTerminalStream(
-              { db, settings, bus },
-              {
-                accountId: grant.accountId,
-                workspaceId,
-                session,
-                viewerId: result.viewerId,
-                lease,
-              },
-            );
+            terminal = await mintTerminalStream(viewerServices, {
+              accountId: grant.accountId,
+              workspaceId,
+              session,
+              viewerId: result.viewerId,
+              lease,
+            });
           }
         }
       }
@@ -1982,23 +2149,83 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyOpenRequest);
-    const ptyId = crypto.randomUUID();
-    const out = await withChannelA({ db, settings, bus }, ctx, async ({ service, lease }) => {
-      const opened = await service.ptyOpen(req, ptyId);
-      // Persist the ptyId<->exec-session map fenced to the box's epoch.
-      await insertPtySession(db, {
-        id: ptyId,
-        accountId: ctx.accountId,
-        workspaceId: ctx.workspaceId,
-        sessionId: ctx.session.id,
-        execSessionId: opened.execSessionId,
-        leaseEpoch: lease.leaseEpoch,
-        cols: req.cols,
-        rows: req.rows,
-        shell: opened.shell,
-        cwd: req.cwd,
-        openedBy: ctx.subjectId,
+    if (ctx.session.sandboxBackend === "selfhosted" || ctx.session.activeSandboxId !== null) {
+      throw new HTTPException(409, {
+        message:
+          "durable interactive terminals require the session-home provider route and are unavailable on active swaps or non-persistable routes; use synchronous exec or attach the session home sandbox",
       });
+    }
+    const ptyId = crypto.randomUUID();
+    const out = await withChannelA({ db, settings, bus }, ctx, async (handle) => {
+      const { service } = handle;
+      const opened = await service.ptyOpen(req, ptyId);
+      const execSessionId = opened.execSessionId;
+      const retained =
+        execSessionId === null
+          ? null
+          : handle.routingSession.retainedProcessIdentity(execSessionId);
+      const process = retained
+        ? await getRetainedProcess(db, {
+            workspaceId: ctx.workspaceId,
+            sessionId: ctx.session.id,
+            processId: retained.id,
+          })
+        : null;
+      if (
+        execSessionId === null ||
+        !retained ||
+        !process ||
+        process.state !== "active" ||
+        process.ownerActorKind !== "direct" ||
+        process.providerSessionId !== execSessionId ||
+        process.routeTargetId !== null ||
+        process.leaseId !== handle.lease.id ||
+        process.sandboxGroupId !== handle.lease.sandboxGroupId ||
+        process.leaseEpoch !== handle.lease.leaseEpoch ||
+        process.providerBackend !== handle.lease.backend ||
+        process.providerInstanceId !== handle.lease.instanceId
+      ) {
+        if (execSessionId !== null && handle.routingSession.hasRetainedProcess(execSessionId)) {
+          await drainOpenedPty(handle, execSessionId);
+        }
+        throw new HTTPException(409, {
+          message: "interactive terminal did not acquire durable process authority",
+        });
+      }
+      const identity: SandboxPtyProcessIdentity = {
+        leaseId: process.leaseId,
+        sandboxGroupId: process.sandboxGroupId,
+        retainedProcessId: process.id,
+        openAdmissionId: process.parentAdmissionId,
+        execSessionId: process.providerSessionId,
+        leaseEpoch: process.leaseEpoch,
+        providerBackend: process.providerBackend,
+        providerInstanceId: process.providerInstanceId,
+        routeKind: process.routeKind,
+        routeTargetId: process.routeTargetId,
+        routeEpoch: process.routeEpoch,
+      };
+      try {
+        await insertPtySession(db, {
+          id: ptyId,
+          accountId: ctx.accountId,
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          identity,
+          cols: req.cols,
+          rows: req.rows,
+          shell: opened.shell,
+          cwd: req.cwd,
+          openedBy: ctx.subjectId,
+        });
+      } catch (persistenceError) {
+        try {
+          await drainOpenedPty(handle, execSessionId);
+        } catch (drainError) {
+          failPtyPersistenceAndDrain(persistenceError, drainError);
+        }
+        throw persistenceError;
+      }
       // Emit terminal.pty.started + any initial banner output on A1.
       const started: TerminalPtyStartedPayload = {
         ptyId,
@@ -2026,24 +2253,52 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/write", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyWriteRequest);
-    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    const pty = await getOpenPtySession(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      ptyId: req.ptyId,
+    });
     if (!pty) {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
-    if (pty.execSessionId === null) {
-      throw new HTTPException(409, {
-        message: "interactive terminal unsupported on this backend",
-      });
-    }
     let seq = 1;
-    await withChannelA({ db, settings, bus }, ctx, async ({ service }) => {
-      const output = await service.ptyWrite(req, pty.execSessionId!, req.data);
-      await updatePtySessionActivity(db, {
+    await withChannelA({ db, settings, bus }, ctx, async (handle) => {
+      await adoptPtyProcess(ctx, handle, pty);
+      let output: string;
+      try {
+        output = await handle.service.ptyWrite(req, pty.execSessionId, req.data);
+      } catch (error) {
+        const terminal = await getRetainedProcess(db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          processId: pty.retainedProcessId,
+        });
+        if (terminal && terminal.state !== "active") {
+          await emitPtyExited(ctx, req.ptyId, terminal);
+        }
+        throw error;
+      }
+      const updated = await updatePtySessionActivity(db, {
         accountId: ctx.accountId,
         workspaceId: ctx.workspaceId,
+        sessionId: ctx.session.id,
         ptyId: req.ptyId,
-        execSessionId: pty.execSessionId,
+        identity: ptyIdentity(pty),
       });
+      if (!updated) {
+        const terminal = await getRetainedProcess(db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          processId: pty.retainedProcessId,
+        });
+        if (terminal && terminal.state !== "active") {
+          await emitPtyExited(ctx, req.ptyId, terminal);
+          return;
+        }
+        throw new HTTPException(409, {
+          message: "pty identity changed while input was in flight; reopen the terminal",
+        });
+      }
       if (output) {
         const delta: TerminalPtyOutputDeltaPayload = {
           ptyId: req.ptyId,
@@ -2062,21 +2317,31 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/resize", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyResizeRequest);
-    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    const pty = await getOpenPtySession(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      ptyId: req.ptyId,
+    });
     if (!pty) {
       throw new HTTPException(404, { message: "pty not found or closed" });
     }
-    if (pty.execSessionId !== null) {
-      await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-        service.ptyResize(req, pty.execSessionId!),
-      );
-    }
-    await updatePtySessionActivity(db, {
-      accountId: ctx.accountId,
-      workspaceId: ctx.workspaceId,
-      ptyId: req.ptyId,
-      cols: req.cols,
-      rows: req.rows,
+    await withChannelA({ db, settings, bus }, ctx, async (handle) => {
+      await adoptPtyProcess(ctx, handle, pty);
+      await handle.service.ptyResize(req, pty.execSessionId);
+      const updated = await updatePtySessionActivity(db, {
+        accountId: ctx.accountId,
+        workspaceId: ctx.workspaceId,
+        sessionId: ctx.session.id,
+        ptyId: req.ptyId,
+        identity: ptyIdentity(pty),
+        cols: req.cols,
+        rows: req.rows,
+      });
+      if (!updated) {
+        throw new HTTPException(409, {
+          message: "pty identity changed while resize was in flight; reopen the terminal",
+        });
+      }
     });
     return c.body(null, 204);
   });
@@ -2084,25 +2349,28 @@ export function registerSessionRoutes(app: Hono, deps: ApiRouteDeps): void {
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/terminal/pty/close", async (c) => {
     const ctx = await channelAPreamble(c, "terminal:attach");
     const req = await parseChannelABody(c, PtyCloseRequest);
-    const pty = await getOpenPtySession(db, ctx.workspaceId, req.ptyId);
+    const pty = await getOpenPtySession(db, {
+      workspaceId: ctx.workspaceId,
+      sessionId: ctx.session.id,
+      ptyId: req.ptyId,
+    });
     // Idempotent: closing an already-closed/absent PTY is a 204 no-op.
     if (pty) {
-      await withChannelA({ db, settings, bus }, ctx, ({ service }) =>
-        service.ptyClose(req, pty.execSessionId),
-      );
-      await closePtySession(db, {
-        accountId: ctx.accountId,
-        workspaceId: ctx.workspaceId,
-        ptyId: req.ptyId,
+      await withChannelA({ db, settings, bus }, ctx, async (handle) => {
+        await adoptPtyProcess(ctx, handle, pty);
+        await handle.service.ptyClose(req, pty.execSessionId);
+        const terminal = await getRetainedProcess(db, {
+          workspaceId: ctx.workspaceId,
+          sessionId: ctx.session.id,
+          processId: pty.retainedProcessId,
+        });
+        if (!terminal || terminal.state === "active") {
+          throw new HTTPException(409, {
+            message: "pty close is pending exact provider exit proof; retry",
+          });
+        }
+        await emitPtyExited(ctx, req.ptyId, terminal);
       });
-      const exited: TerminalPtyExitedPayload = {
-        ptyId: req.ptyId,
-        exitCode: 0,
-        reason: "exit",
-      };
-      await appendAndPublishEvents(db, bus, ctx.workspaceId, ctx.session.id, [
-        { type: "terminal.pty.exited", payload: exited },
-      ]);
     }
     return c.body(null, 204);
   });
@@ -2357,6 +2625,49 @@ function userMessagePayloadHasOwnProperty(value: unknown, key: string): boolean 
   }
   const payload = (value as { payload?: unknown }).payload;
   return hasOwnProperty(payload, key);
+}
+
+/** Stable, value-free JSON errors for only the create-session boundary. */
+export function sessionCreateErrorResponse(c: Context, error: unknown): Response {
+  if (error instanceof SessionSpawnDeniedError) {
+    return c.json(
+      sessionSpawnDenialEnvelope(error),
+      error.denial.code === "nested_agent_depth_override_forbidden" ? 403 : 409,
+    );
+  }
+  if (error instanceof ZodError) {
+    return c.json(
+      {
+        code: "INVALID_SESSION_CREATE_REQUEST",
+        message: `Invalid session create request: ${zodErrorFields(error)} failed schema validation`,
+      },
+      422,
+    );
+  }
+  if (error instanceof HTTPException && error.status === 422) {
+    return c.json(
+      {
+        code: "SESSION_CREATE_REJECTED",
+        message: error.message,
+      },
+      422,
+    );
+  }
+  throw error;
+}
+
+function zodErrorFields(error: ZodError): string {
+  const paths = [
+    ...new Set(
+      error.issues.map((issue) => {
+        const path = issue.path.map(String).join(".");
+        return path || "request";
+      }),
+    ),
+  ];
+  const shown = paths.slice(0, 5);
+  const remainder = paths.length - shown.length;
+  return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more` : ""}`;
 }
 
 function commandConflictResponse(c: Context, error: unknown): Response {

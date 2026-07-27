@@ -1,5 +1,80 @@
 # @opengeni/db
 
+## 0.12.1
+
+### Patch Changes
+
+- Updated dependencies [55c6559]
+  - @opengeni/config@0.7.1
+
+## 0.12.0
+
+### Minor Changes
+
+- 46bac05: Enforce a configurable inclusive nested-agent depth at the transactional
+  session-creation boundary with a server default of three. Persist immutable
+  lineage and policy snapshots, and return idempotent typed denial evidence without
+  creating run, workflow, sandbox, usage, or billing artifacts.
+
+### Patch Changes
+
+- c549ed8: Persist and transactionally materialize revisioned active-goal continuation
+  obligations, recover their Temporal delivery without human input or model
+  polling, preserve authoritative human/Steer ordering, and expose truthful
+  scheduled, running, blocked, and invariant-broken continuation state to clients.
+  Make agent goal updates revisioned, attempt-recoverable commands so ambiguous
+  commit responses reconcile without duplicate mutation or stale overwrites.
+- 860de22: Persist actor-private pre-session drafts on the server, consume only the exact accepted revision after durable session initialization, return structured create errors, deduplicate create resources, derive checksums for SDK uploads, restore finalized attachments without browser-local byte authority, and preserve attachments added while an earlier send is in flight.
+- 5b57a2d: Make provisioned-sandbox recovery truthful and atomic. Provider existence,
+  lease liveness, route attachment, archive availability, restore progress,
+  verified workspace readiness, and epochs are exposed separately; attach/swap
+  must certify readiness. Definitive provider loss is exact-instance fenced,
+  concurrent observers receive typed recovery/superseded outcomes, and ambiguous
+  operations are never replayed. Rematerialization selects one verified archive
+  revision under the lease lock, verifies archive bytes and restored tree contents,
+  and fails closed as degraded or unrecoverable instead of publishing a partial,
+  mixed, previous, or clean fallback workspace.
+
+  Unify every persistable workspace mutation under durable turn, API-direct, or
+  retained-process authority. Direct requests use exact request UUID holders;
+  yielded processes retain their parent admission and exact pinned provider/route
+  identity until durable exit/loss settlement. Direct/process authority blocks
+  archive capture, process stdin receives a distinct mutation admission, and PTY
+  control cannot be rerouted by active-pointer movement.
+
+  Make terminal execution physically synchronous: `terminalExec` always returns a
+  numeric `exitCode` with `running: false`, and timeout/error paths return only
+  after exact process-group absence and retained settlement. Interactive PTYs open
+  only after durable promotion, close only on exact terminal proof, and report
+  provider loss truthfully.
+
+  Activate the generation/process schema through maintenance migration 0117. All
+  old API/control/turn writers must stop before the one-way cutover and may not
+  restart afterward; archive completeness requires the exact closed generation.
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+  - @opengeni/config@0.7.0
+
+## 0.11.0
+
+### Minor Changes
+
+- 0ed0f01: Add per-member session pin preferences with isolated server persistence, bounded/reused stable
+  pagination snapshots, snapshot-free pin polling, typed SDK and React reconciliation, and accessible
+  list and header controls.
+
+### Patch Changes
+
+- b32938f: Preserve the resolved model tool-output policy across pending-call recovery so
+  ordinary and recovered conversation history use one byte-identical bound.
+- Updated dependencies [744a93d]
+  - @opengeni/config@0.6.10
+  - @opengeni/contracts@0.18.1
+
 ## 0.10.7
 
 ### Patch Changes

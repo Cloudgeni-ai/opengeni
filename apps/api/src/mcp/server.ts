@@ -58,15 +58,15 @@ import {
   saveWorkspaceMemory,
   searchWorkspaceMemories,
   serializeEffectiveSessionControl,
-  setSessionGoalStatus,
+  setSessionGoalStatusWithEvent,
   setVariableSetVariable,
   updateScheduledTask,
-  updateSessionGoal,
-  upsertSessionGoal,
+  updateSessionGoalWithEvent,
+  upsertSessionGoalWithEvent,
   RigChangeAlreadyVerifyingError,
   RigChangeTransitionError,
 } from "@opengeni/db";
-import { appendAndPublishEvents } from "@opengeni/events";
+import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
   createGitHubAppInstallationToken,
   GitHubAppConfigurationError,
@@ -109,6 +109,8 @@ import {
   controlAgentSessionWorkstream,
   controlHumanSessionWorkstream,
   createSessionForRequest,
+  SessionSpawnDeniedError,
+  sessionSpawnDenialEnvelope,
   sendAgentSessionMessage,
   steerAgentSession,
   updateSessionTitle,
@@ -135,6 +137,7 @@ import {
   SESSION_EVENT_MCP_MAX_BYTES,
 } from "./session-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
+import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Retained in the
@@ -739,7 +742,7 @@ function registerGoalTools(
           ? (grant.metadata["turnId"] as string)
           : null;
       await assertGoalReactivationAllowed(deps, grant.workspaceId, sessionId, callerTurnId);
-      const { goal, replaced } = await upsertSessionGoal(deps.db, {
+      const { goal, events } = await upsertSessionGoalWithEvent(deps.db, {
         accountId: grant.accountId,
         workspaceId: grant.workspaceId,
         sessionId,
@@ -747,20 +750,11 @@ function registerGoalTools(
         successCriteria: successCriteria ?? null,
         maxAutoContinuations: maxAutoContinuations ?? null,
         createdBy: "agent",
+        actor: "agent",
       });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-        {
-          type: "goal.set",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            version: goal.version,
-            actor: "agent",
-            replaced,
-          },
-        },
-      ]);
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
+      }
       return json(goal);
     },
   );
@@ -774,36 +768,36 @@ function registerGoalTools(
         text: z4.string().min(1).optional(),
         successCriteria: z4.string().min(1).optional(),
         progressNote: z4.string().min(1).optional(),
+        idempotencyKey: z4.string().uuid(),
       },
     },
-    async ({ text, successCriteria, progressNote }) => {
+    async ({ text, successCriteria, progressNote, idempotencyKey }) => {
       await authorizeFirstPartySession(deps, grant, sessionId, "session.goal.write");
-      await requireSession(deps.db, grant.workspaceId, sessionId);
-      const existing = await getSessionGoal(deps.db, grant.workspaceId, sessionId);
-      if (!existing) {
-        throw new Error("this session has no goal; use goal_set first");
-      }
-      if (existing.status === "completed") {
-        throw new Error("session goal is completed; use goal_set to start a new goal");
-      }
-      const goal = await updateSessionGoal(deps.db, grant.workspaceId, sessionId, {
-        ...(text !== undefined ? { text } : {}),
-        ...(successCriteria !== undefined ? { successCriteria } : {}),
-      });
-      await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
+      const context = exactAgentCommandContext(grant, sessionId);
+      const { goal, events, operationId, replay } = await updateSessionGoalWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
         {
-          type: "goal.updated",
-          payload: {
-            goalId: goal.id,
-            text: goal.text,
-            ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
-            ...(progressNote ? { progressNote } : {}),
-            version: goal.version,
-            actor: "agent",
+          ...(text !== undefined ? { text } : {}),
+          ...(successCriteria !== undefined ? { successCriteria } : {}),
+          ...(progressNote !== undefined ? { progressNote } : {}),
+          actor: "agent",
+          command: {
+            accountId: grant.accountId,
+            actor: {
+              type: "agent_attempt",
+              attemptId: context.callerAttemptId,
+              sessionId: context.callerSessionId,
+              turnId: context.callerTurnId,
+              executionGeneration: context.callerExecutionGeneration,
+            },
+            operationKey: idempotencyKey,
           },
         },
-      ]);
-      return json(goal);
+      );
+      await publishDurableSessionEvents(deps.bus, grant.workspaceId, sessionId, events);
+      return json({ ...goal, operationId, replay });
     },
   );
 
@@ -821,17 +815,18 @@ function registerGoalTools(
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "completed",
-        evidence,
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
-            type: "goal.completed",
-            payload: { goalId: goal.id, evidence, version: goal.version },
-          },
-        ]);
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "completed",
+          evidence,
+          event: { type: "goal.completed", evidence },
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },
@@ -851,25 +846,24 @@ function registerGoalTools(
       if (!existing) {
         throw new Error("this session has no goal; use goal_set first");
       }
-      const { goal, changed } = await setSessionGoalStatus(deps.db, grant.workspaceId, sessionId, {
-        status: "paused",
-        rationale,
-        pausedReason: "agent",
-      });
-      if (changed) {
-        await appendAndPublishEvents(deps.db, deps.bus, grant.workspaceId, sessionId, [
-          {
+      const { goal, events } = await setSessionGoalStatusWithEvent(
+        deps.db,
+        grant.workspaceId,
+        sessionId,
+        {
+          status: "paused",
+          rationale,
+          pausedReason: "agent",
+          event: {
             type: "goal.paused",
-            payload: {
-              goalId: goal.id,
-              actor: "agent",
-              reason: "agent",
-              rationale,
-              autoContinuations: goal.autoContinuations,
-              noProgressStreak: goal.noProgressStreak,
-            },
+            actor: "agent",
+            reason: "agent",
+            rationale,
           },
-        ]);
+        },
+      );
+      if (events.length > 0) {
+        await deps.bus.publish(grant.workspaceId, sessionId, events);
       }
       return json(goal);
     },
@@ -1038,6 +1032,13 @@ function registerFleetTools(
     db: deps.db,
     settings: deps.settings,
     bus: deps.bus,
+    ensureSessionGroupReady: async (ctx) => {
+      const session = await requireSession(deps.db, ctx.workspaceId, ctx.sessionId);
+      return await ensureViewerSessionGroupReady(
+        { db: deps.db, settings: deps.settings, bus: deps.bus },
+        { accountId: ctx.accountId, workspaceId: ctx.workspaceId, session },
+      );
+    },
   };
 
   // Resolve the session's group sandbox (the default/home fleet member) at
@@ -1055,7 +1056,7 @@ function registerFleetTools(
     "sandboxes_list",
     {
       description:
-        "List the sandboxes this session can run on: its own session sandbox (the Modal box) PLUS the workspace's enrolled selfhosted machines, each with liveness (online/reconnecting/offline) and an `active` marker for the currently-routed one. Use before sandbox_attach/sandbox_swap to pick a target. The `id` of any entry is the `target` for attach/swap/run_on.",
+        "List the sandboxes this session can run on: its own session sandbox plus enrolled selfhosted machines. `liveness` is conservative: online requires observed provider existence and verified workspace readiness. Provider, lease, route, archive, restore, workspace, lease epoch, and route epoch are also reported separately. Use an entry `id` as an attach/swap/run_on target.",
       inputSchema: {},
     },
     async () => json(await listFleet(services, await fleetContext())),
@@ -1065,7 +1066,7 @@ function registerFleetTools(
     "sandbox_attach",
     {
       description:
-        'Attach this session to a sandbox (make it the active sandbox the agent\'s next tool calls run on). Heterogeneous: a Modal box or an enrolled selfhosted machine. Validates the target is owned by this workspace and online, then repoints under an epoch fence. Identical mechanic to sandbox_swap; use `target` = a sandboxes_list `id`, or "session"/"default" for this session\'s own box.',
+        'Attach this session to a sandbox for the next tool call. The target must be owned and verified ready. A same-target attach is a repair request: it revalidates readiness and advances the route epoch rather than returning unchanged success. Recovery-in-progress/degraded/unrecoverable outcomes are typed. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -1075,7 +1076,7 @@ function registerFleetTools(
     "sandbox_swap",
     {
       description:
-        'Swap the active sandbox for this session mid-conversation (the next tool call runs on the new box). Heterogeneous Modal<->selfhosted<->selfhosted, single active at a time, flippable as many times as you like. Validates ownership + liveness, then bumps the active epoch (fencing any in-flight op, which retries against the new box). `target` = a sandboxes_list `id`, or "session"/"default" to swap back to this session\'s own box.',
+        'Swap the active sandbox for this session mid-conversation. Validates ownership and verified readiness, then advances the route epoch. Same-target swaps also revalidate and fence stale route caches. An operation that encountered provider disappearance is not replayed; retry only after a typed recovery-ready result. Use a sandboxes_list `id`, or "session"/"default" for home.',
       inputSchema: { target: z4.string().min(1) },
     },
     async ({ target }) => json(await swapActiveSandbox(services, await fleetContext(), target)),
@@ -1575,6 +1576,9 @@ function registerWorkspaceOrchestrationTools(
           // Workspace-scoped CREATE idempotency key: a retried session_create with
           // the same key returns the already-spawned worker instead of a duplicate.
           idempotencyKey: z4.string().min(1).max(200).optional(),
+          // Per-session/agent descendant policy. Reductions need only create;
+          // increases are authorized server-side with workspace:admin.
+          maxNestedAgentDepth: z4.number().int().nonnegative().optional(),
           // First-party MCP token permissions for the spawned session; every
           // permission must be held by this grant (validated in the domain).
           // A goal requires goals:manage in the resulting set; it is never
@@ -1619,11 +1623,21 @@ function registerWorkspaceOrchestrationTools(
         },
       },
       async (args) => {
-        if (callerSessionId !== null) {
-          await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+        try {
+          if (callerSessionId !== null) {
+            await authorizeFirstPartySession(deps, grant, callerSessionId, "session.child.create");
+          }
+          const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
+          return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
+        } catch (error) {
+          if (error instanceof SessionSpawnDeniedError) {
+            return {
+              ...json(sessionSpawnDenialEnvelope(error)),
+              isError: true,
+            };
+          }
+          throw error;
         }
-        const created = await createSessionForRequest(deps, grant, grant.workspaceId, args);
-        return json(await withMcpEffectivePolicy(deps, grant.workspaceId, created));
       },
     );
   }

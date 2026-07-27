@@ -229,8 +229,9 @@ heartbeat timeout and the activity's ten-second heartbeat timer.
 
 The dying `runAgentTurn` activity owns physical proof. It cancels the exact
 turn's tool/sandbox controller, waits for all controller-owned operations to
-quiesce, stops and drains attempt-owned Toolspace and run-material renewal
-writes, and immediately writes `session_turn_attempts.quiesced_at` before
+quiesce, stops and drains attempt-owned Git, Toolspace, and generic
+run-credential renewal/materialization writes, and immediately writes
+`session_turn_attempts.quiesced_at` before
 attempt-qualified credential deletion, cache, recording, provider, lease, or
 workspace housekeeping. The
 receipt, its `session.queue.changed` event, the session queue/sequence update,
@@ -288,6 +289,79 @@ does return, the worker immediately records the provider instance id on the
 warming lease before readiness/display/setup work; any later setup failure
 terminates that just-created sandbox before the lease can be retried.
 
+Lease liveness is not provider or workspace truth. The durable recovery
+projection independently records provider existence, archive availability,
+restore progress, and verified workspace readiness alongside lease liveness and
+epoch. API attach/swap paths therefore resume the exact live instance and pass a
+bounded command probe before reporting success. A legacy `warm` row projects to
+`unknown` until that verification succeeds; a provider `NOT_FOUND` instead
+retires only the exact `(lease_epoch, instance_id)` and advances the epoch once.
+
+A lost provider is rematerialized by one cold-to-warming winner. Under the lease
+row lock it selects one versioned archive revision containing archive byte/hash
+metadata and a deterministic workspace-tree fingerprint. Repeated starts with
+the same rematerialization id are idempotent; rivals and stale progress/commit
+writes are fenced. The runtime verifies archive bytes before hydration and the
+restored tree before `warm` publication. A partial hydrate or fingerprint
+mismatch terminates the unpublished box and leaves typed degraded/unrecoverable
+state; it never publishes a clean replacement, a previous revision, or a mixed
+snapshot. A legacy per-session archive can participate only after its archive
+fields—never provider identity—are imported and selected under that same lock.
+
+Concurrent routed calls may all discover the same missing provider. Exactly one
+observer wins the lease-loss transition; the others receive typed `superseded`
+recovery. Each ambiguous operation is invoked at most once and is never replayed
+on a replacement backend. During idle drain, a resumable cloud box is deleted
+only after a verified workspace capture is durably folded onto the fenced lease.
+Definitive `NOT_FOUND` before capture preserves any existing archive or records
+typed unrecoverable truth when no durable revision exists.
+
+Every operation that may mutate a persistable `/workspace` first enters one
+lease-scoped turn/direct/process admission ledger. In one transaction, admission
+binds the session group, warm lease epoch, provider identity, and pinned route to
+the canonical turn attempt, an API request UUID held as `direct:<request UUID>`,
+or an exact retained-process UUID held as `process:<process UUID>`, then
+increments `workspace_generation` and inserts the operation row. The exact
+provider promise is physically settled as `resolved` or `rejected`; a resolved
+result then passes the matching authority/lease/provider/route acceptance fences
+before its output is accepted. Only a turn admission can use authoritative
+`session_turn_attempts.quiesced_at` for its exact attempt; direct and process
+authority remain capture blockers until settled.
+
+A yielded process promotes its parent admission to retained state and creates
+the non-TTL process holder in the same transaction before any caller receives a
+live locator. The exact parent admission, process UUID, provider locator, lease
+epoch, provider instance, and route remain pinned across active-pointer movement.
+Model/user stdin is a separate process-owned mutation admission. Resize, EOF,
+cancellation, helper exec, and drain polling are process control: they may prove
+exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
+settles the parent and process holder and closes any matching PTY; duplicate
+identical proof is idempotent, while missing/conflicting proof keeps the fence
+closed. Connected Machines and other non-persistable routes do not dirty the
+provisioned cloud-home generation.
+
+Capture preflight and archive fold block on every unsettled admission and live
+direct/process holder in the closed write set. Publication is complete only when
+that set is proven closed and `archive_generation === workspace_generation`.
+Late, concurrent, or replayed requests either remain blockers or are admitted
+into a successor generation; no admitted operation is replayed after provider
+rejection, provider loss, or a failed acceptance fence.
+
+Terminal execution follows the same physical boundary. `terminalExec` does not
+return a yielded process: success always carries a numeric `exitCode` and
+`running: false`. Timeout or a non-timeout failure after yield first drains the
+exact process group and settles retained authority; timeout cannot return while
+the process or its durable admission remains live. PTY open returns only after
+durable promotion and persistence of its exact process identity, and PTY close
+leaves metadata open until exact exit/loss proof exists.
+
+Migration `0117_sandbox_recovery_generations.sql` activates this protocol as a
+one-way maintenance cutover. Stop all old API, control-worker, and turn-worker
+writers first. A live `opengeni_app` session rejects activation with SQLSTATE
+`55000` and the transaction rolls back cleanly. Application/image rollback to an
+old writer is permitted only before activation; after activation no old writer
+may restart, because there is no mixed-version or down-migration path.
+
 **Worker restarts are survivable.** A graceful worker shutdown (a deploy or
 rollout restart delivers SIGTERM; Temporal cancels in-flight activities with
 reason `WORKER_SHUTDOWN`) checkpoints conversation truth and the sandbox
@@ -330,7 +404,11 @@ workflow (signalWithStart), and the next turn runs from the stored items.
 Only `cancelled` — an explicit user act — is terminal.
 
 Every transaction that creates or re-enables workflow work also increments the
-session's durable wake revision. Single-target producers signal directly;
+session's durable wake revision. An active goal has a second, goal-owned
+monotonic wake/observed pair: terminal settlement advances it in the same
+transaction as the workflow wake, and continuation materialization observes it
+only alongside the typed update, event pair, usage fact, session transition,
+and successor workflow wake. Single-target producers signal directly;
 recursive controls trigger the bounded dispatcher once without loading the
 affected tree into API memory. Successful delivery acknowledges the exact
 revision, and the dispatcher retries only due unacknowledged rows.
@@ -342,13 +420,30 @@ return when a signal arrived during that chain, closing the completion race.
 
 ## Goals — what makes long runs continue
 
-Agents stop prematurely. A **goal** flips the default so that finishing a turn
-with nothing queued records one typed goal-continuation internal update and the
-agent must explicitly `goal_complete` or `goal_pause` to stop. The update joins
-the next bounded internal batch and never appears as a human queue row. This is
-the mechanism behind every multi-day autonomous run. Full detail in
-`docs/goals.md`; the one-line model: queued human input always wins over an
-internal continuation, and goals are bounded by progress/budget guards, not
+Agents stop prematurely. A **goal** flips the default so terminal settlement of
+the last turn arms one durable Postgres continuation obligation and the agent
+must explicitly `goal_complete` or `goal_pause` to stop. A locked transaction
+materializes one revision as one typed goal-continuation update, its audit
+events and usage fact, and the next workflow wake. The stable
+`goal-continuation:<goalId>:wake:<revision>` identity makes a lost commit
+response/retry a no-op rather than another logical continuation. The update
+joins the next bounded internal batch and never appears as a human queue row.
+
+Queued human input and Steer always win; approval, same-turn recovery,
+provider-capacity wait, recursive Pause, and cancellation block synthesis.
+Temporal activity failure records a delayed outbox wake and may close the
+workflow; `signalWithStart` later reconstructs delivery from Postgres without a
+human message or model polling. A dead worker may re-dispatch the same logical
+goal turn under a new fenced attempt, but cannot materialize or bill another
+continuation. The goal API projects scheduled/running/blocked/invariant-broken
+from one repeatable snapshot so UI state never guesses from `active` or `idle`.
+Agent `goal_update` is itself a revisioned command: its stable operation key is
+target-scoped across replacement attempts, while the receipt retains the
+original attempt for audit. Receipt/result, goal version, session-sequenced
+event, and mutation commit atomically. A lost response can therefore be
+reconciled from a recovered attempt without double-applying the update, and an
+old replay returns its stored result rather than overwriting newer goal truth.
+Full detail in `docs/goals.md`; goals are bounded by progress/budget guards, not
 counts.
 
 ## Memory — three stores, three jobs
@@ -469,10 +564,12 @@ the same one-frame 96-KiB connection queue, and REST pages use a separate 1-MiB
 byte envelope plus the last delivered sequence as the resume cursor. Replaying
 one guarded poison row must still advance to every later durable revision.
 
-Sandbox recovery state is persisted separately again, in
-`sandbox_session_envelopes`: the small versioned descriptor (provider handle /
-snapshot reference / manifest) used to reattach, snapshot-restore, or rebuild
-the session's sandbox on its next turn — decoupled from the RunState blob.
+Sandbox recovery state is persisted separately again. The group lease owns the
+authoritative provider/archive/restore/workspace projection and epoch;
+`sandbox_session_envelopes` stores the small per-session provider/manifest
+descriptor used to reattach and can supply a legacy archive only through the
+lease's atomic revision-selection step. Both are decoupled from the RunState
+blob.
 
 See issue #35 for the rationale and the dual-write → flagged-read → default-flip
 migration history.

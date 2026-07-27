@@ -116,7 +116,9 @@ import type {
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
   MoveSessionQueueItemRequest,
+  NewSessionDraft,
   SaveComposerDraftRequest,
+  SaveNewSessionDraftRequest,
   SteerSessionQueueItemRequest,
   SessionControlResponse,
   WorkspaceInferenceControlResponse,
@@ -197,6 +199,17 @@ import {
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
 
+function sessionListQuery(options: {
+  limit?: number;
+  parentSessionId?: string | null;
+}): Record<string, string> {
+  const { limit, parentSessionId } = options;
+  return {
+    ...(limit === undefined ? {} : { limit: String(limit) }),
+    ...(parentSessionId === undefined ? {} : { parentSessionId: parentSessionId ?? "null" }),
+  };
+}
+
 export type FetchLike = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 export type WorkspaceControlEventPage = {
@@ -273,6 +286,24 @@ export class OpenGeniClient {
     );
   }
 
+  async getNewSessionDraft(workspaceId: string): Promise<NewSessionDraft> {
+    return await this.requestJson<NewSessionDraft>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/new-session-draft`,
+    );
+  }
+
+  async saveNewSessionDraft(
+    workspaceId: string,
+    request: SaveNewSessionDraftRequest,
+  ): Promise<NewSessionDraft> {
+    return await this.requestJson<NewSessionDraft>(
+      "PUT",
+      `/v1/workspaces/${workspaceId}/new-session-draft`,
+      request,
+    );
+  }
+
   async getSession(workspaceId: string, sessionId: string): Promise<Session> {
     return await this.requestJson<Session>(
       "GET",
@@ -332,16 +363,7 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/sessions`,
       undefined,
-      {
-        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
-        ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
-        options.parentSessionId !== undefined
-          ? {
-              parentSessionId:
-                options.parentSessionId === null ? "null" : String(options.parentSessionId),
-            }
-          : {}),
-      },
+      sessionListQuery(options),
     );
   }
 
@@ -357,6 +379,7 @@ export class OpenGeniClient {
       pinsOnly?: boolean;
     } = {},
   ): Promise<SessionListResponse> {
+    const search = options.search?.trim();
     let response: SessionListResponse | Session[];
     try {
       response = await this.requestJson<SessionListResponse | Session[]>(
@@ -365,17 +388,10 @@ export class OpenGeniClient {
         undefined,
         {
           view: "page",
-          ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+          ...sessionListQuery(options),
           ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
-          ...(options.search?.trim() ? { search: options.search.trim() } : {}),
+          ...(search ? { search } : {}),
           ...(options.pinsOnly ? { pinsOnly: "true" } : {}),
-          ...(Object.prototype.hasOwnProperty.call(options, "parentSessionId") &&
-          options.parentSessionId !== undefined
-            ? {
-                parentSessionId:
-                  options.parentSessionId === null ? "null" : String(options.parentSessionId),
-              }
-            : {}),
         },
       );
     } catch (error) {
@@ -395,7 +411,7 @@ export class OpenGeniClient {
       // array as a successful search would be worse than an explicit rolling-
       // upgrade error (and client-side filtering cannot recover matches beyond
       // the old endpoint's bounded first page).
-      if (options.search?.trim()) {
+      if (search) {
         throw new Error("The connected OpenGeni API does not support session search");
       }
       if (options.pinsOnly) {
@@ -1963,21 +1979,27 @@ export class OpenGeniClient {
    * -> complete. Returns the ready `FileAsset`.
    */
   async uploadFile(workspaceId: string, input: UploadFileInput): Promise<FileAsset> {
-    // Copy Uint8Array views into a Blob so byte offsets/shared buffers can't
-    // leak surrounding bytes into the PUT body.
+    // Snapshot mutable inputs before hashing so the digest always describes the
+    // exact bytes later sent to object storage. Copy Uint8Array views into a
+    // Blob so byte offsets/shared buffers can't leak surrounding bytes.
     const body: Blob | ArrayBuffer | string =
-      input.data instanceof Uint8Array ? new Blob([input.data.slice()]) : input.data;
+      input.data instanceof Uint8Array
+        ? new Blob([input.data.slice()])
+        : input.data instanceof ArrayBuffer
+          ? input.data.slice(0)
+          : input.data;
     const sizeBytes =
       typeof body === "string"
         ? new TextEncoder().encode(body).byteLength
         : body instanceof Blob
           ? body.size
           : body.byteLength;
+    const sha256 = input.sha256 ?? (await sha256ForUpload(body));
     const upload = await this.beginFileUpload(workspaceId, {
       filename: input.filename,
       contentType: input.contentType,
       sizeBytes,
-      ...(input.sha256 !== undefined ? { sha256: input.sha256 } : {}),
+      sha256,
     });
     const putResponse = await this.fetchImpl(upload.putUrl, {
       method: "PUT",
@@ -2762,6 +2784,17 @@ function assertApiContractResponse(response: Response): void {
   if (actual && actual !== OPENGENI_API_CONTRACT_REVISION) {
     throw new OpenGeniApiContractMismatchError(OPENGENI_API_CONTRACT_REVISION, actual);
   }
+}
+
+async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {
+  const bytes =
+    typeof body === "string"
+      ? new TextEncoder().encode(body)
+      : body instanceof Blob
+        ? new Uint8Array(await body.arrayBuffer())
+        : new Uint8Array(body);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 async function safeText(response: Response): Promise<string> {

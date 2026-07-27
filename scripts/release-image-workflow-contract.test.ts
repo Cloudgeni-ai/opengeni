@@ -119,6 +119,18 @@ describe("release image workflow contract", () => {
     expect(finalJob).not.toContain("helm package");
     expect(finalJob).toContain("Publish or reconcile the exact accepted Helm chart");
     expect(finalJob).toContain("helm push");
+    expect(finalJob).toContain(
+      'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(finalJob).toContain('chart_pull_oci="${chart_oci}/opengeni"');
+    expect(finalJob).toContain('helm pull "$chart_pull_oci"');
+    expect(finalJob).toContain(
+      'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
+    );
+    expect(finalJob).toContain("for attempt in $(seq 1 10)");
+    expect(finalJob).toContain(
+      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+    );
     expect(finalJob).toContain("name: production-release");
     expect(finalJob.indexOf("Compare existing immutable BOM before aliases")).toBeLessThan(
       finalJob.indexOf("Promote exact accepted manifests"),
@@ -184,6 +196,20 @@ describe("release image workflow contract", () => {
     expect(release).toContain("uses: changesets/action@");
     expect(release).toContain("OPENGENI_RELEASE_PACKAGE_PHASE: verify");
     expect(release).toContain("Publish or reconcile the exact candidate chart");
+    expect(release).toContain('[ "$GITHUB_REF" = "refs/heads/main" ]');
+    expect(release).not.toContain('[ "$GITHUB_SHA" = "$SOURCE_SHA" ]');
+    expect(release).toContain(
+      'chart_ref="${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni:${RELEASE_VERSION}"',
+    );
+    expect(release).toContain('chart_pull_oci="${chart_oci}/opengeni"');
+    expect(release).toContain('helm pull "$chart_pull_oci"');
+    expect(release).toContain(
+      'helm pull "oci://${OPENGENI_RELEASE_OCI_PREFIX}/charts/opengeni/opengeni"',
+    );
+    expect(release).toContain("for attempt in $(seq 1 10)");
+    expect(release).toContain(
+      'resolved_manifest="$(bun scripts/resolve-optional-oci-manifest.ts "$chart_ref")"',
+    );
     expect(release).toContain('OPENGENI_RELEASE_BOM_CHART="$RELEASE_CHART"');
     expect(release).toContain("bun scripts/resolve-github-release-state.ts");
     expect(release).not.toContain('gh release view "$tag"');
@@ -273,6 +299,20 @@ describe("release image workflow contract", () => {
     expect(login).toContain("--expose-token");
     expect(login).not.toContain("client-secret");
     expect(login).not.toContain("admin-password");
+  });
+
+  test("agent publication creates only immutable-compatible versioned releases", async () => {
+    const agentRelease = await workflow("agent-release.yml");
+
+    expect(agentRelease).toContain(
+      "uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65",
+    );
+    expect(agentRelease).not.toContain("softprops/action-gh-release@v2");
+    expect(agentRelease).toContain("tag_name: agent-v${{ needs.guard.outputs.version }}");
+    expect(agentRelease).toContain("OPENGENI_AGENT_STABLE_VERSION");
+    expect(agentRelease).not.toContain("gh release delete");
+    expect(agentRelease).not.toContain("gh release create agent-latest");
+    expect(agentRelease).not.toContain("releases/download/agent-latest");
   });
 
   test("release-state parsing accepts a valid absent release without weakening type checks", async () => {

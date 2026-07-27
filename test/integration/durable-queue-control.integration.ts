@@ -786,9 +786,19 @@ describe("durable queue control integration (real Postgres/NATS/Temporal)", () =
         ).toMatchObject([{ id: newest.updateId, kind: "agent_steer_instruction" }]);
         const events = await listSessionEvents(dbClient.db, grant.workspaceId, target.id, 0, 500);
         expect(events.filter((event) => event.type === "turn.started")).toHaveLength(1);
-        const request = JSON.stringify(model.requests[0]?.input ?? null);
-        expect(countOccurrences(request, firstText)).toBe(0);
-        expect(countOccurrences(request, newestText)).toBe(1);
+        const presentedUpdates = internalUpdatesFromModelRequest(model.requests[0]?.input);
+        expect(JSON.stringify(presentedUpdates)).not.toContain(firstText);
+        expect(presentedUpdates).toEqual([
+          expect.objectContaining({
+            id: newest.updateId,
+            kind: "agent_steer_instruction",
+            summary: newestText,
+            payload: expect.objectContaining({
+              type: "agent_steer_instruction",
+              instruction: newestText,
+            }),
+          }),
+        ]);
 
         const firstRun = temporal.workflow.getHandle(first.workflowId, handle.signaledRunId);
         const history = await firstRun.fetchHistory();
@@ -1346,6 +1356,35 @@ async function installQuiescenceReceiptFault(
 
 function countOccurrences(haystack: string, needle: string): number {
   return haystack.split(needle).length - 1;
+}
+
+function internalUpdatesFromModelRequest(input: unknown): unknown[] {
+  if (!Array.isArray(input)) throw new Error("internal update model input is not an array");
+  const message = input.find(
+    (item) =>
+      item !== null &&
+      typeof item === "object" &&
+      "role" in item &&
+      item.role === "system" &&
+      "content" in item &&
+      typeof item.content === "string" &&
+      item.content.startsWith("[OpenGeni internal updates]\n"),
+  );
+  if (message === undefined || !("content" in message) || typeof message.content !== "string") {
+    throw new Error("internal update model input has no system update message");
+  }
+  const payloadStart = message.content.indexOf('{"updates":');
+  if (payloadStart < 0) throw new Error("internal update system message has no JSON payload");
+  const payload: unknown = JSON.parse(message.content.slice(payloadStart));
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    !("updates" in payload) ||
+    !Array.isArray(payload.updates)
+  ) {
+    throw new Error("internal update system message has an invalid update batch");
+  }
+  return payload.updates;
 }
 
 async function integrationWorker(

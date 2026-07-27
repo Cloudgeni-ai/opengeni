@@ -13,17 +13,33 @@
 // over the events bus) lives here, not in the leaf (which stays db-free).
 
 import type { Settings } from "@opengeni/config";
-import { getSandbox, readActiveSandbox, type Database } from "@opengeni/db";
-import type { EventBus } from "@opengeni/events";
 import {
+  advanceWorkspaceGenerationForDirectRequest,
+  advanceWorkspaceGenerationForRetainedProcess,
+  getSandbox,
+  markWarmLeaseInstanceLost,
+  readActiveSandbox,
+  retainWorkspaceMutationProcess,
+  settleRetainedProcess,
+  verifyDirectWorkspaceMutationSettlement,
+  verifyRetainedProcessMutationSettlement,
+  type Database,
+  type SandboxWorkspaceMutationAdmission,
+} from "@opengeni/db";
+import { appendAndPublishEvents, type EventBus } from "@opengeni/events";
+import {
+  isProviderSandboxGoneDuringRoutedOperation,
   makeActiveBackendResolver,
   NatsControlRpc,
   RoutingSandboxSession,
   type ControlRpc,
   type EstablishedSandboxSession,
   type NatsRequestConnection,
+  type ResolvedActiveBackend,
   type RoutableBackendSession,
   type RoutableSandbox,
+  type RoutingRetainedProcess,
+  type RoutingRetainedProcessTerminalProof,
   type SelfhostedRelayConfig,
 } from "@opengeni/runtime/sandbox";
 
@@ -97,10 +113,198 @@ export function routingEnabled(settings: Settings): boolean {
  */
 export function wrapChannelABoxWithRouting(
   services: ChannelARoutingServices,
-  ids: { workspaceId: string; sessionId: string },
+  ids: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    homeLease: {
+      sandboxGroupId: string;
+      leaseEpoch: number;
+      instanceId: string;
+      backend: string;
+    };
+    directRequest: {
+      requestId: string;
+      holderId: string;
+    };
+  },
   established: EstablishedSandboxSession,
 ): EstablishedSandboxSession {
   const { db, settings, bus } = services;
+  const beforeMutation = async ({
+    op,
+    backend,
+  }: {
+    op: string;
+    backend: ResolvedActiveBackend;
+  }): Promise<SandboxWorkspaceMutationAdmission | null> => {
+    // Connected Machines and other non-persistable targets intentionally do
+    // not dirty or advance the cloud-home archive generation.
+    if (
+      backend.sandboxId !== null ||
+      backend.leaseEpoch === undefined ||
+      backend.providerInstanceId === undefined
+    ) {
+      return null;
+    }
+    if (backend.activeEpoch === undefined) {
+      throw new Error("API-direct workspace mutation resolved without an active route epoch");
+    }
+    return await advanceWorkspaceGenerationForDirectRequest(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      requestId: ids.directRequest.requestId,
+      holderId: ids.directRequest.holderId,
+      sandboxGroupId: ids.homeLease.sandboxGroupId,
+      expectedEpoch: backend.leaseEpoch,
+      expectedInstanceId: backend.providerInstanceId,
+      routeTargetId: backend.sandboxId,
+      routeEpoch: backend.activeEpoch,
+      operation: op,
+    });
+  };
+  const afterMutation = async ({
+    op,
+    backend,
+    admission,
+    outcome,
+    retainedProcess,
+  }: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    admission: unknown;
+    outcome: "resolved" | "rejected";
+    result?: unknown;
+    retainedProcess?: RoutingRetainedProcess;
+  }): Promise<void> => {
+    if (admission === null) return;
+    if (
+      !admission ||
+      typeof admission !== "object" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).id !== "string" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).workspaceGeneration !==
+        "number" ||
+      backend.leaseEpoch === undefined ||
+      backend.providerInstanceId === undefined ||
+      backend.activeEpoch === undefined
+    ) {
+      throw new Error("API-direct workspace mutation settlement lacked its exact admission");
+    }
+    const exactAdmission = admission as SandboxWorkspaceMutationAdmission;
+    if (outcome === "resolved" && retainedProcess) {
+      await retainWorkspaceMutationProcess(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sessionId: ids.sessionId,
+        processId: retainedProcess.id,
+        providerSessionId: retainedProcess.providerSessionId,
+        admissionId: exactAdmission.id,
+        admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
+        operation: op,
+        owner: {
+          kind: "direct",
+          requestId: ids.directRequest.requestId,
+          holderId: ids.directRequest.holderId,
+          sandboxGroupId: ids.homeLease.sandboxGroupId,
+          expectedEpoch: backend.leaseEpoch,
+          expectedInstanceId: backend.providerInstanceId,
+          routeTargetId: exactAdmission.routeTargetId,
+          routeEpoch: exactAdmission.routeEpoch,
+        },
+      });
+      return;
+    }
+    await verifyDirectWorkspaceMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      requestId: ids.directRequest.requestId,
+      holderId: ids.directRequest.holderId,
+      sandboxGroupId: ids.homeLease.sandboxGroupId,
+      expectedEpoch: backend.leaseEpoch,
+      expectedInstanceId: backend.providerInstanceId,
+      routeTargetId: exactAdmission.routeTargetId,
+      routeEpoch: exactAdmission.routeEpoch,
+      admission: exactAdmission,
+      operation: op,
+      outcome,
+    });
+  };
+  const beforeProcessMutation = async ({
+    op,
+    process,
+  }: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+  }): Promise<SandboxWorkspaceMutationAdmission> =>
+    await advanceWorkspaceGenerationForRetainedProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      operation: op,
+    });
+  const afterProcessMutation = async ({
+    op,
+    process,
+    admission,
+    outcome,
+  }: {
+    op: string;
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+    admission: unknown;
+    outcome: "resolved" | "rejected";
+    result?: unknown;
+  }): Promise<void> => {
+    if (
+      !admission ||
+      typeof admission !== "object" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).id !== "string" ||
+      typeof (admission as Partial<SandboxWorkspaceMutationAdmission>).workspaceGeneration !==
+        "number"
+    ) {
+      throw new Error("API retained-process mutation settlement lacked its exact admission");
+    }
+    await verifyRetainedProcessMutationSettlement(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      admission: admission as SandboxWorkspaceMutationAdmission,
+      operation: op,
+      outcome,
+    });
+  };
+  const settleProcess = async ({
+    backend,
+    process,
+    proof,
+  }: {
+    backend: ResolvedActiveBackend;
+    process: RoutingRetainedProcess;
+    proof: RoutingRetainedProcessTerminalProof;
+  }): Promise<void> => {
+    if (
+      backend.sandboxId !== null ||
+      backend.leaseEpoch === undefined ||
+      backend.providerInstanceId === undefined
+    ) {
+      return;
+    }
+    await settleRetainedProcess(db, {
+      accountId: ids.accountId,
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+      outcome: proof.outcome,
+      exitCode: proof.exitCode,
+      reason: proof.reason,
+      idleGraceMs: settings.sandboxIdleGraceMs,
+    });
+  };
   const resolver = makeActiveBackendResolver({
     workspaceId: ids.workspaceId,
     defaultBackend: established.session as RoutableBackendSession,
@@ -118,14 +322,68 @@ export function wrapChannelABoxWithRouting(
     },
     controlRpcFactory: controlRpcFactory(bus),
     relay: relayConfigFromSettings(settings),
+    resolveDefaultBackend: async () => ({
+      session: established.session as RoutableBackendSession,
+      sandboxId: null,
+      kind: established.backendId,
+      leaseEpoch: ids.homeLease.leaseEpoch,
+      providerInstanceId: ids.homeLease.instanceId,
+    }),
   });
 
   const proxy = new RoutingSandboxSession({
+    defaultResolved: {
+      session: established.session as RoutableBackendSession,
+      sandboxId: null,
+      kind: established.backendId,
+      leaseEpoch: ids.homeLease.leaseEpoch,
+      providerInstanceId: ids.homeLease.instanceId,
+    },
     readPointer: async () => {
+      if (!routingEnabled(settings)) {
+        return { activeSandboxId: null, activeEpoch: 0 };
+      }
       const pointer = await readActiveSandbox(db, ids.workspaceId, ids.sessionId);
       return pointer ?? { activeSandboxId: null, activeEpoch: 0 };
     },
     resolveActiveBackend: resolver,
+    beforeMutation,
+    afterMutation,
+    beforeProcessMutation,
+    afterProcessMutation,
+    settleProcess,
+    onDefaultBackendError: async ({ error }) => {
+      if (!isProviderSandboxGoneDuringRoutedOperation(ids.homeLease.backend, error)) return null;
+      const marked = await markWarmLeaseInstanceLost(db, {
+        accountId: ids.accountId,
+        workspaceId: ids.workspaceId,
+        sandboxGroupId: ids.homeLease.sandboxGroupId,
+        expectedEpoch: ids.homeLease.leaseEpoch,
+        expectedInstanceId: ids.homeLease.instanceId,
+        diagnostic: "provider_not_found_during_routed_operation",
+      });
+      if (marked.status === "marked" && bus) {
+        await appendAndPublishEvents(db, bus, ids.workspaceId, ids.sessionId, [
+          {
+            type: "sandbox.box.lost",
+            payload: { sandboxId: ids.homeLease.instanceId },
+          },
+        ]).catch(() => undefined);
+      }
+      const lease = marked.lease;
+      const restore = lease?.recovery.restore.status;
+      return {
+        leaseEpoch: lease?.leaseEpoch ?? ids.homeLease.leaseEpoch,
+        recovery:
+          marked.status === "stale"
+            ? ("superseded" as const)
+            : restore === "pending"
+              ? ("pending" as const)
+              : restore === "degraded"
+                ? ("degraded" as const)
+                : ("unrecoverable" as const),
+      };
+    },
   });
 
   return { ...established, session: proxy };

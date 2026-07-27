@@ -11,6 +11,7 @@ import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import type {
   ComposerDraft,
+  SendMessageInput,
   SessionEvent,
   SessionControlResponse,
   SessionQueueMutationResponse,
@@ -1004,6 +1005,45 @@ describe("useGoal", () => {
     await flush(250);
     expect(reads).toBe(1);
     expect(hook.result.current.isPaused).toBe(true);
+    await hook.unmount();
+  });
+
+  test("turn, session, control, and system-update events refresh continuation truth", async () => {
+    let reads = 0;
+    const client = fakeClient({
+      getGoal: async () => {
+        reads += 1;
+        return fakeGoal({
+          continuation: {
+            state: "scheduled",
+            reason: "wake_pending",
+            wakeRevision: reads,
+            observedRevision: reads,
+            nextAttemptAt: null,
+            lastError: null,
+          },
+        });
+      },
+    });
+    const hook = await renderHook(
+      (events: SessionEvent[]) =>
+        useGoal(SESSION_ID, { client, workspaceId: WORKSPACE_ID, events }),
+      [] as SessionEvent[],
+    );
+    await flush();
+    expect(reads).toBe(0);
+
+    await hook.rerender([
+      makeEvent(1, "agent.message.delta"),
+      makeEvent(2, "turn.started"),
+      makeEvent(3, "session.status.changed"),
+      makeEvent(4, "session.control.paused"),
+      makeEvent(5, "system.update.pending"),
+    ]);
+    await flush(250);
+
+    expect(reads).toBe(1);
+    expect(hook.result.current.goal?.continuation?.state).toBe("scheduled");
     await hook.unmount();
   });
 
@@ -2194,6 +2234,36 @@ describe("useComposer file-only send", () => {
     await hook.unmount();
   });
 
+  test("sendBlocked gates canSend and direct send() calls until the host resolves attachments", async () => {
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      (blocked: boolean) =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "ready-file" }] }),
+          sendBlocked: () => blocked,
+        }),
+      true as boolean,
+    );
+
+    expect(hook.result.current.canSend).toBe(false);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(false));
+    expect(sent).toEqual([]);
+
+    await hook.rerender(false);
+    expect(hook.result.current.canSend).toBe(true);
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+    expect(sent).toHaveLength(1);
+    await hook.unmount();
+  });
+
   test("sending a file-only message dispatches the resources with a minimal default text", async () => {
     const sent: { text: string; resources?: unknown }[] = [];
     const client = fakeClient({
@@ -2222,6 +2292,97 @@ describe("useComposer file-only send", () => {
     // Resources ride along, and the wire text is non-empty (contract: min(1)).
     expect(sent[0]!.resources).toEqual([{ kind: "file", fileId: "file-1" }]);
     expect(sent[0]!.text.trim().length).toBeGreaterThan(0);
+    await hook.unmount();
+  });
+  test("onSent receives the immutable input snapshot accepted before an in-flight edit", async () => {
+    let currentFileId = "accepted-file";
+    let releaseSend!: () => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let accepted: SendMessageInput | undefined;
+    const client = fakeClient({
+      sendMessage: async () => {
+        markStarted();
+        await pending;
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: currentFileId }] }),
+          onSent: (_text, input) => {
+            accepted = input;
+          },
+        }),
+      undefined,
+    );
+
+    let result!: Promise<boolean>;
+    await flushing(() => {
+      result = hook.result.current.send();
+    });
+    await started;
+    currentFileId = "later-file";
+    await flushing(async () => {
+      releaseSend();
+      expect(await result).toBe(true);
+    });
+
+    expect(accepted?.resources).toEqual([{ kind: "file", fileId: "accepted-file" }]);
+    await hook.unmount();
+  });
+
+  test("persists the same file-only text that it submits", async () => {
+    const initial: ComposerDraft = {
+      revision: 3,
+      text: "",
+      resources: [],
+      tools: [],
+      toolsProvided: false,
+      model: "model-x",
+      reasoningEffort: "medium",
+      sourceTurnId: null,
+      sourceTurnVersion: null,
+      updatedAt: null,
+    };
+    const saved: unknown[] = [];
+    const sent: unknown[] = [];
+    const client = fakeClient({
+      getComposerDraft: async () => initial,
+      saveComposerDraft: async (_ws, _session, request) => {
+        saved.push(request);
+        return { ...initial, ...request, revision: request.expectedRevision + 1 };
+      },
+      sendMessage: async (_ws, _session, message) => {
+        sent.push(message);
+        return makeEvent(1, "user.message");
+      },
+    });
+    const hook = await renderHook(
+      () =>
+        useComposer(SESSION_ID, {
+          client,
+          workspaceId: WORKSPACE_ID,
+          sendExtras: () => ({ resources: [{ kind: "file", fileId: "file-1" }] }),
+        }),
+      undefined,
+    );
+    await flush();
+
+    await flushing(async () => expect(await hook.result.current.send()).toBe(true));
+
+    expect(saved).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect((saved[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
+    expect((sent[0] as { text: string }).text).toBe(FILE_ONLY_MESSAGE_TEXT);
     await hook.unmount();
   });
 });

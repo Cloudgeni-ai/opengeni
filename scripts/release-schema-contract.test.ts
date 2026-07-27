@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildSchemaContract } from "./release-schema-contract";
@@ -68,10 +68,22 @@ describe("release schema contract", () => {
   test("preserves published host-export history and appends the forward repair", async () => {
     const contract = await buildSchemaContract();
     const migrations = new Map(contract.migrations.map((migration) => [migration.path, migration]));
+    expect(migrations.get("0065_codex_subscription_overview.sql")).toMatchObject({
+      deploymentMode: "maintenance",
+    });
+    // Current main carries this independently published migration, while the
+    // nested-depth branch was cut before it landed. Account for it explicitly
+    // instead of renumbering the nested-depth chain or freezing main.
+    const currentMainToolPolicyMigration = "0065_session_tool_policy.sql";
+    expect(migrations.has(currentMainToolPolicyMigration)).toBe(true);
+    expect(migrations.get(currentMainToolPolicyMigration)).toMatchObject({
+      deploymentMode: "rolling",
+    });
     const currentMainMigrations = [
       "0105_session_turn_instructions.sql",
       "0106_session_attempt_mcp_approval_policies.sql",
       "0107_host_export_lineage_contract.sql",
+      "0108_fence_invalidated_warming_epochs.sql",
     ].filter((file) => migrations.has(file));
 
     expect(currentMainMigrations).toEqual(
@@ -83,24 +95,78 @@ describe("release schema contract", () => {
             ...(currentMainMigrations.includes("0107_host_export_lineage_contract.sql")
               ? ["0107_host_export_lineage_contract.sql"]
               : []),
+            ...(currentMainMigrations.includes("0108_fence_invalidated_warming_epochs.sql")
+              ? ["0108_fence_invalidated_warming_epochs.sql"]
+              : []),
           ],
     );
-    expect(contract.fileCount).toBe(98 + currentMainMigrations.length + 1);
-    expect(contract.sha256).toBe(
-      "d5522079a0b2f1a0beb0726183e97072841996fc8de608bc83e56ec7ed889ec3",
+    const nestedDepthMigrations = [
+      "0109_nested_agent_depth_expand.sql",
+      "0110_nested_agent_depth_boundary.sql",
+      "0111_nested_agent_depth_backfill.sql",
+      "0112_nested_agent_depth_contract.sql",
+      "0113_nested_agent_depth_validate.sql",
+      "0114_nested_agent_depth_contract.sql",
+      "0115_nested_agent_depth_validate.sql",
+      "0116_nested_agent_depth_index.sql",
+    ].filter((file) => migrations.has(file));
+    expect(nestedDepthMigrations).toEqual(
+      [
+        "0109_nested_agent_depth_expand.sql",
+        "0110_nested_agent_depth_boundary.sql",
+        "0111_nested_agent_depth_backfill.sql",
+        "0112_nested_agent_depth_contract.sql",
+        "0113_nested_agent_depth_validate.sql",
+        "0114_nested_agent_depth_contract.sql",
+        "0115_nested_agent_depth_validate.sql",
+        "0116_nested_agent_depth_index.sql",
+      ].filter((file) => migrations.has(file)),
     );
-    expect(migrations.has("0065_session_tool_policy.sql")).toBe(true);
-    expect(contract.latestMigration).toBe("0119_pending_tool_output_policy.sql");
+    expect(contract.fileCount).toBe(
+      108 +
+        (migrations.has(currentMainToolPolicyMigration) ? 1 : 0) +
+        (migrations.has("0117_sandbox_recovery_generations.sql") ? 1 : 0) +
+        (migrations.has("0118_new_session_drafts.sql") ? 1 : 0) +
+        (migrations.has("0119_pending_tool_output_policy.sql") ? 1 : 0) +
+        (migrations.has("0120_durable_goal_wake.sql") ? 1 : 0) +
+        (migrations.has("0121_goal_update_idempotency.sql") ? 1 : 0),
+    );
+    expect(contract.sha256).toBe(
+      "be5629351d5133d499582c0f5a6d962447212b583bab0a2144285ac3f5a926b2",
+    );
+    expect(contract.latestMigration).toBe("0121_goal_update_idempotency.sql");
+
+    const boundarySql = await readFile(
+      join(import.meta.dir, "../packages/db/drizzle/0110_nested_agent_depth_boundary.sql"),
+      "utf8",
+    );
+    const sourceTableLock = boundarySql.indexOf(
+      'LOCK TABLE "workspaces", "sessions", "session_spawn_denials" IN SHARE MODE;',
+    );
+    const guardInstall = boundarySql.indexOf(
+      "CREATE TRIGGER session_idempotency_guard BEFORE INSERT",
+    );
+    const firstLedgerReconciliation = boundarySql.indexOf(
+      'INSERT INTO "session_create_idempotency_guard"',
+    );
+    expect(sourceTableLock).toBeGreaterThanOrEqual(0);
+    expect(guardInstall).toBeGreaterThan(sourceTableLock);
+    expect(firstLedgerReconciliation).toBeGreaterThan(sourceTableLock);
+    expect(boundarySql.indexOf("DO $reconcile$", sourceTableLock)).toBeGreaterThan(sourceTableLock);
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-8]|0119)_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[01])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
       ...currentMainMigrations,
-      "0108_fence_invalidated_warming_epochs.sql",
+      ...nestedDepthMigrations,
+      "0117_sandbox_recovery_generations.sql",
+      "0118_new_session_drafts.sql",
       "0119_pending_tool_output_policy.sql",
+      "0120_durable_goal_wake.sql",
+      "0121_goal_update_idempotency.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -123,12 +189,30 @@ describe("release schema contract", () => {
         deploymentMode: "rolling",
       });
     }
-    expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
-      sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+    if (migrations.has("0108_fence_invalidated_warming_epochs.sql")) {
+      expect(migrations.get("0108_fence_invalidated_warming_epochs.sql")).toMatchObject({
+        sha256: "5039f21076d55cdf7acc45c613ca5c422ed21eecb84ee9725bfa8d9eeb78810f",
+        deploymentMode: "rolling",
+      });
+    }
+    expect(migrations.get("0117_sandbox_recovery_generations.sql")).toMatchObject({
+      sha256: "365284a9ab495173780d54c4b1470824891b15a7290735bf09b72c2f5fdbc48b",
+      deploymentMode: "maintenance",
+    });
+    expect(migrations.get("0118_new_session_drafts.sql")).toMatchObject({
+      sha256: "69ae71b80392eea964c47cadff876cff58db699d6c2470482d35aaf0931de70c",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0119_pending_tool_output_policy.sql")).toMatchObject({
       sha256: "a70e7f605cf4f2c5677e30ccf80f29674107fc88d346c9fdc0882e0b9f314c25",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0120_durable_goal_wake.sql")).toMatchObject({
+      sha256: "5c24fb49679513e2a7cc387e738b2bbdc9b5b3f465c023ea97921882f035d983",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0121_goal_update_idempotency.sql")).toMatchObject({
+      sha256: "e90f030e9dfb3c2dc040b2192cdd874fad264020f06b9c82f1c3dcd30a9769ca",
       deploymentMode: "rolling",
     });
   });

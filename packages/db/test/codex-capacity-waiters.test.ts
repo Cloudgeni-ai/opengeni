@@ -180,7 +180,7 @@ async function arm(scenario: CapacityScenario, resetAt: Date | null = null) {
   });
 }
 
-async function waitForAppSessionLockWait(): Promise<void> {
+async function waitForAppSessionLockWait(blockerPid: number): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     const [row] = await monitor<{ waiting: number }[]>`
@@ -188,8 +188,9 @@ async function waitForAppSessionLockWait(): Promise<void> {
       from pg_stat_activity
       where datname = current_database()
         and usename = 'opengeni_app'
+        and state = 'active'
         and wait_event_type = 'Lock'
-        and query ilike '%sessions%'`;
+        and ${blockerPid} = any(pg_blocking_pids(pid))`;
     if ((row?.waiting ?? 0) > 0) {
       return;
     }
@@ -337,8 +338,11 @@ describe("credential allocator durable Codex capacity waits", () => {
         select id from sessions
         where workspace_id = ${scenario.workspaceId} and id = ${scenario.sessionId}
         for update`;
+      const [blocker] = await lockTx<{ pid: number }[]>`
+        select pg_backend_pid()::int as pid`;
+      if (!blocker) throw new Error("expected blocker backend");
       claim = claimTestTurn(claimDb, scenario.workspaceId, scenario.sessionId, scenario.workflowId);
-      await waitForAppSessionLockWait();
+      await waitForAppSessionLockWait(blocker.pid);
 
       // If claim took the pending update before waiting for the session, this
       // statement forms update -> session / session -> update and times out.

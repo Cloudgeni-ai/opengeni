@@ -12,7 +12,10 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   releaseWorkflowPath: ".github/workflows/release.yml",
   ciWorkflowPath: ".github/workflows/ci.yml",
   ciWorkflowFile: "ci.yml",
+  sealWorkflowPath: ".github/workflows/seal-release-head.yml",
   sourceAdmissionWorkflowPath: ".github/workflows/source-admission.yml",
+  releaseHeadTagPrefix: "opengeni-release-head-",
+  releaseHeadReleaseNamePrefix: "Retained OpenGeni release head ",
   versionAuthor: Object.freeze({
     login: "github-actions[bot]",
     id: 41898282,
@@ -30,6 +33,7 @@ export const RELEASE_AUTOMATION_CONTRACT = Object.freeze({
   checks: Object.freeze({
     sourceAdmission: "Current-base source admission",
     automationCi: "Automation PR CI",
+    releaseHeadRetention: "Release-head retention",
     requiredSource: Object.freeze([
       "Typecheck and unit tests",
       "Deployment artifacts",
@@ -93,7 +97,7 @@ function requiredEnvironment(env, names) {
 
 function githubClient(fetchImpl, token) {
   invariant(typeof fetchImpl === "function", "fetch implementation is missing");
-  const request = async (method, path, body) => {
+  const request = async (method, path, body, allowedStatuses = []) => {
     invariant(typeof path === "string" && path.startsWith("/"), "GitHub API path is invalid");
     const response = await fetchImpl(`${RELEASE_AUTOMATION_CONTRACT.apiUrl}${path}`, {
       method,
@@ -108,16 +112,20 @@ function githubClient(fetchImpl, token) {
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     invariant(
-      response?.ok === true,
+      response?.ok === true || allowedStatuses.includes(response?.status),
       `GitHub API ${method} ${path} failed with HTTP ${response?.status ?? "unknown"}`,
     );
-    if (response.status === 204) return null;
-    return response.json();
+    if (response.status === 204) return { status: response.status, value: null };
+    return { status: response.status, value: await response.json() };
   };
   return {
-    get: (path) => request("GET", path),
-    patch: (path, body) => request("PATCH", path, body),
-    post: (path, body) => request("POST", path, body),
+    get: async (path) => (await request("GET", path)).value,
+    getOptional: async (path) => {
+      const result = await request("GET", path, undefined, [404]);
+      return result.status === 404 ? null : result.value;
+    },
+    patch: async (path, body) => (await request("PATCH", path, body)).value,
+    post: async (path, body) => (await request("POST", path, body)).value,
   };
 }
 
@@ -146,6 +154,112 @@ function assertMainRef(value, expectedSha, label = "default branch") {
   invariant(value?.object?.type === "commit", `${label} is not a direct commit ref`);
   const actualSha = assertSha(value.object.sha, `${label} SHA`);
   invariant(actualSha === expectedSha, `${label} differs from the admitted base SHA`);
+}
+
+function releaseHeadTagName(headSha) {
+  return `${RELEASE_AUTOMATION_CONTRACT.releaseHeadTagPrefix}${assertSha(
+    headSha,
+    "release head SHA",
+  )}`;
+}
+
+function assertReleaseHeadRef(value, headSha) {
+  const tag = releaseHeadTagName(headSha);
+  invariant(value?.ref === `refs/tags/${tag}`, "release head evidence ref changed");
+  invariant(
+    value?.object?.type === "commit",
+    "release head evidence ref is not a direct commit ref",
+  );
+  invariant(
+    assertSha(value.object.sha, "release head evidence ref SHA") === headSha,
+    "release head evidence ref points to another commit",
+  );
+  return tag;
+}
+
+async function ensureReleaseHeadRef(api, headSha) {
+  const tag = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/git/ref/tags/${tag}`);
+  const existing = await api.getOptional(path);
+  if (existing === null) {
+    await api.post(repositoryPath("/git/refs"), {
+      ref: `refs/tags/${tag}`,
+      sha: headSha,
+    });
+  } else {
+    assertReleaseHeadRef(existing, headSha);
+  }
+  const terminal = await api.get(path);
+  assertReleaseHeadRef(terminal, headSha);
+  return { name: tag, ref: `refs/tags/${tag}`, sha: headSha };
+}
+
+function releaseHeadReleaseName(headSha) {
+  return `${RELEASE_AUTOMATION_CONTRACT.releaseHeadReleaseNamePrefix}${assertSha(
+    headSha,
+    "release head SHA",
+  )}`;
+}
+
+function assertReleaseHeadRelease(value, headSha) {
+  const release = record(value, "release head immutable release");
+  const id = assertPositiveInteger(release.id, "release head immutable release ID");
+  const tagName = releaseHeadTagName(headSha);
+  invariant(release.tag_name === tagName, "release head immutable release tag changed");
+  invariant(
+    release.name === releaseHeadReleaseName(headSha),
+    "release head immutable release name changed",
+  );
+  invariant(
+    release.draft === false && release.prerelease === true && release.immutable === true,
+    "release head evidence is not a published immutable prerelease",
+  );
+  assertIdentity(
+    release.author,
+    RELEASE_AUTOMATION_CONTRACT.versionAuthor,
+    "release head immutable release author",
+  );
+  const publishedAt = new Date(
+    assertTimestamp(release.published_at, "release head immutable release publication time"),
+  ).toISOString();
+  const url =
+    `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
+    `/releases/tag/${tagName}`;
+  invariant(release.html_url === url, "release head immutable release URL changed");
+  return {
+    id,
+    tagName,
+    name: releaseHeadReleaseName(headSha),
+    immutable: true,
+    draft: false,
+    prerelease: true,
+    authorId: RELEASE_AUTOMATION_CONTRACT.versionAuthor.id,
+    authorLogin: RELEASE_AUTOMATION_CONTRACT.versionAuthor.login,
+    authorType: RELEASE_AUTOMATION_CONTRACT.versionAuthor.type,
+    publishedAt,
+    url,
+  };
+}
+
+async function ensureReleaseHeadRelease(api, headSha) {
+  const tagName = releaseHeadTagName(headSha);
+  const path = repositoryPath(`/releases/tags/${tagName}`);
+  const existing = await api.getOptional(path);
+  if (existing === null) {
+    await api.post(repositoryPath("/releases"), {
+      tag_name: tagName,
+      name: releaseHeadReleaseName(headSha),
+      body:
+        `Provider-retained exact release-source head ${headSha}. ` +
+        "This prerelease exists only as immutable source-retention evidence.",
+      draft: false,
+      prerelease: true,
+      make_latest: "false",
+    });
+  } else {
+    assertReleaseHeadRelease(existing, headSha);
+  }
+  return assertReleaseHeadRelease(await api.get(path), headSha);
 }
 
 function assertIdentity(actual, expected, label) {
@@ -296,7 +410,7 @@ function automationCiContext(env, suppliedInputs) {
   return {
     ...context,
     ...inputs,
-    ciRunId: assertPositiveInteger(env.GITHUB_RUN_ID, "CI run ID"),
+    workflowRunId: assertPositiveInteger(env.GITHUB_RUN_ID, "CI run ID"),
   };
 }
 
@@ -459,7 +573,7 @@ function syntheticSourceAdmissionContext(context, pull) {
       GITHUB_API_URL: RELEASE_AUTOMATION_CONTRACT.apiUrl,
       GITHUB_BASE_REF: RELEASE_AUTOMATION_CONTRACT.defaultBranch,
       GITHUB_EVENT_NAME: "pull_request_target",
-      GITHUB_HEAD_REF: RELEASE_AUTOMATION_CONTRACT.versionBranch,
+      GITHUB_HEAD_REF: assertString(pull?.head?.ref, "pull-request head branch"),
       GITHUB_REF: `refs/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`,
       GITHUB_REPOSITORY: RELEASE_AUTOMATION_CONTRACT.repository,
       GITHUB_SERVER_URL: RELEASE_AUTOMATION_CONTRACT.serverUrl,
@@ -516,15 +630,173 @@ export async function validateVersionPrCiAdmission(options = {}) {
   return { ...context, admission };
 }
 
+function releaseHeadSealInputs(env, suppliedInputs) {
+  const values = suppliedInputs ?? {
+    prNumber: env.RELEASE_HEAD_PR_NUMBER,
+    baseSha: env.RELEASE_HEAD_BASE_SHA,
+    headSha: env.RELEASE_HEAD_SHA,
+  };
+  const inputs = {
+    prNumber: assertPositiveInteger(values.prNumber, "release-head PR number"),
+    baseSha: assertSha(values.baseSha, "release-head base SHA"),
+    headSha: assertSha(values.headSha, "release-head SHA"),
+  };
+  invariant(inputs.headSha !== inputs.baseSha, "release head SHA equals its base SHA");
+  return inputs;
+}
+
+function releaseHeadSealContext(env, suppliedInputs) {
+  const github = baseGithubContext(
+    env,
+    RELEASE_AUTOMATION_CONTRACT.sealWorkflowPath,
+    "workflow_dispatch",
+  );
+  requiredEnvironment(env, ["GITHUB_RUN_ID"]);
+  const inputs = releaseHeadSealInputs(env, suppliedInputs);
+  invariant(github.sha === inputs.baseSha, "release-head workflow SHA differs from its base SHA");
+  return {
+    ...github,
+    ...inputs,
+    workflowRunId: assertPositiveInteger(env.GITHUB_RUN_ID, "seal workflow run ID"),
+  };
+}
+
+function assertOpenReleasePull(pull, context) {
+  invariant(pull?.number === context.prNumber, "release-head pull-request number changed");
+  invariant(
+    pull?.state === "open" && pull?.merged === false,
+    "release-head pull request is not open",
+  );
+  invariant(pull?.draft === false, "release-head pull request is a draft");
+  invariant(
+    pull?.base?.ref === RELEASE_AUTOMATION_CONTRACT.defaultBranch &&
+      pull.base.repo?.full_name === RELEASE_AUTOMATION_CONTRACT.repository &&
+      pull.base.sha === context.baseSha,
+    "release-head pull-request base changed",
+  );
+  invariant(pull?.head?.sha === context.headSha, "release-head pull-request head changed");
+  assertString(pull?.head?.ref, "release-head pull-request head branch");
+  assertString(pull?.head?.repo?.full_name, "release-head pull-request head repository");
+}
+
+export async function sealReleaseHeadEvidence(options = {}) {
+  const env = options.env ?? process.env;
+  const logger = options.logger ?? console;
+  const fetchImpl = options.fetchImpl ?? globalThis.fetch;
+  const context = releaseHeadSealContext(env, options.inputs);
+  const api = githubClient(fetchImpl, context.token);
+  const [repository, main, pull] = await Promise.all([
+    api.get(repositoryPath("")),
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+  ]);
+  assertRepository(repository);
+  assertMainRef(main, context.baseSha, "release-head default branch");
+  assertOpenReleasePull(pull, context);
+
+  const admission = await verifySourceAdmission({
+    ...syntheticSourceAdmissionContext(context, pull),
+    fetchImpl,
+    logger,
+  });
+  invariant(admission.baseSha === context.baseSha, "source admission returned another base SHA");
+  invariant(admission.headSha === context.headSha, "source admission returned another head SHA");
+  const sourceAdmission = assertSuccessfulCheck(
+    await paginatedCheckRuns(api, context.headSha),
+    RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
+    context.headSha,
+  );
+  const releaseHead = await ensureReleaseHeadRef(api, context.headSha);
+  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.headSha);
+
+  const now = options.now ?? (() => new Date());
+  await upsertCheckRun(
+    api,
+    { ...context, releaseHeadRelease },
+    "release-head-retention",
+    {
+      status: "in_progress",
+      title: "Verifying immutable release-head retention",
+      summary: `Verifying retained release head ${context.headSha} for PR #${context.prNumber}.`,
+    },
+    now,
+  );
+  const [terminalMain, terminalPull] = await Promise.all([
+    api.get(repositoryPath(`/git/ref/heads/${RELEASE_AUTOMATION_CONTRACT.defaultBranch}`)),
+    api.get(repositoryPath(`/pulls/${context.prNumber}`)),
+  ]);
+  assertMainRef(terminalMain, context.baseSha, "terminal release-head default branch");
+  assertOpenReleasePull(terminalPull, context);
+  const terminalReleaseHeadName = assertReleaseHeadRef(
+    await api.get(repositoryPath(`/git/ref/tags/${releaseHead.name}`)),
+    context.headSha,
+  );
+  const terminalReleaseHeadRelease = assertReleaseHeadRelease(
+    await api.get(repositoryPath(`/releases/tags/${releaseHead.name}`)),
+    context.headSha,
+  );
+  const terminalReleaseHead = {
+    name: terminalReleaseHeadName,
+    ref: `refs/tags/${terminalReleaseHeadName}`,
+    sha: context.headSha,
+  };
+  invariant(
+    JSON.stringify(terminalReleaseHeadRelease) === JSON.stringify(releaseHeadRelease),
+    "release head immutable release moved during sealing",
+  );
+  invariant(
+    JSON.stringify(terminalReleaseHead) === JSON.stringify(releaseHead),
+    "release head ref moved during sealing",
+  );
+  await upsertCheckRun(
+    api,
+    { ...context, releaseHeadRelease: terminalReleaseHeadRelease },
+    "release-head-retention",
+    {
+      status: "completed",
+      conclusion: "success",
+      title: "Release head retained immutably",
+      summary:
+        `PR #${context.prNumber} exact head ${context.headSha} is retained at ${releaseHead.ref} ` +
+        `by immutable prerelease ${releaseHeadRelease.id}.`,
+    },
+    now,
+  );
+  logger.log(
+    `Sealed release head ${context.headSha} for PR #${context.prNumber} at ${releaseHead.ref}.`,
+  );
+  return {
+    ...context,
+    admission,
+    sourceAdmission,
+    releaseHead,
+    releaseHeadRelease,
+  };
+}
+
 function checkIdentity(kind, context) {
-  invariant(kind === "source-admission" || kind === "automation-ci", "check kind is invalid");
+  invariant(
+    kind === "source-admission" || kind === "automation-ci" || kind === "release-head-retention",
+    "check kind is invalid",
+  );
   const name =
     kind === "source-admission"
       ? RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission
-      : RELEASE_AUTOMATION_CONTRACT.checks.automationCi;
+      : kind === "automation-ci"
+        ? RELEASE_AUTOMATION_CONTRACT.checks.automationCi
+        : RELEASE_AUTOMATION_CONTRACT.checks.releaseHeadRetention;
+  const retentionIdentity =
+    kind === "release-head-retention"
+      ? `:release-sha256:${canonicalSha256(
+          record(context.releaseHeadRelease, "release head immutable release check identity"),
+        )}`
+      : "";
   return {
     name,
-    externalId: `opengeni:release-automation:${kind}:v1:pr:${context.prNumber}:head:${context.headSha}`,
+    exclusive: kind === "release-head-retention",
+    externalId:
+      `opengeni:release-automation:${kind}:${kind === "release-head-retention" ? "v2" : "v1"}:` +
+      `pr:${context.prNumber}:head:${context.headSha}${retentionIdentity}`,
   };
 }
 
@@ -542,7 +814,15 @@ async function findCheckRun(api, context, identity) {
     );
     invariant(Array.isArray(response.check_runs), "check-run records are missing");
     for (const check of response.check_runs) {
-      if (check?.external_id !== identity.externalId) continue;
+      if (check?.external_id !== identity.externalId) {
+        if (!identity.exclusive) continue;
+        invariant(
+          check?.head_sha === context.headSha,
+          "conflicting check run is bound to another head",
+        );
+        assertGitHubActionsApp(check?.app, "conflicting check run");
+        throw new Error("existing check run conflicts with the exact idempotency identity");
+      }
       invariant(check?.head_sha === context.headSha, "existing check run is bound to another head");
       assertGitHubActionsApp(check?.app, "existing check run");
       invariant(
@@ -563,7 +843,7 @@ async function upsertCheckRun(api, context, kind, state, now) {
   const existing = await findCheckRun(api, context, identity);
   const detailsUrl =
     `${RELEASE_AUTOMATION_CONTRACT.serverUrl}/${RELEASE_AUTOMATION_CONTRACT.repository}` +
-    `/actions/runs/${context.ciRunId}`;
+    `/actions/runs/${context.workflowRunId}`;
   const completed = state.status === "completed";
   const body = {
     name: identity.name,
@@ -595,7 +875,24 @@ export async function beginVersionPrChecks(options = {}) {
   const context = automationCiContext(env, options.inputs);
   const api = githubClient(options.fetchImpl ?? globalThis.fetch, context.token);
   await terminalVersionIdentity(api, context);
+  const releaseHead = await ensureReleaseHeadRef(api, context.headSha);
+  const releaseHeadRelease = await ensureReleaseHeadRelease(api, context.headSha);
+  await terminalVersionIdentity(api, context);
   const now = options.now ?? (() => new Date());
+  await upsertCheckRun(
+    api,
+    { ...context, releaseHeadRelease },
+    "release-head-retention",
+    {
+      status: "completed",
+      conclusion: "success",
+      title: "Release head retained immutably",
+      summary:
+        `Version PR #${context.prNumber} exact head ${context.headSha} is retained at ` +
+        `${releaseHead.ref} by immutable prerelease ${releaseHeadRelease.id}.`,
+    },
+    now,
+  );
   await upsertCheckRun(
     api,
     context,
@@ -618,7 +915,7 @@ export async function beginVersionPrChecks(options = {}) {
     },
     now,
   );
-  return context;
+  return { ...context, releaseHead, releaseHeadRelease };
 }
 
 export async function completeVersionPrChecks(options = {}) {
@@ -1070,10 +1367,18 @@ export async function verifyApprovedMerge(options = {}) {
     );
   }
 
-  const [headChecks, sourceChecks] = await Promise.all([
+  const releaseHeadTag = releaseHeadTagName(pullIdentity.headSha);
+  const [headChecks, sourceChecks, releaseHeadRef, releaseHeadReleaseValue] = await Promise.all([
     paginatedCheckRuns(api, pullIdentity.headSha),
     paginatedCheckRuns(api, context.sourceSha),
+    api.get(repositoryPath(`/git/ref/tags/${releaseHeadTag}`)),
+    api.get(repositoryPath(`/releases/tags/${releaseHeadTag}`)),
   ]);
+  assertReleaseHeadRef(releaseHeadRef, pullIdentity.headSha);
+  const releaseHeadRelease = assertReleaseHeadRelease(
+    releaseHeadReleaseValue,
+    pullIdentity.headSha,
+  );
   const sourceAdmission = assertSuccessfulCheck(
     headChecks,
     RELEASE_AUTOMATION_CONTRACT.checks.sourceAdmission,
@@ -1086,7 +1391,7 @@ export async function verifyApprovedMerge(options = {}) {
   assertMainRef(terminalMain, context.sourceSha, "terminal release main");
 
   const provenance = {
-    version: 1,
+    version: 2,
     repository: RELEASE_AUTOMATION_CONTRACT.repository,
     sourceSha: context.sourceSha,
     sourceTreeSha: source.treeSha,
@@ -1099,6 +1404,12 @@ export async function verifyApprovedMerge(options = {}) {
     reviewedBaseTreeSha: base.treeSha,
     reviewedHeadSha: pullIdentity.headSha,
     reviewedHeadTreeSha: head.treeSha,
+    releaseHead: {
+      name: releaseHeadTag,
+      ref: `refs/tags/${releaseHeadTag}`,
+      sha: pullIdentity.headSha,
+    },
+    releaseHeadRelease,
     review: {
       type: reviewType,
       id: decision.id,
@@ -1153,6 +1464,18 @@ async function runCommand(env = process.env) {
   }
   if (command === "complete-version-check") {
     await completeVersionPrChecks({ env });
+    return;
+  }
+  if (command === "seal-release-head") {
+    const result = await sealReleaseHeadEvidence({ env });
+    writeOutputs(
+      {
+        release_head_pr_number: result.prNumber,
+        release_head_sha: result.headSha,
+        release_head_ref: result.releaseHead.ref,
+      },
+      env,
+    );
     return;
   }
   if (command === "verify-approved-merge") {

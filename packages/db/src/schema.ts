@@ -81,6 +81,34 @@ export const workspaces = pgTable(
   }),
 );
 
+// One target-schema-local deployment fallback. The migration runner reconciles
+// this singleton from OPENGENI_MAX_NESTED_AGENT_DEPTH; session admission locks
+// and reads it through the SECURITY DEFINER capability installed by the
+// boundary migration so the application role cannot mutate policy authority.
+export const nestedAgentDepthConfiguration = pgTable(
+  "nested_agent_depth_configuration",
+  {
+    singleton: boolean("singleton").primaryKey().notNull().default(true),
+    maxNestedAgentDepth: integer("max_nested_agent_depth").notNull(),
+    policySource: text("policy_source").$type<"deployment" | "default">().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    singletonOnly: check(
+      "nested_agent_depth_configuration_singleton_check",
+      sql`${table.singleton}`,
+    ),
+    maxValid: check(
+      "nested_agent_depth_configuration_max_check",
+      sql`${table.maxNestedAgentDepth} >= 0`,
+    ),
+    sourceValid: check(
+      "nested_agent_depth_configuration_source_check",
+      sql`${table.policySource} in ('deployment', 'default')`,
+    ),
+  }),
+);
+
 // One mandatory workspace-wide admission barrier. Every inference-admitting
 // transaction locks this row before it touches a session; Pause/Resume and
 // foreground Send/Steer advance its monotonic revision under FOR UPDATE.
@@ -741,6 +769,15 @@ export const sessions = pgTable(
     // workspace to a single session row — the dedup that closes the
     // double-submit/double-dispatch stuck-queued bug.
     createIdempotencyKey: text("create_idempotency_key"),
+    // Immutable creation-time hierarchy and policy snapshot. These values are
+    // populated by the database admission boundary and never re-derived from
+    // a live workspace setting for an existing session.
+    rootSessionId: uuid("root_session_id").notNull(),
+    nestedAgentDepth: integer("nested_agent_depth").notNull(),
+    maxNestedAgentDepthOverride: integer("max_nested_agent_depth_override"),
+    effectiveMaxNestedAgentDepth: integer("effective_max_nested_agent_depth").notNull(),
+    nestedAgentDepthPolicySource: text("nested_agent_depth_policy_source").notNull(),
+    nestedAgentDepthPolicySessionId: uuid("nested_agent_depth_policy_session_id"),
     temporalWorkflowId: text("temporal_workflow_id"),
     activeTurnId: uuid("active_turn_id"),
     // Actual input tokens reported for the last model call of the most recent
@@ -823,12 +860,64 @@ export const sessions = pgTable(
     // point and enumerate all sessions in a group for attribution/disclosure.
     sandboxGroup: index("sessions_sandbox_group_idx").on(table.workspaceId, table.sandboxGroupId),
     // Partial unique index: one session per (workspace, create_idempotency_key)
-    // when a key is present. Concurrent creates racing on the same key see a
-    // unique violation on all but one; the domain layer catches it and returns
-    // the winning row instead of erroring.
+    // when a key is present. The boundary trigger reserves the cross-outcome
+    // winner before this source row commits; a losing source insert is
+    // suppressed and the domain layer replays the durable winner.
     createIdempotency: uniqueIndex("sessions_workspace_create_idempotency_idx")
       .on(table.workspaceId, table.createIdempotencyKey)
       .where(sql`${table.createIdempotencyKey} is not null`),
+    rootDepth: index("sessions_workspace_root_depth_idx").on(
+      table.workspaceId,
+      table.rootSessionId,
+      table.nestedAgentDepth,
+    ),
+  }),
+);
+
+// A denied session create is durable evidence, not a mutable session/resource
+// artifact. It has its own workspace-scoped idempotency key so retries replay
+// the same denial without creating a session or billing/run rows.
+export const sessionSpawnDenials = pgTable(
+  "session_spawn_denials",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    parentSessionId: uuid("parent_session_id"),
+    rootSessionId: uuid("root_session_id"),
+    currentDepth: integer("current_depth").notNull(),
+    attemptedDepth: bigint("attempted_depth", { mode: "number" }).notNull(),
+    effectiveMaxNestedAgentDepth: integer("effective_max_nested_agent_depth").notNull(),
+    requestedMaxNestedAgentDepthOverride: integer("requested_max_nested_agent_depth_override"),
+    policySource: text("policy_source").notNull(),
+    policySessionId: uuid("policy_session_id"),
+    subjectId: text("subject_id"),
+    code: text("code").notNull(),
+    idempotencyKey: text("idempotency_key"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceIdentity: uniqueIndex("session_spawn_denials_workspace_id_uq").on(
+      table.workspaceId,
+      table.id,
+    ),
+    workspaceCreated: index("session_spawn_denials_workspace_created_idx").on(
+      table.workspaceId,
+      table.createdAt,
+    ),
+    parent: index("session_spawn_denials_parent_idx").on(
+      table.workspaceId,
+      table.parentSessionId,
+      table.createdAt,
+    ),
+    idempotency: uniqueIndex("session_spawn_denials_workspace_idempotency_idx")
+      .on(table.workspaceId, table.idempotencyKey)
+      .where(sql`${table.idempotencyKey} is not null`),
+    workspaceAccount: foreignKey({
+      name: "session_spawn_denials_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
   }),
 );
 
@@ -1464,6 +1553,9 @@ export const sessionCommandReceipts = pgTable(
       table.targetSessionId,
       table.createdAt,
     ),
+    goalUpdateOperation: uniqueIndex("session_command_receipts_goal_update_operation_uq")
+      .on(table.workspaceId, table.action, table.targetSessionId, table.operationKey)
+      .where(sql`${table.action} = 'goal.update'`),
     actorValid: check(
       "session_command_receipts_actor_check",
       sql`(
@@ -1640,6 +1732,43 @@ export const composerDrafts = pgTable(
   }),
 );
 
+// Private pre-session composer truth. It is separate from composerDrafts so
+// the established-session table keeps its mandatory session foreign key.
+export const newSessionDrafts = pgTable(
+  "new_session_drafts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    subjectId: text("subject_id").notNull(),
+    revision: bigint("revision", { mode: "number" }).notNull().default(1),
+    text: text("text").notNull().default(""),
+    resources: jsonb("resources").$type<unknown[]>().notNull().default([]),
+    tools: jsonb("tools").$type<unknown[]>().notNull().default([]),
+    model: text("model").notNull(),
+    reasoningEffort: text("reasoning_effort").notNull(),
+    sessionOptions: jsonb("session_options").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "new_session_drafts_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    subjectWorkspace: uniqueIndex("new_session_drafts_subject_workspace_uq").on(
+      table.workspaceId,
+      table.subjectId,
+    ),
+    subjectValid: check(
+      "new_session_drafts_subject_check",
+      sql`length(btrim(${table.subjectId})) > 0`,
+    ),
+    revisionValid: check("new_session_drafts_revision_check", sql`${table.revision} >= 1`),
+  }),
+);
+
 export const sessionSystemUpdates = pgTable(
   "session_system_updates",
   {
@@ -1779,6 +1908,10 @@ export const sessionWorkflowWakeOutbox = pgTable(
       "session_workflow_wake_outbox_revision_check",
       sql`${table.wakeRevision} > 0 and ${table.deliveredRevision} >= 0 and ${table.deliveredRevision} <= ${table.wakeRevision}`,
     ),
+    revisionSafe: check(
+      "session_workflow_wake_outbox_revision_safe_check",
+      sql`${table.wakeRevision} <= 9007199254740991 and ${table.deliveredRevision} <= 9007199254740991`,
+    ),
     workspaceAccount: foreignKey({
       name: "session_workflow_wake_outbox_workspace_account_fk",
       columns: [table.workspaceId, table.accountId],
@@ -1825,6 +1958,18 @@ export const sessionGoals = pgTable(
     maxAutoContinuations: integer("max_auto_continuations"), // per-goal override; a configured settings cap (if any) remains the hard ceiling
     lastContinuationTurnId: uuid("last_continuation_turn_id"),
     versionAtLastContinuation: integer("version_at_last_continuation"),
+    // Postgres owns the continuation obligation. Terminal settlement advances
+    // wakeRevision in the same transaction that makes the session idle;
+    // materialization advances observedRevision only alongside the one typed
+    // update, timeline events, usage row, and workflow-wake outbox row.
+    // Temporal signals and workflow history are replaceable nudges over these
+    // monotonic revisions.
+    continuationWakeRevision: bigint("continuation_wake_revision", { mode: "number" })
+      .notNull()
+      .default(0),
+    continuationObservedRevision: bigint("continuation_observed_revision", { mode: "number" })
+      .notNull()
+      .default(0),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1839,6 +1984,10 @@ export const sessionGoals = pgTable(
       table.sessionId,
     ),
     status: index("session_goals_workspace_status_idx").on(table.workspaceId, table.status),
+    continuationRevisionValid: check(
+      "session_goals_continuation_revision_check",
+      sql`${table.continuationWakeRevision} >= 0 and ${table.continuationObservedRevision} >= 0 and ${table.continuationObservedRevision} <= ${table.continuationWakeRevision} and ${table.continuationWakeRevision} <= 9007199254740991 and ${table.continuationObservedRevision} <= 9007199254740991`,
+    ),
   }),
 );
 
@@ -2311,6 +2460,14 @@ export const sandboxLeases = pgTable(
     // Epochs never approach 2^31, so the narrower type loses nothing.
     leaseEpoch: integer("lease_epoch").notNull().default(0),
 
+    // Monotonic mutation intent for the live workspace. Every acknowledged
+    // filesystem-writing operation advances this under the exact lease epoch +
+    // provider-instance fence BEFORE it reaches the provider. A verified
+    // archive fold copies the exact captured value into archive_generation in
+    // the same row update; equality is the only durable completeness proof.
+    workspaceGeneration: integer("workspace_generation").notNull().default(0),
+    archiveGeneration: integer("archive_generation"),
+
     // The group box-envelope (the "envelope split" Critical): the small recovery
     // descriptor to resume()-by-id the group's box without a per-session join.
     resumeBackendId: text("resume_backend_id"),
@@ -2328,9 +2485,30 @@ export const sandboxLeases = pgTable(
   },
   (table) => ({
     groupIdx: uniqueIndex("sandbox_leases_group_idx").on(table.workspaceId, table.sandboxGroupId),
+    scopedId: uniqueIndex("sandbox_leases_scoped_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.sandboxGroupId,
+      table.id,
+    ),
+    accountWorkspaceId: uniqueIndex("sandbox_leases_account_workspace_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.id,
+    ),
     reaperIdx: index("sandbox_leases_reaper_idx")
       .on(table.expiresAt)
       .where(sql`${table.liveness} in ('warming','warm','draining')`),
+    workspaceGenerationValid: check(
+      "sandbox_leases_workspace_generation_check",
+      sql`${table.workspaceGeneration} >= 0`,
+    ),
+    archiveGenerationValid: check(
+      "sandbox_leases_archive_generation_check",
+      sql`${table.archiveGeneration} is null
+        or (${table.archiveGeneration} >= 0
+          and ${table.archiveGeneration} <= ${table.workspaceGeneration})`,
+    ),
   }),
 );
 
@@ -2349,7 +2527,7 @@ export const sandboxLeaseHolders = pgTable(
     leaseId: uuid("lease_id")
       .notNull()
       .references(() => sandboxLeases.id, { onDelete: "cascade" }),
-    kind: text("kind", { enum: ["turn", "viewer"] }).notNull(),
+    kind: text("kind", { enum: ["turn", "viewer", "direct", "process"] }).notNull(),
     holderId: text("holder_id").notNull(),
     // The attributing session within the (possibly shared) group.
     subjectId: uuid("subject_id"),
@@ -2357,6 +2535,11 @@ export const sandboxLeaseHolders = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
+    leaseScope: foreignKey({
+      name: "sandbox_lease_holders_lease_scope_fk",
+      columns: [table.accountId, table.workspaceId, table.leaseId],
+      foreignColumns: [sandboxLeases.accountId, sandboxLeases.workspaceId, sandboxLeases.id],
+    }).onDelete("cascade"),
     holderIdx: uniqueIndex("sandbox_lease_holders_holder_idx").on(
       table.leaseId,
       table.kind,
@@ -2364,6 +2547,283 @@ export const sandboxLeaseHolders = pgTable(
     ),
     staleIdx: index("sandbox_lease_holders_stale_idx").on(table.kind, table.lastHeartbeatAt),
     leaseIdx: index("sandbox_lease_holders_lease_idx").on(table.leaseId),
+  }),
+);
+
+export const sandboxWorkspaceMutationActorKindValues = ["turn", "direct", "process"] as const;
+export const sandboxWorkspaceMutationHolderKindValues = ["turn", "direct", "process"] as const;
+
+// Durable admission ledger for every provider operation that may mutate a
+// persistable /workspace. The row is inserted atomically with the lease's
+// workspace_generation increment before the provider is invoked, then marked
+// physically settled after the provider promise resolves OR rejects. Capture
+// remains blocked by an unsettled direct/process row. A turn row may cease
+// blocking only after its exact attempt carries the authoritative quiesced_at
+// receipt. Yielded provider processes remain retained/unsettled until exact
+// exit or loss proof settles their parent admission.
+export const sandboxWorkspaceMutationAdmissions = pgTable(
+  "sandbox_workspace_mutation_admissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    leaseId: uuid("lease_id")
+      .notNull()
+      .references(() => sandboxLeases.id, { onDelete: "cascade" }),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    actorKind: text("actor_kind", { enum: sandboxWorkspaceMutationActorKindValues }).notNull(),
+    actorId: uuid("actor_id").notNull(),
+    // Exact turn authority is present only for actor_kind='turn'. Direct HTTP
+    // requests and retained processes never invent a turn or quiescence owner.
+    turnId: uuid("turn_id"),
+    attemptId: uuid("attempt_id"),
+    executionGeneration: integer("execution_generation"),
+    holderKind: text("holder_kind", {
+      enum: sandboxWorkspaceMutationHolderKindValues,
+    }).notNull(),
+    holderId: text("holder_id").notNull(),
+    leaseEpoch: integer("lease_epoch").notNull(),
+    providerBackend: text("provider_backend").notNull(),
+    providerInstanceId: text("provider_instance_id").notNull(),
+    routeKind: text("route_kind", { enum: ["home", "active"] }).notNull(),
+    // null route target means the persistable home/group provider. A non-null
+    // target is pinned together with the active pointer epoch observed when the
+    // operation was admitted.
+    routeTargetId: uuid("route_target_id"),
+    routeEpoch: integer("route_epoch").notNull(),
+    workspaceGeneration: integer("workspace_generation").notNull(),
+    operation: text("operation").notNull(),
+    providerOutcome: text("provider_outcome", {
+      enum: ["resolved", "rejected", "retained"],
+    }),
+    admittedAt: timestamp("admitted_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    workspaceTurn: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_turn_fk",
+      columns: [table.workspaceId, table.turnId],
+      foreignColumns: [sessionTurns.workspaceId, sessionTurns.id],
+    }).onDelete("restrict"),
+    workspaceAttempt: foreignKey({
+      name: "sandbox_workspace_mutation_admissions_workspace_attempt_fk",
+      columns: [table.workspaceId, table.attemptId],
+      foreignColumns: [sessionTurnAttempts.workspaceId, sessionTurnAttempts.id],
+    }).onDelete("restrict"),
+    leaseGeneration: uniqueIndex("sandbox_workspace_mutation_admissions_lease_generation_uq").on(
+      table.leaseId,
+      table.workspaceGeneration,
+    ),
+    scopedId: uniqueIndex("sandbox_workspace_mutation_admissions_scoped_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.sessionId,
+      table.leaseId,
+      table.id,
+    ),
+    blocking: index("sandbox_workspace_mutation_admissions_blocking_idx")
+      .on(table.leaseId, table.workspaceGeneration)
+      .where(sql`${table.settledAt} is null`),
+    attempt: index("sandbox_workspace_mutation_admissions_attempt_idx").on(
+      table.workspaceId,
+      table.attemptId,
+    ),
+    actor: index("sandbox_workspace_mutation_admissions_actor_idx").on(
+      table.workspaceId,
+      table.actorKind,
+      table.actorId,
+    ),
+    generationValid: check(
+      "sandbox_workspace_mutation_admissions_generation_check",
+      sql`${table.workspaceGeneration} > 0
+        and ${table.leaseEpoch} >= 0
+        and ${table.routeEpoch} >= 0
+        and (${table.executionGeneration} is null or ${table.executionGeneration} > 0)`,
+    ),
+    actorValid: check(
+      "sandbox_workspace_mutation_admissions_actor_check",
+      sql`(
+          ${table.actorKind} = 'turn'
+          and ${table.actorId} = ${table.attemptId}
+          and ${table.turnId} is not null
+          and ${table.attemptId} is not null
+          and ${table.executionGeneration} is not null
+          and ${table.holderKind} = 'turn'
+        ) or (
+          ${table.actorKind} = 'direct'
+          and ${table.turnId} is null
+          and ${table.attemptId} is null
+          and ${table.executionGeneration} is null
+          and ${table.holderKind} = 'direct'
+        ) or (
+          ${table.actorKind} = 'process'
+          and ${table.turnId} is null
+          and ${table.attemptId} is null
+          and ${table.executionGeneration} is null
+          and ${table.holderKind} = 'process'
+        )`,
+    ),
+    routeValid: check(
+      "sandbox_workspace_mutation_admissions_route_check",
+      sql`${table.actorKind} in ('turn', 'direct', 'process')
+        and ${table.holderKind} in ('turn', 'direct', 'process')
+        and octet_length(${table.holderId}) between 1 and 256
+        and octet_length(${table.providerBackend}) between 1 and 64
+        and octet_length(${table.providerInstanceId}) between 1 and 512
+        and ${table.routeKind} in ('home', 'active')
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)`,
+    ),
+    operationValid: check(
+      "sandbox_workspace_mutation_admissions_operation_check",
+      sql`octet_length(${table.operation}) between 1 and 128`,
+    ),
+    outcomeValid: check(
+      "sandbox_workspace_mutation_admissions_outcome_check",
+      sql`${table.providerOutcome} is null or ${table.providerOutcome} in ('resolved', 'rejected', 'retained')`,
+    ),
+    settlementConsistent: check(
+      "sandbox_workspace_mutation_admissions_settlement_check",
+      sql`(${table.providerOutcome} is null and ${table.settledAt} is null)
+        or (${table.providerOutcome} = 'retained' and ${table.settledAt} is null)
+        or (${table.providerOutcome} in ('resolved', 'rejected') and ${table.settledAt} is not null)`,
+    ),
+  }),
+);
+
+export const sandboxRetainedProcessStateValues = ["active", "exited", "lost"] as const;
+
+// A yielded exec is not merely a numeric provider session id: it is a durable
+// continuation of the exact admitted mutation and owns a non-TTL process lease
+// holder until exit/loss is proven. Every later model-facing stdin write gets a
+// distinct actor_kind='process' admission tied back to this identity. Control
+// polling may use the pinned provider route without creating a new generation.
+export const sandboxRetainedProcesses = pgTable(
+  "sandbox_retained_processes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    leaseId: uuid("lease_id").notNull(),
+    sandboxGroupId: uuid("sandbox_group_id").notNull(),
+    parentAdmissionId: uuid("parent_admission_id").notNull(),
+    holderId: text("holder_id").notNull(),
+    ownerActorKind: text("owner_actor_kind", { enum: ["turn", "direct"] }).notNull(),
+    ownerActorId: uuid("owner_actor_id").notNull(),
+    ownerTurnId: uuid("owner_turn_id"),
+    ownerAttemptId: uuid("owner_attempt_id"),
+    ownerExecutionGeneration: integer("owner_execution_generation"),
+    leaseEpoch: integer("lease_epoch").notNull(),
+    providerBackend: text("provider_backend").notNull(),
+    providerInstanceId: text("provider_instance_id").notNull(),
+    routeKind: text("route_kind", { enum: ["home", "active"] }).notNull(),
+    routeTargetId: uuid("route_target_id"),
+    routeEpoch: integer("route_epoch").notNull(),
+    providerSessionId: integer("provider_session_id").notNull(),
+    state: text("state", { enum: sandboxRetainedProcessStateValues }).notNull().default("active"),
+    exitCode: integer("exit_code"),
+    settlementReason: text("settlement_reason"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    settledAt: timestamp("settled_at", { withTimezone: true }),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "sandbox_retained_processes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "sandbox_retained_processes_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("restrict"),
+    parentAdmissionScope: foreignKey({
+      name: "sandbox_retained_processes_parent_admission_scope_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.leaseId,
+        table.parentAdmissionId,
+      ],
+      foreignColumns: [
+        sandboxWorkspaceMutationAdmissions.accountId,
+        sandboxWorkspaceMutationAdmissions.workspaceId,
+        sandboxWorkspaceMutationAdmissions.sessionId,
+        sandboxWorkspaceMutationAdmissions.leaseId,
+        sandboxWorkspaceMutationAdmissions.id,
+      ],
+    }).onDelete("restrict"),
+    scopedId: uniqueIndex("sandbox_retained_processes_scoped_id_uq").on(
+      table.accountId,
+      table.workspaceId,
+      table.sessionId,
+      table.leaseId,
+      table.id,
+    ),
+    parentAdmission: uniqueIndex("sandbox_retained_processes_parent_admission_uq").on(
+      table.parentAdmissionId,
+    ),
+    liveProviderSession: uniqueIndex("sandbox_retained_processes_live_provider_session_uq")
+      .on(
+        table.leaseId,
+        table.leaseEpoch,
+        table.providerInstanceId,
+        table.routeEpoch,
+        table.providerSessionId,
+      )
+      .where(sql`${table.state} = 'active'`),
+    holder: uniqueIndex("sandbox_retained_processes_holder_uq").on(table.leaseId, table.holderId),
+    active: index("sandbox_retained_processes_active_idx")
+      .on(table.workspaceId, table.sessionId, table.startedAt)
+      .where(sql`${table.state} = 'active'`),
+    identityValid: check(
+      "sandbox_retained_processes_identity_check",
+      sql`${table.leaseEpoch} >= 0
+        and ${table.routeEpoch} >= 0
+        and ${table.providerSessionId} > 0
+        and octet_length(${table.holderId}) between 1 and 256
+        and octet_length(${table.providerBackend}) between 1 and 64
+        and octet_length(${table.providerInstanceId}) between 1 and 512
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)`,
+    ),
+    ownerValid: check(
+      "sandbox_retained_processes_owner_check",
+      sql`(
+          ${table.ownerActorKind} = 'turn'
+          and ${table.ownerActorId} = ${table.ownerAttemptId}
+          and ${table.ownerTurnId} is not null
+          and ${table.ownerAttemptId} is not null
+          and ${table.ownerExecutionGeneration} > 0
+        ) or (
+          ${table.ownerActorKind} = 'direct'
+          and ${table.ownerTurnId} is null
+          and ${table.ownerAttemptId} is null
+          and ${table.ownerExecutionGeneration} is null
+        )`,
+    ),
+    settlementValid: check(
+      "sandbox_retained_processes_settlement_check",
+      sql`(${table.state} = 'active' and ${table.settledAt} is null and ${table.exitCode} is null)
+        or (${table.state} = 'exited' and ${table.settledAt} is not null)
+        or (${table.state} = 'lost' and ${table.settledAt} is not null and ${table.exitCode} is null)`,
+    ),
+    reasonValid: check(
+      "sandbox_retained_processes_reason_check",
+      sql`${table.settlementReason} is null
+        or octet_length(${table.settlementReason}) between 1 and 512`,
+    ),
   }),
 );
 
@@ -2487,14 +2947,12 @@ export const workspaceCaptures = pgTable(
   }),
 );
 
-// Interactive PTY sessions. This is the persistent state needed for a live
-// terminal; file and Git reads remain stateless point
-// queries; an interactive PTY is a live in-box process keyed by the SDK's numeric
-// exec-session id (writeStdin({sessionId})). We map our UUID ptyId <-> that id,
-// the owning workspace/session, the lease_epoch that fences it to the box it was
-// opened on (a box re-key strands the PTY -> reaped with reason owner_gone), and
-// a last_input_at heartbeat so the reaper can kill idle/orphaned PTYs. Mirrors
-// the account/workspace/session FK chain of sandboxSessionEnvelopes.
+// Interactive PTY sessions. An OPEN PTY adopts one exact retained process; the
+// provider's numeric exec-session id is only a copied locator and never authority
+// on its own. Provider/lease/route/admission identity is copied onto the row so a
+// stale pointer or box epoch cannot redirect control to a rival process. Legacy
+// numeric-only rows are closed by the maintenance cutover and may retain null
+// identity columns only in that terminal state.
 export const sandboxPtySessions = pgTable(
   "sandbox_pty_sessions",
   {
@@ -2508,10 +2966,18 @@ export const sandboxPtySessions = pgTable(
     sessionId: uuid("session_id")
       .notNull()
       .references(() => sessions.id, { onDelete: "cascade" }),
-    // The SDK numeric exec-session id used by writeStdin({ sessionId }). Null until
-    // the open exec yields a still-running process (a fast-exiting shell has none).
+    leaseId: uuid("lease_id"),
+    sandboxGroupId: uuid("sandbox_group_id"),
+    retainedProcessId: uuid("retained_process_id"),
+    openAdmissionId: uuid("open_admission_id"),
+    // Copied provider locator for the adopted retained process.
     execSessionId: integer("exec_session_id"),
-    leaseEpoch: integer("lease_epoch").notNull(), // fenced to the box that opened it
+    leaseEpoch: integer("lease_epoch").notNull(),
+    providerBackend: text("provider_backend"),
+    providerInstanceId: text("provider_instance_id"),
+    routeKind: text("route_kind", { enum: ["home", "active"] }),
+    routeTargetId: uuid("route_target_id"),
+    routeEpoch: integer("route_epoch"),
     cols: integer("cols").notNull(),
     rows: integer("rows").notNull(),
     shell: text("shell").notNull(),
@@ -2525,9 +2991,46 @@ export const sandboxPtySessions = pgTable(
     closedAt: timestamp("closed_at", { withTimezone: true }),
   },
   (table) => ({
+    retainedProcessScope: foreignKey({
+      name: "sandbox_pty_sessions_retained_process_scope_fk",
+      columns: [
+        table.accountId,
+        table.workspaceId,
+        table.sessionId,
+        table.leaseId,
+        table.retainedProcessId,
+      ],
+      foreignColumns: [
+        sandboxRetainedProcesses.accountId,
+        sandboxRetainedProcesses.workspaceId,
+        sandboxRetainedProcesses.sessionId,
+        sandboxRetainedProcesses.leaseId,
+        sandboxRetainedProcesses.id,
+      ],
+    }).onDelete("restrict"),
     openIdx: index("sandbox_pty_sessions_session_idx")
       .on(table.workspaceId, table.sessionId)
       .where(sql`${table.status} = 'open'`),
+    processIdx: uniqueIndex("sandbox_pty_sessions_open_process_uq")
+      .on(table.retainedProcessId)
+      .where(sql`${table.status} = 'open'`),
+    openIdentityValid: check(
+      "sandbox_pty_sessions_open_identity_check",
+      sql`${table.status} <> 'open' or (
+        ${table.leaseId} is not null
+        and ${table.sandboxGroupId} is not null
+        and ${table.retainedProcessId} is not null
+        and ${table.openAdmissionId} is not null
+        and ${table.execSessionId} > 0
+        and octet_length(${table.providerBackend}) between 1 and 64
+        and octet_length(${table.providerInstanceId}) between 1 and 512
+        and ${table.routeKind} in ('home', 'active')
+        and (${table.routeKind} = 'active' or ${table.routeTargetId} is null)
+        and ${table.routeEpoch} is not null
+        and ${table.leaseEpoch} >= 0
+        and ${table.routeEpoch} >= 0
+      )`,
+    ),
   }),
 );
 

@@ -1,5 +1,38 @@
 # @opengeni/config
 
+## 0.7.1
+
+### Patch Changes
+
+- 55c6559: Retain release-capable source heads with immutable GitHub prereleases and make
+  the unbaked agent installer resolve through an explicitly configured stable
+  version instead of a mutable release alias.
+
+## 0.7.0
+
+### Minor Changes
+
+- 46bac05: Enforce a configurable inclusive nested-agent depth at the transactional
+  session-creation boundary with a server default of three. Persist immutable
+  lineage and policy snapshots, and return idempotent typed denial evidence without
+  creating run, workflow, sandbox, usage, or billing artifacts.
+
+### Patch Changes
+
+- Updated dependencies [c549ed8]
+- Updated dependencies [46bac05]
+- Updated dependencies [860de22]
+- Updated dependencies [5b57a2d]
+  - @opengeni/contracts@0.19.0
+
+## 0.6.10
+
+### Patch Changes
+
+- 744a93d: Add default-off, bounded adaptive Codex fleet decision telemetry with strict deterministic replay, cache-aware and work-conserving policy simulation, secret-safe event/UI observability, and independent future policy gates.
+- Updated dependencies [744a93d]
+  - @opengeni/contracts@0.18.1
+
 ## 0.6.9
 
 ### Patch Changes

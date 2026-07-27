@@ -199,7 +199,7 @@ export const defaultChatComposerMessages: ChatComposerMessages = {
 export type ComposerSubmitMode = "queue" | "steer";
 export type ComposerSubmitBlocker =
   | "disabled"
-  | "uploading"
+  | "attachment"
   | "sending"
   | "command"
   | "empty"
@@ -292,7 +292,7 @@ export function useChatComposerController({
     return () => document.removeEventListener(OPEN_WORKSTREAM_CONTROL_EVENT, openControl);
   }, [id, paused]);
 
-  const blockedByUpload = attachments?.uploading === true;
+  const blockedByAttachment = attachments?.hasUnresolved === true;
   const hasReadyAttachment = (attachments?.readyResources.length ?? 0) > 0;
 
   const [dragging, setDragging] = useState(false);
@@ -386,8 +386,8 @@ export function useChatComposerController({
 
   const submitBlocker: ComposerSubmitBlocker = disabled
     ? "disabled"
-    : blockedByUpload
-      ? "uploading"
+    : blockedByAttachment
+      ? "attachment"
       : delivery.sending || submitting
         ? "sending"
         : commandDraftBlocked
@@ -404,7 +404,8 @@ export function useChatComposerController({
         delivery.clearError();
         return false;
       }
-      if (disabled || blockedByUpload || delivery.sending || submittingRef.current) return false;
+      if (disabled || blockedByAttachment || delivery.sending || submittingRef.current)
+        return false;
       if (!delivery.canSend && !hasReadyAttachment) return false;
       submittingRef.current = true;
       setSubmitting(true);
@@ -416,7 +417,7 @@ export function useChatComposerController({
       }
     },
     [
-      blockedByUpload,
+      blockedByAttachment,
       commandDraftBlocked,
       delivery,
       disabled,

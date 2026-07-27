@@ -61,4 +61,5 @@ export * from "./domain/session-tool-policy";
 export * from "./domain/scheduled-tasks";
 export * from "./domain/sessions";
 export * from "./domain/workspace-members";
+export * from "./application/new-session-drafts";
 export * from "./application/session-commands";

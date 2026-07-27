@@ -55,6 +55,23 @@ describe(".env.example", () => {
   });
 });
 
+describe("agent stable release selection", () => {
+  test("uses an exact stable version and supports an explicit operator promotion", () => {
+    expect(withEnv({}, () => getSettings()).agentStableVersion).toBe("0.1.8");
+    expect(
+      withEnv({ OPENGENI_AGENT_STABLE_VERSION: "1.4.2" }, () => getSettings()).agentStableVersion,
+    ).toBe("1.4.2");
+  });
+
+  test("rejects moving labels, prereleases, and malformed versions", () => {
+    for (const value of ["latest", "v1.2.3", "1.2", "1.2.3-rc.1", "01.2.3"]) {
+      expect(() =>
+        withEnv({ OPENGENI_AGENT_STABLE_VERSION: value }, () => getSettings()),
+      ).toThrow();
+    }
+  });
+});
+
 describe("rig verification lease ownership rollout", () => {
   test("is default-off and parses explicit false and true without truthy-string coercion", () => {
     expect(withEnv({}, () => getSettings()).rigVerificationLeaseOwnershipEnabled).toBe(false);
