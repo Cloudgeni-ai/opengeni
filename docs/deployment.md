@@ -215,9 +215,42 @@ will be used directly as a release source, dispatch
 `.github/workflows/seal-release-head.yml` from exact current `main` with the PR
 number and exact base/head SHAs before merging. The base-owned workflow reruns
 the complete source-admission verifier, requires the existing successful
-exact-head admission check, then creates or verifies the tag idempotently. A
-tag is retention evidence, not approval: the native pre-merge review and every
-later source/acceptance gate remain mandatory. A missing, moved, indirect, or
+exact-head admission check, then creates or verifies the tag idempotently. Once
+the complete tag/ruleset/PR identity has been re-read without drift, it
+idempotently publishes a successful `Release-head retention` check on the
+exact head with external identity
+`opengeni:release-automation:release-head-retention:v1:pr:<number>:head:<sha>:protection-sha256:<digest>`.
+The digest binds the provider ruleset ID and revision, exact ref pattern and
+rules, and the authenticated no-bypass result. An anonymous downstream
+operator can therefore compare the current visible ruleset revision and
+configuration with the check without receiving a cross-repository credential.
+Its byte contract is SHA-256 over newline-free UTF-8 `JSON.stringify` of this
+object with the top-level keys sorted in ascending ASCII order:
+
+```json
+{
+  "bypassActorCount": 0,
+  "enforcement": "active",
+  "id": 123,
+  "name": "Immutable OpenGeni release heads",
+  "refPattern": "refs/tags/opengeni-release-head-*",
+  "rules": ["deletion", "update"],
+  "target": "tag",
+  "updatedAt": "2026-07-26T23:16:17.229Z"
+}
+```
+
+`id` is the live positive ruleset ID and `updatedAt` is the live provider
+`updated_at` value normalized through `new Date(value).toISOString()`. The
+array order shown above is canonical. If the ruleset revision changes after a
+retention check exists, sealing fails rather than creating a second proof; push
+a new head based on current `main`, let source admission pass, and seal that new
+head.
+Trusted Version-PR admission publishes the same check. This gives downstream
+release operators a provider-owned proof of the full ruleset contract without
+requiring a credential that crosses repository boundaries. A tag is retention
+evidence, not approval: the native pre-merge review and every later
+source/acceptance gate remain mandatory. A missing, moved, indirect, or
 post-hoc substitute ref fails release provenance.
 
 The repository must keep one active tag ruleset named
