@@ -2124,12 +2124,14 @@ describe("useComposer durable draft and control binding", () => {
         getComposerDraft: async () => initial,
         listEvents: async () => (acceptedEvent ? [acceptedEvent] : []),
         sendMessage: async (_workspaceId, _sessionId, input) => {
-          attempts.push(input);
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
           if (attempts.length === 1) throw gatewayError(503);
           return makeEvent(2, "user.message");
         },
         steerMessage: async (_workspaceId, _sessionId, input) => {
-          attempts.push(input);
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
           if (attempts.length === 1) throw gatewayError(503);
           return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
         },
@@ -2155,10 +2157,18 @@ describe("useComposer durable draft and control binding", () => {
 
   for (const delivery of ["send", "steer"] as const) {
     test(`${delivery} keeps the original key and payload across edit and remount`, async () => {
+      const originalResource = {
+        kind: "file" as const,
+        fileId: "66666666-6666-4666-8666-666666666666",
+      };
+      const newerResource = {
+        kind: "file" as const,
+        fileId: "77777777-7777-4777-8777-777777777777",
+      };
       const initial: ComposerDraft = {
         revision: 10,
         text: "original uncertain prompt",
-        resources: [],
+        resources: [originalResource],
         tools: [],
         toolsProvided: false,
         model: "model-x",
@@ -2171,12 +2181,14 @@ describe("useComposer durable draft and control binding", () => {
       const client = fakeClient({
         getComposerDraft: async () => initial,
         sendMessage: async (_workspaceId, _sessionId, input) => {
-          attempts.push(input);
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
           if (attempts.length === 1) throw gatewayError(502);
           return makeEvent(2, "user.message");
         },
         steerMessage: async (_workspaceId, _sessionId, input) => {
-          attempts.push(input);
+          const typed = typeof input === "string" ? { text: input } : input;
+          attempts.push(typed);
           if (attempts.length === 1) throw gatewayError(502);
           return { accepted: makeEvent(2, "user.message"), turn: fakeTurn() };
         },
@@ -2195,13 +2207,25 @@ describe("useComposer durable draft and control binding", () => {
         undefined,
       );
       await flush();
-      await flushing(() => second.result.current.setValue("edited after timeout"));
+      expect(second.result.current.value).toBe("original uncertain prompt");
+      expect(second.result.current.restoredResources).toEqual([originalResource]);
+      await flushing(() =>
+        second.result.current.applyDraft({
+          ...initial,
+          text: "edited after timeout",
+          resources: [newerResource],
+        }),
+      );
+      expect(second.result.current.value).toBe("edited after timeout");
+      expect(second.result.current.restoredResources).toEqual([newerResource]);
       await flushing(async () => expect(await second.result.current[delivery]()).toBe(true));
 
       expect(attempts).toHaveLength(2);
       expect(attempts[1]!.clientEventId).toBe(attempts[0]!.clientEventId);
       expect(attempts[1]!.text).toBe("original uncertain prompt");
+      expect(attempts[1]!.resources).toEqual([originalResource]);
       expect(second.result.current.value).toBe("edited after timeout");
+      expect(second.result.current.restoredResources).toEqual([newerResource]);
       await second.unmount();
     });
   }

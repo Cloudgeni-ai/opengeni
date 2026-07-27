@@ -38,11 +38,18 @@ export type UseComposerOptions = EmbeddedSessionClientOverride &
     draftPersistence?: "durable" | "disabled" | undefined;
   };
 
+type ComposerDraftShadow = {
+  text: string;
+  resources: ResourceRef[];
+};
+
 type PendingComposerOperation = {
   delivery: "send" | "steer";
   input: SendMessageInput;
   draftAtSend: string;
   resourcesAtSend: ResourceRef[];
+  /** Latest local text/resources that must survive an uncertain delivery. */
+  newerShadow: ComposerDraftShadow;
   clearDraftOnAccept: boolean;
   /** False after remount when the original input carried secret credentials. */
   canRetry: boolean;
@@ -53,9 +60,12 @@ type StoredPendingComposerOperation = Omit<PendingComposerOperation, "input" | "
   hasMcpCredentialUpdates: boolean;
 };
 
+const PENDING_COMPOSER_STORAGE_PREFIX = "opengeni.pending-composer.v1:";
+
 // A remount must not manufacture a new operation while the previous mutation
 // is still outcome-unknown. Keep only non-credential request fields here; the
-// mounted hook retains the exact input, including any credential updates.
+// mounted hook retains the exact input, including any credential updates. The
+// safe shadow is also session-scoped so a refresh cannot lose newer edits.
 const pendingComposerOperations = new Map<string, StoredPendingComposerOperation>();
 
 function pendingComposerOperationKey(
@@ -65,14 +75,96 @@ function pendingComposerOperationKey(
   return sessionId ? `${workspaceId}\u0000${sessionId}` : null;
 }
 
+function pendingComposerStorage(): Storage | null {
+  try {
+    return typeof window === "undefined" ? null : window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
+function pendingComposerStorageKey(key: string): string {
+  return `${PENDING_COMPOSER_STORAGE_PREFIX}${encodeURIComponent(key)}`;
+}
+
+function resourceList(value: unknown): value is ResourceRef[] {
+  return (
+    Array.isArray(value) &&
+    value.every((candidate) => {
+      if (typeof candidate !== "object" || candidate === null) return false;
+      const resource = candidate as Record<string, unknown>;
+      return resource.kind === "file"
+        ? typeof resource.fileId === "string"
+        : resource.kind === "repository" &&
+            typeof resource.uri === "string" &&
+            typeof resource.ref === "string";
+    })
+  );
+}
+
+function readStoredPendingComposerOperation(
+  key: string | null,
+): StoredPendingComposerOperation | null {
+  const storage = key ? pendingComposerStorage() : null;
+  if (!storage || !key) return null;
+  try {
+    const parsed: unknown = JSON.parse(storage.getItem(pendingComposerStorageKey(key)) ?? "null");
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const record = parsed as Record<string, unknown>;
+    const input = record.input;
+    const shadow = record.newerShadow;
+    if (typeof input !== "object" || input === null || typeof shadow !== "object" || shadow === null) {
+      return null;
+    }
+    const inputRecord = input as Record<string, unknown>;
+    const shadowRecord = shadow as Record<string, unknown>;
+    if (
+      (record.delivery !== "send" && record.delivery !== "steer") ||
+      typeof record.draftAtSend !== "string" ||
+      !resourceList(record.resourcesAtSend) ||
+      typeof shadowRecord.text !== "string" ||
+      !resourceList(shadowRecord.resources) ||
+      typeof record.clearDraftOnAccept !== "boolean" ||
+      typeof record.hasMcpCredentialUpdates !== "boolean" ||
+      typeof inputRecord.text !== "string" ||
+      typeof inputRecord.clientEventId !== "string" ||
+      "mcpCredentialUpdates" in inputRecord ||
+      ("resources" in inputRecord && !resourceList(inputRecord.resources))
+    ) {
+      return null;
+    }
+    return record as StoredPendingComposerOperation;
+  } catch {
+    return null;
+  }
+}
+
+function writePendingComposerOperation(
+  key: string,
+  operation: StoredPendingComposerOperation,
+): void {
+  const storage = pendingComposerStorage();
+  if (!storage) return;
+  try {
+    storage.setItem(pendingComposerStorageKey(key), JSON.stringify(operation));
+  } catch {
+    // Storage is best effort; the in-memory record still protects remounts.
+  }
+}
+
 function restorePendingComposerOperation(
   key: string | null,
 ): PendingComposerOperation | null {
-  const stored = key ? pendingComposerOperations.get(key) : undefined;
+  const stored =
+    (key && pendingComposerOperations.get(key)) ?? readStoredPendingComposerOperation(key);
   if (!stored) return null;
   return {
     ...stored,
     input: stored.input,
+    newerShadow: stored.newerShadow ?? {
+      text: stored.draftAtSend,
+      resources: stored.resourcesAtSend,
+    },
     canRetry: !stored.hasMcpCredentialUpdates,
   };
 }
@@ -82,16 +174,43 @@ function rememberPendingComposerOperation(
   operation: PendingComposerOperation,
 ): void {
   if (!key) return;
-  const { mcpCredentialUpdates: _mcpCredentialUpdates, ...safeInput } = operation.input;
-  pendingComposerOperations.set(key, {
-    ...operation,
+  const { mcpCredentialUpdates: _mcp, canRetry: _retry, ...safeOperation } = operation;
+  const { input: originalInput, ...withoutInput } = safeOperation;
+  const { mcpCredentialUpdates: _storedMcp, ...safeInput } = originalInput;
+  const stored = {
+    ...withoutInput,
     input: safeInput,
     hasMcpCredentialUpdates: operation.input.mcpCredentialUpdates !== undefined,
-  });
+    newerShadow: {
+      text: operation.newerShadow.text,
+      resources: [...operation.newerShadow.resources],
+    },
+  } satisfies StoredPendingComposerOperation;
+  pendingComposerOperations.set(key, stored);
+  writePendingComposerOperation(key, stored);
 }
 
 function forgetPendingComposerOperation(key: string | null): void {
-  if (key) pendingComposerOperations.delete(key);
+  if (!key) return;
+  pendingComposerOperations.delete(key);
+  const storage = pendingComposerStorage();
+  if (!storage) return;
+  try {
+    storage.removeItem(pendingComposerStorageKey(key));
+  } catch {
+    // Ignore a blocked storage implementation; delivery has already settled.
+  }
+}
+
+function updatePendingComposerShadow(
+  key: string | null,
+  operation: PendingComposerOperation | null,
+  shadow: ComposerDraftShadow,
+): PendingComposerOperation | null {
+  if (!key || !operation) return operation;
+  const next = { ...operation, newerShadow: { ...shadow, resources: [...shadow.resources] } };
+  rememberPendingComposerOperation(key, next);
+  return next;
 }
 
 export type ComposerState = {
@@ -141,7 +260,10 @@ export function useComposer(
   const { client, workspaceId, registerSessionReconciler } = useEmbeddedSession(options);
   const durableDrafts = options.draftPersistence !== "disabled";
   const targetKey = `${workspaceId}\u0000${sessionId ?? ""}\u0000${durableDrafts ? "durable" : "disabled"}`;
-  const [value, setValue] = useState("");
+  const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
+  const initialPendingOperation = restorePendingComposerOperation(pendingOperationKey);
+  const initialShadow = initialPendingOperation?.newerShadow;
+  const [value, setValue] = useState(() => initialShadow?.text ?? "");
   // Keep rendered state behind the committed target identity for one frame:
   // a parent may switch sessionId without remounting this public hook.
   const [stateTargetKey, setStateTargetKey] = useState(targetKey);
@@ -153,18 +275,17 @@ export function useComposer(
   const [draftLoading, setDraftLoading] = useState(Boolean(sessionId) && durableDrafts);
   const [draftSaving, setDraftSaving] = useState(false);
   const [draftConflict, setDraftConflict] = useState<Error | null>(null);
-  const [restoredResources, setRestoredResources] = useState<ResourceRef[]>([]);
-  const pendingOperationKey = pendingComposerOperationKey(workspaceId, sessionId);
-  const pendingOperationRef = useRef<PendingComposerOperation | null>(
-    restorePendingComposerOperation(pendingOperationKey),
+  const [restoredResources, setRestoredResources] = useState<ResourceRef[]>(
+    () => initialShadow?.resources ?? [],
   );
+  const pendingOperationRef = useRef<PendingComposerOperation | null>(initialPendingOperation);
   const pendingClientEventId = useRef<string | null>(
-    pendingOperationRef.current?.input.clientEventId ?? null,
+    initialPendingOperation?.input.clientEventId ?? null,
   );
-  const valueRef = useRef("");
+  const valueRef = useRef(initialShadow?.text ?? "");
   const draftRef = useRef<ComposerDraft | null>(null);
-  const restoredResourcesRef = useRef<ResourceRef[]>([]);
-  const localEditRevision = useRef(0);
+  const restoredResourcesRef = useRef<ResourceRef[]>(initialShadow?.resources ?? []);
+  const localEditRevision = useRef(initialShadow ? 1 : 0);
   const targetGeneration = useRef(0);
   const draftReadGeneration = useRef(0);
   const lastSavedSignature = useRef<string | null>(null);
@@ -197,16 +318,17 @@ export function useComposer(
     draftReadGeneration.current += 1;
     pendingOperationRef.current = restorePendingComposerOperation(pendingOperationKey);
     pendingClientEventId.current = pendingOperationRef.current?.input.clientEventId ?? null;
-    localEditRevision.current = 0;
-    valueRef.current = "";
+    const shadow = pendingOperationRef.current?.newerShadow;
+    localEditRevision.current = shadow ? 1 : 0;
+    valueRef.current = shadow?.text ?? "";
     draftRef.current = null;
-    restoredResourcesRef.current = [];
+    restoredResourcesRef.current = shadow?.resources ?? [];
     lastSavedSignature.current = null;
     // Old saves may still be awaiting the network. Their generation fence
     // prevents settlement, and a fresh chain avoids blocking this target.
     saveChain.current = Promise.resolve();
     setStateTargetKey(targetKey);
-    setValue("");
+    setValue(shadow?.text ?? "");
     setSending(false);
     setPausing(false);
     setResuming(false);
@@ -215,7 +337,7 @@ export function useComposer(
     setDraftLoading(Boolean(sessionId) && durableDrafts);
     setDraftSaving(false);
     setDraftConflict(null);
-    setRestoredResources([]);
+    setRestoredResources(shadow?.resources ?? []);
   }, [durableDrafts, pendingOperationKey, sessionId, targetKey]);
 
   const applyDraft = useCallback(
@@ -230,6 +352,17 @@ export function useComposer(
         setDraft(null);
         setValue(next.text);
         setRestoredResources(next.resources);
+        pendingOperationRef.current = updatePendingComposerShadow(
+          pendingOperationKey,
+          pendingOperationRef.current,
+          {
+            text: next.text,
+            resources: mergeResources(
+              next.resources,
+              resolveSendExtras(sendExtrasRef.current).resources ?? [],
+            ),
+          },
+        );
         setDraftConflict(null);
         return;
       }
@@ -241,10 +374,21 @@ export function useComposer(
       setDraft(next);
       setValue(next.text);
       setRestoredResources(next.resources);
+      pendingOperationRef.current = updatePendingComposerShadow(
+        pendingOperationKey,
+        pendingOperationRef.current,
+        {
+          text: next.text,
+          resources: mergeResources(
+            next.resources,
+            resolveSendExtras(sendExtrasRef.current).resources ?? [],
+          ),
+        },
+      );
       setDraftConflict(null);
       onDraftAppliedRef.current?.(next);
     },
-    [durableDrafts, targetKey],
+    [durableDrafts, pendingOperationKey, targetKey],
   );
 
   const loadDraft = useCallback(
@@ -288,7 +432,16 @@ export function useComposer(
           draftRef.current = fetched;
           setDraft(fetched);
           setDraftConflict(null);
-          if (
+          const shadow = pendingOperationRef.current?.newerShadow;
+          if (shadow) {
+            // The server can only know the original operation. Never replace
+            // newer local edits while that operation is still uncertain.
+            valueRef.current = shadow.text;
+            restoredResourcesRef.current = shadow.resources;
+            localEditRevision.current ||= 1;
+            setValue(shadow.text);
+            setRestoredResources(shadow.resources);
+          } else if (
             replaceLocal ||
             (!localWasDirtyAtStart && localAtStart === localEditRevision.current)
           ) {
@@ -417,15 +570,28 @@ export function useComposer(
   // Private durable autosave. A newer local edit is never replaced by an older
   // response; saves serialize and each reads the latest acknowledged revision.
   useEffect(() => {
-    if (
-      !durableDrafts ||
-      !sessionId ||
-      draftLoading ||
-      sending ||
-      !draftRef.current ||
-      draftConflict ||
-      pendingOperationRef.current
-    )
+    const pending = pendingOperationRef.current;
+    if (pending) {
+      const shadow = {
+        text: valueRef.current,
+        resources: mergeResources(
+          restoredResourcesRef.current,
+          resolveSendExtras(sendExtrasRef.current).resources ?? [],
+        ),
+      };
+      if (
+        pending.newerShadow.text !== shadow.text ||
+        JSON.stringify(pending.newerShadow.resources) !== JSON.stringify(shadow.resources)
+      ) {
+        pendingOperationRef.current = updatePendingComposerShadow(
+          pendingOperationKey,
+          pending,
+          shadow,
+        );
+      }
+      return;
+    }
+    if (!durableDrafts || !sessionId || draftLoading || sending || !draftRef.current || draftConflict)
       return;
     const payload = currentDraftPayload();
     if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
@@ -437,6 +603,7 @@ export function useComposer(
     draftConflict,
     draftLoading,
     liveExtrasVersion,
+    pendingOperationKey,
     persistPayload,
     sending,
     sessionId,
@@ -618,6 +785,10 @@ export function useComposer(
           input,
           draftAtSend,
           resourcesAtSend: [...restoredResources],
+          newerShadow: {
+            text: draftAtSend,
+            resources: mergeResources(restoredResources, extras.resources ?? []),
+          },
           clearDraftOnAccept: explicit === undefined,
           canRetry: true,
         };
@@ -815,9 +986,20 @@ export function useComposer(
       if (targetKeyRef.current !== targetKey) return;
       localEditRevision.current += 1;
       valueRef.current = next;
+      pendingOperationRef.current = updatePendingComposerShadow(
+        pendingOperationKey,
+        pendingOperationRef.current,
+        {
+          text: next,
+          resources: mergeResources(
+            restoredResourcesRef.current,
+            resolveSendExtras(sendExtrasRef.current).resources ?? [],
+          ),
+        },
+      );
       setValue(next);
     },
-    [targetKey],
+    [pendingOperationKey, targetKey],
   );
 
   const removeRestoredResource = useCallback(
@@ -826,9 +1008,17 @@ export function useComposer(
       localEditRevision.current += 1;
       const next = restoredResourcesRef.current.filter((_, candidate) => candidate !== index);
       restoredResourcesRef.current = next;
+      pendingOperationRef.current = updatePendingComposerShadow(
+        pendingOperationKey,
+        pendingOperationRef.current,
+        {
+          text: valueRef.current,
+          resources: mergeResources(next, resolveSendExtras(sendExtrasRef.current).resources ?? []),
+        },
+      );
       setRestoredResources(next);
     },
-    [targetKey],
+    [pendingOperationKey, targetKey],
   );
 
   const hasDraftContent = useCallback((): boolean => {
