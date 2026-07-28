@@ -257,6 +257,9 @@ describe("release image workflow contract", () => {
     expect(publish).toContain("expected_packages:");
     expect(publish).toContain("checks: read");
     expect(publish).toContain("filter=latest&per_page=100");
+    expect(publish).toContain('test "$GITHUB_REF" = "refs/heads/main"');
+    expect(publish).toContain('git merge-base --is-ancestor "$SOURCE_SHA" origin/main');
+    expect(publish).not.toContain('test "$(git rev-parse origin/main)" = "$SOURCE_SHA"');
     for (const required of [
       "Typecheck and unit tests",
       "Deployment artifacts",
