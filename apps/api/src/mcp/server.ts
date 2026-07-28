@@ -745,15 +745,16 @@ function registerSlackBotTools(
     "slack_bot_post_message",
     {
       description:
-        "Post as the workspace-shared OpenGeni bot. Pass channelId for a channel where the bot is already a member, or userId to open/post a DM; pass exactly one.",
+        "Post as the workspace-shared OpenGeni bot. Pass channelId for a channel where the bot is already a member, or userId to open/post a DM; pass exactly one. Generate one operationId UUID per intended message and reuse that same UUID on every retry.",
       inputSchema: {
         connectionId: z4.string().uuid().optional(),
+        operationId: z4.string().uuid(),
         channelId: z4.string().min(1).max(64).optional(),
         userId: z4.string().min(1).max(64).optional(),
         text: z4.string().min(1).max(40_000),
       },
     },
-    async ({ connectionId, channelId, userId, text }) => {
+    async ({ connectionId, operationId, channelId, userId, text }) => {
       if (Boolean(channelId) === Boolean(userId)) {
         throw new Error("exactly one of channelId or userId is required");
       }
@@ -761,6 +762,7 @@ function registerSlackBotTools(
         await (
           await clientFor(connectionId)
         ).postMessage({
+          operationId,
           ...(channelId ? { channelId } : {}),
           ...(userId ? { userId } : {}),
           text,

@@ -68,6 +68,8 @@ async function botConnection(workspace: Awaited<ReturnType<typeof workspaceFixtu
     kind: "app_install",
     credentialEncrypted: randomBytes(48).toString("base64"),
     grantedScopes: [...OPENGENI_SLACK_BOT_REQUIRED_SCOPES],
+    verifiedInstallAt: new Date(0),
+    verifiedInstallVersion: 1,
     metadata: {
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,

@@ -389,6 +389,8 @@ export type ConnectionMetadata = {
   lastUsedAt: string | null;
   lastError: string | null;
   version: number;
+  verifiedInstallAt?: string | null;
+  verifiedInstallVersion?: number | null;
   metadata: Record<string, unknown>;
   createdBySubjectId: string | null;
   updatedBySubjectId: string | null;

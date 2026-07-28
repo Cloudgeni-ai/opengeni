@@ -38,7 +38,7 @@ Event Subscriptions are disabled by omission. Do not enable Socket Mode, Event S
 3. Enter the Slack **Bot User OAuth Token** in the password field and choose **Validate and connect**. Enter the credential only in this form—never in chat, a task prompt, an issue, or logs.
 4. OpenGeni calls Slack server-to-server to verify the bot token, exact scope set, Slack workspace, bot identity, and exact `OpenGeni` display name. It then stores the token only in the existing encrypted connection credential column. API responses, session events, MCP results, and audit events contain only non-secret connection/team/role facts.
 
-The connection is bound to the authenticated OpenGeni account and workspace by the normal RLS-scoped `connections` row. It is workspace-shared (`subjectId = null`) and cannot be fabricated or modified through generic connection metadata APIs.
+The connection is bound to the authenticated OpenGeni account and workspace by the normal RLS-scoped `connections` row. It is workspace-shared (`subjectId = null`) and cannot be fabricated or modified through generic connection metadata APIs. A server-owned verification timestamp and credential-version marker distinguish this dedicated validated install from caller-written legacy connection JSON. Markerless rows fail closed. During a rolling release, any older generic writer that replaces the credential or asserted bot identity automatically clears the marker at the database boundary.
 
 ## Channel access
 
@@ -49,6 +49,8 @@ The connection is bound to the authenticated OpenGeni account and workspace by t
 - Direct messages use `im:write` to open a DM, then post as the bot.
 
 The first-party tools are `slack_bot_list_channels`, `slack_bot_channel_history`, `slack_bot_list_users`, and `slack_bot_post_message`. Outside a scheduled session, every call requires an explicit bot connection ID plus `connections:read`. A scheduled session uses only its immutable selected connection ID. Neither path falls back to personal Slack OAuth.
+
+Every `slack_bot_post_message` call also requires an `operationId` UUID. Generate one UUID per intended message and reuse that exact UUID on every timeout, transport-error, or unknown-outcome retry. OpenGeni durably binds it to the connection, target, and protected request digest before posting and sends the same value to Slack as `client_msg_id`. A completed replay returns the stored provider result without posting again; a lost response or audit-commit failure retries the same provider identity and converges to one logical message and one success receipt. Reusing an operation ID for different text or a different target is rejected.
 
 ## Scheduled tasks
 
@@ -61,10 +63,10 @@ If the Slack app is reinstalled or its credential changes:
 1. Reinstall the existing app in the **same Slack workspace**.
 2. Return to **Capabilities → OpenGeni Slack bot** and choose **Validate and reinstall** with the newly issued bot token.
 
-OpenGeni updates the existing connection in place so scheduled-task references remain stable, but rejects a token from a different Slack workspace. If the manifest name or scopes changed, restore the exact manifest and reinstall in Slack before retrying.
+OpenGeni updates the existing connection in place so scheduled-task references remain stable, but only when the Slack team ID, bot ID, and bot user ID all match the original verified installation. A different bot principal—even in the same Slack workspace and with the same display name—requires a new OpenGeni connection and explicit scheduled-task rebinding. If the manifest name or scopes changed, restore the exact manifest and reinstall in Slack before retrying.
 
 Disconnecting revokes the OpenGeni connection. It does not uninstall the Slack app or affect any subject-owned hosted Slack MCP OAuth connection.
 
 ## Audit evidence
 
-Connect, reinstall, disconnect, list, history, user-list, and post operations write audit events targeted at the connection UUID. Receipts identify the credential role `OpenGeni Slack bot`, connection UUID, Slack team ID, operation, outcome, and applicable scheduled task/session IDs. They never include the token, authorization headers, posted text, channel history text, or raw provider responses.
+Connect, reinstall, disconnect, list, history, user-list, and post operations write audit events targeted at the connection UUID. Receipts identify the credential role `OpenGeni Slack bot`, connection UUID, Slack team ID, operation, outcome, and applicable scheduled task/session IDs. Post receipts also carry the non-secret operation/client-message UUID; success is committed atomically with the durable operation result, so a replay cannot create another success receipt. They never include the token, authorization headers, posted text, channel history text, protected request digest, or raw provider responses.

@@ -1,4 +1,5 @@
-import type { Settings } from "@opengeni/config";
+import { createHmac } from "node:crypto";
+import { environmentsEncryptionKeyBytes, type Settings } from "@opengeni/config";
 import {
   OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
   OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
@@ -16,8 +17,11 @@ import {
 } from "@opengeni/core";
 import {
   buildConnectionTokenResolver,
+  claimSlackBotPostOperation,
+  completeSlackBotPostOperation,
   getSession,
   recordAuditEvent,
+  releaseSlackBotPostOperationClaim,
   type Database,
 } from "@opengeni/db";
 import { readResponseJsonBounded, type FetchLike } from "@opengeni/network";
@@ -30,6 +34,7 @@ const MAX_CHANNEL_PAGE = 200;
 const MAX_HISTORY_PAGE = 100;
 const MAX_USER_PAGE = 200;
 const MAX_PROJECTED_TEXT = 4_000;
+const SLACK_POST_CLAIM_LEASE_MS = 30_000;
 
 type SlackPayload = Record<string, unknown> & { ok?: unknown; error?: unknown };
 
@@ -44,6 +49,8 @@ export type SlackBotReceipt = {
   connectionId: string;
   slackTeamId: string;
   operation: SlackBotOperation;
+  operationId?: string;
+  clientMessageId?: string;
 };
 
 type SlackBotOperation = "channels.list" | "channel_history.read" | "users.list" | "message.post";
@@ -234,8 +241,18 @@ export class OpenGeniSlackBotClient {
     });
   }
 
-  async postMessage(input: { channelId?: string; userId?: string; text: string }) {
-    return await this.withAudit("message.post", async (headers) => {
+  async postMessage(input: {
+    operationId: string;
+    channelId?: string;
+    userId?: string;
+    text: string;
+  }) {
+    const operation = "message.post" as const;
+    const claimHolderId = crypto.randomUUID();
+    let claimAcquired = false;
+    let providerCallStarted = false;
+    try {
+      const headers = await this.headersFor(operation);
       let channelId = input.channelId;
       if (input.userId) {
         const opened = await this.call(headers, "conversations.open", { users: input.userId });
@@ -246,15 +263,82 @@ export class OpenGeniSlackBotClient {
       if (!channelId) {
         throw new Error("exactly one of channelId or userId is required");
       }
+      const targetKind = input.userId ? "user" : "channel";
+      const targetId = input.userId ?? input.channelId!;
+      const requestDigest = this.postRequestDigest({
+        operationId: input.operationId,
+        targetKind,
+        targetId,
+        text: input.text,
+      });
+      const claim = await claimSlackBotPostOperation(this.db, {
+        accountId: this.context.accountId,
+        workspaceId: this.context.workspaceId,
+        connectionId: this.connection.id,
+        operationId: input.operationId,
+        targetKind,
+        targetId,
+        requestDigest,
+        claimHolderId,
+        claimLeaseMs: SLACK_POST_CLAIM_LEASE_MS,
+      });
+      if (claim.kind === "connection_not_found") {
+        throw new Error("OpenGeni Slack bot connection no longer exists");
+      }
+      if (claim.kind === "conflict") {
+        throw new Error("operationId is already bound to a different Slack post request");
+      }
+      if (claim.kind === "in_progress") {
+        throw new Error("Slack post operation is already in progress; retry the same operationId");
+      }
+      if (claim.kind === "completed") {
+        return this.completedPostResult(claim.operation, input.operationId);
+      }
+      claimAcquired = true;
+      providerCallStarted = true;
       const posted = await this.call(headers, "chat.postMessage", {
         channel: channelId,
         text: input.text,
+        client_msg_id: input.operationId,
       });
-      return {
-        channelId: requiredSlackString(posted.channel, "channel"),
-        timestamp: requiredSlackString(posted.ts, "ts"),
-      };
-    });
+      const slackChannelId = requiredSlackString(posted.channel, "channel");
+      const slackMessageTimestamp = requiredSlackString(posted.ts, "ts");
+      const completed = await completeSlackBotPostOperation(this.db, {
+        accountId: this.context.accountId,
+        workspaceId: this.context.workspaceId,
+        connectionId: this.connection.id,
+        operationId: input.operationId,
+        claimHolderId,
+        slackChannelId,
+        slackMessageTimestamp,
+        subjectId: this.context.subjectId,
+        auditMetadata: this.auditMetadata(operation, "succeeded", undefined, input.operationId),
+      });
+      if (completed.kind !== "completed") {
+        throw new Error("Slack post completion lost its durable operation claim");
+      }
+      claimAcquired = false;
+      return this.completedPostResult(completed.operation, input.operationId);
+    } catch (error) {
+      const failureCode = safeFailureCode(error);
+      if (claimAcquired) {
+        await releaseSlackBotPostOperationClaim(this.db, {
+          accountId: this.context.accountId,
+          workspaceId: this.context.workspaceId,
+          connectionId: this.connection.id,
+          operationId: input.operationId,
+          claimHolderId,
+          failureCode,
+        }).catch(() => undefined);
+      }
+      await this.recordAudit(
+        operation,
+        providerCallStarted && slackPostOutcomeMayBeAmbiguous(error) ? "ambiguous" : "failed",
+        failureCode,
+        input.operationId,
+      );
+      throw error;
+    }
   }
 
   private async requireMemberChannel(headers: Record<string, string>, channelId: string) {
@@ -309,20 +393,60 @@ export class OpenGeniSlackBotClient {
     return result.headers;
   }
 
-  private receipt(operation: SlackBotOperation): SlackBotReceipt {
+  private receipt(operation: SlackBotOperation, operationId?: string): SlackBotReceipt {
     return {
       credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
       credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
       connectionId: this.connection.id,
       slackTeamId: this.metadata.slackTeamId,
       operation,
+      ...(operationId ? { operationId, clientMessageId: operationId } : {}),
     };
+  }
+
+  private completedPostResult(
+    operation: {
+      slackChannelId: string | null;
+      slackMessageTimestamp: string | null;
+    },
+    operationId: string,
+  ) {
+    if (!operation.slackChannelId || !operation.slackMessageTimestamp) {
+      throw new Error("completed Slack post operation is missing its provider result");
+    }
+    return {
+      channelId: operation.slackChannelId,
+      timestamp: operation.slackMessageTimestamp,
+      receipt: this.receipt("message.post", operationId),
+    };
+  }
+
+  private postRequestDigest(input: {
+    operationId: string;
+    targetKind: "channel" | "user";
+    targetId: string;
+    text: string;
+  }): string {
+    const key = environmentsEncryptionKeyBytes(this.settings);
+    if (!key) throw new Error("connection encryption is not configured");
+    return createHmac("sha256", key)
+      .update(
+        JSON.stringify({
+          operationId: input.operationId,
+          connectionId: this.connection.id,
+          targetKind: input.targetKind,
+          targetId: input.targetId,
+          text: input.text,
+        }),
+      )
+      .digest("hex");
   }
 
   private async recordAudit(
     operation: SlackBotOperation,
-    outcome: "succeeded" | "failed",
+    outcome: "succeeded" | "failed" | "ambiguous",
     failureCode?: string,
+    operationId?: string,
   ): Promise<void> {
     await recordAuditEvent(this.db, {
       accountId: this.context.accountId,
@@ -331,14 +455,23 @@ export class OpenGeniSlackBotClient {
       action: `slack_bot.${operation}`,
       targetType: "connection",
       targetId: this.connection.id,
-      metadata: {
-        ...this.receipt(operation),
-        outcome,
-        ...(failureCode ? { failureCode } : {}),
-        ...(this.context.sessionId ? { sessionId: this.context.sessionId } : {}),
-        ...(this.context.scheduledTaskId ? { scheduledTaskId: this.context.scheduledTaskId } : {}),
-      },
+      metadata: this.auditMetadata(operation, outcome, failureCode, operationId),
     });
+  }
+
+  private auditMetadata(
+    operation: SlackBotOperation,
+    outcome: "succeeded" | "failed" | "ambiguous",
+    failureCode?: string,
+    operationId?: string,
+  ): Record<string, unknown> {
+    return {
+      ...this.receipt(operation, operationId),
+      outcome,
+      ...(failureCode ? { failureCode } : {}),
+      ...(this.context.sessionId ? { sessionId: this.context.sessionId } : {}),
+      ...(this.context.scheduledTaskId ? { scheduledTaskId: this.context.scheduledTaskId } : {}),
+    };
   }
 }
 
@@ -549,4 +682,13 @@ function safeSlackCode(value: string): string {
 function safeFailureCode(error: unknown): string {
   if (error instanceof SlackBotProviderError) return safeSlackCode(error.code);
   return "local_validation_failed";
+}
+
+function slackPostOutcomeMayBeAmbiguous(error: unknown): boolean {
+  if (!(error instanceof SlackBotProviderError)) return true;
+  return (
+    error.code === "transport_error" ||
+    error.code === "invalid_response" ||
+    error.code.startsWith("http_")
+  );
 }
