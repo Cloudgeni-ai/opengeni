@@ -1,5 +1,14 @@
 # @opengeni/db
 
+## 0.12.6
+
+### Patch Changes
+
+- c135339: Persist safe new-session defaults after successful creates while preserving explicit tool-policy semantics and revalidating stale workspace resources before reuse.
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/config@0.7.6
+
 ## 0.12.5
 
 ### Patch Changes
