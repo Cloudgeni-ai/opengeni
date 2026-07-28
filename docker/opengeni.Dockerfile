@@ -56,17 +56,21 @@ CMD ["bun", "run", "--cwd", "apps/api", "start"]
 
 FROM base AS worker
 # The docker sandbox backend needs the Docker CLI to talk to the mounted host
-# daemon socket. Install the client only; the daemon remains outside this image.
+# daemon socket. Interactive/cancellable commands use the Agents SDK's
+# host-side Python PTY bridge, so Python must live in this worker image rather
+# than only inside the sandbox. The daemon remains outside this image.
 USER root
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+  && apt-get install -y --no-install-recommends ca-certificates curl gnupg python3 \
   && install -m 0755 -d /etc/apt/keyrings \
   && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
   && chmod a+r /etc/apt/keyrings/docker.asc \
   && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list \
   && apt-get update \
   && apt-get install -y --no-install-recommends docker-ce-cli \
+  && /usr/bin/python3 -c 'import pty' \
   && rm -rf /var/lib/apt/lists/*
+ENV OPENAI_AGENTS_PYTHON=/usr/bin/python3
 USER bun
 CMD ["bun", "run", "--cwd", "apps/worker", "start"]
 
