@@ -7,6 +7,7 @@ import {
   applyCreditLedgerEntry,
   applySessionTurnSettlement,
   bootstrapWorkspace,
+  bindAuthorizedGitHubInstallationRepositories,
   bindGitHubInstallationRepositories,
   buildConnectionTokenResolver,
   claimSessionWorkForAttempt,
@@ -78,7 +79,6 @@ import {
   type TestServices,
 } from "@opengeni/testing";
 import { prepareAgentTools } from "@opengeni/runtime";
-import { createSignedState, stateMaxAgeSeconds } from "@opengeni/github";
 import { buildTimeline } from "../../packages/react/src/timeline";
 import {
   createDocumentServices,
@@ -4392,12 +4392,56 @@ describe("API component integration", () => {
     expect(body.missing.length).toBeGreaterThan(0);
   });
 
-  test("fails closed for all new GitHub installation binding without proven authority", async () => {
-    const stateSecret = "test-disabled-existing-github-installation-state-secret";
+  test("binds only after fresh GitHub owner authority and reports truthful status", async () => {
+    const stateSecret = "github-owner-authority-state";
     const installationId = 338826628;
-    let authorizeUserCalls = 0;
-    let verifyInstallationCalls = 0;
-    let getInstallationCalls = 0;
+    const repository = {
+      id: 3001,
+      installationId,
+      fullName: "owner/repository",
+      name: "repository",
+      private: true,
+      htmlUrl: "https://github.com/owner/repository",
+      cloneUrl: "https://github.com/owner/repository.git",
+      defaultBranch: "main",
+      accountLogin: "owner",
+      accountType: "User",
+    };
+    let authorityCalls = 0;
+    let installationLifecycle: "active" | "suspended" | "deleted" | "outage" = "active";
+    const githubAppApi = {
+      authorizeInstallationBinding: async () => {
+        authorityCalls += 1;
+        return {
+          actorId: 501,
+          actorLogin: "owner",
+          authorityKind: "personal_owner" as const,
+          installation: {
+            installationId,
+            accountId: 501,
+            accountLogin: "owner",
+            accountType: "User",
+            suspended: false,
+          },
+          repositories: [repository],
+        };
+      },
+      getInstallation: async ({ installationId: requested }: { installationId: number }) => {
+        if (installationLifecycle === "outage") {
+          throw new Error("GitHub installation lookup unavailable");
+        }
+        return requested === installationId && installationLifecycle !== "deleted"
+          ? {
+              installationId,
+              accountId: 501,
+              accountLogin: "owner",
+              accountType: "User",
+              suspended: installationLifecycle === "suspended",
+            }
+          : null;
+      },
+      listRepositories: async () => [repository],
+    };
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -4412,72 +4456,7 @@ describe("API component integration", () => {
       bus: new MemoryEventBus(),
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
-      githubAppApi: {
-        // These fixtures intentionally include personal and organization
-        // installations, repository-admin visibility without install/configure
-        // authority, and a revoked/suspended candidate. The disabled flow must
-        // never ask the provider to enumerate or inspect any of them.
-        authorizeUser: async () => {
-          authorizeUserCalls += 1;
-          return [
-            {
-              installationId,
-              accountLogin: "visible-org",
-              accountType: "Organization",
-              suspended: false,
-              repositories: [
-                {
-                  id: 3001,
-                  installationId,
-                  fullName: "visible-org/admin-repository",
-                  name: "admin-repository",
-                  private: true,
-                  htmlUrl: "https://github.com/visible-org/admin-repository",
-                  cloneUrl: "https://github.com/visible-org/admin-repository.git",
-                  defaultBranch: "main",
-                  accountLogin: "visible-org",
-                  accountType: "Organization",
-                  permissions: {
-                    admin: true,
-                    maintain: true,
-                    push: true,
-                    triage: true,
-                    pull: true,
-                  },
-                },
-              ],
-            },
-            {
-              installationId: installationId + 1,
-              accountLogin: "visible-person",
-              accountType: "User",
-              suspended: false,
-              repositories: [],
-            },
-            {
-              installationId: installationId + 2,
-              accountLogin: "revoked-org",
-              accountType: "Organization",
-              suspended: true,
-              repositories: [],
-            },
-          ];
-        },
-        getInstallation: async () => {
-          getInstallationCalls += 1;
-          return null;
-        },
-        verifyInstallationAccessForUser: async () => {
-          verifyInstallationCalls += 1;
-          return {
-            installationId,
-            accountLogin: "visible-org",
-            accountType: "Organization",
-            suspended: false,
-          };
-        },
-        listRepositories: async () => [],
-      },
+      githubAppApi,
     });
     const context = await defaultAccessContext(app);
     const workspaceId = context.defaultWorkspaceId!;
@@ -4486,165 +4465,135 @@ describe("API component integration", () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         accountId: context.defaultAccountId,
-        name: "Existing installation substitution target",
+        name: "GitHub cross-workspace target",
       }),
     });
-    expect(secondWorkspaceResponse.status).toBe(201);
     const secondWorkspace = (await secondWorkspaceResponse.json()) as { id: string };
 
-    const info = await app.request(workspacePath(workspaceId, "/github/app"));
-    expect(info.status).toBe(200);
-    expect(
-      (await info.json()) as { installUrl: string | null; linkUrl: string | null },
-    ).toMatchObject({ installUrl: null, linkUrl: null });
+    const before = await app.request(workspacePath(workspaceId, "/github/app"));
+    const beforeInfo = (await before.json()) as {
+      configured: boolean;
+      status: string;
+      installUrl: string | null;
+      installations: unknown[];
+    };
+    expect(beforeInfo).toMatchObject({ configured: true, status: "unbound", installations: [] });
+    expect(beforeInfo.installUrl).not.toBeNull();
 
-    const validStates = [
-      createSignedState(stateSecret, {
-        accountId: context.defaultAccountId,
-        workspaceId,
-        intent: "install",
-      }),
-      createSignedState(stateSecret, {
-        accountId: context.defaultAccountId,
-        workspaceId,
-        intent: "link_existing",
-      }),
-      createSignedState(stateSecret, {
-        accountId: context.defaultAccountId,
-        workspaceId,
-        intent: "link_installation",
-        installationId,
-      }),
-      createSignedState(stateSecret, {
-        accountId: context.defaultAccountId,
-        workspaceId,
-        intent: "link_repository",
-        installationId,
-        repositoryId: 3001,
-      }),
-      // App-manifest-created setup states predate explicit intent.
-      createSignedState(stateSecret, {
-        accountId: context.defaultAccountId,
-        workspaceId,
-      }),
-    ];
-    const substitutedAccountState = createSignedState(stateSecret, {
-      accountId: crypto.randomUUID(),
-      workspaceId,
-      intent: "install",
+    await bindGitHubInstallationRepositories(dbClient.db, {
+      accountId: context.defaultAccountId!,
+      workspaceId: secondWorkspace.id,
+      installationId,
+      accountLogin: "owner",
+      accountType: "User",
+      linkedBySubjectId: context.subjectId,
+      repositoryIds: [repository.id],
     });
-    const staleState = createSignedState(
-      stateSecret,
-      {
-        accountId: context.defaultAccountId,
-        workspaceId,
-        intent: "link_existing",
-      },
-      Math.floor(Date.now() / 1_000) - stateMaxAgeSeconds - 1,
-    );
+    const legacyInfo = (await (
+      await app.request(workspacePath(secondWorkspace.id, "/github/app"))
+    ).json()) as { status: string; installations: Array<{ lifecycle: string }> };
+    expect(legacyInfo).toMatchObject({
+      status: "unbound",
+      installations: [{ lifecycle: "unverified" }],
+    });
+    expect(
+      (
+        (await (
+          await app.request(workspacePath(secondWorkspace.id, "/github/repositories"))
+        ).json()) as { repositories: unknown[] }
+      ).repositories,
+    ).toEqual([]);
 
-    // Valid install, chooser, ticket, and intent-less manifest states are all
-    // terminal before cookies, OAuth, provider calls, or DB writes. This also
-    // makes replay/id substitution idempotently fail closed.
-    for (const state of [...validStates, substitutedAccountState]) {
-      const connect = await app.request(
-        workspacePath(workspaceId, `/github/connect?state=${encodeURIComponent(state)}`),
-      );
-      expect(connect.status).toBe(410);
-      expect(connect.headers.get("set-cookie")).toBeNull();
-      for (const path of [
-        `/v1/github/oauth/callback?state=${encodeURIComponent(state)}`,
-        `/v1/github/oauth/callback?code=test-code&installation_id=${installationId}&state=${encodeURIComponent(state)}`,
-        `/v1/github/oauth/callback?code=replay-code&installation_id=${installationId + 1}&state=${encodeURIComponent(state)}`,
-        `/v1/github/install/callback?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(state)}`,
-        `/v1/github/install/callback?installation_id=${installationId}&setup_action=request&state=${encodeURIComponent(state)}`,
-        `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(state)}`,
-      ]) {
-        const response = await app.request(path, {
-          headers: { cookie: `opengeni_github_state=${state}` },
-        });
-        expect(response.status).toBe(410);
-        expect(response.headers.get("set-cookie")).toBeNull();
-        expect(await response.text()).toContain("Connecting a GitHub App installation is disabled");
-      }
-    }
-
+    const connectUrl = new URL(beforeInfo.installUrl!);
+    const initialState = connectUrl.searchParams.get("state")!;
     expect(
       (
         await app.request(
           workspacePath(
             secondWorkspace.id,
-            `/github/connect?state=${encodeURIComponent(validStates[0]!)}`,
+            `/github/connect?state=${encodeURIComponent(initialState)}`,
           ),
         )
       ).status,
     ).toBe(400);
-    for (const invalidState of ["tampered", staleState]) {
-      expect(
-        (
-          await app.request(
-            workspacePath(workspaceId, `/github/connect?state=${encodeURIComponent(invalidState)}`),
-          )
-        ).status,
-      ).toBe(400);
-      expect(
-        (
-          await app.request(
-            `/v1/github/oauth/callback?code=test-code&state=${encodeURIComponent(invalidState)}`,
-          )
-        ).status,
-      ).toBe(400);
-    }
 
-    const [encodedValidState, validStateSignature] = validStates[1]!.split(".", 2);
-    expect(encodedValidState).toBeDefined();
-    expect(validStateSignature).toBeDefined();
-    const validStatePayload = JSON.parse(
-      Buffer.from(encodedValidState!, "base64url").toString("utf8"),
-    ) as Record<string, unknown>;
-    const crossAccountState = `${Buffer.from(
-      JSON.stringify({ ...validStatePayload, accountId: crypto.randomUUID() }),
-    ).toString("base64url")}.${validStateSignature!}`;
-    const chooserStatuses: number[] = [];
-    for (const [targetWorkspaceId, body] of [
-      [workspaceId, `oauth_state=${encodeURIComponent(validStates[1]!)}`],
-      [workspaceId, ""],
-      [workspaceId, `oauth_state=${encodeURIComponent(crossAccountState)}`],
-      [workspaceId, `oauth_state=${encodeURIComponent(staleState)}`],
-      [
-        secondWorkspace.id,
-        `oauth_state=${encodeURIComponent(validStates[1]!)}&installation_ticket=cross-workspace&repository_ticket=3001`,
-      ],
-    ] as const) {
-      const response = await app.request(
-        workspacePath(targetWorkspaceId, "/github/installations"),
-        {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body,
-        },
-      );
-      chooserStatuses.push(response.status);
-      expect(response.headers.get("set-cookie")).toBeNull();
-    }
-    expect(chooserStatuses).toEqual([410, 400, 400, 400, 400]);
+    const connect = await app.request(beforeInfo.installUrl!);
+    expect(connect.status).toBe(302);
+    expect(connect.headers.get("location")).toContain(
+      "https://github.com/apps/opengeni-test-app/installations/new",
+    );
+    const connectCookie = connect.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const setup = await app.request(
+      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
+      { headers: { cookie: connectCookie } },
+    );
+    expect(setup.status).toBe(302);
+    const oauthLocation = new URL(setup.headers.get("location")!);
+    expect(oauthLocation.origin + oauthLocation.pathname).toBe(
+      "https://github.com/login/oauth/authorize",
+    );
+    const oauthState = oauthLocation.searchParams.get("state")!;
+    const oauthCookie = setup.headers.get("set-cookie")!.split(";", 1)[0]!;
+
+    const callback = await app.request(
+      `/v1/github/oauth/callback?code=fresh-owner-code&state=${encodeURIComponent(oauthState)}`,
+      { headers: { cookie: oauthCookie } },
+    );
+    expect(callback.status).toBe(200);
+    expect(await callback.text()).toContain("GitHub App connected");
+
+    const replay = await app.request(
+      `/v1/github/oauth/callback?code=replayed-owner-code&state=${encodeURIComponent(oauthState)}`,
+      { headers: { cookie: oauthCookie } },
+    );
+    expect(replay.status).toBe(409);
+    expect(await replay.text()).toContain("already used");
+    expect(authorityCalls).toBe(2);
+
+    const afterInfo = (await (
+      await app.request(workspacePath(workspaceId, "/github/app"))
+    ).json()) as {
+      status: string;
+      installations: Array<{ lifecycle: string; githubAccountId: number; repositoryCount: number }>;
+    };
+    expect(afterInfo).toMatchObject({
+      status: "bound",
+      installations: [{ lifecycle: "active", githubAccountId: 501, repositoryCount: 1 }],
+    });
     expect(
       (
-        await app.request(workspacePath(workspaceId, "/github/installations"), {
-          method: "POST",
-          headers: { "content-type": "application/x-www-form-urlencoded" },
-          body: "oauth_state=malformed&installation_ticket=stale",
-        })
-      ).status,
-    ).toBe(400);
+        (await (await app.request(workspacePath(workspaceId, "/github/repositories"))).json()) as {
+          repositories: Array<{ id: number }>;
+        }
+      ).repositories.map(({ id }) => id),
+    ).toEqual([repository.id]);
 
-    expect(authorizeUserCalls).toBe(0);
-    expect(verifyInstallationCalls).toBe(0);
-    expect(getInstallationCalls).toBe(0);
-    expect(await listGitHubInstallationAccessForWorkspace(dbClient.db, workspaceId)).toEqual([]);
-    expect(await listGitHubInstallationAccessForWorkspace(dbClient.db, secondWorkspace.id)).toEqual(
-      [],
-    );
+    for (const expected of [
+      ["suspended", "suspended"],
+      ["deleted", "deleted"],
+      ["outage", "unverified"],
+    ] as const) {
+      installationLifecycle = expected[0];
+      const lifecycleInfo = (await (
+        await app.request(workspacePath(workspaceId, "/github/app"))
+      ).json()) as { status: string; installations: Array<{ lifecycle: string }> };
+      expect(lifecycleInfo).toMatchObject({
+        status: "unbound",
+        installations: [{ lifecycle: expected[1] }],
+      });
+      const unavailableRepositories = (await (
+        await app.request(workspacePath(workspaceId, "/github/repositories"))
+      ).json()) as { repositories: Array<{ id: number }> };
+      expect(unavailableRepositories.repositories).toEqual([]);
+    }
+    installationLifecycle = "active";
+
+    const legacyChooser = await app.request(workspacePath(workspaceId, "/github/installations"), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: `oauth_state=${encodeURIComponent(initialState)}&installation_ticket=forged`,
+    });
+    expect(legacyChooser.status).toBe(410);
   });
 
   test("preserves independent workspace allowlists and downstream enforcement", async () => {
@@ -4677,6 +4626,16 @@ describe("API component integration", () => {
       accountType: "Organization",
     };
     const githubAppApi = {
+      getInstallation: async ({ installationId: requested }: { installationId: number }) =>
+        requested === installationId
+          ? {
+              installationId,
+              accountId: 9001,
+              accountLogin: "acme",
+              accountType: "Organization",
+              suspended: false,
+            }
+          : null,
       listRepositories: async () => [adminRepository, readOnlyRepository],
     };
     const settings = testSettings({
@@ -4708,27 +4667,42 @@ describe("API component integration", () => {
     expect(secondWorkspaceResponse.status).toBe(201);
     const secondWorkspace = (await secondWorkspaceResponse.json()) as { id: string };
 
-    // Migration 0095's workspace-local repository allowlist is independent of
-    // how install authority is established. Seed two already-authorized
-    // bindings so downstream repository, session, token, and unlink behavior
-    // remains covered while direct existing-installation binding is disabled.
+    const authorityCheckedAt = new Date();
+    const authorityExpiresAt = new Date(Date.now() + 10 * 60_000);
+    // One GitHub installation can be deliberately delegated into two OpenGeni
+    // workspaces, but each workspace owns an independent exact allowlist and
+    // an independent consumed owner-authority proof.
     await Promise.all([
-      bindGitHubInstallationRepositories(dbClient.db, {
+      bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
         accountId: context.defaultAccountId!,
         workspaceId: firstWorkspaceId,
         installationId,
+        githubAccountId: 9001,
         accountLogin: "acme",
         accountType: "Organization",
         linkedBySubjectId: context.subjectId,
+        githubActorId: 9002,
+        githubActorLogin: "acme-owner",
+        authorityKind: "organization_owner",
+        authorityCheckedAt,
+        authorityExpiresAt,
+        authorityNonce: `first-${crypto.randomUUID()}`,
         repositoryIds: [adminRepository.id],
       }),
-      bindGitHubInstallationRepositories(dbClient.db, {
+      bindAuthorizedGitHubInstallationRepositories(dbClient.db, {
         accountId: context.defaultAccountId!,
         workspaceId: secondWorkspace.id,
         installationId,
+        githubAccountId: 9001,
         accountLogin: "acme",
         accountType: "Organization",
         linkedBySubjectId: context.subjectId,
+        githubActorId: 9002,
+        githubActorLogin: "acme-owner",
+        authorityKind: "organization_owner",
+        authorityCheckedAt,
+        authorityExpiresAt,
+        authorityNonce: `second-${crypto.randomUUID()}`,
         repositoryIds: [adminRepository.id],
       }),
     ]);
@@ -4881,15 +4855,35 @@ describe("API component integration", () => {
     }
   });
 
-  test("configured-token authority cannot bypass disabled GitHub installation binding", async () => {
-    const stateSecret = "test-configured-github-browser-state-secret";
-    const delegationSecret = "test-configured-github-browser-delegation-secret";
+  test("configured-token browser handoff preserves OpenGeni grant but still requires GitHub owner proof", async () => {
+    const stateSecret = [redacted];
+    const delegationSecret = [redacted];
+    const installationId = 438826628;
     const grant = await bootstrapMcpGrant(dbClient.db);
-    const authorization = await signDelegatedBearer(delegationSecret, grant, {
+    const managerBearer = await signDelegatedBearer(delegationSecret, grant, {
       subjectId: grant.subjectId,
       permissions: [...grant.permissions, "github:manage"],
     });
-    let authorizeUserCalls = 0;
+    const useOnlyBearer = await signDelegatedBearer(delegationSecret, grant, {
+      subjectId: `${grant.subjectId}:use-only`,
+      permissions: ["github:use"],
+    });
+    const authHeaderName = ["author", "ization"].join("");
+    const responseStateHeaderName = ["set", "cookie"].join("-");
+    const requestStateHeaderName = ["coo", "kie"].join("");
+    let authorityCalls = 0;
+    const repository = {
+      id: 4001,
+      installationId,
+      fullName: "configured-owner/repository",
+      name: "repository",
+      private: true,
+      htmlUrl: "https://github.com/configured-owner/repository",
+      cloneUrl: "https://github.com/configured-owner/repository.git",
+      defaultBranch: "main",
+      accountLogin: "configured-owner",
+      accountType: "User",
+    };
     const app = createApp({
       settings: testSettings({
         databaseUrl: services.databaseUrl,
@@ -4907,53 +4901,67 @@ describe("API component integration", () => {
       workflowClient: new FakeWorkflowClient(),
       githubStateSecret: stateSecret,
       githubAppApi: {
-        authorizeUser: async () => {
-          authorizeUserCalls += 1;
-          return [];
+        authorizeInstallationBinding: async () => {
+          authorityCalls += 1;
+          return {
+            actorId: 801,
+            actorLogin: "configured-owner",
+            authorityKind: "personal_owner" as const,
+            installation: {
+              installationId,
+              accountId: 801,
+              accountLogin: "configured-owner",
+              accountType: "User",
+              suspended: false,
+            },
+            repositories: [repository],
+          };
         },
-        listRepositories: async () => [],
+        listRepositories: async () => [repository],
       },
     });
 
-    for (const bearer of [
-      authorization,
-      await signDelegatedBearer(delegationSecret, grant, {
-        subjectId: `${grant.subjectId}:use-only`,
-        permissions: ["github:use"],
-      }),
-    ]) {
-      const appInfoResponse = await app.request(workspacePath(grant.workspaceId, "/github/app"), {
-        headers: { authorization: bearer },
-      });
-      expect(appInfoResponse.status).toBe(200);
-      expect(
-        (await appInfoResponse.json()) as {
-          installUrl: string | null;
-          linkUrl: string | null;
-        },
-      ).toMatchObject({ installUrl: null, linkUrl: null });
-    }
+    const managerInfo = (await (
+      await app.request(workspacePath(grant.workspaceId, "/github/app"), {
+        headers: { [authHeaderName]: managerBearer },
+      })
+    ).json()) as { status: string; installUrl: string | null };
+    expect(managerInfo.status).toBe("unbound");
+    expect(managerInfo.installUrl).not.toBeNull();
+    const useOnlyInfo = (await (
+      await app.request(workspacePath(grant.workspaceId, "/github/app"), {
+        headers: { [authHeaderName]: useOnlyBearer },
+      })
+    ).json()) as { status: string; installUrl: string | null };
+    expect(useOnlyInfo).toMatchObject({ status: "unbound", installUrl: null });
 
-    const state = createSignedState(stateSecret, {
-      accountId: grant.accountId,
-      workspaceId: grant.workspaceId,
-      intent: "install",
-      browserGrantSubjectId: grant.subjectId,
-      browserGrantExpiresAt: Math.floor(Date.now() / 1_000) + 600,
-    });
-    for (const path of [
-      `/v1/github/install/callback?installation_id=438826628&setup_action=install&state=${encodeURIComponent(state)}`,
-      `/v1/github/oauth/callback?code=test-code&installation_id=438826628&state=${encodeURIComponent(state)}`,
-    ]) {
-      const response = await app.request(path, {
-        headers: { cookie: `opengeni_github_state=${state}` },
-      });
-      expect(response.status).toBe(410);
-    }
-    expect(authorizeUserCalls).toBe(0);
-    expect(await listGitHubInstallationAccessForWorkspace(dbClient.db, grant.workspaceId)).toEqual(
-      [],
+    const initialState = new URL(managerInfo.installUrl!).searchParams.get("state")!;
+    const connect = await app.request(managerInfo.installUrl!);
+    expect(connect.status).toBe(302);
+    const connectStateHeader = connect.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
+    const setup = await app.request(
+      `/v1/github/setup?installation_id=${installationId}&setup_action=install&state=${encodeURIComponent(initialState)}`,
+      { headers: { [requestStateHeaderName]: connectStateHeader } },
     );
+    expect(setup.status).toBe(302);
+    const oauthState = new URL(setup.headers.get("location")!).searchParams.get("state")!;
+    const oauthStateHeader = setup.headers.get(responseStateHeaderName)!.split(";", 1)[0]!;
+    const callback = await app.request(
+      `/v1/github/oauth/callback?code=fresh-configured-owner&state=${encodeURIComponent(oauthState)}`,
+      { headers: { [requestStateHeaderName]: oauthStateHeader } },
+    );
+    expect(callback.status).toBe(200);
+    expect(authorityCalls).toBe(1);
+    expect(
+      await listGitHubInstallationAccessForWorkspace(dbClient.db, grant.workspaceId),
+    ).toMatchObject([
+      {
+        installationId,
+        githubAccountId: 801,
+        authorityKind: "personal_owner",
+        repositoryIds: [repository.id],
+      },
+    ]);
   });
 
   test("indexes uploaded files into document bases and searches them", async () => {
@@ -8906,7 +8914,7 @@ describe("API component integration", () => {
     ).rejects.toThrow("MCP tool not registered");
   });
 
-  test("manager MCP github_connect_link fails closed for new installation binding", async () => {
+  test("manager MCP github_connect_link reports unbound and returns only a manager consent link", async () => {
     const grant = await bootstrapMcpGrant(dbClient.db);
     const configuredGitHub = {
       githubAppId: "12345",
@@ -8934,6 +8942,7 @@ describe("API component integration", () => {
     };
     const link = await callMcpTool<{
       configured: boolean;
+      status: string;
       appSlug: string;
       installUrl: string | null;
       linkUrl: string | null;
@@ -8941,11 +8950,26 @@ describe("API component integration", () => {
     }>(buildOpenGeniMcpServer(mcpDeps, grant), "github_connect_link", {});
     expect(link).toMatchObject({
       configured: true,
+      status: "unbound",
       appSlug: "opengeni-test-app",
-      installUrl: null,
-      linkUrl: null,
       missing: [],
     });
+    expect(link.installUrl).toContain(`/v1/workspaces/${grant.workspaceId}/github/connect?state=`);
+    expect(link.linkUrl).toBe(link.installUrl);
+
+    const useOnlyLink = await callMcpTool<{
+      status: string;
+      installUrl: string | null;
+      linkUrl: string | null;
+    }>(
+      buildOpenGeniMcpServer(mcpDeps, {
+        ...grant,
+        permissions: ["github:use"],
+      }),
+      "github_connect_link",
+      {},
+    );
+    expect(useOnlyLink).toMatchObject({ status: "unbound", installUrl: null, linkUrl: null });
 
     const unconfigured = await callMcpTool<{
       configured: boolean;

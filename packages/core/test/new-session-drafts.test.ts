@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { AccessGrant, ResourceRef, ToolRef } from "@opengeni/contracts";
 import {
-  bindGitHubInstallationRepositories,
+  bindAuthorizedGitHubInstallationRepositories,
   createDb,
   saveNewSessionDraftInTransaction,
   type Database,
@@ -106,11 +106,21 @@ describe("core new-session draft hydration", () => {
     if (!available) return;
     const { grant, subjectId } = await fixture();
     const workspaceId = grant.workspaceId!;
-    await bindGitHubInstallationRepositories(db, {
+    const authorityCheckedAt = new Date();
+    await bindAuthorizedGitHubInstallationRepositories(db, {
       accountId: grant.accountId,
       workspaceId,
       installationId: 71,
+      githubAccountId: 7_100,
+      accountLogin: "acme-owner",
+      accountType: "User",
       linkedBySubjectId: subjectId,
+      githubActorId: 7_100,
+      githubActorLogin: "acme-owner",
+      authorityKind: "personal_owner",
+      authorityCheckedAt,
+      authorityExpiresAt: new Date(authorityCheckedAt.getTime() + 10 * 60_000),
+      authorityNonce: `core-new-session-drafts-${crypto.randomUUID()}`,
       repositoryIds: [42],
     });
 

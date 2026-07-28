@@ -2526,15 +2526,12 @@ export class OpenGeniClient {
 
   // --- GitHub ----------------------------------------------------------------------------------
 
-  /** GitHub App configuration status; install/link URLs are null while new binding is disabled. */
+  /** GitHub App server configuration plus truthful workspace binding status. */
   async getGitHubApp(workspaceId: string): Promise<GitHubAppInfo> {
     return await this.requestJson<GitHubAppInfo>("GET", `/v1/workspaces/${workspaceId}/github/app`);
   }
 
-  /**
-   * Compatibility URL for previously issued state. New installation binding is
-   * disabled, so the endpoint validates state and terminates with HTTP 410.
-   */
+  /** Build the GitHub owner-consent entry URL for fresh workspace-bound state. */
   githubConnectUrl(workspaceId: string, state: string): string {
     return this.url(`/v1/workspaces/${workspaceId}/github/connect`, { state });
   }
