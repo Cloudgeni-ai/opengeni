@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.19.4
+
+### Patch Changes
+
+- c135339: Persist safe new-session defaults after successful creates while preserving explicit tool-policy semantics and revalidating stale workspace resources before reuse.
+
 ## 0.19.3
 
 ### Patch Changes

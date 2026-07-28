@@ -1,5 +1,14 @@
 # @opengeni/runtime
 
+## 0.13.10
+
+### Patch Changes
+
+- 8356146: Scope progressive MCP tool search and context accounting to the authoritative configured server identities while keeping the mandatory OpenGeni tools eager.
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/config@0.7.6
+
 ## 0.13.9
 
 ### Patch Changes

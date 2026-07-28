@@ -1,5 +1,20 @@
 # @opengeni/core
 
+## 0.11.8
+
+### Patch Changes
+
+- c135339: Persist safe new-session defaults after successful creates while preserving explicit tool-policy semantics and revalidating stale workspace resources before reuse.
+- Updated dependencies [c135339]
+- Updated dependencies [8356146]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/db@0.12.6
+  - @opengeni/runtime@0.13.10
+  - @opengeni/config@0.7.6
+  - @opengeni/documents@0.2.36
+  - @opengeni/events@0.3.27
+  - @opengeni/storage@0.2.30
+
 ## 0.11.7
 
 ### Patch Changes
