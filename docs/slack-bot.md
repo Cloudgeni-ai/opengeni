@@ -31,11 +31,13 @@ settings:
 
 Event Subscriptions are disabled by omission. Do not enable Socket Mode, Event Subscriptions, token rotation, or add `channels:join`, `chat:write.public`, or other scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
 
+The token-paste connection does not require Slack-specific environment variables.
+
 ## Install and connect
 
 1. In Slack, create the app from the manifest and install it to the intended Slack workspace.
 2. In the intended OpenGeni workspace, open **Capabilities → OpenGeni Slack bot**.
-3. Enter the Slack **Bot User OAuth Token** in the password field and choose **Validate and connect**. Enter the credential only in this form—never in chat, a task prompt, an issue, or logs.
+3. Open [OAuth & Permissions for the OpenGeni Slack app](https://api.slack.com/apps/A0BL4BRE2E7/oauth), copy the **Bot User OAuth Token** (`xoxb-…`), paste it into the password field, and choose **Validate and connect**. Enter the credential only in this form—never in chat, a task prompt, an issue, or logs.
 4. OpenGeni calls Slack server-to-server to verify the bot token, exact scope set, Slack workspace, bot identity, and exact `OpenGeni` display name. It then stores the token only in the existing encrypted connection credential column. API responses, session events, MCP results, and audit events contain only non-secret connection/team/role facts.
 
 The connection is bound to the authenticated OpenGeni account and workspace by the normal RLS-scoped `connections` row. It is workspace-shared (`subjectId = null`) and cannot be fabricated or modified through generic connection metadata APIs. A server-owned verification timestamp and credential-version marker distinguish this dedicated validated install from caller-written legacy connection JSON. Markerless rows fail closed. During a rolling release, any older generic writer that replaces the credential or asserted bot identity automatically clears the marker at the database boundary.

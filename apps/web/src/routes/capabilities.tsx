@@ -209,24 +209,24 @@ export function CapabilitiesRoute({
   }
 
   async function connectSlackBot() {
-    if (!slackBotToken) return;
+    const token = slackBotToken.trim();
+    if (!token) return;
     setSlackBotBusy(true);
     try {
       await client.connectOpenGeniSlackBot(workspaceId, {
-        token: slackBotToken,
+        token,
         ...(slackBotConnection ? { connectionId: slackBotConnection.id } : {}),
       });
-      setSlackBotToken("");
       await refresh();
       toast.success(
         slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
       );
     } catch (error) {
-      setSlackBotToken("");
       toast.error("Couldn't connect the OpenGeni Slack bot", {
         description: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      setSlackBotToken("");
       setSlackBotBusy(false);
     }
   }
@@ -787,10 +787,18 @@ export function CapabilitiesRoute({
                 </div>
               </div>
               <p className="mt-3 max-w-3xl text-xs text-fg-muted">
-                Install the Slack app named and displayed exactly <strong>OpenGeni</strong>, then
-                enter its bot token here. The credential is sent once to the server, encrypted, and
-                never returned. This is separate from your subject-owned hosted Slack OAuth
-                connection.
+                Open{" "}
+                <a
+                  href="https://api.slack.com/apps/A0BL4BRE2E7/oauth"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-brand hover:underline"
+                >
+                  OAuth &amp; Permissions in Slack
+                </a>
+                , copy the <strong>Bot User OAuth Token</strong> beginning with{" "}
+                <span className="font-mono">xoxb-</span>, and paste it below. The credential is sent
+                once to the server, encrypted, and never returned.
               </p>
               <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
                 Required bot scopes: chat:write, im:write, channels:read, channels:history,
@@ -832,13 +840,13 @@ export function CapabilitiesRoute({
               type="password"
               value={slackBotToken}
               onChange={(event) => setSlackBotToken(event.target.value)}
-              placeholder="Slack bot token"
-              aria-label="Slack bot token"
+              placeholder="Paste Bot User OAuth Token (xoxb-…)"
+              aria-label="Slack Bot User OAuth Token"
               autoComplete="off"
               spellCheck={false}
               className="sm:max-w-md"
             />
-            <Button type="submit" disabled={slackBotBusy || !slackBotToken}>
+            <Button type="submit" disabled={slackBotBusy || !slackBotToken.trim()}>
               {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
               {slackBotConnection ? "Validate and reinstall" : "Validate and connect"}
             </Button>
