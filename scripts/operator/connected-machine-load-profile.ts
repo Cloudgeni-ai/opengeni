@@ -133,7 +133,7 @@ export function parseConnectedMachineLoadArgs(
     throw new Error("Pass at least one --session-id or set OPENGENI_LOAD_SESSION_IDS");
   }
   out.sessionIds = [...new Set(out.sessionIds)];
-  new URL(out.baseUrl);
+  if (!URL.canParse(out.baseUrl)) throw new Error("--base-url must be a valid URL");
   if (out.timeoutMs > 120_000) {
     throw new Error("--timeout-ms cannot exceed the terminal exec API maximum of 120000");
   }

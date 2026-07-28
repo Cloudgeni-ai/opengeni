@@ -54,9 +54,7 @@ describe("Helm database upgrade contract", () => {
   test("ships a non-HA single-node profile with narrow private-edge services", async () => {
     const values = await source("deploy/helm/opengeni/values.single-node.example.yaml");
     const defaults = await source("deploy/helm/opengeni/values.yaml");
-    const priorityClasses = await source(
-      "deploy/helm/opengeni/templates/priority-classes.yaml",
-    );
+    const priorityClasses = await source("deploy/helm/opengeni/templates/priority-classes.yaml");
     const natsEdge = await source(
       "deploy/helm/opengeni/templates/nats-websocket-edge-service.yaml",
     );

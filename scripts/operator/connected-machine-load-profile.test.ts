@@ -51,6 +51,15 @@ describe("Connected Machine load profile", () => {
     ).toThrow("--request-timeout-ms must be greater");
   });
 
+  test("rejects an invalid base URL", () => {
+    expect(() =>
+      parseConnectedMachineLoadArgs(
+        ["--base-url", "not a URL", "--workspace-id", "workspace-1", "--session-id", "session-1"],
+        {},
+      ),
+    ).toThrow("--base-url must be a valid URL");
+  });
+
   test("computes nearest-rank percentiles", () => {
     expect(percentile([1, 2, 3, 4, 5], 50)).toBe(3);
     expect(percentile([1, 2, 3, 4, 5], 95)).toBe(5);
