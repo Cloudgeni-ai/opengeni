@@ -1,6 +1,6 @@
 import type { SessionEvent, SessionLineageResponse } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useOpenGeni, type ClientOverride } from "../session-context";
 import { useDebouncedCallback, usePolledValue, useSessionEventTrigger } from "./internal";
 
 export type UseSessionLineageOptions = ClientOverride & {

@@ -1,6 +1,6 @@
 import type { Session, SessionEvent } from "@opengeni/sdk";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useOpenGeni, type ClientOverride } from "../session-context";
 import {
   useMutationRunner,
   usePolledValue,
