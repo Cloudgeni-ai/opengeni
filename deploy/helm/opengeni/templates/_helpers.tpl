@@ -132,46 +132,54 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
 {{- define "opengeni.generatedRuntimeEnv" -}}
-{{- if .Values.postgres.enabled }}
-{{- if .Values.postgres.runtime.existingSecret }}
+{{- $root := . -}}
+{{- $objectStorageEndpoint := "" -}}
+{{- if hasKey . "root" -}}
+{{- $root = .root -}}
+{{- $objectStorageEndpoint = .objectStorageEndpoint -}}
+{{- else if $root.Values.minio.enabled -}}
+{{- $objectStorageEndpoint = include "opengeni.minioEndpoint" $root -}}
+{{- end -}}
+{{- if $root.Values.postgres.enabled }}
+{{- if $root.Values.postgres.runtime.existingSecret }}
 - name: OPENGENI_DATABASE_URL
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.postgres.runtime.existingSecret }}
-      key: {{ .Values.postgres.runtime.databaseUrlKey }}
+      name: {{ $root.Values.postgres.runtime.existingSecret }}
+      key: {{ $root.Values.postgres.runtime.databaseUrlKey }}
 {{- else }}
 - name: OPENGENI_POSTGRES_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ include "opengeni.postgresSecretName" . }}
-      key: {{ .Values.postgres.auth.passwordKey }}
+      name: {{ include "opengeni.postgresSecretName" $root }}
+      key: {{ $root.Values.postgres.auth.passwordKey }}
 - name: OPENGENI_DATABASE_URL
-  value: {{ printf "postgres://%s:$(OPENGENI_POSTGRES_PASSWORD)@%s:%d/%s" .Values.postgres.auth.username (include "opengeni.postgresHost" .) (.Values.postgres.service.port | int) .Values.postgres.auth.database | quote }}
+  value: {{ printf "postgres://%s:$(OPENGENI_POSTGRES_PASSWORD)@%s:%d/%s" $root.Values.postgres.auth.username (include "opengeni.postgresHost" $root) ($root.Values.postgres.service.port | int) $root.Values.postgres.auth.database | quote }}
 {{- end }}
 {{- end }}
-{{- if .Values.temporal.enabled }}
+{{- if $root.Values.temporal.enabled }}
 - name: OPENGENI_TEMPORAL_HOST
-  value: {{ printf "%s-temporal:%d" (include "opengeni.fullname" .) (.Values.temporal.service.port | int) | quote }}
+  value: {{ printf "%s-temporal:%d" (include "opengeni.fullname" $root) ($root.Values.temporal.service.port | int) | quote }}
 {{- end }}
-{{- if .Values.minio.enabled }}
+{{- if $root.Values.minio.enabled }}
 - name: OPENGENI_OBJECT_STORAGE_ENDPOINT
-  value: {{ include "opengeni.minioEndpoint" . | quote }}
+  value: {{ $objectStorageEndpoint | quote }}
 - name: OPENGENI_OBJECT_STORAGE_SANDBOX_ENDPOINT
-  value: {{ include "opengeni.minioSandboxEndpoint" . | quote }}
+  value: {{ include "opengeni.minioSandboxEndpoint" $root | quote }}
 - name: OPENGENI_OBJECT_STORAGE_BACKEND
   value: s3-compatible
 - name: OPENGENI_OBJECT_STORAGE_BUCKET
-  value: {{ .Values.minio.bucket | quote }}
+  value: {{ $root.Values.minio.bucket | quote }}
 - name: OPENGENI_OBJECT_STORAGE_ACCESS_KEY_ID
   valueFrom:
     secretKeyRef:
-      name: {{ include "opengeni.minioSecretName" . }}
-      key: {{ .Values.minio.auth.accessKeyKey }}
+      name: {{ include "opengeni.minioSecretName" $root }}
+      key: {{ $root.Values.minio.auth.accessKeyKey }}
 - name: OPENGENI_OBJECT_STORAGE_SECRET_ACCESS_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ include "opengeni.minioSecretName" . }}
-      key: {{ .Values.minio.auth.secretKeyKey }}
+      name: {{ include "opengeni.minioSecretName" $root }}
+      key: {{ $root.Values.minio.auth.secretKeyKey }}
 {{- end }}
 {{- end -}}
 
