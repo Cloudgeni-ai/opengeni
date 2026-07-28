@@ -144,14 +144,19 @@ describe("release schema contract", () => {
         (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
         (migrations.has("0128_github_installation_authority.sql") ? 1 : 0) +
         (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
-        (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0),
+        (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
+        (migrations.has("0131_slack_bot_install_and_post_idempotency.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "96d6d0976b1a8e2b28cbf4b360fb9f07fd4e0e6e38ef0af378e1dff25851c539",
+      "15c744e23c99a1756cecbee69563067e85627ae4186dec16946edc99fbe4affe",
     );
-    expect(contract.latestMigration).toBe("0130_workspace_instruction_policies.sql");
+    expect(contract.latestMigration).toBe("0131_slack_bot_install_and_post_idempotency.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0131_slack_bot_install_and_post_idempotency.sql")).toMatchObject({
+      sha256: "b9516f61a23ecd363536f159bd772426a0da52eedfb8195a7b22f7be6a131bf2",
       deploymentMode: "rolling",
     });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
@@ -179,7 +184,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|0130)_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[01])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -199,6 +204,7 @@ describe("release schema contract", () => {
       "0128_github_installation_authority.sql",
       "0129_retained_process_reconciliation.sql",
       "0130_workspace_instruction_policies.sql",
+      "0131_slack_bot_install_and_post_idempotency.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,

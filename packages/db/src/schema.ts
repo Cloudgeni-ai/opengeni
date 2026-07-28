@@ -485,6 +485,12 @@ export const connections = pgTable(
     lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
     lastError: text("last_error"),
     version: integer("version").notNull().default(1),
+    // Server-owned proof that the dedicated install route verified the exact
+    // credential at this connection version. Generic/legacy writers cannot set
+    // these columns, and migration 0131 clears them when protected fields change
+    // without a fresh verification in the same statement.
+    verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
+    verifiedInstallVersion: integer("verified_install_version"),
     metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
     createdBySubjectId: text("created_by_subject_id"),
     updatedBySubjectId: text("updated_by_subject_id"),
@@ -506,6 +512,85 @@ export const connections = pgTable(
     workspaceExpires: index("connections_workspace_expires_idx").on(
       table.workspaceId,
       table.expiresAt,
+    ),
+  }),
+);
+
+// Durable provider-operation identity for OpenGeni Slack bot posts. The
+// caller-supplied operation UUID is also Slack's client_msg_id; a bounded claim
+// serializes live attempts while an expired/released claim can safely retry the
+// same provider identity after response loss or process death.
+export const slackBotPostOperations = pgTable(
+  "slack_bot_post_operations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id")
+      .notNull()
+      .references(() => managedAccounts.id, { onDelete: "cascade" }),
+    workspaceId: uuid("workspace_id")
+      .notNull()
+      .references(() => workspaces.id, { onDelete: "cascade" }),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => connections.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    clientMessageId: uuid("client_message_id").notNull(),
+    targetKind: text("target_kind").$type<"channel" | "user">().notNull(),
+    targetId: text("target_id").notNull(),
+    requestDigest: text("request_digest").notNull(),
+    status: text("status").$type<"provider_started" | "completed">().notNull(),
+    claimHolderId: uuid("claim_holder_id"),
+    claimExpiresAt: timestamp("claim_expires_at", { withTimezone: true }),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastFailureCode: text("last_failure_code"),
+    slackChannelId: text("slack_channel_id"),
+    slackMessageTimestamp: text("slack_message_timestamp"),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceOperation: uniqueIndex("slack_bot_post_operations_workspace_operation_uq").on(
+      table.workspaceId,
+      table.connectionId,
+      table.operationId,
+    ),
+    workspaceStatus: index("slack_bot_post_operations_workspace_status_idx").on(
+      table.workspaceId,
+      table.status,
+      table.updatedAt,
+    ),
+    targetKindValid: check(
+      "slack_bot_post_operations_target_kind_check",
+      sql`${table.targetKind} in ('channel', 'user')`,
+    ),
+    statusValid: check(
+      "slack_bot_post_operations_status_check",
+      sql`${table.status} in ('provider_started', 'completed')`,
+    ),
+    identityValid: check(
+      "slack_bot_post_operations_identity_check",
+      sql`${table.clientMessageId} = ${table.operationId}
+        and length(${table.targetId}) between 1 and 64
+        and ${table.requestDigest} ~ '^[0-9a-f]{64}$'
+        and ${table.attemptCount} > 0
+        and ((${table.claimHolderId} is null) = (${table.claimExpiresAt} is null))`,
+    ),
+    completionValid: check(
+      "slack_bot_post_operations_completion_check",
+      sql`(
+          ${table.status} = 'provider_started'
+          and ${table.slackChannelId} is null
+          and ${table.slackMessageTimestamp} is null
+          and ${table.completedAt} is null
+        ) or (
+          ${table.status} = 'completed'
+          and ${table.claimHolderId} is null
+          and ${table.claimExpiresAt} is null
+          and ${table.slackChannelId} is not null
+          and ${table.slackMessageTimestamp} is not null
+          and ${table.completedAt} is not null
+        )`,
     ),
   }),
 );

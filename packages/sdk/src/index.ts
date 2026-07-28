@@ -191,6 +191,7 @@ export type {
   CreateApiKeyRequest,
   CreateApiKeyResponse,
   CreateCapabilityCatalogItemRequest,
+  ConnectOpenGeniSlackBotRequest,
   CreateConnectionRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,

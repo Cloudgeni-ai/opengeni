@@ -6,6 +6,7 @@ import type {
   CreateScheduledTaskRequest as CreateScheduledTaskPayload,
   UpdateScheduledTaskRequest as UpdateScheduledTaskPayload,
 } from "@opengeni/contracts";
+import { OPENGENI_SLACK_BOT_SESSION_METADATA_KEY } from "@opengeni/contracts";
 import {
   createScheduledTask,
   deleteScheduledTask,
@@ -24,6 +25,10 @@ import type { ObjectStorageDependency } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "./capabilities";
 import { validateVariableSetAttachment } from "./environments";
 import { assertWorkspaceModelPolicyAllows, canonicalConfiguredModel } from "./sessions";
+import {
+  hasReservedOpenGeniSlackBotSessionMetadata,
+  validateOpenGeniSlackBotConnectionSelection,
+} from "./slack-bot";
 import {
   normalizeResources,
   validateFileResources,
@@ -197,7 +202,7 @@ export async function validatedScheduledTaskUpdate(input: {
     if (willHaveVariableSet) {
       requirePermission(input.grant, "variable-sets:use");
     }
-    update.agentConfig = await validateScheduledTaskAgentConfig({
+    const nextAgentConfig = await validateScheduledTaskAgentConfig({
       settings: input.settings,
       db: input.db,
       objectStorage: input.objectStorage,
@@ -206,6 +211,18 @@ export async function validatedScheduledTaskUpdate(input: {
       payload: { agentConfig: input.payload.agentConfig },
       ...(input.toolsProvided !== undefined ? { toolsProvided: input.toolsProvided } : {}),
     });
+    if (
+      input.existing.reusableSessionId &&
+      input.existing.runMode === "reusable_session" &&
+      (input.existing.agentConfig.slackBotConnectionId ?? null) !==
+        (nextAgentConfig.slackBotConnectionId ?? null)
+    ) {
+      throw new HTTPException(409, {
+        message:
+          "cannot change the OpenGeni Slack bot connection of a task with a live reusable session; recreate the task",
+      });
+    }
+    update.agentConfig = nextAgentConfig;
   }
   return update;
 }
@@ -355,11 +372,24 @@ async function validateScheduledTaskAgentConfig(input: {
   if (!prompt) {
     throw new HTTPException(422, { message: "scheduled task prompt is required" });
   }
+  if (hasReservedOpenGeniSlackBotSessionMetadata(input.payload.agentConfig.metadata)) {
+    throw new HTTPException(422, {
+      message: `${OPENGENI_SLACK_BOT_SESSION_METADATA_KEY} is reserved for scheduler routing`,
+    });
+  }
   await validateGitHubRepositorySelection(input.db, input.workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !input.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
   }
   await validateFileResources(input.db, input.workspaceId, resources);
+  if (input.payload.agentConfig.slackBotConnectionId) {
+    await validateOpenGeniSlackBotConnectionSelection(
+      input.db,
+      input.grant,
+      input.workspaceId,
+      input.payload.agentConfig.slackBotConnectionId,
+    );
+  }
   const requestedMaxDepth = input.payload.agentConfig.maxNestedAgentDepth;
   if (requestedMaxDepth !== undefined) {
     const workspace = await requireWorkspace(input.db, input.workspaceId);

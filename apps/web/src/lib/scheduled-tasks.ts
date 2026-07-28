@@ -19,6 +19,7 @@ export type ScheduledTaskFormState = {
   runMode: ScheduledTask["runMode"];
   overlapPolicy: ScheduledTask["overlapPolicy"];
   includeOpenGeniTool: boolean;
+  slackBotConnectionId: string;
   resources: ResourceRef[];
 };
 
@@ -37,6 +38,7 @@ export function newScheduledTaskFormState(
     runMode: "new_session_per_run",
     overlapPolicy: "allow_concurrent",
     includeOpenGeniTool,
+    slackBotConnectionId: "",
     resources,
   };
 }
@@ -65,6 +67,7 @@ export function formStateFromScheduledTask(task: ScheduledTask): ScheduledTaskFo
     prompt: task.agentConfig.prompt,
     runMode: task.runMode,
     overlapPolicy: task.overlapPolicy,
+    slackBotConnectionId: task.agentConfig.slackBotConnectionId ?? "",
   };
 }
 
@@ -94,6 +97,7 @@ export function agentConfigFromFormState(
     resources: form.resources,
     tools,
     metadata: existingTask?.agentConfig.metadata ?? {},
+    ...(form.slackBotConnectionId ? { slackBotConnectionId: form.slackBotConnectionId } : {}),
     ...((existingTask?.agentConfig.model ?? defaults.model)
       ? { model: existingTask?.agentConfig.model ?? defaults.model }
       : {}),
