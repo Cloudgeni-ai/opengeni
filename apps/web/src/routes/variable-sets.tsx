@@ -122,9 +122,11 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
             <Label htmlFor="variableSet-name">Name</Label>
             <Input
               id="variableSet-name"
+              name="variable-set-name"
               value={createName}
               onChange={(event) => setCreateName(event.target.value)}
               placeholder="staging-aws"
+              autoComplete="off"
               className="h-9 pointer-coarse:min-h-10"
               autoFocus
             />
@@ -133,9 +135,11 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
             <Label htmlFor="variableSet-description">Description</Label>
             <Input
               id="variableSet-description"
+              name="variable-set-description"
               value={createDescription}
               onChange={(event) => setCreateDescription(event.target.value)}
               placeholder="What these credentials reach"
+              autoComplete="off"
               className="h-9 pointer-coarse:min-h-10"
             />
           </div>
@@ -238,7 +242,7 @@ export function VariableSetsRoute({ workspaceId }: { workspaceId: string }) {
   );
 }
 
-function VariableSetCard(props: {
+export function VariableSetCard(props: {
   workspaceId: string;
   variableSet: WorkspaceVariableSet;
   attachedSessions: Session[];
@@ -319,16 +323,20 @@ function VariableSetCard(props: {
           {editing ? (
             <div className="grid min-w-0 gap-2 md:grid-cols-2">
               <Input
+                name="variable-set-name"
                 value={nameDraft}
                 onChange={(event) => setNameDraft(event.target.value)}
                 aria-label="Variable set name"
+                autoComplete="off"
                 className="h-8 text-sm"
               />
               <Input
+                name="variable-set-description"
                 value={descriptionDraft}
                 onChange={(event) => setDescriptionDraft(event.target.value)}
                 placeholder="Description"
                 aria-label="Variable set description"
+                autoComplete="off"
                 className="h-8 text-sm"
               />
             </div>
@@ -486,61 +494,81 @@ function VariableSetCard(props: {
                     </div>
                   </div>
                   {rotatingName === variable.name ? (
-                    <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+                    <form
+                      aria-label={`Rotate variable ${variable.name}`}
+                      autoComplete="off"
+                      className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        void rotateVariable(variable.name);
+                      }}
+                    >
                       <Input
+                        name="variable-value"
                         type="password"
                         value={rotateValue}
                         onChange={(event) => setRotateValue(event.target.value)}
                         placeholder="New value (write-only)"
                         aria-label={`New value for ${variable.name}`}
+                        autoComplete="new-password"
                         className="h-8 flex-1 text-xs pointer-coarse:min-h-10"
                         autoFocus
                       />
                       <Button
-                        type="button"
+                        type="submit"
                         size="sm"
                         className="h-8 pointer-coarse:min-h-10"
                         disabled={props.mutating || !rotateValue}
-                        onClick={() => void rotateVariable(variable.name)}
                       >
                         <CheckIcon className="size-3.5" />
                         Set
                       </Button>
-                    </div>
+                    </form>
                   ) : null}
                 </div>
               ))
             )}
           </div>
 
-          <div className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]">
+          <form
+            aria-label={`Add variable to ${variableSet.name}`}
+            autoComplete="off"
+            className="mt-2 grid gap-2 sm:grid-cols-[12rem_minmax(0,1fr)_auto]"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void addVariable();
+            }}
+          >
             <Input
+              name="variable-name"
               value={variableName}
               onChange={(event) => setVariableName(event.target.value)}
               placeholder="VARIABLE_NAME"
               aria-label="New variable name"
+              autoComplete="off"
               className="h-8 font-mono text-xs pointer-coarse:min-h-10"
             />
             <Input
+              name="variable-value"
               type="password"
               value={variableValue}
               onChange={(event) => setVariableValue(event.target.value)}
               placeholder="Value (write-only)"
               aria-label="New variable value"
+              autoComplete="new-password"
               className="h-8 text-xs pointer-coarse:min-h-10"
             />
             <Button
-              type="button"
+              type="submit"
               variant="secondary"
               size="sm"
               className="h-8 pointer-coarse:min-h-10"
               disabled={props.mutating || !variableName.trim() || !variableValue}
-              onClick={() => void addVariable()}
             >
               <PlusIcon className="size-3.5" />
               Set variable
             </Button>
-          </div>
+          </form>
 
           {attachmentCount > 0 ? (
             <div className="mt-3 border-t border-border/70 pt-2">
