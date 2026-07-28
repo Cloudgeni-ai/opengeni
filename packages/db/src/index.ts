@@ -27936,7 +27936,7 @@ export async function initializeSessionStartAtomically(
           if (!goal) throw new Error("Failed to create initial session goal");
         }
 
-        let [userEvent] = await tx
+        const existingUserEvents = await tx
           .select()
           .from(schema.sessionEvents)
           .where(
@@ -27948,6 +27948,8 @@ export async function initializeSessionStartAtomically(
           )
           .orderBy(asc(schema.sessionEvents.sequence))
           .limit(1);
+        let userEvent: typeof schema.sessionEvents.$inferSelect | undefined =
+          existingUserEvents[0];
         let sequence = session.lastSequence;
         const insertedEvents: Array<typeof schema.sessionEvents.$inferSelect> = [];
         const runnable = effectiveControl.state === "active";
