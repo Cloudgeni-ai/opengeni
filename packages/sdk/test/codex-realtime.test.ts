@@ -6,6 +6,12 @@ import { SESSION_ID, WORKSPACE_ID } from "./helpers";
 
 const offer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
 const answer = "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n";
+const lifecycleProof = {
+  realtimeId: "33333333-3333-4333-8333-333333333333",
+  browserInstanceId: "browser-test",
+  ownerKey: "owner-key-11111111-1111-4111-8111-111111111111",
+  expectedVersion: 1,
+} as const;
 const negotiated: CodexRealtimeWebrtcResponse = {
   sdp: answer,
   version: "v3",
@@ -58,6 +64,7 @@ describe("Codex realtime browser negotiation", () => {
     const fixture = browserFixture();
     let capturedSignal: AbortSignal | undefined;
     const session = await startCodexRealtimeWebrtc({
+      ...lifecycleProof,
       createPeerConnection: () => fixture.peer,
       getUserMedia: async (constraints) => {
         expect(constraints).toEqual({ audio: true });
@@ -68,6 +75,7 @@ describe("Codex realtime browser negotiation", () => {
       negotiate: async (request, options) => {
         capturedSignal = options.signal;
         expect(request).toEqual({
+          ...lifecycleProof,
           sdp: offer,
           version: "v3",
           instructions: "Current session context",
@@ -102,6 +110,7 @@ describe("Codex realtime browser negotiation", () => {
       negotiationStarted = resolve;
     });
     const pending = startCodexRealtimeWebrtc({
+      ...lifecycleProof,
       signal: abort.signal,
       createPeerConnection: () => fixture.peer,
       getUserMedia: async () => fixture.media,
@@ -126,6 +135,7 @@ describe("Codex realtime browser negotiation", () => {
     const fixture = browserFixture();
     await expect(
       startCodexRealtimeWebrtc({
+        ...lifecycleProof,
         createPeerConnection: () => fixture.peer,
         getUserMedia: async () => fixture.media,
         negotiate: async () => ({ ...negotiated, version: "v2" as "v3" }),
@@ -136,7 +146,7 @@ describe("Codex realtime browser negotiation", () => {
 });
 
 describe("OpenGeniClient Codex realtime negotiation", () => {
-  test("posts only the SDP/configuration to the session route and forwards cancellation", async () => {
+  test("posts lifecycle proof and SDP configuration to the session route and forwards cancellation", async () => {
     const requests: Request[] = [];
     let capturedSignal: AbortSignal | undefined;
     const abort = new AbortController();
@@ -154,7 +164,7 @@ describe("OpenGeniClient Codex realtime negotiation", () => {
     const result = await client.negotiateCodexRealtimeWebrtc(
       WORKSPACE_ID,
       SESSION_ID,
-      { sdp: offer, version: "v3", voice: "cove" },
+      { ...lifecycleProof, sdp: offer, version: "v3", voice: "cove" },
       { signal: abort.signal },
     );
     const captured = requests[0]!;
@@ -165,9 +175,72 @@ describe("OpenGeniClient Codex realtime negotiation", () => {
     );
     expect(capturedSignal).toBe(abort.signal);
     expect(await captured.json()).toEqual({
+      ...lifecycleProof,
       sdp: offer,
       version: "v3",
       voice: "cove",
     });
+  });
+
+  test("exposes begin, heartbeat, and end lifecycle mutations on the ordinary session", async () => {
+    const requests: Request[] = [];
+    const client = new OpenGeniClient({
+      baseUrl: "https://api.example.test",
+      fetch: async (input, init) => {
+        requests.push(new Request(input, init));
+        return new Response(JSON.stringify({ mode: {}, replay: false }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    const owner = {
+      browserInstanceId: lifecycleProof.browserInstanceId,
+      ownerKey: lifecycleProof.ownerKey,
+    };
+    await client.beginSessionRealtime(WORKSPACE_ID, SESSION_ID, {
+      ...owner,
+      operationId: "44444444-4444-4444-8444-444444444444",
+      model: "gpt-live-1-boulder-alpha",
+    });
+    await client.heartbeatSessionRealtime(WORKSPACE_ID, SESSION_ID, lifecycleProof.realtimeId, {
+      ...owner,
+      expectedVersion: 1,
+    });
+    await client.endSessionRealtime(WORKSPACE_ID, SESSION_ID, lifecycleProof.realtimeId, {
+      ...owner,
+      expectedVersion: 2,
+      reason: "user_stop",
+    });
+
+    expect(
+      await Promise.all(
+        requests.map(async (request) => ({
+          method: request.method,
+          path: new URL(request.url).pathname,
+          body: await request.json(),
+        })),
+      ),
+    ).toEqual([
+      {
+        method: "POST",
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/realtime`,
+        body: {
+          ...owner,
+          operationId: "44444444-4444-4444-8444-444444444444",
+          model: "gpt-live-1-boulder-alpha",
+        },
+      },
+      {
+        method: "PATCH",
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/realtime/${lifecycleProof.realtimeId}/heartbeat`,
+        body: { ...owner, expectedVersion: 1 },
+      },
+      {
+        method: "DELETE",
+        path: `/v1/workspaces/${WORKSPACE_ID}/sessions/${SESSION_ID}/realtime/${lifecycleProof.realtimeId}`,
+        body: { ...owner, expectedVersion: 2, reason: "user_stop" },
+      },
+    ]);
   });
 });

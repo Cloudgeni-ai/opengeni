@@ -144,12 +144,13 @@ describe("release schema contract", () => {
         (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
         (migrations.has("0128_github_installation_authority.sql") ? 1 : 0) +
         (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
-        (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0),
+        (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0) +
+        (migrations.has("0131_session_realtime_mode.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "96d6d0976b1a8e2b28cbf4b360fb9f07fd4e0e6e38ef0af378e1dff25851c539",
+      "641ed95bb0bc5be75b7eb89c93e56d21429311d7db55eaac168b1182d2adbb55",
     );
-    expect(contract.latestMigration).toBe("0130_workspace_instruction_policies.sql");
+    expect(contract.latestMigration).toBe("0131_session_realtime_mode.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -179,7 +180,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|0130)_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|013[0-9])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -199,6 +200,7 @@ describe("release schema contract", () => {
       "0128_github_installation_authority.sql",
       "0129_retained_process_reconciliation.sql",
       "0130_workspace_instruction_policies.sql",
+      "0131_session_realtime_mode.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -273,6 +275,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0130_workspace_instruction_policies.sql")).toMatchObject({
       sha256: "12226a4560dc1150ffe2c3549f821d2483cc4d4a09ef74747ed13376404fc7c5",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0131_session_realtime_mode.sql")).toMatchObject({
+      sha256: "0bb280dc00f953d720038ee06fee8d08c05e298de34dd8921b13a0e034dccbe2",
       deploymentMode: "rolling",
     });
   });

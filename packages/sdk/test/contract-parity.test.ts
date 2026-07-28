@@ -4,11 +4,13 @@ import {
   AcknowledgeStreamResponse as ContractAcknowledgeStreamResponse,
   AddWorkspaceMemberRequest as ContractAddWorkspaceMemberRequest,
   AttachViewerRequest as ContractAttachViewerRequest,
+  BeginSessionRealtimeRequest as ContractBeginSessionRealtimeRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
   CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse as ContractCodexRealtimeWebrtcResponse,
   CodexRealtimeVoice as ContractCodexRealtimeVoice,
+  EndSessionRealtimeRequest as ContractEndSessionRealtimeRequest,
   WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
@@ -46,6 +48,9 @@ import {
   SessionEventType as ContractSessionEventType,
   TranscriptionEvent as ContractTranscriptionEvent,
   SessionHumanInputRequest as ContractSessionHumanInputRequest,
+  SessionRealtimeMode as ContractSessionRealtimeMode,
+  SessionRealtimeMutationResponse as ContractSessionRealtimeMutationResponse,
+  RenewSessionRealtimeRequest as ContractRenewSessionRealtimeRequest,
   SessionStatus as ContractSessionStatus,
   SessionTurn as ContractSessionTurn,
   SubmitHumanInputResponseRequest as ContractSubmitHumanInputResponseRequest,
@@ -82,6 +87,7 @@ import type {
   AcknowledgeStreamResponse,
   AddWorkspaceMemberRequest,
   AttachViewerRequest,
+  BeginSessionRealtimeRequest,
   CreateKnowledgeMemoryRequest,
   KnowledgeMemory,
   KnowledgeMemoryStatus,
@@ -93,6 +99,7 @@ import type {
   CodexRealtimeWebrtcRequest,
   CodexRealtimeWebrtcResponse,
   CodexRealtimeVoice,
+  EndSessionRealtimeRequest,
   WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
@@ -127,6 +134,9 @@ import type {
   SessionHumanInputRequest,
   SessionMcpServerInput,
   SessionMcpServerMetadata,
+  SessionRealtimeMode,
+  SessionRealtimeMutationResponse,
+  RenewSessionRealtimeRequest,
   SessionStatus,
   SessionTurn,
   SessionTurnSource,
@@ -175,7 +185,31 @@ describe("SDK / contracts parity", () => {
     const acceptRequest = (
       value: CodexRealtimeWebrtcRequest,
     ): z.input<typeof ContractCodexRealtimeWebrtcRequest> => value;
-    expect([acceptResponse, acceptRequest].every((fn) => typeof fn === "function")).toBe(true);
+    const acceptBegin = (
+      value: BeginSessionRealtimeRequest,
+    ): z.input<typeof ContractBeginSessionRealtimeRequest> => value;
+    const acceptRenew = (
+      value: RenewSessionRealtimeRequest,
+    ): z.input<typeof ContractRenewSessionRealtimeRequest> => value;
+    const acceptEnd = (
+      value: EndSessionRealtimeRequest,
+    ): z.input<typeof ContractEndSessionRealtimeRequest> => value;
+    const acceptMode = (value: z.infer<typeof ContractSessionRealtimeMode>): SessionRealtimeMode =>
+      value;
+    const acceptMutation = (
+      value: z.infer<typeof ContractSessionRealtimeMutationResponse>,
+    ): SessionRealtimeMutationResponse => value;
+    expect(
+      [
+        acceptResponse,
+        acceptRequest,
+        acceptBegin,
+        acceptRenew,
+        acceptEnd,
+        acceptMode,
+        acceptMutation,
+      ].every((fn) => typeof fn === "function"),
+    ).toBe(true);
   });
 
   test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {

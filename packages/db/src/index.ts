@@ -192,6 +192,11 @@ import {
   type SessionTurnAttemptOutcome,
   type WorkspaceControlRow,
 } from "./session-control";
+import {
+  fenceSessionWorkClaimForRealtimeInTransaction,
+  peekActiveSessionRealtime,
+  sessionRealtimeIsActiveInTransaction,
+} from "./session-realtime";
 import * as schema from "./schema";
 import {
   AGENT_VISIBLE_MEMORY_STATUSES,
@@ -213,6 +218,7 @@ import {
 export { sql as dbSql } from "drizzle-orm";
 export * from "./session-control";
 export * from "./session-queue-commands";
+export * from "./session-realtime";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
@@ -29022,7 +29028,7 @@ export type ClaimSessionWorkForAttemptResult =
   | { action: "claimed"; turn: SessionTurnForExecution }
   | {
       action: "unclaimed";
-      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending";
+      reason: "gate-closed" | "no-work" | "stale-approval" | "control-pending" | "realtime-active";
     };
 
 /**
@@ -29241,8 +29247,16 @@ export async function claimSessionWorkForAttempt(
           sessionId,
           { workspaceControl },
         );
-        const session = prefix.sessions[0];
+        let session = prefix.sessions[0];
         if (!session) return { action: "unclaimed", reason: "no-work" };
+        const realtimeFence = await fenceSessionWorkClaimForRealtimeInTransaction(
+          tx as unknown as Database,
+          session,
+        );
+        session = realtimeFence.session;
+        if (realtimeFence.active) {
+          return { action: "unclaimed", reason: "realtime-active" };
+        }
         if (effectiveControl.state !== "active") {
           return { action: "unclaimed", reason: "gate-closed" };
         }
@@ -30621,6 +30635,12 @@ export async function settleSessionAttemptInterruptions(
 
 export type SessionWorkPeek =
   | { kind: "runnable" }
+  | {
+      kind: "realtime-active";
+      realtimeId: string;
+      leaseExpiresAt: string;
+      version: number;
+    }
   | { kind: "approval-pending"; triggerEventId: string }
   | { kind: "approval-wait"; humanInputRequestId?: string; expiresAt?: string }
   | {
@@ -30699,6 +30719,15 @@ export async function peekSessionWork(
       .where(and(eq(schema.sessions.workspaceId, workspaceId), eq(schema.sessions.id, sessionId)))
       .limit(1);
     if (!session) return { kind: "idle" };
+    const realtime = await peekActiveSessionRealtime(scopedDb, workspaceId, sessionId);
+    if (realtime) {
+      return {
+        kind: "realtime-active",
+        realtimeId: realtime.id,
+        leaseExpiresAt: realtime.leaseExpiresAt.toISOString(),
+        version: realtime.version,
+      };
+    }
     const [interruption] = await scopedDb
       .select({ attemptId: schema.sessionAttemptInterruptions.attemptId })
       .from(schema.sessionAttemptInterruptions)
@@ -33449,8 +33478,14 @@ export async function enqueueSessionWorkflowWakeIfRunnable(
           .for("update")
           .limit(1);
         if (!workspace || !session) throw new Error(`Session not found: ${input.sessionId}`);
+        const realtimeActive = await sessionRealtimeIsActiveInTransaction(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
         const runnable =
           session.status !== "cancelled" &&
+          !realtimeActive &&
           session.activeTurnId === null &&
           effectiveControl.state === "active";
         return runnable
@@ -33943,7 +33978,13 @@ export async function addSessionSystemUpdateWithSourceMutation(
           .returning();
         if (!event) throw new Error("Failed to create system-update pending event");
         await mutateSource(tx as unknown as Database, event.id);
-        const shouldWake = session.activeTurnId === null && effectiveControl.state === "active";
+        const realtimeActive = await sessionRealtimeIsActiveInTransaction(
+          tx as unknown as Database,
+          input.workspaceId,
+          input.sessionId,
+        );
+        const shouldWake =
+          !realtimeActive && session.activeTurnId === null && effectiveControl.state === "active";
         const wake = shouldWake
           ? await registerInternalUpdateWakeInTransaction(tx as unknown as Database, {
               accountId: session.accountId,
