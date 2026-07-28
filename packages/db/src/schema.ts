@@ -2539,6 +2539,9 @@ export const sandboxLeases = pgTable(
     reaperIdx: index("sandbox_leases_reaper_idx")
       .on(table.expiresAt)
       .where(sql`${table.liveness} in ('warming','warm','draining')`),
+    expiredDrainingInventory: index("sandbox_leases_expired_draining_inventory_idx")
+      .on(table.expiresAt, table.backend)
+      .where(sql`${table.liveness} = 'draining'`),
     workspaceGenerationValid: check(
       "sandbox_leases_workspace_generation_check",
       sql`${table.workspaceGeneration} >= 0`,
@@ -2776,6 +2779,19 @@ export const sandboxRetainedProcesses = pgTable(
     settlementReason: text("settlement_reason"),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    // Coordination state for bounded terminal-owner reconciliation. While a
+    // claim is live, reconcileAfter is its expiry; otherwise it is the next
+    // retry time. Becoming due only licenses an exact provider probe and is
+    // never exit/loss proof.
+    reconcileAfter: timestamp("reconcile_after", { withTimezone: true }).notNull().defaultNow(),
+    reconcileClaimId: uuid("reconcile_claim_id"),
+    reconcileClaimedAt: timestamp("reconcile_claimed_at", { withTimezone: true }),
+    reconcileAttempts: integer("reconcile_attempts").notNull().default(0),
+    lastReconcileOutcome: text("last_reconcile_outcome"),
+    reconcileProofOutcome: text("reconcile_proof_outcome", { enum: ["exited", "lost"] }),
+    reconcileProofExitCode: integer("reconcile_proof_exit_code"),
+    reconcileProofReason: text("reconcile_proof_reason"),
+    reconcileProofObservedAt: timestamp("reconcile_proof_observed_at", { withTimezone: true }),
   },
   (table) => ({
     workspaceAccount: foreignKey({
@@ -2828,6 +2844,12 @@ export const sandboxRetainedProcesses = pgTable(
     active: index("sandbox_retained_processes_active_idx")
       .on(table.workspaceId, table.sessionId, table.startedAt)
       .where(sql`${table.state} = 'active'`),
+    reconcileDue: index("sandbox_retained_processes_reconcile_due_idx")
+      .on(table.reconcileAfter, table.startedAt, table.id)
+      .where(sql`${table.state} = 'active'`),
+    activeInventory: index("sandbox_retained_processes_active_inventory_idx")
+      .on(table.ownerActorKind, table.workspaceId, table.ownerTurnId, table.ownerAttemptId)
+      .where(sql`${table.state} = 'active'`),
     identityValid: check(
       "sandbox_retained_processes_identity_check",
       sql`${table.leaseEpoch} >= 0
@@ -2863,6 +2885,41 @@ export const sandboxRetainedProcesses = pgTable(
       "sandbox_retained_processes_reason_check",
       sql`${table.settlementReason} is null
         or octet_length(${table.settlementReason}) between 1 and 512`,
+    ),
+    reconcileClaimValid: check(
+      "sandbox_retained_processes_reconcile_claim_check",
+      sql`(${table.reconcileClaimId} is null and ${table.reconcileClaimedAt} is null)
+        or (${table.reconcileClaimId} is not null and ${table.reconcileClaimedAt} is not null)`,
+    ),
+    reconcileAttemptsValid: check(
+      "sandbox_retained_processes_reconcile_attempts_check",
+      sql`${table.reconcileAttempts} >= 0`,
+    ),
+    reconcileOutcomeValid: check(
+      "sandbox_retained_processes_reconcile_outcome_check",
+      sql`${table.lastReconcileOutcome} is null
+        or octet_length(${table.lastReconcileOutcome}) between 1 and 64`,
+    ),
+    reconcileProofValid: check(
+      "sandbox_retained_processes_reconcile_proof_check",
+      sql`(
+          ${table.reconcileProofOutcome} is null
+          and ${table.reconcileProofExitCode} is null
+          and ${table.reconcileProofReason} is null
+          and ${table.reconcileProofObservedAt} is null
+        ) or (
+          ${table.reconcileProofOutcome} = 'exited'
+          and ${table.reconcileProofExitCode} is not null
+          and ${table.reconcileProofReason} = 'provider_exit_banner'
+          and ${table.reconcileProofObservedAt} is not null
+        ) or (
+          ${table.reconcileProofOutcome} = 'lost'
+          and ${table.reconcileProofExitCode} is null
+          and ${table.reconcileProofReason} in (
+            'provider_session_lost_banner', 'provider_instance_not_found'
+          )
+          and ${table.reconcileProofObservedAt} is not null
+        )`,
     ),
   }),
 );

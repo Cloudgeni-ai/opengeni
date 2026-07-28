@@ -16,10 +16,12 @@ import type { Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForDirectRequest,
   advanceWorkspaceGenerationForRetainedProcess,
+  getRetainedProcess,
   getSandbox,
   markWarmLeaseInstanceLost,
   readActiveSandbox,
   retainWorkspaceMutationProcess,
+  retainedProcessSettlementIdentity,
   settleRetainedProcess,
   verifyDirectWorkspaceMutationSettlement,
   verifyRetainedProcessMutationSettlement,
@@ -55,7 +57,12 @@ export type ChannelARoutingServices = {
 export function relayConfigFromSettings(settings: Settings): SelfhostedRelayConfig {
   const raw = settings.selfhostedRelayUrl?.trim();
   if (!raw) {
-    return { host: "relay.opengeni.local", port: 443, tls: true, path: "/stream" };
+    return {
+      host: "relay.opengeni.local",
+      port: 443,
+      tls: true,
+      path: "/stream",
+    };
   }
   try {
     const url = new URL(raw.includes("://") ? raw : `wss://${raw}`);
@@ -290,15 +297,34 @@ export function wrapChannelABoxWithRouting(
     if (
       backend.sandboxId !== null ||
       backend.leaseEpoch === undefined ||
-      backend.providerInstanceId === undefined
+      backend.providerInstanceId === undefined ||
+      backend.activeEpoch === undefined
     ) {
       return;
+    }
+    const durable = await getRetainedProcess(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== backend.kind ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    ) {
+      throw new Error("API retained-process settlement lost its exact durable backend identity");
     }
     await settleRetainedProcess(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
       processId: process.id,
+      expected: retainedProcessSettlementIdentity(durable),
       outcome: proof.outcome,
       exitCode: proof.exitCode,
       reason: proof.reason,
