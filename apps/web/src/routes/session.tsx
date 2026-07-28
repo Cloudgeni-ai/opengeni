@@ -55,9 +55,10 @@ import { sessionPolicyPickerIds, toolsForPolicySelection } from "@/lib/session-t
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
 
-const sessionInspectorModule = import("@/components/session/inspector");
 const LazySessionInspector = lazy(() =>
-  sessionInspectorModule.then(({ SessionInspector }) => ({ default: SessionInspector })),
+  import("@/components/session/inspector").then(({ SessionInspector }) => ({
+    default: SessionInspector,
+  })),
 );
 
 export function SessionRoute({
