@@ -36,6 +36,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.priorityClassName" -}}
+{{- $explicit := .explicit | default "" -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else if .root.Values.priorityClasses.enabled -}}
+{{- printf "%s-%s" (include "opengeni.fullname" .root) .tier | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "opengeni.image" -}}
 {{- $registry := .root.Values.global.imageRegistry -}}
 {{- $repository := .image.repository -}}

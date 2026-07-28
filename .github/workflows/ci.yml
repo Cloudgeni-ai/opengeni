@@ -494,6 +494,11 @@ jobs:
             echo "single-node workloads received the Postgres owner password" >&2
             exit 1
           fi
+          test "$(grep -c '^kind: PriorityClass$' /tmp/opengeni-single-rendered.yaml)" -eq 4
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-presentation\"$' /tmp/opengeni-single-rendered.yaml)" -eq 2
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-execution\"$' /tmp/opengeni-single-rendered.yaml)" -eq 1
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-control\"$' /tmp/opengeni-single-rendered.yaml)" -eq 3
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-durable\"$' /tmp/opengeni-single-rendered.yaml)" -eq 5
           test "$(grep -c '^  replicas: 1$' /tmp/opengeni-single-rendered.yaml)" -eq 9
           test "$(grep -c '^      nodePort:' /tmp/opengeni-single-rendered.yaml)" -eq 5
           for node_port in 30080 30081 30222 30443 30900; do

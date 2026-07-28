@@ -1,4 +1,5 @@
 {{- if .Values.web.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.web.priorityClassName "tier" "presentation") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -30,8 +31,8 @@ spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ .Values.web.terminationGracePeriodSeconds }}
-      {{- if .Values.web.priorityClassName }}
-      priorityClassName: {{ .Values.web.priorityClassName | quote }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.web.podSecurityContext | nindent 8 }}

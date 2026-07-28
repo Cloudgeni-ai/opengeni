@@ -53,6 +53,10 @@ describe("Helm database upgrade contract", () => {
 
   test("ships a non-HA single-node profile with narrow private-edge services", async () => {
     const values = await source("deploy/helm/opengeni/values.single-node.example.yaml");
+    const defaults = await source("deploy/helm/opengeni/values.yaml");
+    const priorityClasses = await source(
+      "deploy/helm/opengeni/templates/priority-classes.yaml",
+    );
     const natsEdge = await source(
       "deploy/helm/opengeni/templates/nats-websocket-edge-service.yaml",
     );
@@ -61,6 +65,12 @@ describe("Helm database upgrade contract", () => {
     expect(values).toContain("replicaCount: 1");
     expect(values).not.toContain("autoscaling:\n    enabled: true");
     expect(values).toContain("resources: null");
+    expect(values).toContain("priorityClasses:\n  enabled: true");
+    for (const tier of ["presentation", "execution", "control", "durable"]) {
+      expect(defaults).toContain(`    ${tier}:`);
+    }
+    expect(priorityClasses).toContain("$tier");
+    expect(priorityClasses).toContain("preemptionPolicy:");
     for (const nodePort of [30080, 30081, 30222, 30443, 30900]) {
       expect(values).toContain(`nodePort: ${nodePort}`);
     }

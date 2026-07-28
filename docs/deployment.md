@@ -51,10 +51,18 @@ supervisor. It is not an autoscaling or failover layer in this profile.
 The profile renders one API, web, control worker, turn worker, relay, Postgres,
 Temporal, NATS, and MinIO process. It disables HPAs, disruption budgets, and
 topology spreading. Container resource requests and limits are omitted, so a
-busy role may use otherwise-idle CPU and memory on the machine. This does not
-create a deterministic memory-pressure failure order; any protection or
-priority policy must be based on measured load evidence rather than assumed
-per-service allocations.
+busy role may use otherwise-idle CPU and memory on the machine.
+
+The profile creates four non-preempting Pod priority tiers. Under
+kubelet-managed node pressure, presentation (web and relay) is evicted before
+turn execution, then live control (API, control worker, and NATS), while
+durable services and the migration gate are retained longest. Priority is not a
+CPU or memory partition, and it cannot order a kernel OOM that happens before
+kubelet reacts. Configure a node-wide `memory.available` eviction threshold
+with enough measured OS/Kubernetes headroom, and include every disk/inode
+threshold when overriding `eviction-hard`; Kubernetes otherwise zeroes omitted
+defaults. This preserves elastic sharing while giving the kubelet room to
+enforce the intended order.
 
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:

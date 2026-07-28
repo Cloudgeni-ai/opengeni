@@ -1,4 +1,5 @@
 {{- if .Values.postgres.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.postgres.priorityClassName "tier" "durable") }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -19,6 +20,9 @@ spec:
         {{- include "opengeni.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: postgres
     spec:
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
       securityContext:
         {{- toYaml .Values.postgres.podSecurityContext | nindent 8 }}
       containers:

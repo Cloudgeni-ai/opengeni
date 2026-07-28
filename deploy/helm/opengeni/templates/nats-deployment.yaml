@@ -1,4 +1,5 @@
 {{- if .Values.nats.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" .Values.nats.priorityClassName "tier" "control") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,6 +23,9 @@ spec:
         checksum/nats-config: {{ include (print $.Template.BasePath "/nats-configmap.yaml") . | sha256sum }}
       {{- end }}
     spec:
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
+      {{- end }}
       containers:
         - name: nats
           image: {{ printf "%s:%s" .Values.nats.image.repository .Values.nats.image.tag | quote }}

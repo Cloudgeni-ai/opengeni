@@ -5,6 +5,9 @@
 # Bootstrap in two phases so Postgres/Temporal/NATS/MinIO are healthy before the
 # pre-upgrade migration/role/posture gate runs. See docs/deployment.md.
 
+priorityClasses:
+  enabled: true
+
 api:
   replicaCount: 1
   resources: null

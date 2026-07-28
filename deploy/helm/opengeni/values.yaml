@@ -15,6 +15,27 @@ serviceAccount:
   annotations: {}
   automountServiceAccountToken: false
 
+# Optional release-local Pod priority tiers. They do not reserve or cap CPU or
+# memory. They tell the kubelet which OpenGeni roles to evict first when the
+# node is under pressure. `Never` keeps priority from preempting a running pod
+# merely to admit another one.
+priorityClasses:
+  enabled: false
+  preemptionPolicy: Never
+  tiers:
+    presentation:
+      value: 1000
+      description: Restartable browser and live-stream presentation.
+    execution:
+      value: 2000
+      description: Restartable turn execution with durable Temporal recovery.
+    control:
+      value: 3000
+      description: API, machine transport, and orchestration control.
+    durable:
+      value: 4000
+      description: Durable database, workflow, object storage, and upgrade gates.
+
 networkPolicy:
   enabled: false
   egress:
@@ -201,6 +222,7 @@ worker:
   containerPort: 8001
   control:
     replicaCount: 2
+    priorityClassName: ""
     strategy:
       type: RollingUpdate
       rollingUpdate:
@@ -226,6 +248,7 @@ worker:
       behavior: {}
   turns:
     replicaCount: 4
+    priorityClassName: ""
     strategy:
       type: RollingUpdate
       rollingUpdate:
@@ -487,6 +510,7 @@ relay:
 
 migrations:
   enabled: true
+  priorityClassName: ""
   image:
     repository: opengeni-api
     # Empty tag resolves to the chart appVersion via the opengeni.image helper.
@@ -525,6 +549,7 @@ migrations:
 # an existing database, or an upstream Postgres operator.
 postgres:
   enabled: false
+  priorityClassName: ""
   image:
     repository: pgvector/pgvector
     tag: pg17
@@ -562,6 +587,7 @@ postgres:
 # existing Temporal endpoint, or the official Temporal chart.
 temporal:
   enabled: false
+  priorityClassName: ""
   image:
     repository: temporalio/auto-setup
     tag: "1.28"
@@ -594,6 +620,7 @@ temporal:
 # GCS, or another external object store.
 minio:
   enabled: false
+  priorityClassName: ""
   image:
     repository: minio/minio
     tag: RELEASE.2025-09-07T16-13-09Z
@@ -731,6 +758,7 @@ ingress:
 # endpoint or the official NATS chart.
 nats:
   enabled: false
+  priorityClassName: ""
   url: ""
   image:
     repository: nats
