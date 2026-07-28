@@ -18,7 +18,9 @@ import type { Settings } from "@opengeni/config";
 import {
   advanceWorkspaceGenerationForRetainedProcess,
   advanceWorkspaceGeneration,
+  getRetainedProcess,
   retainWorkspaceMutationProcess,
+  retainedProcessSettlementIdentity,
   settleRetainedProcess,
   verifyRetainedProcessMutationSettlement,
   verifyWorkspaceMutationSettlement,
@@ -177,7 +179,10 @@ function selfhostedResolverTimeouts(settings: Settings): {
   selfhostedExecTimeoutMs: number;
 } {
   const { timeoutMs, execTimeoutMs } = selfhostedTimeoutsFromSettings(settings);
-  return { selfhostedTimeoutMs: timeoutMs, selfhostedExecTimeoutMs: execTimeoutMs };
+  return {
+    selfhostedTimeoutMs: timeoutMs,
+    selfhostedExecTimeoutMs: execTimeoutMs,
+  };
 }
 
 type HomeRouteLeaseIdentity = {
@@ -234,7 +239,9 @@ function homeRouteRecoveryError(
   );
 }
 
-function providerIdentityFromResumeState(resumeState: Record<string, unknown>): string | null {
+export function providerIdentityFromResumeState(
+  resumeState: Record<string, unknown>,
+): string | null {
   const sessionState =
     resumeState.sessionState && typeof resumeState.sessionState === "object"
       ? (resumeState.sessionState as Record<string, unknown>)
@@ -290,7 +297,10 @@ async function resolveCurrentHomeBackend(
   // A route epoch can advance without a provider replacement. Reuse the exact
   // established handle only when its identity still equals the durable one.
   if (lease.instanceId === established.instanceId) {
-    services.onHomeSandboxRebound?.({ established, leaseEpoch: lease.leaseEpoch });
+    services.onHomeSandboxRebound?.({
+      established,
+      leaseEpoch: lease.leaseEpoch,
+    });
     return {
       session: established.session as RoutableBackendSession,
       sandboxId: null,
@@ -359,7 +369,10 @@ async function resolveCurrentHomeBackend(
   if (rebound.instanceId !== lease.instanceId || rebound.backendId !== resumeBackend) {
     throw homeRouteRecoveryError(lease, lease.leaseEpoch);
   }
-  services.onHomeSandboxRebound?.({ established: rebound, leaseEpoch: lease.leaseEpoch });
+  services.onHomeSandboxRebound?.({
+    established: rebound,
+    leaseEpoch: lease.leaseEpoch,
+  });
   // Keep the resolver's mutable home reference on the latest verified handle so
   // a later route epoch does not resume the same replacement again. This is only
   // a worker-side handle update; the SDK-facing RoutingSandboxSession remains the
@@ -587,12 +600,30 @@ function settleRetainedProcessForTurn(
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!fence) return undefined;
-  return async ({ process, proof }) => {
+  return async ({ backend, process, proof }) => {
+    const durable = await getRetainedProcess(services.db, {
+      workspaceId: ids.workspaceId,
+      sessionId: ids.sessionId,
+      processId: process.id,
+    });
+    if (
+      !durable ||
+      durable.providerSessionId !== process.providerSessionId ||
+      durable.providerBackend !== backend.kind ||
+      durable.providerInstanceId !== backend.providerInstanceId ||
+      durable.leaseEpoch !== backend.leaseEpoch ||
+      durable.routeKind !== (backend.sandboxId === null ? "home" : "active") ||
+      durable.routeTargetId !== backend.sandboxId ||
+      durable.routeEpoch !== backend.activeEpoch
+    ) {
+      throw new Error("Retained-process settlement lost its exact durable backend identity");
+    }
     await settleRetainedProcess(services.db, {
       accountId: fence.accountId,
       workspaceId: ids.workspaceId,
       sessionId: ids.sessionId,
       processId: process.id,
+      expected: retainedProcessSettlementIdentity(durable),
       outcome: proof.outcome,
       exitCode: proof.exitCode,
       reason: proof.reason,
@@ -793,7 +824,10 @@ export function wrapLazyTurnBoxWithRouting(
     backendId: string;
     agentDefaultManifest: unknown;
     provisioner: {
-      get(): Promise<{ established: EstablishedSandboxSession; leaseEpoch?: number }>;
+      get(): Promise<{
+        established: EstablishedSandboxSession;
+        leaseEpoch?: number;
+      }>;
     };
     homeLeaseIdentity?: {
       accountId: string;

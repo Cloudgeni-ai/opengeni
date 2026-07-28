@@ -8,7 +8,7 @@ const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "../drizzle"
 describe("workspace instruction-policy migration", () => {
   test("is rolling, additive, FORCE-RLS protected, and performs no backfill", async () => {
     const sql = await readFile(
-      join(migrationsDir, "0129_workspace_instruction_policies.sql"),
+      join(migrationsDir, "0130_workspace_instruction_policies.sql"),
       "utf8",
     );
     expect(sql.split(/\r?\n/, 1)[0]).toBe("-- deployment-mode: rolling");

@@ -25,7 +25,7 @@ role key is valid only for global targets.
 
 ## Immutable revisions and provenance
 
-Migration `0129_workspace_instruction_policies.sql` adds dedicated
+Migration `0130_workspace_instruction_policies.sql` adds dedicated
 `workspace_instruction_policy_*` storage:
 
 - `workspace_instruction_policy_revisions` is append-only revision history;
@@ -133,6 +133,6 @@ This slice deliberately does not implement:
 Canonical implementation: `packages/contracts/src/workspace-instruction-policies.ts`,
 `packages/db/src/workspace-instruction-policies-schema.ts`,
 `packages/db/src/workspace-instruction-policies.ts`,
-`packages/db/drizzle/0129_workspace_instruction_policies.sql`,
+`packages/db/drizzle/0130_workspace_instruction_policies.sql`,
 `apps/api/src/routes/workspace-instruction-policies.ts`, and
 `packages/sdk/src/workspace-instruction-policies.ts`.

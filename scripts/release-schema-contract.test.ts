@@ -38,8 +38,14 @@ describe("release schema contract", () => {
       fileCount: 2,
       latestMigration: "0002_second.sql",
       migrations: [
-        expect.objectContaining({ path: "0001_first.sql", deploymentMode: "historical" }),
-        expect.objectContaining({ path: "0002_second.sql", deploymentMode: "rolling" }),
+        expect.objectContaining({
+          path: "0001_first.sql",
+          deploymentMode: "historical",
+        }),
+        expect.objectContaining({
+          path: "0002_second.sql",
+          deploymentMode: "rolling",
+        }),
       ],
     });
   });
@@ -137,12 +143,13 @@ describe("release schema contract", () => {
         (migrations.has("0126_document_access_constraints.sql") ? 1 : 0) +
         (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
         (migrations.has("0128_github_installation_authority.sql") ? 1 : 0) +
-        (migrations.has("0129_workspace_instruction_policies.sql") ? 1 : 0),
+        (migrations.has("0129_retained_process_reconciliation.sql") ? 1 : 0) +
+        (migrations.has("0130_workspace_instruction_policies.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "90bdea761d4f865b711562964ace115e7df4c0a4de09edb37309b49187530a33",
+      "96d6d0976b1a8e2b28cbf4b360fb9f07fd4e0e6e38ef0af378e1dff25851c539",
     );
-    expect(contract.latestMigration).toBe("0129_workspace_instruction_policies.sql");
+    expect(contract.latestMigration).toBe("0130_workspace_instruction_policies.sql");
     expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
       sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
       deploymentMode: "rolling",
@@ -172,7 +179,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-79])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-9]|0130)_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -189,7 +196,9 @@ describe("release schema contract", () => {
       "0125_document_drops_visibility.sql",
       "0126_document_access_constraints.sql",
       "0127_document_default_base_index.sql",
-      "0129_workspace_instruction_policies.sql",
+      "0128_github_installation_authority.sql",
+      "0129_retained_process_reconciliation.sql",
+      "0130_workspace_instruction_policies.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -258,7 +267,11 @@ describe("release schema contract", () => {
       sha256: "7deb5fde59f2e0e336a18a72630a00348dc641041f7df60639b50df79b4c4480",
       deploymentMode: "rolling",
     });
-    expect(migrations.get("0129_workspace_instruction_policies.sql")).toMatchObject({
+    expect(migrations.get("0129_retained_process_reconciliation.sql")).toMatchObject({
+      sha256: "913758633b31bb3a4f56dca19e7113630f5d12300d075827ac36179e79305dbd",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0130_workspace_instruction_policies.sql")).toMatchObject({
       sha256: "12226a4560dc1150ffe2c3549f821d2483cc4d4a09ef74747ed13376404fc7c5",
       deploymentMode: "rolling",
     });

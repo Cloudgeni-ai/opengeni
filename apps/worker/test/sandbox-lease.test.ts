@@ -37,6 +37,7 @@ import {
   claimSessionWorkForAttempt,
   createSession,
   createDb,
+  getRetainedProcess,
   initializeSessionStartAtomically,
   mutateSessionControlInTransaction,
   listLiveModalSandboxLeaseAttributions,
@@ -48,6 +49,7 @@ import {
   readLease,
   reconcileColdLostLeaseInstanceBlockers,
   retainWorkspaceMutationProcess,
+  retainedProcessSettlementIdentity,
   SandboxRetainedProcessPromotionFencedError,
   SandboxWorkspaceMutationFencedError,
   settleRetainedProcess,
@@ -1226,11 +1228,18 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     expect(afterReplay?.count).toBe(1);
     expect(afterReplay?.startedAt.getTime()).toBe(retained[0]?.startedAt.getTime());
 
+    const durableProcess = await getRetainedProcess(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId,
+    });
+    if (!durableProcess) throw new Error("Expected durable retained process");
     await settleRetainedProcess(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
       processId,
+      expected: retainedProcessSettlementIdentity(durableProcess),
       outcome: "exited",
       exitCode: 0,
       reason: "provider exited after stale-route promotion",
@@ -1322,11 +1331,18 @@ describe("P1.3 reapSandboxLeases — the one global reaper (real lease + RLS, sp
     };
 
     const terminal = await promote("terminalBeforeProviderLoss", 51);
+    const terminalProcess = await getRetainedProcess(db, {
+      workspaceId: ids.workspaceId,
+      sessionId: attempt.sessionId,
+      processId: terminal.processId,
+    });
+    if (!terminalProcess) throw new Error("Expected durable retained process");
     await settleRetainedProcess(db, {
       accountId: ids.accountId,
       workspaceId: ids.workspaceId,
       sessionId: attempt.sessionId,
       processId: terminal.processId,
+      expected: retainedProcessSettlementIdentity(terminalProcess),
       outcome: "exited",
       exitCode: 0,
       reason: "provider exited before instance loss",
