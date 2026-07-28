@@ -393,9 +393,7 @@ export class Observability {
                   startTimeUnixNano: millisToNanos(span.startMs),
                   endTimeUnixNano: millisToNanos(span.endMs),
                   attributes: otlpAttributes(span.attributes),
-                  status: span.error
-                    ? { code: 2, message: span.error.statusMessage }
-                    : { code: 1 },
+                  status: span.error ? { code: 2, message: span.error.statusMessage } : { code: 1 },
                 },
               ],
             },

@@ -46,7 +46,10 @@ export type {
 export { useGoal, isGoalEvent } from "./hooks/use-goal";
 export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
 export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
-export type { UseSessionLineageOptions, UseSessionLineageResult } from "./hooks/use-session-lineage";
+export type {
+  UseSessionLineageOptions,
+  UseSessionLineageResult,
+} from "./hooks/use-session-lineage";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
   UseSessionControlOptions,
