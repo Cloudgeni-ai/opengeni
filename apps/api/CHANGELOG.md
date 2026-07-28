@@ -1,5 +1,26 @@
 # @opengeni/api-router
 
+## 0.12.0
+
+### Minor Changes
+
+- 06a5801: Add the backend workspace instruction-policy revision, activation, rollback, audit, API, and SDK control surface.
+
+### Patch Changes
+
+- fd764e0: Route direct file, Git, and terminal calls to a machine-targeted session from the first request without creating a phantom provider lease, and make token-driven agent installation replace stale enrollment credentials.
+- Updated dependencies [06a5801]
+- Updated dependencies [fd764e0]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/db@0.13.0
+  - @opengeni/core@0.11.9
+  - @opengeni/config@0.7.7
+  - @opengeni/documents@0.2.37
+  - @opengeni/events@0.3.28
+  - @opengeni/github@0.3.19
+  - @opengeni/runtime@0.13.11
+  - @opengeni/storage@0.2.31
+
 ## 0.11.8
 
 ### Patch Changes
