@@ -11,6 +11,10 @@ export type CodexRealtimeNegotiator = (
 
 export type StartCodexRealtimeWebrtcOptions = {
   negotiate: CodexRealtimeNegotiator;
+  realtimeId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
   signal?: AbortSignal | undefined;
   instructions?: string | undefined;
   voice?: CodexRealtimeVoice | undefined;
@@ -29,8 +33,9 @@ export type CodexRealtimeWebrtcSession = {
 
 /**
  * Complete the browser half of native connected-Codex GPT-Live V3 negotiation.
- * Credentials never enter this boundary: `negotiate` sends only SDP and public
- * session configuration to the OpenGeni API.
+ * Provider credentials never enter this boundary: `negotiate` sends SDP,
+ * public session configuration, and the active browser-owner proof only to the
+ * OpenGeni API.
  */
 export async function startCodexRealtimeWebrtc(
   options: StartCodexRealtimeWebrtcOptions,
@@ -75,6 +80,10 @@ export async function startCodexRealtimeWebrtc(
     const localSdp = peerConnection.localDescription?.sdp ?? offer.sdp;
     const answer = await options.negotiate(
       {
+        realtimeId: options.realtimeId,
+        browserInstanceId: options.browserInstanceId,
+        ownerKey: options.ownerKey,
+        expectedVersion: options.expectedVersion,
         sdp: localSdp,
         version: "v3",
         ...(options.instructions === undefined ? {} : { instructions: options.instructions }),

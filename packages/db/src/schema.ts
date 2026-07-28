@@ -1525,6 +1525,91 @@ export const sessions = pgTable(
   }),
 );
 
+// One temporary realtime owner for an ordinary session. Terminal rows remain
+// as lifecycle evidence; the partial unique index admits only one active owner.
+export const sessionRealtimeModes = pgTable(
+  "session_realtime_modes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    operationId: uuid("operation_id").notNull(),
+    ownerSubjectId: text("owner_subject_id").notNull(),
+    browserInstanceId: text("browser_instance_id").notNull(),
+    ownerKeyHash: text("owner_key_hash").notNull(),
+    model: text("model").notNull(),
+    state: text("state").notNull().default("active"),
+    version: integer("version").notNull().default(1),
+    connectionEpoch: integer("connection_epoch").notNull().default(1),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }).notNull(),
+    lastHeartbeatAt: timestamp("last_heartbeat_at", { withTimezone: true }).notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    endReason: text("end_reason"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_realtime_modes_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_realtime_modes_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    operation: uniqueIndex("session_realtime_modes_operation_uq").on(
+      table.workspaceId,
+      table.sessionId,
+      table.operationId,
+    ),
+    oneActive: uniqueIndex("session_realtime_modes_one_active_uq")
+      .on(table.workspaceId, table.sessionId)
+      .where(sql`${table.state} = 'active'`),
+    activeLease: index("session_realtime_modes_active_lease_idx")
+      .on(table.leaseExpiresAt, table.workspaceId, table.sessionId)
+      .where(sql`${table.state} = 'active'`),
+    stateValid: check(
+      "session_realtime_modes_state_check",
+      sql`${table.state} in ('active', 'ended')`,
+    ),
+    modelValid: check(
+      "session_realtime_modes_model_check",
+      sql`${table.model} = 'gpt-live-1-boulder-alpha'`,
+    ),
+    endReasonValid: check(
+      "session_realtime_modes_end_reason_check",
+      sql`${table.endReason} is null or ${table.endReason} in ('user_stop', 'browser_unload', 'lease_expired')`,
+    ),
+    versionValid: check("session_realtime_modes_version_check", sql`${table.version} >= 1`),
+    epochValid: check("session_realtime_modes_epoch_check", sql`${table.connectionEpoch} >= 1`),
+    ownerSubjectValid: check(
+      "session_realtime_modes_owner_subject_check",
+      sql`octet_length(${table.ownerSubjectId}) between 1 and 1024`,
+    ),
+    browserInstanceValid: check(
+      "session_realtime_modes_browser_instance_check",
+      sql`octet_length(${table.browserInstanceId}) between 1 and 256`,
+    ),
+    ownerKeyHashValid: check(
+      "session_realtime_modes_owner_key_hash_check",
+      sql`${table.ownerKeyHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    leaseValid: check(
+      "session_realtime_modes_lease_check",
+      sql`${table.leaseExpiresAt} > ${table.lastHeartbeatAt}`,
+    ),
+    terminalValid: check(
+      "session_realtime_modes_terminal_check",
+      sql`(${table.state} = 'active' and ${table.endedAt} is null and ${table.endReason} is null)
+        or (${table.state} = 'ended' and ${table.endedAt} is not null and ${table.endReason} is not null)`,
+    ),
+  }),
+);
+
 // A denied session create is durable evidence, not a mutable session/resource
 // artifact. It has its own workspace-scoped idempotency key so retries replay
 // the same denial without creating a session or billing/run rows.

@@ -1,12 +1,14 @@
 import {
   AcknowledgeStreamRequest,
   AttachViewerRequest,
+  BeginSessionRealtimeRequest,
   ClearSessionContextRequest,
   CodexRealtimeWebrtcRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   DeleteSessionQueueItemRequest,
   EditSessionQueueItemRequest,
+  EndSessionRealtimeRequest,
   FsDeleteRequest,
   FsListRequest,
   FsMkdirRequest,
@@ -23,6 +25,7 @@ import {
   PtyOpenRequest,
   PtyResizeRequest,
   PtyWriteRequest,
+  RenewSessionRealtimeRequest,
   SessionControlRequest,
   SESSION_EVENT_RAW_DELTA_TYPES,
   SessionEventPayloadMode,
@@ -61,12 +64,14 @@ import { streamTokenDegraded } from "@opengeni/config";
 import {
   acceptSessionApprovalDecision,
   acceptSessionHumanInputResponse,
+  assertSessionRealtimeOwnerInTransaction,
   clearSessionGoal,
   clearSessionContext,
   getOpenPtySession,
   getRetainedProcess,
   getSandbox,
   getSession,
+  getSessionEvent,
   getSessionForSubject,
   getSessionGoal,
   getSessionHumanInputRequest,
@@ -98,19 +103,25 @@ import {
   setSessionGoalStatusWithEvent,
   updatePtySessionActivity,
   QueueCommandConflictError,
+  beginSessionRealtimeInTransaction,
+  endSessionRealtimeInTransaction,
   NewSessionDraftConflictError,
   SessionCommandIdempotencyError,
   SessionControlConflictError,
+  SessionRealtimeConflictError,
   SessionToolPolicyVersionConflictError,
   SessionContextBusyError,
   HumanInputResponseValidationError,
   latestWorkspaceCapture,
   sessionLatestWorkspaceCapture,
+  renewSessionRealtimeInTransaction,
+  withWorkspaceRls,
   workspaceCaptureAtRevision,
   type AppendEventInput,
   type SandboxOpenPtySessionRow,
   type SandboxPtyProcessIdentity,
   type SandboxRetainedProcess,
+  type Database,
 } from "@opengeni/db";
 import {
   appendAndPublishEvents,
@@ -521,14 +532,139 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, session));
   });
 
+  const publishRealtimeMutation = async (
+    accountId: string,
+    workspaceId: string,
+    sessionId: string,
+    result: {
+      eventIds: string[];
+      workflowWakeRevision: number | null;
+    },
+  ): Promise<void> => {
+    const events = (
+      await Promise.all(result.eventIds.map((eventId) => getSessionEvent(db, workspaceId, eventId)))
+    ).filter((event) => event !== null);
+    await publishDurableSessionEvents(bus, workspaceId, sessionId, events);
+    if (result.workflowWakeRevision !== null) {
+      await workflowClient.wakeSessionWorkflow({
+        accountId,
+        workspaceId,
+        sessionId,
+        workflowId: workflowIdForSession(sessionId),
+        wakeRevision: result.workflowWakeRevision,
+      });
+    }
+  };
+
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(400, { message: "invalid session id" });
+    }
+    const parsed = BeginSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid session realtime request" });
+    }
+    try {
+      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          beginSessionRealtimeInTransaction(tx as unknown as Database, {
+            accountId: grant.accountId,
+            workspaceId,
+            sessionId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
+        ),
+      );
+      await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+      c.header("cache-control", "private, no-store");
+      return c.json({ mode: result.mode, replay: result.replay }, result.replay ? 200 : 201);
+    } catch (error) {
+      throw sessionRealtimeHttpError(error);
+    }
+  });
+
+  app.patch(
+    "/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId/heartbeat",
+    async (c) => {
+      const workspaceId = c.req.param("workspaceId");
+      const sessionId = c.req.param("sessionId");
+      const realtimeId = c.req.param("realtimeId");
+      const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+      if (
+        !z.string().uuid().safeParse(sessionId).success ||
+        !z.string().uuid().safeParse(realtimeId).success
+      ) {
+        throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
+      }
+      const parsed = RenewSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+      if (!parsed.success) {
+        throw new HTTPException(400, { message: "invalid realtime heartbeat request" });
+      }
+      try {
+        const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+          scopedDb.transaction(async (tx) =>
+            renewSessionRealtimeInTransaction(tx as unknown as Database, {
+              workspaceId,
+              sessionId,
+              realtimeId,
+              ownerSubjectId: grant.subjectId,
+              ...parsed.data,
+            }),
+          ),
+        );
+        await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+        c.header("cache-control", "private, no-store");
+        return c.json({ mode: result.mode, replay: result.replay });
+      } catch (error) {
+        throw sessionRealtimeHttpError(error);
+      }
+    },
+  );
+
+  app.delete("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/:realtimeId", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    const realtimeId = c.req.param("realtimeId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (
+      !z.string().uuid().safeParse(sessionId).success ||
+      !z.string().uuid().safeParse(realtimeId).success
+    ) {
+      throw new HTTPException(400, { message: "invalid realtime lifecycle id" });
+    }
+    const parsed = EndSessionRealtimeRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(400, { message: "invalid realtime end request" });
+    }
+    try {
+      const result = await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          endSessionRealtimeInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            ...parsed.data,
+          }),
+        ),
+      );
+      await publishRealtimeMutation(grant.accountId, workspaceId, sessionId, result);
+      c.header("cache-control", "private, no-store");
+      return c.json({ mode: result.mode, replay: result.replay });
+    } catch (error) {
+      throw sessionRealtimeHttpError(error);
+    }
+  });
+
   app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/webrtc", async (c) => {
     const workspaceId = c.req.param("workspaceId");
     const sessionId = c.req.param("sessionId");
-    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     if (!z.string().uuid().safeParse(sessionId).success) {
-      throw new HTTPException(404, { message: "session not found" });
-    }
-    if (!(await getSession(db, workspaceId, sessionId))) {
       throw new HTTPException(404, { message: "session not found" });
     }
     const parsed = CodexRealtimeWebrtcRequest.safeParse(await c.req.json().catch(() => null));
@@ -540,6 +676,21 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
     c.header("cache-control", "private, no-store");
     try {
+      const { realtimeId, browserInstanceId, ownerKey, expectedVersion, ...providerRequest } =
+        parsed.data;
+      await withWorkspaceRls(db, workspaceId, async (scopedDb) =>
+        scopedDb.transaction(async (tx) =>
+          assertSessionRealtimeOwnerInTransaction(tx as unknown as Database, {
+            workspaceId,
+            sessionId,
+            realtimeId,
+            ownerSubjectId: grant.subjectId,
+            browserInstanceId,
+            ownerKey,
+            expectedVersion,
+          }),
+        ),
+      );
       const broker = buildSessionCodexRealtimeBroker(
         db,
         settings,
@@ -547,8 +698,11 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         deps.codexFetch,
       );
-      return c.json(await broker({ request: parsed.data, signal: c.req.raw.signal }));
+      return c.json(await broker({ request: providerRequest, signal: c.req.raw.signal }));
     } catch (error) {
+      if (error instanceof SessionRealtimeConflictError) {
+        throw sessionRealtimeHttpError(error);
+      }
       if (!(error instanceof CodexRealtimeBrokerError)) throw error;
       const failure = codexRealtimeHttpFailure(error);
       return c.json(
@@ -2524,6 +2678,17 @@ function codexRealtimeHttpFailure(error: CodexRealtimeBrokerError): {
   }
 }
 
+function sessionRealtimeHttpError(error: unknown): HTTPException {
+  if (error instanceof HTTPException) return error;
+  if (error instanceof SessionRealtimeConflictError) {
+    return new HTTPException(error.code === "REALTIME_NOT_FOUND" ? 404 : 409, {
+      message: error.message,
+      cause: error,
+    });
+  }
+  throw error;
+}
+
 /**
  * Map every mounted session-addressed HTTP path to the host-neutral operation
  * the embedding port authorizes. Returning null is deliberately fail-closed in
@@ -2556,6 +2721,15 @@ export function sessionAuthorizationOperationForHttp(
   }
   if (suffix === "/realtime/webrtc" && verb === "POST") {
     return "session.realtime.start";
+  }
+  if (suffix === "/realtime" && verb === "POST") {
+    return "session.realtime.start";
+  }
+  if (/^\/realtime\/[^/]+\/heartbeat$/.test(suffix) && verb === "PATCH") {
+    return "session.realtime.control";
+  }
+  if (/^\/realtime\/[^/]+$/.test(suffix) && verb === "DELETE") {
+    return "session.realtime.control";
   }
   if (suffix === "/goal") {
     return verb === "GET"

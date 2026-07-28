@@ -65,7 +65,7 @@ export type CodexRealtimeBrokerDependencies = {
 
 export type CodexRealtimeBrokerInput = {
   sessionId: string;
-  request: CodexRealtimeWebrtcRequest;
+  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "instructions" | "voice">;
   signal?: AbortSignal | undefined;
 };
 

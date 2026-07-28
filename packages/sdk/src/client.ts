@@ -33,6 +33,7 @@ import type {
   BillingUsageResponse,
   InsightsRange,
   WorkspaceInsightsResponse,
+  BeginSessionRealtimeRequest,
   CapabilityCatalogItem,
   CapabilityCatalogResponse,
   CapabilityInstallation,
@@ -72,6 +73,7 @@ import type {
   DeviceEnrollmentDenyResponse,
   DeviceEnrollmentLookupResponse,
   MintEnrollTokenResponse,
+  EndSessionRealtimeRequest,
   DiscoverMcpCapabilitiesResponse,
   Document,
   DocumentBase,
@@ -117,6 +119,8 @@ import type {
   SessionGoal,
   SessionHumanInputRequest,
   SessionLineageResponse,
+  SessionRealtimeMutationResponse,
+  RenewSessionRealtimeRequest,
   SessionMcpCredentialUpdateInput,
   UpdateSessionMcpApprovalPolicyRequest,
   UpdateSessionMcpApprovalPolicyResponse,
@@ -580,6 +584,47 @@ export class OpenGeniClient {
       request,
       {},
       { signal: options.signal },
+    );
+  }
+
+  /** Atomically enter realtime mode for this ordinary session. */
+  async beginSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    request: BeginSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime`,
+      request,
+    );
+  }
+
+  /** Renew the exact authenticated browser owner's realtime lease. */
+  async heartbeatSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: RenewSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "PATCH",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}/heartbeat`,
+      request,
+    );
+  }
+
+  /** End realtime mode and restore ordinary text workflow admission. */
+  async endSessionRealtime(
+    workspaceId: string,
+    sessionId: string,
+    realtimeId: string,
+    request: EndSessionRealtimeRequest,
+  ): Promise<SessionRealtimeMutationResponse> {
+    return await this.requestJson<SessionRealtimeMutationResponse>(
+      "DELETE",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/${realtimeId}`,
+      request,
     );
   }
 

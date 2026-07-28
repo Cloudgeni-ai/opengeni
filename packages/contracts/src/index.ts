@@ -3988,9 +3988,10 @@ export const SessionAuthorizationSurface = z.enum([
 ]);
 export type SessionAuthorizationSurface = z.infer<typeof SessionAuthorizationSurface>;
 
-// Native connected-Codex GPT-Live WebRTC negotiation. The browser sends only
-// its SDP offer and non-secret session configuration; the API owns subscription
-// credential resolution and returns only the provider's SDP answer.
+// Native connected-Codex GPT-Live WebRTC negotiation. The browser sends its
+// SDP offer, non-provider session configuration, and proof of the exact active
+// ordinary-session realtime owner. The API consumes that proof before resolving
+// the subscription credential and returns only the provider's SDP answer.
 export const CodexRealtimeWebrtcVersion = z.literal("v3");
 export type CodexRealtimeWebrtcVersion = z.infer<typeof CodexRealtimeWebrtcVersion>;
 
@@ -4007,17 +4008,22 @@ export const CodexRealtimeVoice = z.enum([
 ]);
 export type CodexRealtimeVoice = z.infer<typeof CodexRealtimeVoice>;
 
-export const CodexRealtimeWebrtcRequest = z
-  .object({
-    sdp: z
-      .string()
-      .min(1)
-      .max(1024 * 1024),
-    version: CodexRealtimeWebrtcVersion,
-    instructions: z.string().max(32_768).optional(),
-    voice: CodexRealtimeVoice.optional(),
-  })
-  .strict();
+const SessionRealtimeOwnerProof = z.object({
+  browserInstanceId: z.string().min(1).max(256),
+  ownerKey: z.string().min(32).max(1024),
+});
+
+export const CodexRealtimeWebrtcRequest = SessionRealtimeOwnerProof.extend({
+  realtimeId: z.string().uuid(),
+  expectedVersion: z.number().int().positive(),
+  sdp: z
+    .string()
+    .min(1)
+    .max(1024 * 1024),
+  version: CodexRealtimeWebrtcVersion,
+  instructions: z.string().max(32_768).optional(),
+  voice: CodexRealtimeVoice.optional(),
+}).strict();
 export type CodexRealtimeWebrtcRequest = z.infer<typeof CodexRealtimeWebrtcRequest>;
 
 export const CodexRealtimeWebrtcResponse = z.object({
@@ -4029,6 +4035,54 @@ export const CodexRealtimeWebrtcResponse = z.object({
   model: z.literal("gpt-live-1-boulder-alpha"),
 });
 export type CodexRealtimeWebrtcResponse = z.infer<typeof CodexRealtimeWebrtcResponse>;
+
+export const SessionRealtimeModel = z.literal("gpt-live-1-boulder-alpha");
+export type SessionRealtimeModel = z.infer<typeof SessionRealtimeModel>;
+
+export const SessionRealtimeState = z.enum(["active", "ended"]);
+export type SessionRealtimeState = z.infer<typeof SessionRealtimeState>;
+
+export const SessionRealtimeEndReason = z.enum(["user_stop", "browser_unload", "lease_expired"]);
+export type SessionRealtimeEndReason = z.infer<typeof SessionRealtimeEndReason>;
+
+export const SessionRealtimeMode = z.object({
+  id: z.string().uuid(),
+  sessionId: z.string().uuid(),
+  operationId: z.string().uuid(),
+  browserInstanceId: z.string().min(1).max(256),
+  model: SessionRealtimeModel,
+  state: SessionRealtimeState,
+  version: z.number().int().positive(),
+  connectionEpoch: z.number().int().positive(),
+  leaseExpiresAt: z.string().datetime(),
+  lastHeartbeatAt: z.string().datetime(),
+  startedAt: z.string().datetime(),
+  endedAt: z.string().datetime().nullable(),
+  endReason: SessionRealtimeEndReason.nullable(),
+});
+export type SessionRealtimeMode = z.infer<typeof SessionRealtimeMode>;
+
+export const BeginSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
+  operationId: z.string().uuid(),
+  model: SessionRealtimeModel,
+});
+export type BeginSessionRealtimeRequest = z.infer<typeof BeginSessionRealtimeRequest>;
+
+export const RenewSessionRealtimeRequest = SessionRealtimeOwnerProof.extend({
+  expectedVersion: z.number().int().positive(),
+});
+export type RenewSessionRealtimeRequest = z.infer<typeof RenewSessionRealtimeRequest>;
+
+export const EndSessionRealtimeRequest = RenewSessionRealtimeRequest.extend({
+  reason: z.enum(["user_stop", "browser_unload"]),
+});
+export type EndSessionRealtimeRequest = z.infer<typeof EndSessionRealtimeRequest>;
+
+export const SessionRealtimeMutationResponse = z.object({
+  mode: SessionRealtimeMode,
+  replay: z.boolean(),
+});
+export type SessionRealtimeMutationResponse = z.infer<typeof SessionRealtimeMutationResponse>;
 
 export const SessionAuthorizationOperation = z.enum([
   "session.read",
@@ -4057,6 +4111,7 @@ export const SessionAuthorizationOperation = z.enum([
   "session.pin.write",
   "session.codex_account.write",
   "session.realtime.start",
+  "session.realtime.control",
   "session.context.write",
   "session.approval.write",
   "session.human_input.read",
@@ -6096,6 +6151,8 @@ export const SessionEventType = z.enum([
   // crossing NATS, SSE, REST, or browser boundaries.
   "session.event.envelope_omitted",
   "session.status.changed",
+  "session.realtime.started",
+  "session.realtime.ended",
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",

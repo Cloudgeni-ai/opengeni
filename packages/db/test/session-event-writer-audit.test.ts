@@ -263,6 +263,10 @@ const expectedWriters: Record<string, ExpectedWriter> = {
     inserts: 1,
     contract: "canonical",
   },
+  "packages/db/src/session-realtime.ts#appendRealtimeLifecycleEvent": {
+    inserts: 1,
+    contract: "canonical",
+  },
   "packages/db/src/session-tool-call-settlement.ts#closePendingSessionToolCallsInTransaction": {
     inserts: 1,
     contract: "owned_suffix",

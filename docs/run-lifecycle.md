@@ -21,6 +21,22 @@ one non-retryable Temporal `runAgentTurn` activity. Inside the activity the
 OpenAI Agents SDK loop makes as many model calls and tool calls as the work
 needs.
 
+The same ordinary session can temporarily switch `normal → realtime → normal`
+for connected-Codex GPT-Live. This is an admission mode, not a second session,
+turn, queue, or workflow. Realtime begin and the final ordinary-work claim both
+take the canonical PostgreSQL session lock. If ordinary, recovery, compaction,
+goal-continuation, or other maintenance work claims first, begin rejects; if
+realtime begins first, those obligations remain pending and cannot execute
+until the owner ends or its lease expires. The workflow treats an active owner
+as a bounded wait through the lease deadline and must not synthesize goal work
+while waiting. Human composer/queue/Send/Steer commands are rejected for only
+that session, while cross-session agent updates remain durable and pending
+without waking normal inference. Ending or expiring the owner commits the
+`session.realtime.ended` event and a normal-work wake so no pending obligation is
+lost. The lifecycle and claim fence are canonical in
+`packages/db/src/session-realtime.ts`, `packages/db/src/index.ts`, and
+`apps/worker/src/workflows/session.ts`.
+
 Every accepted turn also carries one immutable `TurnInitiator`. Human/API
 Send and Steer capture the authenticated subject that accepted the command;
 schedules, goal continuation, compaction, and coalesced internal batches use

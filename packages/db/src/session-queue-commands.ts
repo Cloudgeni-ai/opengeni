@@ -31,6 +31,10 @@ import {
   SessionControlInvariantError,
   updateSessionCommandReceiptResult,
 } from "./session-control";
+import {
+  fenceSessionWorkClaimForRealtimeInTransaction,
+  sessionRealtimeIsActiveInTransaction,
+} from "./session-realtime";
 import * as schema from "./schema";
 import {
   frozenInitiatorForCommandActor,
@@ -46,7 +50,8 @@ export type QueueCommandConflictCode =
   | "PROMPT_CHANGED"
   | "DRAFT_CHANGED"
   | "DRAFT_NOT_EMPTY"
-  | "EDIT_SOURCE_CHANGED";
+  | "EDIT_SOURCE_CHANGED"
+  | "REALTIME_ACTIVE";
 
 export class QueueCommandConflictError extends Error {
   readonly name = "QueueCommandConflictError";
@@ -153,6 +158,21 @@ async function lockSession(
   const session = locks.sessions[0];
   if (!session) throw new Error(`Session not found: ${sessionId}`);
   return session;
+}
+
+async function requireNormalSessionMode(
+  db: Database,
+  session: typeof schema.sessions.$inferSelect,
+): Promise<typeof schema.sessions.$inferSelect> {
+  const realtimeFence = await fenceSessionWorkClaimForRealtimeInTransaction(db, session);
+  if (realtimeFence.active) {
+    throw new QueueCommandConflictError(
+      "REALTIME_ACTIVE",
+      "Session is currently in realtime mode",
+      { queueVersion: session.queueVersion },
+    );
+  }
+  return realtimeFence.session;
 }
 
 type SteerSupersessionResult = {
@@ -467,7 +487,8 @@ export async function saveComposerDraftInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
-  await lockSession(db, input.workspaceId, input.sessionId);
+  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  await requireNormalSessionMode(db, session);
   const current = await getComposerDraftInTransaction(db, {
     ...input,
     lock: true,
@@ -529,7 +550,7 @@ export async function moveQueuedTurnInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  let session = await lockSession(db, input.workspaceId, input.sessionId);
   const requestHash = canonicalSessionCommandHash({
     beforeTurnId: input.beforeTurnId,
     expectedQueueVersion: input.expectedQueueVersion,
@@ -553,6 +574,7 @@ export async function moveQueuedTurnInTransaction(
       replay: true,
     };
   }
+  session = await requireNormalSessionMode(db, session);
   if (session.queueVersion !== input.expectedQueueVersion) {
     throw new QueueCommandConflictError("QUEUE_VERSION_CHANGED", "Queue order changed", {
       queueVersion: session.queueVersion,
@@ -659,7 +681,7 @@ export async function deleteSessionQueueItemInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  let session = await lockSession(db, input.workspaceId, input.sessionId);
   const requestHash = canonicalSessionCommandHash({
     expectedTurnVersion: input.expectedTurnVersion,
     reason: input.reason ?? null,
@@ -683,6 +705,7 @@ export async function deleteSessionQueueItemInTransaction(
       replay: true,
     };
   }
+  session = await requireNormalSessionMode(db, session);
   const turn = (
     await lockSessionEventWriteRows(db, {
       workspaceId: input.workspaceId,
@@ -786,7 +809,7 @@ export async function editQueuedTurnInTransaction(
     workspaceId: input.workspaceId,
     controlLock: "already_locked",
   });
-  const session = await lockSession(db, input.workspaceId, input.sessionId);
+  let session = await lockSession(db, input.workspaceId, input.sessionId);
   const requestHash = canonicalSessionCommandHash({
     expectedTurnVersion: input.expectedTurnVersion,
     expectedDraftRevision: input.expectedDraftRevision,
@@ -817,6 +840,7 @@ export async function editQueuedTurnInTransaction(
       replay: true,
     };
   }
+  session = await requireNormalSessionMode(db, session);
   const draftRevision = existingDraft?.revision ?? 0;
   if (draftRevision !== input.expectedDraftRevision) {
     throw new QueueCommandConflictError("DRAFT_CHANGED", "Composer draft changed", {
@@ -995,6 +1019,7 @@ export async function steerQueuedTurnInTransaction(
       replay: true,
     };
   }
+  await requireNormalSessionMode(db, await lockSession(db, input.workspaceId, input.sessionId));
   if (input.actor.type === "agent_attempt") {
     await assertAgentCommandAuthorityInTransaction(db, {
       workspaceId: input.workspaceId,
@@ -1261,6 +1286,8 @@ export async function submitHumanPromptInTransaction(
       replay: true,
     };
   }
+
+  await requireNormalSessionMode(db, await lockSession(db, input.workspaceId, input.sessionId));
 
   const before = await evaluateSessionControl(db, input.workspaceId, input.sessionId, {
     workspaceControl,
@@ -1782,6 +1809,11 @@ export async function sendAgentMessageInTransaction(
   const effective = await evaluateSessionControl(db, input.workspaceId, input.targetSessionId, {
     workspaceControl,
   });
+  const realtimeActive = await sessionRealtimeIsActiveInTransaction(
+    db,
+    input.workspaceId,
+    input.targetSessionId,
+  );
   const now = new Date();
   const [update] = await db
     .insert(schema.sessionSystemUpdates)
@@ -1828,7 +1860,7 @@ export async function sendAgentMessageInTransaction(
     .returning({ id: schema.sessionEvents.id });
   if (!event) throw new SessionControlInvariantError("Agent message event was not inserted");
   const workflowId = session.temporalWorkflowId ?? `session-${session.id}`;
-  const runnable = session.activeTurnId === null && effective.state === "active";
+  const runnable = !realtimeActive && session.activeTurnId === null && effective.state === "active";
   const wake = runnable
     ? await registerInternalUpdateWakeInTransaction(db, {
         accountId: input.accountId,
@@ -1939,6 +1971,10 @@ export async function steerAgentSessionInTransaction(
       replay: true,
     };
   }
+  await requireNormalSessionMode(
+    db,
+    await lockSession(db, input.workspaceId, input.targetSessionId),
+  );
   await assertAgentCommandAuthorityInTransaction(db, {
     workspaceId: input.workspaceId,
     actor: input.actor,

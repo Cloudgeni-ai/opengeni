@@ -18,6 +18,10 @@ export type CodexRealtimeVoice =
   | "cove";
 
 export type CodexRealtimeWebrtcRequest = {
+  realtimeId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
   instructions?: string | undefined;
@@ -28,6 +32,48 @@ export type CodexRealtimeWebrtcResponse = {
   sdp: string;
   version: CodexRealtimeWebrtcVersion;
   model: "gpt-live-1-boulder-alpha";
+};
+
+export type SessionRealtimeModel = "gpt-live-1-boulder-alpha";
+export type SessionRealtimeState = "active" | "ended";
+export type SessionRealtimeEndReason = "user_stop" | "browser_unload" | "lease_expired";
+
+export type SessionRealtimeMode = {
+  id: string;
+  sessionId: string;
+  operationId: string;
+  browserInstanceId: string;
+  model: SessionRealtimeModel;
+  state: SessionRealtimeState;
+  version: number;
+  connectionEpoch: number;
+  leaseExpiresAt: string;
+  lastHeartbeatAt: string;
+  startedAt: string;
+  endedAt: string | null;
+  endReason: SessionRealtimeEndReason | null;
+};
+
+export type BeginSessionRealtimeRequest = {
+  operationId: string;
+  browserInstanceId: string;
+  ownerKey: string;
+  model: SessionRealtimeModel;
+};
+
+export type RenewSessionRealtimeRequest = {
+  browserInstanceId: string;
+  ownerKey: string;
+  expectedVersion: number;
+};
+
+export type EndSessionRealtimeRequest = RenewSessionRealtimeRequest & {
+  reason: Extract<SessionRealtimeEndReason, "user_stop" | "browser_unload">;
+};
+
+export type SessionRealtimeMutationResponse = {
+  mode: SessionRealtimeMode;
+  replay: boolean;
 };
 
 export type SessionStatus =
@@ -868,6 +914,8 @@ export const SESSION_EVENT_TYPES = [
   // Defensive bounded projection for malformed/legacy oversized envelopes.
   "session.event.envelope_omitted",
   "session.status.changed",
+  "session.realtime.started",
+  "session.realtime.ended",
   "session.requiresAction",
   "session.humanInput.requested",
   "session.context.compaction.requested",
