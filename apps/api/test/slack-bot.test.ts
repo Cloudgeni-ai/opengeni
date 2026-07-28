@@ -473,7 +473,7 @@ describe("OpenGeni Slack bot connection", () => {
       where workspace_id = ${workspace.workspaceId}
         and target_id = ${connection!.id}
         and action like 'slack_bot.%'
-      order by created_at`;
+      order by occurred_at, id`;
     expect(audits.map((audit) => audit.action)).toEqual(
       expect.arrayContaining([
         "slack_bot.channels.list",
