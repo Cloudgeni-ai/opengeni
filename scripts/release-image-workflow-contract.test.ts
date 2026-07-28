@@ -61,6 +61,8 @@ describe("release image workflow contract", () => {
     ]) {
       expect(candidate).toContain(identity);
     }
+    expect(candidate).toContain("docker/setup-qemu-action@");
+    expect(candidate.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
     expect(candidate).toContain("candidate-$SOURCE_SHA");
     expect(candidate).toContain("opengeni-candidate-${SOURCE_SHA}");
     expect(candidate).toContain("evidence/release-candidate.json");
@@ -376,5 +378,7 @@ ${parser}`,
     ]) {
       expect(imagesJob).toContain(identity);
     }
+    expect(imagesJob).toContain("docker/setup-qemu-action@");
+    expect(imagesJob.match(/platforms: linux\/amd64,linux\/arm64/g)).toHaveLength(5);
   });
 });

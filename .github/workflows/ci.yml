@@ -517,6 +517,9 @@ jobs:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.automation_head_sha || github.sha }}
           persist-credentials: false
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -533,7 +536,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: api
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: false
           tags: opengeni-api:ci
 
@@ -543,7 +546,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: worker
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: false
           tags: opengeni-worker:ci
 
@@ -553,7 +556,7 @@ jobs:
           context: .
           file: docker/opengeni.Dockerfile
           target: web
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: false
           tags: opengeni-web:ci
 
@@ -562,7 +565,7 @@ jobs:
         with:
           context: .
           file: docker/sandbox.Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: false
           tags: opengeni-sandbox:ci
 
@@ -571,7 +574,7 @@ jobs:
         with:
           context: agent
           file: agent/crates/opengeni-relay/Dockerfile
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           push: false
           tags: opengeni-relay:ci
 
