@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.20.0
+
+### Minor Changes
+
+- 06a5801: Add the backend workspace instruction-policy revision, activation, rollback, audit, API, and SDK control surface.
+
 ## 0.19.4
 
 ### Patch Changes
