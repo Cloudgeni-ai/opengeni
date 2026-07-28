@@ -139,7 +139,7 @@ describe("release schema contract", () => {
         (migrations.has("0129_workspace_instruction_policies.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "cabb6dfb946145d8eb1626acf246446460525cb85d34ef1db426d9da35470243",
+      "09369784952cec23c988cdf5cd794dc97ffdbd63b42e50f615ad3c3fbe6beceb",
     );
     expect(contract.latestMigration).toBe("0129_workspace_instruction_policies.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
@@ -254,7 +254,7 @@ describe("release schema contract", () => {
       deploymentMode: "rolling",
     });
     expect(migrations.get("0129_workspace_instruction_policies.sql")).toMatchObject({
-      sha256: "8c4b9de6c7109137560599f26e0a8bf7f30a791485550a840238f024d7581770",
+      sha256: "12226a4560dc1150ffe2c3549f821d2483cc4d4a09ef74747ed13376404fc7c5",
       deploymentMode: "rolling",
     });
   });
