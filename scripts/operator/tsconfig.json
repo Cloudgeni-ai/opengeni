@@ -3,5 +3,10 @@
   "compilerOptions": {
     "noEmit": true
   },
-  "include": ["turn-density-profile.ts", "reconcile-cold-lost-sandbox-blockers.ts"]
+  "include": [
+    "connected-machine-load-profile.ts",
+    "connected-machine-load-profile.test.ts",
+    "turn-density-profile.ts",
+    "reconcile-cold-lost-sandbox-blockers.ts"
+  ]
 }

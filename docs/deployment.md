@@ -328,6 +328,32 @@ skipping storage conformance leaves both upload and orphan cleanup unproven.
 
 The conformance command verifies API health, Prometheus metrics exposure, a real session run, event replay, SSE replay, manual scheduled-task dispatch, and file upload/download unless the corresponding `--skip-observability`, `--skip-agent`, `--skip-scheduled-tasks`, or `--skip-storage` flag is set. Skipped checks are explicit verification gaps, not proof that the skipped subsystem works.
 
+Profile the live API → NATS → Connected Machine → process → reply path with an
+existing idle machine-backed session:
+
+```bash
+bun run deployment:connected-machine-load -- \
+  --base-url https://opengeni.example.com \
+  --workspace-id 00000000-0000-0000-0000-000000000000 \
+  --session-id 00000000-0000-0000-0000-000000000000 \
+  --stages 1,10,25,50,100,200
+```
+
+The command runs a harmless marker command, warms every supplied session route,
+then applies a concurrency staircase. It reports request throughput, p50/p95/p99
+latency, and typed failure counts. Pass multiple `--session-id` values to spread
+the test over several machine-backed sessions. Use
+`--deployment-access-key` or `--product-token` only when the deployment enables
+that boundary; neither credential is printed.
+
+This test measures the Connected Machine control transport and host command
+admission. It does **not** measure model-provider capacity, full agent-turn
+memory, or useful development-task throughput. Use
+`scripts/operator/turn-density-profile.ts` for isolated turn-worker memory, and
+run a smaller representative set of real development tasks before choosing an
+active-turn concurrency target. A large number of durable idle sessions is not
+equivalent to the same number of simultaneously executing turns.
+
 For Azure Blob-backed deployments, no object host rewrite should be needed because upload/download URLs are public Azure Blob SAS URLs:
 
 ```bash
