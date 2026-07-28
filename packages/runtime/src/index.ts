@@ -1630,6 +1630,35 @@ export function appendToolspaceInstructions(composed: string, toolspaceAvailable
   return toolspaceAvailable ? `${composed} ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}` : composed;
 }
 
+const GIT_BINDING_DISCOVERY_DIRECTIVE =
+  "This managed sandbox has multiple credential bindings for at least one Git provider. Native Git selects credentials from the repository remote. For gh, glab, or az, run inside the intended attached repository so its origin selects the binding; when running elsewhere, inspect $HOME/.opengeni/git-bindings.json and set OPENGENI_GIT_BINDING to the listed credentialBindingId. The inventory contains identifiers and repository routes, never credential values. A binding marked git_http_broker is Git-only, so use the configured provider MCP tools for provider API operations on it.";
+
+/**
+ * Make multi-account provider-CLI selection discoverable to the model.
+ *
+ * Binding ids are opaque routing identifiers, not credentials. The detailed,
+ * secret-free repository mapping is materialized in the sandbox by the Git
+ * setup hook so prompts stay compact.
+ */
+export function appendGitCredentialBindingInstructions(
+  composed: string,
+  bindings: GitCredentialBindingSeed[] | undefined,
+  activeSandboxBackend?: Settings["sandboxBackend"],
+): string {
+  if (activeSandboxBackend === "selfhosted" || !bindings?.length) {
+    return composed;
+  }
+  const bindingsByProvider = new Map<GitCredentialProvider, Set<string>>();
+  for (const binding of bindings) {
+    const ids = bindingsByProvider.get(binding.provider) ?? new Set<string>();
+    ids.add(binding.credentialBindingId);
+    bindingsByProvider.set(binding.provider, ids);
+  }
+  return [...bindingsByProvider.values()].some((ids) => ids.size > 1)
+    ? `${composed} ${GIT_BINDING_DISCOVERY_DIRECTIVE}`
+    : composed;
+}
+
 /**
  * Appends the one-shot genesis title directive (genesis turn only), joined by
  * " " and always LAST so a white-label persona template or a per-session
@@ -1785,12 +1814,14 @@ export function buildOpenGeniAgent(
     //      when a toolspace token was minted for this turn (feature enabled + a
     //      per-turn seed — the mint gate, which includes selfhosted turns since
     //      they now receive the token too) — appendToolspaceInstructions,
-    //   3. + workspace memory working set, ONLY when the workspace setting is on
+    //   3. + managed-sandbox Git binding discovery, ONLY when one provider has
+    //      multiple credential bindings,
+    //   4. + workspace memory working set, ONLY when the workspace setting is on
     //      and the worker resolved a nonblank block — appendWorkspaceMemory,
-    //   4. + the per-session persona instructions (session-specific, so it
+    //   5. + the per-session persona instructions (session-specific, so it
     //      refines both the workspace persona and the substrate note),
-    //   5. + host context for this exact turn, when supplied,
-    //   6. + durable session-setting state (title present + child notification
+    //   6. + host context for this exact turn, when supplied,
+    //   7. + durable session-setting state (title present + child notification
     //      mode), when supplied by the worker,
     // The genesis title directive is deliberately NOT part of this persistent
     // string. runAgentStream injects it into the first model call only.
@@ -1798,13 +1829,17 @@ export function buildOpenGeniAgent(
       appendTurnInstructions(
         appendSessionInstructions(
           appendWorkspaceMemory(
-            appendToolspaceInstructions(
-              composeAgentInstructions(
-                options.instructionsTemplate ?? settings.agentInstructionsTemplate,
-                options.workspaceEnvironment,
-                options.rig,
+            appendGitCredentialBindingInstructions(
+              appendToolspaceInstructions(
+                composeAgentInstructions(
+                  options.instructionsTemplate ?? settings.agentInstructionsTemplate,
+                  options.workspaceEnvironment,
+                  options.rig,
+                ),
+                settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
               ),
-              settings.toolspaceEnabled && Boolean(options.toolspaceTokenSeed),
+              options.gitCredentialBindings,
+              options.activeSandboxBackend,
             ),
             options.workspaceMemory,
           ),
@@ -5850,6 +5885,7 @@ type RuntimeGitBindingDescriptor = {
   host: string;
   path: string;
   uri: string;
+  mountPath: string;
 };
 
 type RuntimeGitHttpBrokerRouteDescriptor = {
@@ -5902,8 +5938,59 @@ function runtimeGitBindingDescriptors(
       host: url.host.toLowerCase(),
       path,
       uri: resource.uri,
+      mountPath: `/workspace/${resourceMountPath(resource)}`,
     };
   });
+}
+
+function gitCredentialBindingInventoryCommandLines(
+  resources: Extract<ResourceRef, { kind: "repository" }>[],
+  bindings: GitCredentialBindingSeed[],
+): string[] {
+  type GitBindingInventoryTransport = "direct_token" | "git_http_broker";
+  type GitBindingInventoryEntry = {
+    credentialBindingId: string;
+    provider: GitCredentialProvider;
+    transport: GitBindingInventoryTransport;
+    repositories: Array<{ uri: string; mountPath: string }>;
+  };
+  const bindingTransports = new Map<string, GitBindingInventoryTransport>(
+    bindings.map((binding) => [
+      gitCredentialBindingKey(binding.provider, binding.credentialBindingId),
+      binding.transport?.kind === "http_broker" ? "git_http_broker" : "direct_token",
+    ]),
+  );
+  const entries = new Map<string, GitBindingInventoryEntry>();
+  for (const descriptor of runtimeGitBindingDescriptors(resources)) {
+    const key = gitCredentialBindingKey(descriptor.provider, descriptor.credentialBindingId);
+    const transport = bindingTransports.get(key);
+    if (!transport) continue;
+    const entry: GitBindingInventoryEntry = entries.get(key) ?? {
+      credentialBindingId: descriptor.credentialBindingId,
+      provider: descriptor.provider,
+      transport,
+      repositories: [],
+    };
+    entry.repositories.push({ uri: descriptor.uri, mountPath: descriptor.mountPath });
+    entries.set(key, entry);
+  }
+  const inventory = `${JSON.stringify(
+    {
+      version: 1,
+      bindings: [...entries.values()],
+    },
+    null,
+    2,
+  )}\n`;
+  return [
+    'git_binding_inventory="${OPENGENI_GIT_BINDINGS_FILE:-$HOME/.opengeni/git-bindings.json}"',
+    'mkdir -p "$(dirname "$git_binding_inventory")"',
+    'inventory_umask="$(umask)"',
+    "umask 077",
+    `printf '%s' ${shellQuote(inventory)} > "$git_binding_inventory.tmp.$$"`,
+    'mv -f "$git_binding_inventory.tmp.$$" "$git_binding_inventory"',
+    'umask "$inventory_umask"',
+  ];
 }
 
 function gitCredentialBindingKey(
@@ -6257,6 +6344,7 @@ function gitCredentialHelperCommandLines(
     .map(([provider]) => provider);
   return [
     ...gitCredentialTokenWriterCommandLines(bindings),
+    ...gitCredentialBindingInventoryCommandLines(resources, bindings),
     // Provision git/provider-CLI helpers at SETUP (runtime) before any clone
     // runs. Renewal updates only token files and deliberately leaves these
     // repository-specific host mappings intact.
@@ -6419,7 +6507,7 @@ function gitCredentialHelperCommandLines(
     '      *" $provider "*) printf \'%s\\n\' "$tool provider API authentication is host-brokered for this session; use the configured provider MCP tools" >&2; exit 2 ;;',
     "    esac",
     '    case " $multi_binding_providers " in',
-    '      *" $provider "*) printf \'%s\\n\' "Unable to select one of multiple $provider credentials; run inside an attached repository or set OPENGENI_GIT_BINDING" >&2; exit 2 ;;',
+    '      *" $provider "*) printf \'%s\\n\' "Unable to select one of multiple $provider credentials; run inside an attached repository, or inspect ${OPENGENI_GIT_BINDINGS_FILE:-$HOME/.opengeni/git-bindings.json} and set OPENGENI_GIT_BINDING" >&2; exit 2 ;;',
     "    esac",
     '    case "$provider" in',
     '      github) token_file="${OPENGENI_GIT_TOKEN_FILE:-$HOME/.opengeni/git-token}" ;;',
