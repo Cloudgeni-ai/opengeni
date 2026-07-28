@@ -68,6 +68,7 @@ import {
 } from "@opengeni/db";
 import { appendAndPublishEvents, publishDurableSessionEvents } from "@opengeni/events";
 import {
+  createSignedState,
   createGitHubAppInstallationToken,
   GitHubAppConfigurationError,
   githubAppMissingSettings,
@@ -82,7 +83,12 @@ import {
 } from "@opengeni/core";
 import { recordWorkspaceUsage, requireLimit } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
-import { listWorkspaceGitHubRepositories } from "../github-access";
+import {
+  githubBindingStatus,
+  listWorkspaceGitHubInstallationBindings,
+  listWorkspaceGitHubRepositories,
+} from "../github-access";
+import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -140,9 +146,8 @@ import type { ToolspaceMcpSurface } from "./toolspace";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
 
 export type McpServerOptions = {
-  // Origin of the HTTP request that reached the MCP route. Retained in the
-  // options ABI for browser-oriented tools; github_connect_link does not use
-  // it or mint state while new installation binding is disabled.
+  // Origin of the HTTP request that reached the MCP route. Browser-oriented
+  // tools use it only when no configured public base URL is available.
   requestOrigin?: string | null;
   toolspace?: ToolspaceMcpSurface | null;
   workspaceMemoryEnabled?: boolean | undefined;
@@ -229,7 +234,7 @@ export function buildOpenGeniMcpServer(
   registerWorkspaceOrchestrationTools(server, deps, grant, can, sessionId, toolspaceMode, json);
   registerVariableSetTools(server, deps, grant, can, json);
   if (can("github:use")) {
-    registerGitHubConnectTool(server, deps, json);
+    registerGitHubConnectTool(server, deps, grant, options, json);
     // TOKEN-BROKER (B1): the agent-refreshable git token. Session-scoped (keys off the
     // worker-signed sessionId claim so it mints for THIS session's repos), gated on
     // the same github:use capability as github_connect_link.
@@ -2031,15 +2036,18 @@ function registerVariableSetTools(
   }
 }
 
-// The tool remains registered for compatibility, but every new installation
-// binding entry point is fail-closed until a provider-supported authority
-// proof stronger than installation visibility is available.
-function registerGitHubConnectTool(server: McpServer, deps: ApiRouteDeps, json: JsonResult): void {
+function registerGitHubConnectTool(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  options: McpServerOptions,
+  json: JsonResult,
+): void {
   server.registerTool(
     "github_connect_link",
     {
       description:
-        "Report GitHub App connection availability. New installation binding is disabled until GitHub installation authority can be proven, so installUrl and linkUrl are null.",
+        "Report truthful GitHub App workspace binding status and, for a human grant with github:manage, return the fresh GitHub owner-consent link. Server App configuration alone is never reported as a usable binding.",
       inputSchema: {},
     },
     async () => {
@@ -2049,17 +2057,35 @@ function registerGitHubConnectTool(server: McpServer, deps: ApiRouteDeps, json: 
       if (missing.length > 0 || !slug) {
         return json({
           configured: false,
+          status: "disabled",
           appSlug: slug,
           installUrl: null,
           linkUrl: null,
           missing,
         });
       }
+      const installations = await listWorkspaceGitHubInstallationBindings(deps, grant.workspaceId);
+      const status = githubBindingStatus(true, installations);
+      const baseUrl = githubBrowserBaseUrl(settings, options.requestOrigin);
+      const state =
+        baseUrl && hasPermission(grant.permissions, "github:manage")
+          ? createSignedState(deps.githubStateSecret, {
+              accountId: grant.accountId,
+              workspaceId: grant.workspaceId,
+              intent: "installation_authority",
+              ...githubBrowserGrantClaims(settings, grant),
+            })
+          : null;
+      const connectUrl = state
+        ? `${baseUrl}/v1/workspaces/${grant.workspaceId}/github/connect?state=${encodeURIComponent(state)}`
+        : null;
       return json({
         configured: true,
+        status,
         appSlug: slug,
-        installUrl: null,
-        linkUrl: null,
+        installUrl: connectUrl,
+        linkUrl: connectUrl,
+        installations,
         missing: [],
       });
     },

@@ -86,10 +86,10 @@ type ProcessFixture = WorkspaceIds & {
 
 async function freshWorkspace(): Promise<WorkspaceIds> {
   const [account] = await admin<{ id: string }[]>`
-    insert into managed_accounts (name) values ('ope-118-test') returning id`;
+    insert into managed_accounts (name) values ('retained-process-test') returning id`;
   const [workspace] = await admin<{ id: string }[]>`
     insert into workspaces (account_id, name)
-    values (${account!.id}, 'ope-118-test') returning id`;
+    values (${account!.id}, 'retained-process-test') returning id`;
   await admin`
     insert into workspace_inference_controls (workspace_id, account_id)
     values (${workspace!.id}, ${account!.id})`;
@@ -125,11 +125,11 @@ async function freshTurn(ids: WorkspaceIds): Promise<TurnFixture> {
     workflowId: `session-${session.id}`,
     workflowRunId: crypto.randomUUID(),
     attemptId,
-    dispatchId: `ope-118-${crypto.randomUUID()}`,
+    dispatchId: `retained-process-${crypto.randomUUID()}`,
     trigger: { kind: "next" },
   });
   if (claim.action !== "claimed")
-    throw new Error(`Could not claim OPE-118 fixture: ${claim.reason}`);
+    throw new Error(`Could not claim retained-process fixture: ${claim.reason}`);
   return {
     sessionId: session.id,
     turnId: claim.turn.id,
@@ -143,7 +143,7 @@ async function insertWarmLease(
   ids: WorkspaceIds,
   input: { sessionId: string; holderId: string; holderKind: "turn" | "direct" },
 ): Promise<{ leaseId: string; instanceId: string }> {
-  const instanceId = `ope-118-box-${crypto.randomUUID()}`;
+  const instanceId = `retained-process-box-${crypto.randomUUID()}`;
   const [lease] = await admin<{ id: string }[]>`
     insert into sandbox_leases (
       account_id, workspace_id, sandbox_group_id, liveness, refcount,
@@ -155,7 +155,7 @@ async function insertWarmLease(
       'modal', ${JSON.stringify({
         backendId: "modal",
         sessionState: { providerState: { sandboxId: instanceId } },
-        workspaceArchive: "OPE118_UNCHANGED_ARCHIVE",
+        workspaceArchive: "UNCHANGED_ARCHIVE",
       })}::text::jsonb, now() + interval '10 minutes'
     ) returning id`;
   await admin`
@@ -218,7 +218,7 @@ async function promoteTurnProcess(
     holderId: attempt.holderId,
     holderKind: "turn",
   });
-  const operation = `ope118Turn-${crypto.randomUUID()}`;
+  const operation = `retainedProcessTurn-${crypto.randomUUID()}`;
   const admission = await advanceWorkspaceGeneration(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -285,7 +285,7 @@ async function promoteDirectProcess(): Promise<ProcessFixture> {
     holderId,
     holderKind: "direct",
   });
-  const operation = `ope118Direct-${crypto.randomUUID()}`;
+  const operation = `retainedProcessDirect-${crypto.randomUUID()}`;
   const admission = await advanceWorkspaceGenerationForDirectRequest(db, {
     accountId: ids.accountId,
     workspaceId: ids.workspaceId,
@@ -353,7 +353,7 @@ function reaperServices(observability: Observability): () => Promise<ActivitySer
 
 async function runReaper(probe: RetainedProcessProbeFn): Promise<Observability> {
   const observability = createObservability(SETTINGS, {
-    component: "worker-ope-118-test",
+    component: "worker-retained-process-test",
   });
   const activities = createSandboxLeaseActivities(reaperServices(observability), {
     probeRetainedProcess: probe,
@@ -442,7 +442,7 @@ afterAll(async () => {
   await shared?.release();
 }, 180_000);
 
-describe("OPE-118 retained-process terminal-owner reconciliation", () => {
+describe("retained-process terminal-owner reconciliation", () => {
   test("classifies only exact provider exit/loss banners and defers running or malformed output", () => {
     expect(
       classifyRetainedProcessPollResult(
@@ -537,6 +537,235 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
     }
   }, 60_000);
 
+  test("restricted app TEMP shadows cannot influence privileged claims or inventories", async () => {
+    if (!available) return;
+    const fixture = await promoteDirectProcess();
+    const restricted = postgres(shared!.appUrl, { max: 1, prepare: false });
+    try {
+      const result = await restricted.begin(async (tx) => {
+        await tx`set local search_path = pg_temp, public, opengeni_private, pg_catalog`;
+        const [identity] = await tx<
+          {
+            currentUser: string;
+            superuser: boolean;
+            bypassRls: boolean;
+            hasTemp: boolean;
+            forceRls: boolean;
+          }[]
+        >`
+          select current_user as "currentUser", role.rolsuper as "superuser",
+            role.rolbypassrls as "bypassRls",
+            has_database_privilege(current_user, current_database(), 'TEMP') as "hasTemp",
+            retained.relforcerowsecurity as "forceRls"
+          from pg_catalog.pg_roles role
+          cross join pg_catalog.pg_class retained
+          join pg_catalog.pg_namespace namespace on namespace.oid = retained.relnamespace
+          where role.rolname = current_user
+            and namespace.nspname = 'public'
+            and retained.relname = 'sandbox_retained_processes'`;
+
+        await tx.unsafe(`
+          CREATE TEMP TABLE privileged_hijack_calls (helper text NOT NULL);
+          CREATE FUNCTION pg_temp.now() RETURNS timestamptz LANGUAGE plpgsql AS $shadow$
+          BEGIN
+            INSERT INTO pg_temp.privileged_hijack_calls VALUES ('now');
+            RETURN '1900-01-01 00:00:00+00'::timestamptz;
+          END $shadow$;
+          CREATE FUNCTION pg_temp.set_config(text, text, boolean) RETURNS text
+          LANGUAGE plpgsql AS $shadow$
+          BEGIN
+            INSERT INTO pg_temp.privileged_hijack_calls VALUES ('set_config');
+            RETURN $2;
+          END $shadow$;
+          CREATE FUNCTION pg_temp.make_interval(secs double precision) RETURNS interval
+          LANGUAGE plpgsql AS $shadow$
+          BEGIN
+            INSERT INTO pg_temp.privileged_hijack_calls VALUES ('make_interval');
+            RETURN interval '100 years';
+          END $shadow$;
+
+          CREATE TEMP TABLE sandbox_retained_processes (
+            id uuid PRIMARY KEY,
+            account_id uuid,
+            workspace_id uuid,
+            session_id uuid,
+            state text,
+            reconcile_after timestamptz,
+            started_at timestamptz,
+            owner_actor_kind text,
+            owner_turn_id uuid,
+            owner_attempt_id uuid,
+            reconcile_claim_id uuid,
+            reconcile_claimed_at timestamptz,
+            reconcile_attempts integer,
+            last_reconcile_outcome text
+          );
+          CREATE TEMP TABLE session_turns (workspace_id uuid, id uuid, status text);
+          CREATE TEMP TABLE session_turn_attempts (
+            workspace_id uuid, id uuid, state text, outcome text
+          );
+          CREATE TEMP TABLE sandbox_leases (backend text, liveness text, expires_at timestamptz);
+          INSERT INTO sandbox_retained_processes VALUES (
+            '00000000-0000-0000-0000-000000000001',
+            '00000000-0000-0000-0000-000000000002',
+            '00000000-0000-0000-0000-000000000003',
+            '00000000-0000-0000-0000-000000000004',
+            'active', pg_catalog.now() - interval '1 day',
+            pg_catalog.now() - interval '1 day',
+            'direct', NULL, NULL, NULL, NULL, 0, NULL
+          );
+          INSERT INTO sandbox_leases VALUES (
+            'shadow', 'draining', pg_catalog.now() - interval '1 day'
+          );
+        `);
+
+        const functions = await tx<{ name: string; config: string[] | null; definition: string }[]>`
+          select procedure.proname as name, procedure.proconfig as config,
+            pg_catalog.pg_get_functiondef(procedure.oid) as definition
+          from pg_catalog.pg_proc procedure
+          join pg_catalog.pg_namespace namespace on namespace.oid = procedure.pronamespace
+          where namespace.nspname = 'opengeni_private'
+            and procedure.proname in (
+              'claim_terminal_retained_processes',
+              'count_active_retained_processes_by_owner_state',
+              'count_expired_draining_sandbox_leases',
+              'validate_sandbox_retained_process_v2'
+            )
+          order by procedure.proname`;
+        const owners = await tx<
+          { ownerState: string; activeCount: number; terminalOwnerCount: number }[]
+        >`
+          select owner_state as "ownerState", active_count::integer as "activeCount",
+            terminal_owner_count::integer as "terminalOwnerCount"
+          from opengeni_private.count_active_retained_processes_by_owner_state()`;
+        const expired = await tx`
+          select * from opengeni_private.count_expired_draining_sandbox_leases()`;
+        const claims = await tx<{ processId: string }[]>`
+          select process_id as "processId"
+          from opengeni_private.claim_terminal_retained_processes(
+            ${crypto.randomUUID()}::uuid, 1, 300000
+          )`;
+        const [shadow] = await tx<{ outcome: string | null }[]>`
+          select last_reconcile_outcome as outcome
+          from pg_temp.sandbox_retained_processes`;
+        const [hijackCalls] = await tx<{ count: number }[]>`
+          select count(*)::integer as count from pg_temp.privileged_hijack_calls`;
+        return { identity, functions, owners, expired, claims, shadow, hijackCalls };
+      });
+
+      expect(result.identity).toEqual({
+        currentUser: "opengeni_app",
+        superuser: false,
+        bypassRls: false,
+        hasTemp: true,
+        forceRls: true,
+      });
+      expect(result.functions).toHaveLength(4);
+      for (const fn of result.functions) {
+        expect(fn.config).toContain("search_path=pg_catalog");
+        expect(fn.definition).not.toContain("pg_temp");
+      }
+      expect(result.owners).toContainEqual({
+        ownerState: "direct",
+        activeCount: 1,
+        terminalOwnerCount: 1,
+      });
+      expect(result.expired).toHaveLength(0);
+      expect(result.claims).toEqual([{ processId: fixture.process.id }]);
+      expect(result.shadow).toEqual({ outcome: null });
+      expect(result.hijackCalls).toEqual({ count: 0 });
+    } finally {
+      await restricted.end().catch(() => undefined);
+    }
+  }, 60_000);
+
+  test("large corpus keeps candidate joins batch-capped and inventories on live-subset indexes", async () => {
+    if (!available) return;
+    const fixtures: ProcessFixture[] = [];
+    for (let offset = 0; offset < 128; offset += 8) {
+      fixtures.push(
+        ...(await Promise.all(
+          Array.from({ length: 8 }, () => promoteTurnProcess({ outcome: "completed" })),
+        )),
+      );
+    }
+    await admin`
+      update sandbox_leases set liveness = 'draining', expires_at = now() - interval '2 hours'
+      where id = ${fixtures[0]!.leaseId}`;
+
+    const plans = await admin.begin(async (tx) => {
+      await tx`set local enable_seqscan = off`;
+      const candidates = await tx`
+        explain (analyze, buffers, format json, costs off, summary off, timing off)
+        with candidate_window as materialized (
+          select process.id, process.workspace_id, process.owner_actor_kind,
+            process.owner_turn_id, process.owner_attempt_id,
+            process.reconcile_after as due_at, process.started_at
+          from sandbox_retained_processes process
+          where process.state = 'active' and process.reconcile_after <= pg_catalog.now()
+          order by process.reconcile_after, process.started_at, process.id
+          for update of process skip locked
+          limit 7
+        )
+        select candidate.id, turn_row.status, attempt.state, attempt.outcome
+        from candidate_window candidate
+        left join lateral (
+          select source_turn.status from session_turns source_turn
+          where source_turn.workspace_id = candidate.workspace_id
+            and source_turn.id = candidate.owner_turn_id
+          limit 1
+        ) turn_row on true
+        left join lateral (
+          select source_attempt.state, source_attempt.outcome
+          from session_turn_attempts source_attempt
+          where source_attempt.workspace_id = candidate.workspace_id
+            and source_attempt.id = candidate.owner_attempt_id
+          limit 1
+        ) attempt on true`;
+      await tx`set local enable_bitmapscan = off`;
+      await tx`set local enable_sort = off`;
+      const retainedInventory = await tx`
+        explain (format json, costs off)
+        select process.owner_actor_kind, process.workspace_id,
+          process.owner_turn_id, process.owner_attempt_id
+        from sandbox_retained_processes process
+        where process.state = 'active' and process.owner_actor_kind = 'turn'
+        order by process.owner_actor_kind, process.workspace_id,
+          process.owner_turn_id, process.owner_attempt_id`;
+      const leaseInventory = await tx`
+        explain (format json, costs off)
+        select lease.backend, lease.expires_at
+        from sandbox_leases lease
+        where lease.liveness = 'draining' and lease.expires_at < pg_catalog.now()`;
+      return { candidates, retainedInventory, leaseInventory };
+    });
+
+    const candidatePlan = JSON.stringify(plans.candidates);
+    expect(candidatePlan).toContain("sandbox_retained_processes_reconcile_due_idx");
+    expect(candidatePlan).toContain('"Node Type":"Limit"');
+    expect(candidatePlan).toContain('"Actual Rows":7');
+    expect(candidatePlan).toMatch(/session_turn_attempts_(?:workspace_id_uq|pkey)/);
+    expect(candidatePlan).not.toContain('"Actual Loops":128');
+    expect(JSON.stringify(plans.retainedInventory)).toContain(
+      "sandbox_retained_processes_active_inventory_idx",
+    );
+    expect(JSON.stringify(plans.leaseInventory)).toContain(
+      "sandbox_leases_expired_draining_inventory_idx",
+    );
+
+    const claimId = crypto.randomUUID();
+    const claims = await claimTerminalRetainedProcesses(db, {
+      claimId,
+      limit: 7,
+      claimTtlMs: 300_000,
+    });
+    expect(claims).toHaveLength(7);
+    const [mutationCount] = await admin<{ count: number }[]>`
+      select count(*)::integer as count from sandbox_retained_processes
+      where reconcile_claim_id = ${claimId}`;
+    expect(mutationCount).toEqual({ count: 7 });
+  }, 120_000);
+
   test("running, timeout, unknown, and probe errors fail closed without workspace or snapshot loss", async () => {
     if (!available) return;
     const fixture = await promoteTurnProcess({ outcome: "completed" });
@@ -587,7 +816,7 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
         ${fixture.process.leaseEpoch}, ${fixture.process.providerBackend},
         ${fixture.process.providerInstanceId}, ${fixture.process.routeKind},
         ${fixture.process.routeTargetId}, ${fixture.process.routeEpoch}, 120, 40,
-        '/bin/bash', '/workspace', 'open', 'ope-118-test'
+        '/bin/bash', '/workspace', 'open', 'retained-process-test'
       )`;
     const proof: RetainedProcessProviderProof = {
       outcome: "exited",
@@ -738,7 +967,7 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
 
     await admin`
       update sandbox_leases set lease_epoch = lease_epoch + 1,
-        instance_id = 'ope-118-successor'
+        instance_id = 'retained-process-successor'
       where id = ${fixture.leaseId}`;
     await expect(
       settleRetainedProcess(db, {
@@ -758,7 +987,7 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
       admissionOutcome: "retained",
       processHolders: 1,
       leaseEpoch: expected.leaseEpoch + 1,
-      instanceId: "ope-118-successor",
+      instanceId: "retained-process-successor",
     });
   }, 60_000);
 
@@ -804,10 +1033,13 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
       }),
     ).rejects.toBeInstanceOf(SandboxWorkspaceMutationFencedError);
 
-    // Model a worker crash after proof COMMIT and before settlement. Claim age
-    // restores coordination only; the checkpointed exact proof remains authority.
+    // Model a worker crash after proof COMMIT and before settlement. The persisted
+    // reconcile_after claim expiry restores coordination only; the checkpointed
+    // exact proof remains authority.
     await admin`
-      update sandbox_retained_processes set reconcile_claimed_at = now() - interval '6 minutes'
+      update sandbox_retained_processes set
+        reconcile_claimed_at = now() - interval '6 minutes',
+        reconcile_after = now() - interval '1 minute'
       where id = ${fixture.process.id}`;
     let probes = 0;
     await runReaper(async () => {
@@ -848,7 +1080,8 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
     );
     await admin`
       update sandbox_retained_processes set reconcile_claim_id = null,
-        reconcile_claimed_at = null
+        reconcile_claimed_at = null,
+        reconcile_after = now() - interval '1 minute'
       where id in (${fixtures[0]!.process.id}, ${fixtures[1]!.process.id})`;
 
     const [left, right] = await Promise.all([
@@ -891,10 +1124,10 @@ describe("OPE-118 retained-process terminal-owner reconciliation", () => {
   });
 });
 
-describe("OPE-118 retained-process metric contracts", () => {
+describe("retained-process metric contracts", () => {
   test("normalizes fixed labels, zeros absent series, records growth, failures, and expired drain state", async () => {
     const observability = createObservability(SETTINGS, {
-      component: "worker-ope-118-metrics",
+      component: "worker-retained-process-metrics",
     });
     recordRetainedProcessInventoryGauges(observability, [
       { ownerState: "completed", activeCount: 2, terminalOwnerCount: 2 },

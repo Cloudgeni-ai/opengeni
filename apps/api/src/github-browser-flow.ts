@@ -4,10 +4,10 @@ import { hasPermission } from "@opengeni/core";
 import type { GitHubSignedStatePayload } from "@opengeni/github";
 
 /**
- * Dormant compatibility helpers for tests and decoding already-issued browser
- * handoffs. No production route imports this module. Its signed claims preserve
- * a prior OpenGeni grant across a redirect; they do not prove that GitHub
- * authorizes the human to install, configure, or bind an App installation.
+ * Bounded configured-token browser handoff. These signed claims preserve only
+ * the exact OpenGeni github:manage grant across GitHub redirects; the callback
+ * independently proves current GitHub personal/organization ownership. This
+ * state must never be interpreted as GitHub installation authority.
  */
 export const githubBrowserGrantMaxAgeSeconds = 10 * 60;
 

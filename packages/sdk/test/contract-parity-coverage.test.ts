@@ -36,7 +36,9 @@ import {
   RetainedOutputUnavailableReason as ContractRetainedOutputUnavailableReason,
   GitHubAppManifestCreate as ContractGitHubAppManifestCreate,
   GitHubAppInfo as ContractGitHubAppInfo,
+  GitHubBindingStatus as ContractGitHubBindingStatus,
   GitHubInstallationBinding as ContractGitHubInstallationBinding,
+  GitHubInstallationLifecycle as ContractGitHubInstallationLifecycle,
   GitHubRepository as ContractGitHubRepository,
   GitHubRepositoryScope as ContractGitHubRepositoryScope,
   PackInstallation as ContractPackInstallation,
@@ -106,7 +108,9 @@ import type {
   RetainedOutputUnavailableReason,
   GitHubRepository,
   GitHubAppInfo,
+  GitHubBindingStatus,
   GitHubInstallationBinding,
+  GitHubInstallationLifecycle,
   GitHubRepositoryScope,
   PackInstallation,
   PackInstallationStatus,
@@ -146,7 +150,12 @@ describe("SDK / contracts parity (full coverage)", () => {
 
   test("GitHub installation binding literals and response shapes match", () => {
     const scopes: readonly GitHubRepositoryScope[] = ContractGitHubRepositoryScope.options;
+    const statuses: readonly GitHubBindingStatus[] = ContractGitHubBindingStatus.options;
+    const lifecycles: readonly GitHubInstallationLifecycle[] =
+      ContractGitHubInstallationLifecycle.options;
     expect(scopes).toEqual(ContractGitHubRepositoryScope.options);
+    expect(statuses).toEqual(ContractGitHubBindingStatus.options);
+    expect(lifecycles).toEqual(ContractGitHubInstallationLifecycle.options);
     const acceptBinding = (
       value: z.infer<typeof ContractGitHubInstallationBinding>,
     ): GitHubInstallationBinding => value;

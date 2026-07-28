@@ -376,7 +376,7 @@ lease epoch, route target/epoch, and provider session; exact replays are
 idempotent and cannot touch a successor. This reconciliation never calls a
 provider terminate/kill API and never captures or rotates a workspace snapshot.
 The app exports bounded owner-state/backlog, reconciliation, and expired-drain
-metrics; dashboard/PromQL integration is coordinated separately with OPE-115.
+metrics; dashboard/PromQL integration is coordinated separately.
 
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when

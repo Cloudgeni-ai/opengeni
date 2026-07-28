@@ -5,6 +5,7 @@
 //   /workspaces/:id/agent                    → sessions redirect (legacy URL)
 //   /workspaces/:id/sessions                 → sessions index + create
 //   /workspaces/:id/sessions/:sessionId      → session view (queue/goal rail)
+//   /sessions/:sessionId                     → authorized compatibility redirect
 //   /workspaces/:id/variable-sets            → variable sets + variables
 //   /workspaces/:id/rigs                     → rigs list + create
 //   /workspaces/:id/rigs/:rigId              → rig detail (overview/setup/versions/changes)
@@ -60,6 +61,10 @@ const LazyRigDetailRoute = lazyRouteComponent(
 );
 const LazySchedulesRoute = lazyRouteComponent(() => import("@/routes/schedules"), "SchedulesRoute");
 const LazySessionRoute = lazyRouteComponent(() => import("@/routes/session"), "SessionRoute");
+const LazySessionDeepLinkRoute = lazyRouteComponent(
+  () => import("@/routes/session-deep-link"),
+  "SessionDeepLinkRoute",
+);
 const LazySessionsIndexRoute = lazyRouteComponent(
   () => import("@/routes/sessions-index"),
   "SessionsIndexRoute",
@@ -81,6 +86,11 @@ const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
   component: RootIndexRoute,
+});
+const sessionDeepLinkRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "sessions/$sessionId",
+  component: SessionDeepLink,
 });
 // Stripe checkout return target. The API bakes `/billing?checkout=…` into every
 // checkout session's success_url/cancel_url; this top-level route forwards the
@@ -239,6 +249,7 @@ const workspaceAccountRoute = createRoute({
 });
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  sessionDeepLinkRoute,
   billingReturnRoute,
   deviceRoute,
   resetPasswordRoute,
@@ -309,6 +320,11 @@ function SessionsIndex() {
 function SessionView() {
   const { workspaceId, sessionId } = workspaceSessionRoute.useParams();
   return <LazySessionRoute workspaceId={workspaceId} sessionId={sessionId} />;
+}
+
+function SessionDeepLink() {
+  const { sessionId } = sessionDeepLinkRoute.useParams();
+  return <LazySessionDeepLinkRoute sessionId={sessionId} />;
 }
 
 function VariableSets() {

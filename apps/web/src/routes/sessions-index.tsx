@@ -527,6 +527,7 @@ function WorkspaceRepositoryPicker({
   return (
     <RepositoryContextPicker
       configured={context.githubStatus?.configured === true}
+      status={context.githubStatus?.status ?? "disabled"}
       installUrl={context.githubStatus?.installUrl ?? null}
       linkUrl={context.githubStatus?.linkUrl ?? null}
       installations={context.githubStatus?.installations ?? []}
