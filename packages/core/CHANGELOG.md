@@ -1,5 +1,25 @@
 # @opengeni/core
 
+## 0.12.0
+
+### Minor Changes
+
+- 5511c24: Add a secure workspace-shared OpenGeni Slack bot connection with schema-backed verified-install eligibility, immutable team/bot identity across reinstall, idempotent post-operation convergence, exact scope validation, first-party channel/history/user/post tools, explicit scheduled-task routing and rebinding, and install/reinstall/recovery UI and documentation.
+
+### Patch Changes
+
+- fd764e0: Route direct file, Git, and terminal calls to a machine-targeted session from the first request without creating a phantom provider lease, and make token-driven agent installation replace stale enrollment credentials.
+- Updated dependencies [06a5801]
+- Updated dependencies [9326255]
+- Updated dependencies [5511c24]
+  - @opengeni/contracts@0.20.0
+  - @opengeni/db@0.13.0
+  - @opengeni/config@0.7.7
+  - @opengeni/documents@0.2.37
+  - @opengeni/events@0.3.28
+  - @opengeni/runtime@0.13.11
+  - @opengeni/storage@0.2.31
+
 ## 0.11.8
 
 ### Patch Changes
