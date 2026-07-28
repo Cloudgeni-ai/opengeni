@@ -49,8 +49,12 @@ jobs:
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test -n "$EXPECTED_PACKAGES"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$GITHUB_REF" = "refs/heads/main"
           git fetch --no-tags origin main
-          test "$(git rev-parse origin/main)" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main || {
+            echo "source_sha must be reachable from current main" >&2
+            exit 1
+          }
           if find .changeset -maxdepth 1 -type f -name '*.md' ! -name README.md -print -quit | grep -q .; then
             echo "Version PR has not consumed every changeset" >&2
             exit 1
