@@ -1,14 +1,14 @@
-// Progressive connector disclosure for the ChatGPT/Codex backend — parity with
-// how the Codex CLI surfaces its ~217 `codex_apps` connector tools WITHOUT paying
-// their schemas in every turn's context.
+// Progressive MCP disclosure for the ChatGPT/Codex backend — parity with how the
+// Codex CLI surfaces its ~217 `codex_apps` connector tools WITHOUT paying their
+// schemas in every turn's context, while applying the same bounded search seam to
+// other selected MCP servers.
 //
-// WHY. OpenGeni connects the codex_apps MCP server as a CLIENT and the SDK
-// materializes EVERY connector tool as a `function` tool in request.tools[] on
-// every codex turn (~217 tools ≈ tens of thousands of context tokens). The Codex
-// CLI instead uses the backend's NATIVE tool-search: the model gets one compact
-// search tool + all connector tools flagged `defer_loading:true` (schemas dropped
-// from model context), searches by capability, and only the matched tools are
-// disclosed back and become callable.
+// WHY. OpenGeni connects MCP servers as CLIENTs and the SDK materializes every
+// selected MCP tool as a `function` tool in request.tools[] on a Codex turn. The
+// Codex CLI instead uses the backend's NATIVE tool-search: the model gets one
+// compact search tool + deferred MCP tools (schemas dropped from model context),
+// searches by capability, and only matched tools are disclosed back and become
+// callable.
 //
 // PROVEN LIVE (Phase 0 probe against /codex/responses on gpt-5.6-sol): the backend
 // HONORS `defer_loading:true` on function tools — 50 fat tools dropped input_tokens
@@ -16,19 +16,22 @@
 // disclosed it (V3). The model emits `tool_search_call` on our slug.
 //
 // HOW. We wrap the agent's `getAllTools` (codex turns only, flag-gated): tag every
-// `codex_apps__*` function tool `deferLoading = true` (converTool then serializes
+// non-mandatory MCP function tool `deferLoading = true` (converTool then serializes
 // `defer_loading:true`, dropping the schema from context) and append one
 // client-executed `toolSearchTool`. The SDK routes a `tool_search_call` to our
 // executor (ClientToolSearchExecutor), which BM25-ranks the deferred pool and
-// returns the matched tools BY REFERENCE — the SDK emits the `tool_search_output`
-// that discloses them; the subsequent `function_call` resolves through the normal
-// PrefixedMcpServer.callTool path (auth + name-sanitize + structuredContent inline
-// all unchanged). Invocation is untouched; only the wire tool-set shrinks.
+// returns matched tools BY REFERENCE — the SDK emits the `tool_search_output` that
+// discloses them; the subsequent `function_call` resolves through the normal
+// `PrefixedMcpServer.callTool` path (auth + name-sanitize + structuredContent
+// inline all unchanged). Invocation is untouched; only the wire tool-set shrinks.
 
 import { toolSearchTool, type Tool } from "@openai/agents";
 import {
   MCP_MAX_TOOL_DEFINITION_BYTES,
+  MCP_MAX_TOOL_SEARCH_DESCRIPTION_BYTES,
   MCP_MAX_TOOL_SEARCH_DISCLOSURE_BYTES,
+  MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH,
+  MCP_MAX_TOOL_SEARCH_SOURCES,
   mcpSerializedSizeBytes,
 } from "./mcp-network";
 
@@ -48,6 +51,77 @@ export function isCodexAppsFunctionTool(
     typeof (tool as { name?: unknown }).name === "string" &&
     (tool as { name: string }).name.startsWith(CODEX_APPS_TOOL_PREFIX)
   );
+}
+
+const MCP_TOOL_NAME_SEPARATOR = "__";
+const MANDATORY_FIRST_PARTY_MCP_SERVER_ID = "opengeni";
+
+/** Return the server id stamped onto a runtime MCP function tool name. */
+function mcpServerIdForTool(tool: unknown): string | null {
+  if (!tool || typeof tool !== "object") return null;
+  if ((tool as { type?: unknown }).type !== "function") return null;
+  const name = (tool as { name?: unknown }).name;
+  if (typeof name !== "string") return null;
+  const separator = name.indexOf(MCP_TOOL_NAME_SEPARATOR);
+  if (separator <= 0) return null;
+  return name.slice(0, separator);
+}
+
+/**
+ * True for non-mandatory MCP function tools on the effective agent surface.
+ * The prefix is the same runtime namespace used by PrefixedMcpServer; this
+ * intentionally does not inspect the global registry, connection metadata, or
+ * credentials, so search cannot widen the already-authorized tool set.
+ */
+export function isSearchableMcpFunctionTool(
+  tool: unknown,
+): tool is Tool & { name: string; deferLoading?: boolean } {
+  const serverId = mcpServerIdForTool(tool);
+  return serverId !== null && serverId !== MANDATORY_FIRST_PARTY_MCP_SERVER_ID;
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value) <= maxBytes) return value;
+  let output = "";
+  for (const character of value) {
+    const candidate = output + character;
+    if (Buffer.byteLength(candidate) > maxBytes) break;
+    output = candidate;
+  }
+  return output;
+}
+
+function searchSourceForTool(tool: Tool): string | null {
+  const serverId = mcpServerIdForTool(tool);
+  return serverId && serverId !== MANDATORY_FIRST_PARTY_MCP_SERVER_ID
+    ? truncateUtf8(serverId, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH)
+    : null;
+}
+
+function searchSourcesForTools(
+  connectorNamespaces: ReadonlySet<string>,
+  tools: readonly Tool[],
+): Set<string> {
+  const sources = new Set<string>();
+  for (const source of connectorNamespaces) {
+    if (typeof source !== "string" || source.length === 0) continue;
+    if (sources.size >= MCP_MAX_TOOL_SEARCH_SOURCES) break;
+    sources.add(truncateUtf8(source, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH));
+  }
+  for (const tool of tools) {
+    // Codex connector labels come from the transport's original namespace set
+    // (for example, `gmail`), not from the synthetic `codex_apps__` prefix.
+    // Keep that authoritative path intact; derive fallback labels only for
+    // directly materialized non-Codex MCP tools such as selected Slack tools.
+    const source =
+      isSearchableMcpFunctionTool(tool) && !isCodexAppsFunctionTool(tool)
+        ? searchSourceForTool(tool)
+        : null;
+    if (!source || sources.has(source)) continue;
+    if (sources.size >= MCP_MAX_TOOL_SEARCH_SOURCES) break;
+    sources.add(source);
+  }
+  return sources;
 }
 
 // Minimal English stopword set: query phrasings like "send an email to someone"
@@ -211,11 +285,23 @@ export function renderSearchToolDescription(connectorNamespaces: ReadonlySet<str
     "rather than guessing exact tool names. Returns the matching connector tools, which then become callable.";
   const sources = Array.from(connectorNamespaces)
     .filter((n) => typeof n === "string" && n.length > 0)
+    .slice(0, MCP_MAX_TOOL_SEARCH_SOURCES)
+    .map((source) => truncateUtf8(source, MCP_MAX_TOOL_SEARCH_SOURCE_LABEL_LENGTH))
+    .filter(Boolean)
     .sort();
   if (sources.length === 0) {
     return `${base}\nConnected sources: none currently available.`;
   }
-  return `${base}\nYou have access to tools from the following sources:\n${sources.map((s) => `- ${s}`).join("\n")}`;
+  const header = `${base}\nYou have access to tools from the following sources:`;
+  const lines: string[] = [];
+  for (const source of sources) {
+    const candidate = `${header}${[...lines, `- ${source}`].map((line) => `\n${line}`).join("")}`;
+    if (Buffer.byteLength(candidate) > MCP_MAX_TOOL_SEARCH_DESCRIPTION_BYTES) break;
+    lines.push(`- ${source}`);
+  }
+  return lines.length > 0
+    ? `${header}\n${lines.join("\n")}`
+    : `${base}\nConnected sources: none currently available.`;
 }
 
 const SEARCH_TOOL_PARAMETERS = {
@@ -232,7 +318,7 @@ const SEARCH_TOOL_PARAMETERS = {
 } as const;
 
 /**
- * The client tool-search executor: BM25 over the deferred codex_apps pool from the
+ * The client tool-search executor: BM25 over the deferred MCP pool from the
  * turn's live `availableTools`, returning matched tools BY REFERENCE (the only legal
  * return — the SDK emits the disclosing `tool_search_output` and flips the loaded
  * gate; returning copies would throw). Stateless — reads the pool per call.
@@ -241,7 +327,7 @@ function codexToolSearchExecutor(args: {
   availableTools?: Tool[];
   toolCall?: { arguments?: unknown };
 }): Tool[] {
-  const deferred = (args.availableTools ?? []).filter(isCodexAppsFunctionTool);
+  const deferred = (args.availableTools ?? []).filter(isSearchableMcpFunctionTool);
   if (deferred.length === 0) return [];
   const { query, limit } = parseSearchArgs(args.toolCall?.arguments);
   const ranked = bm25RankTools(deferred, query, limit);
@@ -329,7 +415,7 @@ function buildCodexToolSearchToolFromDescription(description: string): Tool {
   }) as unknown as Tool;
 }
 
-/** Build the client-executed tool_search tool that discloses codex_apps connectors on demand. */
+/** Build the client-executed tool_search tool that discloses deferred MCP tools on demand. */
 export function buildCodexToolSearchTool(
   connectorNamespaces: ReadonlySet<string> = NO_NAMESPACES,
 ): Tool {
@@ -343,15 +429,15 @@ function isToolSearchTool(tool: unknown): boolean {
 }
 
 /**
- * The transform applied to a turn's resolved tool list: tag every codex_apps
- * connector function tool `deferLoading = true`, and — unless one is already
+ * The transform applied to a turn's resolved tool list: tag every searchable
+ * non-mandatory MCP function tool `deferLoading = true`, and — unless one is already
  * present — append the client tool_search tool. Pure (mutates the passed tools +
  * returns the possibly-extended array); the SDK's `getTools` gate requires a
  * tool_search whenever a deferred tool is present, which appending here satisfies
  * in the same request.
  *
  * The search tool is appended UNCONDITIONALLY (even when the turn has no
- * codex_apps tools, e.g. the best-effort codex_apps connect was dropped this
+ * searchable MCP tools, e.g. a best-effort connector was dropped this
  * turn): a prior turn's history may carry tool_search_call/output items, and
  * replaying those without a tool_search tool in the request risks a backend
  * reject; a search over an empty pool simply discloses nothing. The description
@@ -365,7 +451,7 @@ export function applyCodexToolSearch(
 ): Tool[] {
   for (const tool of tools) {
     if (
-      isCodexAppsFunctionTool(tool) &&
+      isSearchableMcpFunctionTool(tool) &&
       (tool as { deferLoading?: boolean }).deferLoading !== true
     ) {
       (tool as { deferLoading?: boolean }).deferLoading = true;
@@ -376,7 +462,10 @@ export function applyCodexToolSearch(
   }
   // AM-8: render through the per-turn freeze so the tools-block prefix stays
   // byte-stable across a turn's model calls once connectors are discovered.
-  const description = resolveSearchToolDescription(connectorNamespaces, descriptionFreeze);
+  const description = resolveSearchToolDescription(
+    searchSourcesForTools(connectorNamespaces, tools),
+    descriptionFreeze,
+  );
   return [...tools, buildCodexToolSearchToolFromDescription(description)];
 }
 

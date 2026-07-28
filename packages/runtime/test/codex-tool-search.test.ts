@@ -7,6 +7,7 @@ import {
   buildCodexToolSearchTool,
   installCodexToolSearch,
   isCodexAppsFunctionTool,
+  isSearchableMcpFunctionTool,
   renderSearchToolDescription,
 } from "../src/codex-tool-search";
 import { neutralizeToolSearchItemsInSerializedRunState } from "../src/history-sanitizer";
@@ -31,6 +32,28 @@ function plainTool(name: string): Tool {
     parameters: { type: "object", properties: {} },
   } as unknown as Tool;
 }
+
+const SLACK_SERVER_ID = "cap_integrations_sh_slack_com_5a15dccc0dc0_17qniox";
+const SLACK_TOOLS: Tool[] = [
+  {
+    type: "function",
+    name: `${SLACK_SERVER_ID}__slack_search_users`,
+    description: "Search Slack users by name or email address",
+    parameters: {
+      type: "object",
+      properties: { query: { type: "string" } },
+    },
+  },
+  {
+    type: "function",
+    name: `${SLACK_SERVER_ID}__slack_send_message`,
+    description: "Send a message to a Slack channel or user",
+    parameters: {
+      type: "object",
+      properties: { channel_id: { type: "string" }, message: { type: "string" } },
+    },
+  },
+] as unknown as Tool[];
 
 const POOL: Tool[] = [
   connectorTool("gmail_send_email", "Send an email message via Gmail to one or more recipients", [
@@ -154,6 +177,31 @@ describe("applyCodexToolSearch", () => {
     };
     expect(search.providerData?.description).toContain("- gmail");
   });
+
+  test("selected Slack MCP tools are deferred and add their source to discovery", () => {
+    const tools = [
+      ...(SLACK_TOOLS.map((tool) => ({ ...tool })) as Tool[]),
+      plainTool("opengeni__set_session_title"),
+    ];
+    const out = applyCodexToolSearch(tools);
+    expect(out.filter(isSearchableMcpFunctionTool)).toHaveLength(2);
+    expect(
+      out
+        .filter(isSearchableMcpFunctionTool)
+        .every((tool) => (tool as { deferLoading?: boolean }).deferLoading === true),
+    ).toBe(true);
+    const search = out.find((tool) => (tool as { name?: string }).name === "tool_search") as {
+      providerData?: { description?: string };
+    };
+    expect(search.providerData?.description).toContain(SLACK_SERVER_ID);
+    expect(
+      (
+        out.find((tool) => (tool as { name?: string }).name === "opengeni__set_session_title") as {
+          deferLoading?: boolean;
+        }
+      ).deferLoading,
+    ).toBeUndefined();
+  });
 });
 
 describe("tool_search tool wiring", () => {
@@ -193,6 +241,25 @@ describe("tool_search tool wiring", () => {
     });
     const matched = (Array.isArray(result) ? result : [result]) as Array<{ name: string }>;
     expect(matched[0]!.name).toBe("codex_apps__gmail_send_email");
+  });
+
+  test("finds selected, directly callable Slack tools through the same search surface", async () => {
+    const executor = getClientToolSearchExecutor(buildCodexToolSearchTool() as never)!;
+    const search = async (query: string) => {
+      const result = await executor({
+        agent: {} as never,
+        availableTools: SLACK_TOOLS as never,
+        loadDefault: (() => []) as never,
+        runContext: {} as never,
+        toolCall: { type: "tool_search_call", arguments: { query, limit: 2 } } as never,
+      });
+      return (Array.isArray(result) ? result : result ? [result] : []) as Tool[];
+    };
+
+    const userMatches = await search("find a Slack user");
+    const messageMatches = await search("send a Slack message");
+    expect(userMatches[0]).toBe(SLACK_TOOLS[0]);
+    expect(messageMatches[0]).toBe(SLACK_TOOLS[1]);
   });
 
   test("never discloses an oversized schema and caps aggregate lazy schema bytes", async () => {
