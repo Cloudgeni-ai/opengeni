@@ -42,13 +42,22 @@ describe("Helm database upgrade contract", () => {
       expect(workload).not.toContain('name: {{ include "opengeni.migrationSecretName" . }}');
     }
 
-    const restrictedRuntime = helpers.indexOf("{{- if .Values.postgres.runtime.existingSecret }}");
+    const restrictedRuntime = helpers.indexOf(
+      "{{- if $root.Values.postgres.runtime.existingSecret }}",
+    );
     const ownerPassword = helpers.indexOf("- name: OPENGENI_POSTGRES_PASSWORD");
     expect(restrictedRuntime).toBeGreaterThan(-1);
     expect(ownerPassword).toBeGreaterThan(restrictedRuntime);
     expect(helpers.slice(restrictedRuntime, ownerPassword)).toContain(
       "- name: OPENGENI_DATABASE_URL",
     );
+
+    for (const worker of [workerDeployment, turnWorkerDeployment]) {
+      expect(worker).toContain(
+        '"objectStorageEndpoint" (include "opengeni.minioInternalEndpoint" .)',
+      );
+      expect(worker).not.toContain("- name: OPENGENI_OBJECT_STORAGE_ENDPOINT");
+    }
   });
 
   test("ships a non-HA single-node profile with narrow private-edge services", async () => {
