@@ -64,6 +64,13 @@ threshold when overriding `eviction-hard`; Kubernetes otherwise zeroes omitted
 defaults. This preserves elastic sharing while giving the kubelet room to
 enforce the intended order.
 
+The API's single-node readiness probe uses `/traffic-readyz`, which checks only
+Postgres. If NATS or Temporal restarts, Kubernetes keeps routing safe
+database-backed reads while commands that need the unavailable dependency fail
+explicitly and recover after reconnect. `/readyz` remains the complete
+Postgres/NATS/Temporal dependency report, so the outage is still visible to
+operators. Losing Postgres fails both readiness paths.
+
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
 
@@ -79,9 +86,10 @@ The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
 bind NodePorts to loopback with
 `--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
 loopback listeners through a private edge such as Tailscale Serve. Route `/` to
-web and route `/v1`, `/healthz`, `/metrics`, `/install.sh`, `/install.ps1`,
-`/uninstall.sh`, `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give
-the NATS websocket, relay, and MinIO API their own private TLS ports. Set
+web and route `/v1`, `/healthz`, `/readyz`, `/traffic-readyz`, `/metrics`,
+`/install.sh`, `/install.ps1`, `/uninstall.sh`,
+`/opengeni-agent-minisign.pub`, and `/agent` to the API. Give the NATS
+websocket, relay, and MinIO API their own private TLS ports. Set
 `selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
 private URLs. Also set `OPENGENI_PUBLIC_BASE_URL` to the browser/API origin. The
 API uses it when serving the installer, so an enrolled machine downloads the
@@ -1186,7 +1194,7 @@ OpenGeni emits Prometheus-native metrics. Scrape `/metrics` directly; do not rou
 
 Service endpoints:
 
-- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /readyz` checks Postgres, NATS, and Temporal with bounded timeouts.
+- API: `GET /metrics` and `GET /healthz` on `OPENGENI_API_PORT` (default `8000`); `GET /traffic-readyz` checks Postgres for traffic routing, while `GET /readyz` reports Postgres, NATS, and Temporal with bounded timeouts.
 - Worker: `GET /metrics`, `GET /healthz`, and `GET /readyz` on `OPENGENI_WORKER_HTTP_PORT` (default `8001`); readiness requires lifecycle state `ready` plus healthy Postgres, NATS, and Temporal checks. A draining worker stays live but becomes unready before polling stops.
 - Relay: `GET /metrics` and `GET /healthz` on the relay port when the relay is enabled.
 
@@ -1195,7 +1203,7 @@ Useful settings:
 - `OPENGENI_OBSERVABILITY_STRUCTURED_LOGS=true` for JSON logs.
 - `OPENGENI_OBSERVABILITY_METRICS_ENABLED=true` to expose process and domain metrics.
 - `OPENGENI_WORKER_HTTP_PORT=8001` for the worker metrics/health listener.
-- `OPENGENI_AUTH_ALLOW_HEALTH=true` allows both `/healthz` and `/readyz` through the deployment-key gate.
+- `OPENGENI_AUTH_ALLOW_HEALTH=true` allows `/healthz`, `/traffic-readyz`, and `/readyz` through the deployment-key gate.
 - `OPENGENI_AUTH_ALLOW_METRICS=true` allows API `/metrics` through the deployment-key gate for an internal scraper path.
 - `OPENGENI_DISABLE_OPENAI_TRACING=true` disables OpenAI Agents SDK tracing; tracing also defaults off when no OTLP endpoint is configured.
 - `OPENGENI_OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` to export spans to an OpenTelemetry Collector.

@@ -64,6 +64,7 @@ describe("Helm database upgrade contract", () => {
     expect(values).not.toContain("autoscaling:\n    enabled: true");
     expect(values).toContain("resources: null");
     expect(values).toContain("priorityClasses:\n  enabled: true");
+    expect(values).toContain("path: /traffic-readyz");
     for (const tier of ["presentation", "execution", "control", "durable"]) {
       expect(defaults).toContain(`    ${tier}:`);
     }
