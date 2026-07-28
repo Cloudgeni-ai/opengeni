@@ -670,8 +670,8 @@ export function RootRouteComponent() {
           return;
         }
         setGithubStatus(status);
-        setGithubAppOpen(!status.configured);
-        if (status.configured) {
+        setGithubAppOpen(status.status !== "bound");
+        if (status.status === "bound") {
           // Explicit refreshes re-sync from GitHub (POST /github/repositories/sync)
           // so installations changed after connect show up; passive loads read
           // OpenGeni's cached rows.
