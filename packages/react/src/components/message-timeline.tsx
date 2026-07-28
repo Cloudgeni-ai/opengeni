@@ -184,9 +184,12 @@ export function MessageTimeline({
     allGroups.length > 0 && (bulkActive || firstKeyChangedForBulk || mountingOlderGroups);
 
   // Snapshot the topmost visible element and where it sits in the viewport, so a
-  // later reflow can restore it to the same spot. Transient chrome (the backfill
-  // sentinel and shimmer) is skipped — anchoring to a row that unmounts when the
-  // older window lands would drop the correction mid-prepend.
+  // later reflow can restore it to the same spot. Prefer durable row wrappers
+  // over their containing group: an older activity item can merge into the
+  // existing group, leaving that outer group in place while shifting every row
+  // after the insertion. Transient chrome (the backfill sentinel and shimmer) is
+  // skipped — anchoring to a row that unmounts when the older window lands would
+  // drop the correction mid-prepend.
   const captureAnchor = useCallback(() => {
     const node = scrollRef.current;
     const inner = node?.firstElementChild;
@@ -195,15 +198,25 @@ export function MessageTimeline({
       return;
     }
     const containerTop = node.getBoundingClientRect().top;
-    for (const child of Array.from(inner.children)) {
-      if (child instanceof HTMLElement && child.dataset.ogTimelineChrome !== undefined) {
-        continue;
+    const findVisible = (selector: string): Element | null => {
+      for (const candidate of inner.querySelectorAll(selector)) {
+        if (candidate instanceof HTMLElement && candidate.dataset.ogTimelineChrome !== undefined) {
+          continue;
+        }
+        const rect = candidate.getBoundingClientRect();
+        if (rect.bottom > containerTop + 1 && rect.height > 0) {
+          return candidate;
+        }
       }
-      const rect = child.getBoundingClientRect();
-      if (rect.bottom > containerTop + 1) {
-        anchorRef.current = { el: child, top: rect.top - containerTop };
-        return;
-      }
+      return null;
+    };
+    const anchor =
+      findVisible("[data-og-timeline-row-anchor]") ??
+      findVisible("[data-og-timeline-group-anchor]");
+    if (anchor) {
+      const rect = anchor.getBoundingClientRect();
+      anchorRef.current = { el: anchor, top: rect.top - containerTop };
+      return;
     }
     anchorRef.current = null;
   }, []);
@@ -370,17 +383,18 @@ export function MessageTimeline({
                 </div>
               ) : null}
               {groups.map(({ group, key }, index) => (
-                <TimelineGroupView
-                  key={key}
-                  group={group}
-                  renderMessageText={renderMessageText}
-                  onOpenSession={onOpenSession}
-                  onMemoryClick={onMemoryClick}
-                  onReconnect={onReconnect}
-                  resolveProviderLogo={resolveProviderLogo}
-                  toolRegistry={toolRegistry}
-                  foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
-                />
+                <div key={key} data-og-timeline-group-anchor="">
+                  <TimelineGroupView
+                    group={group}
+                    renderMessageText={renderMessageText}
+                    onOpenSession={onOpenSession}
+                    onMemoryClick={onMemoryClick}
+                    onReconnect={onReconnect}
+                    resolveProviderLogo={resolveProviderLogo}
+                    toolRegistry={toolRegistry}
+                    foldLiveCluster={isAgentProgress(groups[index + 1]?.group)}
+                  />
+                </div>
               ))}
               {working ? (
                 <div className="flex items-center gap-2 text-sm">

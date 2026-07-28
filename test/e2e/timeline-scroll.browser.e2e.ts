@@ -108,6 +108,12 @@ describe("timeline scroll ownership browser regression", () => {
     expect(afterDelayedGrowth.id).toBe(afterWheel.id);
     expect(afterDelayedGrowth.top).toBeCloseTo(afterWheel.top ?? 0, 0);
 
+    await page.evaluate(() => window.timelineScrollHarness!.stream());
+    await page.waitForTimeout(100);
+    const afterStream = await visible(page);
+    expect(afterStream.id).toBe(afterWheel.id);
+    expect(afterStream.top).toBeCloseTo(afterWheel.top ?? 0, 0);
+
     await page.evaluate(() => window.timelineScrollHarness!.append());
     await page.waitForTimeout(100);
     const afterAppend = await visible(page);
@@ -127,6 +133,7 @@ describe("timeline scroll ownership browser regression", () => {
         afterWheel,
         afterPrepend,
         afterDelayedGrowth,
+        afterStream,
         afterAppend,
         ...browserMetrics,
       };
@@ -148,10 +155,93 @@ describe("timeline scroll ownership browser regression", () => {
         .tracing.stop({ path: `${artifactDir}/timeline-scroll-playwright-trace.zip` });
     }
   }, 30_000);
+
+  test("follows a reader that is within the near-bottom threshold", async () => {
+    await page.setViewportSize({ width: 1280, height: 900 });
+    await page.goto(`${baseUrl}/timeline-scroll-test.html`);
+    await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
+    await page.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
+
+    const scroller = page.locator("[data-timeline-test] .og-root > div");
+    await scroller.evaluate((node) => {
+      node.scrollTop = node.scrollHeight - node.clientHeight - 24;
+    });
+    await page.waitForTimeout(100);
+    const before = await scroller.evaluate((node) => ({
+      gap: node.scrollHeight - node.scrollTop - node.clientHeight,
+      scrollTop: node.scrollTop,
+    }));
+    expect(before.gap).toBeLessThan(48);
+
+    await page.evaluate(() => window.timelineScrollHarness!.append());
+    await page.waitForTimeout(100);
+    const after = await scroller.evaluate((node) => ({
+      gap: node.scrollHeight - node.scrollTop - node.clientHeight,
+      scrollTop: node.scrollTop,
+    }));
+    expect(after.gap).toBeLessThan(2);
+    expect(after.scrollTop).toBeGreaterThan(before.scrollTop);
+  }, 30_000);
+
+  test("keeps a narrow mobile reader anchored through prepend", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${baseUrl}/timeline-scroll-test.html`);
+    await page.waitForFunction(() => window.timelineScrollHarness !== undefined);
+    await page.locator('[data-timeline-row="row-1000"]').waitFor({ timeout: 15_000 });
+    const target = page.locator('[data-timeline-row="row-1040"]');
+    await target.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(100);
+
+    const before = await visible(page);
+    await page.evaluate(() => window.timelineScrollHarness!.prepend());
+    await page.waitForTimeout(100);
+    const after = await visible(page);
+    expect(after.id).toBe(before.id);
+    expect(after.top).toBeCloseTo(before.top ?? 0, 0);
+    await page.setViewportSize({ width: 1280, height: 900 });
+  }, 30_000);
+
+  test("keeps a nested row anchored when prepend merges into its activity group", async () => {
+    await page.goto(`${baseUrl}/timeline-scroll-merge-test.html`);
+    await page.waitForFunction(() => window.timelineMergeHarness !== undefined);
+    const target = page.getByText("reasoning-50", { exact: true });
+    await target.waitFor({ timeout: 15_000 });
+    await target.scrollIntoViewIfNeeded();
+    await page.waitForTimeout(100);
+
+    const before = await nestedVisible(page, "reasoning-50");
+    await page.evaluate(() => window.timelineMergeHarness!.prependActivity());
+    await page.waitForTimeout(100);
+    const after = await nestedVisible(page, "reasoning-50");
+
+    expect(after.text).toBe(before.text);
+    expect(after.top).toBeCloseTo(before.top, 0);
+  }, 30_000);
 });
 
 async function visible(page: Page): Promise<VisibleRow> {
   return await page.evaluate(() => window.timelineScrollHarness!.visible());
+}
+
+async function nestedVisible(
+  page: Page,
+  text: string,
+): Promise<{ text: string; top: number; scrollTop: number; overflowAnchor: string }> {
+  return await page.evaluate((targetText) => {
+    const scroller = document.querySelector<HTMLElement>(
+      "[data-timeline-merge-test] .og-root > div",
+    );
+    const target = [...document.querySelectorAll<HTMLElement>("span, p")].find(
+      (candidate) => candidate.textContent === targetText,
+    );
+    if (!scroller || !target) throw new Error(`missing nested timeline row ${targetText}`);
+    return {
+      text: target.textContent ?? "",
+      top: target.getBoundingClientRect().top - scroller.getBoundingClientRect().top,
+      scrollTop: scroller.scrollTop,
+      overflowAnchor: getComputedStyle(scroller).overflowAnchor,
+    };
+  }, text);
 }
 
 async function collectBrowserMetrics(page: Page) {
@@ -215,7 +305,11 @@ declare global {
       append: () => void;
       growRowsAbove: () => void;
       prepend: () => void;
+      stream: () => void;
       visible: () => VisibleRow;
+    };
+    timelineMergeHarness?: {
+      prependActivity: () => void;
     };
     timelinePerformanceTrace?: {
       active: boolean;
