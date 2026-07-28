@@ -80,8 +80,13 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
 
     const webPort = await freePort();
     webBaseUrl = `http://127.0.0.1:${webPort}`;
+    const webEnv = {
+      NODE_ENV: "production",
+      VITE_API_BASE_URL: apiBaseUrl,
+    };
     const build = await runCommand(["bun", "run", "build"], {
       cwd: `${repoRoot}/apps/web`,
+      env: webEnv,
       timeoutMs: 120_000,
     });
     if (build.exitCode !== 0) {
@@ -101,7 +106,7 @@ describe("session pins browser e2e (real API + non-superuser PostgreSQL)", () =>
       ],
       {
         cwd: `${repoRoot}/apps/web`,
-        env: { VITE_API_BASE_URL: apiBaseUrl },
+        env: webEnv,
         ready: async () =>
           (
             await fetch(webBaseUrl, {
@@ -1562,6 +1567,12 @@ async function configuredContext(
   // principal fallback; the placeholder merely satisfies the real console
   // gate and is never treated as a credential or persisted outside context.
   await context.addInitScript(() => {
+    // Playwright runs init scripts for the initial opaque about:blank document
+    // too. That document has no storage origin; avoid turning this test-owned
+    // setup into a pageerror that obscures application failures.
+    if (window.location.origin === "null") {
+      return;
+    }
     localStorage.setItem("opengeni.accessKey", "configured-test-placeholder");
   });
   return context;
