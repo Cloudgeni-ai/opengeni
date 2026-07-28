@@ -1947,13 +1947,13 @@ export function buildOpenGeniAgent(
 }
 
 /**
- * Enable Codex-CLI-style progressive connector disclosure on a codex turn when the
+ * Enable Codex-CLI-style progressive MCP disclosure on a Codex turn when the
  * flag is on. Gated on `structuredToolTransport === false` — the same signal that
- * identifies a codex-subscription turn (the ChatGPT backend that rejects hosted
- * tools) — so no non-codex turn is ever touched. On qualifying turns it wraps
+ * identifies a Codex-subscription turn (the ChatGPT backend that rejects hosted
+ * tools) — so no non-Codex turn is ever touched. On qualifying turns it wraps
  * `getAllTools` (clone-survivingly — see {@link installCodexToolSearch}) to defer
- * codex_apps schemas + add the client tool_search tool, whose description renders
- * the live connector namespaces threaded from prepareAgentTools.
+ * selected non-mandatory MCP schemas and add the client tool_search tool. The
+ * description combines live connector namespaces with selected server identities.
  */
 function maybeInstallCodexToolSearch(
   agent: Agent<any, any>,
@@ -1961,10 +1961,23 @@ function maybeInstallCodexToolSearch(
   options: BuildAgentOptions,
 ): void {
   if (settings.codexToolSearchEnabled && options.structuredToolTransport === false) {
+    const mcpServers = options.mcpServers ?? [];
+    // `defer_loading:true` removes these MCP schemas from provider context until
+    // tool_search discloses a bounded match. Keep the compaction estimator on
+    // that same wire truth; otherwise a large deferred catalog can falsely trip
+    // compaction before the first real model request. OpenGeni remains eager.
+    for (const server of mcpServers) {
+      if (server.name === "opengeni") continue;
+      (
+        server as MCPServer & {
+          deferModelToolSchemaAccounting?: () => void;
+        }
+      ).deferModelToolSchemaAccounting?.();
+    }
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
       options.codexConnectorNamespaces ?? new Set<string>(),
-      new Set((options.mcpServers ?? []).map((server) => server.name)),
+      new Set(mcpServers.map((server) => server.name)),
     );
   }
 }
@@ -3260,6 +3273,7 @@ class PrefixedMcpServer implements MCPServer {
   private readonly bestEffort: boolean;
   private loggedListToolsFailure = false;
   private listedToolSchemaTokens = 0;
+  private modelToolSchemaAccountingDeferred = false;
 
   constructor(
     private readonly inner: MCPServer,
@@ -3341,7 +3355,16 @@ class PrefixedMcpServer implements MCPServer {
 
   /** Latest exact tools/list projection used to build the model request. */
   modelToolSchemaTokens(): number {
-    return this.listedToolSchemaTokens;
+    return this.modelToolSchemaAccountingDeferred ? 0 : this.listedToolSchemaTokens;
+  }
+
+  /**
+   * Keep model-input accounting aligned with Codex `defer_loading`: the full
+   * schema is not provider context until a tool_search_output discloses it.
+   * Instances are turn-local, so this cannot leak into a non-Codex turn.
+   */
+  deferModelToolSchemaAccounting(): void {
+    this.modelToolSchemaAccountingDeferred = true;
   }
 
   async callTool(

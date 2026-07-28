@@ -5366,6 +5366,63 @@ describe("provider item id stripping", () => {
     ).rejects.toBeInstanceOf(CompactionNeededError);
   });
 
+  test("first-call accounting excludes MCP schemas deferred behind Codex tool_search", async () => {
+    let selectedSchemaAccountingDeferred = false;
+    let mandatorySchemaAccountingDeferred = false;
+    const selectedMcp = {
+      name: "selected",
+      cacheToolsList: true,
+      connect: async () => undefined,
+      close: async () => undefined,
+      listTools: async () => [],
+      callTool: async () => ({ content: [] }),
+      modelToolSchemaTokens: () => (selectedSchemaAccountingDeferred ? 0 : 300_000),
+      deferModelToolSchemaAccounting: () => {
+        selectedSchemaAccountingDeferred = true;
+      },
+    } as unknown as MCPServer;
+    const mandatoryMcp = {
+      name: "opengeni",
+      cacheToolsList: true,
+      connect: async () => undefined,
+      close: async () => undefined,
+      listTools: async () => [],
+      callTool: async () => ({ content: [] }),
+      modelToolSchemaTokens: () => (mandatorySchemaAccountingDeferred ? 0 : 500),
+      deferModelToolSchemaAccounting: () => {
+        mandatorySchemaAccountingDeferred = true;
+      },
+    } as unknown as MCPServer;
+    const settings = testSettings({
+      codexToolSearchEnabled: true,
+      contextWindowTokens: 272_000,
+      contextAutoCompactThresholdTokens: 244_800,
+      webSearchEnabled: false,
+    });
+    const agent = buildOpenGeniAgent(settings, [], {
+      structuredToolTransport: false,
+      mcpServers: [selectedMcp, mandatoryMcp],
+    });
+    const filter = contextRobustnessFilterForSettings(settings, {
+      throwOnCompactionNeeded: true,
+    });
+
+    expect(selectedSchemaAccountingDeferred).toBe(true);
+    expect(mandatorySchemaAccountingDeferred).toBe(false);
+    await expect(
+      filter({
+        modelData: {
+          input: [{ type: "message", role: "user", content: "small" }] as any,
+          instructions: "system",
+        },
+        agent,
+        context: undefined,
+      }),
+    ).resolves.toMatchObject({
+      input: [{ type: "message", role: "user", content: "small" }],
+    });
+  });
+
   test("callModelInputFilterForSettings observes an operator compaction request before each model call", async () => {
     let requested = false;
     let polls = 0;

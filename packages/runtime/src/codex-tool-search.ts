@@ -503,11 +503,11 @@ type CloneCapableAgent = {
 };
 
 /**
- * Install progressive connector disclosure on a codex-path agent by wrapping
+ * Install progressive MCP disclosure on a Codex-path agent by wrapping
  * `getAllTools` so every per-model-call tool resolution runs
  * {@link applyCodexToolSearch}. Idempotent-per-call (re-tags each
  * freshly-materialized MCP tool under cacheToolsList:false). Gated by the caller
- * (flag + codex path).
+ * (flag + Codex path).
  *
  * CLONE SURVIVAL (the part that makes this work on the REAL sandbox path): the
  * SDK's sandbox runtime routes EVERY model call through
