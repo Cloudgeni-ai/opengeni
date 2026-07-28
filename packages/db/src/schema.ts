@@ -3450,10 +3450,17 @@ export const githubInstallations = pgTable(
       .notNull()
       .references(() => workspaces.id, { onDelete: "cascade" }),
     installationId: integer("installation_id").notNull(),
+    githubAccountId: bigint("github_account_id", { mode: "number" }),
     accountLogin: text("account_login"),
     accountType: text("account_type"),
     repositoryScope: text("repository_scope").notNull().default("all"),
     linkedBySubjectId: text("linked_by_subject_id"),
+    githubActorId: bigint("github_actor_id", { mode: "number" }),
+    githubActorLogin: text("github_actor_login"),
+    authorityKind: text("authority_kind"),
+    authorityCheckedAt: timestamp("authority_checked_at", { withTimezone: true }),
+    authorityExpiresAt: timestamp("authority_expires_at", { withTimezone: true }),
+    authorityNonce: text("authority_nonce"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -3468,6 +3475,55 @@ export const githubInstallations = pgTable(
       "github_installations_repository_scope_check",
       sql`${table.repositoryScope} in ('all', 'selected')`,
     ),
+    authorityKindCheck: check(
+      "github_installations_authority_kind_check",
+      sql`
+        (
+          ${table.githubAccountId} is null
+          and ${table.githubActorId} is null
+          and ${table.githubActorLogin} is null
+          and ${table.authorityKind} is null
+          and ${table.authorityCheckedAt} is null
+          and ${table.authorityExpiresAt} is null
+          and ${table.authorityNonce} is null
+        )
+        or (
+          ${table.githubAccountId} is not null
+          and ${table.githubAccountId} > 0
+          and ${table.githubActorId} is not null
+          and ${table.githubActorId} > 0
+          and ${table.githubActorLogin} is not null
+          and length(${table.githubActorLogin}) > 0
+          and ${table.accountLogin} is not null
+          and length(${table.accountLogin}) > 0
+          and ${table.accountType} is not null
+          and ${table.linkedBySubjectId} is not null
+          and length(${table.linkedBySubjectId}) > 0
+          and ${table.authorityKind} is not null
+          and ${table.authorityCheckedAt} is not null
+          and ${table.authorityExpiresAt} is not null
+          and ${table.authorityCheckedAt} < ${table.authorityExpiresAt}
+          and ${table.authorityExpiresAt} <= ${table.authorityCheckedAt} + interval '10 minutes'
+          and ${table.authorityNonce} is not null
+          and length(${table.authorityNonce}) > 0
+          and ${table.repositoryScope} = 'selected'
+          and (
+            (
+              ${table.authorityKind} = 'personal_owner'
+              and ${table.accountType} = 'User'
+              and ${table.githubActorId} = ${table.githubAccountId}
+            )
+            or (
+              ${table.authorityKind} = 'organization_owner'
+              and ${table.accountType} = 'Organization'
+            )
+          )
+        )
+      `,
+    ),
+    authorityNonce: uniqueIndex("github_installations_authority_nonce_uq")
+      .on(table.authorityNonce)
+      .where(sql`${table.authorityNonce} is not null`),
   }),
 );
 

@@ -59,9 +59,8 @@ function isAuthExempt(c: Context, settings: Settings): boolean {
   if (path.startsWith("/v1/catalog-assets/")) {
     return true;
   }
-  // Compatibility entry for already-issued GitHub install/link URLs. It stays
-  // public like the callbacks above, verifies signed workspace-bound state,
-  // and then terminates with 410 while new installation binding is disabled.
+  // The GitHub owner-consent entry remains public like the callbacks above; it
+  // verifies fresh signed workspace-bound state before redirecting to GitHub.
   if (githubConnectPathPattern.test(path)) {
     return true;
   }

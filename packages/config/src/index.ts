@@ -341,11 +341,12 @@ const SettingsSchema = z.object({
   // operators can use Codex models without exposing ChatGPT connectors.
   codexConnectedAppsEnabled: EnvBoolean.default(false), // OPENGENI_CODEX_CONNECTED_APPS_ENABLED
   codexProductSku: z.string().optional(), // OPENGENI_CODEX_PRODUCT_SKU (X-OpenAI-Product-Sku, apps only)
-  // Progressive connector disclosure (Codex-CLI-style tool_search): on a codex
-  // turn, flag the ~217 codex_apps connector tools `defer_loading:true` (dropping
-  // their schemas from model context) and add one client-executed tool_search
-  // tool that BM25-discloses only the matching connectors. Default OFF — a codex
-  // turn is byte-for-byte unchanged until enabled. OPENGENI_CODEX_TOOL_SEARCH_ENABLED
+  // Progressive MCP disclosure (Codex-CLI-style tool_search): on a codex turn,
+  // flag non-mandatory selected MCP tools `defer_loading:true` (dropping their
+  // schemas from model context) and add one client-executed tool_search tool
+  // that BM25-discloses bounded matches. The mandatory OpenGeni tools stay
+  // eager. Default OFF — a codex turn is byte-for-byte unchanged until enabled.
+  // OPENGENI_CODEX_TOOL_SEARCH_ENABLED
   codexToolSearchEnabled: EnvBoolean.default(false),
   // credential allocator atomic, workspace-local credential allocation. Default OFF is a
   // deliberate rolling-deploy fence: migrate + roll every worker first, then

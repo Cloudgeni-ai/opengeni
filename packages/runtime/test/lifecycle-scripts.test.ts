@@ -722,7 +722,44 @@ describe("lifecycle scripts — real sh execution semantics", () => {
           encoding: "utf8",
         }),
       ).toBe("GH=gh-two\n");
-      expect(() => execFileSync("gh", [], { cwd: root, env, encoding: "utf8" })).toThrow();
+      const inventory = JSON.parse(
+        readFileSync(join(home, ".opengeni", "git-bindings.json"), "utf8"),
+      );
+      expect(inventory).toEqual({
+        version: 1,
+        bindings: [
+          {
+            credentialBindingId: "one",
+            provider: "github",
+            transport: "direct_token",
+            repositories: [
+              {
+                uri: "https://github.com/acme/one.git",
+                mountPath: "/workspace/repos/github.com/acme/one",
+              },
+            ],
+          },
+          {
+            credentialBindingId: "two",
+            provider: "github",
+            transport: "direct_token",
+            repositories: [
+              {
+                uri: "https://github.com/acme/two.git",
+                mountPath: "/workspace/repos/github.com/acme/two",
+              },
+            ],
+          },
+        ],
+      });
+      try {
+        execFileSync("gh", [], { cwd: root, env, encoding: "utf8" });
+        throw new Error("expected ambiguous GitHub binding selection to fail");
+      } catch (error) {
+        expect(String((error as { stderr?: string | Buffer }).stderr ?? error)).toContain(
+          ".opengeni/git-bindings.json",
+        );
+      }
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
