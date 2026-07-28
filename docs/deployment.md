@@ -432,6 +432,13 @@ configured registry therefore fails closed before becoming distribution
 authority. The candidate receipt records the full image repository names, and
 every later workflow verifies them against the same source-controlled prefix.
 
+For the default GHCR location, the owning organization must allow public
+package creation and each existing `opengeni-*` container package must be made
+public once in its package settings. GitHub does not expose package visibility
+as a REST mutation, so release workflows must not attempt to change it. The
+manual `verify-public-container-packages.yml` audit and the candidate,
+embedded, and final anonymous-pull gates verify the resulting configuration.
+
 Self-hosted embedding consumers have a narrower distribution boundary:
 `.github/workflows/release-embedded.yml` publishes only an exact versioned
 source that already has an immutable candidate receipt from the canonical
