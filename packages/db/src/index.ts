@@ -250,6 +250,7 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./session-realtime";
+export * from "./session-realtime-ledger";
 export * from "./new-session-drafts";
 export * from "./workspace-instruction-policies";
 export * from "./preference-registry";
