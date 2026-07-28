@@ -214,6 +214,7 @@ export { sql as dbSql } from "drizzle-orm";
 export * from "./session-control";
 export * from "./session-queue-commands";
 export * from "./new-session-drafts";
+export * from "./workspace-instruction-policies";
 export { interruptedToolCallResult } from "./session-tool-call-settlement";
 export { decryptEnvironmentValue, encryptEnvironmentValue } from "./environment-crypto";
 export {

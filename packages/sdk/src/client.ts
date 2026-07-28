@@ -199,6 +199,18 @@ import type {
   OAuthStartRequest,
   OAuthStartResponse,
 } from "./types";
+import type {
+  ActivateWorkspaceInstructionPolicyRequest,
+  CreateWorkspaceInstructionPolicyDraftRequest,
+  ImportLegacyWorkspaceInstructionPolicyDraftRequest,
+  RollbackWorkspaceInstructionPolicyRequest,
+  WorkspaceInstructionPolicyActivationResponse,
+  WorkspaceInstructionPolicyDiffRequest,
+  WorkspaceInstructionPolicyDiffResponse,
+  WorkspaceInstructionPolicyListOptions,
+  WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyRevision,
+} from "./workspace-instruction-policies";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
@@ -1614,6 +1626,96 @@ export class OpenGeniClient {
 
   async updateWorkspace(workspaceId: string, request: UpdateWorkspaceRequest): Promise<Workspace> {
     return await this.requestJson<Workspace>("PATCH", `/v1/workspaces/${workspaceId}`, request);
+  }
+
+  /** Inspect immutable instruction-policy history, active heads, and activation audit evidence. */
+  async listWorkspaceInstructionPolicies(
+    workspaceId: string,
+    options: WorkspaceInstructionPolicyListOptions = {},
+  ): Promise<WorkspaceInstructionPolicyListResponse> {
+    const params = new URLSearchParams();
+    if (options.kind !== undefined) params.set("kind", options.kind);
+    if (options.scope !== undefined) params.set("scope", options.scope);
+    if (options.roleKey !== undefined) params.set("roleKey", options.roleKey);
+    if (options.afterRevision !== undefined) {
+      params.set("afterRevision", String(options.afterRevision));
+    }
+    if (options.limit !== undefined) params.set("limit", String(options.limit));
+    const query = params.toString();
+    return await this.requestJson<WorkspaceInstructionPolicyListResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/instruction-policies${query ? `?${query}` : ""}`,
+    );
+  }
+
+  async getWorkspaceInstructionPolicyRevision(
+    workspaceId: string,
+    revisionId: string,
+  ): Promise<WorkspaceInstructionPolicyRevision> {
+    return await this.requestJson<WorkspaceInstructionPolicyRevision>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/instruction-policies/${encodeURIComponent(revisionId)}`,
+    );
+  }
+
+  async createWorkspaceInstructionPolicyDraft(
+    workspaceId: string,
+    request: CreateWorkspaceInstructionPolicyDraftRequest,
+  ): Promise<WorkspaceInstructionPolicyRevision> {
+    return await this.requestJson<WorkspaceInstructionPolicyRevision>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/instruction-policies/drafts`,
+      request,
+    );
+  }
+
+  /** Import the stored legacy workspace override as an inactive charter draft. */
+  async importLegacyWorkspaceInstructionPolicyDraft(
+    workspaceId: string,
+    request: ImportLegacyWorkspaceInstructionPolicyDraftRequest = {},
+  ): Promise<WorkspaceInstructionPolicyRevision> {
+    return await this.requestJson<WorkspaceInstructionPolicyRevision>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/instruction-policies/import-legacy`,
+      request,
+    );
+  }
+
+  async diffWorkspaceInstructionPolicyRevisions(
+    workspaceId: string,
+    request: WorkspaceInstructionPolicyDiffRequest,
+  ): Promise<WorkspaceInstructionPolicyDiffResponse> {
+    const params = new URLSearchParams({
+      fromRevisionId: request.fromRevisionId,
+      toRevisionId: request.toRevisionId,
+    });
+    return await this.requestJson<WorkspaceInstructionPolicyDiffResponse>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/instruction-policies/diff?${params}`,
+    );
+  }
+
+  async activateWorkspaceInstructionPolicyRevision(
+    workspaceId: string,
+    revisionId: string,
+    request: ActivateWorkspaceInstructionPolicyRequest,
+  ): Promise<WorkspaceInstructionPolicyActivationResponse> {
+    return await this.requestJson<WorkspaceInstructionPolicyActivationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/instruction-policies/${encodeURIComponent(revisionId)}/activate`,
+      request,
+    );
+  }
+
+  async rollbackWorkspaceInstructionPolicyRevision(
+    workspaceId: string,
+    request: RollbackWorkspaceInstructionPolicyRequest,
+  ): Promise<WorkspaceInstructionPolicyActivationResponse> {
+    return await this.requestJson<WorkspaceInstructionPolicyActivationResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/instruction-policies/rollback`,
+      request,
+    );
   }
 
   /**
