@@ -113,7 +113,12 @@ function readStoredPendingComposerOperation(
     const record = parsed as Record<string, unknown>;
     const input = record.input;
     const shadow = record.newerShadow;
-    if (typeof input !== "object" || input === null || typeof shadow !== "object" || shadow === null) {
+    if (
+      typeof input !== "object" ||
+      input === null ||
+      typeof shadow !== "object" ||
+      shadow === null
+    ) {
       return null;
     }
     const inputRecord = input as Record<string, unknown>;
@@ -152,9 +157,7 @@ function writePendingComposerOperation(
   }
 }
 
-function restorePendingComposerOperation(
-  key: string | null,
-): PendingComposerOperation | null {
+function restorePendingComposerOperation(key: string | null): PendingComposerOperation | null {
   const stored =
     (key && pendingComposerOperations.get(key)) ?? readStoredPendingComposerOperation(key);
   if (!stored) return null;
@@ -591,7 +594,14 @@ export function useComposer(
       }
       return;
     }
-    if (!durableDrafts || !sessionId || draftLoading || sending || !draftRef.current || draftConflict)
+    if (
+      !durableDrafts ||
+      !sessionId ||
+      draftLoading ||
+      sending ||
+      !draftRef.current ||
+      draftConflict
+    )
       return;
     const payload = currentDraftPayload();
     if (!payload || draftSignature(payload) === lastSavedSignature.current) return;
@@ -614,8 +624,7 @@ export function useComposer(
       const ownedTargetKey = targetKey;
       const ownedGeneration = targetGeneration.current;
       const operationKey = pendingComposerOperationKey(workspaceId, sessionId);
-      const pending =
-        pendingOperationRef.current ?? restorePendingComposerOperation(operationKey);
+      const pending = pendingOperationRef.current ?? restorePendingComposerOperation(operationKey);
       if (pending && !pendingOperationRef.current) {
         pendingOperationRef.current = pending;
         pendingClientEventId.current = pending.input.clientEventId ?? null;
@@ -628,7 +637,7 @@ export function useComposer(
       const extras = pending ? {} : resolveSendExtras(sendExtrasRef.current);
       const hasResources = restoredResources.length > 0 || (extras.resources?.length ?? 0) > 0;
       if (
-        (!pending && (!hasText && !hasResources)) ||
+        (!pending && !hasText && !hasResources) ||
         !sessionId ||
         sending ||
         sendBlockedRef.current?.() === true ||
