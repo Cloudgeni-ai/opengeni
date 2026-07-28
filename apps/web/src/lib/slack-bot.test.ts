@@ -5,7 +5,14 @@ import {
   OPENGENI_SLACK_BOT_REQUIRED_SCOPES,
 } from "@opengeni/contracts";
 import type { ConnectionMetadata } from "@/types";
-import { activeOpenGeniSlackBotConnections, openGeniSlackBotUiMetadata } from "./slack-bot";
+import {
+  activeOpenGeniSlackBotConnections,
+  isDifferentSlackBotPrincipalError,
+  openGeniSlackBotConnectionLabel,
+  openGeniSlackBotConnectInput,
+  openGeniSlackBotUiMetadata,
+  preferredOpenGeniSlackBotConnection,
+} from "./slack-bot";
 
 const connectionId = "11111111-1111-4111-8111-111111111111";
 
@@ -79,5 +86,47 @@ describe("OpenGeni Slack bot UI connection filtering", () => {
       slackTeamId: "T_TEST",
       botDisplayName: "OpenGeni",
     });
+  });
+
+  test("prefers an active reinstall target over a newer revoked connection", () => {
+    const revoked = connection({
+      id: "44444444-4444-4444-8444-444444444444",
+      status: "revoked",
+      createdAt: new Date(2).toISOString(),
+    });
+    const active = connection({ createdAt: new Date(1).toISOString() });
+
+    expect(preferredOpenGeniSlackBotConnection([revoked, active])?.id).toBe(active.id);
+    expect(preferredOpenGeniSlackBotConnection([revoked])?.id).toBe(revoked.id);
+  });
+
+  test("omits the immutable reinstall target only for an explicit new connection", () => {
+    const existing = connection();
+
+    expect(openGeniSlackBotConnectionLabel(existing)).toBe(
+      `Test workspace · OpenGeni · ${connectionId}`,
+    );
+
+    expect(openGeniSlackBotConnectInput("xoxb-fixture", existing, false)).toEqual({
+      token: "xoxb-fixture",
+      connectionId,
+    });
+    expect(openGeniSlackBotConnectInput("xoxb-fixture", existing, true)).toEqual({
+      token: "xoxb-fixture",
+    });
+    expect(openGeniSlackBotConnectInput("xoxb-fixture", null, false)).toEqual({
+      token: "xoxb-fixture",
+    });
+  });
+
+  test("recognizes only the server's immutable-principal recovery error", () => {
+    expect(
+      isDifferentSlackBotPrincipalError(
+        new Error(
+          "OpenGeni API 409: a different Slack bot requires a new connection and explicit scheduled-task rebinding",
+        ),
+      ),
+    ).toBe(true);
+    expect(isDifferentSlackBotPrincipalError(new Error("connection changed; retry"))).toBe(false);
   });
 });

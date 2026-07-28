@@ -37,11 +37,52 @@ export function openGeniSlackBotUiMetadata(
   return metadata as OpenGeniSlackBotUiMetadata;
 }
 
+export function openGeniSlackBotConnections(
+  connections: ConnectionMetadata[],
+): ConnectionMetadata[] {
+  return connections.filter((connection) => openGeniSlackBotUiMetadata(connection) !== null);
+}
+
 export function activeOpenGeniSlackBotConnections(
   connections: ConnectionMetadata[],
 ): ConnectionMetadata[] {
-  return connections.filter(
-    (connection) =>
-      connection.status === "active" && openGeniSlackBotUiMetadata(connection) !== null,
+  return openGeniSlackBotConnections(connections).filter(
+    (connection) => connection.status === "active",
+  );
+}
+
+/** Prefer a usable install over a newer revoked row when choosing a reinstall target. */
+export function preferredOpenGeniSlackBotConnection(
+  connections: ConnectionMetadata[],
+): ConnectionMetadata | null {
+  const botConnections = openGeniSlackBotConnections(connections);
+  return (
+    botConnections.find((connection) => connection.status === "active") ?? botConnections[0] ?? null
+  );
+}
+
+export function openGeniSlackBotConnectionLabel(connection: ConnectionMetadata): string | null {
+  const metadata = openGeniSlackBotUiMetadata(connection);
+  return metadata ? `${metadata.slackTeamName} · OpenGeni · ${connection.id}` : null;
+}
+
+/** A different immutable bot principal must mint a new row, never overwrite the old one. */
+export function openGeniSlackBotConnectInput(
+  token: string,
+  reinstallTarget: ConnectionMetadata | null,
+  createNewConnection: boolean,
+): { token: string; connectionId?: string } {
+  return {
+    token,
+    ...(!createNewConnection && reinstallTarget ? { connectionId: reinstallTarget.id } : {}),
+  };
+}
+
+export function isDifferentSlackBotPrincipalError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes(
+      "a different Slack bot requires a new connection and explicit scheduled-task rebinding",
+    )
   );
 }

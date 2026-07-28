@@ -65,6 +65,8 @@ If the Slack app is reinstalled or its credential changes:
 
 OpenGeni updates the existing connection in place so scheduled-task references remain stable, but only when the Slack team ID, bot ID, and bot user ID all match the original verified installation. A different bot principal—even in the same Slack workspace and with the same display name—requires a new OpenGeni connection and explicit scheduled-task rebinding. If the manifest name or scopes changed, restore the exact manifest and reinstall in Slack before retrying.
 
+For a genuinely different bot principal, choose **Connect a different bot** instead. The UI switches to **Validate and create new connection** and sends no prior connection ID, so the server creates a separate immutable binding rather than weakening or overwriting the old one. Existing scheduled tasks are deliberately unchanged. After validation, choose **Review scheduled tasks** and explicitly select the new connection on every task that should use it; an unavailable old selection remains visibly unavailable until it is replaced. If a reinstall attempt detects a different principal, the UI enters this recovery mode and asks you to re-enter the token in the write-only field—it does not retain or reuse the rejected credential.
+
 Disconnecting revokes the OpenGeni connection. It does not uninstall the Slack app or affect any subject-owned hosted Slack MCP OAuth connection.
 
 ## Audit evidence

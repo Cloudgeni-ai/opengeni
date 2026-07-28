@@ -29,6 +29,7 @@ import { LoadErrorState, PageHeader } from "@/components/common";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
+import { Notice } from "@/components/ui/notice";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAppContext } from "@/context";
 import {
@@ -53,7 +54,12 @@ import {
   type SheetSelection,
 } from "@/lib/capabilities";
 import { listViewState } from "@/lib/load-state";
-import { openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
+import {
+  isDifferentSlackBotPrincipalError,
+  openGeniSlackBotConnectInput,
+  openGeniSlackBotUiMetadata,
+  preferredOpenGeniSlackBotConnection,
+} from "@/lib/slack-bot";
 import { cn } from "@/lib/utils";
 import type { CapabilityCatalogItem, CapabilityPack, ConnectionMetadata } from "@/types";
 
@@ -84,6 +90,10 @@ export function CapabilitiesRoute({
   const [busyId, setBusyId] = useState<string | null>(null);
   const [slackBotToken, setSlackBotToken] = useState("");
   const [slackBotBusy, setSlackBotBusy] = useState(false);
+  const [slackBotInstallMode, setSlackBotInstallMode] = useState<"reinstall" | "new">("reinstall");
+  const [slackBotRecoveryConnectionId, setSlackBotRecoveryConnectionId] = useState<string | null>(
+    null,
+  );
 
   const [filter, setFilter] = useState<CapabilityFilter>(
     initialSection === "packs" ? "pack" : "all",
@@ -122,8 +132,7 @@ export function CapabilitiesRoute({
   const enabledItems = useMemo(() => filtered.filter((item) => item.enabled), [filtered]);
   const browseItems = useMemo(() => filtered.filter((item) => !item.enabled), [filtered]);
   const visibleBrowse = browseItems.slice(0, visibleCount);
-  const slackBotConnection =
-    connections?.find((connection) => openGeniSlackBotUiMetadata(connection) !== null) ?? null;
+  const slackBotConnection = preferredOpenGeniSlackBotConnection(connections ?? []);
   const slackBotMetadata = slackBotConnection
     ? openGeniSlackBotUiMetadata(slackBotConnection)
     : null;
@@ -211,21 +220,40 @@ export function CapabilitiesRoute({
   async function connectSlackBot() {
     if (!slackBotToken) return;
     setSlackBotBusy(true);
+    const createNewConnection = slackBotInstallMode === "new";
     try {
-      await client.connectOpenGeniSlackBot(workspaceId, {
-        token: slackBotToken,
-        ...(slackBotConnection ? { connectionId: slackBotConnection.id } : {}),
-      });
+      const connection = await client.connectOpenGeniSlackBot(
+        workspaceId,
+        openGeniSlackBotConnectInput(slackBotToken, slackBotConnection, createNewConnection),
+      );
       setSlackBotToken("");
       await refresh();
-      toast.success(
-        slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
-      );
+      setSlackBotInstallMode("reinstall");
+      if (createNewConnection && slackBotConnection) {
+        setSlackBotRecoveryConnectionId(connection.id);
+        toast.success("New OpenGeni Slack bot connection created", {
+          description: "Scheduled tasks were not changed and must be rebound explicitly.",
+        });
+      } else {
+        setSlackBotRecoveryConnectionId(null);
+        toast.success(
+          slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
+        );
+      }
     } catch (error) {
       setSlackBotToken("");
-      toast.error("Couldn't connect the OpenGeni Slack bot", {
-        description: error instanceof Error ? error.message : String(error),
-      });
+      if (isDifferentSlackBotPrincipalError(error)) {
+        setSlackBotInstallMode("new");
+        setSlackBotRecoveryConnectionId(null);
+        toast.error("This token belongs to a different Slack bot", {
+          description:
+            "Re-enter it below to create a new connection, then explicitly rebind scheduled tasks.",
+        });
+      } else {
+        toast.error("Couldn't connect the OpenGeni Slack bot", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+      }
     } finally {
       setSlackBotBusy(false);
     }
@@ -237,6 +265,8 @@ export function CapabilitiesRoute({
     try {
       await client.deleteConnection(workspaceId, slackBotConnection.id);
       await refresh();
+      setSlackBotInstallMode("new");
+      setSlackBotRecoveryConnectionId(null);
       toast.success("OpenGeni Slack bot disconnected");
     } catch (error) {
       toast.error("Couldn't disconnect the OpenGeni Slack bot", {
@@ -809,18 +839,65 @@ export function CapabilitiesRoute({
                 </div>
               ) : null}
             </div>
-            {slackBotConnection?.status === "active" ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                disabled={slackBotBusy}
-                onClick={() => void disconnectSlackBot()}
-              >
-                Disconnect
-              </Button>
-            ) : null}
+            <div className="flex flex-wrap items-center gap-2">
+              {slackBotConnection ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={slackBotBusy}
+                  onClick={() => {
+                    setSlackBotInstallMode((mode) => (mode === "new" ? "reinstall" : "new"));
+                    setSlackBotRecoveryConnectionId(null);
+                  }}
+                >
+                  {slackBotInstallMode === "new"
+                    ? "Reinstall existing bot"
+                    : "Connect a different bot"}
+                </Button>
+              ) : null}
+              {slackBotConnection?.status === "active" ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  disabled={slackBotBusy}
+                  onClick={() => void disconnectSlackBot()}
+                >
+                  Disconnect
+                </Button>
+              ) : null}
+            </div>
           </div>
+          {slackBotInstallMode === "new" && slackBotConnection ? (
+            <Notice tone="waiting" title="Create a separate bot connection" className="mt-4">
+              A different Slack bot cannot replace connection {slackBotConnection.id}. This action
+              creates a new connection; existing scheduled tasks stay bound to the old connection
+              until you explicitly update them in Scheduled tasks.
+            </Notice>
+          ) : null}
+          {slackBotRecoveryConnectionId ? (
+            <Notice
+              tone="success"
+              title="New bot connection ready"
+              className="mt-4"
+              action={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() =>
+                    void window.location.assign(`/workspaces/${workspaceId}/schedules`)
+                  }
+                >
+                  Review scheduled tasks
+                </Button>
+              }
+            >
+              Connection {slackBotRecoveryConnectionId} was created. Existing task bindings were not
+              changed; select this connection explicitly on each task that should use it.
+            </Notice>
+          ) : null}
           <form
             className="mt-4 flex flex-col gap-2 sm:flex-row"
             onSubmit={(event) => {
@@ -840,7 +917,11 @@ export function CapabilitiesRoute({
             />
             <Button type="submit" disabled={slackBotBusy || !slackBotToken}>
               {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              {slackBotConnection ? "Validate and reinstall" : "Validate and connect"}
+              {slackBotInstallMode === "new" && slackBotConnection
+                ? "Validate and create new connection"
+                : slackBotConnection
+                  ? "Validate and reinstall"
+                  : "Validate and connect"}
             </Button>
           </form>
         </section>

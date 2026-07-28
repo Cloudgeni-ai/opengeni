@@ -32,7 +32,10 @@ import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
-import { activeOpenGeniSlackBotConnections, openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
+import {
+  activeOpenGeniSlackBotConnections,
+  openGeniSlackBotConnectionLabel,
+} from "@/lib/slack-bot";
 import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
@@ -655,14 +658,13 @@ function ScheduledTaskForm(props: {
                 (connection) => connection.id === form.slackBotConnectionId,
               ) ? (
                 <option value={form.slackBotConnectionId} disabled>
-                  Selected connection is unavailable
+                  Selected connection {form.slackBotConnectionId} is unavailable
                 </option>
               ) : null}
               {props.slackBotConnections.map((connection) => {
-                const metadata = openGeniSlackBotUiMetadata(connection)!;
                 return (
                   <option key={connection.id} value={connection.id}>
-                    {metadata.slackTeamName} · OpenGeni
+                    {openGeniSlackBotConnectionLabel(connection)}
                   </option>
                 );
               })}

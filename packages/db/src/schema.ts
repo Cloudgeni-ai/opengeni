@@ -487,7 +487,7 @@ export const connections = pgTable(
     version: integer("version").notNull().default(1),
     // Server-owned proof that the dedicated install route verified the exact
     // credential at this connection version. Generic/legacy writers cannot set
-    // these columns, and migration 0130 clears them when protected fields change
+    // these columns, and migration 0131 clears them when protected fields change
     // without a fresh verification in the same statement.
     verifiedInstallAt: timestamp("verified_install_at", { withTimezone: true }),
     verifiedInstallVersion: integer("verified_install_version"),
