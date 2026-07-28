@@ -7,6 +7,7 @@ import {
   cancellableShellCommand,
   createTurnToolCancellationController,
 } from "../src/sandbox/turn-tool-cancellation";
+import { RoutingMutationOutcomeUnknownError } from "../src/sandbox/routing/routing-session";
 import { createSandboxClientForBackend } from "../src/index";
 import { testSettings } from "@opengeni/testing";
 
@@ -246,6 +247,60 @@ describe("turn sandbox-tool physical cancellation fence", () => {
     expect(settlementOrder.lastIndexOf("provider-control")).toBeGreaterThan(
       settlementOrder.indexOf("group-absent"),
     );
+  });
+
+  test("registers a durably promoted process even when stale authority rejects the exec output", async () => {
+    const controller = createTurnToolCancellationController();
+    let processAlive = true;
+    let retained = true;
+    let providerCalls = 0;
+    let controlPolls = 0;
+    const exec = functionTool("exec_command", async () => {
+      providerCalls += 1;
+      throw new RoutingMutationOutcomeUnknownError(
+        "execCommand",
+        "durable promotion succeeded but output was rejected",
+        {
+          retainedProcess: {
+            id: "77777777-7777-4777-8777-777777777777",
+            providerSessionId: 34,
+          },
+        },
+      );
+    });
+    const session = {
+      hasRetainedProcess: (sessionId: number) => sessionId === 34 && retained,
+      writeStdinForProcessControl: async () => {
+        controlPolls += 1;
+        retained = false;
+        return exited(143);
+      },
+      execCommandForProcessControl: async (sessionId: number, args: { cmd: string }) => {
+        expect(sessionId).toBe(34);
+        if (args.cmd.includes("command cat '/tmp/opengeni-turn-shell/")) {
+          return exited(0, "6200 6200\n");
+        }
+        if (args.cmd.includes("command kill -TERM")) {
+          processAlive = false;
+          return exited(0);
+        }
+        if (args.cmd.includes("command kill -0")) return exited(processAlive ? 75 : 0);
+        return exited(0);
+      },
+    };
+    const [wrappedExec] = controller.wrapTools([exec], session) as Array<
+      Extract<Tool<unknown>, { type: "function" }>
+    >;
+
+    await expect(
+      wrappedExec!.invoke(runContext, JSON.stringify({ cmd: "sleep 60" })),
+    ).rejects.toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    controller.cancel(new Error("turn finalized"));
+    await controller.waitForQuiescence();
+
+    expect(providerCalls).toBe(1);
+    expect(controlPolls).toBe(1);
+    expect(retained).toBe(false);
   });
 
   test("retained-process terminal settlement failure keeps the cancellation fence closed", async () => {

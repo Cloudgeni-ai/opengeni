@@ -324,10 +324,14 @@ fields—never provider identity—are imported and selected under that same loc
 Concurrent routed calls may all discover the same missing provider. Exactly one
 observer wins the lease-loss transition; the others receive typed `superseded`
 recovery. Each ambiguous operation is invoked at most once and is never replayed
-on a replacement backend. During idle drain, a resumable cloud box is deleted
-only after a verified workspace capture is durably folded onto the fenced lease.
-Definitive `NOT_FOUND` before capture preserves any existing archive or records
-typed unrecoverable truth when no durable revision exists.
+on a replacement backend. In the winning loss transaction, every active
+retained process on that exact lease epoch/provider is marked lost, all matching
+open admissions are rejected, matching PTYs are closed, and only those process
+holders are removed before the epoch advances. Terminal processes and every
+other epoch/provider remain untouched. During idle drain, a resumable cloud box
+is deleted only after a verified workspace capture is durably folded onto the
+fenced lease. Definitive `NOT_FOUND` before capture preserves any existing
+archive or records typed unrecoverable truth when no durable revision exists.
 
 Every operation that may mutate a persistable `/workspace` first enters one
 lease-scoped turn/direct/process admission ledger. In one transaction, admission
@@ -350,8 +354,10 @@ cancellation, helper exec, and drain polling are process control: they may prove
 exit/loss but do not advance `workspace_generation`. Exact exit/loss atomically
 settles the parent and process holder and closes any matching PTY; duplicate
 identical proof is idempotent, while missing/conflicting proof keeps the fence
-closed. Connected Machines and other non-persistable routes do not dirty the
-provisioned cloud-home generation.
+closed. Normal turn finalization invokes this same physical drain for every
+registered yielded shell before workspace capture, independently of whether a
+Pause/Steer quiescence receipt is required. Connected Machines and other
+non-persistable routes do not dirty the provisioned cloud-home generation.
 
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when

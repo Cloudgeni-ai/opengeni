@@ -4,6 +4,7 @@ import {
   parseExecBannerExitCode,
   parseExecBannerSessionId,
 } from "./exec-banner";
+import { RoutingMutationOutcomeUnknownError } from "./routing/routing-session";
 
 const TURN_EXEC_YIELD_MS = 250;
 const TURN_WRITE_YIELD_MS = 250;
@@ -759,6 +760,34 @@ class TurnToolCancellationControllerImpl implements TurnToolCancellationControll
                 correlationId,
                 async () => await tool.invoke(runContext, cancellableInput, details),
               );
+            } catch (error) {
+              const retainedProcess =
+                !useRemoteOpCancellation && error instanceof RoutingMutationOutcomeUnknownError
+                  ? error.retainedProcess
+                  : null;
+              const processSession =
+                retainedProcess === null
+                  ? null
+                  : retainedProcessSession(cancellationSession, retainedProcess.providerSessionId);
+              if (retainedProcess && processSession) {
+                // The provider output remains rejected, but DB promotion is
+                // already durable. Preserve only the safe process locator and
+                // exact routing session so turn finalization can drain it; never
+                // invoke a helper through the mutable current route.
+                this.shellSessions.set(retainedProcess.providerSessionId, {
+                  sessionId: retainedProcess.providerSessionId,
+                  markerPath,
+                  token,
+                  runContext,
+                  execInvoke: tool.invoke,
+                  writeInvoke: this.rawWriteInvoke,
+                  processSession,
+                  identity: null,
+                  identityValidated: false,
+                  cancellation: null,
+                });
+              }
+              throw error;
             } finally {
               remoteExec?.settle();
             }

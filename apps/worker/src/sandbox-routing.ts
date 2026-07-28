@@ -26,6 +26,7 @@ import {
   markWarmLeaseInstanceLost,
   readLease,
   readActiveSandbox,
+  SandboxRetainedProcessPromotionFencedError,
   type Database,
   type SandboxWorkspaceMutationAdmission,
 } from "@opengeni/db";
@@ -47,6 +48,7 @@ import {
   type RoutableBackendSession,
   type RoutableSandbox,
   type ResolvedActiveBackend,
+  type RoutingMutationSettlementResult,
   type RoutingRetainedProcess,
   type RoutingRetainedProcessTerminalProof,
   type SelfhostedOpObserver,
@@ -423,7 +425,7 @@ function afterPersistableHomeMutation(
       outcome: "resolved" | "rejected";
       result?: unknown;
       retainedProcess?: RoutingRetainedProcess;
-    }) => Promise<void>)
+    }) => Promise<void | RoutingMutationSettlementResult>)
   | undefined {
   const fence = ids.workspaceMutationFence;
   if (!home || !fence) return undefined;
@@ -442,29 +444,58 @@ function afterPersistableHomeMutation(
     }
     const exactAdmission = admission as SandboxWorkspaceMutationAdmission;
     if (outcome === "resolved" && retainedProcess) {
-      await retainWorkspaceMutationProcess(services.db, {
-        accountId: fence.accountId,
-        workspaceId: ids.workspaceId,
-        sessionId: ids.sessionId,
-        processId: retainedProcess.id,
-        providerSessionId: retainedProcess.providerSessionId,
-        admissionId: exactAdmission.id,
-        admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
-        operation: op,
-        owner: {
-          kind: "turn",
-          turnId: fence.turnId,
-          executionGeneration: fence.executionGeneration,
-          attemptId: fence.attemptId,
-          holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
-          sandboxGroupId: home.sandboxGroupId,
-          expectedEpoch: backend.leaseEpoch,
-          expectedInstanceId: backend.providerInstanceId,
-          routeKind: exactAdmission.routeKind,
-          routeTargetId: exactAdmission.routeTargetId,
-          routeEpoch: exactAdmission.routeEpoch,
-        },
-      });
+      try {
+        await retainWorkspaceMutationProcess(services.db, {
+          accountId: fence.accountId,
+          workspaceId: ids.workspaceId,
+          sessionId: ids.sessionId,
+          processId: retainedProcess.id,
+          providerSessionId: retainedProcess.providerSessionId,
+          admissionId: exactAdmission.id,
+          admittedWorkspaceGeneration: exactAdmission.workspaceGeneration,
+          operation: op,
+          owner: {
+            kind: "turn",
+            turnId: fence.turnId,
+            executionGeneration: fence.executionGeneration,
+            attemptId: fence.attemptId,
+            holderId: sandboxLeaseHolderIdForAttempt(fence.attemptId),
+            sandboxGroupId: home.sandboxGroupId,
+            expectedEpoch: backend.leaseEpoch,
+            expectedInstanceId: backend.providerInstanceId,
+            routeKind: exactAdmission.routeKind,
+            routeTargetId: exactAdmission.routeTargetId,
+            routeEpoch: exactAdmission.routeEpoch,
+          },
+        });
+      } catch (error) {
+        if (!(error instanceof SandboxRetainedProcessPromotionFencedError)) throw error;
+        const durable = error.process;
+        if (
+          durable.id !== retainedProcess.id ||
+          durable.providerSessionId !== retainedProcess.providerSessionId ||
+          durable.sessionId !== ids.sessionId ||
+          durable.sandboxGroupId !== home.sandboxGroupId ||
+          durable.parentAdmissionId !== exactAdmission.id ||
+          durable.leaseEpoch !== backend.leaseEpoch ||
+          durable.providerInstanceId !== backend.providerInstanceId ||
+          durable.routeKind !== exactAdmission.routeKind ||
+          durable.routeTargetId !== exactAdmission.routeTargetId ||
+          durable.routeEpoch !== exactAdmission.routeEpoch ||
+          durable.state !== "active"
+        ) {
+          throw new Error("Durable retained-process promotion returned a mismatched identity", {
+            cause: error,
+          });
+        }
+        return {
+          status: "retained_process_durable_output_rejected",
+          retainedProcess: {
+            id: durable.id,
+            providerSessionId: durable.providerSessionId,
+          },
+        };
+      }
       return;
     }
     await verifyWorkspaceMutationSettlement(services.db, {

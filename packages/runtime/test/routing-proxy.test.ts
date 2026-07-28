@@ -447,6 +447,51 @@ describe("RoutingSandboxSession — per-call re-read + per-epoch dispatch", () =
     expect(newWrites).toBe(0);
   });
 
+  test("durable stale-authority promotion rejects output but hands off the exact process without retry", async () => {
+    let providerCalls = 0;
+    let promotions = 0;
+    let controlWrites = 0;
+    const backend: RoutableBackendSession = {
+      async execCommand() {
+        providerCalls += 1;
+        return "Process running with session ID 77\n\nOutput:\nstarted";
+      },
+      async writeStdin() {
+        controlWrites += 1;
+        return "Process exited with code 0\n\nOutput:\ndone";
+      },
+    };
+    const proxy = new RoutingSandboxSession({
+      readPointer: async () => ({ activeSandboxId: null, activeEpoch: 0 }),
+      resolveActiveBackend: async () => ({ session: backend, sandboxId: null, kind: "modal" }),
+      beforeMutation: async () => "parent",
+      afterMutation: async ({ retainedProcess }) => {
+        promotions += 1;
+        return {
+          status: "retained_process_durable_output_rejected",
+          retainedProcess: retainedProcess!,
+        };
+      },
+    });
+
+    const error = await proxy.execCommand({ cmd: "start" }).catch((caught) => caught);
+    expect(error).toBeInstanceOf(RoutingMutationOutcomeUnknownError);
+    expect((error as RoutingMutationOutcomeUnknownError).retainedProcess).toEqual({
+      id: expect.any(String),
+      providerSessionId: 77,
+    });
+    expect((error as RoutingMutationOutcomeUnknownError).retryable).toBe(false);
+    expect(proxy.hasRetainedProcess(77)).toBe(true);
+
+    expect(await proxy.writeStdinForProcessControl({ sessionId: 77, chars: "" })).toContain(
+      "Process exited with code 0",
+    );
+    expect(proxy.hasRetainedProcess(77)).toBe(false);
+    expect(providerCalls).toBe(1);
+    expect(promotions).toBe(1);
+    expect(controlWrites).toBe(1);
+  });
+
   test("an adopted durable process stays on the exact default backend without reading a moved pointer", async () => {
     let pointerReads = 0;
     let oldWrites = 0;
