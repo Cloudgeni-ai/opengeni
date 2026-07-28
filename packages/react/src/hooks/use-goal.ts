@@ -1,6 +1,6 @@
 import { OpenGeniApiError, type SessionEvent, type SessionGoal } from "@opengeni/sdk";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useOpenGeni, type ClientOverride } from "../provider";
+import { useOpenGeni, type ClientOverride } from "../session-context";
 import {
   useDebouncedCallback,
   useMutationRunner,
