@@ -4,6 +4,7 @@ import type { Session } from "@/types";
 import {
   applySessionPinProjection,
   applySessionRailProjection,
+  mergeSessionContextProjection,
   reconcileFailedSessionPin,
 } from "./session-pins";
 
@@ -157,5 +158,51 @@ describe("session pin reconciliation", () => {
       pinVersion: 5,
       treeStats: projected.treeStats,
     });
+  });
+
+  test("keeps a newer context pin while adopting detail content", () => {
+    const current = {
+      ...session,
+      title: "Renamed in the open route",
+      pinned: true,
+      pinnedAt: "2026-07-10T00:06:00.000Z",
+      pinVersion: 2,
+    } as Session;
+    const staleDetail = {
+      ...session,
+      title: "Stale detail title",
+      status: "failed",
+      pinned: false,
+      pinnedAt: null,
+      pinVersion: 1,
+    } as Session;
+
+    const merged = mergeSessionContextProjection(current, staleDetail);
+
+    expect(merged).toMatchObject({
+      title: "Stale detail title",
+      status: "failed",
+      pinned: true,
+      pinnedAt: "2026-07-10T00:06:00.000Z",
+      pinVersion: 2,
+    });
+    expect(merged).not.toBe(staleDetail);
+  });
+
+  test("preserves identity when the detail and context pin triples are equal", () => {
+    const current = {
+      ...session,
+      pinned: true,
+      pinnedAt: "2026-07-10T00:07:00.000Z",
+      pinVersion: 3,
+    } as Session;
+    const detail = {
+      ...current,
+      effectiveControl: { ...current.effectiveControl },
+    };
+
+    const merged = mergeSessionContextProjection(current, detail);
+
+    expect(merged).toBe(detail);
   });
 });

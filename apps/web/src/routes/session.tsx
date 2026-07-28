@@ -51,6 +51,7 @@ import {
   projectSessionTimeline,
   summarizeSessionFailure,
 } from "@/lib/events";
+import { mergeSessionContextProjection } from "@/lib/session-pins";
 import { sessionPolicyPickerIds, toolsForPolicySelection } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
@@ -160,7 +161,7 @@ export function SessionRoute({
   // Keep the workspace header (title, status badge, connection pill) in sync.
   const { setSession: setContextSession, setConnectionState: setContextConnectionState } = context;
   useEffect(() => {
-    setContextSession(session);
+    setContextSession((current) => mergeSessionContextProjection(current, session));
   }, [session, setContextSession]);
   useEffect(() => {
     setContextConnectionState(connectionState);

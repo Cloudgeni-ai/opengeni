@@ -74,6 +74,22 @@ export function applySessionPinProjection(
 }
 
 /**
+ * Merge a detail/SSE projection into the root context without allowing a
+ * slower detail read to erase a newer list or optimistic pin projection.
+ * Detail remains authoritative for every non-pin field; the current context
+ * contributes only its pin fields when that projection is newer or equal.
+ */
+export function mergeSessionContextProjection(
+  current: Session | null,
+  projected: Session | null,
+): Session | null {
+  if (!projected) {
+    return null;
+  }
+  return applySessionPinProjection(projected, current ?? projected) ?? projected;
+}
+
+/**
  * Merge list-owned personal pin and hierarchy fields into route-owned session
  * content. A route/SSE object must never overwrite a newer cross-device unpin,
  * while a list poll must never regress lifecycle state or message content.
