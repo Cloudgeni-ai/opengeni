@@ -1,5 +1,8 @@
 import type { Settings } from "@opengeni/config";
-import type { CodexRealtimeWebrtcRequest, CodexRealtimeWebrtcResponse } from "@opengeni/contracts";
+import type {
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+} from "@opengeni/contracts";
 import {
   CODEX_CLIENT_VERSION,
   CodexRealtimeError,
@@ -8,15 +11,18 @@ import {
   selectCodexCredentialId,
   type CodexAuthHeaders,
   type CodexFetch,
+  type CodexRealtimeInitialItem,
   type CodexRealtimeCallInput,
 } from "@opengeni/codex";
 import {
   buildCodexTokenResolver,
+  getActiveSessionHistoryItems,
   getCodexCredentialStatus,
   getSessionCodexState,
   listCodexAccountStatuses,
   type Database,
 } from "@opengeni/db";
+import { projectSessionRealtimeInitialItems } from "./session-realtime-context";
 
 export type CodexRealtimeBrokerFailureReason =
   | "subscription_disabled"
@@ -55,6 +61,7 @@ export type CodexRealtimeBrokerDependencies = {
     activeCredentialId: string | null;
     connectedCredentialIds: ReadonlySet<string>;
   }>;
+  loadInitialItems(): Promise<CodexRealtimeInitialItem[]>;
   tokenResolver(credentialId: string): CodexTokenResolver;
   createCall(
     auth: CodexAuthHeaders,
@@ -65,7 +72,10 @@ export type CodexRealtimeBrokerDependencies = {
 
 export type CodexRealtimeBrokerInput = {
   sessionId: string;
-  request: Pick<CodexRealtimeWebrtcRequest, "sdp" | "version" | "instructions" | "voice">;
+  request: Pick<
+    CodexRealtimeWebrtcRequest,
+    "sdp" | "version" | "instructions" | "voice"
+  >;
   signal?: AbortSignal | undefined;
 };
 
@@ -96,6 +106,11 @@ export async function brokerSessionCodexRealtime(
     );
   }
 
+  // This comes from active session_history_items after lifecycle owner proof;
+  // it is not accepted from the browser request and is replayed identically on
+  // the one authentication-only retry below.
+  const initialItems = await deps.loadInitialItems();
+
   const resolver = deps.tokenResolver(credentialId);
   let token: Omit<CodexAuthHeaders, "clientVersion">;
   try {
@@ -106,13 +121,21 @@ export async function brokerSessionCodexRealtime(
   const callInput: CodexRealtimeCallInput = {
     ...input.request,
     sessionId: input.sessionId,
+    initialItems,
   };
   try {
-    return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
-      signal: input.signal,
-    });
+    return await deps.createCall(
+      { ...token, clientVersion: CODEX_CLIENT_VERSION },
+      callInput,
+      {
+        signal: input.signal,
+      },
+    );
   } catch (error) {
-    if (!(error instanceof CodexRealtimeError) || error.code !== "authentication") {
+    if (
+      !(error instanceof CodexRealtimeError) ||
+      error.code !== "authentication"
+    ) {
       throw brokerProviderError(error);
     }
   }
@@ -126,11 +149,18 @@ export async function brokerSessionCodexRealtime(
     throw credentialError(error);
   }
   try {
-    return await deps.createCall({ ...token, clientVersion: CODEX_CLIENT_VERSION }, callInput, {
-      signal: input.signal,
-    });
+    return await deps.createCall(
+      { ...token, clientVersion: CODEX_CLIENT_VERSION },
+      callInput,
+      {
+        signal: input.signal,
+      },
+    );
   } catch (error) {
-    if (error instanceof CodexRealtimeError && error.code === "authentication") {
+    if (
+      error instanceof CodexRealtimeError &&
+      error.code === "authentication"
+    ) {
       throw new CodexRealtimeBrokerError(
         "reconnect_required",
         "Codex subscription must be reconnected for realtime",
@@ -148,7 +178,9 @@ export function buildSessionCodexRealtimeBroker(
   workspaceId: string,
   sessionId: string,
   fetchImpl: CodexFetch = fetch,
-): (input: Omit<CodexRealtimeBrokerInput, "sessionId">) => Promise<CodexRealtimeWebrtcResponse> {
+): (
+  input: Omit<CodexRealtimeBrokerInput, "sessionId">,
+) => Promise<CodexRealtimeWebrtcResponse> {
   return async (input) =>
     await brokerSessionCodexRealtime(
       {
@@ -175,6 +207,10 @@ export function buildSessionCodexRealtimeBroker(
             ),
           };
         },
+        loadInitialItems: async () =>
+          projectSessionRealtimeInitialItems(
+            await getActiveSessionHistoryItems(db, workspaceId, sessionId),
+          ),
         tokenResolver: (credentialId) =>
           buildCodexTokenResolver(db, settings, workspaceId, credentialId),
         createCall: async (auth, callInput, options) =>
@@ -199,7 +235,10 @@ function credentialError(error: unknown): CodexRealtimeBrokerError {
 
 function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
   if (!(error instanceof CodexRealtimeError)) {
-    return new CodexRealtimeBrokerError("network_error", "Codex realtime provider request failed");
+    return new CodexRealtimeBrokerError(
+      "network_error",
+      "Codex realtime provider request failed",
+    );
   }
   const reason: CodexRealtimeBrokerFailureReason =
     error.code === "invalid_request"
@@ -221,7 +260,11 @@ function brokerProviderError(error: unknown): CodexRealtimeBrokerError {
                     : error.code === "network"
                       ? "network_error"
                       : "provider_error";
-  return new CodexRealtimeBrokerError(reason, safeBrokerMessage(reason), error.providerStatus);
+  return new CodexRealtimeBrokerError(
+    reason,
+    safeBrokerMessage(reason),
+    error.providerStatus,
+  );
 }
 
 function safeBrokerMessage(reason: CodexRealtimeBrokerFailureReason): string {

@@ -24,7 +24,8 @@ const response = {
 const BEARER_DEFAULT = ["fixture", "bearer", "default"].join("-");
 const BEARER_STALE = ["fixture", "bearer", "stale"].join("-");
 const BEARER_FRESH = ["fixture", "bearer", "fresh"].join("-");
-const ACCESS_TOKEN_FIELD: keyof Omit<CodexAuthHeaders, "clientVersion"> = "accessToken";
+const ACCESS_TOKEN_FIELD: keyof Omit<CodexAuthHeaders, "clientVersion"> =
+  "accessToken";
 
 function tokenSnapshot(
   value = BEARER_DEFAULT,
@@ -48,6 +49,7 @@ function dependencies(
       activeCredentialId: "credential-active",
       connectedCredentialIds: new Set(["credential-pin", "credential-active"]),
     }),
+    loadInitialItems: async () => [],
     tokenResolver: () => ({
       getToken: async () => tokenSnapshot(),
       refresh: async () => tokenSnapshot(),
@@ -67,7 +69,8 @@ describe("session Codex realtime broker", () => {
         tokenResolver: (credentialId) => {
           selected = credentialId;
           return {
-            getToken: async () => tokenSnapshot(BEARER_DEFAULT, "account-bound", true),
+            getToken: async () =>
+              tokenSnapshot(BEARER_DEFAULT, "account-bound", true),
             refresh: async () => {
               throw new Error("refresh must not run");
             },
@@ -87,7 +90,11 @@ describe("session Codex realtime broker", () => {
     expect(capturedAuth?.chatgptAccountId).toBe("account-bound");
     expect(capturedAuth?.isFedramp).toBe(true);
     expect(capturedAuth?.clientVersion).toBe("0.145.0");
-    expect(capturedInput).toEqual({ ...request, sessionId: "session-one" });
+    expect(capturedInput).toEqual({
+      ...request,
+      sessionId: "session-one",
+      initialItems: [],
+    });
     expect(result).toEqual(response);
     expect(JSON.stringify(result)).not.toContain("credential-pin");
     expect(JSON.stringify(result)).not.toContain("account-bound");
@@ -111,6 +118,40 @@ describe("session Codex realtime broker", () => {
       { sessionId: "session-one", request },
     );
     expect(selected).toBe("credential-active");
+  });
+
+  test("adds server-projected history and reuses the exact snapshot on an auth retry", async () => {
+    const history = [
+      { role: "user" as const, text: "prior request" },
+      { role: "assistant" as const, text: "prior answer" },
+    ];
+    let historyReads = 0;
+    const calls: CodexRealtimeCallInput[] = [];
+    await brokerSessionCodexRealtime(
+      dependencies({
+        loadInitialItems: async () => {
+          historyReads += 1;
+          return history;
+        },
+        tokenResolver: () => ({
+          getToken: async () => tokenSnapshot(BEARER_STALE),
+          refresh: async () => tokenSnapshot(BEARER_FRESH),
+        }),
+        createCall: async (_auth, input) => {
+          calls.push(input);
+          if (calls.length === 1) {
+            throw new CodexRealtimeError("authentication", "rejected", 401);
+          }
+          return response;
+        },
+      }),
+      { sessionId: "session-one", request },
+    );
+    expect(historyReads).toBe(1);
+    expect(calls).toEqual([
+      { ...request, sessionId: "session-one", initialItems: history },
+      { ...request, sessionId: "session-one", initialItems: history },
+    ]);
   });
 
   test("forces one refresh after a provider 401, then retries exactly once", async () => {
@@ -159,7 +200,11 @@ describe("session Codex realtime broker", () => {
         }),
         createCall: async () => {
           calls += 1;
-          throw new CodexRealtimeError("authentication", "provider body must not escape", 401);
+          throw new CodexRealtimeError(
+            "authentication",
+            "provider body must not escape",
+            401,
+          );
         },
       }),
       { sessionId: "session-one", request },
