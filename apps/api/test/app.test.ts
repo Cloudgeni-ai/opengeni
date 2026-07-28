@@ -450,6 +450,7 @@ describe("API helpers", () => {
     );
     expect(routeLabel("/v1/unregistered/resource-1")).toBe("/v1/unknown");
     expect(routeLabel("/readyz")).toBe("/readyz");
+    expect(routeLabel("/traffic-readyz")).toBe("/traffic-readyz");
   });
 
   test("preserves HTTPException status codes in error metrics", () => {
@@ -539,6 +540,65 @@ describe("API helpers", () => {
     expect(body.ok).toBe(false);
     expect(body.checks.nats.ok).toBe(false);
     expect(body.checks.nats.error).toContain("nats down");
+  });
+
+  test("traffic-readyz stays routable through a NATS or Temporal outage", async () => {
+    let natsChecks = 0;
+    let temporalChecks = 0;
+    const app = createApp({
+      settings: {
+        ...testSettings(),
+        authRequired: true,
+        accessKey: "deployment-key",
+        authAllowHealth: true,
+      },
+      db: {} as never,
+      bus: { isConnected: () => false } as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {},
+        nats: () => {
+          natsChecks += 1;
+          throw new Error("nats down");
+        },
+        temporal: async () => {
+          temporalChecks += 1;
+          throw new Error("temporal down");
+        },
+      },
+    });
+
+    const response = await app.request("/traffic-readyz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, checks: { db: { ok: true } } });
+    expect(natsChecks).toBe(0);
+    expect(temporalChecks).toBe(0);
+  });
+
+  test("traffic-readyz stops routing when the durable database is unavailable", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+      readinessChecks: {
+        db: async () => {
+          throw new Error("database down");
+        },
+      },
+    });
+
+    const response = await app.request("/traffic-readyz");
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as {
+      ok: boolean;
+      checks: { db: { ok: boolean; error?: string } };
+    };
+    expect(body.ok).toBe(false);
+    expect(body.checks.db.ok).toBe(false);
+    expect(body.checks.db.error).toContain("database down");
   });
 
   test("rejects oversized streamed request bodies before route parsing", async () => {

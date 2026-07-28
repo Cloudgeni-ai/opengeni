@@ -17,6 +17,11 @@ api:
     enabled: false
   autoscaling:
     enabled: false
+  probes:
+    # Keep safe database-backed API traffic available when restartable
+    # orchestration or machine-control plumbing is temporarily unavailable.
+    readiness:
+      path: /traffic-readyz
   service:
     type: NodePort
     port: 8000
