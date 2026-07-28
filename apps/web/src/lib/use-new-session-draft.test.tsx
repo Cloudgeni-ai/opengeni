@@ -162,6 +162,75 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
+  test("treats an old-server response without toolsProvided as explicit", async () => {
+    const legacy = remote(4, { tools: [{ kind: "mcp", id: "docs" }] });
+    delete (legacy as NewSessionDraft & { toolsProvided?: boolean }).toolsProvided;
+    const hook = await renderDraftHook(client({ getNewSessionDraft: async () => legacy }));
+    await flush();
+
+    expect(hook.result.current.value.toolsProvided).toBe(true);
+    expect(hook.result.current.value.tools).toEqual([{ kind: "mcp", id: "docs" }]);
+    await hook.unmount();
+  });
+
+  test("catalog callback identity changes do not reset an in-flight newest edit", async () => {
+    const pendingSave = deferred<NewSessionDraft>();
+    const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
+    const draftClient = client({
+      getNewSessionDraft: async () => {
+        reads += 1;
+        return remote(1, { text: "server" });
+      },
+      saveNewSessionDraft: async (_workspaceId, request) => {
+        requests.push(request);
+        return await pendingSave.promise;
+      },
+    });
+    const hook = await renderHook(
+      (props: {
+        hydrateResources: (
+          resources: NewSessionDraftEditable["resources"],
+        ) => NewSessionDraftEditable["resources"];
+      }) => {
+        const [value, setValue] = useState(() => editable());
+        const draft = useNewSessionDraft({
+          client: draftClient,
+          workspaceId: WORKSPACE_A,
+          value,
+          onApplyRemote: setValue,
+          restoreReadyFiles: () => {},
+          hydrateResources: props.hydrateResources,
+          resourceHydrationReady: true,
+        });
+        return { draft, value, setValue };
+      },
+      { hydrateResources: (resources) => resources },
+    );
+    await flush();
+    await actRun(() => hook.result.current.setValue(editable({ text: "newest local edit" })));
+
+    let pending!: Promise<unknown>;
+    await actRun(() => {
+      pending = hook.result.current.draft.flush();
+    });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({ expectedRevision: 1, text: "newest local edit" });
+
+    await hook.rerender({ hydrateResources: (resources) => [...resources] });
+    await flush();
+    expect(reads).toBe(1);
+    expect(hook.result.current.value.text).toBe("newest local edit");
+
+    const request = requests[0];
+    if (!request) throw new Error("Expected an in-flight draft save");
+    await actRun(() => pendingSave.resolve(remote(2, request)));
+    await actRun(async () => await pending);
+    expect(hook.result.current.draft.revision).toBe(2);
+    expect(hook.result.current.value.text).toBe("newest local edit");
+    await hook.unmount();
+  });
+
   test("debounces autosave for 500 ms", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
     const hook = await renderDraftHook(

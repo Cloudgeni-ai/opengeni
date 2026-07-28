@@ -13,7 +13,10 @@ import {
   testSettings,
   type SharedTestDatabase,
 } from "@opengeni/testing";
-import { getActorNewSessionDraft } from "../src/application/new-session-drafts";
+import {
+  getActorNewSessionDraft,
+  saveActorNewSessionDraft,
+} from "../src/application/new-session-drafts";
 
 let available = true;
 let shared: SharedTestDatabase | null = null;
@@ -70,6 +73,35 @@ const settings = testSettings({
 const mcp = (id: string): ToolRef => ({ kind: "mcp", id });
 
 describe("core new-session draft hydration", () => {
+  test("treats a markerless old-client save, including [], as explicit tools", async () => {
+    if (!available) return;
+    const { grant } = await fixture();
+    const deps = { db, settings, objectStorage: null };
+    const base = {
+      expectedRevision: 0,
+      text: "legacy client",
+      resources: [],
+      model: "scripted-model",
+      reasoningEffort: "high" as const,
+      options: {},
+    };
+
+    const narrowed = await saveActorNewSessionDraft(deps, grant, grant.workspaceId!, {
+      ...base,
+      tools: [mcp("docs")],
+    });
+    expect(narrowed.toolsProvided).toBe(true);
+    expect(narrowed.tools).toEqual([mcp("docs")]);
+
+    const empty = await saveActorNewSessionDraft(deps, grant, grant.workspaceId!, {
+      ...base,
+      expectedRevision: narrowed.revision,
+      tools: [],
+    });
+    expect(empty.toolsProvided).toBe(true);
+    expect(empty.tools).toEqual([]);
+  }, 180_000);
+
   test("retains authorized repositories, drops revoked resources/tools, and invalidates stale targets", async () => {
     if (!available) return;
     const { grant, subjectId } = await fixture();

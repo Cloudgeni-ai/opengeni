@@ -147,7 +147,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
   const readRemote = useCallback(async (): Promise<ValidatedRemoteDraft | null> => {
     const generation = targetGeneration.current;
-    const remote = await client.getNewSessionDraft(workspaceId);
+    const remote = normalizeLegacyNewSessionDraft(await client.getNewSessionDraft(workspaceId));
     if (generation !== targetGeneration.current) return null;
     return await validateRemoteDraft(remote, generation);
   }, [client, validateRemoteDraft, workspaceId]);
@@ -189,6 +189,13 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     }
   }, [applyRemote, readRemote, resourceHydrationReady]);
 
+  // `reload` intentionally follows resource hydration callbacks, but those
+  // callbacks can change identity when a catalog refresh publishes a new
+  // snapshot. Keep the effect below targeted to durable authority (the actor,
+  // workspace/client, and readiness), not to an incidental callback identity.
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
   // A client replacement represents a new authenticated actor. Reset all OCC
   // state before the first await, so no effect in this commit can persist the
   // prior actor/workspace value under the new target.
@@ -207,13 +214,21 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     setCurrentConflict(null);
     setError(null);
     setSaving(false);
-    void reload();
+    loadingRef.current = true;
+    setLoading(true);
     return () => {
       targetGeneration.current += 1;
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
     };
-  }, [reload, setCurrentConflict, targetKey]);
+  }, [setCurrentConflict, targetKey]);
+
+  // Initial/target reads wait for the catalogs required to validate resources.
+  // A later catalog refresh keeps this boolean true and therefore does not
+  // restart the read or fence a local/in-flight edit.
+  useEffect(() => {
+    if (resourceHydrationReady) void reloadRef.current();
+  }, [resourceHydrationReady, targetKey]);
 
   const persistSnapshot = useCallback(
     (snapshot: NewSessionDraftEditable): Promise<FlushedNewSessionDraft | null> => {
@@ -473,6 +488,14 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
 function cloneEditable(value: NewSessionDraftEditable): NewSessionDraftEditable {
   return structuredClone(value);
+}
+
+function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraft {
+  // Old servers returned the tools array without the explicitness marker. The
+  // old request contract made that array the user's complete selection, so an
+  // absent marker must remain explicit (including an empty array) on a new
+  // client rather than inheriting current workspace defaults.
+  return Object.hasOwn(remote, "toolsProvided") ? remote : { ...remote, toolsProvided: true };
 }
 
 function draftSignature(value: NewSessionDraftEditable): string {

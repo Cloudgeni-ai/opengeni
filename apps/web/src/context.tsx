@@ -691,9 +691,10 @@ export function RootRouteComponent() {
         if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
           return;
         }
-        setGithubStatus(null);
-        setGithubRepos([]);
-        setGithubCatalogReady(true);
+        // A failed status/catalog request is unavailable/unknown, not proof
+        // that the last-known installation or repository identities vanished.
+        // Keep the last successful snapshot and readiness fence so draft
+        // hydration cannot project it to [] and autosave destructive loss.
         toast.error("GitHub status unavailable", { description: String(error) });
       } finally {
         if (githubRefreshId.current === refreshId) {

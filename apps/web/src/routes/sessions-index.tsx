@@ -50,7 +50,7 @@ import { Label } from "@/components/ui/label";
 import { Notice } from "@/components/ui/notice";
 import { Select } from "@/components/ui/select";
 import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
-import { useAppContext } from "@/context";
+import { useAppContext, useLatestCallback } from "@/context";
 import { groupSessionsForRail, relativeTimeLabel } from "@/lib/sessions-group";
 import { useCodexModels } from "@/lib/use-codex-models";
 import { isMachineComputeSelectable } from "@/lib/machine-selectability";
@@ -149,10 +149,8 @@ function SessionsIndexRouteContent({ workspaceId }: { workspaceId: string }) {
       persistedToolPolicy,
     ],
   );
-  const hydrateResources = useCallback(
-    (resources: NewSessionDraftEditable["resources"]) =>
-      rehydrateRepositoryResources(resources, context.githubRepos),
-    [context.githubRepos],
+  const hydrateResources = useLatestCallback((resources: NewSessionDraftEditable["resources"]) =>
+    rehydrateRepositoryResources(resources, context.githubRepos),
   );
   const setModel = context.setModel;
   const setReasoningEffort = context.setReasoningEffort;

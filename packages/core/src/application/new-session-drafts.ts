@@ -21,6 +21,7 @@ import { HTTPException } from "hono/http-exception";
 import type { AppDependencies } from "../dependencies";
 import { settingsWithEnabledCapabilityMcpServers } from "../domain/capabilities";
 import {
+  isAuthoritativeGitHubRepositorySelectionError,
   normalizeResources,
   validateFileResources,
   validateGitHubRepositorySelection,
@@ -30,6 +31,10 @@ import { hasPermission } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
+
+function hasOwn(value: unknown, key: string): boolean {
+  return typeof value === "object" && value !== null && Object.hasOwn(value, key);
+}
 
 function mapNewSessionDraft(
   row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
@@ -68,9 +73,15 @@ async function hydrateNewSessionDraft(
       try {
         await validateGitHubRepositorySelection(deps.db, workspaceId, [resource]);
         resources.push(resource);
-      } catch {
-        // Repository authorization can be revoked after the draft was saved.
-        // The next form must not present the stale identity as selectable.
+      } catch (error) {
+        if (isAuthoritativeGitHubRepositorySelectionError(error)) {
+          // Repository authorization can be revoked after the draft was saved.
+          // The next form must not present the stale identity as selectable.
+          continue;
+        }
+        // A catalog/database outage is not proof that a repository was revoked.
+        // Preserve the resource so a later retry cannot autosave its deletion.
+        resources.push(resource);
       }
       continue;
     }
@@ -178,13 +189,18 @@ export async function saveActorNewSessionDraft(
   rawInput: unknown,
 ): Promise<NewSessionDraftValue> {
   const input = SaveNewSessionDraftRequest.parse(rawInput);
+  // The pre-marker client contract required `tools` and had no
+  // `toolsProvided`. Its array—including []—was the user's complete selection.
+  // Do this presence check before Zod's default turns the missing marker into
+  // false, preserving old-client → new-server intent safely.
+  const toolsProvided = hasOwn(rawInput, "toolsProvided") ? input.toolsProvided : true;
   const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
     deps.db,
     workspaceId,
     deps.settings,
   );
   const resources = normalizeResources(input.resources);
-  const tools = input.toolsProvided ? validateToolRefs(input.tools, runtimeSettings) : [];
+  const tools = toolsProvided ? validateToolRefs(input.tools, runtimeSettings) : [];
   await validateGitHubRepositorySelection(deps.db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !deps.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -204,7 +220,7 @@ export async function saveActorNewSessionDraft(
           text: input.text,
           resources,
           tools,
-          toolsProvided: input.toolsProvided,
+          toolsProvided,
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           options: input.options,

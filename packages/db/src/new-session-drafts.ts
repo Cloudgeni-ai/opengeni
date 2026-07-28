@@ -40,7 +40,13 @@ function storedOptions(
 }
 
 export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
-  return (row.sessionOptions as StoredNewSessionDraftOptions).toolsProvided === true;
+  const options = row.sessionOptions as StoredNewSessionDraftOptions;
+  // Rows written before the explicitness marker was introduced always carried
+  // a `tools` array. Treat a markerless row as explicit rather than widening a
+  // narrowed (including empty) legacy selection to today's workspace defaults.
+  // New rows always write the marker, so an explicit false remains omitted /
+  // workspace-default policy.
+  return options.toolsProvided === true || !Object.hasOwn(options, "toolsProvided");
 }
 
 export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptions {

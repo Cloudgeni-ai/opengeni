@@ -16,6 +16,7 @@ import {
   initializeSessionStartAtomically,
   NewSessionDraftAccessError,
   NewSessionDraftConflictError,
+  newSessionDraftToolsProvided,
   removeWorkspaceMember,
   saveNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
@@ -128,6 +129,54 @@ async function initialize(
 }
 
 describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () => {
+  test("markerless legacy rows preserve narrowed and empty tool intent through seeding", async () => {
+    for (const tools of [[{ kind: "mcp", id: "docs" }], []] as ToolRef[][]) {
+      const context = await fixture();
+      const legacy = await withWorkspaceSubjectRls(
+        client.db,
+        context.grant.workspaceId!,
+        context.subjectId,
+        (db) =>
+          db
+            .insert(schema.newSessionDrafts)
+            .values({
+              accountId: context.grant.accountId,
+              workspaceId: context.grant.workspaceId!,
+              subjectId: context.subjectId,
+              revision: 1,
+              text: "legacy draft",
+              resources: [],
+              tools,
+              model: "scripted-model",
+              reasoningEffort: "low",
+              // No toolsProvided marker: this is a pre-marker row.
+              sessionOptions: {},
+            })
+            .returning(),
+      );
+      expect(legacy[0]).toBeDefined();
+      expect(newSessionDraftToolsProvided(legacy[0]!)).toBe(true);
+
+      const seeded = await withWorkspaceSubjectRls(
+        client.db,
+        context.grant.workspaceId!,
+        context.subjectId,
+        (db) =>
+          consumeNewSessionDraftInTransaction(db, {
+            workspaceId: context.grant.workspaceId!,
+            subjectId: context.subjectId,
+            expectedRevision: 1,
+          }),
+      );
+      expect(seeded).toBe(true);
+      expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
+        revision: 2,
+        tools,
+        sessionOptions: { toolsProvided: true },
+      });
+    }
+  });
+
   test("enables and forces RLS with an actor-qualified policy", async () => {
     const [role] = await shared.admin<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
       select rolsuper, rolbypassrls from pg_roles where rolname = 'opengeni_app'`;
