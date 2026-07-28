@@ -1,5 +1,11 @@
 # @opengeni/contracts
 
+## 0.19.3
+
+### Patch Changes
+
+- a0f2442: Return typed correlation-safe API failures, discard bounded non-JSON gateway bodies in the SDK, preserve retryability and ambiguous mutation outcomes, and keep composer drafts stable across transient failures and live policy rerenders.
+
 ## 0.19.2
 
 ### Patch Changes
