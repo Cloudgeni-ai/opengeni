@@ -71,6 +71,13 @@ explicitly and recover after reconnect. `/readyz` remains the complete
 Postgres/NATS/Temporal dependency report, so the outage is still visible to
 operators. Losing Postgres fails both readiness paths.
 
+The one turn worker uses Temporal's resource-based slot tuner. It admits more
+agent turns while whole-machine CPU stays below 80% and memory stays below 75%,
+up to 256 active turns; excess work remains durable in Temporal. This is a
+safety ceiling, not a reservation or a promise that 256 heavy turns fit. The
+ordinary chart default remains a fixed 16 turns per worker so multi-worker
+deployments can scale replicas predictably.
+
 The ordinary dependency services remain private `ClusterIP` services. Five
 one-port NodePort services are the complete private-edge surface:
 

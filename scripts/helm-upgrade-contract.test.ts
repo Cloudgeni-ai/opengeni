@@ -65,6 +65,8 @@ describe("Helm database upgrade contract", () => {
     expect(values).toContain("resources: null");
     expect(values).toContain("priorityClasses:\n  enabled: true");
     expect(values).toContain("path: /traffic-readyz");
+    expect(values).toContain("OPENGENI_TURN_WORKER_CONCURRENCY_MODE: resource-based");
+    expect(values).toContain('OPENGENI_TURN_WORKER_MAX_CONCURRENT_TURNS: "256"');
     for (const tier of ["presentation", "execution", "control", "durable"]) {
       expect(defaults).toContain(`    ${tier}:`);
     }

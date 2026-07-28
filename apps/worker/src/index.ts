@@ -57,7 +57,8 @@ import {
 import {
   CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
   CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
-  TURN_WORKER_MAX_CONCURRENT_TURNS,
+  turnWorkerConcurrencyLogFields,
+  turnWorkerConcurrencyOptions,
 } from "./concurrency";
 import {
   constructWithOwnedConnection,
@@ -179,13 +180,10 @@ export async function createOpenGeniWorker(options: WorkerOptions): Promise<{
                 ? { workflowBundle: options.workflowBundle }
                 : resolveOpenGeniWorkflowDefinition()),
               maxConcurrentWorkflowTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS,
+              maxConcurrentActivityTaskExecutions: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
             }
-          : {}),
+          : turnWorkerConcurrencyOptions(settings)),
         activities,
-        maxConcurrentActivityTaskExecutions:
-          options.role === "turn"
-            ? TURN_WORKER_MAX_CONCURRENT_TURNS
-            : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
         // Cancellation is delivered through an activity heartbeat. The SDK would
         // otherwise throttle a two-minute heartbeat timeout to its 60-second cap,
         // making Pause/Steer take roughly a minute even though runAgentTurn emits a
@@ -642,10 +640,14 @@ export async function createOpenGeniWorkerService(
           options.role === "control"
             ? settings.temporalTaskQueue
             : turnTaskQueue(settings.temporalTaskQueue),
-        maxConcurrentActivityTaskExecutions:
-          options.role === "turn"
-            ? TURN_WORKER_MAX_CONCURRENT_TURNS
-            : CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+        ...(options.role === "turn"
+          ? turnWorkerConcurrencyLogFields(settings)
+          : {
+              concurrencyMode: "fixed",
+              maxConcurrentTurns: CONTROL_WORKER_MAX_CONCURRENT_ACTIVITIES,
+              targetCpuUsage: null,
+              targetMemoryUsage: null,
+            }),
         maxConcurrentWorkflowTaskExecutions:
           options.role === "control" ? CONTROL_WORKER_MAX_CONCURRENT_WORKFLOW_TASKS : 0,
         httpPort: options.http === false ? null : settings.workerHttpPort,
