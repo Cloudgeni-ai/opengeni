@@ -194,8 +194,8 @@ describe("migration replay — RLS isolation under a DEDICATED schema + NON-OWNE
     expect(posture.memberships).toEqual([]);
     expect(posture.ownedSchemas).toEqual([]);
     expect(posture.ownedRelations).toEqual([]);
-    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(77);
-    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(77);
+    expect(posture.tables.filter((table) => table.rlsEnabled)).toHaveLength(78);
+    expect(posture.tables.filter((table) => table.rlsActive)).toHaveLength(78);
     expect(
       posture.tables.filter(
         (table) => table.select && table.insert && table.update && table.delete,
