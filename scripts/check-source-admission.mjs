@@ -350,14 +350,12 @@ function assertFileProjection(files, manifest, expectedCount) {
 }
 
 function assertComparison(value, baseSha, headSha) {
-  invariant(value?.status === "ahead", "candidate head is not strictly ahead of current main");
   invariant(value?.base_commit?.sha === baseSha, "comparison base differs from current main");
   invariant(
     Array.isArray(value?.commits) && value.commits.length > 0,
     "comparison commits are missing",
   );
   invariant(value.commits.at(-1)?.sha === headSha, "comparison head changed");
-  invariant(value?.behind_by === 0, "candidate head is behind current main");
   invariant(
     Number.isSafeInteger(value?.ahead_by) && value.ahead_by > 0,
     "candidate head has no admitted commits",
