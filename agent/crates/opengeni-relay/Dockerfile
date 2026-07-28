@@ -10,29 +10,35 @@
 # (build context = the `agent/` Cargo workspace; the relay shares the
 # opengeni-agent-stream codec, so the whole workspace must be in context.)
 
+# syntax=docker/dockerfile:1
+
 # ---- build stage ----------------------------------------------------------------
-FROM rust:1.82-alpine AS build
+# BuildKit normally runs each build stage as the target architecture. That makes
+# an arm64 Rust release build crawl through QEMU on an amd64 CI runner. `xx`
+# configures clang/lld + Cargo for the requested target while this stage remains
+# native to the builder, so both OCI variants compile at native speed.
+FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
+FROM --platform=$BUILDPLATFORM rust:1.82-alpine AS build
 
-ARG TARGETARCH
+COPY --from=xx / /
 
-# musl-dev + the build essentials for a fully-static link. protoc is NOT needed:
-# the proto crate compiles the .proto via the pure-Rust `protox` (build.rs).
-RUN apk add --no-cache musl-dev
+# clang/lld are native cross-compilers. protoc is NOT needed: the proto crate
+# compiles the .proto via the pure-Rust `protox` (build.rs).
+RUN apk add --no-cache clang lld
 
 WORKDIR /build
 # The build context is the agent/ workspace root.
 COPY . .
 
 # Build the relay binary for the requested OCI architecture as a static musl
-# target. The workspace profile already strips + LTOs the release build.
+# target without emulation. The workspace profile already strips + LTOs the
+# release build; `xx-verify` fails if the output architecture drifts.
+ARG TARGETPLATFORM
 RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) rust_target="x86_64-unknown-linux-musl" ;; \
-      arm64) rust_target="aarch64-unknown-linux-musl" ;; \
-      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
-    esac; \
+    rust_target="$(xx-cargo --print-target-triple)"; \
     rustup target add "${rust_target}"; \
-    cargo build --release --target "${rust_target}" -p opengeni-relay; \
+    xx-cargo build --release --target-dir /build/target -p opengeni-relay; \
+    xx-verify "/build/target/${rust_target}/release/opengeni-relay"; \
     cp "target/${rust_target}/release/opengeni-relay" /opengeni-relay
 
 # ---- runtime stage --------------------------------------------------------------
