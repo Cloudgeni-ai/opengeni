@@ -52,20 +52,39 @@ describe("session tool policy resolution", () => {
     expect(result.effectivePolicy.counts).toMatchObject({ effective: 1, configured: 1 });
   });
 
-  test("fixed modes never widen from configured defaults", () => {
+  test("fixed modes search only their configured MCP allow-list", () => {
     for (const mode of ["explicit", "inherited", "legacy"] as const) {
       const result = resolve({
         toolPolicy: { mode, inheritedFromSessionId: null },
         sessionTools: [mcp("cap-selected")],
+        availableMcpServerIds: ["opengeni", "cap-selected"],
       });
       expect(result.toolRefs).toEqual([mcp("cap-selected"), mcp("opengeni")]);
       expect(result.effectivePolicy.effectiveIds).toEqual(["cap-selected", "opengeni"]);
       expect(result.effectivePolicy.lazyRouter).toEqual({
-        state: "disabled",
-        deferredIds: [],
+        state: "required",
+        deferredIds: ["cap-selected"],
       });
       expect(result.effectivePolicy.counts.selected).toBe(1);
     }
+  });
+
+  test("an explicitly selected Slack-shaped MCP is deferred without widening policy", () => {
+    const slackId = "cap_integrations_sh_slack_com_5a15dccc0dc0_17qniox";
+    const result = resolve({
+      toolPolicy: { mode: "explicit", inheritedFromSessionId: null },
+      sessionTools: [{ kind: "mcp", id: slackId }],
+      availableMcpServerIds: ["opengeni", slackId, "unselected-server"],
+      defaultMcpServerIds: [],
+    });
+
+    expect(result.effectivePolicy.effectiveIds).toEqual([slackId, "opengeni"]);
+    expect(result.effectivePolicy.lazyRouter).toEqual({
+      state: "required",
+      deferredIds: [slackId],
+    });
+    expect(result.toolRefs.map((tool) => tool.id)).toEqual([slackId, "opengeni"]);
+    expect(sessionToolPolicyAllowsDefaultNativeTools(result.effectivePolicy)).toBe(false);
   });
 
   test("distinguishes omitted turn tools from an explicit empty narrowing", () => {
