@@ -37,6 +37,7 @@ import {
   composeAgentInstructions,
   connectMcpServersInBatches,
   coreInstructions,
+  appendGitCredentialBindingInstructions,
   appendPersistentSessionSettings,
   appendTurnInstructions,
   appendToolspaceInstructions,
@@ -1917,6 +1918,27 @@ describe("runtime event normalization", () => {
       `BASE ${TOOLSPACE_PROGRAMMATIC_DIRECTIVE}`,
     );
     expect(appendToolspaceInstructions("BASE", false)).toBe("BASE");
+  });
+
+  test("multi-account Git binding discovery is model-visible only for managed sandboxes", () => {
+    const bindings = [
+      {
+        credentialBindingId: "github-work",
+        provider: "github" as const,
+        token: "token-one",
+      },
+      {
+        credentialBindingId: "github-personal",
+        provider: "github" as const,
+        token: "token-two",
+      },
+    ];
+    const instructions = appendGitCredentialBindingInstructions("BASE", bindings, "modal");
+    expect(instructions).toContain("$HOME/.opengeni/git-bindings.json");
+    expect(instructions).toContain("OPENGENI_GIT_BINDING");
+    expect(instructions).not.toContain("token-one");
+    expect(appendGitCredentialBindingInstructions("BASE", bindings, "selfhosted")).toBe("BASE");
+    expect(appendGitCredentialBindingInstructions("BASE", [bindings[0]], "modal")).toBe("BASE");
   });
 
   test("the toolspace directive text is a stable, generic, host-agnostic snapshot", () => {

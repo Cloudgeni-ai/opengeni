@@ -301,6 +301,13 @@ fall through to a sibling credential. Provider aliases (including
 binding; they are removed when a second appears. `gh`, `glab`, and `az` select
 an explicit `OPENGENI_GIT_BINDING`, then the current repository's `origin`, then
 a sole direct-provider binding, and fail closed if selection remains ambiguous.
+For a managed sandbox with multiple bindings for one provider, the model is told
+to inspect the secret-free `$HOME/.opengeni/git-bindings.json` inventory. It maps
+each opaque `credentialBindingId` to its provider, transport kind, repository URI,
+and mount path, so an agent running outside a repository can deliberately set
+`OPENGENI_GIT_BINDING` without guessing. The wrapper's ambiguity error points to
+the same file. Connected Machines receive neither platform bindings nor this
+instruction and continue using their own ambient Git authentication.
 Broker bearers are never exported as provider tokens: a provider CLI selected
 for a brokered binding fails with guidance to use the configured provider MCP
 tools. Each binding renews independently, so one failed connection cannot block
