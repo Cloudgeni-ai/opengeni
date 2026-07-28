@@ -135,12 +135,17 @@ describe("release schema contract", () => {
         (migrations.has("0124_session_event_duplicate_lookup.sql") ? 1 : 0) +
         (migrations.has("0125_document_drops_visibility.sql") ? 1 : 0) +
         (migrations.has("0126_document_access_constraints.sql") ? 1 : 0) +
-        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0),
+        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
+        (migrations.has("0128_github_installation_authority.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "988125394d6a6a96cecfa2a2f97c4d290daa802a749bf8e6fca6193848e3ae3f",
+      "572480616ca23d19a6fc458bd25b035b3069a54f38f8bb97046f4428da87da9f",
     );
-    expect(contract.latestMigration).toBe("0127_document_default_base_index.sql");
+    expect(contract.latestMigration).toBe("0128_github_installation_authority.sql");
+    expect(migrations.get("0128_github_installation_authority.sql")).toMatchObject({
+      sha256: "365793b2a204a70e214adb90298b522acbb6dcfae22a46681a58f41a6938e6f0",
+      deploymentMode: "rolling",
+    });
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
       deploymentMode: "maintenance",
