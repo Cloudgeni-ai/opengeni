@@ -32,7 +32,12 @@ export type SessionRealtimeConflictCode =
   | "REALTIME_NOT_FOUND"
   | "REALTIME_NOT_ACTIVE"
   | "REALTIME_OWNER_MISMATCH"
-  | "REALTIME_VERSION_CHANGED";
+  | "REALTIME_VERSION_CHANGED"
+  | "REALTIME_CONNECTION_CHANGED"
+  | "REALTIME_CONNECTION_ACTIVE"
+  | "REALTIME_CONNECTION_NOT_FOUND"
+  | "REALTIME_CONNECTION_STATE_CHANGED"
+  | "REALTIME_ACK_INVALID";
 
 export class SessionRealtimeConflictError extends Error {
   readonly name = "SessionRealtimeConflictError";
@@ -265,6 +270,15 @@ async function endWithEvent(
   session: SessionRow;
 }> {
   const ended = await endRow(db, row, reason, now);
+  await db
+    .update(schema.sessionRealtimeConnections)
+    .set({ state: "closed", closedAt: now, updatedAt: now })
+    .where(
+      and(
+        eq(schema.sessionRealtimeConnections.realtimeId, row.id),
+        inArray(schema.sessionRealtimeConnections.state, ["negotiating", "active"]),
+      ),
+    );
   const event = await appendRealtimeLifecycleEvent(
     db,
     session,

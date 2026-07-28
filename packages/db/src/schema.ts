@@ -961,6 +961,169 @@ export const sessionRealtimeModes = pgTable(
   }),
 );
 
+export const sessionRealtimeConnections = pgTable(
+  "session_realtime_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    realtimeId: uuid("realtime_id")
+      .notNull()
+      .references(() => sessionRealtimeModes.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    connectionEpoch: integer("connection_epoch").notNull(),
+    state: text("state").notNull().default("negotiating"),
+    sdpAnswer: text("sdp_answer"),
+    failureCode: text("failure_code"),
+    negotiatedAt: timestamp("negotiated_at", { withTimezone: true }),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_realtime_connections_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_realtime_connections_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    operation: uniqueIndex("session_realtime_connections_operation_uq").on(
+      table.realtimeId,
+      table.operationId,
+    ),
+    epoch: uniqueIndex("session_realtime_connections_epoch_uq").on(
+      table.realtimeId,
+      table.connectionEpoch,
+    ),
+    oneOpen: uniqueIndex("session_realtime_connections_one_open_uq")
+      .on(table.realtimeId)
+      .where(sql`${table.state} in ('negotiating', 'active')`),
+    epochValid: check(
+      "session_realtime_connections_epoch_check",
+      sql`${table.connectionEpoch} >= 1`,
+    ),
+    stateValid: check(
+      "session_realtime_connections_state_check",
+      sql`${table.state} in ('negotiating', 'active', 'failed', 'closed')`,
+    ),
+    sdpValid: check(
+      "session_realtime_connections_sdp_check",
+      sql`${table.sdpAnswer} is null or octet_length(${table.sdpAnswer}) between 1 and 1048576`,
+    ),
+    failureValid: check(
+      "session_realtime_connections_failure_check",
+      sql`${table.failureCode} is null or octet_length(${table.failureCode}) between 1 and 128`,
+    ),
+    terminalValid: check(
+      "session_realtime_connections_terminal_check",
+      sql`(${table.state} = 'negotiating' and ${table.sdpAnswer} is null and ${table.failureCode} is null and ${table.negotiatedAt} is null and ${table.closedAt} is null)
+        or (${table.state} = 'active' and ${table.sdpAnswer} is not null and ${table.failureCode} is null and ${table.negotiatedAt} is not null and ${table.closedAt} is null)
+        or (${table.state} = 'failed' and ${table.sdpAnswer} is null and ${table.failureCode} is not null and ${table.closedAt} is not null)
+        or (${table.state} = 'closed' and ${table.closedAt} is not null)`,
+    ),
+  }),
+);
+
+export const sessionRealtimeEntries = pgTable(
+  "session_realtime_entries",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    accountId: uuid("account_id").notNull(),
+    workspaceId: uuid("workspace_id").notNull(),
+    sessionId: uuid("session_id").notNull(),
+    realtimeId: uuid("realtime_id")
+      .notNull()
+      .references(() => sessionRealtimeModes.id, { onDelete: "cascade" }),
+    operationId: uuid("operation_id").notNull(),
+    connectionEpoch: integer("connection_epoch").notNull(),
+    sequence: integer("sequence").notNull(),
+    direction: text("direction").notNull(),
+    kind: text("kind").notNull(),
+    role: text("role"),
+    providerEventId: text("provider_event_id"),
+    delegationItemId: text("delegation_item_id"),
+    // The referenced tables are declared later in this schema module; the
+    // rolling migration owns both ON DELETE SET NULL foreign keys.
+    sourceUpdateId: uuid("source_update_id"),
+    historyItemId: uuid("history_item_id"),
+    text: text("text"),
+    payload: jsonb("payload").$type<Record<string, unknown>>().notNull().default({}),
+    clientAckedAt: timestamp("client_acked_at", { withTimezone: true }),
+    providerAckedAt: timestamp("provider_acked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    workspaceAccount: foreignKey({
+      name: "session_realtime_entries_workspace_account_fk",
+      columns: [table.workspaceId, table.accountId],
+      foreignColumns: [workspaces.id, workspaces.accountId],
+    }).onDelete("cascade"),
+    workspaceSession: foreignKey({
+      name: "session_realtime_entries_workspace_session_fk",
+      columns: [table.workspaceId, table.sessionId],
+      foreignColumns: [sessions.workspaceId, sessions.id],
+    }).onDelete("cascade"),
+    operation: uniqueIndex("session_realtime_entries_operation_uq").on(
+      table.realtimeId,
+      table.operationId,
+    ),
+    sequence: uniqueIndex("session_realtime_entries_sequence_uq").on(
+      table.realtimeId,
+      table.sequence,
+    ),
+    sourceUpdate: uniqueIndex("session_realtime_entries_source_update_uq")
+      .on(table.realtimeId, table.sourceUpdateId)
+      .where(sql`${table.sourceUpdateId} is not null`),
+    outboundPending: index("session_realtime_entries_outbound_pending_idx")
+      .on(table.realtimeId, table.sequence)
+      .where(
+        sql`${table.direction} = 'provider_out' and (${table.clientAckedAt} is null or ${table.providerAckedAt} is null)`,
+      ),
+    epochValid: check("session_realtime_entries_epoch_check", sql`${table.connectionEpoch} >= 1`),
+    sequenceValid: check("session_realtime_entries_sequence_check", sql`${table.sequence} >= 1`),
+    directionValid: check(
+      "session_realtime_entries_direction_check",
+      sql`${table.direction} in ('provider_in', 'provider_out')`,
+    ),
+    kindValid: check(
+      "session_realtime_entries_kind_check",
+      sql`${table.kind} in ('user_transcript', 'assistant_transcript', 'delegation_call', 'delegation_result', 'interruption', 'session_update', 'error')`,
+    ),
+    roleValid: check(
+      "session_realtime_entries_role_check",
+      sql`${table.role} is null or ${table.role} in ('user', 'assistant')`,
+    ),
+    providerEventValid: check(
+      "session_realtime_entries_provider_event_check",
+      sql`${table.providerEventId} is null or octet_length(${table.providerEventId}) between 1 and 1024`,
+    ),
+    delegationItemValid: check(
+      "session_realtime_entries_delegation_item_check",
+      sql`${table.delegationItemId} is null or octet_length(${table.delegationItemId}) between 1 and 1024`,
+    ),
+    textValid: check(
+      "session_realtime_entries_text_check",
+      sql`${table.text} is null or octet_length(${table.text}) <= 131072`,
+    ),
+    payloadValid: check(
+      "session_realtime_entries_payload_check",
+      sql`octet_length(${table.payload}::text) <= 131072`,
+    ),
+    transcriptValid: check(
+      "session_realtime_entries_transcript_check",
+      sql`(${table.kind} = 'user_transcript' and ${table.role} = 'user' and ${table.text} is not null)
+        or (${table.kind} = 'assistant_transcript' and ${table.role} = 'assistant' and ${table.text} is not null)
+        or (${table.kind} not in ('user_transcript', 'assistant_transcript') and ${table.role} is null)`,
+    ),
+  }),
+);
+
 // A denied session create is durable evidence, not a mutable session/resource
 // artifact. It has its own workspace-scoped idempotency key so retries replay
 // the same denial without creating a session or billing/run rows.
