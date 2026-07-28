@@ -52,12 +52,25 @@ Core value props in one line: **durable + recoverable + streamable + multi-tenan
 
 These are the load-bearing, cross-cutting rules. Breaking one tends to be a subtle correctness or security bug, not a compile error. Each is stated as an imperative rule with its canonical anchor.
 
-### 3.1 Postgres is the durable source of truth; NATS is realtime fanout only
+### 3.1 Postgres is durable truth; NATS is an ephemeral transport
 
-> Postgres remembers, NATS broadcasts.
+> Postgres remembers; NATS transports.
 
-- **Write durable, then publish best-effort.** `appendAndPublishEvents` writes the DB (system of record) **then** best-effort-publishes to NATS. _"The DB append above is the durable system of record; the publish is only a best-effort LIVE fan-out."_ **Never publish without a prior durable append; never reverse the order.**
-- **A NATS blip must never kill an in-flight turn.** `publish()` must not throw the run to death; consumers reconcile missed live events from the durable log.
+- **Session-event fanout is best-effort.** `appendAndPublishEvents` writes the DB
+  (system of record) **then** best-effort-publishes to NATS. Never publish an
+  authoritative session event without a prior durable append; never reverse the
+  order. A fanout failure must not kill an in-flight turn because consumers
+  reconcile missed events from the durable log.
+- **Connected-machine commands also use NATS.** Agent request/reply, streamed
+  operation frames, heartbeats, and enrollment auth callout all cross the same
+  broker. They are live transport, not durable broker state. A broker restart
+  loses no session history, but connected machines are unreachable until
+  clients reconnect; affected operations surface typed offline/timeout outcomes.
+- **NATS is therefore restartable, not optional.** API and worker startup require
+  a connection and readiness turns unhealthy during a disconnect. Already
+  committed state and queued Temporal work survive, while new or active
+  connected-machine execution waits, retries at its owning boundary, or fails
+  visibly.
 - **Missed events are backfilled from Postgres by `sequence`.** The SSE stream replays durable events in bounded pages, subscribes live, and on a sequence gap **backfills from the DB**, deduping by sequence. During replay or slow-client delivery it retains only the newest live notification and then gap-fills, so a hot producer cannot create an unbounded API or NATS-client buffer. Each session and workspace-control HTTP body queues at most one complete frame of at most 96 KiB. A second write waits on `desiredSize` for at most 30 seconds; a still-stalled reader is disconnected, its upstream subscription is released, and the SDK reconnects from the last sequence it actually observed. Fixed-cardinality `stream`/`reason` counters expose queue pressure, timeout, and impossible oversized-frame failures without tenant identifiers. The streaming core _refuses to deliver with a gap or without monotonic cursor progress_ (it throws rather than skip or spin).
 - **Reads never ride the bus.** Channel-A point reads go client→API→box in-process; only side-effect notifications (`fs.changed`/`git.changed`/`terminal.pty.*`) are appended+published. Putting reads on the bus would corrupt SSE gap-fill.
 - **Gateway failures cross one bounded typed boundary.** The browser/SDK sends a bounded safe `x-opengeni-correlation-id`; the API validates or replaces it, returns it, and emits typed JSON error envelopes. The SDK retains only structured JSON error bodies up to 16 KiB and discards raw proxy HTML/plain text. A raw `502`/`503`/`504` or unexpected successful non-JSON response to a mutation is outcome-unknown: callers reconcile before retrying and reuse the exact idempotency key rather than manufacturing a new operation. The React composer preserves draft text/resources through these failures and reuses the same Send/Steer `clientEventId`. Error metrics use only fixed-cardinality route/status/code labels, never tenant or correlation identifiers.
@@ -225,7 +238,7 @@ The web bundle ships no production adapter and therefore fails closed.
 
 ## 4. System architecture
 
-Public clients talk only to the **Hono API**. The API authenticates/authorizes at the workspace boundary, persists durable state to **Postgres**, drives orchestration via **Temporal**, and fans out live events over **NATS Core**. A **Temporal worker** runs each agent turn as a non-retryable activity — inside a provisioned **sandbox backend**, or **directly on a Connected Machine** (the `selfhosted` primary-compute path, §3.8).
+Public clients talk only to the **Hono API**. The API authenticates/authorizes at the workspace boundary, persists durable state to **Postgres**, drives orchestration via **Temporal**, and uses **NATS Core** for live event fanout and Connected Machine transport. A **Temporal worker** runs each agent turn as a non-retryable activity — inside a provisioned **sandbox backend**, or **directly on a Connected Machine** (the `selfhosted` primary-compute path, §3.8).
 
 ### 4.1 Live path vs durable path
 
@@ -238,8 +251,9 @@ flowchart LR
   PG[("Postgres<br/>DURABLE truth")]
   TQ["Temporal<br/>session workflow"]
   W["Worker (apps/worker)<br/>runAgentTurn activity"]
-  SB["Sandbox backend<br/>11 backends"]
-  NATS(["NATS Core<br/>LIVE fanout only"])
+  SB["Provisioned sandbox backend"]
+  CM["Connected Machine"]
+  NATS(["NATS Core<br/>ephemeral live transport"])
 
   Client -->|"POST events / GET stream"| API
   API ==>|"1. durable append (system of record)"| PG
@@ -247,6 +261,8 @@ flowchart LR
   API -->|"signalWithStart"| TQ
   TQ -->|"dispatch turn"| W
   W <-->|"exec / fs / git"| SB
+  W <-->|"request/reply + op stream"| NATS
+  NATS <-->|"workspace-scoped agent transport"| CM
   W ==>|"appendAndPublishEvents: durable first"| PG
   W -.->|"then best-effort live"| NATS
   NATS -.->|"live SSE"| API
@@ -258,7 +274,10 @@ flowchart LR
 ```
 
 - **Thick arrows (`==>`) are the durable path** — the system of record. Everything else can be lost and rebuilt from it.
-- **Dotted arrows (`-.->`) are the live path** — best-effort, fast, never load-bearing for correctness.
+- **Dotted fanout arrows (`-.->`) are reconstructible live notifications.**
+  Connected-machine arrows are also ephemeral, but they carry real commands:
+  losing them does not lose durable history, yet execution cannot continue until
+  transport recovers.
 - The SSE stream **starts** from durable replay (`after` cursor), **subscribes** live, and on a sequence gap **backfills** from Postgres — so a client that misses live events never sees a gap.
 
 ### 4.2 How a request becomes an agent run (narration)
@@ -404,7 +423,7 @@ A Cargo workspace building the box-side binary for the `selfhosted` backend. `ag
 
 ### 6.4 Deployment (`deploy/`)
 
-`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; in-chart Postgres/Temporal/NATS/MinIO are **disposable fixtures**), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary). See §12.
+`deploy/helm/opengeni` (the chart — owns api/web/worker/relay/migrations plus the optional Terraform Registry MCP docs service; its in-chart Postgres/Temporal/NATS/MinIO support disposable conformance stacks and the explicit persistent non-HA single-machine profile), `deploy/terraform/{azure,aws,gcp}` (per-cloud roots), `deploy/stacks` (wrappers for deps managed outside the chart), `deploy/nats/auth-callout.conf` (BYO-compute tenancy boundary). See §12.
 
 ### 6.5 Docs, scripts, test
 
@@ -635,9 +654,9 @@ The current map:
 
 ## 12. Deployment
 
-A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile into validated deploy plans: required env, preflight checks, Terraform/Helm targets, and generated artifacts. **12 built-in profiles** (local-compose, local-kubernetes, kubernetes-external, {azure,aws,gcp}-{managed,existing-services}, preview-pr, preview-branch, self-contained-kubernetes) + **product overlays** (none / managed-saas-staging / managed-saas-production, which hard-override sandbox→modal and access→externalGateway).
+A typed `DeploymentContract` (`@opengeni/deployment`) turns an abstract profile into validated deploy plans: required env, preflight checks, Terraform/Helm targets, and generated artifacts. The built-in profile registry lives in `packages/deployment/src/index.ts`; product overlays hard-override sandbox and access posture for managed SaaS staging/production.
 
-- **What OpenGeni owns vs disposable fixtures.** The chart (`deploy/helm/opengeni`) owns **api/web/worker/relay/migrations**, plus optional app-adjacent integrations such as the Terraform Registry MCP docs service. The in-chart **Postgres/Temporal/NATS/MinIO are disposable conformance fixtures** (default `enabled:false`) — _not production services_. Official NATS/Temporal are lifecycle-managed by the stack wrappers (`deploy/stacks`), outside the app chart; official Temporal needs an **existing** Postgres.
+- **What OpenGeni owns.** The chart (`deploy/helm/opengeni`) owns **api/web/worker/relay/migrations**, plus optional app-adjacent integrations such as the Terraform Registry MCP docs service. In-chart **Postgres/Temporal/NATS/MinIO** serve both disposable conformance stacks (default `enabled:false`) and the explicit persistent non-HA single-machine profile. Multi-node profiles keep platform dependencies outside the app chart through managed/existing services or the stack wrappers (`deploy/stacks`).
 - **Secrets never reach Helm values.** `generateRuntimeArtifacts` puts sensitive Terraform outputs only into `runtime.env` (and records them in `sensitiveTerraformOutputsUsed`); generated files carry "Do not commit generated copies."
 - **Parity (not import).** `@opengeni/deployment`'s `SANDBOX_REQUIRED_ENV` and `SandboxBackend` _mirror_ `@opengeni/config`/`@opengeni/contracts` — enforced by **tests, not the type system**. Edit one side without the other and it compiles but the parity test goes red.
 - **Conformance.** `scripts/deployment-conformance.ts` black-box-verifies a running deployment (health, access boundary, session run, SSE replay, MCP-tool session, scheduled task, storage round-trip). Preflight is `scripts/deployment-preflight.ts`.

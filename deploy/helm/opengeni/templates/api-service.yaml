@@ -19,6 +19,9 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+      {{- with .Values.api.service.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
   selector:
     {{- include "opengeni.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/component: api
