@@ -54,6 +54,7 @@ import {
   listRigVersionMonitoringSummaries,
   listSocialConnections,
   listSocialPosts,
+  recordSyncedSocialPosts,
   listVariableSets,
   MEMORY_CORRECT_TOOL_DESCRIPTION,
   MEMORY_SAVE_TOOL_DESCRIPTION,
@@ -100,6 +101,13 @@ import {
   listWorkspaceGitHubRepositories,
 } from "../github-access";
 import { githubBrowserBaseUrl, githubBrowserGrantClaims } from "../github-browser-flow";
+import {
+  socialMentionsLive,
+  socialOwnPostsLive,
+  socialPostReply,
+  socialSearchLive,
+  socialThreadLive,
+} from "../integrations/social-api";
 import {
   promoteVerifiedDefinitionEditChangeForApi,
   proposeRigChangeForApi,
@@ -219,6 +227,13 @@ const FIRST_PARTY_TOOL_AUTHORIZATION = {
   social_connections_list: { allOf: ["connections:read"] },
   social_posts_recent: { allOf: ["connections:read"] },
   social_daily_analysis_context: { allOf: ["connections:read"] },
+  social_search_live: { allOf: ["connections:read"] },
+  social_mentions_live: { allOf: ["connections:read"] },
+  social_thread_fetch: { allOf: ["connections:read"] },
+  social_posts_sync: { allOf: ["connections:read"] },
+  // Publishes under the user's identity: connections:write keeps it out of the
+  // default agent permission set, unlike the read-only social tools above.
+  social_post_reply: { allOf: ["connections:write"] },
   scheduled_tasks_list: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
   scheduled_tasks_get: { anyOf: ["scheduled_tasks:manage", "scheduled_tasks:run"] },
   scheduled_tasks_create: { allOf: ["scheduled_tasks:manage"] },
@@ -541,6 +556,141 @@ export function buildOpenGeniMcpServer(
             "Report data gaps explicitly when posts or metrics are missing.",
             "Do not infer unpublished metrics or hidden platform data.",
           ],
+        });
+      },
+    );
+
+    // Live provider reads (X / Reddit). Tokens are resolved and used entirely
+    // host-side; the agent only ever sees normalized post payloads.
+    server.registerTool(
+      "social_search_live",
+      {
+        description:
+          "Search live conversations on a connected social account (X recent search or Reddit search). Use social_connections_list first to find the connectionId. For Reddit, pass subreddit to scope the search.",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          query: z4.string().min(1).max(512),
+          subreddit: z4.string().min(1).max(100).optional(),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, query, subreddit, limit }) => {
+        const result = await socialSearchLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId },
+          { query, subreddit, limit },
+        );
+        return json({ provider: result.connection.provider, posts: result.posts });
+      },
+    );
+
+    server.registerTool(
+      "social_mentions_live",
+      {
+        description:
+          "Fetch live mentions of the connected account (X mentions timeline, or the Reddit inbox with username mentions and comment replies).",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          sinceId: z4.string().optional(),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, sinceId, limit }) => {
+        const result = await socialMentionsLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId },
+          { sinceId, limit },
+        );
+        return json({ provider: result.connection.provider, posts: result.posts });
+      },
+    );
+
+    server.registerTool(
+      "social_thread_fetch",
+      {
+        description:
+          "Fetch a live conversation thread: for X pass a tweet id (returns the conversation), for Reddit pass a post id or t3_ fullname (returns the post plus top comments).",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          id: z4.string().min(1).max(100),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, id, limit }) => {
+        const result = await socialThreadLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId },
+          { id, limit },
+        );
+        return json({ provider: result.connection.provider, posts: result.posts });
+      },
+    );
+
+    server.registerTool(
+      "social_posts_sync",
+      {
+        description:
+          "Sync the connected account's own recent posts from the provider into OpenGeni's social_posts store (idempotent), so social_posts_recent and daily analysis see fresh data.",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          limit: z4.number().int().positive().optional(),
+        },
+      },
+      async ({ connectionId, limit }) => {
+        const result = await socialOwnPostsLive(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId },
+          { limit },
+        );
+        const synced = await recordSyncedSocialPosts(deps.db, {
+          accountId: grant.accountId,
+          workspaceId: grant.workspaceId,
+          connectionId,
+          posts: result.posts.map((post) => ({
+            externalPostId: post.id,
+            url: post.url,
+            authorHandle: post.author,
+            text: post.text,
+            publishedAt: post.createdAt ? new Date(post.createdAt) : new Date(),
+            metrics: post.metrics,
+          })),
+        });
+        return json({
+          provider: result.connection.provider,
+          fetched: result.posts.length,
+          inserted: synced.inserted,
+          skipped: synced.skipped,
+        });
+      },
+    );
+  }
+
+  // Posting is a write with real-world blast radius: it publishes under the
+  // user's identity. Gated on connections:write (never in the default
+  // first-party agent permission set) so scheduled tasks must opt in, and
+  // deployments can additionally wrap it in a requireApproval policy.
+  if (!toolspaceMode || can("connections:write")) {
+    server.registerTool(
+      "social_post_reply",
+      {
+        description:
+          "Publish a reply from the connected social account. X: inReplyToId is the tweet id to reply to. Reddit: inReplyToId is a fullname (t3_<post> or t1_<comment>). Draft and get approval before calling this — it posts publicly and immediately.",
+        inputSchema: {
+          connectionId: z4.string().uuid(),
+          inReplyToId: z4.string().min(1).max(100),
+          text: z4.string().min(1).max(10000),
+        },
+      },
+      async ({ connectionId, inReplyToId, text }) => {
+        const result = await socialPostReply(
+          deps,
+          { workspaceId: grant.workspaceId, connectionId },
+          { inReplyToId, text },
+        );
+        return json({
+          provider: result.connection.provider,
+          postedId: result.postedId,
+          url: result.url,
         });
       },
     );

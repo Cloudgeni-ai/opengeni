@@ -1,4 +1,9 @@
-import { CreateSocialConnectionRequest, CreateSocialPostRequest } from "@opengeni/contracts";
+import {
+  CreateSocialConnectionRequest,
+  CreateSocialPostRequest,
+  OAuthStartResponse,
+  SocialOAuthStartRequest,
+} from "@opengeni/contracts";
 import {
   createSocialConnection,
   createSocialPost,
@@ -11,9 +16,10 @@ import { z } from "zod";
 import { requireAccessGrant } from "@opengeni/core";
 import type { ApiRouteDeps } from "@opengeni/core";
 import { boundedLimit } from "../http/common";
+import { completeSocialOAuthCallback, startSocialOAuth } from "../integrations/social-oauth";
 
 export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
-  const { db } = deps;
+  const { db, settings, observability } = deps;
 
   app.get("/v1/workspaces/:workspaceId/social/connections", async (c) => {
     const workspaceId = c.req.param("workspaceId");
@@ -45,6 +51,39 @@ export function registerSocialRoutes(app: Hono, deps: ApiRouteDeps): void {
     } catch (error) {
       throw socialHttpException(error);
     }
+  });
+
+  // First-party social OAuth (X / Reddit). Distinct from the MCP integrations
+  // flow: providers are pinned, tokens land in social_connections, and the
+  // callback is unauthenticated (browser redirect) but bound by signed state.
+  app.post("/v1/workspaces/:workspaceId/social/oauth/start", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const grant = await requireAccessGrant(c, deps, workspaceId, "workspace:admin");
+    const payload = SocialOAuthStartRequest.parse(await c.req.json());
+    const result = await startSocialOAuth(
+      { db, settings, observability },
+      {
+        accountId: grant.accountId,
+        workspaceId,
+        subjectId: grant.subjectId,
+        requestUrl: c.req.url,
+        payload,
+      },
+    );
+    return c.json(OAuthStartResponse.parse(result));
+  });
+
+  app.get("/v1/social/oauth/callback", async (c) => {
+    const result = await completeSocialOAuthCallback(
+      { db, settings, observability },
+      {
+        code: c.req.query("code"),
+        state: c.req.query("state"),
+        error: c.req.query("error"),
+        requestUrl: c.req.url,
+      },
+    );
+    return c.redirect(result.redirectTo, 302);
   });
 
   app.get("/v1/workspaces/:workspaceId/social/posts", async (c) => {

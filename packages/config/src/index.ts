@@ -267,6 +267,9 @@ const SettingsSchema = z.object({
   // Undefined is meaningful: the migration boundary persists the product
   // default of 3 when no deployment override is supplied.
   maxNestedAgentDepth: z.coerce.number().int().nonnegative().max(MAX_NESTED_AGENT_DEPTH).optional(),
+  // Operator OAuth apps for first-party social connectors, keyed by provider
+  // id ("x", "reddit"): {"x":{"clientId":"...","clientSecret":"..."}}.
+  socialOauthClientsJson: z.string().default("{}"),
   // Session goal guard rails. Goals are designed for runs that legitimately
   // span days, so length is bounded by pathology detection (no-progress
   // streaks, budget exhaustion), never by count. goalMaxAutoContinuations is
@@ -1386,6 +1389,7 @@ export function getSettings(): Settings {
     slackClientId: optional("OPENGENI_SLACK_CLIENT_ID"),
     slackClientSecret: optional("OPENGENI_SLACK_CLIENT_SECRET"),
     maxNestedAgentDepth: optional("OPENGENI_MAX_NESTED_AGENT_DEPTH"),
+    socialOauthClientsJson: optional("OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON"),
     goalMaxAutoContinuations: optional("OPENGENI_GOAL_MAX_AUTO_CONTINUATIONS"),
     goalNoProgressLimit: optional("OPENGENI_GOAL_NO_PROGRESS_LIMIT"),
     agentMaxModelCallsPerTurn: optional("OPENGENI_AGENT_MAX_MODEL_CALLS_PER_TURN"),
@@ -3197,6 +3201,53 @@ export function parseIntegrationsOauthClientsJson(
   return out;
 }
 
+export const SocialOAuthClientConfigSchema = z.object({
+  clientId: z.string().min(1),
+  clientSecret: z.string().min(1).optional(),
+});
+export type SocialOAuthClientConfig = z.infer<typeof SocialOAuthClientConfigSchema>;
+
+const SOCIAL_OAUTH_PROVIDER_IDS = ["x", "reddit"] as const;
+
+export function parseSocialOauthClientsJson(
+  raw: string | undefined,
+): Partial<Record<(typeof SOCIAL_OAUTH_PROVIDER_IDS)[number], SocialOAuthClientConfig>> {
+  if (!raw?.trim() || raw.trim() === "{}") {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON must be valid JSON: ${message}`, {
+      cause: error,
+    });
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(
+      "OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON must be a JSON object keyed by social provider id",
+    );
+  }
+  const out: Partial<Record<(typeof SOCIAL_OAUTH_PROVIDER_IDS)[number], SocialOAuthClientConfig>> =
+    {};
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!SOCIAL_OAUTH_PROVIDER_IDS.includes(key as (typeof SOCIAL_OAUTH_PROVIDER_IDS)[number])) {
+      throw new Error(
+        `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON provider ${key} is not supported (expected: ${SOCIAL_OAUTH_PROVIDER_IDS.join(", ")})`,
+      );
+    }
+    const result = SocialOAuthClientConfigSchema.safeParse(value);
+    if (!result.success) {
+      throw new Error(
+        `OPENGENI_SOCIAL_OAUTH_CLIENTS_JSON client for ${key} is invalid: ${result.error.message}`,
+      );
+    }
+    out[key as (typeof SOCIAL_OAUTH_PROVIDER_IDS)[number]] = result.data;
+  }
+  return out;
+}
+
 export function parseStaticUsageLimitsJson(raw: string): StaticUsageLimitsConfig {
   if (!raw.trim() || raw.trim() === "{}") {
     return {};
@@ -3452,6 +3503,7 @@ function validateSettings(settings: Settings): void {
     }
   }
   parseIntegrationsOauthClientsJson(settings.integrationsOauthClientsJson);
+  parseSocialOauthClientsJson(settings.socialOauthClientsJson);
   if (
     settings.productAccessMode === "configured" &&
     !["local", "test"].includes(settings.environment) &&

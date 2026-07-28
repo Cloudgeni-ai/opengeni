@@ -3170,8 +3170,29 @@ export type CreateSocialConnectionInput = {
   status: SocialConnectionStatus;
   scopes?: string[];
   credentialRef?: string | null;
+  credentialEncrypted?: string | null;
   tokenMetadata?: Record<string, unknown>;
   metadata?: Record<string, unknown>;
+};
+
+export type UpsertSocialOAuthConnectionInput = {
+  accountId: string;
+  workspaceId: string;
+  provider: SocialProvider;
+  accountHandle: string;
+  accountName?: string | null;
+  externalAccountId?: string | null;
+  scopes: string[];
+  credentialEncrypted: string;
+  tokenMetadata?: Record<string, unknown>;
+};
+
+export type UpdateSocialConnectionCredentialInput = {
+  workspaceId: string;
+  connectionId: string;
+  credentialEncrypted?: string | null;
+  status?: SocialConnectionStatus;
+  tokenMetadata?: Record<string, unknown>;
 };
 
 export type CreateSocialPostInput = {
@@ -7157,6 +7178,7 @@ export async function createSocialConnection(
           status: input.status,
           scopes: input.scopes ?? [],
           credentialRef: input.credentialRef ?? null,
+          credentialEncrypted: input.credentialEncrypted ?? null,
           tokenMetadata: input.tokenMetadata ?? {},
           metadata: input.metadata ?? {},
         })
@@ -7167,6 +7189,112 @@ export async function createSocialConnection(
       return mapSocialConnection(row);
     },
   );
+}
+
+/**
+ * OAuth-callback persistence: reconnecting the same provider account replaces
+ * the stored credential and revives the connection instead of failing on the
+ * (workspace, provider, handle) unique index.
+ */
+export async function upsertSocialOAuthConnection(
+  db: Database,
+  input: UpsertSocialOAuthConnectionInput,
+): Promise<SocialConnection> {
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const [row] = await scopedDb
+        .insert(schema.socialConnections)
+        .values({
+          accountId: input.accountId,
+          workspaceId: input.workspaceId,
+          provider: input.provider,
+          accountHandle: input.accountHandle,
+          accountName: input.accountName ?? null,
+          externalAccountId: input.externalAccountId ?? null,
+          status: "connected",
+          scopes: input.scopes,
+          credentialEncrypted: input.credentialEncrypted,
+          tokenMetadata: input.tokenMetadata ?? {},
+        })
+        .onConflictDoUpdate({
+          target: [
+            schema.socialConnections.workspaceId,
+            schema.socialConnections.provider,
+            schema.socialConnections.accountHandle,
+          ],
+          set: {
+            accountName: input.accountName ?? null,
+            externalAccountId: input.externalAccountId ?? null,
+            status: "connected",
+            scopes: input.scopes,
+            credentialEncrypted: input.credentialEncrypted,
+            tokenMetadata: input.tokenMetadata ?? {},
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+      if (!row) {
+        throw new Error("Failed to upsert social connection");
+      }
+      return mapSocialConnection(row);
+    },
+  );
+}
+
+/**
+ * Host-side credential read for the social API client. Deliberately not part
+ * of mapSocialConnection so the encrypted bundle never rides along on list or
+ * MCP responses.
+ */
+export async function loadSocialConnectionCredential(
+  db: Database,
+  workspaceId: string,
+  connectionId: string,
+): Promise<{ connection: SocialConnection; credentialEncrypted: string | null } | null> {
+  return await withWorkspaceRls(db, workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .select()
+      .from(schema.socialConnections)
+      .where(
+        and(
+          eq(schema.socialConnections.workspaceId, workspaceId),
+          eq(schema.socialConnections.id, connectionId),
+        ),
+      )
+      .limit(1);
+    if (!row) {
+      return null;
+    }
+    return { connection: mapSocialConnection(row), credentialEncrypted: row.credentialEncrypted };
+  });
+}
+
+export async function updateSocialConnectionCredential(
+  db: Database,
+  input: UpdateSocialConnectionCredentialInput,
+): Promise<SocialConnection | null> {
+  return await withWorkspaceRls(db, input.workspaceId, async (scopedDb) => {
+    const [row] = await scopedDb
+      .update(schema.socialConnections)
+      .set({
+        ...(input.credentialEncrypted !== undefined
+          ? { credentialEncrypted: input.credentialEncrypted }
+          : {}),
+        ...(input.status !== undefined ? { status: input.status } : {}),
+        ...(input.tokenMetadata !== undefined ? { tokenMetadata: input.tokenMetadata } : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(schema.socialConnections.workspaceId, input.workspaceId),
+          eq(schema.socialConnections.id, input.connectionId),
+        ),
+      )
+      .returning();
+    return row ? mapSocialConnection(row) : null;
+  });
 }
 
 export async function listSocialConnections(
@@ -7250,6 +7378,70 @@ export async function createSocialPost(
         throw new Error("Failed to create social post");
       }
       return mapSocialPost(row);
+    },
+  );
+}
+
+/**
+ * Idempotent bulk ingest for provider sync: rows already present under the
+ * (workspace, connection, external post id) unique index are skipped, so a
+ * scheduled re-sync never duplicates or fails.
+ */
+export async function recordSyncedSocialPosts(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    connectionId: string;
+    posts: Array<{
+      externalPostId: string;
+      url?: string | null;
+      authorHandle?: string | null;
+      text: string;
+      publishedAt: Date;
+      metrics?: Record<string, number>;
+      raw?: Record<string, unknown>;
+    }>;
+  },
+): Promise<{ inserted: number; skipped: number }> {
+  if (input.posts.length === 0) {
+    return { inserted: 0, skipped: 0 };
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) => {
+      const connection = await requireSocialConnection(
+        scopedDb,
+        input.workspaceId,
+        input.connectionId,
+      );
+      const rows = await scopedDb
+        .insert(schema.socialPosts)
+        .values(
+          input.posts.map((post) => ({
+            accountId: input.accountId,
+            workspaceId: input.workspaceId,
+            connectionId: input.connectionId,
+            provider: connection.provider,
+            externalPostId: post.externalPostId,
+            url: post.url ?? null,
+            authorHandle: post.authorHandle ?? connection.accountHandle,
+            text: post.text,
+            publishedAt: post.publishedAt,
+            metrics: post.metrics ?? {},
+            raw: post.raw ?? {},
+          })),
+        )
+        .onConflictDoNothing({
+          target: [
+            schema.socialPosts.workspaceId,
+            schema.socialPosts.connectionId,
+            schema.socialPosts.externalPostId,
+          ],
+        })
+        .returning({ id: schema.socialPosts.id });
+      return { inserted: rows.length, skipped: input.posts.length - rows.length };
     },
   );
 }

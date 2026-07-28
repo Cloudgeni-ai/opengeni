@@ -197,6 +197,8 @@ import type {
   ConnectionResponse,
   OAuthStartRequest,
   OAuthStartResponse,
+  SocialConnection,
+  SocialOAuthStartRequest,
 } from "./types";
 import type {
   ActivateWorkspaceInstructionPolicyRequest,
@@ -2786,6 +2788,30 @@ export class OpenGeniClient {
       request,
       {},
       options,
+    );
+  }
+
+  /**
+   * Start a first-party social OAuth flow (X / Reddit); redirect the user to
+   * the returned `authorizationUrl`. The completed connection lands in
+   * `listSocialConnections`.
+   */
+  async startSocialOAuth(
+    workspaceId: string,
+    request: SocialOAuthStartRequest,
+  ): Promise<OAuthStartResponse> {
+    return await this.requestJson<OAuthStartResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/social/oauth/start`,
+      request,
+    );
+  }
+
+  /** Connected social accounts (X / Reddit / pushed custom providers). */
+  async listSocialConnections(workspaceId: string): Promise<SocialConnection[]> {
+    return await this.requestJson<SocialConnection[]>(
+      "GET",
+      `/v1/workspaces/${workspaceId}/social/connections`,
     );
   }
 
