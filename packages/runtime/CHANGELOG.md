@@ -1,5 +1,15 @@
 # @opengeni/runtime
 
+## 0.13.10
+
+### Patch Changes
+
+- 543bb26: Expose a secret-free Git credential binding inventory to managed-sandbox agents so multi-account provider CLI routing is discoverable outside an attached repository.
+- 8356146: Scope progressive MCP tool search and context accounting to the authoritative configured server identities while keeping the mandatory OpenGeni tools eager.
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/config@0.7.6
+
 ## 0.13.9
 
 ### Patch Changes
