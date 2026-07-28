@@ -858,6 +858,11 @@ async function loadPreviousPage(
     before,
     limit: requested,
     compact: true,
+    // Monitoring summaries omit correlation fields once a bounded durable
+    // payload exceeds their preview threshold. The browser timeline needs the
+    // sanitized stored payload so persisted tool outputs still match their
+    // calls and expose truthful truncation telemetry after a reload.
+    payloadMode: "full",
   });
   if (options.signal?.aborted) {
     throw abortError();
