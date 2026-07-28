@@ -1,5 +1,21 @@
 # @opengeni/api-router
 
+## 0.11.7
+
+### Patch Changes
+
+- a0f2442: Return typed correlation-safe API failures, discard bounded non-JSON gateway bodies in the SDK, preserve retryability and ambiguous mutation outcomes, and keep composer drafts stable across transient failures and live policy rerenders.
+- Updated dependencies [a0f2442]
+  - @opengeni/contracts@0.19.3
+  - @opengeni/config@0.7.5
+  - @opengeni/core@0.11.7
+  - @opengeni/db@0.12.5
+  - @opengeni/documents@0.2.35
+  - @opengeni/events@0.3.26
+  - @opengeni/github@0.3.17
+  - @opengeni/runtime@0.13.9
+  - @opengeni/storage@0.2.29
+
 ## 0.11.6
 
 ### Patch Changes
