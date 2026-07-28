@@ -4727,15 +4727,16 @@ export const CreateConnectionRequest = z.object({
 });
 export type CreateConnectionRequest = z.infer<typeof CreateConnectionRequest>;
 
-/**
- * Write-only Slack bot installation input. `token` is accepted only by the
- * dedicated validated endpoint and is never represented in a response schema.
- */
-export const ConnectOpenGeniSlackBotRequest = z.object({
-  token: z.string().trim().startsWith("xoxb-").max(8192),
+export const OpenGeniSlackBotInstallRequest = z.object({
   connectionId: z.string().uuid().optional(),
 });
-export type ConnectOpenGeniSlackBotRequest = z.infer<typeof ConnectOpenGeniSlackBotRequest>;
+export type OpenGeniSlackBotInstallRequest = z.infer<typeof OpenGeniSlackBotInstallRequest>;
+
+export const OpenGeniSlackBotInstallStart = z.object({
+  authorizationUrl: z.string().url(),
+  expiresAt: z.string().datetime({ offset: true }),
+});
+export type OpenGeniSlackBotInstallStart = z.infer<typeof OpenGeniSlackBotInstallStart>;
 
 export const UpdateConnectionRequest = z.object({
   providerDomain: z.string().min(1).optional(),

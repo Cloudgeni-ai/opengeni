@@ -46,7 +46,8 @@ import type {
   CreateCapabilityCatalogItemRequest,
   CreateCheckoutRequest,
   CreateCheckoutResponse,
-  ConnectOpenGeniSlackBotRequest,
+  OpenGeniSlackBotInstallRequest,
+  OpenGeniSlackBotInstallStart,
   CreateConnectionRequest,
   CreateDocumentBaseRequest,
   CreateFileUploadRequest,
@@ -2487,17 +2488,16 @@ export class OpenGeniClient {
     return response.connection;
   }
 
-  /** Validate and store/reinstall the workspace-shared OpenGeni Slack bot credential. */
-  async connectOpenGeniSlackBot(
+  /** Start the public Slack installation flow for the workspace-shared OpenGeni bot. */
+  async startOpenGeniSlackBotInstall(
     workspaceId: string,
-    request: ConnectOpenGeniSlackBotRequest,
-  ): Promise<ConnectionMetadata> {
-    const response = await this.requestJson<ConnectionResponse>(
+    request: OpenGeniSlackBotInstallRequest = {},
+  ): Promise<OpenGeniSlackBotInstallStart> {
+    return await this.requestJson<OpenGeniSlackBotInstallStart>(
       "POST",
-      `/v1/workspaces/${workspaceId}/connections/slack-bot`,
+      `/v1/workspaces/${workspaceId}/connections/slack-bot/install`,
       request,
     );
-    return response.connection;
   }
 
   async updateConnection(

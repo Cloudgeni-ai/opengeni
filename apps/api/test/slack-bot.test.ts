@@ -17,6 +17,7 @@ import {
   createSession,
   getConnectionMetadata,
   getSlackBotPostOperation,
+  listConnectionsMetadata,
   loadConnectionCredentialForBroker,
   releaseSlackBotPostOperationClaim,
   updateConnection,
@@ -30,6 +31,7 @@ import {
 import { createApp } from "../src/app";
 import {
   createOpenGeniSlackBotClient,
+  exchangeOpenGeniSlackAuthorizationCode,
   resolveSlackBotConnectionForTool,
   verifyOpenGeniSlackBotCredential,
 } from "../src/integrations/slack-bot";
@@ -54,6 +56,10 @@ beforeAll(async () => {
     productAccessMode: "managed",
     delegationSecret: DELEGATION_SECRET,
     environmentsEncryptionKey: ENCRYPTION_KEY,
+    publicBaseUrl: "https://app.example.test",
+    integrationsStateSecret: "slack-state-secret-for-tests",
+    slackClientId: "slack-client-id",
+    slackClientSecret: "slack-client-secret",
   }) as Settings;
 }, 180_000);
 
@@ -124,6 +130,9 @@ function fakeSlack(
       method === "auth.test"
         ? { "x-oauth-scopes": (options.scopes ?? OPENGENI_SLACK_BOT_REQUIRED_SCOPES).join(",") }
         : undefined;
+    if (method === "oauth.v2.access") {
+      return Response.json({ ok: true, access_token: fixtureBotToken() });
+    }
     if (method === "auth.test") {
       return Response.json(
         {
@@ -217,6 +226,37 @@ function fakeSlack(
 }
 
 describe("OpenGeni Slack bot credential verification", () => {
+  test("exchanges the authorization code server-side with the configured callback", async () => {
+    let requestUrl = "";
+    let requestInit: RequestInit | undefined;
+    const token = await exchangeOpenGeniSlackAuthorizationCode(
+      {
+        code: "authorization-code",
+        clientId: "client-id",
+        clientSecret: "client-secret",
+        redirectUri: "https://app.example.test/v1/integrations/slack/callback",
+      },
+      (async (input, init) => {
+        requestUrl = String(input);
+        requestInit = init;
+        return Response.json({ ok: true, access_token: fixtureBotToken() });
+      }) as typeof globalThis.fetch,
+    );
+
+    expect(token).toBe(fixtureBotToken());
+    expect(requestUrl).toBe("https://slack.com/api/oauth.v2.access");
+    expect(requestInit?.method).toBe("POST");
+    expect(requestInit?.redirect).toBe("error");
+    expect(new URLSearchParams(String(requestInit?.body))).toEqual(
+      new URLSearchParams({
+        code: "authorization-code",
+        client_id: "client-id",
+        client_secret: "client-secret",
+        redirect_uri: "https://app.example.test/v1/integrations/slack/callback",
+      }),
+    );
+  });
+
   test("accepts only the exact bot identity and scope set", async () => {
     const exact = fakeSlack();
     const verified = await verifyOpenGeniSlackBotCredential(
@@ -277,8 +317,8 @@ async function connectBot(
   slackFetch: typeof globalThis.fetch,
   connectionId?: string,
 ) {
-  const response = await app(slackFetch).request(
-    `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot`,
+  const start = await app(slackFetch).request(
+    `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
     {
       method: "POST",
       headers: {
@@ -288,10 +328,23 @@ async function connectBot(
         ]),
         "content-type": "application/json",
       },
-      body: JSON.stringify({ token: fixtureBotToken(), ...(connectionId ? { connectionId } : {}) }),
+      body: JSON.stringify(connectionId ? { connectionId } : {}),
     },
   );
-  const body = (await response.json()) as { connection: { id: string } };
+  if (start.status !== 200) {
+    return { response: start, body: { connection: { id: "" } } };
+  }
+  const installation = (await start.json()) as { authorizationUrl: string };
+  const state = new URL(installation.authorizationUrl).searchParams.get("state");
+  if (!state) throw new Error("expected Slack installation state fixture");
+  const response = await app(slackFetch).request(
+    `/v1/integrations/slack/callback?code=fixture-code&state=${encodeURIComponent(state)}`,
+  );
+  const connections = await listConnectionsMetadata(client.db, workspace.workspaceId, "subject-a");
+  const connection = connections.find(
+    (candidate) => candidate.metadata.credentialRole === OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  );
+  const body = { connection: { id: connection?.id ?? "" } };
   return { response, body };
 }
 
@@ -301,7 +354,8 @@ describe("OpenGeni Slack bot connection", () => {
     const workspace = await freshWorkspace();
     const slack = fakeSlack();
     const { response, body } = await connectBot(workspace, slack.fetch);
-    expect(response.status).toBe(201);
+    expect(response.status).toBe(302);
+    expect(response.headers.get("location")).toContain("slack=connected");
     expect(JSON.stringify(body)).not.toContain(fixtureBotToken());
 
     const connection = await getConnectionMetadata(
@@ -350,28 +404,28 @@ describe("OpenGeni Slack bot connection", () => {
     expect(JSON.stringify(audit)).not.toContain(fixtureBotToken());
 
     const denied = await app(slack.fetch).request(
-      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot`,
+      `/v1/workspaces/${workspace.workspaceId}/connections/slack-bot/install`,
       {
         method: "POST",
         headers: {
           authorization: await bearer(workspace, "subject-a", ["connections:read"]),
           "content-type": "application/json",
         },
-        body: JSON.stringify({ token: fixtureBotToken() }),
+        body: JSON.stringify({}),
       },
     );
     expect(denied.status).toBe(403);
 
     const other = await freshWorkspace();
     const crossTenant = await app(slack.fetch).request(
-      `/v1/workspaces/${other.workspaceId}/connections/slack-bot`,
+      `/v1/workspaces/${other.workspaceId}/connections/slack-bot/install`,
       {
         method: "POST",
         headers: {
           authorization: await bearer(other, "subject-a", ["connections:write"]),
           "content-type": "application/json",
         },
-        body: JSON.stringify({ token: fixtureBotToken(), connectionId: body.connection.id }),
+        body: JSON.stringify({ connectionId: body.connection.id }),
       },
     );
     expect(crossTenant.status).toBe(404);
@@ -434,7 +488,8 @@ describe("OpenGeni Slack bot connection", () => {
     ];
     for (const slack of cases) {
       const result = await connectBot(workspace, slack.fetch);
-      expect(result.response.status).toBe(422);
+      expect(result.response.status).toBe(302);
+      expect(result.response.headers.get("location")).toContain("slack=error");
       expect(JSON.stringify(result.body)).not.toContain(fixtureBotToken());
     }
 
@@ -539,7 +594,7 @@ describe("OpenGeni Slack bot connection", () => {
     const workspace = await freshWorkspace();
     const slack = fakeSlack();
     const connected = await connectBot(workspace, slack.fetch);
-    expect(connected.response.status).toBe(201);
+    expect(connected.response.status).toBe(302);
     const connection = await getConnectionMetadata(
       client.db,
       workspace.workspaceId,

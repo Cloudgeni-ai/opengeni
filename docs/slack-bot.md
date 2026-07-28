@@ -14,6 +14,8 @@ features:
     display_name: OpenGeni
     always_online: false
 oauth_config:
+  redirect_urls:
+    - https://app.opengeni.ai/v1/integrations/slack/callback
   scopes:
     bot:
       - chat:write
@@ -29,14 +31,23 @@ settings:
   token_rotation_enabled: false
 ```
 
-Event Subscriptions are disabled by omission. Do not enable Socket Mode, Event Subscriptions, token rotation, or add `channels:join`, `chat:write.public`, or other scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest.
+Event Subscriptions are disabled by omission. Do not enable Socket Mode, Event Subscriptions, token rotation, or add `channels:join`, `chat:write.public`, or other scopes. OpenGeni rejects an installation whose reported bot scopes do not exactly match the manifest. Self-hosted deployments replace `https://app.opengeni.ai` with their stable HTTPS `OPENGENI_PUBLIC_BASE_URL`.
+
+Configure the deployment with the Slack app's client credentials:
+
+- `OPENGENI_SLACK_CLIENT_ID`
+- `OPENGENI_SLACK_CLIENT_SECRET`
+- `OPENGENI_INTEGRATIONS_STATE_SECRET`
+- `OPENGENI_PUBLIC_BASE_URL`
+
+Enable **Manage Distribution → Public Distribution** in Slack so any workspace can use the direct install link. A Slack Marketplace listing is optional and is not required for OpenGeni's install button.
 
 ## Install and connect
 
-1. In Slack, create the app from the manifest and install it to the intended Slack workspace.
-2. In the intended OpenGeni workspace, open **Capabilities → OpenGeni Slack bot**.
-3. Enter the Slack **Bot User OAuth Token** in the password field and choose **Validate and connect**. Enter the credential only in this form—never in chat, a task prompt, an issue, or logs.
-4. OpenGeni calls Slack server-to-server to verify the bot token, exact scope set, Slack workspace, bot identity, and exact `OpenGeni` display name. It then stores the token only in the existing encrypted connection credential column. API responses, session events, MCP results, and audit events contain only non-secret connection/team/role facts.
+1. In the intended OpenGeni workspace, open **Capabilities → OpenGeni Slack bot**.
+2. Choose **Install in Slack**. OpenGeni creates a signed, workspace-bound, single-use OAuth state and redirects the browser to Slack without a hard-coded Slack team.
+3. Review and approve the requested scopes in Slack. Slack returns the browser to `/v1/integrations/slack/callback`; OpenGeni exchanges the temporary code server-side.
+4. OpenGeni verifies the bot token, exact scope set, Slack workspace, bot identity, and exact `OpenGeni` display name. It stores the token only in the encrypted connection credential column. API responses, browser URLs, session events, MCP results, and audit events contain only non-secret connection/team/role facts.
 
 The connection is bound to the authenticated OpenGeni account and workspace by the normal RLS-scoped `connections` row. It is workspace-shared (`subjectId = null`) and cannot be fabricated or modified through generic connection metadata APIs. A server-owned verification timestamp and credential-version marker distinguish this dedicated validated install from caller-written legacy connection JSON. Markerless rows fail closed. During a rolling release, any older generic writer that replaces the credential or asserted bot identity automatically clears the marker at the database boundary.
 
@@ -60,8 +71,8 @@ In **Scheduled tasks → Advanced → OpenGeni Slack bot**, select an active bot
 
 If the Slack app is reinstalled or its credential changes:
 
-1. Reinstall the existing app in the **same Slack workspace**.
-2. Return to **Capabilities → OpenGeni Slack bot** and choose **Validate and reinstall** with the newly issued bot token.
+1. Return to **Capabilities → OpenGeni Slack bot**.
+2. Choose **Reinstall in Slack** and approve the installation in the **same Slack workspace**.
 
 OpenGeni updates the existing connection in place so scheduled-task references remain stable, but only when the Slack team ID, bot ID, and bot user ID all match the original verified installation. A different bot principal—even in the same Slack workspace and with the same display name—requires a new OpenGeni connection and explicit scheduled-task rebinding. If the manifest name or scopes changed, restore the exact manifest and reinstall in Slack before retrying.
 

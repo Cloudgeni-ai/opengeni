@@ -43,6 +43,55 @@ export type VerifiedOpenGeniSlackBot = {
   metadata: OpenGeniSlackBotConnectionMetadata;
 };
 
+export async function exchangeOpenGeniSlackAuthorizationCode(
+  input: {
+    code: string;
+    clientId: string;
+    clientSecret: string;
+    redirectUri: string;
+  },
+  fetchImpl: FetchLike = fetch,
+): Promise<string> {
+  const body = new URLSearchParams({
+    code: input.code,
+    client_id: input.clientId,
+    client_secret: input.clientSecret,
+    redirect_uri: input.redirectUri,
+  });
+  let response: Response;
+  try {
+    response = await fetchImpl(`${SLACK_API_BASE}oauth.v2.access`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+      redirect: "error",
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+    });
+  } catch {
+    throw new HTTPException(502, { message: "Slack installation token exchange failed" });
+  }
+  if (!response.ok) {
+    throw new HTTPException(502, { message: "Slack installation token exchange failed" });
+  }
+  const payload = await readResponseJsonBounded<unknown>(
+    response,
+    SLACK_RESPONSE_MAX_BYTES,
+    "Slack OAuth response",
+  );
+  const record = slackRecord(payload);
+  if (!record || record.ok !== true) {
+    throw new SlackBotProviderError(slackString(record?.error) || "oauth_exchange_failed");
+  }
+  const accessToken = slackString(record.access_token);
+  if (!accessToken?.startsWith("xoxb-")) {
+    throw new HTTPException(502, { message: "Slack installation did not return a bot token" });
+  }
+  return accessToken;
+}
+
 export type SlackBotReceipt = {
   credentialRole: typeof OPENGENI_SLACK_BOT_CREDENTIAL_ROLE;
   credentialLabel: typeof OPENGENI_SLACK_BOT_CREDENTIAL_LABEL;

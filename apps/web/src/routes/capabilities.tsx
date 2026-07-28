@@ -82,7 +82,6 @@ export function CapabilitiesRoute({
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [slackBotToken, setSlackBotToken] = useState("");
   const [slackBotBusy, setSlackBotBusy] = useState(false);
 
   const [filter, setFilter] = useState<CapabilityFilter>(
@@ -208,25 +207,17 @@ export function CapabilitiesRoute({
     void packs.refresh();
   }
 
-  async function connectSlackBot() {
-    if (!slackBotToken) return;
+  async function installSlackBot() {
     setSlackBotBusy(true);
     try {
-      await client.connectOpenGeniSlackBot(workspaceId, {
-        token: slackBotToken,
+      const installation = await client.startOpenGeniSlackBotInstall(workspaceId, {
         ...(slackBotConnection ? { connectionId: slackBotConnection.id } : {}),
       });
-      setSlackBotToken("");
-      await refresh();
-      toast.success(
-        slackBotConnection ? "OpenGeni Slack bot reinstalled" : "OpenGeni Slack bot connected",
-      );
+      window.location.assign(installation.authorizationUrl);
     } catch (error) {
-      setSlackBotToken("");
-      toast.error("Couldn't connect the OpenGeni Slack bot", {
+      toast.error("Couldn't start the OpenGeni Slack installation", {
         description: error instanceof Error ? error.message : String(error),
       });
-    } finally {
       setSlackBotBusy(false);
     }
   }
@@ -787,15 +778,14 @@ export function CapabilitiesRoute({
                 </div>
               </div>
               <p className="mt-3 max-w-3xl text-xs text-fg-muted">
-                Install the Slack app named and displayed exactly <strong>OpenGeni</strong>, then
-                enter its bot token here. The credential is sent once to the server, encrypted, and
-                never returned. This is separate from your subject-owned hosted Slack OAuth
-                connection.
+                Install <strong>OpenGeni</strong> in your Slack workspace. Slack will show the
+                permissions before approval, then return you here automatically. The workspace bot
+                token is exchanged server-side, encrypted, and never shown in the browser.
               </p>
               <p className="mt-2 max-w-3xl text-2xs text-fg-subtle">
                 Required bot scopes: chat:write, im:write, channels:read, channels:history,
-                groups:read, groups:history, users:read. Socket Mode, Event Subscriptions, token
-                rotation, channels:join, and chat:write.public must remain off.
+                groups:read, groups:history, users:read. This workspace-shared app is separate from
+                personal Slack OAuth connections.
               </p>
               {slackBotConnection && slackBotMetadata ? (
                 <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
@@ -821,28 +811,12 @@ export function CapabilitiesRoute({
               </Button>
             ) : null}
           </div>
-          <form
-            className="mt-4 flex flex-col gap-2 sm:flex-row"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void connectSlackBot();
-            }}
-          >
-            <Input
-              type="password"
-              value={slackBotToken}
-              onChange={(event) => setSlackBotToken(event.target.value)}
-              placeholder="Slack bot token"
-              aria-label="Slack bot token"
-              autoComplete="off"
-              spellCheck={false}
-              className="sm:max-w-md"
-            />
-            <Button type="submit" disabled={slackBotBusy || !slackBotToken}>
+          <div className="mt-4">
+            <Button type="button" disabled={slackBotBusy} onClick={() => void installSlackBot()}>
               {slackBotBusy ? <Loader2Icon className="animate-spin" /> : <PlugIcon />}
-              {slackBotConnection ? "Validate and reinstall" : "Validate and connect"}
+              {slackBotConnection ? "Reinstall in Slack" : "Install in Slack"}
             </Button>
-          </form>
+          </div>
         </section>
 
         {/* Primary search — front and center. */}

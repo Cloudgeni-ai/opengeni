@@ -6,4 +6,4 @@
 "@opengeni/worker-bundle": minor
 ---
 
-Add a secure workspace-shared OpenGeni Slack bot connection with schema-backed verified-install eligibility, immutable team/bot identity across reinstall, idempotent post-operation convergence, exact scope validation, first-party channel/history/user/post tools, explicit scheduled-task routing, and install/reinstall UI and documentation.
+Add a secure public OAuth installation flow for the workspace-shared OpenGeni Slack bot, with server-side token exchange, schema-backed verified-install eligibility, immutable team/bot identity across reinstall, idempotent post-operation convergence, exact scope validation, first-party channel/history/user/post tools, explicit scheduled-task routing, and install/reinstall UI and documentation.
