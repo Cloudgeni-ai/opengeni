@@ -3,6 +3,7 @@ import type {
   FileAsset,
   NewSessionDraft,
   OpenGeniClient,
+  ResourceRef,
   SaveNewSessionDraftRequest,
 } from "@opengeni/sdk";
 import { OpenGeniApiError } from "@opengeni/sdk";
@@ -19,6 +20,10 @@ export type UseNewSessionDraftOptions = {
   onApplyRemote: (value: NewSessionDraftEditable) => void;
   /** Replace finalized attachments with freshly revalidated server assets. */
   restoreReadyFiles: (files: Iterable<FileAsset>) => void;
+  /** Revalidate non-file resource identities against the current UI catalog. */
+  hydrateResources?: (resources: ResourceRef[]) => ResourceRef[] | Promise<ResourceRef[]>;
+  /** Keep the first read pending until catalogs needed for hydration are ready. */
+  resourceHydrationReady?: boolean;
 };
 
 export type FlushedNewSessionDraft = {
@@ -42,7 +47,7 @@ export type UseNewSessionDraftResult = {
   isCurrentSignature: (signature: string) => boolean;
   /**
    * Fence the exact acknowledged snapshot after session creation consumes it,
-   * preserving a genuinely newer local value against the now-absent row.
+   * preserving a genuinely newer local value against the safe-seed row.
    */
   acknowledgeConsumed: (
     flushed: FlushedNewSessionDraft,
@@ -66,6 +71,8 @@ type ValidatedRemoteDraft = {
  */
 export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSessionDraftResult {
   const { client, workspaceId } = options;
+  const resourceHydrationReady = options.resourceHydrationReady ?? true;
+  const hydrateResources = options.hydrateResources;
   const [draft, setDraft] = useState<NewSessionDraft | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -95,8 +102,13 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
   const validateRemoteDraft = useCallback(
     async (remote: NewSessionDraft, generation: number): Promise<ValidatedRemoteDraft | null> => {
+      if (!resourceHydrationReady) return null;
+      const hydratedResources = hydrateResources
+        ? await hydrateResources(remote.resources)
+        : remote.resources;
+      if (generation !== targetGeneration.current) return null;
       const seen = new Set<string>();
-      const fileRefs = remote.resources.flatMap((resource) => {
+      const fileRefs = hydratedResources.flatMap((resource) => {
         if (resource.kind !== "file" || seen.has(resource.fileId)) return [];
         seen.add(resource.fileId);
         return [resource];
@@ -117,11 +129,12 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         draft: remote,
         editable: {
           text: remote.text,
-          // Repository state is not persisted by this browser surface until it
-          // has visible repository rehydration. Revalidated ready files are the
-          // only resource identities restored here.
-          resources: files.map((file) => ({ kind: "file", fileId: file.id })),
+          resources: [
+            ...hydratedResources.filter((resource) => resource.kind === "repository"),
+            ...files.map((file): ResourceRef => ({ kind: "file", fileId: file.id })),
+          ],
           tools: remote.tools,
+          toolsProvided: remote.toolsProvided,
           model: remote.model,
           reasoningEffort: remote.reasoningEffort,
           options: remote.options,
@@ -129,12 +142,12 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         files,
       };
     },
-    [client, workspaceId],
+    [client, hydrateResources, resourceHydrationReady, workspaceId],
   );
 
   const readRemote = useCallback(async (): Promise<ValidatedRemoteDraft | null> => {
     const generation = targetGeneration.current;
-    const remote = await client.getNewSessionDraft(workspaceId);
+    const remote = normalizeLegacyNewSessionDraft(await client.getNewSessionDraft(workspaceId));
     if (generation !== targetGeneration.current) return null;
     return await validateRemoteDraft(remote, generation);
   }, [client, validateRemoteDraft, workspaceId]);
@@ -162,6 +175,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     const generation = targetGeneration.current;
     loadingRef.current = true;
     setLoading(true);
+    if (!resourceHydrationReady) return;
     try {
       const remote = await readRemote();
       if (remote && generation === targetGeneration.current) applyRemote(remote);
@@ -173,7 +187,14 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         setLoading(false);
       }
     }
-  }, [applyRemote, readRemote]);
+  }, [applyRemote, readRemote, resourceHydrationReady]);
+
+  // `reload` intentionally follows resource hydration callbacks, but those
+  // callbacks can change identity when a catalog refresh publishes a new
+  // snapshot. Keep the effect below targeted to durable authority (the actor,
+  // workspace/client, and readiness), not to an incidental callback identity.
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
 
   // A client replacement represents a new authenticated actor. Reset all OCC
   // state before the first await, so no effect in this commit can persist the
@@ -193,13 +214,21 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
     setCurrentConflict(null);
     setError(null);
     setSaving(false);
-    void reload();
+    loadingRef.current = true;
+    setLoading(true);
     return () => {
       targetGeneration.current += 1;
       if (autosaveTimer.current) clearTimeout(autosaveTimer.current);
       autosaveTimer.current = null;
     };
-  }, [reload, setCurrentConflict, targetKey]);
+  }, [setCurrentConflict, targetKey]);
+
+  // Initial/target reads wait for the catalogs required to validate resources.
+  // A later catalog refresh keeps this boolean true and therefore does not
+  // restart the read or fence a local/in-flight edit.
+  useEffect(() => {
+    if (resourceHydrationReady) void reloadRef.current();
+  }, [resourceHydrationReady, targetKey]);
 
   const persistSnapshot = useCallback(
     (snapshot: NewSessionDraftEditable): Promise<FlushedNewSessionDraft | null> => {
@@ -308,21 +337,14 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       persistenceEpoch.current = epoch;
       const snapshot = cloneEditable(valueRef.current);
       const signature = draftSignature(snapshot);
+      const priorSaves = saveChain.current;
 
-      // Session creation consumed this exact server revision. Invalidate every
-      // save that captured the old row as its OCC base before inspecting the
-      // current browser value; a late response from that epoch must not restore
-      // stale persistence authority or surface its expected conflict.
-      draftRef.current = null;
-      lastSavedSignature.current = null;
-      setDraft(null);
+      // Session creation accepted this exact server revision. Invalidate every
+      // save that captured the old row as its OCC base, then wait for its
+      // physical response before reading the safe seed. A late response must
+      // not restore stale persistence authority or race the seed read.
       setCurrentConflict(null);
       setError(null);
-
-      if (signature === flushed.signature) {
-        setSaving(false);
-        return { kind: "consumed" };
-      }
 
       const run = async (): Promise<AcknowledgeConsumedNewSessionDraftResult | null> => {
         if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
@@ -330,13 +352,53 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
         }
         setSaving(true);
         try {
-          // The accepted revision no longer exists. A same-tab edit therefore
-          // rebases onto the API's absent-row revision zero. If a sibling tab
-          // inserts first, this remains a typed OCC conflict and never overwrites
-          // that newer remote value.
+          await priorSaves;
+          if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
+            return null;
+          }
+          const remote = await readRemote();
+          if (!remote || generation !== targetGeneration.current) return null;
+
+          // A successful create turns the accepted revision into exactly one
+          // newer safe seed. A larger revision proves that a sibling/in-flight
+          // edit won after the create; never overwrite that newer authority.
+          const expectedSeedRevision = flushed.revision + 1;
+          if (remote.draft.revision > expectedSeedRevision) {
+            const problem = new Error(
+              "New-session defaults changed in another client while the session was created",
+            );
+            draftRef.current = remote.draft;
+            lastSavedSignature.current = draftSignature(remote.editable);
+            setDraft(remote.draft);
+            setCurrentConflict(problem);
+            setError(problem);
+            return null;
+          }
+          if (remote.draft.revision < expectedSeedRevision) {
+            const problem = new Error("New-session defaults were not seeded yet");
+            setError(problem);
+            return null;
+          }
+
+          draftRef.current = remote.draft;
+          lastSavedSignature.current = draftSignature(remote.editable);
+          setDraft(remote.draft);
+          if (signature === flushed.signature) {
+            // The server now owns the safe seed. Keep the post-create composer
+            // UI-only until the next page load instead of persisting the
+            // route's deliberate clear as a new empty draft.
+            draftRef.current = null;
+            lastSavedSignature.current = null;
+            setDraft(null);
+            return { kind: "consumed" };
+          }
+
+          // A newer local edit is the next draft. It may be saved only against
+          // the exact safe-seed revision; OCC still fences a concurrent sibling
+          // save that lands between this read and this write.
           const saved = await client.saveNewSessionDraft(workspaceId, {
             ...snapshot,
-            expectedRevision: 0,
+            expectedRevision: remote.draft.revision,
           });
           if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
             return null;
@@ -354,16 +416,6 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
           if (generation !== targetGeneration.current || epoch !== persistenceEpoch.current) {
             return null;
           }
-          // Revision zero is the API's explicit logical baseline for no row.
-          // Retain it after a failed insert so an explicit retry can safely use
-          // expectedRevision=0; it is not treated as a durable acknowledgement.
-          const absentBaseline: NewSessionDraft = {
-            revision: 0,
-            ...snapshot,
-            updatedAt: null,
-          };
-          draftRef.current = absentBaseline;
-          setDraft(absentBaseline);
           const problem = asError(cause);
           if (isNewSessionDraftConflict(cause)) setCurrentConflict(problem);
           setError(problem);
@@ -382,7 +434,7 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
       );
       return await operation;
     },
-    [client, setCurrentConflict, workspaceId],
+    [client, readRemote, setCurrentConflict, workspaceId],
   );
 
   const resolveConflict = useCallback(
@@ -436,6 +488,14 @@ export function useNewSessionDraft(options: UseNewSessionDraftOptions): UseNewSe
 
 function cloneEditable(value: NewSessionDraftEditable): NewSessionDraftEditable {
   return structuredClone(value);
+}
+
+function normalizeLegacyNewSessionDraft(remote: NewSessionDraft): NewSessionDraft {
+  // Old servers returned the tools array without the explicitness marker. The
+  // old request contract made that array the user's complete selection, so an
+  // absent marker must remain explicit (including an empty array) on a new
+  // client rather than inheriting current workspace defaults.
+  return Object.hasOwn(remote, "toolsProvided") ? remote : { ...remote, toolsProvided: true };
 }
 
 function draftSignature(value: NewSessionDraftEditable): string {

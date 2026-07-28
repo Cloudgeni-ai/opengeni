@@ -3661,6 +3661,8 @@ export const NewSessionDraft = z.object({
   text: z.string(),
   resources: z.array(ResourceRef),
   tools: z.array(ToolRef),
+  /** False means the workspace-default MCP policy is still inherited. */
+  toolsProvided: z.boolean().default(false),
   model: z.string().min(1),
   reasoningEffort: ReasoningEffort,
   options: NewSessionDraftOptions,
@@ -3672,6 +3674,7 @@ export const SaveNewSessionDraftRequest = NewSessionDraft.pick({
   text: true,
   resources: true,
   tools: true,
+  toolsProvided: true,
   model: true,
   reasoningEffort: true,
   options: true,

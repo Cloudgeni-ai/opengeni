@@ -159,7 +159,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import { decryptEnvironmentValue } from "./environment-crypto";
 import { sanitizeEventPayload, sanitizeModelPayload } from "./event-payload-sanitizer";
-import { consumeNewSessionDraftInTransaction } from "./new-session-drafts";
+import { seedNewSessionDraftInTransaction } from "./new-session-drafts";
 import {
   runIdempotentPersistenceTransaction,
   type IdempotentPersistenceTransactionOptions,
@@ -28148,7 +28148,7 @@ export async function initializeSessionStartAtomically(
             tx as unknown as Database,
             input.consumeNewSessionDraft.subjectId,
           );
-          await consumeNewSessionDraftInTransaction(tx as unknown as Database, {
+          await seedNewSessionDraftInTransaction(tx as unknown as Database, {
             workspaceId: input.workspaceId,
             subjectId: input.consumeNewSessionDraft.subjectId,
             expectedRevision: input.consumeNewSessionDraft.expectedRevision,

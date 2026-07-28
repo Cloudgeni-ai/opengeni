@@ -59,7 +59,10 @@ import {
   initialReasoningEffort,
   labelEffort,
   mergeMcpServerOptions,
+  newSessionDraftToolPolicy,
   normalizeRepositoryUrl,
+  rehydrateRepositoryResources,
+  repositorySelectionFromResources,
   reasoningEffortOrder,
   selectedAvailableCapabilityToolIds,
 } from "./lib/session-tools";
@@ -1638,6 +1641,79 @@ describe("GitHub repository resources", () => {
       githubInstallationId: 123,
       githubRepositoryId: 456,
     });
+  });
+
+  test("hydrates private repositories by identity, drops revoked entries, and keeps manual refs", () => {
+    const privateRepo = githubRepository({ private: true });
+    const publicRepo = githubRepository({ id: 789, private: false, fullName: "example/public" });
+    const resources: ResourceRef[] = [
+      {
+        kind: "repository",
+        uri: privateRepo.cloneUrl,
+        ref: "develop",
+        githubInstallationId: privateRepo.installationId,
+        githubRepositoryId: privateRepo.id,
+      },
+      {
+        kind: "repository",
+        uri: "https://github.com/example/revoked.git",
+        ref: "main",
+        githubInstallationId: 999,
+        githubRepositoryId: 998,
+      },
+      {
+        kind: "repository",
+        uri: "https://git.example.com/acme/manual.git",
+        ref: "main",
+      },
+    ];
+
+    const privateResource = resources[0]!;
+    const manualResource = resources[2] as Extract<ResourceRef, { kind: "repository" }>;
+    const hydrated = rehydrateRepositoryResources(resources, [privateRepo, publicRepo]);
+    expect(hydrated).toEqual([privateResource, manualResource]);
+    expect(repositorySelectionFromResources(hydrated, [privateRepo, publicRepo])).toEqual({
+      manualRepos: [{ id: 1, url: manualResource.uri, ref: "main" }],
+      selectedRepoIds: new Set([privateRepo.id]),
+      selectedRepoRefs: { [privateRepo.id]: "develop" },
+    });
+  });
+});
+
+describe("new-session draft tool policy", () => {
+  test("keeps omitted defaults distinct from explicit empty and narrowed policies", () => {
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni", "docs"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: true,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: [],
+        workspaceDefaultMcpServerIds: ["opengeni"],
+        catalogReady: true,
+        explicit: true,
+      }),
+    ).toEqual({ tools: [], toolsProvided: true });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: true,
+        explicit: false,
+      }),
+    ).toEqual({ tools: [{ kind: "mcp", id: "opengeni" }], toolsProvided: true });
+    expect(
+      newSessionDraftToolPolicy({
+        selectedMcpServerIds: ["opengeni"],
+        workspaceDefaultMcpServerIds: ["opengeni", "docs"],
+        catalogReady: false,
+        explicit: true,
+      }),
+    ).toEqual({ tools: [], toolsProvided: false });
   });
 });
 

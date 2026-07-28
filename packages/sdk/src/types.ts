@@ -2340,6 +2340,8 @@ export type NewSessionDraft = {
   text: string;
   resources: ResourceRef[];
   tools: ToolRef[];
+  /** False inherits the workspace-default MCP policy; true preserves an explicit array. */
+  toolsProvided: boolean;
   model: string;
   reasoningEffort: ReasoningEffort;
   options: NewSessionDraftOptions;
