@@ -5,6 +5,31 @@ import type { WorkspaceTranscriptionPolicy } from "./transcription";
 // publishable on its own; `test/contract-parity.test.ts` pins these types to
 // the contracts package so drift fails the gate instead of shipping.
 
+export type CodexRealtimeWebrtcVersion = "v3";
+export type CodexRealtimeVoice =
+  | "juniper"
+  | "maple"
+  | "spruce"
+  | "ember"
+  | "vale"
+  | "breeze"
+  | "arbor"
+  | "sol"
+  | "cove";
+
+export type CodexRealtimeWebrtcRequest = {
+  sdp: string;
+  version: CodexRealtimeWebrtcVersion;
+  instructions?: string | undefined;
+  voice?: CodexRealtimeVoice | undefined;
+};
+
+export type CodexRealtimeWebrtcResponse = {
+  sdp: string;
+  version: CodexRealtimeWebrtcVersion;
+  model: "gpt-live-1-boulder-alpha";
+};
+
 export type SessionStatus =
   | "queued"
   | "running"
@@ -2167,7 +2192,9 @@ export type CodexAccountOverview = {
 };
 
 /** Independently settled live overview keyed by workspace credential id. */
-export type CodexOverviewResponse = { accounts: Record<string, CodexAccountOverview> };
+export type CodexOverviewResponse = {
+  accounts: Record<string, CodexAccountOverview>;
+};
 
 export type CodexAllocatorUpdate = {
   allocatorEnabled: boolean;

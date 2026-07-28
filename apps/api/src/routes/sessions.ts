@@ -2,6 +2,7 @@ import {
   AcknowledgeStreamRequest,
   AttachViewerRequest,
   ClearSessionContextRequest,
+  CodexRealtimeWebrtcRequest,
   ClientSessionEvent,
   CompactSessionContextRequest,
   DeleteSessionQueueItemRequest,
@@ -49,6 +50,7 @@ import {
   type SandboxBackend,
   type LineageNode,
   type Session,
+  type ErrorCode,
   type SessionAuthorizationOperation,
   type SessionQueueSnapshot,
   type TerminalPtyExitedPayload,
@@ -121,6 +123,7 @@ import { withChannelA, type ChannelAContext, type ChannelAHandle } from "../sand
 import { negotiateCapabilities } from "@opengeni/runtime/sandbox";
 import type { Context, Hono, MiddlewareHandler } from "hono";
 import { HTTPException } from "hono/http-exception";
+import type { ContentfulStatusCode } from "hono/utils/http-status";
 import {
   requireAccessGrant,
   requireSessionAuthorization,
@@ -144,6 +147,7 @@ import {
   type TerminalStreamMint,
   type ViewerServices,
 } from "../sandbox/viewer";
+import { buildSessionCodexRealtimeBroker, CodexRealtimeBrokerError } from "../codex-realtime";
 import {
   acceptSessionUserMessage,
   controlHumanSessionWorkstream,
@@ -517,6 +521,54 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     return c.json(await withEffectivePolicy(deps, workspaceId, session));
   });
 
+  app.post("/v1/workspaces/:workspaceId/sessions/:sessionId/realtime/webrtc", async (c) => {
+    const workspaceId = c.req.param("workspaceId");
+    const sessionId = c.req.param("sessionId");
+    await requireAccessGrant(c, deps, workspaceId, "sessions:control");
+    if (!z.string().uuid().safeParse(sessionId).success) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    if (!(await getSession(db, workspaceId, sessionId))) {
+      throw new HTTPException(404, { message: "session not found" });
+    }
+    const parsed = CodexRealtimeWebrtcRequest.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) {
+      throw new HTTPException(422, {
+        message: "invalid Codex realtime WebRTC request",
+      });
+    }
+
+    c.header("cache-control", "private, no-store");
+    try {
+      const broker = buildSessionCodexRealtimeBroker(
+        db,
+        settings,
+        workspaceId,
+        sessionId,
+        deps.codexFetch,
+      );
+      return c.json(await broker({ request: parsed.data, signal: c.req.raw.signal }));
+    } catch (error) {
+      if (!(error instanceof CodexRealtimeBrokerError)) throw error;
+      const failure = codexRealtimeHttpFailure(error);
+      return c.json(
+        {
+          error: {
+            status: failure.status,
+            code: failure.code,
+            message: error.message,
+            retryable: failure.retryable,
+            details: {
+              reason: error.reason,
+              ...(error.providerStatus === null ? {} : { providerStatus: error.providerStatus }),
+            },
+          },
+        },
+        failure.status,
+      );
+    }
+  });
+
   // Personal pin only: this is organization state for the authenticated member,
   // not a mutation of the shared session. It deliberately requires read access
   // (not session control) and returns 404 for a foreign/inaccessible session.
@@ -685,7 +737,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         await c.req.json().catch(() => null),
       );
       if (!parsedServerId.success || !payload.success) {
-        throw new HTTPException(400, { message: "invalid MCP approval-policy request" });
+        throw new HTTPException(400, {
+          message: "invalid MCP approval-policy request",
+        });
       }
       await assertSessionExists(db, workspaceId, sessionId);
       return c.json(
@@ -1011,7 +1065,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
       const result = compactSessionEventResult(
         event,
         latestClass!,
-        dbPage.coveredSequence ?? { first: event.sequence, last: event.sequence },
+        dbPage.coveredSequence ?? {
+          first: event.sequence,
+          last: event.sequence,
+        },
       );
       c.header("X-OpenGeni-Covered-First", String(result.coveredSequence.first));
       c.header("X-OpenGeni-Covered-Last", String(result.coveredSequence.last));
@@ -1262,12 +1319,16 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const workspaceId = c.req.param("workspaceId");
     const grant = await requireAccessGrant(c, deps, workspaceId, "sessions:control");
     if (workspaceControlUtf8Bytes(grant.subjectId) > WORKSPACE_CONTROL_ACTOR_MAX_BYTES) {
-      throw new HTTPException(400, { message: "workspace-control actor is too large" });
+      throw new HTTPException(400, {
+        message: "workspace-control actor is too large",
+      });
     }
     const sessionId = c.req.param("sessionId");
     const parsed = SessionControlRequest.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) {
-      throw new HTTPException(400, { message: "invalid session control request" });
+      throw new HTTPException(400, {
+        message: "invalid session control request",
+      });
     }
     try {
       const response = await controlHumanSessionWorkstream(
@@ -1410,7 +1471,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         throw error;
       }
       if (accepted.action === "not_found") {
-        throw new HTTPException(404, { message: "human-input request not found" });
+        throw new HTTPException(404, {
+          message: "human-input request not found",
+        });
       }
       await publishDurableSessionEvents(bus, workspaceId, sessionId, accepted.events);
       if (accepted.workflowWakeRevision !== null) {
@@ -1440,7 +1503,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     const rawStatus = c.req.query("status");
     const status = rawStatus ? HumanInputRequestStatus.safeParse(rawStatus) : null;
     if (status && !status.success) {
-      throw new HTTPException(400, { message: "invalid human-input request status" });
+      throw new HTTPException(400, {
+        message: "invalid human-input request status",
+      });
     }
     const requests = await listSessionHumanInputRequests(db, workspaceId, sessionId, {
       ...(status?.success ? { status: status.data } : {}),
@@ -1460,7 +1525,10 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
         sessionId,
         c.req.param("requestId"),
       );
-      if (!request) throw new HTTPException(404, { message: "human-input request not found" });
+      if (!request)
+        throw new HTTPException(404, {
+          message: "human-input request not found",
+        });
       return c.json(request);
     },
   );
@@ -2428,6 +2496,34 @@ function eventListLimit(raw: string | undefined, max = 2000, fallback = 500): nu
   return Math.min(max, Math.max(1, Math.floor(limit)));
 }
 
+function codexRealtimeHttpFailure(error: CodexRealtimeBrokerError): {
+  status: ContentfulStatusCode;
+  code: ErrorCode;
+  retryable: boolean;
+} {
+  switch (error.reason) {
+    case "invalid_request":
+    case "incompatible":
+      return { status: 422, code: "validation_failed", retryable: false };
+    case "entitlement_denied":
+      return { status: 403, code: "forbidden", retryable: false };
+    case "rate_limited":
+      return { status: 429, code: "limit_exceeded", retryable: true };
+    case "timeout":
+      return { status: 504, code: "upstream_unavailable", retryable: true };
+    case "cancelled":
+      return { status: 408, code: "upstream_unavailable", retryable: true };
+    case "provider_error":
+    case "invalid_provider_response":
+    case "network_error":
+      return { status: 502, code: "upstream_unavailable", retryable: true };
+    case "subscription_disabled":
+    case "credential_unavailable":
+    case "reconnect_required":
+      return { status: 409, code: "conflict", retryable: false };
+  }
+}
+
 /**
  * Map every mounted session-addressed HTTP path to the host-neutral operation
  * the embedding port authorizes. Returning null is deliberately fail-closed in
@@ -2457,6 +2553,9 @@ export function sessionAuthorizationOperationForHttp(
   if (suffix === "/lineage" && verb === "GET") return "session.lineage.read";
   if (suffix === "/codex-account" && verb === "POST") {
     return "session.codex_account.write";
+  }
+  if (suffix === "/realtime/webrtc" && verb === "POST") {
+    return "session.realtime.start";
   }
   if (suffix === "/goal") {
     return verb === "GET"
@@ -2521,7 +2620,9 @@ function sessionAuthorizationHttpError(error: unknown): HTTPException {
     return new HTTPException(404, { message: "session not found" });
   }
   if (error instanceof SessionAuthorizationUnavailableError) {
-    return new HTTPException(503, { message: "session authorization is unavailable" });
+    return new HTTPException(503, {
+      message: "session authorization is unavailable",
+    });
   }
   if (error instanceof HTTPException) return error;
   throw error;
@@ -2564,12 +2665,16 @@ function eventEnumList<T extends string>(
     .map((value) => value.trim())
     .filter(Boolean);
   if (values.length > 100) {
-    throw new HTTPException(400, { message: `${name} accepts at most 100 values` });
+    throw new HTTPException(400, {
+      message: `${name} accepts at most 100 values`,
+    });
   }
   return values.map((value) => {
     const parsed = schema.safeParse(value);
     if (!parsed.success) {
-      throw new HTTPException(400, { message: `${name} contains an invalid value` });
+      throw new HTTPException(400, {
+        message: `${name} contains an invalid value`,
+      });
     }
     return parsed.data as T;
   });
@@ -2610,7 +2715,9 @@ function sessionListQuery(
     });
   }
   if (query.pinsOnly !== undefined && query.pinsOnly !== "true") {
-    throw new HTTPException(400, { message: 'pinsOnly must be the literal "true"' });
+    throw new HTTPException(400, {
+      message: 'pinsOnly must be the literal "true"',
+    });
   }
   const pinsOnly = query.pinsOnly === "true";
   if (pinsOnly && !allowCursor) {

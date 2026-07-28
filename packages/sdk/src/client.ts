@@ -23,6 +23,8 @@ import type {
   CodexOverviewResponse,
   CodexAllocatorUpdate,
   CodexConnectionStatus,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
   CodexConnectPoll,
   CodexConnectStart,
   CodexUsage,
@@ -565,6 +567,22 @@ export class OpenGeniClient {
     );
   }
 
+  /** Negotiate one server-mediated connected-Codex GPT-Live V3 WebRTC call. */
+  async negotiateCodexRealtimeWebrtc(
+    workspaceId: string,
+    sessionId: string,
+    request: CodexRealtimeWebrtcRequest,
+    options: { signal?: AbortSignal | undefined } = {},
+  ): Promise<CodexRealtimeWebrtcResponse> {
+    return await this.requestJson<CodexRealtimeWebrtcResponse>(
+      "POST",
+      `/v1/workspaces/${workspaceId}/sessions/${sessionId}/realtime/webrtc`,
+      request,
+      {},
+      { signal: options.signal },
+    );
+  }
+
   async listTurns(
     workspaceId: string,
     sessionId: string,
@@ -659,7 +677,10 @@ export class OpenGeniClient {
     return await this.requestJson<DeviceEnrollmentApproveResponse>(
       "POST",
       `/v1/workspaces/${workspaceId}/enrollments/device/approve`,
-      { userCode: request.userCode, allowScreenControl: request.allowScreenControl ?? false },
+      {
+        userCode: request.userCode,
+        allowScreenControl: request.allowScreenControl ?? false,
+      },
     );
   }
 
@@ -812,7 +833,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     await assertJsonResponse(response, { method: "GET", correlationId });
     const body = await response.json();
@@ -872,7 +896,9 @@ export class OpenGeniClient {
   async getLatestEventResult(
     workspaceId: string,
     sessionId: string,
-    options: Omit<SessionEventCompactResultOptions, "resultMode"> = { latest: "terminal" },
+    options: Omit<SessionEventCompactResultOptions, "resultMode"> = {
+      latest: "terminal",
+    },
   ): Promise<SessionEventCompactResult | null> {
     return await this.listEventPage(workspaceId, sessionId, {
       ...options,
@@ -910,7 +936,11 @@ export class OpenGeniClient {
   async pauseSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+    options: {
+      reason?: string;
+      clientEventId?: string;
+      expectedControlEtag?: string;
+    } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "pause",
@@ -945,7 +975,9 @@ export class OpenGeniClient {
       status?: SessionHumanInputRequest["status"];
     } = {},
   ): Promise<SessionHumanInputRequest[]> {
-    const result = await this.requestJson<{ requests: SessionHumanInputRequest[] }>(
+    const result = await this.requestJson<{
+      requests: SessionHumanInputRequest[];
+    }>(
       "GET",
       `/v1/workspaces/${workspaceId}/sessions/${sessionId}/human-input-requests`,
       undefined,
@@ -1022,7 +1054,10 @@ export class OpenGeniClient {
     });
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -1130,7 +1165,11 @@ export class OpenGeniClient {
   async resumeSession(
     workspaceId: string,
     sessionId: string,
-    options: { reason?: string; clientEventId?: string; expectedControlEtag?: string } = {},
+    options: {
+      reason?: string;
+      clientEventId?: string;
+      expectedControlEtag?: string;
+    } = {},
   ): Promise<SessionControlResponse> {
     return await this.controlSession(workspaceId, sessionId, {
       action: "resume",
@@ -1199,7 +1238,10 @@ export class OpenGeniClient {
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     await assertJsonResponse(response, { method: "GET", correlationId });
     const events = (await response.json()) as WorkspaceControlEvent[];
@@ -1249,13 +1291,19 @@ export class OpenGeniClient {
       }),
       {
         method: "GET",
-        headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "text/event-stream",
+        },
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -2091,7 +2139,9 @@ export class OpenGeniClient {
       "GET",
       `/v1/workspaces/${workspaceId}/scheduled-tasks/${taskId}/runs`,
       undefined,
-      { ...(options.limit !== undefined ? { limit: String(options.limit) } : {}) },
+      {
+        ...(options.limit !== undefined ? { limit: String(options.limit) } : {}),
+      },
     );
   }
 
@@ -2455,7 +2505,10 @@ export class OpenGeniClient {
       throw error;
     }
     if (!response.ok) {
-      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+      throw await apiErrorFromResponse(response, {
+        method: "GET",
+        correlationId,
+      });
     }
     if (response.status !== 200 && response.status !== 206) {
       await cancelResponseBody(response, "unexpected retained artifact response status");
@@ -3207,10 +3260,10 @@ export class OpenGeniClient {
     workspaceId: string,
     accountId: string,
   ): Promise<{ disconnected: boolean; newActiveId: string | null }> {
-    return await this.requestJson<{ disconnected: boolean; newActiveId: string | null }>(
-      "DELETE",
-      `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`,
-    );
+    return await this.requestJson<{
+      disconnected: boolean;
+      newActiveId: string | null;
+    }>("DELETE", `/v1/workspaces/${workspaceId}/codex/accounts/${accountId}`);
   }
 
   /** Rename a Codex account (label only in P1). */

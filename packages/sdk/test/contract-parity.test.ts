@@ -6,6 +6,9 @@ import {
   AttachViewerRequest as ContractAttachViewerRequest,
   CAPABILITY_DESCRIPTORS,
   ClientConfig as ContractClientConfig,
+  CodexRealtimeWebrtcRequest as ContractCodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse as ContractCodexRealtimeWebrtcResponse,
+  CodexRealtimeVoice as ContractCodexRealtimeVoice,
   WorkspaceModelCatalogResponse as ContractWorkspaceModelCatalogResponse,
   ClientSessionEvent,
   CreateSessionRequest as ContractCreateSessionRequest,
@@ -88,6 +91,9 @@ import type {
   Workspace,
   WorkspaceMemorySearchResponse,
   ClientConfig,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  CodexRealtimeVoice,
   WorkspaceModelCatalogResponse,
   ClientSessionEventInput,
   CreateSessionRequest,
@@ -172,6 +178,18 @@ describe("SDK / contracts parity", () => {
     expect([sdkAcceptsContract, contractAcceptsSdk].every((fn) => typeof fn === "function")).toBe(
       true,
     );
+  });
+
+  test("Codex realtime V3 wire shapes and voices match", () => {
+    const voices: readonly CodexRealtimeVoice[] = ContractCodexRealtimeVoice.options;
+    expect(voices).toEqual(ContractCodexRealtimeVoice.options);
+    const acceptResponse = (
+      value: z.infer<typeof ContractCodexRealtimeWebrtcResponse>,
+    ): CodexRealtimeWebrtcResponse => value;
+    const acceptRequest = (
+      value: CodexRealtimeWebrtcRequest,
+    ): z.input<typeof ContractCodexRealtimeWebrtcRequest> => value;
+    expect([acceptResponse, acceptRequest].every((fn) => typeof fn === "function")).toBe(true);
   });
 
   test("sandbox backend enum is 3-way parity across contracts / sdk / deployment", () => {
@@ -334,7 +352,10 @@ describe("SDK / contracts parity", () => {
       credentialHooks: ["azure-cli-login"],
       defaultVariableSetIds: [],
     };
-    const update: UpdateRigRequest = { name: "dev-machine-2", description: null };
+    const update: UpdateRigRequest = {
+      name: "dev-machine-2",
+      description: null,
+    };
     const append: ProposeRigChangeRequest = {
       kind: "setup_append",
       payload: { command: "apt-get install -y jq", note: "needed jq" },
@@ -356,7 +377,10 @@ describe("SDK / contracts parity", () => {
     );
     // setup_append requires a command.
     expect(
-      ContractProposeRigChangeRequest.safeParse({ kind: "setup_append", payload: {} }).success,
+      ContractProposeRigChangeRequest.safeParse({
+        kind: "setup_append",
+        payload: {},
+      }).success,
     ).toBe(false);
     // Defaults: checks/hooks/ids default to [].
     expect(ContractCreateRigRequest.parse({ name: "bare" }).checks).toEqual([]);
@@ -456,7 +480,10 @@ describe("SDK / contracts parity", () => {
       kind: "preference",
       pinned: true,
     };
-    const update: UpdateKnowledgeMemoryRequest = { pinned: false, status: "archived" };
+    const update: UpdateKnowledgeMemoryRequest = {
+      pinned: false,
+      status: "archived",
+    };
     const settings: UpdateWorkspaceSettingsRequest = { memoryEnabled: true };
     expect(ContractCreateKnowledgeMemoryRequest.safeParse(create).success).toBe(true);
     expect(ContractUpdateKnowledgeMemoryRequest.safeParse(update).success).toBe(true);
@@ -525,7 +552,9 @@ describe("SDK / contracts parity", () => {
     expect(ContractCreateKnowledgeMemoryRequest.parse({ text: "x" }).status).toBe("active");
     // Search request requires a query and clamps limit at 20.
     expect(
-      ContractWorkspaceMemorySearchRequest.safeParse({ query: "how do we deploy" }).success,
+      ContractWorkspaceMemorySearchRequest.safeParse({
+        query: "how do we deploy",
+      }).success,
     ).toBe(true);
     expect(ContractWorkspaceMemorySearchRequest.safeParse({ query: "x", limit: 999 }).success).toBe(
       false,
@@ -608,7 +637,13 @@ describe("SDK / contracts parity", () => {
     const request: CreateSessionRequest = {
       requestedSessionId: "00000000-0000-4000-8000-000000000042",
       initialMessage: "Investigate the failing deploy",
-      resources: [{ kind: "repository", uri: "https://github.com/acme/app.git", ref: "main" }],
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/app.git",
+          ref: "main",
+        },
+      ],
       tools: [{ kind: "mcp", id: "documents" }],
       metadata: { origin: "sdk-test" },
       sandboxBackend: "none",
@@ -702,8 +737,13 @@ describe("SDK / contracts parity", () => {
     expect(serverToClient.every((fn) => typeof fn === "function")).toBe(true);
 
     // Client -> server: SDK-sent request bodies parse under the contracts schema.
-    const attach: AttachViewerRequest = { viewerId: "33333333-3333-4333-8333-333333333333" };
-    const ack: AcknowledgeStreamRequest = { acknowledgeUnredacted: true, acknowledgeShared: true };
+    const attach: AttachViewerRequest = {
+      viewerId: "33333333-3333-4333-8333-333333333333",
+    };
+    const ack: AcknowledgeStreamRequest = {
+      acknowledgeUnredacted: true,
+      acknowledgeShared: true,
+    };
     const heartbeat: ViewerHeartbeatRequest = { leaseEpoch: 7 };
     expect(ContractAttachViewerRequest.safeParse(attach).success).toBe(true);
     expect(ContractAcknowledgeStreamRequest.safeParse(ack).success).toBe(true);

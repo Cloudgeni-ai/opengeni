@@ -27,6 +27,12 @@ export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
 export { normalizeMcpOutput } from "./mcp-output";
 export type { NormalizedMcpOutput } from "./mcp-output";
+export { startCodexRealtimeWebrtc } from "./codex-realtime";
+export type {
+  CodexRealtimeNegotiator,
+  CodexRealtimeWebrtcSession,
+  StartCodexRealtimeWebrtcOptions,
+} from "./codex-realtime";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
@@ -215,6 +221,10 @@ export type {
   ClientConfig,
   ClientVoiceInputConfig,
   ClientModel,
+  CodexRealtimeVoice,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  CodexRealtimeWebrtcVersion,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
   ModelCapabilitiesV1,
