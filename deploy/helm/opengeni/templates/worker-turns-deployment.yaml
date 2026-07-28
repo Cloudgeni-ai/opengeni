@@ -81,8 +81,10 @@ spec:
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).liveness) | nindent 12 }}
           {{- end }}
+          {{- with .Values.worker.turns.resources }}
           resources:
-            {{- toYaml .Values.worker.turns.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker-turns" "values" .Values.worker) | nindent 8 }}

@@ -74,8 +74,10 @@ spec:
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" .Values.api.probes.liveness) | nindent 12 }}
           {{- end }}
+          {{- with .Values.api.resources }}
           resources:
-            {{- toYaml .Values.api.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- if .Values.api.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "api" "values" .Values.api) | nindent 8 }}

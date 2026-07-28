@@ -57,6 +57,7 @@
     "deployment:preflight": "bun scripts/deployment-preflight.ts",
     "deployment:stack": "bun scripts/deployment-stack.ts",
     "deployment:runtime-artifacts": "bun scripts/deployment-runtime-artifacts.ts",
+    "deployment:single-node-secrets": "bun scripts/generate-single-node-secrets.ts",
     "deployment:temporal-values": "bun scripts/deployment-temporal-values.ts",
     "deployment:conformance": "bun scripts/deployment-conformance.ts",
     "acceptance:workbench-live": "bun scripts/workbench-live-acceptance.ts",

@@ -41,6 +41,138 @@ kubectl -n opengeni create secret generic opengeni-runtime \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
+### Single-machine Kubernetes
+
+`deploy/helm/opengeni/values.single-node.example.yaml` is the supported
+persistent, non-HA profile for running the complete control plane on one
+machine. Kubernetes is used only as the process, restart, volume, and upgrade
+supervisor. It is not an autoscaling or failover layer in this profile.
+
+The profile renders one API, web, control worker, turn worker, relay, Postgres,
+Temporal, NATS, and MinIO process. It disables HPAs, disruption budgets, and
+topology spreading. Container resource requests and limits are omitted, so a
+busy role may use otherwise-idle CPU and memory on the machine. This does not
+create a deterministic memory-pressure failure order; any protection or
+priority policy must be based on measured load evidence rather than assumed
+per-service allocations.
+
+The ordinary dependency services remain private `ClusterIP` services. Five
+one-port NodePort services are the complete private-edge surface:
+
+| NodePort | Destination | Purpose |
+| --- | --- | --- |
+| `30080` | web | browser application |
+| `30081` | API | API, SSE, enrollment, and agent distribution |
+| `30222` | NATS websocket | enrolled-machine command/event transport |
+| `30443` | relay | live terminal/desktop byte streams |
+| `30900` | MinIO API | signed browser file transfer only |
+
+The NATS client/monitor ports and MinIO admin console are not exposed. On K3s,
+bind NodePorts to loopback with
+`--kube-proxy-arg=nodeport-addresses=127.0.0.0/8`, then publish only the five
+loopback listeners through a private edge such as Tailscale Serve. Route `/` to
+web and route `/v1`, `/healthz`, `/metrics`, `/install.sh`, `/install.ps1`,
+`/uninstall.sh`, `/opengeni-agent-minisign.pub`, and `/agent` to the API. Give
+the NATS websocket, relay, and MinIO API their own private TLS ports. Set
+`selfhosted.natsUrl`, `selfhosted.relayUrl`, and `minio.publicEndpoint` to those
+private URLs.
+
+For a tailnet-only deployment, `OPENGENI_AUTH_REQUIRED=false` and
+`OPENGENI_PRODUCT_ACCESS_MODE=local` mean there is no shared deployment access
+key; tailnet membership is the outer access boundary. Internal database, NATS,
+enrollment-signing, relay-token, object-storage, and model-provider credentials
+remain required because services must still authenticate to each other. They
+are not an additional user-facing gateway.
+
+Create the four Secrets before installation:
+
+- `opengeni-postgres`: the Postgres owner `POSTGRES_PASSWORD`;
+- `opengeni-minio`: `MINIO_ROOT_USER` and `MINIO_ROOT_PASSWORD`;
+- `opengeni-runtime`: the restricted `opengeni_app`
+  `OPENGENI_DATABASE_URL`, object-storage credentials, model-provider
+  credentials, and Connected Machine signing/NATS/relay secrets;
+- `opengeni-migrations`: the owner
+  `OPENGENI_MIGRATIONS_DATABASE_URL`,
+  `OPENGENI_APP_DATABASE_USER=opengeni_app`, and
+  `OPENGENI_APP_DATABASE_PASSWORD`.
+
+Generate the matched database and NATS credentials locally. The command creates
+a new mode-`0700` directory containing four mode-`0600` env files, refuses to
+overwrite an existing directory, and prints no secret values:
+
+```bash
+bun run deployment:single-node-secrets -- \
+  --out-dir .agent/generated/single-node/secrets
+
+kubectl create namespace opengeni --dry-run=client -o yaml | kubectl apply -f -
+
+kubectl -n opengeni create secret generic opengeni-postgres \
+  --from-env-file=.agent/generated/single-node/secrets/postgres.env
+
+kubectl -n opengeni create secret generic opengeni-minio \
+  --from-env-file=.agent/generated/single-node/secrets/minio.env
+
+test -n "$OPENGENI_OPENAI_API_KEY"
+kubectl -n opengeni create secret generic opengeni-runtime \
+  --from-env-file=.agent/generated/single-node/secrets/runtime.env \
+  --from-literal=OPENGENI_OPENAI_API_KEY="$OPENGENI_OPENAI_API_KEY"
+
+kubectl -n opengeni create secret generic opengeni-migrations \
+  --from-env-file=.agent/generated/single-node/secrets/migrations.env
+```
+
+Use the corresponding model-provider keys instead of
+`OPENGENI_OPENAI_API_KEY` when the deployment selects another configured
+provider. Keep the generated directory as a private recovery artifact or move
+the values into a secret manager; never commit it.
+
+Bootstrap a new machine in two phases. First install only the persistent
+dependencies and wait until they are healthy:
+
+```bash
+helm upgrade --install opengeni deploy/helm/opengeni \
+  --namespace opengeni --create-namespace \
+  --values deploy/helm/opengeni/values.single-node.example.yaml \
+  --set api.enabled=false \
+  --set worker.enabled=false \
+  --set web.enabled=false \
+  --set relay.enabled=false \
+  --set migrations.enabled=false \
+  --wait --timeout 10m
+```
+
+Then enable the application. Because this is an upgrade, the pre-upgrade
+database Job can reach the already-running Postgres. It applies forward
+migrations, converges the restricted runtime role, and proves a connection
+through that role before Helm replaces application pods:
+
+```bash
+helm upgrade opengeni deploy/helm/opengeni \
+  --namespace opengeni \
+  --values deploy/helm/opengeni/values.single-node.example.yaml \
+  --wait --timeout 15m
+```
+
+Future versions use the same second command with a new official chart/image
+version or digest. Postgres and MinIO PVCs remain attached. Database migrations
+are forward-only: if the migration gate fails, the old application stays in
+place; after a migration succeeds, roll the application forward unless the
+older image is explicitly proven compatible with the new schema.
+
+Failure behavior is intentionally uneven:
+
+- web and relay hold no durable product state; losing them removes the browser
+  UI or live terminal/desktop streams;
+- a turn worker can restart while queued work remains in Temporal/Postgres;
+- NATS stores no authoritative history, but losing it disconnects enrolled
+  machines and pauses their command path as well as live fanout;
+- MinIO owns uploaded file bytes;
+- Temporal owns durable orchestration state;
+- Postgres owns the durable product record and database migration ledger.
+
+This profile promises restart and persistence on one machine, not service
+continuity while that machine is down.
+
 ### Database identities and runtime posture
 
 Standalone deployments using the default `OPENGENI_RLS_STRATEGY=force` require
@@ -54,12 +186,20 @@ two distinct secret paths:
   database but authenticating as `opengeni_app`; this is the only database URL
   available to API and worker containers.
 
-After every migration and before rolling workloads, run:
+After every migration and before rolling workloads, the Helm migration hook runs:
 
 ```bash
 bun run db:provision-roles
 bun run db:assert-runtime-posture
 ```
+
+The Job receives the ordinary runtime Secret first and the separate
+migration-only Secret second. This gives the assertion the restricted
+`OPENGENI_DATABASE_URL` while keeping the owner URL and provisioning password
+out of API and worker pods. Its default command serializes `db:migrate`,
+`db:provision-roles`, and `db:assert-runtime-posture`; any failure aborts
+`helm upgrade` before workload replacement begins. Operators running without
+Helm must preserve the same order explicitly.
 
 The provisioner converges `opengeni_app` to `LOGIN NOSUPERUSER NOBYPASSRLS
 NOCREATEROLE NOCREATEDB NOREPLICATION NOINHERIT`, refuses to guess through any
@@ -192,6 +332,7 @@ Current profiles:
 
 - `local-compose`: existing Docker Compose development stack.
 - `local-kubernetes`: local Kubernetes cluster running the Helm chart with in-cluster dependencies.
+- `single-node-kubernetes`: persistent non-HA Kubernetes stack on one machine, using official images and a private edge.
 - `kubernetes-external`: Kubernetes workloads connected to existing customer services.
 - `azure-managed`: AKS plus Azure-managed substrate where supported, provider-native object storage, and stack-wrapper managed upstream NATS/Temporal charts unless you replace them with existing endpoints.
 - `azure-existing-services`: Azure Kubernetes workloads connected to existing Postgres, Temporal, and object storage.
@@ -870,10 +1011,10 @@ ingress and secret wiring:
   ingress.
 - **NATS with auth-callout**: the machine's agent dials a NATS websocket to reach
   the request/reply control plane, authenticated per workspace by a NATS
-  auth-callout responder. Use the chart-managed NATS fixture with
-  `nats.authCallout.enabled=true` for preview/smoke, or fold the same
-  `deploy/nats/auth-callout.conf` config into an external/production NATS
-  deployment (`nats.enabled=false`).
+  auth-callout responder. Use chart-managed NATS with
+  `nats.authCallout.enabled=true` for the single-machine profile and
+  preview/smoke stacks, or fold the same `deploy/nats/auth-callout.conf` config
+  into an external multi-node NATS deployment (`nats.enabled=false`).
 
 Both the relay and the NATS websocket need public wss ingress hosts (for example
 `relay.<domain>` and `nats.<domain>`) with the long-lived-stream ingress

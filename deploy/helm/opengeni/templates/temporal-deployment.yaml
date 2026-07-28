@@ -65,6 +65,8 @@ spec:
               port: grpc
             initialDelaySeconds: 60
             periodSeconds: 20
+          {{- with .Values.temporal.resources }}
           resources:
-            {{- toYaml .Values.temporal.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
 {{- end }}

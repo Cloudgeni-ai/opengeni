@@ -121,8 +121,10 @@ spec:
               sleep:
                 seconds: {{ .Values.relay.preStopDrainSeconds }}
           {{- end }}
+          {{- with .Values.relay.resources }}
           resources:
-            {{- toYaml .Values.relay.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- if .Values.relay.topologySpreadConstraints.enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "relay" "values" .Values.relay) | nindent 8 }}

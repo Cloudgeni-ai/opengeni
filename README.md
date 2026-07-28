@@ -229,7 +229,9 @@ The operator guide is in `docs/deployment.md`.
 Current deployment artifacts include:
 
 - A repo-owned deployment contract in `packages/deployment`.
-- A Helm chart for API, web, worker, migrations, and disposable local/smoke fixtures at `deploy/helm/opengeni`.
+- A Helm chart for API, web, worker, migrations, a persistent non-HA
+  single-machine profile, and disposable local/smoke fixtures at
+  `deploy/helm/opengeni`.
 - An Azure reference Terraform substrate at `deploy/terraform/azure`.
 - AWS and GCP reference Terraform substrates at `deploy/terraform/aws` and `deploy/terraform/gcp`.
 - Stack-wrapper plans that can install official upstream NATS and Temporal Helm charts outside the OpenGeni application chart.
@@ -242,7 +244,12 @@ bun run deployment:preflight -- --profile azure-existing-services
 bun run deployment:stack -- --profile gcp-managed
 ```
 
-Production operators should use managed services, existing endpoints, or official upstream charts/operators for Postgres, Temporal, NATS, secret delivery, ingress/TLS, and observability. The in-chart Postgres, Temporal, NATS, and MinIO templates are only for local, CI, and smoke verification. Keep cloud resource inventories, generated credentials, kubeconfigs, Terraform state, and filled tfvars in private operator-controlled storage outside the repository.
+The in-chart Postgres, Temporal, NATS, and MinIO templates support a persistent
+non-HA single-machine deployment as well as disposable local, CI, and smoke
+verification. Multi-node operators should use managed services, existing
+endpoints, or official upstream charts/operators. Keep cloud resource
+inventories, generated credentials, kubeconfigs, Terraform state, and filled
+tfvars in private operator-controlled storage outside the repository.
 
 ## Web App
 

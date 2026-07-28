@@ -77,8 +77,10 @@ spec:
               port: monitor
             initialDelaySeconds: 20
             periodSeconds: 20
+          {{- with .Values.nats.resources }}
           resources:
-            {{- toYaml .Values.nats.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           {{- if .Values.nats.authCallout.enabled }}
           volumeMounts:
             - name: nats-config

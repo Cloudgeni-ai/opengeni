@@ -60,8 +60,10 @@ spec:
               port: api
             initialDelaySeconds: 30
             periodSeconds: 20
+          {{- with .Values.minio.resources }}
           resources:
-            {{- toYaml .Values.minio.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: data
               mountPath: /data

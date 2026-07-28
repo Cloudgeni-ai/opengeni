@@ -31,13 +31,19 @@ spec:
             {{- toYaml .Values.migrations.command | nindent 12 }}
           envFrom:
             - secretRef:
+                name: {{ include "opengeni.secretName" . }}
+            {{- if ne (include "opengeni.migrationSecretName" .) (include "opengeni.secretName" .) }}
+            - secretRef:
                 name: {{ include "opengeni.migrationSecretName" . }}
+            {{- end }}
             - configMapRef:
                 name: {{ include "opengeni.fullname" . }}-config
           {{- if or .Values.postgres.enabled .Values.temporal.enabled .Values.minio.enabled }}
           env:
             {{- include "opengeni.generatedRuntimeEnv" . | nindent 12 }}
           {{- end }}
+          {{- with .Values.migrations.resources }}
           resources:
-            {{- toYaml .Values.migrations.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
 {{- end }}
