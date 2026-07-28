@@ -34,6 +34,7 @@ function plainTool(name: string): Tool {
 }
 
 const SLACK_SERVER_ID = "cap_integrations_sh_slack_com_5a15dccc0dc0_17qniox";
+const CODEX_APPS_SERVER_IDS = new Set(["codex_apps"]);
 const SLACK_TOOLS: Tool[] = [
   {
     type: "function",
@@ -144,7 +145,7 @@ describe("applyCodexToolSearch", () => {
       ...(POOL.map((t) => ({ ...t })) as Tool[]),
       plainTool("opengeni__set_session_title"),
     ];
-    const out = applyCodexToolSearch(tools);
+    const out = applyCodexToolSearch(tools, new Set(), undefined, CODEX_APPS_SERVER_IDS);
     const connectors = out.filter(isCodexAppsFunctionTool);
     expect(connectors.length).toBe(POOL.length);
     for (const c of connectors) expect((c as { deferLoading?: boolean }).deferLoading).toBe(true);
@@ -165,13 +166,18 @@ describe("applyCodexToolSearch", () => {
 
   test("idempotent — re-applying does not double-add the search tool", () => {
     const tools: Tool[] = POOL.map((t) => ({ ...t })) as Tool[];
-    const once = applyCodexToolSearch(tools);
+    const once = applyCodexToolSearch(tools, new Set(), undefined, CODEX_APPS_SERVER_IDS);
     const twice = applyCodexToolSearch(once);
     expect(twice.filter((t) => (t as { name?: string }).name === "tool_search")).toHaveLength(1);
   });
 
   test("the search tool description reflects the passed namespaces", () => {
-    const out = applyCodexToolSearch(POOL.map((t) => ({ ...t })) as Tool[], new Set(["gmail"]));
+    const out = applyCodexToolSearch(
+      POOL.map((t) => ({ ...t })) as Tool[],
+      new Set(["gmail"]),
+      undefined,
+      CODEX_APPS_SERVER_IDS,
+    );
     const search = out.find((t) => (t as { name?: string }).name === "tool_search") as {
       providerData?: { description?: string };
     };
@@ -183,11 +189,13 @@ describe("applyCodexToolSearch", () => {
       ...(SLACK_TOOLS.map((tool) => ({ ...tool })) as Tool[]),
       plainTool("opengeni__set_session_title"),
     ];
-    const out = applyCodexToolSearch(tools);
-    expect(out.filter(isSearchableMcpFunctionTool)).toHaveLength(2);
+    const out = applyCodexToolSearch(tools, new Set(), undefined, new Set([SLACK_SERVER_ID]));
+    expect(
+      out.filter((tool) => isSearchableMcpFunctionTool(tool, new Set([SLACK_SERVER_ID]))),
+    ).toHaveLength(2);
     expect(
       out
-        .filter(isSearchableMcpFunctionTool)
+        .filter((tool) => isSearchableMcpFunctionTool(tool, new Set([SLACK_SERVER_ID])))
         .every((tool) => (tool as { deferLoading?: boolean }).deferLoading === true),
     ).toBe(true);
     const search = out.find((tool) => (tool as { name?: string }).name === "tool_search") as {
@@ -202,11 +210,46 @@ describe("applyCodexToolSearch", () => {
       ).deferLoading,
     ).toBeUndefined();
   });
+
+  test("uses authoritative MCP identities for mandatory, underscore, and non-MCP names", () => {
+    const mcpServerIds = new Set(["opengeni", "opengeni_", "my", "my_", "my__"]);
+    const tools = [
+      plainTool("opengeni__set_session_title"),
+      plainTool("opengeni___selected_tool"),
+      plainTool("my__selected_tool"),
+      plainTool("my___selected_tool"),
+      plainTool("my____selected_tool"),
+      plainTool("ordinary__function"),
+    ];
+    const out = applyCodexToolSearch(tools, new Set(), undefined, mcpServerIds);
+    const deferredNames = new Set(
+      out
+        .filter((tool) => (tool as { deferLoading?: boolean }).deferLoading === true)
+        .map((tool) => (tool as { name: string }).name),
+    );
+
+    expect(deferredNames).toEqual(
+      new Set([
+        "opengeni___selected_tool",
+        "my__selected_tool",
+        "my___selected_tool",
+        "my____selected_tool",
+      ]),
+    );
+    expect(deferredNames.has("opengeni__set_session_title")).toBe(false);
+    expect(deferredNames.has("ordinary__function")).toBe(false);
+    expect(isSearchableMcpFunctionTool(tools[0], mcpServerIds)).toBe(false);
+    expect(isSearchableMcpFunctionTool(tools[1], mcpServerIds)).toBe(true);
+    expect(isSearchableMcpFunctionTool(tools[5], mcpServerIds)).toBe(false);
+  });
 });
 
 describe("tool_search tool wiring", () => {
   test("buildCodexToolSearchTool carries a client executor that BM25s the deferred pool by reference", async () => {
-    const searchTool = buildCodexToolSearchTool(new Set(["gmail", "github"]));
+    const searchTool = buildCodexToolSearchTool(
+      new Set(["gmail", "github"]),
+      CODEX_APPS_SERVER_IDS,
+    );
     expect((searchTool as { name?: string }).name).toBe("tool_search");
     const executor = getClientToolSearchExecutor(searchTool as never);
     expect(typeof executor).toBe("function");
@@ -231,7 +274,9 @@ describe("tool_search tool wiring", () => {
   });
 
   test("the executor accepts OBJECT arguments (the live wire shape) as well as a string", async () => {
-    const executor = getClientToolSearchExecutor(buildCodexToolSearchTool() as never)!;
+    const executor = getClientToolSearchExecutor(
+      buildCodexToolSearchTool(new Set(), CODEX_APPS_SERVER_IDS) as never,
+    )!;
     const result = await executor({
       agent: {} as never,
       availableTools: POOL as never,
@@ -244,7 +289,9 @@ describe("tool_search tool wiring", () => {
   });
 
   test("finds selected, directly callable Slack tools through the same search surface", async () => {
-    const executor = getClientToolSearchExecutor(buildCodexToolSearchTool() as never)!;
+    const executor = getClientToolSearchExecutor(
+      buildCodexToolSearchTool(new Set(), new Set([SLACK_SERVER_ID])) as never,
+    )!;
     const search = async (query: string) => {
       const result = await executor({
         agent: {} as never,
@@ -270,7 +317,9 @@ describe("tool_search tool wiring", () => {
     const boundedMatches = Array.from({ length: 20 }, (_, index) =>
       connectorTool(`calendar_${index}`, `Create a calendar meeting ${"y".repeat(40 * 1024)}`),
     );
-    const executor = getClientToolSearchExecutor(buildCodexToolSearchTool() as never)!;
+    const executor = getClientToolSearchExecutor(
+      buildCodexToolSearchTool(new Set(), CODEX_APPS_SERVER_IDS) as never,
+    )!;
     const result = await executor({
       agent: {} as never,
       availableTools: [oversized, ...boundedMatches] as never,
@@ -304,7 +353,7 @@ describe("clone survival (the SandboxAgent path — the REAL staging path)", () 
 
   test("a clone's getAllTools still defers codex_apps tools + appends the search tool", async () => {
     const agent = buildSandboxAgent();
-    installCodexToolSearch(agent as never, new Set(["gmail"]));
+    installCodexToolSearch(agent as never, new Set(["gmail"]), CODEX_APPS_SERVER_IDS);
     const cloned = (
       agent as unknown as {
         clone: (c: unknown) => { getAllTools: (rc: unknown) => Promise<Tool[]> };
@@ -319,7 +368,7 @@ describe("clone survival (the SandboxAgent path — the REAL staging path)", () 
 
   test("clone-of-clone still carries the transform (recursive re-install)", async () => {
     const agent = buildSandboxAgent();
-    installCodexToolSearch(agent as never);
+    installCodexToolSearch(agent as never, new Set(), CODEX_APPS_SERVER_IDS);
     const c1 = (agent as unknown as { clone: (c: unknown) => any }).clone({});
     const c2 = c1.clone({});
     const tools: Tool[] = await c2.getAllTools({} as never);
@@ -439,13 +488,23 @@ describe("per-turn description freeze (AM-8 — prefix cache stability)", () => 
   });
 
   test("applyCodexToolSearch without a freeze cell live-renders (byte-for-byte pre-AM-8 behavior for direct callers)", () => {
-    const first = applyCodexToolSearch(POOL.map((t) => ({ ...t })) as Tool[], new Set(["gmail"]));
+    const first = applyCodexToolSearch(
+      POOL.map((t) => ({ ...t })) as Tool[],
+      new Set(["gmail"]),
+      undefined,
+      CODEX_APPS_SERVER_IDS,
+    );
     const search = first.find((t) => (t as { name?: string }).name === "tool_search") as {
       providerData?: { description?: string };
     };
     expect(search.providerData?.description).toContain("- gmail");
     // A second call with a DIFFERENT set live-renders the new set (no freeze without a cell).
-    const second = applyCodexToolSearch(POOL.map((t) => ({ ...t })) as Tool[], new Set(["linear"]));
+    const second = applyCodexToolSearch(
+      POOL.map((t) => ({ ...t })) as Tool[],
+      new Set(["linear"]),
+      undefined,
+      CODEX_APPS_SERVER_IDS,
+    );
     const search2 = second.find((t) => (t as { name?: string }).name === "tool_search") as {
       providerData?: { description?: string };
     };

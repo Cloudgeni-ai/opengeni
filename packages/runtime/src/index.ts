@@ -1964,6 +1964,7 @@ function maybeInstallCodexToolSearch(
     installCodexToolSearch(
       agent as unknown as Parameters<typeof installCodexToolSearch>[0],
       options.codexConnectorNamespaces ?? new Set<string>(),
+      new Set((options.mcpServers ?? []).map((server) => server.name)),
     );
   }
 }
