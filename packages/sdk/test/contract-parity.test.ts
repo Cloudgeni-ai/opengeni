@@ -30,6 +30,7 @@ import {
   MachineMetricsSeriesResponse as ContractMachineMetricsSeriesResponse,
   NewSessionDraft as ContractNewSessionDraft,
   SaveNewSessionDraftRequest as ContractSaveNewSessionDraftRequest,
+  OPENGENI_CORRELATION_HEADER as CONTRACT_CORRELATION_HEADER,
   SandboxBackend as ContractSandboxBackend,
   SandboxOs as ContractSandboxOs,
   Session as ContractSessionSchema,
@@ -70,6 +71,7 @@ import type { z } from "zod";
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
   SESSION_EVENT_TYPES,
 } from "../src/types";
 import type {
@@ -140,9 +142,10 @@ import type { TranscriptionEvent, WorkspaceTranscriptionPolicy } from "../src/tr
 // contracts move, these checks (value-level and type-level) fail the gate.
 
 describe("SDK / contracts parity", () => {
-  test("pins the exact API revision and header values", () => {
+  test("pins the exact API revision and transport header values", () => {
     expect(OPENGENI_API_CONTRACT_REVISION).toBe(CONTRACT_API_CONTRACT_REVISION);
     expect(OPENGENI_API_CONTRACT_HEADER).toBe(CONTRACT_API_CONTRACT_HEADER);
+    expect(OPENGENI_CORRELATION_HEADER).toBe(CONTRACT_CORRELATION_HEADER);
   });
   test("known session event types match the contracts enum exactly", () => {
     expect([...SESSION_EVENT_TYPES].sort()).toEqual([...ContractSessionEventType.options].sort());

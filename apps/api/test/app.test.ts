@@ -6,6 +6,7 @@ import {
   API_MAX_REQUEST_BODY_BYTES,
   allowedCorsOrigin,
   createApp,
+  errorCodeForStatus,
   httpStatusForError,
   isApiContractProtectedMutation,
   normalizeResources,
@@ -455,6 +456,62 @@ describe("API helpers", () => {
     expect(httpStatusForError(new HTTPException(401))).toBe(401);
     expect(httpStatusForError(new McpPayloadTooLargeError("MCP tool list", 5, 4))).toBe(413);
     expect(httpStatusForError(new Error("boom"))).toBe(500);
+    expect(errorCodeForStatus(401)).toBe("unauthenticated");
+    expect(errorCodeForStatus(409)).toBe("conflict");
+    expect(errorCodeForStatus(503)).toBe("upstream_unavailable");
+  });
+
+  test("returns secret-safe typed bounded /v1 errors with a correlation id", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    app.get("/v1/test/upstream", () => {
+      throw new HTTPException(503, { message: `PRIVATE-UPSTREAM-${"x".repeat(4_000)}` });
+    });
+
+    const response = await app.request("http://localhost/v1/test/upstream", {
+      headers: { "x-opengeni-correlation-id": "browser-safe-503" },
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("x-opengeni-correlation-id")).toBe("browser-safe-503");
+    const body = await response.json();
+    expect(body).toEqual({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni is temporarily unavailable — retry.",
+        retryable: true,
+        requestId: "browser-safe-503",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("PRIVATE-UPSTREAM");
+  });
+
+  test("suppresses unhandled internal error messages and bounds invalid correlation ids", async () => {
+    const app = createApp({
+      settings: testSettings(),
+      db: {} as never,
+      bus: {} as never,
+      workflowClient: {} as never,
+      managedAuth: null,
+    });
+    app.get("/v1/test/internal", () => {
+      throw new Error("PRIVATE-DATABASE-CREDENTIAL");
+    });
+
+    const response = await app.request("http://localhost/v1/test/internal", {
+      headers: { "x-opengeni-correlation-id": "<unsafe html>" },
+    });
+    const body = (await response.json()) as { error: { requestId: string; message: string } };
+    expect(response.status).toBe(500);
+    expect(body.error.message).toBe("OpenGeni could not complete the request.");
+    expect(body.error.requestId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(JSON.stringify(body)).not.toContain("PRIVATE-DATABASE-CREDENTIAL");
   });
 
   test("readyz reports a failing dependency", async () => {

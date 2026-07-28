@@ -30,6 +30,34 @@ for await (const event of client.streamEvents(workspaceId, session.id)) {
 }
 ```
 
+## Error handling
+
+Non-2xx responses throw `OpenGeniApiError` with stable transport metadata:
+`status`, optional `code`, `retryable`, optional `correlationId`,
+`outcomeUnknown`, and a bounded structured `body`. The SDK sends a fresh bounded
+correlation ID on each API request and includes the safe returned reference in
+the display message.
+
+```ts
+import { OpenGeniApiError } from "@opengeni/sdk";
+
+try {
+  await client.sendMessage(workspaceId, sessionId, input);
+} catch (error) {
+  if (error instanceof OpenGeniApiError && error.outcomeUnknown) {
+    // Reconcile durable state, then retry only with input.clientEventId unchanged.
+  }
+  throw error;
+}
+```
+
+Error bodies are read only when they are JSON and no larger than 16 KiB; raw
+gateway HTML/plain text and oversized bodies are discarded. A controlled typed
+API rejection has `outcomeUnknown: false`. A raw `502`/`503`/`504` or an
+unexpected successful non-JSON response to a mutation has `outcomeUnknown:
+true` because the mutation might already have been accepted. Never turn that
+condition into a new operation by changing its idempotency key.
+
 ## Streaming guarantees
 
 `client.streamEvents(...)` (and the underlying `streamSessionEvents`) delivers

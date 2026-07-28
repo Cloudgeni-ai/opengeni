@@ -2,31 +2,95 @@
 export class OpenGeniApiError extends Error {
   readonly status: number;
   readonly code: string | undefined;
+  readonly retryable: boolean;
+  readonly correlationId: string | undefined;
+  /** True only when an uncontrolled transport failed after a mutation may have been accepted. */
+  readonly outcomeUnknown: boolean;
   readonly body: string;
 
-  constructor(status: number, body: string) {
+  constructor(
+    status: number,
+    body: string,
+    options: {
+      code?: string | undefined;
+      retryable?: boolean | undefined;
+      correlationId?: string | undefined;
+      outcomeUnknown?: boolean | undefined;
+      displayMessage?: string | undefined;
+      mutation?: boolean | undefined;
+    } = {},
+  ) {
     const decoded = decodeApiErrorBody(body);
-    super(`OpenGeni API ${status}: ${decoded.message ?? (body || "(empty body)")}`);
+    const correlationId = decoded?.requestId ?? boundedCorrelationId(options.correlationId);
+    const gatewayFailure = status >= 502 && status <= 504;
+    const fromResponse = options.mutation !== undefined;
+    const message = decoded?.message ?? (fromResponse ? "Request failed." : body || "(empty body)");
+    const displayMessage =
+      options.displayMessage ??
+      (gatewayFailure && fromResponse
+        ? "OpenGeni is temporarily unavailable — retry."
+        : `OpenGeni API ${status}: ${message}`);
+    super(correlationId ? `${displayMessage} Reference: ${correlationId}.` : displayMessage);
     this.name = "OpenGeniApiError";
     this.status = status;
-    this.code = decoded.code;
-    this.body = body;
+    this.code =
+      options.code ??
+      decoded?.code ??
+      (gatewayFailure && fromResponse ? "upstream_unavailable" : undefined);
+    this.retryable = options.retryable ?? decoded?.retryable ?? retryableApiStatus(status);
+    this.correlationId = correlationId;
+    this.outcomeUnknown =
+      options.outcomeUnknown ?? (gatewayFailure && !!options.mutation && !decoded);
+    this.body = !fromResponse || decoded ? body : "";
   }
 }
 
-function decodeApiErrorBody(body: string): { code?: string; message?: string } {
-  if (!body) return {};
+function decodeApiErrorBody(body: string): {
+  code: string | undefined;
+  message: string | undefined;
+  requestId: string | undefined;
+  retryable: boolean | undefined;
+} | null {
+  if (!body) return null;
   try {
     const decoded: unknown = JSON.parse(body);
-    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return {};
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return null;
     const record = decoded as Record<string, unknown>;
+    const nested =
+      record.error && typeof record.error === "object" && !Array.isArray(record.error)
+        ? (record.error as Record<string, unknown>)
+        : record;
+    const code = boundedApiField(nested.code);
+    const message = boundedApiField(nested.message);
+    const requestId = boundedCorrelationId(nested.requestId);
+    const retryable = typeof nested.retryable === "boolean" ? nested.retryable : undefined;
+    if (!code && !message && !requestId && retryable === undefined) return null;
     return {
-      ...(typeof record.code === "string" && record.code ? { code: record.code } : {}),
-      ...(typeof record.message === "string" && record.message ? { message: record.message } : {}),
+      code,
+      message,
+      requestId,
+      retryable,
     };
   } catch {
-    return {};
+    return null;
   }
+}
+
+function boundedApiField(value: unknown): string | undefined {
+  if (typeof value !== "string") return;
+  const bytes = new TextEncoder().encode(value);
+  return bytes.byteLength <= 512 ? value : new TextDecoder().decode(bytes.slice(0, 512));
+}
+
+function retryableApiStatus(status: number): boolean {
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+function boundedCorrelationId(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length > 128 || !/^[\w.:-]+$/.test(value)) {
+    return;
+  }
+  return value;
 }
 
 /** A short-lived session-list snapshot cursor can no longer be continued. */
@@ -67,14 +131,6 @@ export function isAbortError(error: unknown): boolean {
  * permanent and surface to the caller instead.
  */
 export function isRetryableStreamError(error: unknown): boolean {
-  if (error instanceof OpenGeniApiError) {
-    return (
-      error.status === 408 ||
-      error.status === 409 ||
-      error.status === 425 ||
-      error.status === 429 ||
-      error.status >= 500
-    );
-  }
+  if (error instanceof OpenGeniApiError) return error.retryable;
   return error instanceof TypeError;
 }

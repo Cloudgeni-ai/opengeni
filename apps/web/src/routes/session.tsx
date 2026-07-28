@@ -1,10 +1,9 @@
 // The session view — live timeline plus one compact prompt queue above the
 // composer. Enter queues and Cmd/Ctrl+Enter steers; failed sessions stay
 // honest (reason + retry history) and revivable from the same composer.
+import { HumanInputForm, MessageTimeline, QueueSurface } from "@opengeni/react/session-ui";
 import {
   creditExhaustedFromEvents,
-  HumanInputForm,
-  MessageTimeline,
   projectPendingApprovals,
   useComposer,
   useFileAttachments,
@@ -13,17 +12,16 @@ import {
   useSession,
   useSessionEvents,
   useSessionLineage,
-  QueueSurface,
   useTurnQueue,
   type AgentMessageItem,
   type AuthNeededItem,
   type PendingApproval,
   type TimelineItem,
   type UserMessageItem,
-} from "@opengeni/react";
+} from "@opengeni/react/session";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, Loader2Icon, MenuIcon, MessagesSquareIcon, XIcon } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { isApiErrorStatus } from "@/api";
@@ -40,7 +38,6 @@ import {
 import { ComposerAgentsPill } from "@/components/session/composer-agents-pill";
 import { useRail } from "@/components/rail/rail-context";
 import { GoalSurface } from "@/components/session/goal-surface";
-import { SessionInspector } from "@/components/session/inspector";
 import { SessionWorkspace } from "@/components/session/sandbox-workspace";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
@@ -57,6 +54,12 @@ import {
 import { sessionPolicyPickerIds, toolsForPolicySelection } from "@/lib/session-tools";
 import type { ComposerDraft, LineageNode } from "@opengeni/sdk";
 import type { ConnectionMetadata, Session, SessionEvent } from "@/types";
+
+const LazySessionInspector = lazy(() =>
+  import("@/components/session/inspector").then(({ SessionInspector }) => ({
+    default: SessionInspector,
+  })),
+);
 
 export function SessionRoute({
   workspaceId,
@@ -459,11 +462,13 @@ function SessionDock(props: {
     id: "debug",
     label: "Debug",
     content: (
-      <SessionInspector
-        session={props.session}
-        events={props.events}
-        connectionState={props.connectionState}
-      />
+      <Suspense fallback={<LoadingPanel label="Opening debug inspector" />}>
+        <LazySessionInspector
+          session={props.session}
+          events={props.events}
+          connectionState={props.connectionState}
+        />
+      </Suspense>
     ),
   };
 

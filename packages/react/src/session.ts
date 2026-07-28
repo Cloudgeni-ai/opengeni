@@ -15,6 +15,8 @@ export type {
   EmbeddedSessionClientOverride as ClientOverride,
 } from "./session-context";
 
+export { useSession, isTitleEvent } from "./hooks/use-session";
+export type { UseSessionOptions, UseSessionResult } from "./hooks/use-session";
 export { useSessionEvents } from "./hooks/use-session-events";
 export type {
   SessionEventsConnectionState,
@@ -29,12 +31,22 @@ export {
   FILE_ONLY_MESSAGE_TEXT,
 } from "./hooks/use-composer";
 export type { ComposerSendExtras, ComposerState, UseComposerOptions } from "./hooks/use-composer";
+export { useFileAttachments } from "./hooks/use-file-attachments";
+export type {
+  FileAttachment,
+  UseFileAttachmentsOptions,
+  UseFileAttachmentsResult,
+} from "./hooks/use-file-attachments";
 export { useTurnQueue, isTurnQueueEvent } from "./hooks/use-turn-queue";
 export type {
   QueueMutationKind,
   UseTurnQueueOptions,
   UseTurnQueueResult,
 } from "./hooks/use-turn-queue";
+export { useGoal, isGoalEvent } from "./hooks/use-goal";
+export type { UseGoalOptions, UseGoalResult } from "./hooks/use-goal";
+export { useSessionLineage, isLineageRefreshEvent } from "./hooks/use-session-lineage";
+export type { UseSessionLineageOptions, UseSessionLineageResult } from "./hooks/use-session-lineage";
 export { useSessionControl } from "./hooks/use-session-control";
 export type {
   UseSessionControlOptions,

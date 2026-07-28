@@ -478,8 +478,10 @@ export type ErrorCode = z.infer<typeof ErrorCode>;
 
 export const ErrorEnvelope = z.object({
   error: z.object({
+    status: z.number().int().min(400).max(599),
     code: ErrorCode,
     message: z.string(),
+    retryable: z.boolean(),
     requestId: z.string().optional(),
     details: z.record(z.string(), z.unknown()).optional(),
   }),
@@ -8569,6 +8571,8 @@ export type WorkspaceModelCatalogResponse = z.infer<typeof WorkspaceModelCatalog
  */
 export const OPENGENI_API_CONTRACT_REVISION = "2026-07-turn-instructions-v1" as const;
 export const OPENGENI_API_CONTRACT_HEADER = "x-opengeni-api-contract" as const;
+/** Bounded request/response identifier shared by browser, ingress, and API diagnostics. */
+export const OPENGENI_CORRELATION_HEADER = "x-opengeni-correlation-id" as const;
 
 export const ClientConfig = /* @__PURE__ */ defineModelContractSchema(() =>
   z.object({

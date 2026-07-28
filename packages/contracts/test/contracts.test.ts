@@ -20,6 +20,7 @@ import {
   CreateSessionRequest,
   DocumentSearchRequest,
   EnablePackRequest,
+  ErrorEnvelope,
   GitCredentialBindingId,
   gitCredentialBindingIdForRepository,
   gitCredentialProviderForRepository,
@@ -77,6 +78,28 @@ describe("contracts", () => {
     credentialSource: { kind: "deployment", mechanism: "api_key" },
     billing: { upstreamPayer: "deployment", metering: "opengeni_credits" },
     definitionVersion: `sha256:${"a".repeat(64)}`,
+  });
+
+  test("accepts the canonical typed HTTP error envelope", () => {
+    expect(
+      ErrorEnvelope.parse({
+        error: {
+          status: 503,
+          code: "upstream_unavailable",
+          message: "OpenGeni is temporarily unavailable — retry.",
+          retryable: true,
+          requestId: "edge-503-safe",
+        },
+      }),
+    ).toEqual({
+      error: {
+        status: 503,
+        code: "upstream_unavailable",
+        message: "OpenGeni is temporarily unavailable — retry.",
+        retryable: true,
+        requestId: "edge-503-safe",
+      },
+    });
   });
 
   test("distinguishes a lost PTY provider process from an owner departure", () => {

@@ -38,6 +38,7 @@ export function fakeClient(partial: Partial<SessionClientLike>): SessionClientLi
         structuredServices: { fileSystem: false, git: false, terminalEvents: false },
       }) as never,
     getComposerDraft: async () => emptyDraft,
+    listEvents: async () => [],
     saveComposerDraft: async (_workspaceId: string, _sessionId: string, request: any) => ({
       ...emptyDraft,
       ...request,

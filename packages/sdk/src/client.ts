@@ -199,6 +199,7 @@ import type {
 import {
   OPENGENI_API_CONTRACT_HEADER,
   OPENGENI_API_CONTRACT_REVISION,
+  OPENGENI_CORRELATION_HEADER,
   RETAINED_OUTPUT_MAX_PAGE_BYTES,
 } from "./types";
 
@@ -412,7 +413,13 @@ export class OpenGeniClient {
       );
     } catch (error) {
       if (error instanceof OpenGeniApiError && error.status === 410) {
-        throw new OpenGeniSessionListCursorError(error.status, error.body);
+        throw new OpenGeniSessionListCursorError(error.status, error.body, {
+          ...(error.code ? { code: error.code } : {}),
+          retryable: error.retryable,
+          ...(error.correlationId ? { correlationId: error.correlationId } : {}),
+          outcomeUnknown: error.outcomeUnknown,
+          displayMessage: "The session list changed — refresh and try again.",
+        });
       }
       throw error;
     }
@@ -666,6 +673,7 @@ export class OpenGeniClient {
     }
     const listOptions: SessionEventListOptions | null =
       options.resultMode === "compact" ? null : options;
+    const correlationId = crypto.randomUUID();
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events`, {
         ...(listOptions?.after !== undefined ? { after: String(listOptions.after) } : {}),
@@ -692,11 +700,14 @@ export class OpenGeniClient {
       }),
       {
         method: "GET",
-        headers: { ...this.headers(), Accept: "application/json" },
+        headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
     assertApiContractResponse(response);
-    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    }
+    await assertJsonResponse(response, { method: "GET", correlationId });
     const body = await response.json();
     if (options.resultMode === "compact") {
       return body as SessionEventCompactResult;
@@ -896,14 +907,15 @@ export class OpenGeniClient {
     const url = this.url(`/v1/workspaces/${workspaceId}/sessions/${sessionId}/events/stream`, {
       after: String(options.after ?? 0),
     });
+    const correlationId = crypto.randomUUID();
     const response = await this.fetchImpl(url, {
       method: "GET",
-      headers: { ...this.headers(), Accept: "text/event-stream" },
+      headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
       ...(options.signal ? { signal: options.signal } : {}),
     });
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
     }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
@@ -1049,6 +1061,7 @@ export class OpenGeniClient {
     workspaceId: string,
     options: { after?: number; limit?: number } = {},
   ): Promise<WorkspaceControlEventPage> {
+    const correlationId = crypto.randomUUID();
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/control-events`, {
         ...(options.after !== undefined ? { after: String(options.after) } : {}),
@@ -1056,13 +1069,14 @@ export class OpenGeniClient {
       }),
       {
         method: "GET",
-        headers: { ...this.headers(), Accept: "application/json" },
+        headers: { ...this.headers(correlationId), Accept: "application/json" },
       },
     );
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
     }
+    await assertJsonResponse(response, { method: "GET", correlationId });
     const events = (await response.json()) as WorkspaceControlEvent[];
     const bytesHeader = response.headers.get("X-OpenGeni-Page-Bytes");
     const nextHeader = response.headers.get("X-OpenGeni-Next-After");
@@ -1103,18 +1117,21 @@ export class OpenGeniClient {
     workspaceId: string,
     options: { after?: number; signal?: AbortSignal } = {},
   ): Promise<ReadableStream<Uint8Array>> {
+    const correlationId = crypto.randomUUID();
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/control-events/stream`, {
         after: String(options.after ?? 0),
       }),
       {
         method: "GET",
-        headers: { ...this.headers(), Accept: "text/event-stream" },
+        headers: { ...this.headers(correlationId), Accept: "text/event-stream" },
         ...(options.signal ? { signal: options.signal } : {}),
       },
     );
     assertApiContractResponse(response);
-    if (!response.ok) throw new OpenGeniApiError(response.status, await safeText(response));
+    if (!response.ok) {
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
+    }
     if (!response.body) {
       throw new OpenGeniApiError(response.status, "SSE response did not include a readable body");
     }
@@ -2029,7 +2046,7 @@ export class OpenGeniClient {
       body,
     });
     if (!putResponse.ok) {
-      throw new OpenGeniApiError(putResponse.status, await safeText(putResponse));
+      throw await apiErrorFromResponse(putResponse, { method: "PUT" });
     }
     return await this.completeFileUpload(workspaceId, upload.uploadId);
   }
@@ -2064,12 +2081,13 @@ export class OpenGeniClient {
     if (options.range && (options.range.length > 128 || /[^\x20-\x7e]/.test(options.range))) {
       throw new RangeError("retained artifact range must be at most 128 printable ASCII bytes");
     }
+    const correlationId = crypto.randomUUID();
     const response = await this.fetchImpl(
       this.url(`/v1/workspaces/${workspaceId}/artifacts/${artifactId}/content`),
       {
         method: "GET",
         headers: {
-          ...this.headers(),
+          ...this.headers(correlationId),
           Accept: "application/octet-stream",
           ...(options.range ? { Range: options.range } : {}),
         },
@@ -2083,7 +2101,7 @@ export class OpenGeniClient {
       throw error;
     }
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeBoundedText(response));
+      throw await apiErrorFromResponse(response, { method: "GET", correlationId });
     }
     if (response.status !== 200 && response.status !== 206) {
       await cancelResponseBody(response, "unexpected retained artifact response status");
@@ -2623,13 +2641,14 @@ export class OpenGeniClient {
 
   // --- Internals -------------------------------------------------------------
 
-  private headers(): Record<string, string> {
+  private headers(correlationId?: string): Record<string, string> {
     const extra =
       typeof this.options.headers === "function" ? this.options.headers() : this.options.headers;
     return {
       ...(this.options.apiKey ? { Authorization: `Bearer ${this.options.apiKey}` } : {}),
       ...extra,
       [OPENGENI_API_CONTRACT_HEADER]: OPENGENI_API_CONTRACT_REVISION,
+      ...(correlationId ? { [OPENGENI_CORRELATION_HEADER]: correlationId } : {}),
     };
   }
 
@@ -2793,37 +2812,63 @@ export class OpenGeniClient {
     query: Record<string, string> = {},
     options: OpenGeniRequestOptions = {},
   ): Promise<T> {
-    const response = await this.fetchImpl(this.url(path, query), {
-      method,
-      headers: {
-        ...this.headers(),
-        Accept: "application/json",
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path, query), {
+        method,
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/json",
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw await apiErrorFromResponse(response, { method, correlationId });
     }
-    return (await response.json()) as T;
+    await assertJsonResponse(response, { method, correlationId });
+    try {
+      return (await response.json()) as T;
+    } catch (error) {
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
   }
 
   /** Like `requestJson` for endpoints that respond with no body (204). */
   private async requestVoid(method: string, path: string, body?: unknown): Promise<void> {
-    const response = await this.fetchImpl(this.url(path), {
-      method,
-      headers: {
-        ...this.headers(),
-        Accept: "application/json",
-        ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
-      },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    });
+    const correlationId = crypto.randomUUID();
+    let response: Response;
+    try {
+      response = await this.fetchImpl(this.url(path), {
+        method,
+        headers: {
+          ...this.headers(correlationId),
+          Accept: "application/json",
+          ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      });
+    } catch (error) {
+      if (isMutationMethod(method)) {
+        throw mutationTransportError(correlationId);
+      }
+      throw error;
+    }
     assertApiContractResponse(response);
     if (!response.ok) {
-      throw new OpenGeniApiError(response.status, await safeText(response));
+      throw await apiErrorFromResponse(response, { method, correlationId });
     }
   }
 }
@@ -2835,6 +2880,75 @@ function assertApiContractResponse(response: Response): void {
   }
 }
 
+const API_ERROR_MAX_BYTES = 16 * 1024;
+
+type ApiErrorRequestContext = {
+  method: string;
+  correlationId?: string | undefined;
+};
+
+async function apiErrorFromResponse(
+  response: Response,
+  context: ApiErrorRequestContext,
+): Promise<OpenGeniApiError> {
+  return new OpenGeniApiError(response.status, await readBoundedJsonErrorBody(response), {
+    correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
+    mutation: isMutationMethod(context.method),
+  });
+}
+
+async function assertJsonResponse(
+  response: Response,
+  context: ApiErrorRequestContext,
+): Promise<void> {
+  if (isJsonContentType(response.headers.get("content-type"))) return;
+  await cancelResponseBody(response, "unexpected non-JSON API response");
+  throw new OpenGeniApiError(502, "", {
+    code: "upstream_unavailable",
+    retryable: true,
+    correlationId: response.headers.get(OPENGENI_CORRELATION_HEADER) ?? context.correlationId,
+    outcomeUnknown: isMutationMethod(context.method),
+    displayMessage: "OpenGeni is temporarily unavailable — retry.",
+  });
+}
+
+async function readBoundedJsonErrorBody(response: Response): Promise<string> {
+  if (!isJsonContentType(response.headers.get("content-type"))) {
+    await cancelResponseBody(response, "discarding API error body");
+    return "";
+  }
+  if (Number(response.headers.get("content-length")) > API_ERROR_MAX_BYTES) {
+    await cancelResponseBody(response, "discarding API error body");
+    return "";
+  }
+  try {
+    return new TextDecoder().decode(
+      await readBoundedResponseBytes(response, API_ERROR_MAX_BYTES, null),
+    );
+  } catch {
+    return "";
+  }
+}
+
+function isJsonContentType(value: string | null): boolean {
+  return /^(application\/json|[^;]+\+json)\s*(;|$)/i.test(value ?? "");
+}
+
+function isMutationMethod(method: string): boolean {
+  return method !== "GET" && method !== "HEAD" && method !== "OPTIONS";
+}
+
+function mutationTransportError(correlationId: string): OpenGeniApiError {
+  return new OpenGeniApiError(0, "", {
+    code: "network_error",
+    retryable: true,
+    correlationId,
+    outcomeUnknown: true,
+    mutation: true,
+    displayMessage: "OpenGeni could not confirm the request — reconcile before retrying.",
+  });
+}
+
 async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<string> {
   const bytes =
     typeof body === "string"
@@ -2844,22 +2958,6 @@ async function sha256ForUpload(body: Blob | ArrayBuffer | string): Promise<strin
         : new Uint8Array(body);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function safeText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return "";
-  }
-}
-
-async function safeBoundedText(response: Response): Promise<string> {
-  try {
-    return new TextDecoder().decode(await readBoundedResponseBytes(response, 64 * 1024, null));
-  } catch {
-    return "";
-  }
 }
 
 async function cancelResponseBody(response: Response, reason: string): Promise<void> {
