@@ -696,6 +696,12 @@ describe("OpenGeniClient documents", () => {
       kind: "decision",
     });
     await client.updateKnowledgeMemory(WORKSPACE_ID, DOCUMENT_ID, { status: "approved" });
+    await client.createKnowledgeDrop(WORKSPACE_ID, {
+      text: "meeting notes",
+      visibility: "private",
+      agentAccess: false,
+    });
+    await client.moveDocument(WORKSPACE_ID, DOCUMENT_ID);
     expect(search.results).toEqual([]);
     expect(knowledgeSearch.results).toEqual([]);
     expect(requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual(
@@ -712,6 +718,8 @@ describe("OpenGeniClient documents", () => {
         `GET /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
         `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/memories`,
         `PATCH /v1/workspaces/${WORKSPACE_ID}/knowledge/memories/${DOCUMENT_ID}`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/knowledge/drops`,
+        `POST /v1/workspaces/${WORKSPACE_ID}/documents/${DOCUMENT_ID}/move`,
       ],
     );
     expect(JSON.parse(requests[6]!.body!)).toEqual({ query: "rollback steps", limit: 3 });
@@ -726,6 +734,12 @@ describe("OpenGeniClient documents", () => {
       kind: "decision",
     });
     expect(JSON.parse(requests[11]!.body!)).toEqual({ status: "approved" });
+    expect(JSON.parse(requests[12]!.body!)).toEqual({
+      text: "meeting notes",
+      visibility: "private",
+      agentAccess: false,
+    });
+    expect(JSON.parse(requests[13]!.body!)).toEqual({});
   });
 
   test("deleteDocument DELETEs the document and resolves on 204", async () => {

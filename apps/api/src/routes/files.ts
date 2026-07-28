@@ -351,7 +351,7 @@ export function registerFileRoutes(app: Hono, deps: ApiRouteDeps): void {
   });
 }
 
-function sanitizeFilename(filename: string): string {
+export function sanitizeFilename(filename: string): string {
   const trimmed = filename.trim().replace(/[/\\]/g, "_");
   const safe = trimmed
     .replace(/[^A-Za-z0-9._ -]+/g, "_")

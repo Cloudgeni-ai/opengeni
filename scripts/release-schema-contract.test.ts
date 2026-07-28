@@ -132,12 +132,15 @@ describe("release schema contract", () => {
         (migrations.has("0121_goal_update_idempotency.sql") ? 1 : 0) +
         (migrations.has("0122_codex_capacity_same_turn.sql") ? 1 : 0) +
         (migrations.has("0123_session_tool_policy_version.sql") ? 1 : 0) +
-        (migrations.has("0124_session_event_duplicate_lookup.sql") ? 1 : 0),
+        (migrations.has("0124_session_event_duplicate_lookup.sql") ? 1 : 0) +
+        (migrations.has("0125_document_drops_visibility.sql") ? 1 : 0) +
+        (migrations.has("0126_document_access_constraints.sql") ? 1 : 0) +
+        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "07738b1c68e7acc8030fc53e9334e7aab5e7abdda0ba54560c78d162eb2b25b4",
+      "988125394d6a6a96cecfa2a2f97c4d290daa802a749bf8e6fca6193848e3ae3f",
     );
-    expect(contract.latestMigration).toBe("0124_session_event_duplicate_lookup.sql");
+    expect(contract.latestMigration).toBe("0127_document_default_base_index.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
       deploymentMode: "maintenance",
@@ -163,7 +166,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-4])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-7])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -177,6 +180,9 @@ describe("release schema contract", () => {
       "0122_codex_capacity_same_turn.sql",
       "0123_session_tool_policy_version.sql",
       "0124_session_event_duplicate_lookup.sql",
+      "0125_document_drops_visibility.sql",
+      "0126_document_access_constraints.sql",
+      "0127_document_default_base_index.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -231,6 +237,18 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0124_session_event_duplicate_lookup.sql")).toMatchObject({
       sha256: "115dbd71c528c78d340cf3be476f2973db273740e8bcbf47196da96c2d9f94c1",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0125_document_drops_visibility.sql")).toMatchObject({
+      sha256: "d2d9f0c7f4b5cc239df3d764d04e0b9fecf2ab9a37ade02735607393c03cb18f",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0126_document_access_constraints.sql")).toMatchObject({
+      sha256: "0519e1050c51af5b2f1a02def53f20e5e1e116277d85811d0bfef9c567302dba",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0127_document_default_base_index.sql")).toMatchObject({
+      sha256: "7deb5fde59f2e0e336a18a72630a00348dc641041f7df60639b50df79b4c4480",
       deploymentMode: "rolling",
     });
   });

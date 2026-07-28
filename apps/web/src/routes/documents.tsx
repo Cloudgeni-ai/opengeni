@@ -1,12 +1,16 @@
 // Documents: indexed document bases for agent search, with upload, reindex,
 // and semantic search — all through the SDK client.
 import {
+  BotOffIcon,
   CheckIcon,
   FileSearchIcon,
   FilesIcon,
+  FolderInputIcon,
   Loader2Icon,
+  LockIcon,
   PlusIcon,
   RefreshCwIcon,
+  SparklesIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -26,6 +30,7 @@ import type {
   DocumentBase,
   DocumentSearchMode,
   DocumentSearchResult,
+  DocumentVisibility,
   IndexedDocument,
   KnowledgeSourceKind,
 } from "@/types";
@@ -63,8 +68,16 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
   const [uploadSourceTitle, setUploadSourceTitle] = useState("");
   const [uploadSourceAuthor, setUploadSourceAuthor] = useState("");
   const [uploadAclTags, setUploadAclTags] = useState("");
+  const [uploadVisibility, setUploadVisibility] = useState<DocumentVisibility>("workspace");
+  const [uploadAgentAccess, setUploadAgentAccess] = useState(true);
+  const [dropText, setDropText] = useState("");
+  const [dropVisibility, setDropVisibility] = useState<DocumentVisibility>("workspace");
+  const [dropAgentAccess, setDropAgentAccess] = useState(true);
+  const [dropping, setDropping] = useState(false);
   const [creatingBase, setCreatingBase] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [movingIds, setMovingIds] = useState<Set<string>>(() => new Set());
+  const dropFileInputRef = useRef<HTMLInputElement | null>(null);
   const [searching, setSearching] = useState(false);
   // The query behind the results on screen, so a completed search that found
   // nothing reads as "No results" rather than the initial prompt.
@@ -193,6 +206,8 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
         const indexed = await client.addDocument(workspaceId, selectedBaseId, {
           fileId: asset.id,
           sourceKind: uploadSourceKind,
+          visibility: uploadVisibility,
+          agentAccess: uploadAgentAccess,
           ...(uploadSourceUri.trim() ? { sourceUri: uploadSourceUri.trim() } : {}),
           ...(uploadSourceTitle.trim() ? { sourceTitle: uploadSourceTitle.trim() } : {}),
           ...(uploadSourceAuthor.trim() ? { sourceAuthor: uploadSourceAuthor.trim() } : {}),
@@ -208,6 +223,99 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
     } finally {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  // A drop can create the Default base or auto-file into any base — re-pull
+  // the base list and land the user where the document actually went.
+  async function finishDrop(document: IndexedDocument) {
+    try {
+      const nextBases = await client.listDocumentBases(workspaceId);
+      setBases(nextBases);
+    } catch {
+      // Base list refresh is cosmetic here; the document view below still lands.
+    }
+    setSelectedBaseId(document.baseId);
+    await refreshDocuments(document.baseId);
+  }
+
+  async function handleDropText() {
+    const text = dropText.trim();
+    if (!text) return;
+    setDropping(true);
+    try {
+      const document = await client.createKnowledgeDrop(workspaceId, {
+        text,
+        visibility: dropVisibility,
+        agentAccess: dropAgentAccess,
+      });
+      setDropText("");
+      toast.success("Dropped into knowledge", {
+        description: dropResultDescription(document),
+      });
+      await finishDrop(document);
+    } catch (error) {
+      toast.error("Drop failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setDropping(false);
+    }
+  }
+
+  async function handleDropFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setDropping(true);
+    try {
+      let last: IndexedDocument | null = null;
+      for (const file of Array.from(files)) {
+        const asset = await client.uploadFile(workspaceId, {
+          filename: file.name || "file",
+          contentType: file.type || "application/octet-stream",
+          data: file,
+        });
+        last = await client.createKnowledgeDrop(workspaceId, {
+          fileId: asset.id,
+          visibility: dropVisibility,
+          agentAccess: dropAgentAccess,
+        });
+      }
+      toast.success(
+        files.length === 1 ? "Dropped into knowledge" : `${files.length} files dropped`,
+        {
+          description: last ? dropResultDescription(last) : "The files were added to Default.",
+        },
+      );
+      if (last) await finishDrop(last);
+    } catch (error) {
+      toast.error("Drop failed", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setDropping(false);
+      if (dropFileInputRef.current) dropFileInputRef.current.value = "";
+    }
+  }
+
+  async function handleApplySuggestion(document: IndexedDocument) {
+    setMovingIds((current) => new Set(current).add(document.id));
+    try {
+      const moved = await client.moveDocument(workspaceId, document.id);
+      // The document left the currently selected base.
+      setDocuments((current) => current.filter((item) => item.id !== document.id));
+      toast.success(
+        `Filed “${moved.title}” into ${moved.curation?.suggestedBaseName ?? "the suggested base"}`,
+      );
+    } catch (error) {
+      toast.error("Failed to move document", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setMovingIds((current) => {
+        const next = new Set(current);
+        next.delete(document.id);
+        return next;
+      });
     }
   }
 
@@ -319,6 +427,93 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
             </div>
           }
         />
+
+        <div
+          className="mt-5 rounded-lg border border-dashed border-border bg-surface/25 p-3"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            void handleDropFiles(event.dataTransfer?.files ?? null);
+          }}
+        >
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <SparklesIcon className="size-4 text-brand" />
+            Drop anything
+            <span className="text-2xs font-normal text-fg-subtle">
+              Drops start in Default; enabled curation may name, summarize, and file them.
+            </span>
+          </div>
+          <div className="mt-2 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+            <textarea
+              value={dropText}
+              onChange={(event) => setDropText(event.target.value)}
+              placeholder="Paste notes, a transcript, an email — or drag files here."
+              rows={2}
+              disabled={!fileUploadsEnabled || dropping}
+              className="min-h-16 w-full resize-y rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2.5 py-2 text-xs leading-5 text-[color:var(--color-fg)]"
+            />
+            <div className="flex flex-col gap-2">
+              <select
+                value={dropVisibility}
+                onChange={(event) => setDropVisibility(event.target.value as DocumentVisibility)}
+                disabled={dropping}
+                aria-label="Who can see this document"
+                className="h-8 rounded-md border border-[color:var(--color-border)] bg-[color:var(--color-bg)] px-2 text-xs text-[color:var(--color-fg)]"
+              >
+                <option value="workspace">Everyone in workspace</option>
+                <option value="private">Private — creator subject only</option>
+              </select>
+              <label className="flex items-center gap-2 text-xs text-fg-muted">
+                <input
+                  type="checkbox"
+                  checked={dropAgentAccess}
+                  onChange={(event) => setDropAgentAccess(event.target.checked)}
+                  disabled={dropping}
+                />
+                Subject-aware agents can read it
+              </label>
+              <div className="flex gap-2">
+                <input
+                  ref={dropFileInputRef}
+                  type="file"
+                  multiple
+                  className="hidden"
+                  onChange={(event) => void handleDropFiles(event.target.files)}
+                />
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={!fileUploadsEnabled || dropping}
+                  onClick={() => dropFileInputRef.current?.click()}
+                  className="h-8"
+                >
+                  <FilesIcon className="size-3.5" />
+                  Files
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={!fileUploadsEnabled || dropping || !dropText.trim()}
+                  onClick={() => void handleDropText()}
+                  className="h-8"
+                >
+                  {dropping ? (
+                    <Loader2Icon className="size-3.5 animate-spin" />
+                  ) : (
+                    <SparklesIcon className="size-3.5" />
+                  )}
+                  Drop
+                </Button>
+              </div>
+            </div>
+          </div>
+          {!fileUploadsEnabled ? (
+            <div className="mt-2 text-2xs text-fg-subtle">
+              Knowledge drops need object storage, which is off for this deployment.
+            </div>
+          ) : null}
+        </div>
 
         <div className="mt-5 grid min-h-0 min-w-0 flex-1 gap-4 lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_minmax(0,1fr)_20rem]">
           <aside
@@ -476,6 +671,28 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                       placeholder="team, confidential"
                     />
                   </FormField>
+                  <FormField label="Visibility">
+                    <Select
+                      value={uploadVisibility}
+                      onChange={(event) =>
+                        setUploadVisibility(event.target.value as DocumentVisibility)
+                      }
+                      className="h-8 text-xs pointer-coarse:min-h-10"
+                    >
+                      <option value="workspace">Everyone in workspace</option>
+                      <option value="private">Private — creator subject only</option>
+                    </Select>
+                  </FormField>
+                  <FormField label="Agent access">
+                    <Select
+                      value={uploadAgentAccess ? "on" : "off"}
+                      onChange={(event) => setUploadAgentAccess(event.target.value === "on")}
+                      className="h-8 text-xs pointer-coarse:min-h-10"
+                    >
+                      <option value="on">Subject-aware agents can read</option>
+                      <option value="off">Agents blocked</option>
+                    </Select>
+                  </FormField>
                 </FormGrid>
 
                 <div className="mt-4 space-y-2">
@@ -550,12 +767,47 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                           <div className="break-words text-sm font-medium" title={document.title}>
                             {document.title}
                           </div>
+                          {document.summary ? (
+                            <p className="mt-1 line-clamp-2 max-w-3xl text-xs leading-5 text-fg-muted">
+                              {document.summary}
+                            </p>
+                          ) : null}
                           <div className="mt-1 text-2xs text-fg-subtle">
                             {document.status} · {document.chunkCount} chunks · {document.parser}
                           </div>
                           <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-[color:var(--color-fg-subtle)]">
                             <span>{formatToken(document.sourceKind)}</span>
                             {document.sourceTitle ? <span>· {document.sourceTitle}</span> : null}
+                            {document.visibility === "private" ? (
+                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                                <LockIcon className="size-3" />
+                                creator subject only
+                              </span>
+                            ) : null}
+                            <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                              {document.agentAccess === false ? (
+                                <BotOffIcon className="size-3" />
+                              ) : null}
+                              {document.agentAccess
+                                ? document.visibility === "private"
+                                  ? "creator's subject-aware agent can read"
+                                  : "subject-aware agents can read"
+                                : "agents blocked"}
+                            </span>
+                            {document.curationStatus === "auto_filed" ? (
+                              <span className="inline-flex items-center gap-1 rounded border border-[color:var(--color-border)] px-1">
+                                <SparklesIcon className="size-3" />
+                                auto-filed
+                              </span>
+                            ) : null}
+                            {document.topics.slice(0, 4).map((topic) => (
+                              <span
+                                key={topic}
+                                className="rounded border border-[color:var(--color-border)] px-1"
+                              >
+                                {topic}
+                              </span>
+                            ))}
                             {document.aclTags.slice(0, 3).map((tag) => (
                               <span
                                 key={tag}
@@ -565,6 +817,31 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
                               </span>
                             ))}
                           </div>
+                          {document.curationStatus === "suggested" &&
+                          document.curation?.suggestedBaseId ? (
+                            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-fg-muted">
+                              <span>
+                                Suggested base: “{document.curation.suggestedBaseName}”
+                                {typeof document.curation.confidence === "number"
+                                  ? ` (${Math.round(document.curation.confidence * 100)}%)`
+                                  : ""}
+                              </span>
+                              <Button
+                                type="button"
+                                variant="secondary"
+                                size="xs"
+                                disabled={movingIds.has(document.id)}
+                                onClick={() => void handleApplySuggestion(document)}
+                              >
+                                {movingIds.has(document.id) ? (
+                                  <Loader2Icon className="size-3 animate-spin" />
+                                ) : (
+                                  <FolderInputIcon className="size-3" />
+                                )}
+                                Move it there
+                              </Button>
+                            </div>
+                          ) : null}
                           {document.status === "failed" && document.error ? (
                             <div className="mt-2 line-clamp-2 max-w-3xl text-xs leading-5 text-danger">
                               {document.error}
@@ -737,6 +1014,21 @@ export function DocumentsRoute({ workspaceId }: { workspaceId: string }) {
       </section>
     </ContentPage>
   );
+}
+
+function dropResultDescription(document: Pick<IndexedDocument, "curationStatus">): string {
+  switch (document.curationStatus) {
+    case "none":
+      return "Curation is disabled; the document stays in Default with its supplied metadata.";
+    case "pending":
+      return "The document was added to Default; curation is still processing.";
+    case "suggested":
+      return "Curation suggested a destination; review the suggestion below.";
+    case "auto_filed":
+      return "Curation named, summarized, and filed the document automatically.";
+    case "failed":
+      return "Curation failed softly; the document remains searchable with safe fallback metadata.";
+  }
 }
 
 function documentStatusTone(status: IndexedDocument["status"]): StatusTone {
