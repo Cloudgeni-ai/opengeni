@@ -1731,6 +1731,13 @@ describe("P4.4 SandboxChannelAService — terminal cwd frames", () => {
             exitCode: 0,
           };
         }
+        if (cmd.includes("wc -c")) {
+          return {
+            stdout: "__OPENGENI_FS_CONFINED_OK__\n0\t0\n",
+            stderr: "",
+            exitCode: 0,
+          };
+        }
         return {
           stdout: cmd.includes('cd -P -- "$target"') ? "__OPENGENI_FS_CONFINED_OK__\n" : "",
           stderr: "",
