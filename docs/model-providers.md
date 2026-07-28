@@ -105,11 +105,11 @@ full capability record is also present, the legacy booleans must agree with it.
 Generic registry JSON cannot set `credentialSource` or `billing`. OpenGeni
 derives both from the provider kind:
 
-| Provider kind | Credential source | Upstream payer | Metering |
-| --- | --- | --- | --- |
-| Built-in or registry API key | deployment | deployment | OpenGeni credits |
-| Azure without an API key | deployment Azure AD bearer | deployment | OpenGeni credits |
-| Connected Codex subscription | connected subscription | connected subscription | external |
+| Provider kind                | Credential source          | Upstream payer         | Metering         |
+| ---------------------------- | -------------------------- | ---------------------- | ---------------- |
+| Built-in or registry API key | deployment                 | deployment             | OpenGeni credits |
+| Azure without an API key     | deployment Azure AD bearer | deployment             | OpenGeni credits |
+| Connected Codex subscription | connected subscription     | connected subscription | external         |
 
 `workspace_connection` is a reserved normalized contract. Generic JSON does
 not enable workspace BYOK; that requires a separately reviewed encrypted
@@ -173,6 +173,50 @@ provider support for X search or Responses WebSocket remains `runnable: false`
 until OpenGeni has the request, recovery, and billing contracts to use it
 safely. Capability metadata also never authorizes an OpenGeni tool; tool
 discovery and authorization remain independent.
+
+### Connected-Codex native realtime audio
+
+Connected Codex subscriptions have one runnable realtime-audio path separate
+from ordinary turn execution and model-catalog selection. An authorized client
+posts a browser-created audio SDP offer to the session-scoped OpenGeni route;
+the server resolves the existing encrypted session pin→workspace active
+credential, binds the ChatGPT account, and performs this native subscription
+request:
+
+```text
+POST https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas
+Content-Type: application/json
+Authorization: Bearer <server-resolved connected-subscription token>
+ChatGPT-Account-ID: <server-resolved account binding, when present>
+OpenAI-Alpha: quicksilver=v2
+Session-ID: <OpenGeni session ID>
+Thread-ID: <OpenGeni session ID>
+```
+
+The shared current Codex client-header builder adds
+`Originator: codex_cli_rs`, `User-Agent: codex_cli_rs/0.145.0`, and
+`Version: 0.145.0`, plus the optional FedRAMP header when required. The JSON
+body contains the SDP offer and a session with instructions,
+`audio.output.voice` (default `cove`), client delegation, and fixed model
+`gpt-live-1-boulder-alpha`. Success is a raw SDP answer plus a compatible call
+identifier in `Location`; the call identifier is validated server-side and is
+not returned. The public response contains only
+`{ sdp, version: "v3", model }`.
+
+Only Frameless/V3 is accepted. Invalid SDP, unsupported versions, entitlement
+denial, reauthentication, rate limiting, provider/network/timeout failures,
+and malformed provider answers use controlled error reasons without response
+bodies or account/credential identity. Exactly one provider 401 may force the
+existing singleflight/advisory-lock/CAS refresh and replay the identical offer
+once. No other result is replayed, and there is no public API-key or Codex
+WebSocket fallback.
+
+The SDK's `startCodexRealtimeWebrtc` helper lazily owns browser microphone,
+peer connection, and `oai-events` data-channel setup and closes them together.
+V3 event/delegation behavior remains client-owned; a server sideband/tool
+lifecycle and upstream call-stop endpoint are outside this transport slice.
+This conversation path is not composer speech-to-text and does not change the
+workspace transcription policy seam.
 
 ### Native web search follows the durable session tool policy
 
@@ -287,7 +331,7 @@ activation.
 The SDK method is:
 
 ```ts
-client.getWorkspaceModelCatalog(workspaceId)
+client.getWorkspaceModelCatalog(workspaceId);
 ```
 
 ## Per-turn execution policy

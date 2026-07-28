@@ -180,6 +180,7 @@ import {
   classifyCodexUsageLimitError,
   codexRequestStorage,
   isCodexTransportError,
+  selectCodexCredentialId,
   type CodexRequestContext,
   type CodexUsageHeaderSnapshot,
 } from "@opengeni/codex";
@@ -365,14 +366,7 @@ export function selectCodexCredentialForTurn(args: {
   activeCredentialId: string | null;
   connectedIds: Set<string>;
 }): string | null {
-  const { sessionPinnedCredentialId: pin, activeCredentialId: active, connectedIds } = args;
-  if (pin && connectedIds.has(pin)) {
-    return pin;
-  }
-  if (active && connectedIds.has(active)) {
-    return active;
-  }
-  return null;
+  return selectCodexCredentialId(args);
 }
 
 export function filterUnmaterializedSandboxFileDownloads(
@@ -3762,12 +3756,22 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               },
             ]
           : !resolvedModel && fallbackProviderApiKey
-            ? [{ name: "MODEL_PROVIDER_API_KEY", value: fallbackProviderApiKey }]
+            ? [
+                {
+                  name: "MODEL_PROVIDER_API_KEY",
+                  value: fallbackProviderApiKey,
+                },
+              ]
             : []),
         ...Object.entries(selectedProvider?.defaultHeaders ?? {}).flatMap(([name, value]) =>
           publicProviderHeaders.has(name.toLowerCase())
             ? []
-            : [{ name: `MODEL_PROVIDER_HEADER_${name.toUpperCase()}`, value }],
+            : [
+                {
+                  name: `MODEL_PROVIDER_HEADER_${name.toUpperCase()}`,
+                  value,
+                },
+              ],
         ),
         ...Object.entries(selectedProvider?.defaultQuery ?? {}).flatMap(([name, value]) =>
           publicProviderQueries.has(name.toLowerCase())
@@ -5271,10 +5275,14 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
                     },
                     ...(lazyGitTokens ? { gitTokenSeedsOverride: lazyGitTokens } : {}),
                     ...(lazyGitCredentials?.bindings
-                      ? { gitCredentialBindingsOverride: lazyGitCredentials.bindings }
+                      ? {
+                          gitCredentialBindingsOverride: lazyGitCredentials.bindings,
+                        }
                       : {}),
                     ...(lazyToolspaceToken
-                      ? { toolspaceTokenSeedOverride: lazyToolspaceToken.token }
+                      ? {
+                          toolspaceTokenSeedOverride: lazyToolspaceToken.token,
+                        }
                       : {}),
                     ...(toolCancellationFenceRef.current
                       ? {
@@ -6134,7 +6142,12 @@ export function createRunAgentTurnActivity(services: () => Promise<ActivityServi
               events: [
                 ...requestEvents,
                 ...(approvals.length > 0
-                  ? [{ type: "session.requiresAction" as const, payload: { approvals } }]
+                  ? [
+                      {
+                        type: "session.requiresAction" as const,
+                        payload: { approvals },
+                      },
+                    ]
                   : []),
                 {
                   type: "session.status.changed",
@@ -8379,7 +8392,11 @@ function sanitizedModelUsageInput(normalized: ModelCallUsageNormalization): Mode
       : {}),
     ...(normalized.totalTokens !== null ? { totalTokens: normalized.totalTokens } : {}),
     ...(normalized.telemetry.cachedTokens !== null
-      ? { inputTokensDetails: { cached_tokens: normalized.telemetry.cachedTokens } }
+      ? {
+          inputTokensDetails: {
+            cached_tokens: normalized.telemetry.cachedTokens,
+          },
+        }
       : {}),
   };
 }

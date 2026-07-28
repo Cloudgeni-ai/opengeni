@@ -50,9 +50,10 @@ Changing any accepted policy field revokes the active session; a new session mus
 acceptance ID.
 
 This authorization is intentionally separate from workspace turn-model policy and from the model
-chosen for an agent turn. A transcription target cannot inherit agent model-routing permission,
-and no audio is routed through coding-model inference. A Codex-subscription transcription adapter
-is not included because no stable authorized audio-transcription entitlement has been established.
+chosen for an agent turn. A transcription target cannot inherit agent model-routing permission.
+Connected-Codex GPT-Live V3 conversation is available through a separate, session-scoped native
+WebRTC SDP route and SDK helper, but it is not speech-to-text, does not append editable composer
+text, and does not implement or authorize this transcription-adapter seam.
 
 The policy contains only a workspace connection UUID for a BYOK target, never a credential value.
 The current client seam does not resolve that reference itself: an authorized host adapter must use
@@ -60,15 +61,15 @@ its own credential broker without exposing secrets to the composer or public eve
 
 ## Canonical implementation
 
-| Concern | Canonical source |
-| --- | --- |
-| Stored workspace schema and PATCH validation | `packages/contracts/src/index.ts` (`WorkspaceTranscriptionPolicy`) |
-| Browser-global-free adapter, authorization, event, and session contracts | `packages/sdk/src/transcription.ts` |
-| React lifecycle, sequence/generation fences, and final insertion | `packages/react/src/hooks/use-transcription.ts` |
-| One accessible microphone control | `packages/react/src/components/composer-transcription-control.tsx` |
-| Ordinary composer integration | `packages/react/src/components/chat-composer.tsx` |
-| Workspace-only policy editor | `apps/web/src/components/transcription-settings.tsx` |
-| Deterministic browser fixture | `packages/react/demo/transcription-harness.tsx` |
+| Concern                                                                  | Canonical source                                                   |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------ |
+| Stored workspace schema and PATCH validation                             | `packages/contracts/src/index.ts` (`WorkspaceTranscriptionPolicy`) |
+| Browser-global-free adapter, authorization, event, and session contracts | `packages/sdk/src/transcription.ts`                                |
+| React lifecycle, sequence/generation fences, and final insertion         | `packages/react/src/hooks/use-transcription.ts`                    |
+| One accessible microphone control                                        | `packages/react/src/components/composer-transcription-control.tsx` |
+| Ordinary composer integration                                            | `packages/react/src/components/chat-composer.tsx`                  |
+| Workspace-only policy editor                                             | `apps/web/src/components/transcription-settings.tsx`               |
+| Deterministic browser fixture                                            | `packages/react/demo/transcription-harness.tsx`                    |
 
 `@opengeni/sdk` deliberately references no browser or native microphone API. Web, desktop, native,
 and mobile hosts implement the same `TranscriptionAdapter`/`TranscriptionSession` seam and emit the
@@ -109,21 +110,21 @@ credential. The demo/e2e adapter is local deterministic fixture code only.
 9. A fallback is never selected silently. The workspace must accept explicit fallback targets and
    the host must request one exact accepted index.
 10. The host adapter is responsible for enforcing provider-specific retention/privacy commitments
-   and cost ceilings before and during capture. The generic SDK passes these values through but has
-   no provider meter or billing integration of its own.
+    and cost ceilings before and during capture. The generic SDK passes these values through but has
+    no provider meter or billing integration of its own.
 
 ## Provider research matrix
 
 Research below is limited to the vendors' public documentation, accessed **2026-07-21**. It is an
 integration-planning matrix, not an endorsement or a claim of verified runtime behavior.
 
-| Candidate | Documented integration shape | OpenGeni adapter considerations | Current status |
-| --- | --- | --- | --- |
-| OpenAI speech/transcription | Hosted speech-to-text APIs plus documented realtime transcription; separate data-control and API-pricing documentation | A future host adapter would need an authorized API credential path, exact model binding, documented retention/privacy acceptance, and independent cost enforcement. A coding-model or Codex subscription is not a substitute. | No adapter; no entitlement, provider call, or benchmark verified. |
-| Deepgram | Hosted live-streaming audio interface with separate published pricing | A host adapter would own live audio transport, credential brokerage, reconnect ordering, region/privacy review, and usage/cost enforcement. | No adapter or benchmark. |
-| Azure Speech | Speech-to-text SDK/service documentation and a separately documented container option | OpenGeni policy permits `azure-speech` only with a workspace BYOK connection. Region and deployment mode must be exact; selecting Azure Speech never authorizes Azure-hosted model inference. | No adapter, container integration, or benchmark. |
-| AssemblyAI | Hosted streaming transcription interface with separate published pricing | A host adapter would own streaming transport, credential brokerage, reconnect/dedupe behavior, privacy review, and usage/cost enforcement. | No adapter or benchmark. |
-| Self-hosted Whisper-class | Open-source Whisper model/code suitable for operator-owned inference; the upstream repository does not establish an OpenGeni streaming service contract | A host must own model packaging, audio capture, segmentation/streaming strategy, compute, region, observability, and stable acceptance IDs. Self-hosting reduces vendor coupling but does not by itself prove privacy, latency, or cost. | No packaged service or adapter; no hardware benchmark. |
+| Candidate                   | Documented integration shape                                                                                                                            | OpenGeni adapter considerations                                                                                                                                                                                                          | Current status                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| OpenAI speech/transcription | Hosted speech-to-text APIs plus documented realtime transcription; separate data-control and API-pricing documentation                                  | A future host adapter would need an authorized API credential path, exact model binding, documented retention/privacy acceptance, and independent cost enforcement. A coding-model or Codex subscription is not a substitute.            | No adapter; no entitlement, provider call, or benchmark verified. |
+| Deepgram                    | Hosted live-streaming audio interface with separate published pricing                                                                                   | A host adapter would own live audio transport, credential brokerage, reconnect ordering, region/privacy review, and usage/cost enforcement.                                                                                              | No adapter or benchmark.                                          |
+| Azure Speech                | Speech-to-text SDK/service documentation and a separately documented container option                                                                   | OpenGeni policy permits `azure-speech` only with a workspace BYOK connection. Region and deployment mode must be exact; selecting Azure Speech never authorizes Azure-hosted model inference.                                            | No adapter, container integration, or benchmark.                  |
+| AssemblyAI                  | Hosted streaming transcription interface with separate published pricing                                                                                | A host adapter would own streaming transport, credential brokerage, reconnect/dedupe behavior, privacy review, and usage/cost enforcement.                                                                                               | No adapter or benchmark.                                          |
+| Self-hosted Whisper-class   | Open-source Whisper model/code suitable for operator-owned inference; the upstream repository does not establish an OpenGeni streaming service contract | A host must own model packaging, audio capture, segmentation/streaming strategy, compute, region, observability, and stable acceptance IDs. Self-hosting reduces vendor coupling but does not by itself prove privacy, latency, or cost. | No packaged service or adapter; no hardware benchmark.            |
 
 Official references:
 
@@ -142,9 +143,11 @@ Official references:
 
 ## Honest runtime gaps
 
-- No production browser, desktop, native, mobile, server, or provider adapter ships today.
-- No provider credential has been resolved through this seam, and no paid/provider call was made
-  while implementing or testing it.
+- No production browser, desktop, native, mobile, server, or provider **composer transcription**
+  adapter ships today. The separate connected-Codex GPT-Live conversation transport does not fill
+  this gap.
+- No provider credential has been resolved through the composer transcription seam, and no
+  paid/provider transcription call was made while implementing or testing it.
 - Provider accuracy, language coverage, latency, reconnect behavior, region availability, privacy,
   retention, and cost have not been benchmarked or operationally verified.
 - Cost policy is carried to an adapter but cannot be metered or enforced without a real adapter and

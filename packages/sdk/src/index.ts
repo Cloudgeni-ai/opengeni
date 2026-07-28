@@ -24,6 +24,12 @@ export {
 export type { ProxySessionEventStreamOptions, SseReStreamOptions } from "./proxy";
 export { parseSseStream } from "./sse";
 export type { SseMessage } from "./sse";
+export { startCodexRealtimeWebrtc } from "./codex-realtime";
+export type {
+  CodexRealtimeNegotiator,
+  CodexRealtimeWebrtcSession,
+  StartCodexRealtimeWebrtcOptions,
+} from "./codex-realtime";
 // Desktop (noVNC) transport contract — pure, zero-dep (the RFB import lives in
 // @opengeni/react). URL assembler + connection state machine + rotation fence.
 export { desktopSocketUrl, nextDesktopState, applyUrlRotation } from "./desktop";
@@ -125,6 +131,10 @@ export type {
   CapabilityUnavailableReason,
   ClientConfig,
   ClientModel,
+  CodexRealtimeVoice,
+  CodexRealtimeWebrtcRequest,
+  CodexRealtimeWebrtcResponse,
+  CodexRealtimeWebrtcVersion,
   ModelAvailabilityV1,
   ModelBillingAttributionV1,
   ModelCapabilitiesV1,
