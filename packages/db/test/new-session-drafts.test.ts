@@ -1,5 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { ReasoningEffort } from "@opengeni/contracts";
+import type {
+  NewSessionDraftOptions,
+  ReasoningEffort,
+  ResourceRef,
+  ToolRef,
+} from "@opengeni/contracts";
 import { acquireSharedTestDatabase, type SharedTestDatabase } from "@opengeni/testing";
 import { and, eq, sql } from "drizzle-orm";
 import {
@@ -51,8 +56,12 @@ function draftInput(
   expectedRevision: number,
   overrides: Partial<{
     text: string;
+    resources: ResourceRef[];
+    tools: ToolRef[];
+    toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
+    options: NewSessionDraftOptions;
   }> = {},
 ) {
   return {
@@ -61,11 +70,12 @@ function draftInput(
     subjectId: context.subjectId,
     expectedRevision,
     text: overrides.text ?? "Recover this private draft",
-    resources: [],
-    tools: [],
+    resources: overrides.resources ?? [],
+    tools: overrides.tools ?? [],
+    toolsProvided: overrides.toolsProvided ?? false,
     model: overrides.model ?? "scripted-model",
     reasoningEffort: overrides.reasoningEffort ?? ("low" as const),
-    options: {},
+    options: overrides.options ?? {},
   };
 }
 
@@ -244,13 +254,68 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
     expect((rejected[0]!.reason as NewSessionDraftConflictError).currentRevision).toBe(1);
   });
 
-  test("consumes only an exact accepted revision after durable initialization", async () => {
+  test("turns only an exact accepted revision into a safe seed after durable initialization", async () => {
     const exact = await fixture();
-    await saveDraft(exact, 0);
+    await saveDraft(exact, 0, {
+      text: "private prompt",
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          mountPath: "repos/private",
+          provider: "github",
+          credentialBindingId: "secret-binding",
+          access: "write",
+          repositoryId: 123,
+          installationId: 456,
+          connectionId: "secret-connection",
+          githubRepositoryId: 789,
+          githubInstallationId: 456,
+        },
+        { kind: "file", fileId: crypto.randomUUID() },
+      ],
+      tools: [{ kind: "mcp", id: "docs" }],
+      toolsProvided: true,
+      options: {
+        sandboxBackend: "selfhosted",
+        targetSandboxId: crypto.randomUUID(),
+        workingDir: "projects/opengeni",
+        variableSetId: crypto.randomUUID(),
+        rigId: crypto.randomUUID(),
+        goal: { text: "do not retain", successCriteria: "never" },
+        firstPartyMcpPermissions: ["sessions:create"],
+      },
+    });
     const exactSession = await createUninitializedSession(exact);
     const initialized = await initialize(exact, exactSession.id, 1);
     expect(initialized.turn?.status).toBe("queued");
-    expect(await readDraft(exact.grant.workspaceId!, exact.subjectId)).toBeNull();
+    const seeded = await readDraft(exact.grant.workspaceId!, exact.subjectId);
+    expect(seeded).toMatchObject({
+      revision: 2,
+      text: "",
+      resources: [
+        {
+          kind: "repository",
+          uri: "https://github.com/acme/private.git",
+          ref: "main",
+          mountPath: "repos/private",
+          githubRepositoryId: 789,
+          githubInstallationId: 456,
+        },
+      ],
+      tools: [{ kind: "mcp", id: "docs" }],
+      model: "scripted-model",
+      reasoningEffort: "low",
+    });
+    expect(seeded?.sessionOptions).toEqual({
+      sandboxBackend: "selfhosted",
+      targetSandboxId: expect.any(String),
+      workingDir: "projects/opengeni",
+      variableSetId: expect.any(String),
+      rigId: expect.any(String),
+      toolsProvided: true,
+    });
 
     const advanced = await fixture();
     await saveDraft(advanced, 0);
@@ -284,16 +349,16 @@ describe("actor-private new-session drafts (real PostgreSQL + FORCE RLS)", () =>
 
     const initialized = await initialize(context, session.id, 1);
     expect(initialized.turn?.status).toBe("queued");
-    expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toBeNull();
+    expect((await readDraft(context.grant.workspaceId!, context.subjectId))?.revision).toBe(2);
 
-    const laterDraft = await saveDraft(context, 0, { text: "later independent draft" });
-    expect(laterDraft.revision).toBe(1);
+    const laterDraft = await saveDraft(context, 2, { text: "later independent draft" });
+    expect(laterDraft.revision).toBe(3);
 
     await initialize(context, session.id, 1);
 
     expect(await readDraft(context.grant.workspaceId!, context.subjectId)).toMatchObject({
       id: laterDraft.id,
-      revision: 1,
+      revision: 3,
       text: "later independent draft",
     });
   });

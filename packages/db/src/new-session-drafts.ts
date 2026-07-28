@@ -1,6 +1,7 @@
 import type {
   NewSessionDraftOptions,
   ReasoningEffort,
+  RepositoryResourceRef,
   ResourceRef,
   ToolRef,
 } from "@opengeni/contracts";
@@ -24,6 +25,28 @@ export class NewSessionDraftAccessError extends Error {
   constructor() {
     super("New-session draft access changed");
   }
+}
+
+type StoredNewSessionDraftOptions = NewSessionDraftOptions & {
+  /** JSONB-only compatibility marker; deliberately not part of public options. */
+  toolsProvided?: boolean;
+};
+
+function storedOptions(
+  options: NewSessionDraftOptions,
+  toolsProvided: boolean,
+): StoredNewSessionDraftOptions {
+  return { ...options, toolsProvided };
+}
+
+export function newSessionDraftToolsProvided(row: NewSessionDraftRow): boolean {
+  return (row.sessionOptions as StoredNewSessionDraftOptions).toolsProvided === true;
+}
+
+export function publicNewSessionDraftOptions(row: NewSessionDraftRow): NewSessionDraftOptions {
+  const options = { ...(row.sessionOptions as StoredNewSessionDraftOptions) };
+  delete options.toolsProvided;
+  return options;
 }
 
 export async function getNewSessionDraftInTransaction(
@@ -54,6 +77,7 @@ export async function saveNewSessionDraftInTransaction(
     text: string;
     resources: ResourceRef[];
     tools: ToolRef[];
+    toolsProvided: boolean;
     model: string;
     reasoningEffort: ReasoningEffort;
     options: NewSessionDraftOptions;
@@ -96,7 +120,9 @@ export async function saveNewSessionDraftInTransaction(
     tools: input.tools,
     model: input.model,
     reasoningEffort: input.reasoningEffort,
-    sessionOptions: input.options,
+    // Keep the explicit/omitted policy in the existing JSONB extension point;
+    // adding a column here would turn a client preference into a migration.
+    sessionOptions: storedOptions(input.options, input.toolsProvided),
     updatedAt: new Date(),
   };
   if (current) {
@@ -124,21 +150,110 @@ export async function saveNewSessionDraftInTransaction(
   throw new NewSessionDraftConflictError(raced?.revision ?? 0);
 }
 
-/** Delete only the submitted revision; a newer sibling-tab revision survives. */
-export async function consumeNewSessionDraftInTransaction(
+function safeRepositoryResource(resource: RepositoryResourceRef): RepositoryResourceRef {
+  // A repository's URI/ref/mount and GitHub identity are ordinary selection
+  // state. Credential bindings, connection refs, access intent, and generic
+  // provider ids are per-session authorization/runtime state and must not seed
+  // the next create.
+  return {
+    kind: "repository",
+    uri: resource.uri,
+    ref: resource.ref,
+    ...(resource.mountPath ? { mountPath: resource.mountPath } : {}),
+    ...(resource.subpath ? { subpath: resource.subpath } : {}),
+    ...(resource.githubInstallationId
+      ? { githubInstallationId: resource.githubInstallationId }
+      : {}),
+    ...(resource.githubRepositoryId ? { githubRepositoryId: resource.githubRepositoryId } : {}),
+  };
+}
+
+function safeWorkingDir(value: unknown, targetSandboxId: string | undefined): string | undefined {
+  if (!targetSandboxId || typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  // Only a workspace-root-relative path is safe to remember. Absolute host
+  // paths and traversal would leak or unexpectedly target a different machine
+  // location after the user changes machines.
+  if (
+    !trimmed ||
+    trimmed === "." ||
+    trimmed === ".." ||
+    trimmed.includes("\u0000") ||
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("\\") ||
+    /^[A-Za-z]:[\\/]/.test(trimmed) ||
+    trimmed.split(/[\\/]+/).some((part) => part === "..")
+  ) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+/**
+ * Replace one exact accepted draft with the next-create safe seed. The row is
+ * locked before the revision check so a concurrent save either commits first
+ * and wins (this returns false), or observes the incremented seed revision and
+ * reports a typed OCC conflict. A missing row is an idempotent no-op.
+ */
+export async function seedNewSessionDraftInTransaction(
   db: Database,
   input: { workspaceId: string; subjectId: string; expectedRevision: number },
 ): Promise<boolean> {
   if (input.expectedRevision === 0) return false;
-  const deleted = await db
-    .delete(schema.newSessionDrafts)
+  const [current] = await db
+    .select()
+    .from(schema.newSessionDrafts)
     .where(
       and(
         eq(schema.newSessionDrafts.workspaceId, input.workspaceId),
         eq(schema.newSessionDrafts.subjectId, input.subjectId),
+      ),
+    )
+    .for("update")
+    .limit(1);
+  if (!current || current.revision !== input.expectedRevision) return false;
+
+  const options = current.sessionOptions as StoredNewSessionDraftOptions;
+  const targetSandboxId =
+    typeof options.targetSandboxId === "string" ? options.targetSandboxId : undefined;
+  const safeOptions: NewSessionDraftOptions = {
+    ...(options.sandboxBackend ? { sandboxBackend: options.sandboxBackend } : {}),
+    ...(targetSandboxId ? { targetSandboxId } : {}),
+    ...(safeWorkingDir(options.workingDir, targetSandboxId)
+      ? { workingDir: safeWorkingDir(options.workingDir, targetSandboxId) }
+      : {}),
+    ...(options.variableSetId ? { variableSetId: options.variableSetId } : {}),
+    ...(options.rigId ? { rigId: options.rigId } : {}),
+  };
+  const resources = (Array.isArray(current.resources) ? current.resources : []).flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || (raw as { kind?: unknown }).kind !== "repository") {
+      return [];
+    }
+    return [safeRepositoryResource(raw as RepositoryResourceRef)];
+  });
+  const [seeded] = await db
+    .update(schema.newSessionDrafts)
+    .set({
+      revision: current.revision + 1,
+      text: "",
+      resources,
+      // The explicit array is retained only when the caller explicitly pinned
+      // tools. Omitted workspace-default policy is represented by [] + false.
+      tools: newSessionDraftToolsProvided(current) ? current.tools : [],
+      model: current.model,
+      reasoningEffort: current.reasoningEffort,
+      sessionOptions: storedOptions(safeOptions, newSessionDraftToolsProvided(current)),
+      updatedAt: new Date(),
+    })
+    .where(
+      and(
+        eq(schema.newSessionDrafts.id, current.id),
         eq(schema.newSessionDrafts.revision, input.expectedRevision),
       ),
     )
     .returning({ id: schema.newSessionDrafts.id });
-  return deleted.length > 0;
+  return Boolean(seeded);
 }
+
+/** @deprecated Kept as a compatibility name for low-level callers. */
+export const consumeNewSessionDraftInTransaction = seedNewSessionDraftInTransaction;

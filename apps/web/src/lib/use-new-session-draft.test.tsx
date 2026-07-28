@@ -26,6 +26,7 @@ function editable(overrides: Partial<NewSessionDraftEditable> = {}): NewSessionD
     text: "",
     resources: [],
     tools: [],
+    toolsProvided: false,
     model: "gpt-5.6-sol",
     reasoningEffort: "medium",
     options: {},
@@ -114,7 +115,7 @@ function conflict(): OpenGeniApiError {
 }
 
 describe("useNewSessionDraft", () => {
-  test("revalidates every persisted file and restores only matching ready assets", async () => {
+  test("revalidates persisted files while retaining ordinary repository resources", async () => {
     const readyId = "00000000-0000-4000-8000-000000000011";
     const foreignId = "00000000-0000-4000-8000-000000000012";
     const failedId = "00000000-0000-4000-8000-000000000013";
@@ -151,7 +152,10 @@ describe("useNewSessionDraft", () => {
 
     expect(reads).toEqual([readyId, foreignId, failedId, missingId]);
     expect(hook.result.current.value.text).toBe("restore me");
-    expect(hook.result.current.value.resources).toEqual([{ kind: "file", fileId: readyId }]);
+    expect(hook.result.current.value.resources).toEqual([
+      { kind: "repository", uri: "https://example.com/repo.git", ref: "main" },
+      { kind: "file", fileId: readyId },
+    ]);
     expect(hook.result.current.files.map((file) => file.id)).toEqual([readyId]);
     expect(hook.result.current.draft.loading).toBe(false);
     expect(saves).toHaveLength(0);
@@ -328,10 +332,15 @@ describe("useNewSessionDraft", () => {
     await hook.unmount();
   });
 
-  test("marking the accepted snapshot consumed prevents a delayed clear from recreating it", async () => {
+  test("marking the accepted snapshot consumed preserves the safe seed", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
     const hook = await renderDraftHook(
       client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(2, { model: "seed-model" });
+        },
         saveNewSessionDraft: async (_workspaceId, request) => {
           requests.push(request);
           return remote(request.expectedRevision + 1, request);
@@ -354,13 +363,19 @@ describe("useNewSessionDraft", () => {
     await flush(550);
     expect(requests).toHaveLength(1);
     expect(await actRun(() => hook.result.current.draft.flush())).toBeNull();
+    expect(reads).toBe(2);
     await hook.unmount();
   });
 
-  test("preserves a newer post-create edit against absent-row revision zero", async () => {
+  test("preserves a newer post-create edit against the safe-seed revision", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
     const hook = await renderDraftHook(
       client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(2, { model: "seed-model" });
+        },
         saveNewSessionDraft: async (_workspaceId, request) => {
           requests.push(request);
           return remote(request.expectedRevision + 1, request);
@@ -378,22 +393,26 @@ describe("useNewSessionDraft", () => {
 
     expect(acknowledged).toEqual({
       kind: "preserved",
-      flushed: expect.objectContaining({ revision: 1 }),
+      flushed: expect.objectContaining({ revision: 3 }),
     });
     expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject({ expectedRevision: 0, text: "newer local edit" });
-    expect(hook.result.current.draft.revision).toBe(1);
+    expect(requests[1]).toMatchObject({ expectedRevision: 2, text: "newer local edit" });
+    expect(hook.result.current.draft.revision).toBe(3);
     expect(hook.result.current.draft.conflict).toBeNull();
     await hook.unmount();
   });
 
-  test("keeps a sibling-tab revision-zero winner as a visible conflict", async () => {
+  test("keeps a sibling-tab newer winner as a visible conflict", async () => {
     const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
     const hook = await renderDraftHook(
       client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(3, { text: "sibling" });
+        },
         saveNewSessionDraft: async (_workspaceId, request) => {
           requests.push(request);
-          if (requests.length === 2) throw conflict();
           return remote(request.expectedRevision + 1, request);
         },
       }),
@@ -407,19 +426,23 @@ describe("useNewSessionDraft", () => {
     const acknowledged = await actRun(() => hook.result.current.draft.acknowledgeConsumed(flushed));
 
     expect(acknowledged).toBeNull();
-    expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject({ expectedRevision: 0, text: "keep this local" });
+    expect(requests).toHaveLength(1);
     expect(hook.result.current.value.text).toBe("keep this local");
-    expect(hook.result.current.draft.revision).toBe(0);
-    expect(hook.result.current.draft.conflict?.message).toContain("draft changed");
+    expect(hook.result.current.draft.revision).toBe(3);
+    expect(hook.result.current.draft.conflict?.message).toContain("another client");
     await hook.unmount();
   });
 
-  test("retries a non-conflict revision-zero preservation failure without losing the newer value", async () => {
+  test("retries a safe-seed preservation failure without losing the newer value", async () => {
     const fileId = "00000000-0000-4000-8000-000000000099";
     const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
     const hook = await renderDraftHook(
       client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(2, { model: "seed-model" });
+        },
         saveNewSessionDraft: async (_workspaceId, request) => {
           requests.push(request);
           if (requests.length === 2) throw new Error("temporary preservation failure");
@@ -442,19 +465,19 @@ describe("useNewSessionDraft", () => {
     expect(acknowledged).toBeNull();
     expect(requests).toHaveLength(2);
     expect(requests[1]).toMatchObject({
-      expectedRevision: 0,
+      expectedRevision: 2,
       text: newer.text,
       resources: newer.resources,
     });
     expect(hook.result.current.value).toEqual(newer);
-    expect(hook.result.current.draft.revision).toBe(0);
+    expect(hook.result.current.draft.revision).toBe(2);
     expect(hook.result.current.draft.conflict).toBeNull();
     expect(hook.result.current.draft.error?.message).toContain("temporary preservation failure");
 
     const preserved = await actRun(() => hook.result.current.draft.flush());
     expect(requests).toHaveLength(3);
     expect(requests[2]).toMatchObject({
-      expectedRevision: 0,
+      expectedRevision: 2,
       text: newer.text,
       resources: newer.resources,
     });
@@ -469,8 +492,13 @@ describe("useNewSessionDraft", () => {
   test("invalidates an in-flight old-revision autosave before preserving the newer value", async () => {
     const staleAutosave = deferred<NewSessionDraft>();
     const requests: SaveNewSessionDraftRequest[] = [];
+    let reads = 0;
     const hook = await renderDraftHook(
       client({
+        getNewSessionDraft: async () => {
+          reads += 1;
+          return reads === 1 ? remote(0) : remote(2, { model: "seed-model" });
+        },
         saveNewSessionDraft: async (_workspaceId, request) => {
           requests.push(request);
           if (requests.length === 2) return await staleAutosave.promise;
@@ -500,10 +528,10 @@ describe("useNewSessionDraft", () => {
     });
     expect(acknowledged).toEqual({
       kind: "preserved",
-      flushed: expect.objectContaining({ revision: 1 }),
+      flushed: expect.objectContaining({ revision: 3 }),
     });
     expect(requests).toHaveLength(3);
-    expect(requests[2]).toMatchObject({ expectedRevision: 0, text: "newer local edit" });
+    expect(requests[2]).toMatchObject({ expectedRevision: 2, text: "newer local edit" });
     expect(hook.result.current.draft.conflict).toBeNull();
     expect(hook.result.current.draft.error).toBeNull();
     await hook.unmount();

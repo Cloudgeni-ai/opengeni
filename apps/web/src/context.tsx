@@ -115,6 +115,8 @@ export type AppContextValue = {
   setSelectedRepoRefs: Dispatch<SetStateAction<Record<number, string>>>;
   githubRepos: GitHubRepository[];
   githubStatus: GitHubAppInfo | null;
+  /** True once the current workspace's repository catalog has completed its first load. */
+  githubCatalogReady: boolean;
   githubAppOpen: boolean;
   setGithubAppOpen: Dispatch<SetStateAction<boolean>>;
   githubOrg: string;
@@ -245,6 +247,7 @@ export function RootRouteComponent() {
   const [selectedRepoRefs, setSelectedRepoRefs] = useState<Record<number, string>>({});
   const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
   const [githubStatus, setGithubStatus] = useState<GitHubAppInfo | null>(null);
+  const [githubCatalogReady, setGithubCatalogReady] = useState(false);
   const [githubAppOpen, setGithubAppOpen] = useState(false);
   const [githubOrg, setGithubOrg] = useState("");
   const [workspaceMcpServers, setWorkspaceMcpServers] = useState<McpServerOption[]>([]);
@@ -679,8 +682,10 @@ export function RootRouteComponent() {
             return;
           }
           setGithubRepos(repositories);
+          setGithubCatalogReady(true);
         } else {
           setGithubRepos([]);
+          setGithubCatalogReady(true);
         }
       } catch (error) {
         if (isAbortError(error) || signal?.aborted || githubRefreshId.current !== refreshId) {
@@ -688,6 +693,7 @@ export function RootRouteComponent() {
         }
         setGithubStatus(null);
         setGithubRepos([]);
+        setGithubCatalogReady(true);
         toast.error("GitHub status unavailable", { description: String(error) });
       } finally {
         if (githubRefreshId.current === refreshId) {
@@ -927,6 +933,7 @@ export function RootRouteComponent() {
   const resetWorkspaceIntegrations = useCallback(() => {
     setGithubStatus(null);
     setGithubRepos([]);
+    setGithubCatalogReady(false);
     setWorkspaceMcpServers([]);
     setWorkspaceMcpCatalogReady(false);
   }, []);
@@ -983,6 +990,7 @@ export function RootRouteComponent() {
           setSelectedRepoRefs,
           githubRepos,
           githubStatus,
+          githubCatalogReady,
           githubAppOpen,
           setGithubAppOpen,
           githubOrg,
@@ -1049,6 +1057,7 @@ export function RootRouteComponent() {
     githubOrg,
     githubRepos,
     githubStatus,
+    githubCatalogReady,
     inspectorOpen,
     keyAuthRequired,
     manualRepos,

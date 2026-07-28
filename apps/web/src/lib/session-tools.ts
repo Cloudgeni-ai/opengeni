@@ -100,6 +100,23 @@ export function toolsForPolicySelection(input: {
     : selected;
 }
 
+/** Canonical persisted new-session policy, including the omitted/explicit bit. */
+export function newSessionDraftToolPolicy(input: {
+  selectedMcpServerIds: Iterable<string>;
+  workspaceDefaultMcpServerIds: Iterable<string>;
+  catalogReady: boolean;
+  explicit: boolean;
+}): { tools: ToolRef[]; toolsProvided: boolean } {
+  if (!input.catalogReady) return { tools: [], toolsProvided: false };
+  const selected = buildTools(undefined, [...input.selectedMcpServerIds]);
+  const baseline = buildTools(undefined, [...input.workspaceDefaultMcpServerIds]);
+  const equal =
+    canonicalToolIds(selected).join("\u0000") === canonicalToolIds(baseline).join("\u0000");
+  return input.explicit || !equal
+    ? { tools: selected, toolsProvided: true }
+    : { tools: [], toolsProvided: false };
+}
+
 /**
  * Project the server-authoritative session policy into currently selectable
  * picker IDs. Workspace-default sessions follow the live capability baseline;
@@ -190,8 +207,11 @@ export function isRepositoryResourceForGitHubRepo(
   resource: Extract<ResourceRef, { kind: "repository" }>,
   repo: GitHubRepository,
 ): boolean {
-  if (repo.private) {
+  const hasGitHubIdentity =
+    resource.githubRepositoryId !== undefined || resource.githubInstallationId !== undefined;
+  if (hasGitHubIdentity || repo.private) {
     return (
+      repo.private &&
       resource.githubRepositoryId === repo.id &&
       resource.githubInstallationId === repo.installationId
     );
@@ -201,6 +221,64 @@ export function isRepositoryResourceForGitHubRepo(
 
 export function sameRepositoryUri(resource: ResourceRef, uri: string): boolean {
   return resource.kind === "repository" && resource.uri === uri;
+}
+
+/**
+ * Revalidate repository resources against the browser's authoritative GitHub
+ * catalog. Private selections must retain both stable GitHub identities;
+ * public/manual selections are URI-based and remain usable as manual refs when
+ * the catalog no longer contains a matching public repository.
+ */
+export function rehydrateRepositoryResources(
+  resources: ResourceRef[],
+  repositories: GitHubRepository[],
+): ResourceRef[] {
+  return resources.flatMap<ResourceRef>((resource) => {
+    if (resource.kind !== "repository") return [resource];
+    const hasGitHubIdentity =
+      resource.githubRepositoryId !== undefined || resource.githubInstallationId !== undefined;
+    if (hasGitHubIdentity) {
+      return repositories.some((repo) => isRepositoryResourceForGitHubRepo(resource, repo))
+        ? [resource]
+        : [];
+    }
+    return [resource];
+  });
+}
+
+/** Project hydrated repository resources into the existing picker state. */
+export function repositorySelectionFromResources(
+  resources: ResourceRef[],
+  repositories: GitHubRepository[],
+): {
+  manualRepos: RepoDraft[];
+  selectedRepoIds: Set<number>;
+  selectedRepoRefs: Record<number, string>;
+} {
+  const manualRepos: RepoDraft[] = [];
+  const selectedRepoIds = new Set<number>();
+  const selectedRepoRefs: Record<number, string> = {};
+  let nextManualId = 1;
+
+  for (const resource of resources) {
+    if (resource.kind !== "repository") continue;
+    const matched = repositories.find((repo) => {
+      if (
+        resource.githubRepositoryId !== undefined ||
+        resource.githubInstallationId !== undefined
+      ) {
+        return isRepositoryResourceForGitHubRepo(resource, repo);
+      }
+      return sameRepositoryUri(resource, gitHubRepositoryResource(repo, repo.defaultBranch).uri);
+    });
+    if (matched) {
+      selectedRepoIds.add(matched.id);
+      selectedRepoRefs[matched.id] = resource.ref;
+    } else {
+      manualRepos.push({ id: nextManualId++, url: resource.uri, ref: resource.ref });
+    }
+  }
+  return { manualRepos, selectedRepoIds, selectedRepoRefs };
 }
 
 export function repositoryDisplayName(

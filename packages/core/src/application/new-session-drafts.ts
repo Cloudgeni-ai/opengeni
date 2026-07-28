@@ -6,7 +6,14 @@ import {
 } from "@opengeni/contracts";
 import {
   getNewSessionDraftInTransaction,
+  getEnrollment,
+  getRig,
+  getSandbox,
+  getVariableSet,
   NewSessionDraftAccessError,
+  newSessionDraftToolsProvided,
+  publicNewSessionDraftOptions,
+  requireFile,
   saveNewSessionDraftInTransaction,
   withWorkspaceSubjectRls,
 } from "@opengeni/db";
@@ -19,6 +26,7 @@ import {
   validateGitHubRepositorySelection,
   validateToolRefs,
 } from "../domain/resources";
+import { hasPermission } from "../access";
 import { assertConfiguredModel, assertWorkspaceModelPolicyAllows } from "../domain/sessions";
 
 type NewSessionDraftDependencies = Pick<AppDependencies, "settings" | "db" | "objectStorage">;
@@ -31,12 +39,102 @@ function mapNewSessionDraft(
     revision: row.revision,
     text: row.text,
     resources: row.resources,
-    tools: row.tools,
+    tools: newSessionDraftToolsProvided(row) ? row.tools : [],
+    toolsProvided: newSessionDraftToolsProvided(row),
     model: row.model,
     reasoningEffort: row.reasoningEffort,
-    options: row.sessionOptions,
+    options: publicNewSessionDraftOptions(row),
     updatedAt: row.updatedAt.toISOString(),
   });
+}
+
+async function hydrateNewSessionDraft(
+  deps: Pick<NewSessionDraftDependencies, "db" | "settings">,
+  grant: AccessGrant,
+  workspaceId: string,
+  row: Awaited<ReturnType<typeof getNewSessionDraftInTransaction>>,
+): Promise<NewSessionDraftValue | null> {
+  if (!row) return null;
+  const mapped = mapNewSessionDraft(row);
+  if (!mapped) return null;
+  const runtimeSettings = await settingsWithEnabledCapabilityMcpServers(
+    deps.db,
+    workspaceId,
+    deps.settings,
+  );
+  const resources = [] as NewSessionDraftValue["resources"];
+  for (const resource of mapped.resources) {
+    if (resource.kind === "repository") {
+      try {
+        await validateGitHubRepositorySelection(deps.db, workspaceId, [resource]);
+        resources.push(resource);
+      } catch {
+        // Repository authorization can be revoked after the draft was saved.
+        // The next form must not present the stale identity as selectable.
+      }
+      continue;
+    }
+    try {
+      const file = await requireFile(deps.db, workspaceId, resource.fileId);
+      if (file.status === "ready") resources.push(resource);
+    } catch {
+      // Missing, foreign, failed, and pending files are stale draft state.
+    }
+  }
+
+  const options = { ...mapped.options };
+  if (options.variableSetId) {
+    if (
+      !hasPermission(grant.permissions, "variable-sets:use") ||
+      !(await getVariableSet(deps.db, workspaceId, options.variableSetId))
+    ) {
+      delete options.variableSetId;
+    }
+  }
+  if (options.rigId) {
+    const rig = await getRig(deps.db, workspaceId, options.rigId);
+    if (!rig?.activeVersion) delete options.rigId;
+  }
+  if (options.targetSandboxId) {
+    const sandbox = await getSandbox(deps.db, workspaceId, options.targetSandboxId);
+    const enrollment = sandbox?.enrollmentId
+      ? await getEnrollment(deps.db, workspaceId, sandbox.enrollmentId)
+      : null;
+    if (
+      !sandbox ||
+      sandbox.kind !== "selfhosted" ||
+      !enrollment ||
+      enrollment.status !== "active"
+    ) {
+      delete options.targetSandboxId;
+      delete options.workingDir;
+      delete options.sandboxBackend;
+    }
+  }
+
+  let tools: NewSessionDraftValue["tools"] = [];
+  if (mapped.toolsProvided) {
+    try {
+      tools = validateToolRefs(mapped.tools, runtimeSettings);
+    } catch {
+      // A revoked/disabled MCP selection is removed while explicitness remains
+      // true, so an explicit empty policy cannot silently widen to defaults.
+      tools = mapped.tools.filter((tool) => {
+        try {
+          validateToolRefs([tool], runtimeSettings);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    }
+  }
+  return {
+    ...mapped,
+    resources,
+    tools,
+    options,
+  };
 }
 
 /** Read the authenticated actor's server-authoritative pre-session composer state. */
@@ -52,11 +150,12 @@ export async function getActorNewSessionDraft(
     }),
   );
   return (
-    mapNewSessionDraft(row) ?? {
+    (await hydrateNewSessionDraft(deps, grant, workspaceId, row)) ?? {
       revision: 0,
       text: "",
       resources: [],
       tools: [],
+      toolsProvided: false,
       model: deps.settings.openaiModel,
       reasoningEffort: deps.settings.openaiReasoningEffort,
       options: {},
@@ -85,7 +184,7 @@ export async function saveActorNewSessionDraft(
     deps.settings,
   );
   const resources = normalizeResources(input.resources);
-  const tools = validateToolRefs(input.tools, runtimeSettings);
+  const tools = input.toolsProvided ? validateToolRefs(input.tools, runtimeSettings) : [];
   await validateGitHubRepositorySelection(deps.db, workspaceId, resources);
   if (resources.some((resource) => resource.kind === "file") && !deps.objectStorage) {
     throw new HTTPException(503, { message: "object storage is not configured" });
@@ -105,6 +204,7 @@ export async function saveActorNewSessionDraft(
           text: input.text,
           resources,
           tools,
+          toolsProvided: input.toolsProvided,
           model: input.model,
           reasoningEffort: input.reasoningEffort,
           options: input.options,
