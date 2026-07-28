@@ -36,6 +36,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{- define "opengeni.priorityClassName" -}}
+{{- $explicit := .explicit | default "" -}}
+{{- if $explicit -}}
+{{- $explicit -}}
+{{- else if .root.Values.priorityClasses.enabled -}}
+{{- printf "%s-%s" (include "opengeni.fullname" .root) .tier | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "opengeni.image" -}}
 {{- $registry := .root.Values.global.imageRegistry -}}
 {{- $repository := .image.repository -}}
@@ -124,6 +133,13 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{- define "opengeni.generatedRuntimeEnv" -}}
 {{- if .Values.postgres.enabled }}
+{{- if .Values.postgres.runtime.existingSecret }}
+- name: OPENGENI_DATABASE_URL
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.postgres.runtime.existingSecret }}
+      key: {{ .Values.postgres.runtime.databaseUrlKey }}
+{{- else }}
 - name: OPENGENI_POSTGRES_PASSWORD
   valueFrom:
     secretKeyRef:
@@ -131,6 +147,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
       key: {{ .Values.postgres.auth.passwordKey }}
 - name: OPENGENI_DATABASE_URL
   value: {{ printf "postgres://%s:$(OPENGENI_POSTGRES_PASSWORD)@%s:%d/%s" .Values.postgres.auth.username (include "opengeni.postgresHost" .) (.Values.postgres.service.port | int) .Values.postgres.auth.database | quote }}
+{{- end }}
 {{- end }}
 {{- if .Values.temporal.enabled }}
 - name: OPENGENI_TEMPORAL_HOST

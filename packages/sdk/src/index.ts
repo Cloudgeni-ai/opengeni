@@ -59,6 +59,29 @@ export type {
 } from "./stream";
 export { streamWorkspaceControlEvents } from "./workspace-control-stream";
 export type { WorkspaceControlStreamTransport } from "./workspace-control-stream";
+export { normalizeWorkspaceInstructionPolicyRoleKey } from "./workspace-instruction-policies";
+export type {
+  ActivateWorkspaceInstructionPolicyRequest,
+  CreateWorkspaceInstructionPolicyDraftRequest,
+  ImportLegacyWorkspaceInstructionPolicyDraftRequest,
+  RollbackWorkspaceInstructionPolicyRequest,
+  WorkspaceInstructionPolicyActivationEvent,
+  WorkspaceInstructionPolicyActivationResponse,
+  WorkspaceInstructionPolicyActivationType,
+  WorkspaceInstructionPolicyConflictResponse,
+  WorkspaceInstructionPolicyDiffRequest,
+  WorkspaceInstructionPolicyDiffResponse,
+  WorkspaceInstructionPolicyDraftProvenanceSource,
+  WorkspaceInstructionPolicyHead,
+  WorkspaceInstructionPolicyKind,
+  WorkspaceInstructionPolicyListOptions,
+  WorkspaceInstructionPolicyListResponse,
+  WorkspaceInstructionPolicyProvenanceSource,
+  WorkspaceInstructionPolicyRevision,
+  WorkspaceInstructionPolicyRevisionIdentity,
+  WorkspaceInstructionPolicyScope,
+  WorkspaceInstructionPolicyTarget,
+} from "./workspace-instruction-policies";
 export {
   DEFAULT_WORKSPACE_TRANSCRIPTION_POLICY,
   authorizeTranscriptionAdapter,

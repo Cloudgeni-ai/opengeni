@@ -1,0 +1,21 @@
+{{- if and .Values.nats.enabled .Values.nats.authCallout.enabled .Values.nats.websocketEdgeService.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "opengeni.fullname" . }}-nats-websocket-edge
+  labels:
+    {{- include "opengeni.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  type: {{ .Values.nats.websocketEdgeService.type }}
+  ports:
+    - name: websocket
+      port: {{ .Values.nats.authCallout.websocketPort }}
+      targetPort: websocket
+      {{- with .Values.nats.websocketEdgeService.nodePort }}
+      nodePort: {{ . }}
+      {{- end }}
+  selector:
+    {{- include "opengeni.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+{{- end }}

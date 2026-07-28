@@ -426,6 +426,7 @@ jobs:
           bun run deployment:preflight -- --profile aws-managed --json
           bun run deployment:preflight -- --profile gcp-existing-services --json
           bun run deployment:preflight -- --profile gcp-managed --json
+          bun run deployment:preflight -- --profile single-node-kubernetes --json
           bun run deployment:preflight -- --profile preview-pr --json
           bun run deployment:preflight -- --profile preview-branch --json
 
@@ -477,6 +478,32 @@ jobs:
             --namespace opengeni-preview \
             -f deploy/helm/opengeni/values.preview-managed.example.yaml \
             >/tmp/opengeni-preview-rendered.yaml
+          helm template opengeni-single deploy/helm/opengeni \
+            --namespace opengeni \
+            -f deploy/helm/opengeni/values.single-node.example.yaml \
+            >/tmp/opengeni-single-rendered.yaml
+          if grep -qE '^kind: (HorizontalPodAutoscaler|PodDisruptionBudget)$' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node profile rendered an autoscaler or disruption budget" >&2
+            exit 1
+          fi
+          if grep -q '^          resources:' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node profile rendered container resource partitions" >&2
+            exit 1
+          fi
+          if grep -q 'OPENGENI_POSTGRES_PASSWORD' /tmp/opengeni-single-rendered.yaml; then
+            echo "single-node workloads received the Postgres owner password" >&2
+            exit 1
+          fi
+          test "$(grep -c '^kind: PriorityClass$' /tmp/opengeni-single-rendered.yaml)" -eq 4
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-presentation\"$' /tmp/opengeni-single-rendered.yaml)" -eq 2
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-execution\"$' /tmp/opengeni-single-rendered.yaml)" -eq 1
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-control\"$' /tmp/opengeni-single-rendered.yaml)" -eq 3
+          test "$(grep -c '^      priorityClassName: \"opengeni-single-durable\"$' /tmp/opengeni-single-rendered.yaml)" -eq 5
+          test "$(grep -c '^  replicas: 1$' /tmp/opengeni-single-rendered.yaml)" -eq 9
+          test "$(grep -c '^      nodePort:' /tmp/opengeni-single-rendered.yaml)" -eq 5
+          for node_port in 30080 30081 30222 30443 30900; do
+            grep -q "^      nodePort: $node_port$" /tmp/opengeni-single-rendered.yaml
+          done
           for component in api worker-control worker-turns web; do
             if awk -v name="opengeni-preview-$component" '
               $1 == "kind:" && $2 == "PodDisruptionBudget" { pdb = 1; next }

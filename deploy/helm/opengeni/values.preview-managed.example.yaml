@@ -46,6 +46,8 @@ web:
 
 migrations:
   backoffLimit: 12
+  secret:
+    existingSecret: opengeni-migrations
 
 secret:
   create: false
@@ -72,6 +74,9 @@ config:
 
 postgres:
   enabled: true
+  runtime:
+    existingSecret: opengeni-runtime
+    databaseUrlKey: OPENGENI_DATABASE_URL
   persistence:
     size: 2Gi
 
