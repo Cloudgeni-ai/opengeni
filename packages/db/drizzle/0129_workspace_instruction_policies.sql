@@ -276,6 +276,20 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+  -- PostgreSQL implements ON DELETE CASCADE with a parent constraint trigger.
+  -- By the time that trigger deletes child rows, the workspace is absent and
+  -- this child trigger is nested. Require both facts so direct history deletes
+  -- and deletes issued by unrelated triggers remain fail-closed.
+  IF TG_OP = 'DELETE'
+    AND pg_trigger_depth() > 1
+    AND NOT EXISTS (
+      SELECT 1
+      FROM "workspaces" workspace
+      WHERE workspace."id" = OLD."workspace_id"
+    )
+  THEN
+    RETURN OLD;
+  END IF;
   RAISE EXCEPTION 'workspace instruction-policy history is immutable'
     USING ERRCODE = '55000';
 END;

@@ -26,6 +26,8 @@ describe("workspace instruction-policy migration", () => {
     expect(sql).toContain("workspace_instruction_policy_validate_head");
     expect(sql).toContain("workspace_instruction_policy_revisions_immutable");
     expect(sql).toContain("workspace_instruction_policy_events_immutable");
+    expect(sql).toContain("pg_trigger_depth() > 1");
+    expect(sql).toContain('workspace."id" = OLD."workspace_id"');
     expect(sql.match(/opengeni_private\.workspace_rls_visible/g)).toHaveLength(6);
     expect(sql).not.toMatch(/INSERT\s+INTO[\s\S]+SELECT/i);
     expect(sql).not.toContain('UPDATE "workspaces"');

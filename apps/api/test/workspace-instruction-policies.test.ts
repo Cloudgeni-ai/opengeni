@@ -8,6 +8,7 @@ import {
 import {
   bootstrapWorkspace,
   createDb,
+  deleteWorkspace,
   getWorkspaceInstructionPolicyRevision,
   getWorkspace,
   updateWorkspace,
@@ -580,5 +581,133 @@ describe("workspace instruction-policy API and PostgreSQL authority", () => {
       heads_update: true,
       events_update: false,
     });
+  }, 180_000);
+
+  test("keeps history immutable while workspace deletion cascades atomically", async () => {
+    const access = await bootstrapWorkspace(client.db, {
+      accountExternalSource: "test",
+      accountExternalId: `instruction-policy-cascade-account-${crypto.randomUUID()}`,
+      accountName: "Instruction policy cascade account",
+      workspaceExternalSource: "test",
+      workspaceExternalId: `instruction-policy-cascade-workspace-${crypto.randomUUID()}`,
+      workspaceName: "Instruction policy cascade workspace",
+      subjectId: "user:policy-cascade-owner",
+    });
+    const grant = access.workspaceGrants[0]!;
+    const revision = await createDraft(grant, {
+      kind: "policy",
+      scope: "global",
+      roleKey: null,
+      content: "Preserve immutable history during ordinary operation.",
+    });
+    const activationResponse = await request(
+      grant,
+      `/instruction-policies/${revision.id}/activate`,
+      {
+        method: "POST",
+        body: { expectedCurrentRevisionId: null, reason: "Exercise workspace cascade" },
+      },
+    );
+    expect(activationResponse.status).toBe(200);
+    const activation = (await activationResponse.json()) as Record<string, any>;
+
+    const readOnlyMutation = await request(grant, "/instruction-policies/drafts", {
+      method: "POST",
+      permissions: ["workspace:read"],
+      body: {
+        kind: "policy",
+        scope: "global",
+        roleKey: null,
+        content: "Read-only callers cannot mutate policy history.",
+      },
+    });
+    expect(readOnlyMutation.status).toBe(403);
+
+    const crossTenantRead = await request(defaultGrant, `/instruction-policies/${revision.id}`, {
+      permissions: ["workspace:read"],
+    });
+    expect(crossTenantRead.status).toBe(404);
+    const crossTenantRows = await withRlsContext(
+      client.db,
+      { accountId: defaultGrant.accountId, workspaceId: defaultGrant.workspaceId },
+      async (scopedDb) =>
+        await scopedDb
+          .select({ id: dbSchema.workspaceInstructionPolicyRevisions.id })
+          .from(dbSchema.workspaceInstructionPolicyRevisions)
+          .where(eq(dbSchema.workspaceInstructionPolicyRevisions.id, revision.id)),
+    );
+    expect(crossTenantRows).toEqual([]);
+
+    await expectDatabaseFailure(
+      shared.admin`
+        DELETE FROM workspace_instruction_policy_revisions
+        WHERE id = ${revision.id}
+      `,
+      /instruction-policy history is immutable/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin`
+        DELETE FROM workspace_instruction_policy_activation_events
+        WHERE id = ${activation.event.id}
+      `,
+      /instruction-policy history is immutable/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin`
+        UPDATE workspace_instruction_policy_revisions
+        SET created_by_subject_id = 'user:mutated-history'
+        WHERE id = ${revision.id}
+      `,
+      /instruction-policy history is immutable/i,
+    );
+    await expectDatabaseFailure(
+      shared.admin`
+        UPDATE workspace_instruction_policy_activation_events
+        SET reason = 'Mutated audit history'
+        WHERE id = ${activation.event.id}
+      `,
+      /instruction-policy history is immutable/i,
+    );
+
+    await expectDatabaseFailure(
+      shared.admin.begin(async (transaction) => {
+        await transaction`DELETE FROM workspaces WHERE id = ${grant.workspaceId}`;
+        const [insideTransaction] = await transaction<
+          Array<{ workspaces: number; revisions: number; heads: number; events: number }>
+        >`
+          SELECT
+            (SELECT count(*)::integer FROM workspaces WHERE id = ${grant.workspaceId}) AS workspaces,
+            (SELECT count(*)::integer FROM workspace_instruction_policy_revisions WHERE workspace_id = ${grant.workspaceId}) AS revisions,
+            (SELECT count(*)::integer FROM workspace_instruction_policy_heads WHERE workspace_id = ${grant.workspaceId}) AS heads,
+            (SELECT count(*)::integer FROM workspace_instruction_policy_activation_events WHERE workspace_id = ${grant.workspaceId}) AS events
+        `;
+        expect(insideTransaction).toEqual({ workspaces: 0, revisions: 0, heads: 0, events: 0 });
+        await transaction`SELECT 1 / 0`;
+      }),
+      /division by zero/i,
+    );
+
+    const [afterRollback] = await shared.admin<
+      Array<{ workspaces: number; revisions: number; heads: number; events: number }>
+    >`
+      SELECT
+        (SELECT count(*)::integer FROM workspaces WHERE id = ${grant.workspaceId}) AS workspaces,
+        (SELECT count(*)::integer FROM workspace_instruction_policy_revisions WHERE workspace_id = ${grant.workspaceId}) AS revisions,
+        (SELECT count(*)::integer FROM workspace_instruction_policy_heads WHERE workspace_id = ${grant.workspaceId}) AS heads,
+        (SELECT count(*)::integer FROM workspace_instruction_policy_activation_events WHERE workspace_id = ${grant.workspaceId}) AS events
+    `;
+    expect(afterRollback).toEqual({ workspaces: 1, revisions: 1, heads: 1, events: 1 });
+
+    await deleteWorkspace(client.db, grant.workspaceId);
+    const [afterDelete] = await shared.admin<
+      Array<{ workspaces: number; revisions: number; heads: number; events: number }>
+    >`
+      SELECT
+        (SELECT count(*)::integer FROM workspaces WHERE id = ${grant.workspaceId}) AS workspaces,
+        (SELECT count(*)::integer FROM workspace_instruction_policy_revisions WHERE workspace_id = ${grant.workspaceId}) AS revisions,
+        (SELECT count(*)::integer FROM workspace_instruction_policy_heads WHERE workspace_id = ${grant.workspaceId}) AS heads,
+        (SELECT count(*)::integer FROM workspace_instruction_policy_activation_events WHERE workspace_id = ${grant.workspaceId}) AS events
+    `;
+    expect(afterDelete).toEqual({ workspaces: 0, revisions: 0, heads: 0, events: 0 });
   }, 180_000);
 });
