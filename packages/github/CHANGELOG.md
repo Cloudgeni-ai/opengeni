@@ -1,5 +1,17 @@
 # @opengeni/github
 
+## 0.3.18
+
+### Patch Changes
+
+- 9a8f793: Add fail-closed GitHub personal/organization owner authority proofs, audited
+  workspace installation bindings with explicit repository allowlists, and
+  truthful disabled/unbound/bound lifecycle contracts.
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/contracts@0.19.4
+  - @opengeni/config@0.7.6
+
 ## 0.3.17
 
 ### Patch Changes

@@ -34,21 +34,32 @@ import {
   accrueWarmSeconds,
   confirmDrainCold,
   appendSessionEventToSandboxGroup,
+  claimTerminalRetainedProcesses,
+  countActiveRetainedProcessesByOwnerState,
+  countExpiredDrainingSandboxLeases,
   countQueuedTurns,
   countSandboxLeasesByLiveness,
+  deferRetainedProcessReconciliation,
   forceDrainOverLimitViewerOnlyBoxes,
   getBillingBalance,
   listCreditBalancesByAccount,
   listLiveModalSandboxLeaseAttributions,
   listMeterableWarmLeases,
   persistDrainSnapshot,
+  recordRetainedProcessReconciliationProof,
   readWorkspaceArchiveCapturePreflight,
   readLease,
   reapExpiredSessionListSnapshots,
   reapStaleLeaseHoldersGlobal,
+  retainedProcessReconciliationProof,
+  retainedProcessSettlementIdentity,
   rlsContextForWorkspace,
+  settleRetainedProcess,
   type MeterableWarmLease,
   type ReapDrainable,
+  type RetainedProcessProviderProof,
+  type SandboxRetainedProcess,
+  type LeaseSnapshot,
 } from "@opengeni/db";
 import { sandboxWarmRateMicrosPerSecond } from "@opengeni/config";
 import {
@@ -62,7 +73,9 @@ import {
   createSandboxClientForBackend,
   deletePriorPersistedSnapshot,
   deserializeSandboxSessionStateEnvelope,
+  isExecSessionLostBanner,
   isProviderSandboxNotFoundError,
+  parseExecBannerExitCode,
   sweepModalOrphanSandboxes,
   terminateModalSandboxById,
   type ModalOrphanSweepTermination,
@@ -73,10 +86,15 @@ import { reconcilePendingParentSystemUpdates } from "./parent-wake";
 import {
   recordCreditBalanceGauges,
   recordCreditMicros,
+  recordExpiredDrainingSandboxLeaseGauges,
+  recordRetainedProcessInventoryGauges,
+  recordRetainedProcessReconciliation,
+  type RetainedProcessReconciliationOutcome,
   recordSandboxLeaseGauges,
   recordSandboxOrphansTerminated,
   recordTurnsQueuedGauge,
 } from "../observability-metrics";
+import { providerIdentityFromResumeState } from "../sandbox-routing";
 
 export type ReapSandboxLeasesResult = {
   /** Stale viewer holders + warming-death rows the sweep touched is folded into
@@ -179,7 +197,34 @@ export type SandboxLeaseActivityOptions = {
   /** Override the provider-side Modal orphan sweep (tests spy this; defaults to
    *  Modal list+tag comparison when Modal is configured). */
   sweepModalOrphans?: SweepModalOrphansFn;
+  /** Override only the read-only provider process probe. The canonical DB
+   * settlement remains real in tests and production. */
+  probeRetainedProcess?: RetainedProcessProbeFn;
 };
+
+export type RetainedProcessProbeResult =
+  | { status: "proved"; proof: RetainedProcessProviderProof }
+  | {
+      status: "deferred";
+      reason:
+        | "identity_mismatch"
+        | "resume_state_missing"
+        | "backend_unsupported"
+        | "provider_running"
+        | "provider_unknown"
+        | "provider_timeout"
+        | "provider_error";
+    };
+
+export type RetainedProcessProbeFn = (
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+  process: SandboxRetainedProcess,
+) => Promise<RetainedProcessProbeResult>;
+
+export const RETAINED_PROCESS_RECONCILIATION_LIMIT = 20;
+export const RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS = 5 * 60_000;
+export const RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS = 5_000;
 
 export function createSandboxLeaseActivities(
   services: () => Promise<ActivityServices>,
@@ -188,6 +233,7 @@ export function createSandboxLeaseActivities(
   const terminateBox: TerminateBoxFn = options.terminateBox ?? terminateProviderBox;
   const sweepModalOrphans: SweepModalOrphansFn =
     options.sweepModalOrphans ?? sweepModalOrphansForConfiguredBackend;
+  const probeRetainedProcess = options.probeRetainedProcess ?? probeRetainedProcessAtProvider;
   /**
    * The one global reaper sweep. Idempotent; concurrency-safe with itself.
    * Gated by the caller (the Schedule is only registered when
@@ -247,6 +293,12 @@ export function createSandboxLeaseActivities(
       metered.workspaceIds,
       observability,
     );
+
+    // (0c) Terminal-owner retained-process reconciliation. Owner state selects
+    // only a bounded inspection batch; exact provider exit/loss proof is
+    // checkpointed before canonical settlement. Ambiguous, running, timed-out,
+    // unsupported, and transient provider states preserve every durable row.
+    await reconcileTerminalRetainedProcesses(db, settings, observability, probeRetainedProcess);
 
     // (1) The DB-only cross-workspace sweep. Returns the drainable rows.
     const drainable: ReapDrainable[] = await reapStaleLeaseHoldersGlobal(db, {
@@ -336,6 +388,345 @@ export function createSandboxLeaseActivities(
   return { reapSandboxLeases };
 }
 
+async function reconcileTerminalRetainedProcesses(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  probe: RetainedProcessProbeFn,
+): Promise<void> {
+  const claimId = crypto.randomUUID();
+  let claims: Awaited<ReturnType<typeof claimTerminalRetainedProcesses>>;
+  try {
+    claims = await claimTerminalRetainedProcesses(db, {
+      claimId,
+      limit: RETAINED_PROCESS_RECONCILIATION_LIMIT,
+      claimTtlMs: RETAINED_PROCESS_RECONCILIATION_CLAIM_TTL_MS,
+    });
+  } catch (error) {
+    recordRetainedProcessReconciliation(observability, "claim_failed");
+    observability.warn("sandbox reaper: retained-process claim failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return;
+  }
+
+  for (const claim of claims) {
+    let process = claim.process;
+    const expected = retainedProcessSettlementIdentity(process);
+    let proof = retainedProcessReconciliationProof(process);
+    if (!proof) {
+      const lease = await readLease(db, process.workspaceId, process.sandboxGroupId).catch(
+        () => null,
+      );
+      if (
+        !lease ||
+        lease.id !== process.leaseId ||
+        lease.leaseEpoch !== process.leaseEpoch ||
+        lease.backend !== process.providerBackend ||
+        lease.instanceId !== process.providerInstanceId ||
+        process.routeTargetId !== null
+      ) {
+        await deferRetainedProcessClaim(
+          db,
+          settings,
+          observability,
+          process,
+          expected,
+          claim.claimId,
+          "identity_mismatch",
+        );
+        continue;
+      }
+
+      let observation: RetainedProcessProbeResult;
+      try {
+        observation = await probe(settings, lease, process);
+      } catch (error) {
+        observability.warn("sandbox reaper: retained-process provider probe failed", {
+          processId: process.id,
+          providerBackend: process.providerBackend,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        observation = { status: "deferred", reason: "provider_error" };
+      }
+      if (observation.status === "deferred") {
+        await deferRetainedProcessClaim(
+          db,
+          settings,
+          observability,
+          process,
+          expected,
+          claim.claimId,
+          observation.reason,
+        );
+        continue;
+      }
+      try {
+        process = await recordRetainedProcessReconciliationProof(db, {
+          accountId: process.accountId,
+          workspaceId: process.workspaceId,
+          sessionId: process.sessionId,
+          processId: process.id,
+          expected,
+          claimId: claim.claimId,
+          proof: observation.proof,
+        });
+        proof = observation.proof;
+        recordRetainedProcessReconciliation(observability, `proof_${proof.outcome}`);
+      } catch (error) {
+        recordRetainedProcessReconciliation(observability, "proof_checkpoint_failed");
+        observability.warn("sandbox reaper: retained-process proof checkpoint failed", {
+          processId: process.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        continue;
+      }
+    }
+
+    try {
+      await settleRetainedProcess(db, {
+        accountId: process.accountId,
+        workspaceId: process.workspaceId,
+        sessionId: process.sessionId,
+        processId: process.id,
+        expected,
+        reconciliationClaimId: claim.claimId,
+        outcome: proof.outcome,
+        exitCode: proof.exitCode,
+        reason: proof.reason,
+        idleGraceMs: settings.sandboxIdleGraceMs,
+      });
+      recordRetainedProcessReconciliation(observability, `settled_${proof.outcome}`);
+    } catch (error) {
+      recordRetainedProcessReconciliation(observability, "settlement_failed");
+      observability.warn("sandbox reaper: retained-process settlement failed", {
+        processId: process.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      await deferRetainedProcessClaim(
+        db,
+        settings,
+        observability,
+        process,
+        expected,
+        claim.claimId,
+        "settlement_failed",
+      );
+    }
+  }
+}
+
+async function deferRetainedProcessClaim(
+  db: ActivityServices["db"],
+  settings: ActivityServices["settings"],
+  observability: ActivityServices["observability"],
+  process: SandboxRetainedProcess,
+  expected: ReturnType<typeof retainedProcessSettlementIdentity>,
+  claimId: string,
+  outcome: RetainedProcessReconciliationOutcome,
+): Promise<void> {
+  const exponent = Math.min(4, Math.max(0, process.reconcileAttempts - 1));
+  const retryAfterMs = Math.min(
+    5 * 60_000,
+    Math.max(settings.sandboxLeaseReaperPeriodMs, 30_000) * 2 ** exponent,
+  );
+  try {
+    await deferRetainedProcessReconciliation(db, {
+      accountId: process.accountId,
+      workspaceId: process.workspaceId,
+      sessionId: process.sessionId,
+      processId: process.id,
+      expected,
+      claimId,
+      outcome,
+      retryAfterMs,
+    });
+    recordRetainedProcessReconciliation(observability, outcome);
+  } catch (error) {
+    recordRetainedProcessReconciliation(observability, "defer_failed");
+    observability.warn("sandbox reaper: retained-process defer failed", {
+      processId: process.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+type RetainedProcessProbeClient = {
+  backendId: string;
+  resume?: (state: unknown) => Promise<unknown>;
+  deserializeSessionState?: (state: Record<string, unknown>) => Promise<unknown>;
+};
+
+type RetainedProcessProbeSession = {
+  writeStdin?: (args: {
+    sessionId: number;
+    chars: string;
+    yieldTimeMs: number;
+    maxOutputTokens: number;
+  }) => Promise<unknown>;
+};
+
+const RETAINED_PROCESS_PROBE_TIMEOUT = Symbol("retained-process-provider-probe-timeout");
+
+async function withRetainedProcessProbeTimeout<T>(promise: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(RETAINED_PROCESS_PROBE_TIMEOUT),
+          RETAINED_PROCESS_PROVIDER_PROBE_TIMEOUT_MS,
+        );
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export async function probeRetainedProcessAtProvider(
+  settings: ActivityServices["settings"],
+  lease: LeaseSnapshot,
+  process: SandboxRetainedProcess,
+): Promise<RetainedProcessProbeResult> {
+  if (
+    lease.id !== process.leaseId ||
+    lease.sandboxGroupId !== process.sandboxGroupId ||
+    lease.leaseEpoch !== process.leaseEpoch ||
+    lease.backend !== process.providerBackend ||
+    lease.instanceId !== process.providerInstanceId ||
+    lease.resumeBackendId !== process.providerBackend ||
+    process.routeTargetId !== null
+  ) {
+    return { status: "deferred", reason: "identity_mismatch" };
+  }
+  if (!lease.resumeState) {
+    return { status: "deferred", reason: "resume_state_missing" };
+  }
+  const envelopeBackend = (lease.resumeState as { backendId?: unknown }).backendId;
+  if (envelopeBackend !== undefined && envelopeBackend !== process.providerBackend) {
+    return { status: "deferred", reason: "identity_mismatch" };
+  }
+  if (providerIdentityFromResumeState(lease.resumeState) !== process.providerInstanceId) {
+    return { status: "deferred", reason: "identity_mismatch" };
+  }
+
+  let client: RetainedProcessProbeClient | undefined;
+  try {
+    client = createSandboxClientForBackend(process.providerBackend as never, settings) as
+      | RetainedProcessProbeClient
+      | undefined;
+  } catch {
+    return { status: "deferred", reason: "provider_error" };
+  }
+  if (!client || client.backendId !== process.providerBackend || !client.resume) {
+    return { status: "deferred", reason: "backend_unsupported" };
+  }
+  const envelopeSessionState =
+    (lease.resumeState as { sessionState?: unknown }).sessionState ?? lease.resumeState;
+  let resumedState: unknown;
+  try {
+    resumedState = await deserializeSandboxSessionStateEnvelope(
+      client as never,
+      envelopeSessionState,
+    );
+  } catch {
+    return { status: "deferred", reason: "provider_error" };
+  }
+  if (resumedState === undefined) {
+    return { status: "deferred", reason: "resume_state_missing" };
+  }
+
+  let session: RetainedProcessProbeSession;
+  try {
+    session = (await withRetainedProcessProbeTimeout(
+      client.resume(resumedState),
+    )) as RetainedProcessProbeSession;
+  } catch (error) {
+    if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
+      return { status: "deferred", reason: "provider_timeout" };
+    }
+    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      return {
+        status: "proved",
+        proof: {
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_instance_not_found",
+        },
+      };
+    }
+    return { status: "deferred", reason: "provider_error" };
+  }
+  if (typeof session.writeStdin !== "function") {
+    return { status: "deferred", reason: "backend_unsupported" };
+  }
+
+  let result: unknown;
+  try {
+    result = await withRetainedProcessProbeTimeout(
+      session.writeStdin({
+        sessionId: process.providerSessionId,
+        chars: "",
+        yieldTimeMs: 1_000,
+        maxOutputTokens: 2_000,
+      }),
+    );
+  } catch (error) {
+    if (error === RETAINED_PROCESS_PROBE_TIMEOUT) {
+      return { status: "deferred", reason: "provider_timeout" };
+    }
+    if (isProviderSandboxNotFoundError(client.backendId, error)) {
+      return {
+        status: "proved",
+        proof: {
+          outcome: "lost",
+          exitCode: null,
+          reason: "provider_instance_not_found",
+        },
+      };
+    }
+    return { status: "deferred", reason: "provider_error" };
+  }
+  return classifyRetainedProcessPollResult(result, process.providerSessionId);
+}
+
+/** Classify only exact SDK control banners. Arbitrary output, malformed text,
+ * and a running marker are observations to retry; none is physical exit proof. */
+export function classifyRetainedProcessPollResult(
+  result: unknown,
+  providerSessionId: number,
+): RetainedProcessProbeResult {
+  if (typeof result !== "string") {
+    return { status: "deferred", reason: "provider_unknown" };
+  }
+  if (isExecSessionLostBanner(result, providerSessionId)) {
+    return {
+      status: "proved",
+      proof: {
+        outcome: "lost",
+        exitCode: null,
+        reason: "provider_session_lost_banner",
+      },
+    };
+  }
+  const exitCode = parseExecBannerExitCode(result);
+  if (exitCode !== null) {
+    return {
+      status: "proved",
+      proof: { outcome: "exited", exitCode, reason: "provider_exit_banner" },
+    };
+  }
+  return {
+    status: "deferred",
+    reason: result.includes("Process running with session ID")
+      ? "provider_running"
+      : "provider_unknown",
+  };
+}
+
 /**
  * The reaper-tick warm-meter pass (P2.1). Accrues warm-seconds for every WARM
  * viewer-only lease cross-workspace (the list fn excludes turn-held boxes — those
@@ -402,6 +793,26 @@ async function refreshQueueLeaseAndCreditGauges(
     recordSandboxLeaseGauges(observability, await countSandboxLeasesByLiveness(db));
   } catch (error) {
     observability.warn("sandbox reaper: sandbox-lease gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    recordRetainedProcessInventoryGauges(
+      observability,
+      await countActiveRetainedProcessesByOwnerState(db),
+    );
+  } catch (error) {
+    observability.warn("sandbox reaper: retained-process gauge refresh failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  try {
+    recordExpiredDrainingSandboxLeaseGauges(
+      observability,
+      await countExpiredDrainingSandboxLeases(db),
+    );
+  } catch (error) {
+    observability.warn("sandbox reaper: expired-draining gauge refresh failed", {
       error: error instanceof Error ? error.message : String(error),
     });
   }

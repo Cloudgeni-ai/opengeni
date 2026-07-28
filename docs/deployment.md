@@ -431,6 +431,10 @@ the published image aliases and chart bytes. A private or inconsistently
 configured registry therefore fails closed before becoming distribution
 authority. The candidate receipt records the full image repository names, and
 every later workflow verifies them against the same source-controlled prefix.
+Each official workload image is one OCI index containing both `linux/amd64`
+and `linux/arm64`; candidate creation builds both variants before freezing the
+index digest, so downstream hosts select their native architecture without
+building OpenGeni locally.
 
 For the default GHCR location, the owning organization must allow public
 package creation and each existing `opengeni-*` container package must be made

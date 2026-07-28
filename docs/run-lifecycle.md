@@ -359,6 +359,25 @@ registered yielded shell before workspace capture, independently of whether a
 Pause/Steer quiescence receipt is required. Connected Machines and other
 non-persistable routes do not dirty the provisioned cloud-home generation.
 
+If an owner finalizer or worker dies before reaching that settlement, the sole
+global lease reaper also runs a bounded, oldest-due reconciliation batch. A
+direct owner or closed exact turn attempt makes a process eligible for provider
+inspection only: owner/turn state, row age, timeout, and expired claim are never
+physical-exit proof. The worker resumes the exact persisted provider envelope
+and accepts only an exact SDK exit banner, exact provider-session-lost banner,
+or structured provider-instance `NOT_FOUND`. It durably checkpoints that proof
+before calling the same canonical settlement transaction, so a worker crash in
+between can reclaim coordination without probing again. Running, malformed,
+unsupported, identity-mismatched, timed-out, and transient provider results are
+deferred without changing the process, admission, PTY, holder, lease, archive,
+snapshot, or workspace generation. Settlement copies and fences the process
+UUID, parent admission, process holder, lease/group, provider backend/instance,
+lease epoch, route target/epoch, and provider session; exact replays are
+idempotent and cannot touch a successor. This reconciliation never calls a
+provider terminate/kill API and never captures or rotates a workspace snapshot.
+The app exports bounded owner-state/backlog, reconciliation, and expired-drain
+metrics; dashboard/PromQL integration is coordinated separately.
+
 Capture preflight and archive fold block on every unsettled admission and live
 direct/process holder in the closed write set. Publication is complete only when
 that set is proven closed and `archive_generation === workspace_generation`.

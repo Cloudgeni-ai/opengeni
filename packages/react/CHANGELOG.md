@@ -1,5 +1,14 @@
 # @opengeni/react
 
+## 0.25.5
+
+### Patch Changes
+
+- 6f0690d: Preserve persisted tool-call correlation and bounded truncation telemetry when loading timeline history.
+- Updated dependencies [9a8f793]
+- Updated dependencies [c135339]
+  - @opengeni/sdk@0.25.5
+
 ## 0.25.4
 
 ### Patch Changes
