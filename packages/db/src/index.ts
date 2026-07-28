@@ -21521,7 +21521,108 @@ export type SandboxRetainedProcess = {
   settlementReason: string | null;
   startedAt: string;
   settledAt: string | null;
+  reconcileAfter: string;
+  reconcileClaimId: string | null;
+  reconcileClaimedAt: string | null;
+  reconcileAttempts: number;
+  lastReconcileOutcome: string | null;
+  reconcileProofOutcome: "exited" | "lost" | null;
+  reconcileProofExitCode: number | null;
+  reconcileProofReason:
+    | "provider_exit_banner"
+    | "provider_session_lost_banner"
+    | "provider_instance_not_found"
+    | null;
+  reconcileProofObservedAt: string | null;
 };
+
+export type RetainedProcessProviderProof =
+  | { outcome: "exited"; exitCode: number; reason: "provider_exit_banner" }
+  | {
+      outcome: "lost";
+      exitCode: null;
+      reason: "provider_session_lost_banner" | "provider_instance_not_found";
+    };
+
+export type SandboxRetainedProcessIdentity = Pick<
+  SandboxRetainedProcess,
+  | "leaseId"
+  | "sandboxGroupId"
+  | "parentAdmissionId"
+  | "holderId"
+  | "leaseEpoch"
+  | "providerBackend"
+  | "providerInstanceId"
+  | "routeKind"
+  | "routeTargetId"
+  | "routeEpoch"
+  | "providerSessionId"
+>;
+
+export type SandboxRetainedProcessReconciliationClaim = {
+  process: SandboxRetainedProcess;
+  claimId: string;
+  ownerState: string;
+  ownerAttemptOutcome: string | null;
+};
+
+export type ActiveRetainedProcessOwnerCount = {
+  ownerState: string;
+  activeCount: number;
+  terminalOwnerCount: number;
+};
+
+export type ExpiredDrainingSandboxLeaseCount = {
+  backend: string;
+  ageBucket: "lt_5m" | "5m_1h" | "1h_1d" | "gte_1d";
+  count: number;
+};
+
+export function retainedProcessSettlementIdentity(
+  process: SandboxRetainedProcess,
+): SandboxRetainedProcessIdentity {
+  return {
+    leaseId: process.leaseId,
+    sandboxGroupId: process.sandboxGroupId,
+    parentAdmissionId: process.parentAdmissionId,
+    holderId: process.holderId,
+    leaseEpoch: process.leaseEpoch,
+    providerBackend: process.providerBackend,
+    providerInstanceId: process.providerInstanceId,
+    routeKind: process.routeKind,
+    routeTargetId: process.routeTargetId,
+    routeEpoch: process.routeEpoch,
+    providerSessionId: process.providerSessionId,
+  };
+}
+
+export function retainedProcessReconciliationProof(
+  process: SandboxRetainedProcess,
+): RetainedProcessProviderProof | null {
+  if (
+    process.reconcileProofOutcome === "exited" &&
+    process.reconcileProofReason === "provider_exit_banner" &&
+    process.reconcileProofExitCode !== null
+  ) {
+    return {
+      outcome: "exited",
+      exitCode: process.reconcileProofExitCode,
+      reason: "provider_exit_banner",
+    };
+  }
+  if (
+    process.reconcileProofOutcome === "lost" &&
+    (process.reconcileProofReason === "provider_session_lost_banner" ||
+      process.reconcileProofReason === "provider_instance_not_found")
+  ) {
+    return {
+      outcome: "lost",
+      exitCode: null,
+      reason: process.reconcileProofReason,
+    };
+  }
+  return null;
+}
 
 /** Durable promotion committed before a mutable route/turn authority check
  * rejected the provider output. The process identity is safe to hand to the
@@ -21657,6 +21758,18 @@ function normalizeRetainedProcessSettlementReason(reason: string): string {
   return bounded;
 }
 
+function normalizeRetainedProcessReconciliationOutcome(outcome: string): string {
+  const normalized = outcome.trim();
+  const byteLength = Buffer.byteLength(normalized, "utf8");
+  if (byteLength < 1 || byteLength > 64) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process reconciliation outcome must contain between 1 and 64 UTF-8 bytes",
+    );
+  }
+  return normalized;
+}
+
 function mapWorkspaceMutationAdmission(row: {
   id: string;
   lease_id: string;
@@ -21722,7 +21835,36 @@ function mapRetainedProcess(
     settlementReason: row.settlementReason ?? null,
     startedAt: row.startedAt.toISOString(),
     settledAt: row.settledAt?.toISOString() ?? null,
+    reconcileAfter: row.reconcileAfter.toISOString(),
+    reconcileClaimId: row.reconcileClaimId ?? null,
+    reconcileClaimedAt: row.reconcileClaimedAt?.toISOString() ?? null,
+    reconcileAttempts: row.reconcileAttempts,
+    lastReconcileOutcome: row.lastReconcileOutcome ?? null,
+    reconcileProofOutcome: row.reconcileProofOutcome ?? null,
+    reconcileProofExitCode: row.reconcileProofExitCode ?? null,
+    reconcileProofReason:
+      (row.reconcileProofReason as SandboxRetainedProcess["reconcileProofReason"]) ?? null,
+    reconcileProofObservedAt: row.reconcileProofObservedAt?.toISOString() ?? null,
   };
+}
+
+function retainedProcessMatchesSettlementIdentity(
+  process: typeof schema.sandboxRetainedProcesses.$inferSelect,
+  expected: SandboxRetainedProcessIdentity,
+): boolean {
+  return (
+    process.leaseId === expected.leaseId &&
+    process.sandboxGroupId === expected.sandboxGroupId &&
+    process.parentAdmissionId === expected.parentAdmissionId &&
+    process.holderId === expected.holderId &&
+    process.leaseEpoch === expected.leaseEpoch &&
+    process.providerBackend === expected.providerBackend &&
+    process.providerInstanceId === expected.providerInstanceId &&
+    process.routeKind === expected.routeKind &&
+    (process.routeTargetId ?? null) === expected.routeTargetId &&
+    process.routeEpoch === expected.routeEpoch &&
+    process.providerSessionId === expected.providerSessionId
+  );
 }
 
 async function lockWorkspaceMutationSessionTx(
@@ -22775,6 +22917,293 @@ export async function getRetainedProcess(
   });
 }
 
+/** Claim a bounded, oldest-due batch of active retained processes whose exact
+ * owner attempt is closed (or whose direct request already returned). Claim
+ * expiry only recovers coordination after worker death; it is never provider
+ * exit proof. Rows that settle between the global claim and scoped read are
+ * deliberately omitted. */
+export async function claimTerminalRetainedProcesses(
+  db: Database,
+  input: { claimId: string; limit: number; claimTtlMs: number },
+): Promise<SandboxRetainedProcessReconciliationClaim[]> {
+  if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) {
+    throw new Error("Retained process reconciliation limit must be between 1 and 100");
+  }
+  if (
+    !Number.isSafeInteger(input.claimTtlMs) ||
+    input.claimTtlMs < 0 ||
+    input.claimTtlMs > 3_600_000
+  ) {
+    throw new Error("Retained process reconciliation claim TTL is invalid");
+  }
+  const rows = await rawRows<{
+    account_id: string;
+    workspace_id: string;
+    session_id: string;
+    process_id: string;
+    claim_id: string;
+    owner_state: string;
+    owner_attempt_outcome: string | null;
+  }>(
+    db,
+    sql`
+      select account_id, workspace_id, session_id, process_id, claim_id,
+        owner_state, owner_attempt_outcome
+      from opengeni_private.claim_terminal_retained_processes(
+        ${input.claimId}::uuid, ${input.limit}::integer, ${input.claimTtlMs}::bigint
+      )
+    `,
+  );
+  const claims: SandboxRetainedProcessReconciliationClaim[] = [];
+  for (const row of rows) {
+    const process = await getRetainedProcess(db, {
+      workspaceId: row.workspace_id,
+      sessionId: row.session_id,
+      processId: row.process_id,
+    });
+    if (
+      !process ||
+      process.accountId !== row.account_id ||
+      process.state !== "active" ||
+      process.reconcileClaimId !== row.claim_id
+    ) {
+      continue;
+    }
+    claims.push({
+      process,
+      claimId: row.claim_id,
+      ownerState: row.owner_state,
+      ownerAttemptOutcome: row.owner_attempt_outcome,
+    });
+  }
+  return claims;
+}
+
+/** Durably checkpoint exact provider exit/loss proof before canonical
+ * settlement. This closes the worker-death window between provider observation
+ * and settlement without converting owner state, age, timeout, or claim expiry
+ * into physical proof. */
+export async function recordRetainedProcessReconciliationProof(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    claimId: string;
+    proof: RetainedProcessProviderProof;
+  },
+): Promise<SandboxRetainedProcess> {
+  if (
+    input.proof.outcome === "exited" &&
+    (!Number.isSafeInteger(input.proof.exitCode) || input.proof.exitCode === null)
+  ) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process reconciliation exit proof requires a safe integer exit code",
+    );
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [process] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+              eq(schema.sandboxRetainedProcesses.id, input.processId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (
+          !process ||
+          process.state !== "active" ||
+          !retainedProcessMatchesSettlementIdentity(process, input.expected)
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process proof did not match an active copied durable identity",
+          );
+        }
+        if (process.reconcileClaimId !== input.claimId) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process proof claim was lost or superseded",
+          );
+        }
+        const existing = mapRetainedProcess(process);
+        const existingProof = retainedProcessReconciliationProof(existing);
+        if (existingProof) {
+          if (
+            existingProof.outcome !== input.proof.outcome ||
+            existingProof.exitCode !== input.proof.exitCode ||
+            existingProof.reason !== input.proof.reason
+          ) {
+            throw new SandboxWorkspaceMutationFencedError(
+              "process_fenced",
+              "Retained process already carries different provider proof",
+            );
+          }
+          return existing;
+        }
+        const [updated] = await tx
+          .update(schema.sandboxRetainedProcesses)
+          .set({
+            reconcileProofOutcome: input.proof.outcome,
+            reconcileProofExitCode: input.proof.exitCode,
+            reconcileProofReason: input.proof.reason,
+            reconcileProofObservedAt: new Date(),
+            lastReconcileOutcome: `proof_${input.proof.outcome}`,
+          })
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.id, process.id),
+              eq(schema.sandboxRetainedProcesses.state, "active"),
+              eq(schema.sandboxRetainedProcesses.reconcileClaimId, input.claimId),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process changed while checkpointing provider proof",
+          );
+        }
+        return mapRetainedProcess(updated);
+      }),
+  );
+}
+
+/** Release one exact reconciliation claim after an ambiguous/running provider
+ * observation. This schedules a bounded retry but never changes process,
+ * admission, holder, lease, archive, snapshot, or workspace state. */
+export async function deferRetainedProcessReconciliation(
+  db: Database,
+  input: {
+    accountId: string;
+    workspaceId: string;
+    sessionId: string;
+    processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    claimId: string;
+    outcome: string;
+    retryAfterMs: number;
+  },
+): Promise<boolean> {
+  const outcome = normalizeRetainedProcessReconciliationOutcome(input.outcome);
+  if (
+    !Number.isSafeInteger(input.retryAfterMs) ||
+    input.retryAfterMs < 0 ||
+    input.retryAfterMs > 86_400_000
+  ) {
+    throw new SandboxWorkspaceMutationFencedError(
+      "process_fenced",
+      "Retained process reconciliation retry delay is invalid",
+    );
+  }
+  return await withRlsContext(
+    db,
+    { accountId: input.accountId, workspaceId: input.workspaceId },
+    async (scopedDb) =>
+      await scopedDb.transaction(async (txRaw) => {
+        const tx = txRaw as unknown as Database;
+        const [process] = await tx
+          .select()
+          .from(schema.sandboxRetainedProcesses)
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.accountId, input.accountId),
+              eq(schema.sandboxRetainedProcesses.workspaceId, input.workspaceId),
+              eq(schema.sandboxRetainedProcesses.sessionId, input.sessionId),
+              eq(schema.sandboxRetainedProcesses.id, input.processId),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!process || !retainedProcessMatchesSettlementIdentity(process, input.expected)) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process reconciliation did not match the copied durable identity",
+          );
+        }
+        if (process.state !== "active") return false;
+        if (process.reconcileClaimId !== input.claimId) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process reconciliation claim was lost or superseded",
+          );
+        }
+        const [updated] = await tx
+          .update(schema.sandboxRetainedProcesses)
+          .set({
+            reconcileAfter: new Date(Date.now() + input.retryAfterMs),
+            reconcileClaimId: null,
+            reconcileClaimedAt: null,
+            lastReconcileOutcome: outcome,
+          })
+          .where(
+            and(
+              eq(schema.sandboxRetainedProcesses.id, process.id),
+              eq(schema.sandboxRetainedProcesses.state, "active"),
+              eq(schema.sandboxRetainedProcesses.reconcileClaimId, input.claimId),
+            ),
+          )
+          .returning({ id: schema.sandboxRetainedProcesses.id });
+        return Boolean(updated);
+      }),
+  );
+}
+
+export async function countActiveRetainedProcessesByOwnerState(
+  db: Database,
+): Promise<ActiveRetainedProcessOwnerCount[]> {
+  const rows = await rawRows<{
+    owner_state: string;
+    active_count: number | string;
+    terminal_owner_count: number | string;
+  }>(
+    db,
+    sql`
+      select owner_state, active_count, terminal_owner_count
+      from opengeni_private.count_active_retained_processes_by_owner_state()
+    `,
+  );
+  return rows.map((row) => ({
+    ownerState: row.owner_state,
+    activeCount: Number(row.active_count),
+    terminalOwnerCount: Number(row.terminal_owner_count),
+  }));
+}
+
+export async function countExpiredDrainingSandboxLeases(
+  db: Database,
+): Promise<ExpiredDrainingSandboxLeaseCount[]> {
+  const rows = await rawRows<{
+    backend: string;
+    age_bucket: ExpiredDrainingSandboxLeaseCount["ageBucket"];
+    count: number | string;
+  }>(
+    db,
+    sql`
+      select backend, age_bucket, count
+      from opengeni_private.count_expired_draining_sandbox_leases()
+    `,
+  );
+  return rows.map((row) => ({
+    backend: row.backend,
+    ageBucket: row.age_bucket,
+    count: Number(row.count),
+  }));
+}
+
 /** Settle an exact retained process only after exit or definitive loss proof.
  * The process row, parent admission, non-TTL holder, and lease count transition
  * commit atomically. Duplicate identical proof is idempotent; conflicting proof
@@ -22786,6 +23215,8 @@ export async function settleRetainedProcess(
     workspaceId: string;
     sessionId: string;
     processId: string;
+    expected: SandboxRetainedProcessIdentity;
+    reconciliationClaimId?: string;
     outcome: "exited" | "lost";
     exitCode?: number | null;
     reason: string;
@@ -22826,6 +23257,12 @@ export async function settleRetainedProcess(
             "Retained process settlement did not match a durable process",
           );
         }
+        if (!retainedProcessMatchesSettlementIdentity(process, input.expected)) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process settlement did not match the copied durable identity",
+          );
+        }
         if (process.state !== "active") {
           if (
             process.state !== input.outcome ||
@@ -22848,6 +23285,27 @@ export async function settleRetainedProcess(
             );
           return { settled: false, process: mapRetainedProcess(process) };
         }
+        if (
+          input.reconciliationClaimId !== undefined &&
+          process.reconcileClaimId !== input.reconciliationClaimId
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process settlement reconciliation claim was lost or superseded",
+          );
+        }
+        const durableProof = retainedProcessReconciliationProof(mapRetainedProcess(process));
+        if (
+          durableProof &&
+          (durableProof.outcome !== input.outcome ||
+            durableProof.exitCode !== exitCode ||
+            durableProof.reason !== reason)
+        ) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "process_fenced",
+            "Retained process settlement conflicts with checkpointed provider proof",
+          );
+        }
         const admissions = await tx.execute<AdmissionIdentityRow>(sql`
           select * from sandbox_workspace_mutation_admissions
           where id = ${process.parentAdmissionId}
@@ -22855,6 +23313,13 @@ export async function settleRetainedProcess(
             and workspace_id = ${input.workspaceId}
             and session_id = ${input.sessionId}
             and lease_id = ${process.leaseId}
+            and sandbox_group_id = ${process.sandboxGroupId}
+            and lease_epoch = ${process.leaseEpoch}
+            and provider_backend = ${process.providerBackend}
+            and provider_instance_id = ${process.providerInstanceId}
+            and route_kind = ${process.routeKind}
+            and route_target_id is not distinct from ${process.routeTargetId}
+            and route_epoch = ${process.routeEpoch}
             and provider_outcome = 'retained'
             and settled_at is null
           for update
@@ -22863,6 +23328,23 @@ export async function settleRetainedProcess(
           throw new SandboxWorkspaceMutationFencedError(
             "admission_fenced",
             "Retained process parent admission is not open",
+          );
+        }
+        const leases = await tx.execute<LeaseRow>(sql`
+          select * from sandbox_leases
+          where id = ${process.leaseId}
+            and account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
+            and sandbox_group_id = ${process.sandboxGroupId}
+            and lease_epoch = ${process.leaseEpoch}
+            and backend = ${process.providerBackend}
+            and instance_id = ${process.providerInstanceId}
+          for update
+        `);
+        if (!leases[0]) {
+          throw new SandboxWorkspaceMutationFencedError(
+            "lease_fenced",
+            "Retained process settlement cannot mutate a successor lease identity",
           );
         }
         await tx
@@ -22881,6 +23363,12 @@ export async function settleRetainedProcess(
             exitCode,
             settlementReason: reason,
             settledAt: new Date(),
+            reconcileClaimId: null,
+            reconcileClaimedAt: null,
+            lastReconcileOutcome:
+              input.reconciliationClaimId === undefined
+                ? `owner_settled_${input.outcome}`
+                : `reconciled_${input.outcome}`,
           })
           .where(
             and(
@@ -22905,6 +23393,8 @@ export async function settleRetainedProcess(
         await tx.execute(sql`
           delete from sandbox_lease_holders
           where lease_id = ${process.leaseId}
+            and account_id = ${input.accountId}
+            and workspace_id = ${input.workspaceId}
             and kind = 'process' and holder_id = ${process.holderId}
         `);
         const [counts] = await tx.execute<{
@@ -22933,6 +23423,10 @@ export async function settleRetainedProcess(
             }
             updated_at = now()
           where id = ${process.leaseId}
+            and sandbox_group_id = ${process.sandboxGroupId}
+            and lease_epoch = ${process.leaseEpoch}
+            and backend = ${process.providerBackend}
+            and instance_id = ${process.providerInstanceId}
         `);
         return { settled: true, process: mapRetainedProcess(updated) };
       }),

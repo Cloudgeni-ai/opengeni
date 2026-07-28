@@ -38,8 +38,14 @@ describe("release schema contract", () => {
       fileCount: 2,
       latestMigration: "0002_second.sql",
       migrations: [
-        expect.objectContaining({ path: "0001_first.sql", deploymentMode: "historical" }),
-        expect.objectContaining({ path: "0002_second.sql", deploymentMode: "rolling" }),
+        expect.objectContaining({
+          path: "0001_first.sql",
+          deploymentMode: "historical",
+        }),
+        expect.objectContaining({
+          path: "0002_second.sql",
+          deploymentMode: "rolling",
+        }),
       ],
     });
   });
@@ -135,12 +141,13 @@ describe("release schema contract", () => {
         (migrations.has("0124_session_event_duplicate_lookup.sql") ? 1 : 0) +
         (migrations.has("0125_document_drops_visibility.sql") ? 1 : 0) +
         (migrations.has("0126_document_access_constraints.sql") ? 1 : 0) +
-        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0),
+        (migrations.has("0127_document_default_base_index.sql") ? 1 : 0) +
+        (migrations.has("0128_retained_process_reconciliation.sql") ? 1 : 0),
     );
     expect(contract.sha256).toBe(
-      "988125394d6a6a96cecfa2a2f97c4d290daa802a749bf8e6fca6193848e3ae3f",
+      "ac0e588247ef6513949744d021250640a5da7e9442dc9f8e5d666315a457cebd",
     );
-    expect(contract.latestMigration).toBe("0127_document_default_base_index.sql");
+    expect(contract.latestMigration).toBe("0128_retained_process_reconciliation.sql");
     expect(migrations.get("0122_codex_capacity_same_turn.sql")).toMatchObject({
       sha256: "84e97abff7394d9fcca110012d9ceaede9ae683280a8a4a7335bcf9ec5d52d4e",
       deploymentMode: "maintenance",
@@ -166,7 +173,7 @@ describe("release schema contract", () => {
     expect(
       contract.migrations
         .map((migration) => migration.path)
-        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-7])_/.test(path)),
+        .filter((path) => /^(?:010[3-9]|011[0-9]|012[0-8])_/.test(path)),
     ).toEqual([
       "0103_host_export_root_session.sql",
       "0104_host_export_root_session_backfill.sql",
@@ -183,6 +190,7 @@ describe("release schema contract", () => {
       "0125_document_drops_visibility.sql",
       "0126_document_access_constraints.sql",
       "0127_document_default_base_index.sql",
+      "0128_retained_process_reconciliation.sql",
     ]);
     expect(new Set(contract.migrations.map((migration) => migration.path)).size).toBe(
       contract.fileCount,
@@ -249,6 +257,10 @@ describe("release schema contract", () => {
     });
     expect(migrations.get("0127_document_default_base_index.sql")).toMatchObject({
       sha256: "7deb5fde59f2e0e336a18a72630a00348dc641041f7df60639b50df79b4c4480",
+      deploymentMode: "rolling",
+    });
+    expect(migrations.get("0128_retained_process_reconciliation.sql")).toMatchObject({
+      sha256: "386b9b76a3c9787b5c8fc73f0d1f966d983e0a35d323be59af4a62750305f5d1",
       deploymentMode: "rolling",
     });
   });
