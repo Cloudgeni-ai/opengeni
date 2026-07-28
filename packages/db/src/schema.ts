@@ -4333,3 +4333,5 @@ export const rigChanges = pgTable(
     workspaceStatus: index("rig_changes_workspace_status_idx").on(table.workspaceId, table.status),
   }),
 );
+
+export * from "./workspace-instruction-policies-schema";

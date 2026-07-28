@@ -8730,3 +8730,4 @@ export function evaluateWorkspaceModelPolicy(
 
 export * from "./codex-fleet-policy";
 export * from "./secret-redaction";
+export * from "./workspace-instruction-policies";
