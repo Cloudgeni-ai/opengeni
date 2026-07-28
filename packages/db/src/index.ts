@@ -2442,11 +2442,16 @@ async function assertGitHubAuthorityWindowOpen(
   checkedAt: Date,
   expiresAt: Date,
 ): Promise<void> {
+  // postgres.js does not serialize JavaScript Date instances passed through
+  // raw Drizzle SQL. Bind the already-validated ISO timestamp representation
+  // and retain PostgreSQL's timestamptz/database-clock authority checks.
+  const checkedAtIso = checkedAt.toISOString();
+  const expiresAtIso = expiresAt.toISOString();
   const result = await tx.execute<{ valid: boolean }>(sql`
     select (
-      ${checkedAt}::timestamptz <= clock_timestamp()
-      and clock_timestamp() < ${expiresAt}::timestamptz
-      and ${expiresAt}::timestamptz <= ${checkedAt}::timestamptz + interval '10 minutes'
+      ${checkedAtIso}::timestamptz <= clock_timestamp()
+      and clock_timestamp() < ${expiresAtIso}::timestamptz
+      and ${expiresAtIso}::timestamptz <= ${checkedAtIso}::timestamptz + interval '10 minutes'
     ) as valid
   `);
   if (result[0]?.valid !== true) {

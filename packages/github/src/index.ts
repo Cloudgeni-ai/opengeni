@@ -339,20 +339,11 @@ export async function authorizeGitHubInstallationBinding(
   if (installation.accountType === "User" && actor.id === installation.accountId) {
     authorityKind = "personal_owner";
   } else if (installation.accountType === "Organization" && installation.accountLogin) {
-    const membership = await getAuthenticatedOrganizationMembership(
+    await assertActiveOrganizationOwner(
       userToken,
+      installation.accountId,
       installation.accountLogin,
     );
-    if (
-      membership.organizationId !== installation.accountId ||
-      membership.state !== "active" ||
-      membership.role !== "admin"
-    ) {
-      throw new GitHubInstallationAuthorityError(
-        "authority_denied",
-        "Only an active GitHub organization owner may bind this installation",
-      );
-    }
     authorityKind = "organization_owner";
   } else {
     throw new GitHubInstallationAuthorityError(
@@ -373,6 +364,16 @@ export async function authorizeGitHubInstallationBinding(
     throw new GitHubInstallationAuthorityError(
       "repository_access_empty",
       "GitHub App installation does not currently grant access to any repositories",
+    );
+  }
+  if (authorityKind === "organization_owner") {
+    // Repository enumeration is an async provider boundary. Re-read the live
+    // owner tuple after it so a role revoked after the chooser proof cannot be
+    // durably bound with a later, misleading authority timestamp.
+    await assertActiveOrganizationOwner(
+      userToken,
+      installation.accountId,
+      installation.accountLogin!,
     );
   }
   return {
@@ -602,6 +603,24 @@ async function getAuthenticatedOrganizationMembership(
     );
   }
   return { organizationId, role: payload.role, state: payload.state };
+}
+
+async function assertActiveOrganizationOwner(
+  token: string,
+  organizationId: number,
+  organizationLogin: string,
+): Promise<void> {
+  const membership = await getAuthenticatedOrganizationMembership(token, organizationLogin);
+  if (
+    membership.organizationId !== organizationId ||
+    membership.state !== "active" ||
+    membership.role !== "admin"
+  ) {
+    throw new GitHubInstallationAuthorityError(
+      "authority_denied",
+      "Only an active GitHub organization owner may bind this installation",
+    );
+  }
 }
 
 async function listUserAccessibleInstallations(

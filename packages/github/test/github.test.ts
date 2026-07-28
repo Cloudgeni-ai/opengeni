@@ -172,33 +172,71 @@ describe("GitHub app manifest helpers", () => {
   });
 
   test("proves exact personal-account ownership with a fresh GitHub user authorization", async () => {
-    await withAuthorityGitHub({ accountType: "User", accountId: 501, actorId: 501 }, async () => {
-      const proof = await authorizeGitHubInstallationBinding(authoritySettings(), {
-        code: "fresh-code",
-        installationId: 42,
-      });
-      expect(proof).toMatchObject({
-        actorId: 501,
-        actorLogin: "actor",
-        authorityKind: "personal_owner",
-        installation: { installationId: 42, accountId: 501, suspended: false },
-      });
-      expect(proof.repositories.map((repository) => repository.id)).toEqual([1001]);
-    });
+    await withAuthorityGitHub(
+      { accountType: "User", accountId: 501, actorId: 501 },
+      async (requests) => {
+        const proof = await authorizeGitHubInstallationBinding(authoritySettings(), {
+          code: "fresh-code",
+          installationId: 42,
+        });
+        expect(proof).toMatchObject({
+          actorId: 501,
+          actorLogin: "actor",
+          authorityKind: "personal_owner",
+          installation: { installationId: 42, accountId: 501, suspended: false },
+        });
+        expect(proof.repositories.map((repository) => repository.id)).toEqual([1001]);
+        expect(requests.filter((url) => url.includes("/user/memberships/orgs/"))).toEqual([]);
+      },
+    );
   });
 
   test("proves active organization ownership where GitHub exposes membership authority", async () => {
     await withAuthorityGitHub(
       { accountType: "Organization", membershipRole: "admin", membershipState: "active" },
-      async () => {
+      async (requests) => {
         const proof = await authorizeGitHubInstallationBinding(authoritySettings(), {
           code: "fresh-code",
           installationId: 42,
         });
         expect(proof.authorityKind).toBe("organization_owner");
+        const membershipUrl = "https://api.github.com/user/memberships/orgs/acme";
+        expect(requests.filter((url) => url === membershipUrl)).toHaveLength(2);
+        expect(requests.lastIndexOf(membershipUrl)).toBeGreaterThan(
+          requests.findIndex((url) =>
+            url.startsWith("https://api.github.com/installation/repositories?"),
+          ),
+        );
       },
     );
   });
+
+  test.each([
+    [
+      "revoked",
+      [
+        { role: "admin", state: "active" },
+        { role: "member", state: "active" },
+      ],
+      "authority_denied",
+    ],
+    ["unavailable", [{ role: "admin", state: "active" }, { status: 403 }], "authority_unavailable"],
+  ] as const)(
+    "fails closed when organization-owner authority becomes %s before commit",
+    async (_label, membershipChecks, reason) => {
+      await withAuthorityGitHub(
+        { accountType: "Organization", membershipChecks: [...membershipChecks] },
+        async () => {
+          await expect(
+            authorizeGitHubInstallationBinding(authoritySettings(), {
+              code: "fresh-code",
+              installationId: 42,
+            }),
+          ).rejects.toMatchObject({ reason });
+        },
+      );
+    },
+  );
 
   test.each([
     ["non-owner repository administrator", "member", "active"],
@@ -317,18 +355,22 @@ async function withAuthorityGitHub(
     membershipRole?: string;
     membershipState?: string;
     membershipStatus?: number;
+    membershipChecks?: Array<{ role?: string; state?: string; status?: number }>;
     suspended?: boolean;
     deleted?: boolean;
     repositories?: Array<Record<string, unknown>>;
   },
-  run: () => Promise<void>,
+  run: (requests: string[]) => Promise<void>,
 ): Promise<void> {
   const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  let membershipCheck = 0;
   const accountId = input.accountId ?? 700;
   const accountType = input.accountType ?? "Organization";
   const account = { id: accountId, login: "acme", type: accountType };
   globalThis.fetch = (async (request: RequestInfo | URL) => {
     const url = String(request);
+    requests.push(url);
     if (url === "https://github.com/login/oauth/access_token") {
       return Response.json({ access_token: "user-access" });
     }
@@ -346,15 +388,14 @@ async function withAuthorityGitHub(
       );
     }
     if (url === "https://api.github.com/user/memberships/orgs/acme") {
-      if (input.membershipStatus) {
-        return Response.json(
-          { message: "membership unavailable" },
-          { status: input.membershipStatus },
-        );
+      const current = input.membershipChecks?.[membershipCheck++];
+      const status = current?.status ?? input.membershipStatus;
+      if (status) {
+        return Response.json({ message: "membership unavailable" }, { status });
       }
       return Response.json({
-        role: input.membershipRole ?? "admin",
-        state: input.membershipState ?? "active",
+        role: current?.role ?? input.membershipRole ?? "admin",
+        state: current?.state ?? input.membershipState ?? "active",
         organization: { id: accountId, login: "acme" },
       });
     }
@@ -371,7 +412,7 @@ async function withAuthorityGitHub(
     return Response.json({ message: `unexpected request ${url}` }, { status: 500 });
   }) as typeof fetch;
   try {
-    await run();
+    await run(requests);
   } finally {
     globalThis.fetch = originalFetch;
   }

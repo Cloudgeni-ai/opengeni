@@ -340,7 +340,9 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
     if (repositoryIds.length !== proof.repositories.length) {
       throw new HTTPException(409, { message: "GitHub returned duplicate repository identities" });
     }
-    const now = new Date();
+    // The provider contract revalidates organization ownership after its final
+    // repository read, so this commit-near timestamp records that live check.
+    const authorityCheckedAt = new Date();
     const expiresAt = new Date((statePayload.iat + githubBindingStateMaxAgeSeconds) * 1_000);
     let bound;
     try {
@@ -355,7 +357,7 @@ export function registerGitHubRoutes(app: Hono, deps: ApiRouteDeps): void {
         githubActorId: proof.actorId,
         githubActorLogin: proof.actorLogin,
         authorityKind: proof.authorityKind,
-        authorityCheckedAt: now,
+        authorityCheckedAt,
         authorityExpiresAt: expiresAt,
         authorityNonce: statePayload.nonce,
         repositoryIds,

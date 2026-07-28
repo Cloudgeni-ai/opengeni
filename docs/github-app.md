@@ -30,7 +30,10 @@ advance to a fresh GitHub App user authorization. The callback then verifies:
 
 1. the exact authenticated GitHub user, live App installation, installation
    account, suspension state, and current installation repositories;
-2. one of the provider-supported authority cases below; and
+2. one of the provider-supported authority cases below; organization ownership
+   is queried again after repository enumeration, immediately before the proof
+   is handed to the durable bind, and any revocation or unavailable recheck
+   fails closed; and
 3. the exact OpenGeni account, workspace, managing subject, signed-state nonce,
    installation ID, immutable GitHub account ID, GitHub actor ID, and explicit
    repository IDs committed by one transaction.

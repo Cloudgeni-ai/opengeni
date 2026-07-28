@@ -2216,6 +2216,8 @@ export type GitHubAppApiPort = {
    * installation authority. Implementations must accept only exact personal
    * ownership or active organization ownership; installation visibility,
    * repository permission bits, and App Manager metadata are not authority.
+   * Organization ownership must be revalidated after repository discovery,
+   * immediately before returning the proof used by the durable bind.
    */
   authorizeInstallationBinding?: (input: {
     code: string;
