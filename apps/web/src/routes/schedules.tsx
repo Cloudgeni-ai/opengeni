@@ -32,6 +32,7 @@ import { StatusDot, type StatusTone } from "@/components/ui/status-dot";
 import { useAppContext } from "@/context";
 import { formatTimestamp } from "@/lib/format";
 import { listViewState } from "@/lib/load-state";
+import { activeOpenGeniSlackBotConnections, openGeniSlackBotUiMetadata } from "@/lib/slack-bot";
 import {
   agentConfigFromFormState,
   formStateFromScheduledTask,
@@ -42,13 +43,14 @@ import {
   type ScheduledTaskFormState,
 } from "@/lib/scheduled-tasks";
 import { cn } from "@/lib/utils";
-import type { ScheduledTask, ScheduledTaskRun } from "@/types";
+import type { ConnectionMetadata, ScheduledTask, ScheduledTaskRun } from "@/types";
 
 export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const context = useAppContext();
   const navigate = useNavigate();
   const client = context.client;
   const [tasks, setTasks] = useState<ScheduledTask[]>([]);
+  const [slackBotConnections, setSlackBotConnections] = useState<ConnectionMetadata[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [runs, setRuns] = useState<Record<string, ScheduledTaskRun[]>>({});
@@ -75,8 +77,12 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const next = await client.listScheduledTasks(workspaceId);
+      const [next, connections] = await Promise.all([
+        client.listScheduledTasks(workspaceId),
+        client.listConnections(workspaceId).catch(() => []),
+      ]);
       setTasks(next);
+      setSlackBotConnections(activeOpenGeniSlackBotConnections(connections));
       setLoadError(null);
       // Track each task's run-history load outcome separately: a failed history
       // fetch must surface as an error row, never as a false "No runs yet".
@@ -262,6 +268,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
           submitLabel="Create scheduled task"
           busy={busyTaskId === "new"}
           canAttachOpenGeniTool={canAttachOpenGeniTool}
+          slackBotConnections={slackBotConnections}
           onSubmit={(form) => void createTask(form)}
         />
       ) : null}
@@ -400,6 +407,7 @@ export function SchedulesRoute({ workspaceId }: { workspaceId: string }) {
                     submitLabel="Save changes"
                     busy={busyTaskId === task.id}
                     canAttachOpenGeniTool={canAttachOpenGeniTool}
+                    slackBotConnections={slackBotConnections}
                     onSubmit={(form) => void saveTask(task, form)}
                     onCancel={() => setEditingTaskId(null)}
                     secondaryActions={
@@ -513,6 +521,7 @@ function ScheduledTaskForm(props: {
   submitLabel: string;
   busy: boolean;
   canAttachOpenGeniTool: boolean;
+  slackBotConnections: ConnectionMetadata[];
   onSubmit: (form: ScheduledTaskFormState) => void;
   onCancel?: () => void;
   secondaryActions?: ReactNode;
@@ -634,6 +643,46 @@ function ScheduledTaskForm(props: {
             />
             Let the agent use OpenGeni tools
           </label>
+          <div className="grid gap-1.5">
+            <Label>OpenGeni Slack bot</Label>
+            <Select
+              value={form.slackBotConnectionId}
+              onChange={(event) => update("slackBotConnectionId", event.target.value)}
+            >
+              <option value="">Do not route Slack bot tools</option>
+              {form.slackBotConnectionId &&
+              !props.slackBotConnections.some(
+                (connection) => connection.id === form.slackBotConnectionId,
+              ) ? (
+                <option value={form.slackBotConnectionId} disabled>
+                  Selected connection is unavailable
+                </option>
+              ) : null}
+              {props.slackBotConnections.map((connection) => {
+                const metadata = openGeniSlackBotUiMetadata(connection)!;
+                return (
+                  <option key={connection.id} value={connection.id}>
+                    {metadata.slackTeamName} · OpenGeni
+                  </option>
+                );
+              })}
+            </Select>
+            <p className="text-2xs text-fg-subtle">
+              Runs use only the selected workspace-shared bot connection. Personal Slack OAuth is
+              never substituted.
+            </p>
+            {props.slackBotConnections.length === 0 ? (
+              <button
+                type="button"
+                className="w-fit text-2xs font-medium text-brand hover:underline"
+                onClick={() =>
+                  void window.location.assign(`/workspaces/${props.workspaceId}/capabilities`)
+                }
+              >
+                Connect OpenGeni Slack bot in Capabilities
+              </button>
+            ) : null}
+          </div>
           <ScheduledTaskRepositoryPicker
             status={context.githubStatus?.status ?? "disabled"}
             repositories={context.githubRepos}

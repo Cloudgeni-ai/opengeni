@@ -1,4 +1,14 @@
 import {
+  OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+  OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+  OPENGENI_SLACK_BOT_SESSION_METADATA_KEY,
+} from "@opengeni/contracts";
+import {
+  openGeniSlackBotMetadata,
+  requireOpenGeniSlackBotConnection,
+  scheduledSlackBotConnectionId,
+} from "@opengeni/core";
+import {
   appendSessionEventsWithLockedSessionUpdate,
   addSessionSystemUpdateWithSourceMutation,
   createScheduledTaskRun,
@@ -41,6 +51,23 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
     ): Promise<DispatchScheduledTaskRunResult> => {
       const { settings, db, bus, wakeSessionWorkflow } = await services();
       const task = await requireScheduledTask(db, input.workspaceId, input.taskId);
+      // A scheduled bot selection was authorized when the task was written,
+      // but connection status and tenant/role binding are mutable. Revalidate
+      // before any session/model cost and never fall back to a personal Slack
+      // OAuth grant when the selected bot has been revoked or changed.
+      const slackBotConnection = task.agentConfig.slackBotConnectionId
+        ? await requireOpenGeniSlackBotConnection(
+            db,
+            task.workspaceId,
+            task.agentConfig.slackBotConnectionId,
+          )
+        : null;
+      const slackBotMetadata = slackBotConnection
+        ? openGeniSlackBotMetadata(slackBotConnection.metadata)
+        : null;
+      if (slackBotConnection && !slackBotMetadata) {
+        throw new Error("OpenGeni Slack bot connection metadata is invalid");
+      }
       // The scheduled task's model can be codex/<slug>; resolve it here so the
       // admission gate can skip the credit/cost gates for a codex-billed run
       // (paid by the user's ChatGPT/Codex plan). This file uses BASE settings (no
@@ -160,6 +187,8 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
             frozenRigVersionId = rig.activeVersion.id;
           }
           let session: Awaited<ReturnType<typeof createSession>>;
+          const taskMetadata = { ...task.agentConfig.metadata };
+          delete taskMetadata[OPENGENI_SLACK_BOT_SESSION_METADATA_KEY];
           try {
             session = await createSession(db, {
               accountId: task.accountId,
@@ -168,11 +197,16 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
               resources: task.agentConfig.resources,
               tools: taskTools,
               metadata: {
-                ...task.agentConfig.metadata,
+                ...taskMetadata,
                 model,
                 reasoningEffort,
                 scheduledTaskId: task.id,
                 scheduledTaskRunId: run.id,
+                ...(slackBotConnection
+                  ? {
+                      [OPENGENI_SLACK_BOT_SESSION_METADATA_KEY]: slackBotConnection.id,
+                    }
+                  : {}),
               },
               createdBy: {
                 kind: "service",
@@ -230,6 +264,16 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
                 // Names/ids only; never values.
                 ...(variableSet
                   ? { variableSetId: variableSet.id, variableSetName: variableSet.name }
+                  : {}),
+                ...(slackBotConnection && slackBotMetadata
+                  ? {
+                      slackBotConnection: {
+                        credentialRole: OPENGENI_SLACK_BOT_CREDENTIAL_ROLE,
+                        credentialLabel: OPENGENI_SLACK_BOT_CREDENTIAL_LABEL,
+                        connectionId: slackBotConnection.id,
+                        slackTeamId: slackBotMetadata.slackTeamId,
+                      },
+                    }
                   : {}),
               },
             },
@@ -314,6 +358,14 @@ export function createScheduledTaskActivities(services: () => Promise<ActivitySe
           if ((session.variableSetId ?? null) !== (task.variableSetId ?? null)) {
             throw new Error(
               "scheduled task variableSet attachment does not match its reusable session",
+            );
+          }
+          if (
+            scheduledSlackBotConnectionId(session.metadata) !==
+            (task.agentConfig.slackBotConnectionId ?? null)
+          ) {
+            throw new Error(
+              "scheduled task OpenGeni Slack bot binding does not match its reusable session",
             );
           }
           // A recurring "maintain X" task re-establishes its objective on every

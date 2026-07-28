@@ -144,6 +144,10 @@ import {
 } from "./session-view";
 import type { ToolspaceMcpSurface } from "./toolspace";
 import { ensureSessionGroupReady as ensureViewerSessionGroupReady } from "../sandbox/viewer";
+import {
+  createOpenGeniSlackBotClient,
+  resolveSlackBotConnectionForTool,
+} from "../integrations/slack-bot";
 
 export type McpServerOptions = {
   // Origin of the HTTP request that reached the MCP route. Browser-oriented
@@ -219,6 +223,7 @@ export function buildOpenGeniMcpServer(
   }
   if (!toolspaceMode) {
     registerRigTools(server, deps, grant, can, sessionId, json);
+    registerSlackBotTools(server, deps, grant, sessionId, json);
   }
 
   // Orchestration, variableSet, and GitHub status/token tools are permission-gated
@@ -650,6 +655,119 @@ export function buildOpenGeniMcpServer(
   registerToolspaceProxyTools(server, options.toolspace ?? null);
 
   return server;
+}
+
+function registerSlackBotTools(
+  server: McpServer,
+  deps: ApiRouteDeps,
+  grant: AccessGrant,
+  sessionId: string | null,
+  json: JsonResult,
+): void {
+  const clientFor = async (connectionId?: string) => {
+    const resolved = await resolveSlackBotConnectionForTool({
+      db: deps.db,
+      grant,
+      sessionId,
+      ...(connectionId ? { requestedConnectionId: connectionId } : {}),
+    });
+    return createOpenGeniSlackBotClient(deps, resolved);
+  };
+
+  server.registerTool(
+    "slack_bot_list_channels",
+    {
+      description:
+        "List public and bot-visible private Slack channels through the workspace-shared OpenGeni bot. isMember identifies channels the bot may read/post in; the bot never joins channels automatically.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(200).optional(),
+      },
+    },
+    async ({ connectionId, cursor, limit }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).listChannels({
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_channel_history",
+    {
+      description:
+        "Read Slack channel history as the workspace-shared OpenGeni bot. Public and private channels both require bot membership; invite the bot to private channels first.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4.string().min(1).max(64),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(100).optional(),
+      },
+    },
+    async ({ connectionId, channelId, cursor, limit }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).channelHistory({
+          channelId,
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_list_users",
+    {
+      description: "List Slack workspace users through the workspace-shared OpenGeni bot.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        cursor: z4.string().max(1024).optional(),
+        limit: z4.number().int().min(1).max(200).optional(),
+      },
+    },
+    async ({ connectionId, cursor, limit }) =>
+      json(
+        await (
+          await clientFor(connectionId)
+        ).listUsers({
+          ...(cursor ? { cursor } : {}),
+          ...(limit !== undefined ? { limit } : {}),
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "slack_bot_post_message",
+    {
+      description:
+        "Post as the workspace-shared OpenGeni bot. Pass channelId for a channel where the bot is already a member, or userId to open/post a DM; pass exactly one.",
+      inputSchema: {
+        connectionId: z4.string().uuid().optional(),
+        channelId: z4.string().min(1).max(64).optional(),
+        userId: z4.string().min(1).max(64).optional(),
+        text: z4.string().min(1).max(40_000),
+      },
+    },
+    async ({ connectionId, channelId, userId, text }) => {
+      if (Boolean(channelId) === Boolean(userId)) {
+        throw new Error("exactly one of channelId or userId is required");
+      }
+      return json(
+        await (
+          await clientFor(connectionId)
+        ).postMessage({
+          ...(channelId ? { channelId } : {}),
+          ...(userId ? { userId } : {}),
+          text,
+        }),
+      );
+    },
+  );
 }
 
 function registerToolspaceProxyTools(server: McpServer, surface: ToolspaceMcpSurface | null): void {
