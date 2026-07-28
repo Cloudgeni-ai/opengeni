@@ -93,6 +93,9 @@ config:
   OPENGENI_AUTH_REQUIRED: "false"
   OPENGENI_AUTH_ALLOW_HEALTH: "true"
   OPENGENI_AUTH_ALLOW_METRICS: "false"
+  # Set this in the private overlay to the browser/API origin exposed by the
+  # private edge. It makes enrollment installers fetch this deployment's agent.
+  # OPENGENI_PUBLIC_BASE_URL: https://node.example-tailnet.ts.net
   OPENGENI_PRODUCT_ACCESS_MODE: local
   OPENGENI_BILLING_MODE: disabled
   OPENGENI_ENTITLEMENTS_MODE: none
@@ -102,6 +105,7 @@ config:
   OPENGENI_OBJECT_STORAGE_REGION: us-east-1
   OPENGENI_OBJECT_STORAGE_S3_PROVIDER: Minio
   OPENGENI_OBJECT_STORAGE_FORCE_PATH_STYLE: "true"
+  OPENGENI_SANDBOX_OWNERSHIP_ENABLED: "true"
   OPENGENI_SANDBOX_BACKEND: selfhosted
   OPENGENI_SANDBOX_PREPARATION_PROFILES: none
 
