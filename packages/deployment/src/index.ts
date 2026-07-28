@@ -3,6 +3,7 @@ import { z } from "zod";
 export const DeploymentProfileId = z.enum([
   "local-compose",
   "local-kubernetes",
+  "single-node-kubernetes",
   "kubernetes-external",
   "azure-managed",
   "azure-existing-services",
@@ -130,6 +131,18 @@ export const SANDBOX_SURFACING_PASSTHROUGH_ENV: readonly string[] = [
   "OPENGENI_STREAM_CONTROL_ENABLED",
   "OPENGENI_SANDBOX_OWNERSHIP_ENABLED",
   "OPENGENI_SANDBOX_DESKTOP_ENABLED",
+];
+
+/** Control-plane secrets needed for a complete Connected Machine deployment.
+ * The config layer permits graceful degradation when these are absent; a
+ * deployment whose primary backend is selfhosted cannot. */
+export const SELFHOSTED_CONTROL_PLANE_REQUIRED_ENV: readonly string[] = [
+  "OPENGENI_ENROLLMENT_SIGNING_SECRET",
+  "OPENGENI_STREAM_TOKEN_SECRET",
+  "OPENGENI_SELFHOSTED_NATS_CALLOUT_ACCOUNT_SEED",
+  "OPENGENI_SELFHOSTED_NATS_CALLOUT_PUBLIC_KEY",
+  "OPENGENI_SELFHOSTED_NATS_CONTROL_PASSWORD",
+  "OPENGENI_SELFHOSTED_NATS_CALLOUT_PASSWORD",
 ];
 
 export const SecretDeliveryMode = z.enum([
@@ -624,6 +637,39 @@ export const deploymentProfiles: Record<DeploymentProfileId, DeploymentContract>
       requireStructuredLogs: true,
     },
     sandbox: { backend: "none", preparationProfiles: ["none"], envAllowlist: [] },
+  }),
+  "single-node-kubernetes": parseDeploymentContract({
+    profile: "single-node-kubernetes",
+    runtime: {
+      platform: "kubernetes",
+      cloud: "generic",
+      namespace: "opengeni",
+      releaseName: "opengeni",
+    },
+    database: { mode: "inCluster", engine: "postgres", pgvectorRequired: true },
+    temporal: { mode: "inCluster", namespace: "default", taskQueue: "opengeni-runs-ts" },
+    nats: { mode: "inCluster" },
+    objectStorage: { mode: "inCluster", api: "s3-compatible", bucket: "opengeni-files" },
+    secrets: { mode: "kubernetesSecret" },
+    ingress: { enabled: false, tls: false, sseTimeoutSeconds: 3600 },
+    access: {
+      mode: "disabled",
+      allowUnauthenticatedHealth: true,
+      allowUnauthenticatedMetrics: false,
+    },
+    product: {
+      accessMode: "local",
+      billingMode: "disabled",
+      entitlementsMode: "none",
+      usageLimitsMode: "none",
+    },
+    observability: {
+      backend: "none",
+      requireTraces: false,
+      requireMetrics: false,
+      requireStructuredLogs: true,
+    },
+    sandbox: { backend: "selfhosted", preparationProfiles: ["none"], envAllowlist: [] },
   }),
   "kubernetes-external": parseDeploymentContract({
     profile: "kubernetes-external",
@@ -1305,7 +1351,7 @@ export function requiredRuntimeEnvVars(
   } else {
     vars.push("OPENGENI_OPENAI_API_KEY");
   }
-  if (contract.database.mode !== "inCluster") {
+  if (runtimeDatabaseUrlRequired(contract)) {
     vars.push("OPENGENI_DATABASE_URL");
   }
   if (contract.temporal.mode !== "inCluster") {
@@ -1374,6 +1420,9 @@ export function requiredRuntimeEnvVars(
   }
   // Backend-gated: only the active backend's required creds enter the manifest.
   vars.push(...SANDBOX_REQUIRED_ENV[contract.sandbox.backend].required);
+  if (contract.sandbox.backend === "selfhosted") {
+    vars.push(...SELFHOSTED_CONTROL_PLANE_REQUIRED_ENV);
+  }
   return [...new Set(vars)].sort();
 }
 
@@ -1397,6 +1446,7 @@ export function stackPlanFor(
   const requiredSecretKeys = [
     ...requiredRuntimeEnvVars(contract, env).filter((name) => secretLikeRuntimeEnv(name)),
     ...platformDependencies.flatMap((dependency) => dependency.requiredSecretKeys),
+    ...profileRequiredSecretKeys(contract),
   ];
   return {
     profile: contract.profile,
@@ -1480,6 +1530,8 @@ function terraformRootFor(contract: DeploymentContract): string | null {
 function helmValuesFileFor(contract: DeploymentContract): string | null {
   if (contract.profile === "local-kubernetes")
     return "deploy/helm/opengeni/values.local-kubernetes.example.yaml";
+  if (contract.profile === "single-node-kubernetes")
+    return "deploy/helm/opengeni/values.single-node.example.yaml";
   if (contract.profile === "preview-pr" || contract.profile === "preview-branch")
     return "deploy/helm/opengeni/values.preview-managed.example.yaml";
   if (contract.profile === "azure-managed")
@@ -1526,6 +1578,8 @@ function createdResourceClasses(contract: DeploymentContract): string[] {
       "IAM service accounts and bindings",
       "optional Cloud SQL PostgreSQL",
     );
+  } else if (contract.profile === "single-node-kubernetes") {
+    out.push("persistent single-node Postgres/Temporal/NATS/MinIO services and local volumes");
   } else if (
     contract.database.mode === "inCluster" ||
     contract.temporal.mode === "inCluster" ||
@@ -1572,6 +1626,22 @@ function deployCommands(
   if (contract.profile === "local-compose") {
     return ["bun run dev"];
   }
+  if (contract.profile === "single-node-kubernetes") {
+    const namespace = contract.runtime.namespace ?? "opengeni";
+    const release = contract.runtime.releaseName;
+    const values = helmValuesFile ?? "deploy/helm/opengeni/values.single-node.example.yaml";
+    return [
+      `kubectl create namespace ${namespace} --dry-run=client -o yaml | kubectl apply -f -`,
+      "bun run deployment:single-node-secrets -- --out-dir .agent/generated/single-node/secrets",
+      `kubectl -n ${namespace} create secret generic opengeni-postgres --from-env-file=.agent/generated/single-node/secrets/postgres.env --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} create secret generic opengeni-minio --from-env-file=.agent/generated/single-node/secrets/minio.env --dry-run=client -o yaml | kubectl apply -f -`,
+      'test -n "$OPENGENI_OPENAI_API_KEY"',
+      `kubectl -n ${namespace} create secret generic opengeni-runtime --from-env-file=.agent/generated/single-node/secrets/runtime.env --from-literal=OPENGENI_OPENAI_API_KEY="$OPENGENI_OPENAI_API_KEY" --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${namespace} create secret generic opengeni-migrations --from-env-file=.agent/generated/single-node/secrets/migrations.env --dry-run=client -o yaml | kubectl apply -f -`,
+      `helm upgrade --install ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} --set api.enabled=false --set worker.enabled=false --set web.enabled=false --set relay.enabled=false --set migrations.enabled=false --wait --timeout 10m`,
+      `helm upgrade ${release} deploy/helm/opengeni --namespace ${namespace} --values ${values} --wait --timeout 15m`,
+    ];
+  }
   if (contract.profile === "local-kubernetes") {
     return [
       "docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target api -t opengeni-api:local-k8s .",
@@ -1579,7 +1649,7 @@ function deployCommands(
       "OPENGENI_DEPLOYMENT_REVISION=${OPENGENI_DEPLOYMENT_REVISION:-local-k8s} docker build --platform linux/amd64 -f docker/opengeni.Dockerfile --target web --build-arg OPENGENI_DEPLOYMENT_REVISION -t opengeni-web:local-k8s .",
       "kind load docker-image opengeni-api:local-k8s opengeni-worker:local-k8s opengeni-web:local-k8s --name ${KIND_CLUSTER_NAME:-opengeni-local}",
       `kubectl create namespace ${contract.runtime.namespace ?? "opengeni-local"} --dry-run=client -o yaml | kubectl apply -f -`,
-      `kubectl -n ${contract.runtime.namespace ?? "opengeni-local"} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --dry-run=client -o yaml | kubectl apply -f -`,
+      `kubectl -n ${contract.runtime.namespace ?? "opengeni-local"} create secret generic opengeni-runtime-local-k8s --from-literal=OPENGENI_ACCESS_KEY="$OPENGENI_ACCESS_KEY" --from-literal=OPENGENI_DATABASE_URL="postgres://opengeni_app:opengeni_app@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_MIGRATIONS_DATABASE_URL="postgres://opengeni:opengeni@opengeni-local-postgres:5432/opengeni" --from-literal=OPENGENI_APP_DATABASE_USER=opengeni_app --from-literal=OPENGENI_APP_DATABASE_PASSWORD=opengeni_app --dry-run=client -o yaml | kubectl apply -f -`,
       `helm upgrade --install ${contract.runtime.releaseName} deploy/helm/opengeni --namespace ${contract.runtime.namespace ?? "opengeni-local"} --values ${helmValuesFile ?? "deploy/helm/opengeni/values.local-kubernetes.example.yaml"}`,
     ];
   }
@@ -1827,6 +1897,13 @@ function planNotes(contract: DeploymentContract): string[] {
       "Temporal is intentionally outside the OpenGeni app chart; use Temporal Cloud, an existing endpoint, or the official Temporal Helm chart.",
     );
   }
+  if (contract.profile === "single-node-kubernetes") {
+    notes.push(
+      "This profile is one persistent machine with no service redundancy; Kubernetes owns restart, volume, and upgrade sequencing only.",
+      "Bind NodePorts to loopback and expose only the documented edge ports through the private network boundary.",
+      "Create the runtime, migration, Postgres, and MinIO Secrets before the two-phase Helm bootstrap.",
+    );
+  }
   return notes;
 }
 
@@ -1836,9 +1913,33 @@ function secretLikeRuntimeEnv(name: string): boolean {
     name.includes("SECRET") ||
     name.includes("TOKEN") ||
     name.includes("PASSWORD") ||
+    name.includes("SEED") ||
     name.includes("CONNECTION_STRING") ||
     name === "OPENGENI_DATABASE_URL"
   );
+}
+
+function runtimeDatabaseUrlRequired(contract: DeploymentContract): boolean {
+  return (
+    contract.database.mode !== "inCluster" ||
+    contract.profile === "single-node-kubernetes" ||
+    contract.profile.startsWith("preview")
+  );
+}
+
+function profileRequiredSecretKeys(contract: DeploymentContract): string[] {
+  if (contract.profile !== "single-node-kubernetes") {
+    return [];
+  }
+  return [
+    "opengeni-postgres/POSTGRES_PASSWORD",
+    "opengeni-minio/MINIO_ROOT_USER",
+    "opengeni-minio/MINIO_ROOT_PASSWORD",
+    "opengeni-runtime/OPENGENI_DATABASE_URL",
+    "opengeni-migrations/OPENGENI_MIGRATIONS_DATABASE_URL",
+    "opengeni-migrations/OPENGENI_APP_DATABASE_USER",
+    "opengeni-migrations/OPENGENI_APP_DATABASE_PASSWORD",
+  ];
 }
 
 function runtimeEnvFileValue(value: string | undefined): string {
@@ -1893,7 +1994,7 @@ function runtimeEnvValues(
     envOrRequiredRuntime(
       "OPENGENI_DATABASE_URL",
       env.OPENGENI_DATABASE_URL,
-      contract.database.mode !== "inCluster",
+      runtimeDatabaseUrlRequired(contract),
     ),
     valueEnv("OPENGENI_AUTH_REQUIRED", String(contract.access.mode === "sharedKey")),
     ...(contract.access.mode === "sharedKey"
@@ -2140,6 +2241,11 @@ function runtimeEnvValues(
   for (const key of sandboxEnv.optional) {
     entries.push(valueEnv(key, env[key]));
   }
+  if (contract.sandbox.backend === "selfhosted") {
+    for (const key of SELFHOSTED_CONTROL_PLANE_REQUIRED_ENV) {
+      entries.push(requiredEnv(key, env[key]));
+    }
+  }
 
   // sandbox workspace passthroughs (the desktop/Channel-A feature rollout). These are
   // recognized runtime env vars so a surfacing-enabled deployment carries them
@@ -2219,9 +2325,21 @@ function dedupeRuntimeEnv(entries: RuntimeEnvEntry[]): RuntimeEnvEntry[] {
   const byKey = new Map<string, RuntimeEnvEntry>();
   for (const entry of entries) {
     const existing = byKey.get(entry.key);
-    if (!existing || (!existing.value && entry.value)) {
+    if (!existing) {
       byKey.set(entry.key, entry);
+      continue;
     }
+    byKey.set(entry.key, {
+      ...existing,
+      value: existing.value || entry.value,
+      required: existing.required || entry.required,
+      ...(existing.fromSensitiveTerraformOutput || entry.fromSensitiveTerraformOutput
+        ? {
+            fromSensitiveTerraformOutput:
+              existing.fromSensitiveTerraformOutput ?? entry.fromSensitiveTerraformOutput,
+          }
+        : {}),
+    });
   }
   return [...byKey.values()].sort((a, b) => a.key.localeCompare(b.key));
 }
@@ -2308,9 +2426,13 @@ function addRuntimeConfigHelmValues(
   ) {
     values["minio.publicEndpoint"] = publicBaseUrl;
   }
-  if (contract.database.mode !== "inCluster") {
+  if (runtimeDatabaseUrlRequired(contract)) {
     values["migrations.secret.existingSecret"] =
       env.OPENGENI_MIGRATIONS_SECRET_NAME ?? "opengeni-migrations";
+  }
+  if (contract.database.mode === "inCluster" && runtimeDatabaseUrlRequired(contract)) {
+    values["postgres.runtime.existingSecret"] = "opengeni-runtime";
+    values["postgres.runtime.databaseUrlKey"] = "OPENGENI_DATABASE_URL";
   }
 }
 

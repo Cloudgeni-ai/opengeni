@@ -1,4 +1,5 @@
 {{- if .Values.worker.enabled }}
+{{- $priorityClassName := include "opengeni.priorityClassName" (dict "root" . "explicit" (.Values.worker.turns.priorityClassName | default .Values.worker.priorityClassName) "tier" "execution") }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,8 +35,8 @@ spec:
       serviceAccountName: {{ include "opengeni.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
       terminationGracePeriodSeconds: {{ .Values.worker.terminationGracePeriodSeconds }}
-      {{- if .Values.worker.priorityClassName }}
-      priorityClassName: {{ .Values.worker.priorityClassName | quote }}
+      {{- if $priorityClassName }}
+      priorityClassName: {{ $priorityClassName | quote }}
       {{- end }}
       securityContext:
         {{- toYaml .Values.worker.podSecurityContext | nindent 8 }}
@@ -81,8 +82,10 @@ spec:
           livenessProbe:
             {{- include "opengeni.httpProbe" (dict "probe" ((.Values.worker).probes).liveness) | nindent 12 }}
           {{- end }}
+          {{- with .Values.worker.turns.resources }}
           resources:
-            {{- toYaml .Values.worker.turns.resources | nindent 12 }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
       {{- if ((.Values.worker).topologySpreadConstraints).enabled }}
       topologySpreadConstraints:
         {{- include "opengeni.topologySpreadConstraints" (dict "root" . "component" "worker-turns" "values" .Values.worker) | nindent 8 }}

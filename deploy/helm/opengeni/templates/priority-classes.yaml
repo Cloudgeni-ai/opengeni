@@ -1,0 +1,16 @@
+{{- if .Values.priorityClasses.enabled }}
+{{- range $tier, $class := .Values.priorityClasses.tiers }}
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ printf "%s-%s" (include "opengeni.fullname" $) $tier | trunc 63 | trimSuffix "-" }}
+  labels:
+    {{- include "opengeni.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: pod-priority
+value: {{ $class.value }}
+globalDefault: false
+preemptionPolicy: {{ $.Values.priorityClasses.preemptionPolicy }}
+description: {{ $class.description | quote }}
+{{- end }}
+{{- end }}
